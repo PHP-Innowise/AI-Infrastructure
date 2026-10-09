@@ -21,6 +21,12 @@ MAX_SOURCE_BYTES = 256 * 1024
 MAX_SERVICES = 500
 MAX_ITEMS = 100
 MAX_CONTEXT = 64000
+EXCERPT_CHARS = 2000
+# What one plan may open and read to fill its context, the system file and
+# passports aside. Every declared source at its largest is 500 x 100 x 256 KiB,
+# about 12 GiB; a full 64,000-character context needs a few MiB of it.
+MAX_PLAN_READ_FILES = 2000
+MAX_PLAN_READ_BYTES = 32 * 1024 * 1024
 IDENTIFIER = re.compile(r"[a-z][a-z0-9._-]{0,79}\Z")
 DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 KINDS = {"policy", "spec", "contract", "code", "test", "memory"}
@@ -36,6 +42,14 @@ BLOCKED = {".git", ".ssh", ".aws", ".kube", "node_modules", "vendor",
 
 class SystemError(Exception):
     """Invalid input or refused filesystem access."""
+
+
+class Unread(Exception):
+    """A source the planner leaves unread: `budget` (it cannot fit) or `read_limit`."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
 
 
 def encoded(value):
@@ -103,7 +117,12 @@ def open_directory(path):
     return fs.open_target_directory(absolute(path))
 
 
-def read_file(root, name, limit=MAX_BYTES):
+def read_file(root, name, limit=MAX_BYTES, check=None):
+    """The bytes of a bounded regular file, opened without following links.
+
+    `check(size)`, when given, runs once the file is known to be one and
+    before a byte of it is read; it raises to leave the file unread.
+    """
     name = relative(name)
     fd = open_directory(root)
     try:
@@ -117,6 +136,8 @@ def read_file(root, name, limit=MAX_BYTES):
             info = fs.fstat(file_fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
                 raise SystemError("Source must be a bounded regular file without hard links")
+            if check is not None:
+                check(info.st_size)
             with os.fdopen(file_fd, "rb", closefd=False) as handle:
                 raw = handle.read(limit + 1)
             if len(raw) > limit:
@@ -177,6 +198,25 @@ def source(value):
 def is_memory_path(path):
     parts = PurePosixPath(path).parts
     return "memory-bank" in parts and "chunks" in parts
+
+
+def evidence(sid, entry, sha, content):
+    """A source's context entry; its excerpt is the content's first EXCERPT_CHARS characters."""
+    return {"service": sid, "path": entry["path"], "kind": entry["kind"], "sha256": sha,
+            "trust": "source_evidence", "excerpt": content[:EXCERPT_CHARS],
+            "truncated": len(content) > EXCERPT_CHARS}
+
+
+def least_excerpt(size):
+    """The fewest characters a usable source of `size` bytes adds to its entry
+    beyond the same entry with an empty excerpt marked truncated.
+
+    UTF-8 spends at most four bytes on a character, so the content has at least
+    size/4 of them; an excerpt keeps up to EXCERPT_CHARS, an untruncated entry
+    spells `false`, one character longer than `true`, and JSON escaping only
+    lengthens the excerpt. Anything not UTF-8 is refused after reading anyway.
+    """
+    return min(EXCERPT_CHARS, -(-size // 4) + 1)
 
 
 def manifest(value, service_id):
@@ -340,12 +380,29 @@ class System:
             self.warning_keys.add(key)
             self.warnings.append(entry)
 
-    def read(self, sid, root, path):
+    def read(self, sid, root, path, fits=None, reads=None):
+        """Read and fingerprint one file. `fits(size)` may leave it unread; `reads`
+        is a plan's allowance ({"files", "bytes"}), spent here: a file it cannot
+        cover is left unread as `read_limit`."""
+        check = fits
+        if reads is not None:
+            if reads["files"] <= 0:
+                raise Unread("read_limit")
+            reads["files"] -= 1
+
+            def check(size):
+                if fits is not None:
+                    fits(size)
+                if size > reads["bytes"]:
+                    raise Unread("read_limit")
         try:
-            raw = read_file(root, path, MAX_BYTES if sid == "__system__" and path == self.config.name else MAX_SOURCE_BYTES)
+            raw = read_file(root, path, MAX_BYTES if sid == "__system__" and path == self.config.name else MAX_SOURCE_BYTES,
+                            check)
         except FileNotFoundError:
             self.missing.add((sid, path))
             raise
+        if reads is not None:
+            reads["bytes"] -= len(raw)
         self.snapshot[(sid, path)] = digest(raw)
         return raw
 
@@ -451,10 +508,12 @@ class System:
             self.warn("__system__", "dependency_cycle")
         return [selected[sid] for sid in sorted(selected)]
 
-    def source_content(self, sid, root, entry):
+    def source_content(self, sid, root, entry, fits=None, reads=None):
+        """The source's context entry, or None when it is unusable. Raises Unread
+        when `fits` or the `reads` allowance leaves it, or a file it cites, unread."""
         path = entry["path"]
         try:
-            raw = self.read(sid, root, path)
+            raw = self.read(sid, root, path, fits, reads)
             content = raw.decode("utf-8")
             if "\x00" in content or SECRET.search(content):
                 raise SystemError("sensitive_or_binary")
@@ -478,7 +537,7 @@ class System:
                 # Absence is allowed; an existing unreadable/malformed config is not.
                 native_path = "project-brain/config/runtime.json"
                 try:
-                    native_raw = self.read(sid, root, native_path)
+                    native_raw = self.read(sid, root, native_path, reads=reads)
                 except FileNotFoundError:
                     native = {}
                 else:
@@ -502,7 +561,7 @@ class System:
                     if name not in cited or name in seen or not isinstance(fingerprint["sha256"], str):
                         raise SystemError("unverified_memory")
                     seen.add(name)
-                    cited_raw = self.read(sid, root, name)
+                    cited_raw = self.read(sid, root, name, reads=reads)
                     if digest(cited_raw) != fingerprint["sha256"]:
                         raise SystemError("stale_memory")
                 contract = memory_contract()
@@ -512,9 +571,7 @@ class System:
                     raise SystemError("invalid_native_memory") from error
                 if any(pattern.search(content) for pattern in contract.SECRET_PATTERNS.values()):
                     raise SystemError("sensitive_memory")
-            return {"service": sid, "path": path, "kind": entry["kind"],
-                    "sha256": digest(raw), "trust": "source_evidence",
-                    "excerpt": content[:2000], "truncated": len(content) > 2000}
+            return evidence(sid, entry, digest(raw), content)
         except (OSError, UnicodeError, ValueError, KeyError, TypeError, SystemError):
             self.warn(sid, "source_unavailable_or_ineligible", path)
             return None
@@ -558,20 +615,51 @@ class System:
         for group in groups.values():
             group.sort(key=lambda pair: (priority[pair[1]["kind"]], pair[1]["path"]))
         queue = deque(sorted(groups))
+        # A source is read only if it can still fit: what fits is decided by
+        # the sources read before it, and a size that rules a file out leaves
+        # it unread. The allowance bounds the rest - files read and refused,
+        # and the cited files a memory source checks.
+        reads = {"files": MAX_PLAN_READ_FILES, "bytes": MAX_PLAN_READ_BYTES}
+        length = len(encoded(capsule))
+        exhausted = False
         while queue:
             sid = queue.popleft()
             root, entry = groups[sid].pop(0)
             if groups[sid]:
                 queue.append(sid)
-            content = self.source_content(sid, root, entry)
-            if content is None:
-                omissions.append({"service": sid, "path": entry["path"], "reason": "ineligible"})
+            omitted = {"service": sid, "path": entry["path"]}
+            # Appending an entry to the sources adds it and, after the first, a comma.
+            separator = 1 if capsule["sources"] else 0
+            floor = len(encoded({**evidence(sid, entry, "0" * 64, ""), "truncated": True}))
+            room = budget - length - separator - floor
+            if room < 1:  # not even an empty file's entry fits
+                omissions.append({**omitted, "reason": "budget"})
                 continue
-            trial = {**capsule, "sources": capsule["sources"] + [content]}
-            if len(encoded(trial)) <= budget:
-                capsule = trial
+            if exhausted:
+                omissions.append({**omitted, "reason": "read_limit"})
+                continue
+
+            def fits(size, room=room):
+                if least_excerpt(size) > room:
+                    raise Unread("budget")
+
+            try:
+                content = self.source_content(sid, root, entry, fits, reads)
+            except Unread as unread:
+                if unread.reason == "read_limit":
+                    exhausted = True
+                    self.warn("__system__", "source_read_limit")
+                omissions.append({**omitted, "reason": unread.reason})
+                continue
+            if content is None:
+                omissions.append({**omitted, "reason": "ineligible"})
+                continue
+            added = separator + len(encoded(content))
+            if length + added <= budget:
+                capsule["sources"].append(content)
+                length += added
             else:
-                omissions.append({"service": sid, "path": entry["path"], "reason": "budget"})
+                omissions.append({**omitted, "reason": "budget"})
         steps = [{"id": "scope", "depends_on": [], "goal": "Confirm affected services and missing relationships"},
                  {"id": "contracts", "depends_on": ["scope"], "goal": "Agree invariants, changed contracts, compatibility and delivery order"}]
         previous = "contracts"

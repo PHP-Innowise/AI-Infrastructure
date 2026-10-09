@@ -87,7 +87,13 @@ Nothing is written into the project. All work happens in the cache (default
    eval/<id> --ephemeral --sanitize --json` is timed. The environment is
    minimal: no attached-mode variables, no task override, no caller Git
    configuration, `PYTHONHASHSEED=0`, `TZ=UTC`.
-7. **The score.** See [What the numbers mean](#what-the-numbers-mean).
+7. **The score.** See [What the numbers mean](#what-the-numbers-mean). Only a
+   refresh that exited 0 is scored. One that ran past `--timeout` is skipped
+   as `refresh-timeout`; one that exited non-zero, or printed no JSON, as
+   `refresh-error` - the runtime prints its JSON and exits 1 when a memory
+   layer failed to update, and scoring that turn would count a broken
+   runtime as a silent one. Either way the item keeps the refresh's
+   diagnostics, and the prompt counts in no measure and no latency.
 
 `--as-of now` skips steps 1, 2 and 5 and copies the current working tree
 (what Git lists plus the memory trees, without `.git` and local state): the
@@ -135,11 +141,19 @@ python3 scripts/memory_eval.py realized --project ~/Desktop/next --since 2026-09
 | `--clock as-of\|real` | Pin the runtime's clock to the prompt (default) or leave it alone. |
 | `--updated-after drop\|keep` | A working-tree memory document created before the prompt but edited after it: leave it out (default, the strict as-of corpus) or copy today's body and mark the turn contaminated. |
 | `--cache DIR` | Work and cache directory; refused inside this clone. |
-| `--timeout SECONDS` | Per runtime call (default 30). A timeout skips the prompt as `refresh-timeout`. |
+| `--timeout SECONDS` | Per runtime call (default 30). A refresh past it skips the prompt as `refresh-timeout`. |
 | `--keep` | Keep each prompt's corpus and record its path in the item, for debugging. |
 
 `run` prints the report of its result; it exits 0 when at least one prompt
 was evaluated, 1 when none was, 2 on a usage error.
+
+`report A --compare B` prints each result's own numbers side by side. The
+delta of every measure is over the prompts evaluated in both - a prompt one
+run skipped would otherwise read as a loss or a gain - while `prompts`,
+`evaluated` and `skipped` compare the whole runs. When the runs evaluated
+different prompts, the column is headed `paired delta` and a note gives the
+counts; the paired per-prompt diff below it names the ids evaluated in only
+one run.
 
 `realized` reads Claude Code transcripts (`--claude-root`, default
 `~/.claude/projects`) and Codex rollouts (`--codex-root`, default
@@ -160,10 +174,14 @@ prompt. `--json` prints the numbers as JSON, `--paths` adds per-path counts.
 [{"id": "next-017", "project": "next", "ts": "2026-08-05T12:00:00Z", "prompt": "..."}]
 ```
 
-**Judgments** - `{prompt id: {path: grade}}`, grade 0, 1 or 2; 1 and above is
-useful, 0 is noise; a grade that is not an integer is ignored. Skill paths in
-any tool tree (`.claude/skills/`, `.cursor/skills/`, `.codex/skills/`) count
-as `.agents/skills/`.
+**Judgments** - `{prompt id: {path: grade}}`, grade the integer 0, 1 or 2; 1
+and above is useful, 0 is noise. Any other grade (`3`, `-1`, `1.5`, `true`,
+`"2"`, `null`), or a prompt whose judgments are not an object, stops `run`
+before it starts with an error naming the prompt and the path (exit 2): it
+would otherwise count as useful or noise, or leave its document unjudged.
+Skill paths in any tool tree (`.claude/skills/`, `.cursor/skills/`,
+`.codex/skills/`) count as `.agents/skills/`; two spellings of one path keep
+the higher grade.
 
 **Passages** - `{prompt id: {path: {"useful": true, "passages": ["..."]}}}`:
 the sentences that make a document useful for that prompt.
@@ -173,14 +191,17 @@ the edition(s) with their release, a digest of the edition files the overlay
 installs and whether the edition directory had uncommitted changes, this
 clone's commit, the host, `as_of`, the clock, the SHA-256 of the set,
 judgments and passages files, and the start and finish times. Each item has
-`status` (`ok` or `skipped` with a `reason`), `edition` and `edition_source`,
+`status` (`ok`, or `skipped` with a `reason` such as `no-history`,
+`refresh-timeout` or `refresh-error`), `edition` and `edition_source`,
 `commit`, `provenance` (`from_git`, `from_worktree`, `dropped_future`,
 `undetermined`, `updated_after`, `unreconstructable_updated`; `config_from_worktree` when the working
 tree's `runtime.json` was used; under `--as-of now`, `future_present`), the
 overlay counts, `history_linked`,
-`refresh` (exit status, seconds, the warm-up's seconds, the runtime's phase
-timings, a warning count, a stderr tail with any line quoting the prompt
-withheld), and the score below. `summary` is what `report` prints.
+`refresh` (exit status, seconds, the warm-up's seconds and exit status, the
+runtime's phase timings, a warning count, each memory layer's state -
+`updated`, `failed`, or `other` for anything else - and a stderr tail with any
+line quoting the prompt withheld), and, when `ok`, the score below. `summary`
+is what `report` prints.
 
 ## What the numbers mean
 

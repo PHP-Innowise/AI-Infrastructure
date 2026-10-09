@@ -91,6 +91,9 @@ import install_accelerator as installer  # noqa: E402  - inventories and install
 UTC = timezone.utc
 HOSTS = ("claude", "codex", "cursor")
 LAYERS = ("semantic", "episodic", "procedural")
+# What a refresh reports per layer; anything else is recorded as "other".
+LAYER_STATES = ("updated", "failed")
+GRADES = (0, 1, 2)
 CLASSES = ("useful", "noise-only", "unjudged-only", "silent")
 CANON_SKILLS = ".agents/skills/"
 TOOL_SKILLS = (".claude/skills/", ".cursor/skills/", ".codex/skills/")
@@ -1065,6 +1068,18 @@ def refresh_json(stdout: bytes) -> Optional[Dict[str, Any]]:
     return None
 
 
+def layer_states(result: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Each memory layer's state as the refresh reported it: one of
+    LAYER_STATES, or "other" - never text the runtime may have put there."""
+    if not isinstance(result, dict):
+        return {}
+    return {
+        layer: result[layer] if result[layer] in LAYER_STATES else "other"
+        for layer in LAYERS
+        if layer in result
+    }
+
+
 def quotes_prompt(line: str, prompt: str) -> bool:
     if not prompt:
         return False
@@ -1090,18 +1105,27 @@ def stderr_tail(raw: bytes, prompt: str) -> str:
 
 
 def load_judgments(path: Path) -> Dict[str, Dict[str, int]]:
-    """{prompt id: {path: grade}}; a grade that is not an integer is ignored."""
+    """{prompt id: {path: grade}}, every grade the integer 0, 1 or 2.
+
+    Anything else stops the run before it starts: a grade of 3 or -1 counted
+    as useful or as noise, and one that is not a number left its document
+    unjudged - either way the measures moved without a word.
+    """
     raw = read_json(path)
     if not isinstance(raw, dict):
         raise EvalError(f"{path}: judgments must be a JSON object of {{prompt id: {{path: grade}}}}")
     judgments: Dict[str, Dict[str, int]] = {}
     for prompt_id, grades in raw.items():
         if not isinstance(grades, dict):
-            continue
+            raise EvalError(f"{path}: the judgments of prompt {prompt_id!r} must be an object of {{path: grade}}")
         clean: Dict[str, int] = {}
         for document, grade in grades.items():
-            if not isinstance(document, str) or isinstance(grade, bool) or not isinstance(grade, int):
-                continue
+            if isinstance(grade, bool) or not isinstance(grade, int) or grade not in GRADES:
+                shown = json.dumps(grade)
+                shown = shown if len(shown) <= 40 else shown[:37] + "..."
+                raise EvalError(
+                    f"{path}: prompt {prompt_id!r}, {document!r}: a grade is the integer 0, 1 or 2, not {shown}"
+                )
             key = normalise_path(document)
             clean[key] = max(grade, clean.get(key, grade))
         judgments[str(prompt_id)] = clean
@@ -1511,11 +1535,18 @@ class Run:
                     if isinstance(value, (int, float))
                 },
                 "warnings": len((result or {}).get("warnings") or []),
+                "layers": layer_states(result),
                 "capsule_missing": bool(result) and result.get("capsule") is None and not result.get("query_withheld"),
                 "stderr_tail": stderr_tail(refresh["stderr"], prompt["prompt"]),
             }
-            if result is None:
-                raise Skip("refresh-timeout" if refresh["exit"] is None else "refresh-error")
+            # Only a refresh that exited 0 is scored. The runtime prints its
+            # JSON and exits 1 when a memory layer failed to update: scored,
+            # that turn read as a silent one, or one served from a stale
+            # index, and a broken runtime as a quiet one.
+            if refresh["exit"] is None:
+                raise Skip("refresh-timeout")
+            if refresh["exit"] != 0 or result is None:
+                raise Skip("refresh-error")
             item.update(score(result, grades, self.passages.get(prompt["id"], {}), existed, answered))
             item["status"] = "ok"
         except Skip as skip:
@@ -1607,6 +1638,8 @@ ROWS: Tuple[Tuple[str, str], ...] = (
 )
 SHARED_ROWS = {"useful", "answer_in_text", "noise_only", "unjudged_only", "silent", "could_help",
                "answer_could_help", "contaminated"}
+# Rows about a run's coverage; every other row measures its evaluated prompts.
+COVERAGE_ROWS = {"prompts", "evaluated", "skipped_total"}
 
 
 def row_value(summary: Dict[str, Any], key: str) -> Optional[float]:
@@ -1646,24 +1679,44 @@ def describe_meta(meta: Dict[str, Any], items: Dict[str, Dict[str, Any]]) -> str
     )
 
 
+def evaluated_ids(items: Dict[str, Dict[str, Any]]) -> Set[str]:
+    return {prompt_id for prompt_id, item in items.items() if item.get("status") == "ok"}
+
+
 def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
     summaries = [summarize(document["items"]) for _, _, document in results]
     lines = []
     for (label, path, document), _summary in zip(results, summaries):
         lines.append(f"{label}: {path}  {describe_meta(document.get('meta') or {}, document['items'])}")
+    paired: List[Dict[str, Any]] = []
+    delta_title = "delta"
+    if len(results) == 2:
+        # A measure's delta is over the prompts both runs evaluated: a prompt
+        # one of them skipped would otherwise read as a loss or a gain.
+        runs = [document["items"] for _, _, document in results]
+        both = evaluated_ids(runs[0]) & evaluated_ids(runs[1])
+        if both:
+            paired = [summarize({prompt_id: items[prompt_id] for prompt_id in both}) for items in runs]
+        only = [len(evaluated_ids(items) - both) for items in runs]
+        if any(only):
+            delta_title = "paired delta"
+            lines.append(
+                f"note: {len(both)} evaluated in both, {only[0]} only in A, {only[1]} only in B: each measure's "
+                "delta is over the prompts evaluated in both; prompts, evaluated and skipped compare the whole runs"
+            )
     width = max(len(title) for title, _ in ROWS) + 2
     cell = 18
     header = " " * width + "".join(label.rjust(cell) for label, _, _ in results)
     if len(results) == 2:
-        header += "delta".rjust(cell)
+        header += delta_title.rjust(cell)
     lines += ["", header]
     for title, key in ROWS:
         row = title.ljust(width) + "".join(row_cell(summary, key).rjust(cell) for summary in summaries)
         if len(results) == 2:
-            first, second = (row_value(summary, key) for summary in summaries)
-            if first is not None and second is not None:
-                delta = second - first
-                row += (f"{delta:+.3f}" if key.startswith(("mean", "latency")) else f"{int(delta):+d}").rjust(cell)
+            values = [row_value(summary, key) for summary in (summaries if key in COVERAGE_ROWS else paired)]
+            if len(values) == 2 and values[0] is not None and values[1] is not None:
+                change = values[1] - values[0]
+                row += (f"{change:+.3f}" if key.startswith(("mean", "latency")) else f"{int(change):+d}").rjust(cell)
             else:
                 row += "-".rjust(cell)
         lines.append(row)
@@ -1717,6 +1770,10 @@ def command_report(arguments: argparse.Namespace) -> int:
         count, changes = paired_diff(first["items"], second["items"])
         print("")
         print(f"paired over {count} prompt(s) evaluated in both (B against A)")
+        for label, items, other in (("A", first["items"], second["items"]), ("B", second["items"], first["items"])):
+            only = sorted(evaluated_ids(items) - evaluated_ids(other))
+            if only:
+                print(f"  evaluated only in {label}: {', '.join(only)}")
         for name, (gained, lost) in changes.items():
             print(f"  {name:<11} +{len(gained)} -{len(lost)}")
             if gained:

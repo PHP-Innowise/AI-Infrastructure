@@ -30,6 +30,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -278,7 +279,6 @@ JUDGMENTS = {
         PATH_B: 1,
         CHUNK: 2,
         ".claude/skills/coder/SKILL.md": 0,
-        "README.md": "not a grade",
     },
     "p2": {CHUNK: 2, "docs/billing.md": 1},
 }
@@ -402,6 +402,8 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(p2["class"], "useful")
         self.assertTrue(p2["answer_in_text"])
         self.assertEqual(p2["refresh"]["exit"], 0)
+        # The real runtime's layer report, as the stand records it.
+        self.assertEqual({layer: "updated" for layer in memory_eval.LAYERS}, p2["refresh"]["layers"])
 
     def test_the_runtime_clock_reads_the_prompt(self) -> None:
         # The chunk is due for review on 2026-08-20: live at p2 (08-12), overdue today.
@@ -625,21 +627,45 @@ class ScoringTest(unittest.TestCase):
                                        grades, passages, list(grades), list(grades))
             self.assertEqual((True, True), (scored["answer_could_help"], scored["answer_in_text"]))
 
-    def test_judgments_ignore_what_is_not_an_integer_grade(self) -> None:
-        grades = {
-            "docs/a.md": 2,
-            "docs/b.md": "2",
-            "docs/c.md": True,
-            "docs/d.md": 1.5,
-            ".codex/skills/x/SKILL.md": 1,
-        }
+    def test_judgments_take_grades_0_1_2_and_refuse_anything_else(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             path = Path(name) / "judgments.json"
-            path.write_text(json.dumps({"p": grades, "q": []}), encoding="utf-8")
+            grades = {"docs/a.md": 2, "docs/b.md": 0, ".codex/skills/x/SKILL.md": 1, ".agents/skills/x/SKILL.md": 0}
+            path.write_text(json.dumps({"p": grades, "q": {}}), encoding="utf-8")
             self.assertEqual(
                 memory_eval.load_judgments(path),
-                {"p": {"docs/a.md": 2, ".agents/skills/x/SKILL.md": 1}},
+                {"p": {"docs/a.md": 2, "docs/b.md": 0, ".agents/skills/x/SKILL.md": 1}, "q": {}},
             )
+            # A grade of 3 or -1 counted as useful or noise; one that is not a
+            # number was dropped and its document counted unjudged. Either way
+            # the measures moved without a word.
+            for grade in (3, -1, 10 ** 30, True, False, 1.5, 2.0, "2", None, [2]):
+                with self.subTest(grade=grade):
+                    path.write_text(json.dumps({"p17": {"docs/a.md": 1, "docs/odd.md": grade}}), encoding="utf-8")
+                    with self.assertRaises(memory_eval.EvalError) as caught:
+                        memory_eval.load_judgments(path)
+                    message = str(caught.exception)
+                    self.assertIn("'p17'", message)
+                    self.assertIn("docs/odd.md", message)
+                    self.assertIn("0, 1 or 2", message)
+            path.write_text(json.dumps({"p17": [["docs/a.md", 2]]}), encoding="utf-8")
+            with self.assertRaisesRegex(memory_eval.EvalError, "'p17'"):
+                memory_eval.load_judgments(path)
+
+    def test_run_refuses_judgments_out_of_range_before_any_work(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            base = Path(name)
+            (base / "set.json").write_text(json.dumps(SET[:1]), encoding="utf-8")
+            (base / "judgments.json").write_text(json.dumps({"p1": {"docs/billing.md": 3}}), encoding="utf-8")
+            process = run_cli(
+                "run", "--set", str(base / "set.json"), "--judgments", str(base / "judgments.json"),
+                "--projects-root", str(base), "--edition", "PHP Core",
+                "--cache", str(base / "cache"), "--out", str(base / "result.json"),
+            )
+            self.assertEqual(2, process.returncode, process.stderr)
+            self.assertIn("docs/billing.md", process.stderr)
+            self.assertFalse((base / "cache").exists())
+            self.assertFalse((base / "result.json").exists())
 
     def test_summary(self) -> None:
         def evaluated(kind: str, delivered: List[str], noise: List[str], answer: bool, seconds: float) -> Dict[str, Any]:
@@ -680,6 +706,44 @@ class ScoringTest(unittest.TestCase):
         self.assertEqual(changes["noise-only"], (["c"], ["b"]))
         self.assertEqual(changes["answer"], (["b"], ["a"]))
 
+    def test_compare_deltas_are_over_the_prompts_evaluated_in_both(self) -> None:
+        # p1 is useful in both; p2 is useful in A and failed in B. Nothing was
+        # lost on a prompt B measured, so no measure may show a loss.
+        def ok(kind: str, seconds: float, delivered: int) -> Dict[str, Any]:
+            return {
+                "status": "ok", "class": kind, "could_help": True, "answer_in_text": kind == "useful",
+                "delivered": ["x"] * delivered, "noise_delivered": [], "unjudged": [],
+                "refresh": {"seconds": seconds},
+            }
+
+        first = {"meta": {}, "items": {"p1": ok("useful", 0.1, 1), "p2": ok("useful", 3.0, 5)}}
+        second = {"meta": {}, "items": {"p1": ok("useful", 0.1, 1), "p2": {"status": "skipped", "reason": "refresh-error"}}}
+        report = memory_eval.format_report([("A", Path("a.json"), first), ("B", Path("b.json"), second)])
+        rows = {line[:42].strip(): line.split()[-1] for line in report.splitlines() if line[:1].strip()}
+        for title in ("useful turns", "could help (a useful document existed)", "answer in the capsule text",
+                      "useful among could-help"):
+            self.assertEqual("+0", rows[title], (title, report))
+        for title in ("mean delivered per turn", "latency p50 (s)", "latency p95 (s)"):
+            self.assertEqual("+0.000", rows[title], (title, report))
+        # The coverage rows compare the whole runs, and the report says so.
+        self.assertEqual("-1", rows["evaluated"], report)
+        self.assertEqual("+1", rows["skipped"], report)
+        self.assertIn("1 evaluated in both", report)
+        self.assertIn("paired delta", report)
+        # The same prompts in both: the delta is the difference of the columns.
+        second["items"]["p2"] = ok("noise-only", 1.0, 2)
+        report = memory_eval.format_report([("A", Path("a.json"), first), ("B", Path("b.json"), second)])
+        rows = {line[:42].strip(): line.split()[-1] for line in report.splitlines() if line[:1].strip()}
+        self.assertEqual("-1", rows["useful turns"])
+        self.assertNotIn("evaluated in both", report)
+        self.assertNotIn("paired delta", report)
+        # Nothing evaluated in both: there is no measure to compare.
+        second["items"] = {key: {"status": "skipped", "reason": "refresh-error"} for key in ("p1", "p2")}
+        report = memory_eval.format_report([("A", Path("a.json"), first), ("B", Path("b.json"), second)])
+        rows = {line[:42].strip(): line.split()[-1] for line in report.splitlines() if line[:1].strip()}
+        self.assertEqual(("-", "-", "-2"), (rows["useful turns"], rows["latency p50 (s)"], rows["evaluated"]))
+        self.assertIn("0 evaluated in both, 2 only in A, 0 only in B", report)
+
     def test_stderr_tail_withholds_lines_quoting_the_prompt(self) -> None:
         prompt = "Please explain how the invoice totals are rounded for ACME exports"
         stderr = (
@@ -701,6 +765,84 @@ class ScoringTest(unittest.TestCase):
         self.assertEqual(parse("2026-08-05 12:00:00"), datetime(2026, 8, 5, 12, tzinfo=timezone.utc))
         self.assertIsNone(parse("2026-08-05"))
         self.assertIsNone(parse("yesterday"))
+
+
+class RefreshOutcomeTest(unittest.TestCase):
+    """A prompt is scored only on a refresh that succeeded; the runtime itself is replaced."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.temporary = tempfile.TemporaryDirectory(prefix="memory-eval-refresh-")
+        base = Path(cls.temporary.name)
+        project = base / "projects" / "shop"
+        project.mkdir(parents=True)
+        git(project, "init", "-q")
+        write(project, "README.md", "# Shop\n")
+        write(project, "docs/orders.md", "# Orders\n\nOrders are confirmed by e-mail.\n")
+        git(project, "add", "-A")
+        git(project, "commit", "-q", "-m", "shop", when=T1)
+        prompts = [{"id": "s1", "project": "shop", "ts": P1_TS, "prompt": "How are orders confirmed?"}]
+        (base / "set.json").write_text(json.dumps(prompts), encoding="utf-8")
+        (base / "judgments.json").write_text(json.dumps({"s1": {"docs/orders.md": 2}}), encoding="utf-8")
+        arguments = memory_eval.build_parser().parse_args([
+            "run", "--set", str(base / "set.json"), "--judgments", str(base / "judgments.json"),
+            "--projects-root", str(base / "projects"), "--edition", "PHP Core",
+            "--cache", str(base / "cache"), "--out", str(base / "result.json"),
+        ])
+        cls.stand = memory_eval.Run(arguments)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.temporary.cleanup()
+
+    def evaluate(self, refresh: Dict[str, Any]) -> Dict[str, Any]:
+        def runtime(corpus: Path, arguments: List[str], env: Dict[str, str], timeout: float) -> Dict[str, Any]:
+            if arguments[0] == "index":
+                return {"exit": 0, "seconds": 0.5, "stdout": b"", "stderr": b""}
+            return {"seconds": 0.25, "stderr": b"", **refresh}
+
+        with mock.patch.object(memory_eval, "run_runtime", runtime):
+            return self.stand.evaluate(self.stand.prompts[0])
+
+    @staticmethod
+    def printed(capsule: Optional[Dict[str, Any]], layer_state: str = "updated") -> bytes:
+        result = {layer: layer_state for layer in memory_eval.LAYERS}
+        result.update(phases={"index": 0.1}, warnings=[], capsule=capsule)
+        if capsule is not None:
+            result["capsule_text"] = "- memory docs/orders.md - Orders"
+        return json.dumps(result).encode("utf-8")
+
+    def test_a_refresh_that_exits_non_zero_is_an_error_not_a_silent_turn(self) -> None:
+        # The runtime prints its JSON and exits 1 when a memory layer failed to update.
+        item = self.evaluate({"exit": 1, "stdout": self.printed(None, "failed"), "stderr": b"index refresh failed\n"})
+        self.assertEqual(("skipped", "refresh-error"), (item["status"], item.get("reason")), item)
+        self.assertNotIn("class", item)
+        self.assertEqual(1, item["refresh"]["exit"])
+        self.assertEqual({"procedural": "failed", "semantic": "failed", "episodic": "failed"}, item["refresh"]["layers"])
+        self.assertIn("index refresh failed", item["refresh"]["stderr_tail"])
+        # Even one that delivered: a failed layer means a stale index.
+        capsule = {"semantic": [{"path": "docs/orders.md"}]}
+        item = self.evaluate({"exit": 1, "stdout": self.printed(capsule, "failed")})
+        self.assertEqual(("skipped", "refresh-error"), (item["status"], item.get("reason")))
+        summary = memory_eval.summarize({"s1": item})
+        self.assertEqual((0, {"refresh-error": 1}, None), (summary["evaluated"], summary["skipped"], summary["latency_p50"]))
+
+    def test_a_timeout_is_one_whatever_it_printed(self) -> None:
+        item = self.evaluate({"exit": None, "stdout": self.printed({"semantic": [{"path": "docs/orders.md"}]})})
+        self.assertEqual(("skipped", "refresh-timeout"), (item["status"], item.get("reason")))
+
+    def test_a_refresh_that_succeeded_is_scored(self) -> None:
+        item = self.evaluate({"exit": 0, "stdout": self.printed({"semantic": [{"path": "docs/orders.md"}]})})
+        self.assertEqual(("ok", "useful"), (item["status"], item["class"]), item)
+        self.assertEqual({"procedural": "updated", "semantic": "updated", "episodic": "updated"}, item["refresh"]["layers"])
+        item = self.evaluate({"exit": 0, "stdout": b"Traceback (most recent call last):\n"})
+        self.assertEqual(("skipped", "refresh-error"), (item["status"], item.get("reason")))
+
+    def test_layer_states_are_fixed_words_never_client_text(self) -> None:
+        stdout = json.loads(self.printed(None))
+        stdout.update(procedural="How are orders confirmed?", semantic=["x"], episodic="failed")
+        item = self.evaluate({"exit": 1, "stdout": json.dumps(stdout).encode("utf-8")})
+        self.assertEqual({"procedural": "other", "semantic": "other", "episodic": "failed"}, item["refresh"]["layers"])
 
 
 class ReconstructionTest(unittest.TestCase):
