@@ -56,6 +56,37 @@ class DetectEditionTests(unittest.TestCase):
         self.assertIn("no composer.json", evidence)
 
 
+class ProjectIdentityTests(unittest.TestCase):
+    """One folder is one project - one key, one state directory - however it is spelled."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.project = self.root / "shop"
+        write(self.project / "composer.json", json.dumps({"require": {"laravel/framework": "^11.0"}}))
+        (self.root / "other").mkdir()
+
+    def test_equivalent_spellings_share_the_key_and_the_state_directory(self):
+        spellings = [str(self.project) + os.sep, f"{self.root}{os.sep}.{os.sep}shop",
+                     f"{self.root / 'other'}{os.sep}..{os.sep}shop"]
+        if os.name != "nt":
+            # POSIX lets `//` name the root too; a symbolic link names the folder it points to.
+            (self.root / "link").symlink_to(self.project, target_is_directory=True)
+            spellings += ["/" + str(self.project), str(self.root / "link")]
+        base = self.root / "state"
+        key = attach.project_key(self.project)
+        self.assertEqual(base / "attached" / key, attach.state_directory(self.project, base))
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                self.assertEqual(self.project, attach.resolve_project(spelling))
+                self.assertEqual(key, attach.project_key(spelling))
+                self.assertEqual(base / "attached" / key, attach.state_directory(attach.resolve_project(spelling), base))
+
+    def test_another_folder_is_another_project(self):
+        self.assertNotEqual(attach.project_key(self.project), attach.project_key(self.root / "other"))
+
+
 class LauncherTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

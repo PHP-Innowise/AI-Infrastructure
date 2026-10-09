@@ -9,15 +9,18 @@ import time
 import unittest
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
-from harness import commands
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "harness" / "src"))
+from harness import commands, sessions
 from harness.sessions import SessionError
 
 NAVIGATION = [item["name"] for item in commands.NAVIGATION]
 
 FAKE_CLAUDE = r'''#!/usr/bin/env python3
-import json, os, sys, time
+import json, os, pathlib, sys, time
 log = os.environ["FAKE_LOG"]
+# Each `--add-dir` folder's commands are listed too, as Claude Code lists them.
+added = [sys.argv[index + 1] for index, value in enumerate(sys.argv[:-1]) if value == "--add-dir"]
 mode = os.environ.get("FAKE_MODE", "")
 with open(log, "a") as handle:
     handle.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
@@ -49,6 +52,8 @@ for line in sys.stdin:
         {"name": "bad name", "description": "spaces are not a command"},
         {"name": "unite-cms:init", "description": "Plugin command (plugin)", "argumentHint": ""},
     ] + ([{"name": os.environ["FAKE_EXTRA"], "description": "Installed a moment ago (project)"}] if os.environ.get("FAKE_EXTRA") else [])
+    commands += [{"name": path.stem, "description": "From an added directory (project)"}
+                 for folder in added for path in sorted(pathlib.Path(folder, ".claude/commands").glob("*.md"))]
     print(json.dumps({"type": "system", "subtype": "noise"}), flush=True)
     print(json.dumps({"type": "control_response", "response": {"subtype": "success", "request_id": message["request_id"],
                       "response": {"commands": commands, "models": []}}}), flush=True)
@@ -272,6 +277,103 @@ class CommandCatalogTests(unittest.TestCase):
         self.assertEqual(commands.frontmatter("# No frontmatter\ndescription: not metadata\n")["description"], "")
         long = commands.frontmatter("---\ndescription: " + "word " * 200 + "\n---\n")["description"]
         self.assertEqual((len(long), long[-1]), (commands.DESCRIPTION_CHARS, "…"))
+
+
+@unittest.skipIf(os.name == "nt", "The fake CLIs are POSIX scripts")
+class AttachedCatalogTests(unittest.TestCase):
+    """A project with the Laravel edition attached from this clone: what the composer lists for the edition is what a
+    message that names it is routed to - a Claude Code command, a Codex `$skill`, a Cursor `/skill`."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.project = self.root / "shop"
+        self.project.mkdir()
+        (self.project / "composer.json").write_text(json.dumps({"require": {"laravel/framework": "^11.0"}}))
+        self.edition = ROOT / "Laravel"
+        self.log = self.root / "log.jsonl"
+        for name, body in (("claude", FAKE_CLAUDE), ("codex", FAKE_CODEX)):
+            script = self.root / name
+            script.write_text(body)
+            script.chmod(0o755)
+        environment = patch.dict(os.environ, {"FAKE_LOG": str(self.log), "CODEX_HOME": str(self.root / "codex-home")})
+        environment.start()
+        self.addCleanup(environment.stop)
+        discovery = patch.object(sessions.providers, "discover_providers", return_value=[
+            {"id": "claude", "name": "Claude Code", "available": True, "executable": str(self.root / "claude"), "detail": ""},
+            {"id": "codex", "name": "Codex", "available": True, "executable": str(self.root / "codex"), "detail": ""},
+            {"id": "cursor", "name": "Cursor", "available": True, "executable": "/never-executed/cursor-agent", "detail": ""}])
+        discovery.start()
+        self.addCleanup(discovery.stop)
+        for name in ("_worker", "_keep_accelerators_current"):
+            stub = patch.object(sessions.Sessions, name, return_value=None)
+            stub.start()
+            self.addCleanup(stub.stop)
+        self.store = sessions.Sessions(self.root / "state", [self.project])
+        self.addCleanup(self.store.close)
+        self.project_id = next(iter(self.store.projects))
+        self.assertEqual({"mode": "attached", "edition": "Laravel"}, self.store.accelerators.summary(self.project_id))
+
+    def session(self, provider, project_id=None):
+        project_id = project_id or self.project_id
+        return {"provider": provider, "project_id": project_id, "project_path": self.store.project(project_id)["path"],
+                "agents_enabled": False, "agent_count": 3, "thinking_effort": None}
+
+    def probes(self):
+        entries = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+        return [entry["argv"] for entry in entries if "argv" in entry]
+
+    def test_claude_runs_an_attached_command_it_lists(self):
+        # Routed before anything was listed: the probe carries the edition's folder, as the launch does.
+        route = self.store.catalog.route(self.session("claude"), "/eloquent check the Order model")
+        self.assertEqual("native", route["mode"])
+        self.assertIn("Claude Code runs /eloquent itself", route["notice"])
+        [probe] = self.probes()
+        self.assertEqual(str(self.edition), probe[probe.index("--add-dir") + 1])
+        # The composer offers it from that same probe.
+        listed = {item["name"]: item["kind"] for item in self.store.command_listing(self.project_id, "claude")["commands"]}
+        self.assertEqual("native", listed["eloquent"])
+        self.assertEqual(1, len(self.probes()))
+        self.assertEqual("native", self.store.catalog.route(self.session("claude"), "/php-review src")["mode"])
+        # Another project without an edition lists and routes without it.
+        notes = self.root / "notes"
+        notes.mkdir()
+        other = self.store.add_project({"path": str(notes)})["id"]
+        self.assertNotIn("eloquent", [item["name"] for item in self.store.command_listing(other, "claude")["commands"]])
+        route = self.store.catalog.route(self.session("claude", other), "/eloquent check the Order model")
+        self.assertEqual("text", route["mode"])
+        self.assertIn("is not a Claude Code command here", route["notice"])
+        self.assertNotIn("--add-dir", self.probes()[-1])
+
+    def test_codex_requests_an_attached_skill_it_lists(self):
+        skill = str(self.edition / ".agents/skills/eloquent/SKILL.md")
+        listed = {item["name"]: item["path"] for item in self.store.command_listing(self.project_id, "codex")["skills"]}
+        self.assertEqual(skill, listed["eloquent"])
+        route = self.store.catalog.route(self.session("codex"), "Use $eloquent and $php-review on app/Order.php")
+        self.assertEqual([("eloquent", skill), ("php-review", listed["php-review"])],
+                         [(item["name"], item["path"]) for item in route["requests"]])
+        self.assertEqual("Codex skills requested: eloquent, php-review.", route["notice"])
+        self.assertIn(f"- eloquent ({skill}): read that file and follow it.", commands.request(route["requests"]))
+        # The edition's skills reach Codex in its instructions, so they are requested even when Codex cannot list its own.
+        self.store.providers["codex"] = {"id": "codex", "available": False, "executable": None}
+        route = commands.Catalog(self.store).route(self.session("codex"), "Use $eloquent")
+        self.assertEqual(["eloquent"], [item["name"] for item in route["requests"]])
+
+    def test_cursor_requests_an_attached_skill_it_lists(self):
+        listed = {item["name"]: item["kind"] for item in self.store.command_listing(self.project_id, "cursor")["commands"]}
+        self.assertEqual("skill", listed["eloquent"])
+        route = self.store.catalog.route(self.session("cursor"), "/eloquent check the Order model")
+        self.assertEqual(([("eloquent", str(self.edition / ".cursor/skills/eloquent/SKILL.md"))], "Cursor skill requested: eloquent."),
+                         ([(item["name"], item["path"]) for item in route["requests"]], route["notice"]))
+        # The project's own skill of the same name wins, in the list and on send alike.
+        folder = self.project / ".cursor/skills/eloquent"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text("---\nname: eloquent\ndescription: The project's own.\n---\n# Eloquent\n")
+        [own] = [item for item in self.store.command_listing(self.project_id, "cursor")["commands"] if item["name"] == "eloquent"]
+        self.assertEqual("The project's own.", own["description"])
+        route = self.store.catalog.route(self.session("cursor"), "/eloquent")
+        self.assertEqual([".cursor/skills/eloquent/SKILL.md"], [item["path"] for item in route["requests"]])
 
 
 if __name__ == "__main__":

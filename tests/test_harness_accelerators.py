@@ -58,6 +58,42 @@ class AttachedAcceleratorTests(unittest.TestCase):
         self.assertEqual({"mode": "attached", "edition": "Laravel"}, listed["accelerator"])
         self.assert_project_untouched()
 
+    @unittest.skipIf(os.name == "nt", "POSIX spellings: a leading // and a symbolic link")
+    def test_every_spelling_of_a_folder_is_one_project_with_the_terminals_state(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import accelerator_attach
+        root = self.root.resolve()
+        blog = root / "blog"
+        (blog / "app").mkdir(parents=True)
+        (blog / "composer.json").write_text(json.dumps({"require": {"laravel/framework": "^11.0"}}), encoding="utf-8")
+        (root / "other").mkdir()
+        (root / "link").symlink_to(blog, target_is_directory=True)
+
+        def terminal(spelling):
+            """The state `accelerator_attach.py run --project <spelling>` uses with this server's state."""
+            return accelerator_attach.state_directory(accelerator_attach.resolve_project(spelling), self.root / "state")
+
+        # POSIX lets `//` name the root too: registered so, the folder gets the terminal's ID and state.
+        first = self.store.add_project({"path": "/" + str(blog)})
+        state = Path(self.store.accelerators.get(first["id"])["state"])
+        self.assertEqual((first["id"], first["path"], state),
+                         (accelerator_attach.project_key(blog), str(blog), terminal("/" + str(blog))))
+        # Git reads the folder; registered as `//...` it was "unavailable" and no session could start.
+        self.assertEqual(first["id"], self.store.git(first["id"])["project_id"])
+        for spelling in (str(blog), str(blog) + "/", f"{root}/./blog"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(first, self.store.add_project({"path": spelling}))
+                self.assertEqual(state, terminal(spelling))
+        # The browser refuses parent traversal and links; the terminal resolves them to the same folder and state.
+        for spelling in (f"{root}/other/../blog", str(root / "link")):
+            with self.subTest(spelling=spelling):
+                with self.assertRaises(sessions.SessionError):
+                    self.store.add_project({"path": spelling})
+                self.assertEqual(state, terminal(spelling))
+        registered = sorted([self.project_id, first["id"]])
+        self.assertEqual(registered, sorted(item["id"] for item in self.store.list_projects()))
+        self.assertEqual(registered, sorted(path.name for path in (self.root / "state/attached").iterdir()))
+
     def test_a_project_with_its_own_accelerator_is_left_alone(self):
         installed = self.root / "installed"
         (installed / "memory-bank/scripts").mkdir(parents=True)

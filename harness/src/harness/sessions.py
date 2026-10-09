@@ -23,6 +23,8 @@ import uuid
 
 from .filesystem import fs
 from .filesystem import existing_directory, same_path, secure_private_dir
+# scripts/, which .filesystem puts on the path: the terminal launcher keys a project's attached state the same way.
+from accelerator_attach import project_key
 from . import process_runtime
 from . import clash, context_usage, providers, run_activity, sdd
 from .config import DEFAULT_LENSES
@@ -514,7 +516,7 @@ class Sessions:
             path = existing_directory(candidate)
             if not path.is_dir():
                 raise SessionError("Each project must be an existing directory.")
-            key = hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()[:16]
+            key = project_key(path)
             self.projects[key] = {"id": key, "name": path.name, "path": str(path)}
         self.providers = {p["id"]: p for p in providers.discover_providers(overrides)}
         self.timeout = timeout
@@ -758,7 +760,9 @@ class Sessions:
                 raise SessionError('Enter an absolute project path without parent traversal.')
             descriptor = open_project_path(path, '.', directory=True)
             fs.close(descriptor)
-            return path
+            # The spelling a restart registers (on POSIX `//srv/shop` is `/srv/shop`), so one folder
+            # has one ID and one attached state directory, the one the terminal launcher uses too.
+            return existing_directory(path)
         except (OSError, ValueError, RuntimeError):
             raise SessionError('The project directory is missing, inaccessible, or contains a symbolic link.') from None
 
@@ -781,12 +785,13 @@ class Sessions:
         if not isinstance(data, dict) or set(data) != {'path'}:
             raise SessionError('A project registration accepts only its path.')
         path = self._project_folder(data['path'])
-        key = hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()[:16]
+        key = project_key(path)
         project = {'id': key, 'name': path.name or str(path), 'path': str(path)}
         with self.lock:
             if self.stopping.is_set():
                 raise SessionError('The server is stopping.')
-            existing = next((value for value in self.projects.values() if same_path(value['path'], path)), None)
+            existing = self.projects.get(key) or next(
+                (value for value in self.projects.values() if same_path(value['path'], path)), None)
             if existing:
                 return {**existing, 'available': True}
             if key not in self.projects and len(self.projects) >= 100:
