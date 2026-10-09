@@ -172,6 +172,11 @@ jobs:
         run: python3 -m unittest tests.test_hook_wiring
       - name: Attach an edition without copying it
         run: python3 -m unittest tests.test_accelerator_attach
+      - name: Memory evaluation stand
+        # The stand runs on client prompts and stays out of CI; its as-of
+        # reconstruction, edition overlay, scoring, report and transcript
+        # parsing run here on a synthetic project, with one real refresh.
+        run: python3 -m unittest tests.test_memory_eval
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.

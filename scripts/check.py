@@ -453,6 +453,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                 unittests("Test selected-tool clean installations", ["tests.test_installation"]),
                 unittests("Hook wiring runs from any working directory", ["tests.test_hook_wiring"]),
                 unittests("Attach an edition without copying it", ["tests.test_accelerator_attach"]),
+                unittests("Memory evaluation stand", ["tests.test_memory_eval"]),
                 unittests("Preserve framework-specific skill semantics", ["tests.test_framework_semantics"]),
                 unittests("Optional developer tooling stays out of the editions", ["tests.test_collect_context"]),
                 step("Kit 3 admission registry is well-formed", "python3 scripts/validate_registry.py --check"),
