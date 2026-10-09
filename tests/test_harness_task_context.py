@@ -178,7 +178,8 @@ class TaskContextTests(unittest.TestCase):
         findings = [record for record in info["records"] if record["type"] == "finding"]
         self.assertEqual([("Cobalt allocation needs one owner", "resolved", "verified")],
                          [(record["title"], record["status"], record["authority"]) for record in findings])
-        self.assertEqual({memory_draft.AUTOMATIC_REASON}, {item["reason"] for item in findings[0]["transitions"][-2:]})
+        self.assertEqual([memory_draft.AUTOMATIC_REASON + " [attestation:agent]", memory_draft.AUTOMATIC_REASON],
+                         [item["reason"] for item in findings[0]["transitions"][-2:]])
         saved = self.memory_events(store, sid)[-1]
         self.assertTrue(saved["ok"], saved)
         self.assertIn("Saved to project memory: the task's progress and next steps; "
@@ -221,6 +222,74 @@ class TaskContextTests(unittest.TestCase):
             {'progress': 'Release coverage finished.', 'next_steps': [], 'learnings': []}, automatic=True)
         self.assertTrue(result['ok'], result)
         self.assertEqual([], store.brain_info(sid)['task']['next_steps'])
+
+    LEARNING = {"type": "finding", "title": "Cobalt allocation needs one owner",
+                "consequence": "Every cobalt allocation names exactly one owner.", "sources": ["specs/authority.md"]}
+
+    def findings(self, store, sid):
+        return [record for record in store.brain_info(sid)["records"]
+                if record["type"] == "finding" and record["title"] == self.LEARNING["title"]]
+
+    def test_a_repeated_save_of_one_run_writes_each_learning_once(self):
+        # The same run's save again - a retry, or a replay after a crash
+        # between its writes - finds what the first attempt wrote.
+        store = self.manager(); sid = self.linked_run(store)
+        context = store._task_context()
+        draft = {"progress": "The cobalt rule is checked.", "next_steps": [], "learnings": [self.LEARNING],
+                 "verified": True}
+        generation = store.generations.get(sid)
+        first = context.save_memory(store.get(sid), draft, automatic=True, generation=generation)
+        revision = store.brain_info(sid)["task"]["revision"]
+        second = context.save_memory(store.get(sid), draft, automatic=True, generation=generation)
+        self.assertTrue(first["ok"] and second["ok"], (first, second))
+        self.assertEqual(1, len(self.findings(store, sid)))
+        self.assertEqual(revision, store.brain_info(sid)["task"]["revision"])
+        # A later run restating the same learning names the same record too.
+        third = context.save_memory(store.get(sid), {**draft, "progress": "Release path covered."}, automatic=True)
+        self.assertTrue(third["ok"], third)
+        self.assertEqual(1, len(self.findings(store, sid)))
+        self.assertEqual("Release path covered.", store.brain_info(sid)["task"]["progress"])
+
+    def test_a_task_moved_on_since_it_was_read_is_saved_on_the_second_try(self):
+        # A Stop hook's checkpoint can land between reading the task and saving.
+        store = self.manager(); sid = self.linked_run(store)
+        context = store._task_context()
+        stale = store.brain_info(sid)["task"]
+        moved = store.brain_action(sid, {"action": "brain-update", "revision": stale["revision"],
+                                         "progress": "A checkpoint moved the task on."})
+        self.assertTrue(moved["ok"], moved)
+        original = context._knowledge
+        reads = []
+        def first_read_is_stale(operation, *arguments, **options):
+            if operation == "inspect" and options.get("task_only") and not reads:
+                reads.append(True)
+                return {"task": stale}
+            return original(operation, *arguments, **options)
+        with patch.object(context, "_knowledge", side_effect=first_read_is_stale):
+            result = context.save_memory(store.get(sid), {"progress": "Saved after the checkpoint.", "next_steps": [],
+                                                          "learnings": [self.LEARNING], "verified": True}, automatic=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("Saved after the checkpoint.", store.brain_info(sid)["task"]["progress"])
+        self.assertEqual(1, len(self.findings(store, sid)))
+
+    def test_a_runtime_without_record_result_saves_command_by_command(self):
+        from harness import knowledge
+        store = self.manager(); sid = self.linked_run(store)
+        context = store._task_context()
+        original = context._call
+        actions = []
+        def older_runtime(session, options, workspace, action, **fields):
+            actions.append(action)
+            if action == "record-result":
+                raise sessions.SessionError(knowledge.OLDER_RUNTIME)
+            return original(session, options, workspace, action, **fields)
+        with patch.object(context, "_call", side_effect=older_runtime):
+            result = context.save_memory(store.get(sid), {"progress": "Saved the old way.", "next_steps": [],
+                                                          "learnings": [self.LEARNING], "verified": True}, automatic=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual("record-result", actions[0])
+        self.assertIn("brain-create", actions)
+        self.assertEqual([("finding", "resolved")], [(item["type"], item["status"]) for item in result["saved"]["records"]])
 
     def test_saving_refuses_unconfirmed_or_unsourced_learnings_and_a_finished_task(self):
         store = self.manager()
@@ -326,8 +395,9 @@ class TaskContextTests(unittest.TestCase):
         # The ledger says the attestation was the agent's, not a person's.
         self.assertEqual([("observed", "verified"), ("open", "resolved")],
                          [(item["from"], item["to"]) for item in findings[0]["transitions"]][-2:])
-        self.assertEqual({memory_draft.AUTOMATIC_REASON},
-                         {item["reason"] for item in findings[0]["transitions"][-2:]})
+        # The verification itself carries the machine-readable attestation.
+        self.assertEqual([memory_draft.AUTOMATIC_REASON + " [attestation:agent]", memory_draft.AUTOMATIC_REASON],
+                         [item["reason"] for item in findings[0]["transitions"][-2:]])
         saved = self.memory_events(store, sid)[-1]
         self.assertTrue(saved["ok"], saved)
         self.assertIn("Saved to project memory: the task's progress and next steps; "

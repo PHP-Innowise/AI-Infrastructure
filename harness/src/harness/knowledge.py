@@ -49,11 +49,18 @@ ACTION_FIELDS = {
     'promote-review': ('promotion_id', 'reviewer', 'reject'),
     'promote-apply': ('promotion_id',),
     'promote-auto': (),
+    # One result - progress, next steps, learnings - in one replayable call.
+    'record-result': ('task_id', 'result_id', 'revision', 'request', 'attestation', 'reason'),
     'export': ('include_archive', 'include_superseded'),
     # The turn checkpoint a host's Stop hook runs; the Harness runs it for a
     # provider whose headless mode fires no Stop event (Cursor).
     'turn': ('task_id',),
 }
+
+# What `run` says when the project's runtime predates an operation; callers
+# that can do the same work another way look for it.
+OLDER_RUNTIME = 'The installed context runtime is older than this operation. Update the accelerator in this project first.'
+STALE_RECORD = 'This record changed. Reload it and repeat the edit using its current revision.'
 
 # Run the installed runtime's own policy helpers in its guarded subprocess.
 # Project code is never imported into the HTTP server's Python process.
@@ -344,7 +351,7 @@ class KnowledgeManager:
             'brain-update': ('record_id', 'revision'), 'complete': ('task_id', 'revision', 'outcome'),
             'promote-propose': ('source_ids', 'title', 'content'),
             'promote-review': ('promotion_id', 'reviewer'), 'promote-apply': ('promotion_id',),
-            'turn': ('task_id',),
+            'turn': ('task_id',), 'record-result': ('task_id', 'result_id', 'revision', 'request'),
         }.get(action, ())
         if any(field not in data for field in required):
             raise SessionError('Required knowledge operation fields are missing.')
@@ -367,7 +374,8 @@ class KnowledgeManager:
         if action == 'rebind':
             names['record_id'] = 'record'
         for field in ACTION_FIELDS[action]:
-            if field not in data or field in ('record_type', 'layer') or (field == 'query' and query is not None):
+            # A result's body travels in a file (`run`): it outgrows a Windows command line.
+            if field not in data or field in ('record_type', 'layer', 'request') or (field == 'query' and query is not None):
                 continue
             value = data[field]
             if field in ('include_archive', 'include_superseded', 'reject', 'replace_next_steps'):
@@ -408,6 +416,10 @@ class KnowledgeManager:
                     raise SessionError('Select a supported record privacy level.')
                 if field == 'authority' and value not in ('inferred', 'observed', 'verified'):
                     raise SessionError('Select a supported evidence authority.')
+                if field == 'attestation' and value not in ('agent', 'person'):
+                    raise SessionError('Say whether the agent or a person checked the learnings.')
+                if field == 'result_id' and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', value):
+                    raise SessionError('Use a result ID of letters, digits, dots, underscores or hyphens.')
                 if field in ('memory_id', 'superseded_by') and not re.fullmatch(r'MEM-(?:\d+|\d{8}-[0-9a-f]{8})', value):
                     raise SessionError('Select a valid Memory Bank ID.')
                 if field in ('review_after', 'valid_to'):
@@ -579,7 +591,8 @@ class KnowledgeManager:
             if not info['runtime_available']:
                 raise SessionError('The selected Memory Bank does not have an installed context runtime.')
             if action in ('start', 'brain-create', 'brain-update', 'complete', 'rebind',
-                          'promote-propose', 'promote-review', 'promote-apply', 'promote-auto') and info['mode'] != 'governed':
+                          'promote-propose', 'promote-review', 'promote-apply', 'promote-auto',
+                          'record-result') and info['mode'] != 'governed':
                 raise SessionError('Project Brain editing requires the project to use governed mode.')
             layout = self.layout(project_id, _root)
             root = layout['folder'] / info['root']
@@ -609,6 +622,18 @@ class KnowledgeManager:
                 export_id = str(uuid.uuid4())
                 destination = Path(self.temporary.name) / export_id
                 arguments.extend(['--destination', str(destination)])
+            request_file = None
+            if action == 'record-result':
+                request = data['request']
+                try:
+                    encoded = json.dumps(request, ensure_ascii=False, allow_nan=False)
+                except (TypeError, ValueError, RecursionError) as error:
+                    raise SessionError('The memory result is not plain JSON.') from error
+                if not isinstance(request, dict) or len(encoded.encode('utf-8')) > 262144:
+                    raise SessionError('The memory result must be a JSON object of at most 256 KiB.')
+                request_file = Path(self.temporary.name) / f'result-{uuid.uuid4().hex}.json'
+                request_file.write_text(encoded, encoding='utf-8')
+                arguments.extend(['--input', str(request_file)])
             scripts = layout['scripts'] or root / 'memory-bank/scripts'
             command = [sys.executable, str(scripts / 'context.py'), '--root', str(root), *arguments]
             try:
@@ -625,14 +650,18 @@ class KnowledgeManager:
             except (OSError, ValueError, RecursionError, subprocess.TimeoutExpired, SessionError) as error:
                 if destination is not None:
                     shutil.rmtree(destination, ignore_errors=True)
+                if request_file is not None:
+                    request_file.unlink(missing_ok=True)
                 return {'ok': False, 'action': action, 'result': None,
                         'error': str(error) if isinstance(error, SessionError) else 'The context runtime could not finish this operation. Refresh before retrying; changes may have been applied.'}
+            if request_file is not None:
+                request_file.unlink(missing_ok=True)
             response = {'ok': code == 0, 'action': action, 'result': result}
             if code != 0:
                 detail = stderr.decode('utf-8', errors='replace')
                 message = 'The context runtime rejected this operation. Check record fields, sources and project validation.'
                 if 'Stale ' in detail and 'revision' in detail:
-                    message = 'This record changed. Reload it and repeat the edit using its current revision.'
+                    message = STALE_RECORD
                 elif 'Owner is not authorized' in detail:
                     message = 'The configured Project Brain owner is not authorized to edit this record.'
                 elif 'binding' in detail.lower() or 'Working task not found' in detail:
@@ -642,7 +671,9 @@ class KnowledgeManager:
                 elif 'secret' in detail.lower():
                     message = 'The runtime refused content matching its secret-protection rules.'
                 elif 'unrecognized arguments' in detail or 'invalid choice' in detail:
-                    message = 'The installed context runtime is older than this operation. Update the accelerator in this project first.'
+                    message = OLDER_RUNTIME
+                elif action == 'record-result' and 'Result ID was already used' in detail:
+                    message = 'This memory result was already saved with different content.'
                 response['error'] = message
             elif result is None:
                 response.update(ok=False, error='The context runtime did not return a valid JSON result. Refresh before retrying; changes may have been applied.')

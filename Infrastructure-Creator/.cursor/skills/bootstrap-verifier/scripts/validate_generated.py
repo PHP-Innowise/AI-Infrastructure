@@ -116,6 +116,8 @@ RUNTIME_SCRIPTS = (
     "workspace_roots.py",
     # validate.py imports it at load: without it no memory command starts.
     "automatic_query.py",
+    # context.py imports it at load: the one write path for a run's result.
+    "memory_results.py",
     "mcp_server.py",
     "mcp_config.py",
 )

@@ -107,6 +107,9 @@ from context_retrieval import (
     token_coverage,
 )
 import workspace_roots
+# One pattern for paths a turn may not record and sources a learning may not
+# cite: secrets, keys, environment files.
+from memory_results import SOURCE_PATH_DENYLIST as TURN_PATH_DENYLIST, record_result
 from validate import (
     PRIVATE_PATTERNS,
     SECRET_PATTERNS,
@@ -235,10 +238,6 @@ LAST_TURN_REPORT_MAX_AGE_SECONDS = 24 * 60 * 60
 # crowd the capsule: one compact line, problems first.
 LAST_TURN_SECTION_CHARACTER_LIMIT = 600
 LAST_TURN_SECTION_PATH_LIMIT = 3
-TURN_PATH_DENYLIST = re.compile(
-    r"(^|/)(\.env(\..+)?|secrets?|id_[a-z0-9]+|[^/]+\.(pem|key|p12|pfx|jks|keystore))$",
-    re.IGNORECASE,
-)
 TURN_RUNTIME_DIRECTORIES = ("dynamic", "control", "indexes", "archive", "local")
 BRANCH_PREFIXES = (
     "feature/", "feat/", "fix/", "bugfix/", "hotfix/", "chore/", "release/",
@@ -293,6 +292,14 @@ def connect(database: Path) -> sqlite3.Connection:
         if connection.execute(
             "SELECT name FROM sqlite_master WHERE name = 'document_links'"
         ).fetchone() is None:
+            connection.execute("DROP TABLE IF EXISTS document_source_state")
+        # The same for a metadata column added later: retained rows would
+        # otherwise keep the column's default until their file changes.
+        metadata_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(document_metadata)")
+        }
+        if metadata_columns and "attestation" not in metadata_columns:
             connection.execute("DROP TABLE IF EXISTS document_source_state")
         episode_schema = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
@@ -2636,6 +2643,8 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
         marks.append("weak match")
     if item.get("match") == "conflict":
         marks.append("conflicts with another item here")
+    if item.get("attestation") == "agent":
+        marks.append("agent-attested, not reviewed by a person")
     changed = item.get("source_changed")
     if isinstance(changed, list) and changed:
         marks.append(
@@ -5006,6 +5015,38 @@ def build_parser() -> argparse.ArgumentParser:
     create_brain.add_argument("--confidence", type=float, default=1.0)
     create_brain.add_argument("--json", action="store_true")
 
+    record = commands.add_parser(
+        "record-result",
+        help=(
+            "record a run's progress, next steps and up to three source-backed "
+            "findings or decisions; replaying the same --result-id with the "
+            "same content completes a save that stopped half way"
+        ),
+    )
+    record.add_argument("--task-id", required=True)
+    record.add_argument(
+        "--result-id",
+        required=True,
+        help="stable for this result: the same ID and content is a replay, never a second copy",
+    )
+    record.add_argument("--revision", type=revision_argument, required=True)
+    record.add_argument(
+        "--input",
+        required=True,
+        help=(
+            "JSON object with progress, next_steps, learnings (type, title, "
+            "consequence, sources) and verified; '-' reads standard input"
+        ),
+    )
+    record.add_argument(
+        "--attestation",
+        choices=("agent", "person"),
+        default="agent",
+        help="who checked the learnings against their sources (default: agent)",
+    )
+    record.add_argument("--reason")
+    record.add_argument("--json", action="store_true")
+
     update_brain = commands.add_parser(
         "brain-update", help="CAS-update a governed dynamic Brain record"
     )
@@ -5614,6 +5655,52 @@ def main() -> int:
                 else:
                     print(f"Delegation capsule is valid ({len(content)} characters).")
                 return 0 if not problems else 1
+
+            if arguments.command == "record-result":
+                raw = (
+                    sys.stdin.read()
+                    if arguments.input == "-"
+                    else Path(arguments.input).read_text(encoding="utf-8")
+                )
+                try:
+                    data = json.loads(raw)
+                except ValueError as error:
+                    raise ContextError("The result must be a JSON object") from error
+                revision = arguments.revision
+                if revision == AUTO_REVISION:
+                    from brain_runtime import find_task
+
+                    revision = find_task(
+                        repository, validate_task_id(arguments.task_id)
+                    )[1]["revision"]
+                reason = arguments.reason or (
+                    "Saved with context.py record-result; agent-attested, "
+                    "not reviewed by a person"
+                    if arguments.attestation == "agent"
+                    else "Saved with context.py record-result; reviewed by a person"
+                )
+                result = record_result(
+                    repository,
+                    arguments.task_id,
+                    arguments.result_id,
+                    revision,
+                    data,
+                    owner=owner,
+                    reason=reason,
+                    attestation=arguments.attestation,
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    states = ", ".join(
+                        f"{item['type']} {item['title']!r} {item['state']}"
+                        for item in result["records"]
+                    ) or "no learnings"
+                    print(
+                        ("Result already recorded" if result["replayed"] else "Result recorded")
+                        + f": {states}."
+                    )
+                return 0
 
             if arguments.command == "brain-create":
                 external_id = validate_task_id(arguments.external_id)

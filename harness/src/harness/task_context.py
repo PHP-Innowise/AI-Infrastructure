@@ -15,7 +15,7 @@ import uuid
 
 from . import memory_draft
 from .automatic_query import AutomaticQueryError, sanitize_automatic_query
-from .knowledge import KnowledgeBusy, _path, _text
+from .knowledge import OLDER_RUNTIME, STALE_RECORD, KnowledgeBusy, _path, _text
 from .sessions import CAPSULE_LIMIT, SessionError, read_context
 
 UUID4 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
@@ -315,21 +315,94 @@ class TaskContext:
                 'memory_draft': memory_draft.latest(self.sessions, session['id'])}
 
     def save_memory(self, session, data, *, automatic=False, known=(), generation=None):
-        """Record a memory draft through the runtime's own commands.
+        """Record a memory draft through the runtime's own `record-result`.
 
-        The task's progress and next steps are updated first; each kept learning
-        becomes a verified finding or decision, resolved or accepted with its
-        consequence as the content promotion carries; then automatic promotion
-        runs once, under the runtime's own rules. Each command is atomic, the
-        chain is not: a failure reports what was already saved.
+        One call carries the task's progress and next steps and each kept
+        learning, which becomes a finding or decision checked against its
+        sources - resolved or accepted, with its consequence as the content
+        promotion carries - and then runs promotion under the runtime's own
+        rules. The call is replayable: a learning is named by its content, so
+        a retry after an interruption finds the record instead of writing
+        another, and the run's result ID marks the task update as done. A
+        runtime older than the command gets the previous chain.
 
         `automatic` is the unattended save at the end of a run: the agent's draft
         as written, with any learning whose sources are not in the workspace, or
         that this session already saved (`known`), left out rather than failing
-        the rest. Its learnings are written as observed and raised to verified
-        with a reason saying the agent attested them and no person reviewed them,
-        so the record's own ledger tells the two apart. Promotion still follows
-        the project's `automatic_promotion` setting.
+        the rest. Its learnings are attested by the agent and no person
+        reviewed them, which the records say (`attestation: agent`) and the
+        capsule repeats next to them. Promotion still follows the project's
+        `automatic_promotion` setting.
+        """
+        _, options, workspace, info = self._bound(session)
+        root = Path(workspace) / info['root']
+        original = data
+        skipped = []
+        if automatic:
+            data, skipped = memory_draft.usable(root, data, known)
+            if not (data['progress'] or data['next_steps'] or data['learnings']):
+                return {'ok': True, 'saved': {'task': None, 'records': [], 'promotion': None},
+                        'skipped': skipped, 'error': None}
+        draft = memory_draft.submission(data)
+        memory_draft.check_sources(root, draft)
+        task = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
+                               task_id=options.get('record_id') or options['task_id'], task_only=True)['task']
+        if task.get('status') in ('completed', 'cancelled'):
+            raise SessionError('The linked task is finished. Link an active task to save more.')
+        reason = (memory_draft.AUTOMATIC_REASON if automatic else 'Saved from a reviewed Harness session')
+        def guard():
+            sid = session['id']
+            if (sid in self.sessions.cancelled or self.sessions.stopping.is_set()
+                    or self.sessions.generations.get(sid) != generation):
+                raise SessionError('Memory save was cancelled; no further writes were started.')
+        checked = {'_guard': guard} if generation is not None else {}
+        request = {'learnings': [{'type': item['type'], 'title': item['title'], 'consequence': item['consequence'],
+                                  'sources': item['sources']} for item in draft['learnings']],
+                   'verified': True}
+        if draft['progress'] or draft['next_steps']:
+            # The draft is the current plan, including an empty completed
+            # plan; remove steps the run may have finished.
+            request['next_steps'] = draft['next_steps']
+            if draft['progress']:
+                request['progress'] = draft['progress']
+        # One run, one result: a replay of this save is recognised as such.
+        result_id = f"harness-{session['id']}-{generation if generation is not None else uuid.uuid4().hex[:12]}"[:64]
+        outcome = None
+        for attempt in range(2):
+            try:
+                outcome = self._call(session, options, workspace, 'record-result', **checked,
+                                     task_id=options['task_id'], result_id=result_id, revision=task['revision'],
+                                     request=request, attestation='agent' if automatic else 'person', reason=reason)
+                break
+            except SessionError as error:
+                if str(error) == OLDER_RUNTIME:
+                    return self._save_memory_chain(session, original, automatic=automatic, known=known,
+                                                   generation=generation)
+                if attempt == 0 and str(error) == STALE_RECORD:
+                    # A Stop hook's checkpoint moved the task on between reading
+                    # it and saving; the learnings are already saved, and the
+                    # replay with the current revision finishes the task update.
+                    task = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
+                                           task_id=options.get('record_id') or options['task_id'],
+                                           task_only=True)['task']
+                    continue
+                return {'ok': False, 'saved': {'task': None, 'records': [], 'promotion': None},
+                        'skipped': skipped, 'error': str(error)}
+            except (KeyError, TypeError):
+                return {'ok': False, 'saved': {'task': None, 'records': [], 'promotion': None},
+                        'skipped': skipped, 'error': 'The runtime returned an unexpected record.'}
+        records = [{'id': item.get('id'), 'type': item.get('type'), 'title': item.get('title'),
+                    'status': item.get('status')} for item in outcome.get('records') or [] if isinstance(item, dict)]
+        promotion = outcome.get('promotion') if isinstance(outcome.get('promotion'), dict) else None
+        saved = {'task': outcome.get('task') if isinstance(outcome.get('task'), dict) else None,
+                 'records': records, 'promotion': promotion}
+        return {'ok': True, 'saved': saved, 'skipped': skipped, 'error': None}
+
+    def _save_memory_chain(self, session, data, *, automatic=False, known=(), generation=None):
+        """The command-by-command save, for a runtime older than `record-result`.
+
+        Each command is atomic, the chain is not: a failure reports what was
+        already saved, and a retry can write a learning twice.
         """
         _, options, workspace, info = self._bound(session)
         root = Path(workspace) / info['root']

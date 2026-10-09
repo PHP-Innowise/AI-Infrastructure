@@ -78,16 +78,22 @@ See [Claude MCP](https://code.claude.com/docs/en/mcp),
   sanitized `progress`, up to three `next_steps`, and up to three reusable
   findings/decisions. Each learning needs `type`, `title`, `consequence` and
   1–10 canonical project `sources`. Set `verified: true` after checking claims.
-  Records explicitly say **agent-attested, not human-reviewed**. Empty learnings
-  is valid; explicit `next_steps: []` clears finished steps.
+  Records explicitly say **agent-attested, not human-reviewed**: the verification's
+  ledger entry carries `[attestation:agent]`, a chunk promoted from it is tagged
+  `agent-attested`, and the capsule marks such knowledge where it delivers it.
+  Empty learnings is valid; explicit `next_steps: []` clears finished steps.
 
 Use `CONTEXT_TASK_ID`, otherwise the branch task. On detached HEAD, use an explicit
 existing task ID. Do not create another task for the same work. Saving runs promotion
-under the existing setting. Shared intent/completion events prevent blind retries
-and duplicate results after restart/cache deletion or from another worktree.
-Different content under an existing result ID, stale revisions, unauthorized actors,
-private sources and ambiguous partial saves are refused. Inspect partial records
-before reconciling. Completion remains explicit.
+under the existing setting. A learning's record is named by its content, so a retry,
+or a later result restating it, finds that record instead of writing a second one.
+Replaying the same `result_id` and content finishes a save that stopped half way; a
+lost local receipt is covered by the task already holding the result. Different
+content under an existing result ID, stale revisions (refused before anything is
+written), unauthorized actors and private sources are refused. Without MCP,
+`python3 memory-bank/scripts/context.py record-result --task-id ID --result-id RID
+--revision auto --input result.json` is the same write path, and so is the
+Harness's save at the end of a run. Completion remains explicit.
 
 Without MCP use the installed context CLI and Project Brain protocol. `/memory`
 refreshes layers; `/checkpoint` saves working continuity; reusable knowledge needs

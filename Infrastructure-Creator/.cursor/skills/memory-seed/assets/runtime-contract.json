@@ -86,7 +86,8 @@
       "memory-bank/scripts/mcp_server.py",
       "memory-bank/scripts/mcp_config.py",
       "memory-bank/MCP.md",
-      "memory-bank/scripts/automatic_query.py"
+      "memory-bank/scripts/automatic_query.py",
+      "memory-bank/scripts/memory_results.py"
     ],
     "creatable": [
       {

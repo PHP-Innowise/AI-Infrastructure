@@ -1117,6 +1117,28 @@ def create_task(
     )
 
 
+# Who checked a verified claim: the agent that wrote it, or a person.
+ATTESTATIONS = ("agent", "person")
+ATTESTATION_MARK = re.compile(r"\[attestation:(agent|person)\]")
+
+
+def record_attestation(record: dict[str, Any]) -> str:
+    """Who checked the claim the record's latest verification hardened.
+
+    'agent' or 'person' from the verification's ledger entry; '' when it
+    does not say. Unattended saves made before the mark existed said
+    "agent-attested" in their reason, and still count as the agent's.
+    """
+    for transition in reversed(record.get("transitions") or []):
+        if transition.get("to") != "verified" or transition.get("from") not in AUTHORITY_TRANSITIONS:
+            continue
+        reason = str(transition.get("reason") or "")
+        mark = ATTESTATION_MARK.search(reason)
+        if mark:
+            return mark.group(1)
+        return "agent" if "agent-attested" in reason else ""
+    return ""
+
 def update_record(
     repository: Path,
     identifier: str,
@@ -1133,6 +1155,7 @@ def update_record(
     authority: Optional[str] = None,
     auto_checkpoint: Optional[str] = None,
     reason: str = "Task updated",
+    attestation: Optional[str] = None,
     allow_phase_regression: bool = False,
     replace_next_steps: bool = False,
 ) -> dict[str, Any]:
@@ -1151,6 +1174,13 @@ def update_record(
     is the point — each flush supersedes the previous checkpoint — while
     ``progress`` stays reserved for the operator's narrative, so an automated
     caller passes ``progress=None`` and its checkpoint here.
+
+    ``attestation`` says who checked the claim a verification hardens:
+    ``agent`` when the agent that wrote it attested it and no person read it,
+    ``person`` when someone did. It is written into the verification's own
+    ledger entry (`record_attestation` reads it back), not into a new record
+    field, so a runtime that predates it still accepts the record; promotion
+    carries an agent's attestation into the chunk's tags.
 
     ``next_steps`` are appended unless ``replace_next_steps`` makes them the
     whole list: without it a step that was done could never leave, and the
@@ -1178,6 +1208,8 @@ def update_record(
             raise BrainError("Events are immutable; only lifecycle supersession is allowed")
         if auto_checkpoint is not None and record["type"] != "task":
             raise BrainError("only a task may record an auto checkpoint")
+        if attestation is not None and attestation not in ATTESTATIONS:
+            raise BrainError("attestation must be one of: " + ", ".join(ATTESTATIONS))
         if authority is not None:
             if authority not in AUTHORITY_TRANSITIONS.get(record["authority"], set()):
                 raise BrainError(
@@ -1187,7 +1219,10 @@ def update_record(
             record["transitions"].append(
                 {
                     "from": record["authority"], "to": authority, "at": utc_now(),
-                    "actor": actor, "reason": reason,
+                    "actor": actor,
+                    "reason": reason + (
+                        f" [attestation:{attestation}]" if attestation is not None else ""
+                    ),
                 }
             )
             record["authority"] = authority
@@ -3040,6 +3075,16 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         # Tag the chunk so the bank itself shows which knowledge no human
         # approved; a reader must not have to open the promotion to find out.
         tags = ["project-brain", "promoted"] + (["auto-promoted"] if automatic else [])
+        # A claim only its own agent ever checked stays marked as such in
+        # the bank, so a later reader can weigh it.
+        attested = []
+        for item in proposal["source_records"]:
+            try:
+                attested.append(record_attestation(find_record(repository, item["id"])[1]))
+            except BrainError:
+                attested.append("")
+        if "agent" in attested:
+            tags.append("agent-attested")
         metadata = {
             "id": memory_id, "title": proposal["title"],
             # Derived from what was promoted, not asserted. `decision` remains

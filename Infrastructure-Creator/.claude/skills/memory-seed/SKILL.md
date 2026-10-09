@@ -34,7 +34,7 @@ Into the required generation root, create:
 - `memory-bank/README.md`, `memory-bank/INDEX.md`, `memory-bank/.memory-counter` (written fresh)
 - `memory-bank/runtime-contract.json` (copied verbatim from `assets/runtime-contract.json`)
 - `memory-bank/templates/chunk.md` (copied verbatim from `assets/templates/chunk.md`)
-- `memory-bank/scripts/context.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py`, `memory-bank/scripts/automatic_query.py`, `memory-bank/scripts/telemetry.py`, `memory-bank/scripts/workspace_roots.py`, `memory-bank/scripts/mcp_server.py`, `memory-bank/scripts/mcp_config.py` (copied verbatim from `assets/scripts/`)
+- `memory-bank/scripts/context.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py`, `memory-bank/scripts/automatic_query.py`, `memory-bank/scripts/memory_results.py`, `memory-bank/scripts/telemetry.py`, `memory-bank/scripts/workspace_roots.py`, `memory-bank/scripts/mcp_server.py`, `memory-bank/scripts/mcp_config.py` (copied verbatim from `assets/scripts/`)
 - `memory-bank/local/.gitkeep` (gitignored machine-local state: the disposable SQLite index `context.db`, turn buffers, ephemeral manifests)
 - `memory-bank/chunks/MEM-{NNNN}-{short-slug}.md` per seeded chunk (starting at `MEM-0001`)
 
@@ -116,7 +116,7 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 - [MEM-0001: title (source)]
 - ...
 
-**Runtime:** memory-bank/scripts/ (context.py, brain_runtime.py, context_retrieval.py, validate.py, automatic_query.py, telemetry.py, workspace_roots.py, mcp_server.py, mcp_config.py - verbatim)
+**Runtime:** memory-bank/scripts/ (context.py, brain_runtime.py, context_retrieval.py, validate.py, automatic_query.py, memory_results.py, telemetry.py, workspace_roots.py, mcp_server.py, mcp_config.py - verbatim)
 **Project Brain:** project-brain/ skeleton (framework slug: [slug], canonical edition: [.agents/.claude/.cursor])
 **Counter:** [value]
 **validate.py:** [pass/fail] | **context.py validate:** [pass/fail] | **context.py status:** [pass/fail]

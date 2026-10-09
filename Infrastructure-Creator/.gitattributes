@@ -87,6 +87,7 @@
 .claude/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/mcp_config.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/mcp_server.py -diff linguist-generated=true
+.claude/skills/memory-seed/assets/scripts/memory_results.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/telemetry.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/validate.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/workspace_roots.py -diff linguist-generated=true
@@ -230,6 +231,7 @@
 .cursor/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/mcp_config.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/mcp_server.py -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/scripts/memory_results.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/telemetry.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/validate.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/workspace_roots.py -diff linguist-generated=true

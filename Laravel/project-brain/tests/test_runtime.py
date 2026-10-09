@@ -29,6 +29,7 @@ try:
     import brain_runtime as brain
     import context as context_cli
     import context_retrieval as retrieval
+    import memory_results
     import telemetry as telemetry_runtime
 finally:
     sys.path.pop(0)
@@ -8276,6 +8277,154 @@ class DeliveryTest(RuntimeHarness):
         paths = [item["path"] for item in candidates]
         self.assertIn("specs/quartz.md", paths)
         self.assertNotIn("specs/long.md", paths)
+
+
+
+class RecordResultTest(RuntimeHarness):
+    """One replayable write path for a run's result: MCP, the Harness and the CLI."""
+
+    LEARNING = {
+        "type": "finding",
+        "title": "Cobalt authority is canonical",
+        "consequence": "The cobalt authority rule decides allocation; nothing overrides it.",
+        "sources": ["specs/authority.md"],
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", "automatic_promotion": True}), encoding="utf-8")
+        started = self.run_cli("start", "--task-id", "TASK-RESULT", "--goal", "Check the cobalt authority", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+
+    def task(self) -> dict:
+        return brain.find_record(self.repository, "TASK-RESULT", record_type="task")[1]
+
+    def records(self, record_type: str = "finding") -> list[dict]:
+        return [record for _, record, _ in brain.iter_records(self.repository) if record["type"] == record_type]
+
+    def record(self, result_id: str, data: dict, revision: int | None = None) -> dict:
+        return memory_results.record_result(
+            self.repository, "TASK-RESULT", result_id,
+            self.task()["revision"] if revision is None else revision, data,
+            owner="local", reason="Saved by the test; agent-attested, not reviewed by a person",
+        )
+
+    def result(self, **changes) -> dict:
+        return {"progress": "Authority checked.", "next_steps": ["Cover release"],
+                "learnings": [self.LEARNING], "verified": True, **changes}
+
+    def test_a_result_closes_its_learnings_and_says_the_agent_attested_them(self) -> None:
+        saved = self.record("run-1", self.result())
+        self.assertEqual([("finding", "resolved", "created")],
+                         [(item["type"], item["status"], item["state"]) for item in saved["records"]])
+        self.assertFalse(saved["replayed"])
+        finding = self.records()[0]
+        self.assertEqual("verified", finding["authority"])
+        self.assertEqual("agent", brain.record_attestation(finding))
+        self.assertEqual(("Authority checked.", ["Cover release"]),
+                         (self.task()["progress"], self.task()["next_steps"]))
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.assertIn("agent-attested", chunk.read_text(encoding="utf-8"))
+
+    def test_a_replay_writes_nothing_and_other_content_under_the_same_id_is_refused(self) -> None:
+        self.record("run-1", self.result())
+        revision = self.task()["revision"]
+        replay = self.record("run-1", self.result())
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(revision, self.task()["revision"])
+        self.assertEqual(1, len(self.records()))
+        with self.assertRaisesRegex(brain.BrainError, "different content"):
+            self.record("run-1", self.result(progress="Something else."))
+        # A lost receipt: the task already says what the result would write.
+        shutil.rmtree(self.repository / "project-brain/local/results")
+        self.assertTrue(self.record("run-1", self.result())["replayed"])
+        self.assertEqual(revision, self.task()["revision"])
+
+    def test_a_save_that_stopped_after_writing_a_learning_is_finished_by_its_replay(self) -> None:
+        identifier = memory_results.learning_id("TASK-RESULT", self.LEARNING)
+        brain.create_record(self.repository, "finding", identifier, self.LEARNING["title"], [],
+                            self.LEARNING["sources"], owner="local", authority="observed",
+                            goal=self.LEARNING["consequence"])
+        saved = self.record("run-1", self.result())
+        self.assertEqual(["completed"], [item["state"] for item in saved["records"]])
+        self.assertEqual([("resolved", "verified")], [(r["status"], r["authority"]) for r in self.records()])
+        self.assertEqual("Authority checked.", self.task()["progress"])
+
+    def test_a_stale_revision_writes_nothing(self) -> None:
+        revision = self.task()["revision"]
+        moved = self.run_cli("update", "--task-id", "TASK-RESULT", "--revision", "auto",
+                             "--progress", "Moved on.", "--json")
+        self.assertEqual(0, moved.returncode, moved.stderr)
+        with self.assertRaisesRegex(brain.BrainError, "Stale task revision.*Nothing was written"):
+            self.record("run-1", self.result(), revision=revision)
+        self.assertEqual([], self.records())
+        self.assertEqual("Moved on.", self.task()["progress"])
+
+    def test_the_same_learning_from_a_later_result_names_the_same_record(self) -> None:
+        self.record("run-1", self.result())
+        later = self.record("run-2", self.result(progress="Release covered."))
+        self.assertEqual(["existing"], [item["state"] for item in later["records"]])
+        self.assertEqual(1, len(self.records()))
+        self.assertEqual("Release covered.", self.task()["progress"])
+
+    def test_sources_outside_the_project_or_in_derived_memory_are_refused_before_writes(self) -> None:
+        for source in ("../outside.md", ".env", "memory-bank/chunks/x.md", "specs/missing.md"):
+            with self.subTest(source=source), self.assertRaises(brain.BrainError):
+                self.record("run-1", self.result(learnings=[{**self.LEARNING, "sources": [source]}]))
+        with self.assertRaisesRegex(brain.BrainError, "verified=true"):
+            self.record("run-1", self.result(verified=False))
+        self.assertEqual([], self.records())
+
+    def test_the_cli_records_a_result_from_a_file(self) -> None:
+        request = self.repository / "result.json"
+        request.write_text(json.dumps(self.result()), encoding="utf-8")
+        first = self.run_cli("record-result", "--task-id", "TASK-RESULT", "--result-id", "cli-1",
+                             "--revision", "auto", "--input", str(request), "--json")
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertFalse(json.loads(first.stdout)["replayed"])
+        second = self.run_cli("record-result", "--task-id", "TASK-RESULT", "--result-id", "cli-1",
+                              "--revision", "auto", "--input", str(request))
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertIn("Result already recorded", second.stdout)
+        self.assertEqual(1, len(self.records()))
+
+    def test_the_capsule_says_which_knowledge_only_an_agent_checked(self) -> None:
+        self.record("run-1", self.result())
+        refreshed = self.run_cli("refresh", "--query", "cobalt authority canonical allocation",
+                                 "--task-id", "TASK-RESULT", "--ephemeral")
+        self.assertEqual(0, refreshed.returncode, refreshed.stderr)
+        self.assertRegex(refreshed.stdout, r"Cobalt authority is canonical[^\n]*agent-attested, not reviewed by a person")
+
+    def test_an_older_unattended_save_still_reads_as_the_agents(self) -> None:
+        record = {"transitions": [
+            {"from": None, "to": "open", "reason": "Finding created"},
+            {"from": "observed", "to": "verified",
+             "reason": "Saved automatically when a Harness run completed; agent-attested, not reviewed by a person"},
+        ]}
+        self.assertEqual("agent", brain.record_attestation(record))
+        record["transitions"][-1]["reason"] = "Verified by Dana [attestation:person]"
+        self.assertEqual("person", brain.record_attestation(record))
+        record["transitions"].pop()
+        self.assertEqual("", brain.record_attestation(record))
+
+
+class SmallIndexRarityTest(RuntimeHarness):
+    def test_an_identifier_in_one_document_of_a_small_index_is_still_rare(self) -> None:
+        self.repository.joinpath("specs/allocation.md").write_text(
+            "# Allocation\n\nCMS768 needs one owner.\n", encoding="utf-8")
+        self.repository.joinpath("specs/other.md").write_text(
+            "# Other\n\nUnrelated notes about allocation.\n", encoding="utf-8")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            self.assertLess(total, 10)
+            coverage, distinctive = retrieval.token_coverage(connection, ["cms768", "owner"])
+        finally:
+            connection.close()
+        self.assertIn("specs/allocation.md", distinctive)
 
 
 if __name__ == "__main__":

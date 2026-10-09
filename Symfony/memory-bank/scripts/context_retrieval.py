@@ -27,6 +27,7 @@ from brain_runtime import (
     mutation_lock,
     new_uuid,
     parse_markdown_record,
+    record_attestation,
     record_is_eligible,
     render_current_state,
     source_changes,
@@ -842,7 +843,8 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
             conflicts TEXT NOT NULL,
             source_fingerprints TEXT NOT NULL DEFAULT '[]',
             updated_at TEXT NOT NULL DEFAULT '',
-            confidence REAL NOT NULL DEFAULT 1.0
+            confidence REAL NOT NULL DEFAULT 1.0,
+            attestation TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -869,6 +871,14 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE document_metadata "
             "ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0"
+        )
+    # Who checked a verified claim ('agent' or 'person'; '' when nobody
+    # said). `connect` forces one full re-read when the column is new, so a
+    # retained row cannot keep claiming it was never attested.
+    if "attestation" not in metadata_columns:
+        connection.execute(
+            "ALTER TABLE document_metadata "
+            "ADD COLUMN attestation TEXT NOT NULL DEFAULT ''"
         )
     connection.execute(
         """
@@ -1545,11 +1555,18 @@ def _link_rows(path: str, sources: object) -> list[tuple[str, str, str]]:
 def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:
     # Repository documents carry no provenance timestamp or confidence of
     # their own: '' means "never decayed" and 1.0 keeps them rank-neutral.
+    # A chunk promoted from a claim only its agent checked says so in its tags.
+    attested = (
+        "agent"
+        if kind == "memory"
+        and "agent-attested" in (_chunk_frontmatter(content).get("tags") or [])
+        else ""
+    )
     return (
         path, category_for(kind), "public", "*", "verified", "active",
         _content_hash(content), None, "[]",
         _chunk_digests(content) if kind == "memory" else "[]",
-        "", 1.0,
+        "", 1.0, attested,
     )
 
 
@@ -1605,6 +1622,7 @@ def _brain_documents(
                 json.dumps(record["source_fingerprints"], sort_keys=True),
                 str(record.get("updated_at") or ""),
                 float(record.get("confidence", 1.0)),
+                record_attestation(record),
             )
         )
         links.extend(_link_rows(relative, record.get("sources")))
@@ -1636,6 +1654,7 @@ def _brain_documents(
                     json.dumps(task["source_fingerprints"], sort_keys=True),
                     str(handoff.get("updated_at") or ""),
                     float(task.get("confidence", 1.0)),
+                    "",
                 )
             )
             # From the handoff's own frontmatter, not the task's: the link
@@ -1781,8 +1800,9 @@ def index_documents(
             """
             INSERT INTO document_metadata(
                 path, category, privacy, owner, authority, lifecycle, source_hash,
-                record_id, conflicts, source_fingerprints, updated_at, confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                record_id, conflicts, source_fingerprints, updated_at, confidence,
+                attestation
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             metadata,
         )
@@ -1968,7 +1988,10 @@ def token_coverage(
             ).fetchall()
         except sqlite3.OperationalError:
             continue
-        rare = len(rows) <= total * DISTINCTIVE_DOCUMENT_RATIO
+        # At least one document: in an index of fewer than ten, a share of
+        # the corpus rounds below one and no term - not even an identifier
+        # only one document carries - would count as rare.
+        rare = len(rows) <= max(1.0, total * DISTINCTIVE_DOCUMENT_RATIO)
         for row in rows:
             coverage[row[0]] = coverage.get(row[0], 0) + 1
             if rare:
@@ -2437,7 +2460,7 @@ def _candidates(
             snippet(documents, 5, '[', ']', ' … ', 32) AS snippet,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
-            m.source_fingerprints, m.updated_at, m.confidence,
+            m.source_fingerprints, m.updated_at, m.confidence, m.attestation,
             bm25(documents, ?, ?, ?, ?, ?, ?) AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
@@ -2740,7 +2763,7 @@ def _conflict_candidates(
             d.path, d.layer, d.kind, d.title, d.content,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
-            m.source_fingerprints, m.updated_at, m.confidence,
+            m.source_fingerprints, m.updated_at, m.confidence, m.attestation,
             0.0 AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
@@ -2940,7 +2963,7 @@ def linked_documents(
             l.ref_path, l.ref_kind,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
-            m.updated_at, m.confidence
+            m.updated_at, m.confidence, m.attestation
         FROM document_links AS l
         JOIN documents AS d ON d.path = l.path
         JOIN document_metadata AS m ON m.path = l.path
@@ -3141,6 +3164,10 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
         # The cited files edited since this knowledge was verified: the
         # capsule says so next to it instead of silently dropping it.
         public["source_changed"] = list(item["source_changed"])
+    if item.get("attestation") == "agent":
+        # Checked only by the agent that wrote it: worth reading, and worth
+        # checking before relying on it.
+        public["attestation"] = "agent"
     return public
 
 

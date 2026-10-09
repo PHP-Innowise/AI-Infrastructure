@@ -128,7 +128,7 @@ class MemoryMcpTests(unittest.TestCase):
         import shutil
         draft = self.draft(self.start())
         self.assertFalse(self.call('memory_record_result', **draft)['isError'])
-        shutil.rmtree(self.root / 'memory-bank/local/mcp-results')
+        shutil.rmtree(self.root / 'project-brain/local/results')
         current = self.cli_call('get', '--task-id', 'TASK-MCP')
         reply = self.call('memory_record_result', **{**draft, 'revision': current['revision']})
         self.assertTrue(reply['structuredContent']['replayed'])
@@ -141,7 +141,7 @@ class MemoryMcpTests(unittest.TestCase):
         for source in ('.env', 'memory-bank/local/context.db', '.git/config'):
             draft = self.draft(revision); draft['learnings'][0]['sources'] = [source]
             self.assertTrue(self.call('memory_record_result', **draft)['isError'])
-        self.assertFalse((self.root / 'memory-bank/local/mcp-results').exists())
+        self.assertFalse((self.root / 'project-brain/local/results').exists())
         result = subprocess.run([sys.executable, str(self.cli), '--root', str(self.root), '--owner', 'alice',
             'start', '--task-id', 'TASK-ALICE', '--goal', 'Check cobalt', '--json'], capture_output=True, text=True, timeout=10)
         self.assertEqual(0, result.returncode, result.stderr)
@@ -149,16 +149,18 @@ class MemoryMcpTests(unittest.TestCase):
         draft = {**self.draft(task['revision']), 'task_id': 'TASK-ALICE'}
         self.assertTrue(self.call('memory_record_result', **draft)['isError'])
         self.assertTrue(self.call('memory_retrieve', task_id='TASK-ALICE', query='cobalt')['isError'])
-        self.assertFalse((self.root / 'memory-bank/local/mcp-results').exists())
+        self.assertFalse((self.root / 'project-brain/local/results').exists())
 
-    def test_shared_pending_intent_blocks_retry_without_local_state(self):
+    def test_a_stale_revision_writes_nothing_and_its_replay_finishes(self):
         draft = self.draft(self.start())
-        key = hashlib.sha256(b'TASK-MCP\0result-1').hexdigest()
-        self.cli_call('brain-create', 'event', '--external-id', 'mcp-request-' + key,
-            '--title', 'Memory save requested', '--goal', 'pending')
+        self.cli_call('update', '--task-id', 'TASK-MCP', '--revision', 'auto', '--progress', 'Moved on by a checkpoint.')
         before = self.cli_call('get', '--task-id', 'TASK-MCP')
         self.assertTrue(self.call('memory_record_result', **draft)['isError'])
         self.assertEqual(before, self.cli_call('get', '--task-id', 'TASK-MCP'))
+        self.assertEqual([], list((self.root / 'project-brain/dynamic/findings').glob('*.md')))
+        reply = self.call('memory_record_result', **{**draft, 'revision': before['revision']})
+        self.assertFalse(reply['isError'], reply)
+        self.assertEqual(1, len(list((self.root / 'project-brain/dynamic/findings').glob('*.md'))))
 
     def test_saved_result_can_replay_after_task_completion(self):
         draft = self.draft(self.start())
@@ -180,14 +182,27 @@ class MemoryMcpTests(unittest.TestCase):
             self.assertEqual(0, created.returncode, created.stderr)
             self.assertTrue(self.call('memory_retrieve', task_id=identifier, query='cobalt')['isError'])
 
-    def test_partial_receipt_refuses_ambiguous_retry(self):
+    def test_a_save_that_stopped_half_way_is_finished_by_its_replay(self):
+        # The first attempt wrote the learning's record and stopped before
+        # closing it or updating the task: the replay closes that record and
+        # writes no second one.
         draft = self.draft(self.start())
-        key = hashlib.sha256(b'TASK-MCP\0result-1').hexdigest()
-        path = self.root / 'memory-bank/local/mcp-results' / (key + '.json'); path.parent.mkdir(parents=True)
-        request_hash = hashlib.sha256(json.dumps({k: v for k, v in draft.items() if k != 'revision'}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        path.write_text(json.dumps({'request_hash': request_hash, 'state': 'pending'}))
-        self.assertTrue(self.call('memory_record_result', **draft)['isError'])
-        self.assertEqual([], list((self.root / 'project-brain/dynamic/findings').glob('*.md')))
+        sys.path.insert(0, str(self.root / 'memory-bank/scripts'))
+        try:
+            import memory_results
+            identifier = memory_results.learning_id('TASK-MCP', draft['learnings'][0])
+        finally:
+            sys.path.remove(str(self.root / 'memory-bank/scripts'))
+        learning = draft['learnings'][0]
+        self.cli_call('brain-create', 'finding', '--external-id', identifier, '--title', learning['title'],
+            '--goal', learning['consequence'], '--source', learning['sources'][0])
+        reply = self.call('memory_record_result', **draft)
+        self.assertFalse(reply['isError'], reply)
+        self.assertEqual(['completed'], [item['state'] for item in reply['structuredContent']['records']])
+        findings = list((self.root / 'project-brain/dynamic/findings').glob('*.md'))
+        self.assertEqual(1, len(findings))
+        self.assertIn('resolved', findings[0].read_text())
+        self.assertEqual('Cobalt allocation checked.', self.cli_call('get', '--task-id', 'TASK-MCP')['progress'])
 
     def test_protocol_rejects_bad_params_and_arbitrary_root(self):
         self.assertTrue(self.call('memory_status', root=str(self.root.parent))['isError'])

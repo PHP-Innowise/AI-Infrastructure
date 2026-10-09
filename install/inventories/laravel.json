@@ -24,6 +24,7 @@
       "memory-bank/scripts/context_retrieval.py",
       "memory-bank/scripts/mcp_config.py",
       "memory-bank/scripts/mcp_server.py",
+      "memory-bank/scripts/memory_results.py",
       "memory-bank/scripts/telemetry.py",
       "memory-bank/scripts/validate.py",
       "memory-bank/scripts/workspace_roots.py",
