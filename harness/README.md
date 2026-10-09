@@ -1056,11 +1056,10 @@ through a symbolic link inside the project, backups and the sync's record
 included, even one another process swaps in while the sync runs: each folder
 on a path is opened by descriptor without following links, and a folder
 swapped during a write leaves the file alone. Such a path is reported instead.
-Native Windows has no descriptor-relative file calls in Python, so there each
-folder is checked just before it is used; a link that is there before the sync
-starts is still refused, but the moment between check and write stays open to
-a process that can write to the project. Set `HARNESS_CODEX_HOOK_TRUST=0` in
-the server's environment to leave the approval to `/hooks`.
+Native Windows has no descriptor-relative file calls in Python, so there the
+same walk goes by NT handles; where neither is available the sync writes
+nothing and reports each file. Set `HARNESS_CODEX_HOOK_TRUST=0` in the
+server's environment to leave the approval to `/hooks`.
 
 The folder browser navigates local folders, or takes an absolute path
 directly. The folder picker provides Home, Parent folder,

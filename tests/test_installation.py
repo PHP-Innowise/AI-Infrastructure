@@ -1449,53 +1449,199 @@ class SyncRaceTest(unittest.TestCase):
 
 
 class SyncWithoutDescriptorsTest(unittest.TestCase):
-    """The fallback for a platform whose os.supports_dir_fd lacks the calls (native Windows).
+    """A platform whose os.supports_dir_fd lacks the calls, as native Windows does.
 
-    There each component is looked at with lstat before the path is used: a
-    link that stands there before the sync starts is still refused, and the
-    sync still writes, backs up and records - only the window between the
-    look and the write stays open.
+    The sync looked at each component with lstat there and then wrote by the
+    path, and a `.cursor` swapped for a link in between sent `.cursor/mcp.json`
+    to the link's target (a review reproduced it on this same fallback under
+    Linux). Windows now walks by NT handles; where neither descriptors nor
+    handles are available - here: descriptors taken away, and Linux has no
+    handle calls - nothing is written and each file is reported in `kept`.
     """
 
-    def test_links_are_refused_and_everything_else_is_written(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="sync by path ") as raw, patch.object(
-            install_accelerator, "_DESCRIPTOR_WALK", False
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="sync without descriptors ")
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        self.target = self.base / "project"
+        self.target.mkdir()
+        run("git", "init", "--quiet", str(self.target))
+        install_quietly(self.target, "Laravel", ["claude", "cursor", "codex"])
+        self.outside = self.base / "outside"
+        self.outside.mkdir()
+
+    @staticmethod
+    def without_descriptors():
+        return patch.object(install_accelerator, "_DESCRIPTOR_WALK", False)
+
+    def test_a_folder_swapped_while_the_sync_writes_takes_no_write(self) -> None:
+        (self.target / ".cursor/mcp.json").unlink()  # the sync adds it back
+        with self.without_descriptors(), swapped_while_written(
+            self.target, ".cursor", self.outside, "mcp.json.", "moved"
+        ) as swaps:
+            code, out, err = run_installer("--source-root", str(ROOT), "--sync", "--target", str(self.target))
+        self.assertEqual((0, ""), (code, err))
+        report = json.loads(out)
+        self.assertEqual({}, files_under(self.outside))
+        # Nothing was even begun: no temporary file for the swap to race.
+        self.assertEqual([], swaps)
+        kept = {item["path"]: item["reason"] for item in report["kept"]}
+        self.assertEqual(install_accelerator.NO_SAFE_WRITE, kept.get(".cursor/mcp.json"))
+        self.assertFalse((self.target / ".cursor/mcp.json").exists())
+        self.assertEqual([], temporaries(self.target))
+
+    def test_nothing_is_written_and_every_write_is_reported(self) -> None:
+        runtime = self.target / "memory-bank/scripts/context.py"
+        edited = runtime.read_text(encoding="utf-8") + "\n# local patch\n"
+        runtime.write_text(edited, encoding="utf-8")
+        (self.target / ".claude/CLAUDE.md").unlink()
+        shutil.rmtree(self.target / ".codex")
+        (self.target / ".codex").symlink_to(self.outside, target_is_directory=True)
+        before = files_under(self.target)
+
+        with self.without_descriptors():
+            report = install_accelerator.sync_installation(ROOT, self.target)
+        kept = {item["path"]: item["reason"] for item in report["kept"]}
+        self.assertIsNone(report["error"])
+        self.assertEqual(([], []), (report["changed"], report["backups"]))
+        self.assertEqual(before, files_under(self.target))
+        self.assertEqual({}, files_under(self.outside))
+        # Reads still look at each component first: the link is named.
+        self.assertIn(".codex is a symbolic link", kept.get(".codex/hooks.json", ""))
+        self.assertEqual(install_accelerator.NO_SAFE_WRITE, kept.get(".claude/CLAUDE.md"))
+        # Without its backup a local edit would be lost: it stays.
+        self.assertEqual(
+            "not replaced: its backup cannot be written inside the project "
+            f"({install_accelerator.NO_SAFE_WRITE})",
+            kept.get("memory-bank/scripts/context.py"),
+        )
+        self.assertEqual(
+            f"the sync's record is not written ({install_accelerator.NO_SAFE_WRITE})",
+            kept.get(install_accelerator.SYNC_MANIFEST),
+        )
+
+    def test_an_install_writes_no_merge_by_path(self) -> None:
+        mcp = self.target / ".mcp.json"
+        team = json.dumps({"mcpServers": {"team-server": {"command": "node", "args": []}}}, indent=2) + "\n"
+        mcp.write_text(team, encoding="utf-8")
+        with self.without_descriptors():
+            code, out, err = run_installer(
+                "--edition", "Laravel", "--target", str(self.target), "--tool", "claude", "--merge-existing"
+            )
+        self.assertEqual(1, code)
+        self.assertIn(install_accelerator.NO_SAFE_WRITE, err)
+        self.assertEqual(team, mcp.read_text(encoding="utf-8"))
+        self.assertEqual([], temporaries(self.target))
+
+
+class StandInCalls:
+    """The descriptor calls standing in for another platform's (Windows: NT handles).
+
+    They keep the contract a walk relies on - one component at a time,
+    relative to an open folder - and record what they are asked.
+    """
+
+    def __init__(self) -> None:
+        self._real = install_accelerator._DescriptorCalls()
+        self.used: dict[str, int] = {}
+        self.names: list[str] = []
+
+    def __getattr__(self, attribute: str):
+        call = getattr(self._real, attribute)
+
+        def recorded(*arguments):
+            self.used[attribute] = self.used.get(attribute, 0) + 1
+            if attribute != "open_project":
+                self.names.extend(argument for argument in arguments if isinstance(argument, str))
+            return call(*arguments)
+
+        return recorded
+
+
+class SyncThroughStandInCallsTest(unittest.TestCase):
+    """Where descriptors cannot walk, the walk takes whatever calls stand in for them.
+
+    On native Windows those are `_HandleCalls`, which cannot run here; the
+    same walk through the stand-in shows that every read, write, backup and
+    the record go through those calls - never by path below the project -
+    and that the swap which took `.cursor/mcp.json` outside takes nothing.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="sync through stand-in calls ")
+        self.addCleanup(self._tmp.cleanup)
+        self.calls = StandInCalls()
+
+    def project(self, name: str) -> tuple[Path, Path]:
+        base = Path(self._tmp.name) / name
+        target, outside = base / "project", base / "outside"
+        target.mkdir(parents=True)
+        outside.mkdir()
+        run("git", "init", "--quiet", str(target))
+        install_quietly(target, "Laravel", ["claude", "cursor", "codex"])
+        return target, outside
+
+    @contextlib.contextmanager
+    def through_stand_in(self):
+        with patch.object(install_accelerator, "_DESCRIPTOR_WALK", False), patch.object(
+            install_accelerator, "_HANDLE_CALLS", self.calls
         ):
-            base = Path(raw)
-            target = base / "project"
-            target.mkdir()
-            run("git", "init", "--quiet", str(target))
-            install_quietly(target, "Laravel", ["claude", "cursor"])
-            runtime = target / "memory-bank/scripts/context.py"
-            runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# local patch\n", encoding="utf-8")
-            outside = base / "outside"
-            outside.mkdir()
-            shutil.rmtree(target / ".cursor")
-            (target / ".cursor").symlink_to(outside, target_is_directory=True)
+            yield
 
-            report = install_accelerator.sync_installation(ROOT, target)
-            kept = {item["path"]: item["reason"] for item in report["kept"]}
-            self.assertIsNone(report["error"])
-            # The shared component's file there: with the link, Cursor's own
-            # files are not counted as installed at all.
-            self.assertIn(".cursor is a symbolic link", kept.get(".cursor/README.md", ""))
-            self.assertEqual({}, files_under(outside))
-            self.assertEqual((ROOT / "Laravel" / "memory-bank/scripts/context.py").read_bytes(), runtime.read_bytes())
-            [backup] = report["backups"]
-            self.assertIn("# local patch", (target / backup).read_text(encoding="utf-8"))
-            self.assertTrue((target / install_accelerator.SYNC_MANIFEST).is_file())
+    def assert_one_component_each(self) -> None:
+        for name in self.calls.names:
+            self.assertTrue(name and "/" not in name and os.sep not in name, name)
 
-            outside_local = base / "outside-local"
-            (target / "memory-bank/local").rename(outside_local)
-            (target / "memory-bank/local").symlink_to(outside_local, target_is_directory=True)
-            before = files_under(outside_local)
-            runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# another patch\n", encoding="utf-8")
+    def test_a_folder_swapped_while_written_takes_no_write_outside(self) -> None:
+        for how in ("moved", "removed"):
+            with self.subTest(how=how):
+                target, outside = self.project(how)
+                (target / ".cursor/mcp.json").unlink()  # the sync adds it back
+                with self.through_stand_in(), swapped_while_written(
+                    target, ".cursor", outside, "mcp.json.", how
+                ) as swaps:
+                    report = install_accelerator.sync_installation(ROOT, target)
+                self.assertEqual(1, len(swaps), "the write never created its temporary file")
+                self.assertEqual({}, files_under(outside))
+                kept = {item["path"]: item["reason"] for item in report["kept"]}
+                self.assertIn(".cursor is a symbolic link", kept.get(".cursor/mcp.json", ""))
+                self.assertNotIn(".cursor/mcp.json", {item["path"] for item in report["changed"]})
+                self.assertEqual([], temporaries(target))
+        self.assertTrue(self.calls.used.get("create_file") and self.calls.used.get("unlink"))
+        self.assert_one_component_each()
+
+    def test_reads_writes_backups_and_the_record_go_through_the_calls(self) -> None:
+        target, _ = self.project("whole")
+        runtime = target / "memory-bank/scripts/context.py"
+        runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# local patch\n", encoding="utf-8")
+        (target / ".claude/CLAUDE.md").unlink()
+        project = os.fspath(target)
+        real_open = os.open
+        by_path: list[str] = []
+
+        def watching_open(path, flags, *arguments, **options):
+            text = os.fsdecode(path)
+            if os.path.isabs(text) and text != project and text.startswith(project + os.sep):
+                by_path.append(text)
+            return real_open(path, flags, *arguments, **options)
+
+        with self.through_stand_in(), patch.object(os, "open", watching_open):
             report = install_accelerator.sync_installation(ROOT, target)
-            kept = {item["path"]: item["reason"] for item in report["kept"]}
-            self.assertIn("backup cannot be written inside the project", kept.get("memory-bank/scripts/context.py", ""))
-            self.assertIn("memory-bank/local is a symbolic link", kept.get(install_accelerator.SYNC_MANIFEST, ""))
-            self.assertIn("# another patch", runtime.read_text(encoding="utf-8"))
-            self.assertEqual(before, files_under(outside_local))
+        self.assertIsNone(report["error"])
+        self.assertEqual([], by_path)
+        changed = {item["path"]: item["action"] for item in report["changed"]}
+        self.assertEqual("updated over a local edit", changed.get("memory-bank/scripts/context.py"))
+        self.assertEqual("added", changed.get(".claude/CLAUDE.md"))
+        [backup] = report["backups"]
+        self.assertIn("# local patch", (target / backup).read_text(encoding="utf-8"))
+        self.assertTrue((target / install_accelerator.SYNC_MANIFEST).is_file())
+        self.assertEqual(
+            (ROOT / "Laravel/memory-bank/scripts/context.py").read_bytes(), runtime.read_bytes()
+        )
+        for call in ("open_project", "open_folder", "make_folder", "lstat", "open_file", "create_file",
+                     "fstat", "chmod", "set_times", "rename", "close"):
+            self.assertTrue(self.calls.used.get(call), call)
+        self.assert_one_component_each()
 
 
 class InterruptedMergeTest(unittest.TestCase):

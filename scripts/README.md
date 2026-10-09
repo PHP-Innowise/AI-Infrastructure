@@ -268,11 +268,14 @@ link inside the project. Where Python offers descriptor-relative calls
 record walk the path by folder descriptors with `O_NOFOLLOW`, so a folder
 another process swaps for a link while the sync runs is not followed either;
 a folder swapped during a write leaves the file alone, and the path is
-reported under `kept`. Native Windows has no such calls, so there each
-component is checked with `lstat` (junctions included) just before the path
-is used: a link that is there before the sync starts is refused, but the
-moment between the check and the write stays open to a process that can
-write to the project.
+reported under `kept`. Native Windows has no such calls in Python; there the
+walk takes the same steps by NT handles (`NtCreateFile` relative to the
+folder before, no reparse point followed, the temporary file renamed within
+the last folder's handle), so a junction or link swapped in is not followed
+there either. Where neither descriptors nor handles are available nothing is
+written - each file that would have been is reported under `kept` - because
+a write by path after a check would follow a folder swapped in between. The
+same calls carry the files an install replaces or merges.
 
 ### `context_budget.py`
 
