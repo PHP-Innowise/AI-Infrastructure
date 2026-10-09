@@ -17,6 +17,7 @@ import re
 import stat
 import uuid
 
+from .automatic_query import source_path_problem
 from .filesystem import fs
 from .knowledge import _path, _text
 from .sessions import SessionError, open_project_path
@@ -274,7 +275,16 @@ def submission(data):
 
 
 def _unusable(root, source):
-    """Why the session workspace cannot back a cited source, or None when it can."""
+    """Why a cited source cannot back a learning, or None when it can.
+
+    The runtime's own path policy comes first (`source_path_problem`, shared
+    byte for byte with it), so a secret, a key, derived memory or runtime
+    state is refused here whichever write path the save then takes - an older
+    runtime without record-result would otherwise accept it.
+    """
+    problem = source_path_problem(source)
+    if problem:
+        return f"{problem}: {source.split('#', 1)[0]}"
     head = source.split("#", 1)[0]
     try:
         descriptor = open_project_path(root, head)
@@ -353,10 +363,22 @@ def summary(state, result=None):
     if state == "unreadable":
         return "This run's memory draft could not be read, so nothing was saved to project memory."
     saved = result.get("saved") or {}
-    parts = (["the task's progress and next steps"] if saved.get("task") else []) + [
-        f"{record.get('type')} \u201c{record.get('title')}\u201d" for record in saved.get("records") or []]
+    records = [record for record in saved.get("records") or [] if isinstance(record, dict)]
+    def named(record):
+        return f"{record.get('type')} \u201c{record.get('title')}\u201d"
+    # A runtime older than per-record states reports none: what it returns it wrote.
+    written = [record for record in records if record.get("state") in (None, "created", "completed", "updated")]
+    parts = (["the task's progress and next steps"] if saved.get("task") else []) + [named(r) for r in written]
     text = ("Saved to project memory: " + "; ".join(parts) + "." if parts
             else "Nothing new to save to project memory from this run.")
+    already = [record for record in records if record.get("state") in ("existing", "archived")]
+    if already:
+        text += " Already in project memory: " + "; ".join(named(r) for r in already) + "."
+    held = [record for record in records if record.get("state") in ("differs", "archived-differs")]
+    if held:
+        text += (" Kept as recorded, with a different consequence than this run's: "
+                 + "; ".join(named(r) for r in held)
+                 + " (verified by a person, someone else's, archived or moved on).")
     skipped = [item.get("reason") for item in result.get("skipped") or [] if isinstance(item, dict)]
     if skipped.count("repeated"):
         text += f" {skipped.count('repeated')} learning(s) were already saved from this session."
@@ -365,15 +387,15 @@ def summary(state, result=None):
     promotion = saved.get("promotion")
     if isinstance(promotion, dict):
         promoted = [item.get("memory_id") for item in promotion.get("promoted") or [] if isinstance(item, dict)]
-        held = len(promotion.get("blocked") or []) + len(promotion.get("failed") or [])
+        held_back = len(promotion.get("blocked") or []) + len(promotion.get("failed") or [])
         if promotion.get("error"):
             text += " Not promoted yet: " + promotion["error"]
         elif promotion.get("enabled") is False:
             text += " Automatic promotion is off for this project, so it stays in Project Brain."
         if promoted:
             text += " Promoted to the Memory Bank as " + ", ".join(promoted) + "."
-        if held:
-            text += f" {held} held back from the Memory Bank; they stay in Project Brain."
+        if held_back:
+            text += f" {held_back} held back from the Memory Bank; they stay in Project Brain."
     if not result.get("ok"):
         text += " Stopped: " + (result.get("error") or "the runtime did not finish.")
         if parts:

@@ -26,6 +26,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **Second review of the unified memory branch: secrets, revised learnings, one source policy, and the stand.** Each finding was reproduced first; every regression test fails on the previous code.
+  - HTTP credentials are secrets everywhere the shared patterns apply - write refusal, direct-query refusal, automatic-query cutting: `Authorization: Bearer|Token|Digest <token with a digit>`, `Authorization: Basic <base64>` and a bare `Bearer <20+ characters with a digit>`; placeholders (`YOUR_TOKEN`, `<token>`, `$TOKEN`) are not. No match in this repository or in four client projects' documents and memory.
+  - A learning restated with a different consequence is no longer reported as already there: an agent revises what an agent attested (`updated`); what a person verified, or nobody said who, another owner's record and an archived one are left as recorded and reported as `differs`/`archived-differs`, and the result is not a replay. The Harness notice says what was saved, what was already in memory and what was kept as recorded.
+  - Which paths a learning may cite - secrets, keys, environment files, dependencies, runtime state and derived memory refused - is one function, `source_path_problem`, in the module the runtime and the Harness share byte for byte; the Harness applies it before choosing a write path, so an older runtime's command chain no longer accepts what `record-result` refuses.
+  - A damaged session-repeat record (a list where items belong, a turn that is not a number) is normalised away, costing at most one repeat instead of the turn's retrieval.
+  - The stand: a document's own edit time decides whether it changed after the prompt, whatever its mtime; a skill counts as existing only where the edition under test installed it; a run that evaluated nothing exits 1.
+
 - **An independent review of the unified memory branch: the write path, the MCP boundary and the stand.** Each finding was reproduced first and has a regression test.
   - A quoted credential goes from an automatic query whole: `password='alpha beta gamma'` used to leave `beta gamma'`, which reached the automatic task goal stored in Git and the retrieval manifest (`QUOTED_CREDENTIAL`, cut to the closing quote or the end of the line).
   - `record-result` resolves a learning's sources in the project the way fingerprints do (`workspace_roots`), so an attached project can record knowledge about its own files; it refused every one.

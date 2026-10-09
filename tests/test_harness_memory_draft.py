@@ -175,6 +175,25 @@ class SubmissionTests(unittest.TestCase):
                     with self.assertRaises(SessionError):
                         memory_draft.check_sources(root, missing)
 
+    def test_a_draft_may_not_cite_derived_memory_or_secrets_on_any_write_path(self):
+        # The runtime's record-result refuses these; an older runtime's
+        # command chain would not, so the Harness refuses them first.
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            for relative in ("memory-bank/chunks/derived.md", ".env.local", "config/app.pem", "app/Order.php"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("x", encoding="utf-8")
+            draft = {"progress": "", "next_steps": [], "verified": True, "learnings": [
+                {"type": "finding", "title": title, "consequence": "c", "sources": [source]}
+                for title, source in (("Derived", "memory-bank/chunks/derived.md"), ("Env", ".env.local"),
+                                      ("Key", "config/app.pem"), ("Order", "app/Order.php"))]}
+            kept, skipped = memory_draft.usable(root, draft)
+            self.assertEqual(["Order"], [item["title"] for item in kept["learnings"]])
+            self.assertEqual({"Derived", "Env", "Key"}, {item["title"] for item in skipped})
+            with self.assertRaises(SessionError):
+                memory_draft.check_sources(root, {"learnings": [draft["learnings"][0]]})
+
     def test_external_ids_name_the_task_and_stay_unique(self):
         first = memory_draft.external_id("feature/cobalt", "finding")
         self.assertTrue(first.startswith("feature/cobalt-finding-"), first)

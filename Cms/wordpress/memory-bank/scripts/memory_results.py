@@ -23,7 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 import workspace_roots
-from automatic_query import RAW_TEXT_PATTERN
+from automatic_query import RAW_TEXT_PATTERN, SOURCE_PATH_DENYLIST, source_path_problem
 from brain_runtime import (
     LIFECYCLES,
     BrainError,
@@ -35,26 +35,11 @@ from brain_runtime import (
     guard_shared_text,
     load_config,
     mutation_lock,
+    record_attestation,
     source_fingerprints,
     update_record,
 )
 
-# A cited path that names a secret, a key or an environment file.
-SOURCE_PATH_DENYLIST = re.compile(
-    r"(^|/)(\.env(\..+)?|secrets?|id_[a-z0-9]+|[^/]+\.(pem|key|p12|pfx|jks|keystore))$",
-    re.IGNORECASE,
-)
-# Directory names a learning never cites: tooling, dependencies, credentials.
-BLOCKED_PARTS = frozenset({
-    ".git", ".ssh", ".aws", ".kube", "node_modules", "vendor", ".venv",
-    "__pycache__", "secrets", ".secrets", "credentials",
-})
-# Runtime state and derived memory: a learning cites what it was derived
-# from, never memory derived from something else.
-DERIVED_PREFIXES = (
-    "memory-bank/local/", "memory-bank/chunks/", "project-brain/local/",
-    "project-brain/dynamic/", "project-brain/archive/", "project-brain/control/",
-)
 RESULT_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 LEARNING_TYPES = ("finding", "decision")
@@ -88,17 +73,10 @@ def check_source(root: Path, value: object) -> str:
     """A canonical project file a learning may cite, or BrainError."""
     value = _text(value, "source path", 1024)
     head = value.split("#", 1)[0]
-    if SOURCE_PATH_DENYLIST.search(head):
-        raise BrainError("Sensitive source paths are refused")
-    if head.startswith(DERIVED_PREFIXES):
-        raise BrainError("Cite canonical project sources, not private runtime state or derived memory")
+    problem = source_path_problem(value)
+    if problem:
+        raise BrainError(problem)
     relative = PurePosixPath(head)
-    if (any(part.casefold() in BLOCKED_PARTS or part.casefold().startswith(".env") for part in relative.parts)
-            or relative.suffix.casefold() in {".pem", ".key", ".p12", ".pfx", ".sqlite", ".db"}
-            or relative.name.casefold() == "credentials.json"):
-        raise BrainError("Private or dependency source paths are refused")
-    if relative.is_absolute() or ".." in relative.parts or "\\" in head or ":" in head:
-        raise BrainError("Use project-relative source paths")
     # The project's root: the runtime's own when installed, the project the
     # launcher named when the edition is attached and its state lives apart.
     current = workspace_roots.project_root(root)
@@ -240,6 +218,12 @@ def _holds(task: dict[str, Any], result: dict[str, Any]) -> bool:
     )
 
 
+def _consequence(record: dict[str, Any]) -> str:
+    """What a learning record says follows from it, as recorded: the progress
+    its closing wrote, or the goal it was created with."""
+    return " ".join(str(record.get("progress") or record.get("goal") or "").split())
+
+
 def _summary(record: dict[str, Any], state: str) -> dict[str, Any]:
     return {"id": record["id"], "external_id": record["external_id"], "type": record["type"],
             "title": record["title"], "status": record["status"], "revision": record["revision"],
@@ -307,8 +291,11 @@ def record_result(
             current, archived = _existing(root, identifier)
             closed_state = CLOSED_STATE[learning["type"]]
             state = "existing"
+            same = current is not None and _consequence(current) == " ".join(learning["consequence"].split())
             if archived:
-                records.append(_summary(current, "archived"))
+                # An archived record is never rewritten; a different
+                # consequence is said, not dropped behind "already there".
+                records.append(_summary(current, "archived" if same else "archived-differs"))
                 continue
             if current is None:
                 current = create_record(
@@ -335,7 +322,25 @@ def record_result(
                     attestation=attestation,
                 )
                 state = "created" if state == "created" else "completed"
-            wrote = wrote or state != "existing"
+            elif not same:
+                # The same learning with a revised consequence: the record
+                # takes the new one when an agent revises what an agent
+                # attested, or a person revises it. What a person verified -
+                # or nobody said who - an agent does not overwrite, and a
+                # record of someone else's or one that has moved on is left
+                # too; the response says so instead of "already there".
+                revisable = attestation == "person" or record_attestation(current) == "agent"
+                if (not revisable or owner not in current["authorized_owners"]
+                        or current["status"] != closed_state):
+                    state = "differs"
+                else:
+                    current = update_record(
+                        root, current["id"], expected_revision=current["revision"],
+                        progress=learning["consequence"], next_steps=[], files=[], sources=[],
+                        actor=owner, reason=reason,
+                    )
+                    state = "updated"
+            wrote = wrote or state not in ("existing", "differs")
             records.append(_summary(current, state))
         updated = task if task_fields else None
         if update_task:
@@ -358,6 +363,8 @@ def record_result(
         "records": records,
         "promotion": promotion,
         "attestation": attestation,
-        # Nothing was written: the result, or every part of it, was already there.
-        "replayed": not wrote,
+        # Nothing was written because the result, every part of it, was
+        # already there - not because a part of it was refused.
+        "replayed": not wrote and not any(
+            item["state"] in ("differs", "archived-differs") for item in records),
     }

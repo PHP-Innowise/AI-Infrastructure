@@ -318,6 +318,7 @@ class EndToEndTest(unittest.TestCase):
             ("prompt", []),
             ("now", ["--as-of", "now"]),
             ("real-clock", ["--ids", "p2", "--clock", "real"]),
+            ("no-match", ["--ids", "nothing-like-this"]),
         ):
             out = base / "results" / f"{name}.json"
             cls.outputs[name] = out
@@ -332,6 +333,16 @@ class EndToEndTest(unittest.TestCase):
         process = self.processes[name]
         self.assertEqual(process.returncode, 0, process.stderr)
         return json.loads(self.outputs[name].read_text(encoding="utf-8"))
+
+    def test_a_run_that_evaluated_nothing_fails(self) -> None:
+        # Ids that match no prompt, like an empty set, measure nothing.
+        self.assertEqual(1, self.processes["no-match"].returncode)
+        empty = self.cache.parent / "data" / "empty.json"
+        empty.write_text("[]", encoding="utf-8")
+        process = run_cli("run", "--set", str(empty), "--judgments", str(self.judgments_path),
+                          "--projects-root", str(self.projects), "--edition", "PHP Core",
+                          "--cache", str(self.cache), "--out", str(self.cache.parent / "results" / "empty.json"))
+        self.assertEqual(1, process.returncode, process.stderr)
 
     def test_the_project_is_untouched(self) -> None:
         # .git included: borrowing the project's objects would refresh their mtimes.
@@ -590,6 +601,15 @@ class ScoringTest(unittest.TestCase):
             scored = memory_eval.score(refresh_result({}), grades, passages, ["CHANGELOG.md"], [])
             self.assertEqual((True, False), (scored["could_help"], scored["answer_could_help"]))
 
+    def test_a_skill_the_edition_does_not_install_did_not_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            corpus = Path(name)
+            grades = {".agents/skills/removed/SKILL.md": 2, ".agents/skills/kept/SKILL.md": 2}
+            skill = corpus / ".cursor/skills/kept/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("# Kept\n", encoding="utf-8")
+            self.assertEqual([".agents/skills/kept/SKILL.md"], memory_eval.existing_useful(corpus, grades))
+
     def test_a_skills_labelled_answer_counts_where_the_overlay_put_it(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             corpus = Path(name)
@@ -726,6 +746,15 @@ class ReconstructionTest(unittest.TestCase):
         write(self.project, f"{memory_eval.PROMOTIONS}/promo.json", json.dumps(promotion))
         counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
         self.assertEqual(counts["from_worktree"], 1)
+
+    def test_a_backdated_mtime_does_not_hide_an_edit_after_the_prompt(self) -> None:
+        text = finding(RECORD_B, "B", "goal", "2026-08-03T08:00:00Z", "b", updated="2026-08-09T08:00:00Z")
+        path = write(self.project, PATH_B, text)
+        earlier = datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp()
+        os.utime(path, (earlier, earlier))
+        counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
+        self.assertEqual((counts["from_worktree"], counts["unreconstructable_updated"]), (0, 1))
+        self.assertFalse((self.corpus / PATH_B).exists())
 
     def test_a_record_edited_after_the_prompt_is_left_out_unless_kept(self) -> None:
         # Its body today may hold the very answer the prompt's work produced.

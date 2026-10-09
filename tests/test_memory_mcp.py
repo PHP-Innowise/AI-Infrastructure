@@ -221,6 +221,15 @@ class MemoryMcpTests(unittest.TestCase):
         replies = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual([-32700, -32602], [r['error']['code'] for r in replies])
 
+    def test_a_bearer_token_in_a_result_is_refused_and_never_stored(self):
+        token = 'Zx81Kq0vLm2Np3Qr4St5Uv6Wx7'
+        draft = self.draft(self.start())
+        draft['learnings'][0]['consequence'] = f'Call the API with Authorization: Bearer {token}.'
+        self.assertTrue(self.call('memory_record_result', **draft)['isError'])
+        for path in (self.root / 'project-brain').rglob('*'):
+            if path.is_file():
+                self.assertNotIn(token, path.read_text(encoding='utf-8', errors='replace'))
+
     def test_deeply_nested_json_is_a_parse_error_and_the_server_stays_up(self):
         # Under the 128 KiB message limit, past the parser's recursion depth.
         deep = '[' * 60000 + ']' * 60000

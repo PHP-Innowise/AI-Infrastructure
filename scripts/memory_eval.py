@@ -738,7 +738,9 @@ def reconstruct_memory(
             continue
         # A file unmodified since before the prompt existed then, as it is now.
         if (window is not None and window[1] <= moment) or modified <= moment:
-            edited = modified > moment and changed_after(source, kind, moment)
+            # The document's own edit time decides: a copy tool can preserve
+            # or restore an older mtime over a body written after the prompt.
+            edited = changed_after(source, kind, moment)
             if edited and updated_after == "drop":
                 counts["unreconstructable_updated"] += 1
                 continue
@@ -1198,17 +1200,28 @@ def score(
     }
 
 
+def corpus_file(corpus: Path, path: str) -> Optional[Path]:
+    """The regular file a judged path names in the corpus, or None.
+
+    A skill is judged under its canonical path; the overlay installs it under
+    whichever tool directories the edition carries.
+    """
+    if not installer.is_safe_relative_path(path):
+        return None
+    candidates = [path]
+    if path.startswith(CANON_SKILLS):
+        candidates += [tool + path[len(CANON_SKILLS):] for tool in TOOL_SKILLS]
+    for candidate in candidates:
+        target = corpus / PurePosixPath(candidate)
+        if target.is_file() and not target.is_symlink():
+            return target
+    return None
+
+
 def existing_useful(corpus: Path, grades: Dict[str, int]) -> List[str]:
-    """Judged-useful paths present in the corpus; a skill always exists."""
-    found = []
-    for path, grade in sorted(grades.items()):
-        if grade < 1:
-            continue
-        if is_skill(path) or (
-            installer.is_safe_relative_path(path) and (corpus / PurePosixPath(path)).is_file()
-        ):
-            found.append(path)
-    return found
+    """Judged-useful paths present in the corpus - skills included, only where
+    the edition under test installed them."""
+    return [path for path, grade in sorted(grades.items()) if grade >= 1 and corpus_file(corpus, path)]
 
 
 def answer_existing(corpus: Path, grades: Dict[str, int], passages: Dict[str, Dict[str, Any]]) -> List[str]:
@@ -1226,22 +1239,11 @@ def answer_existing(corpus: Path, grades: Dict[str, int], passages: Dict[str, Di
         entry = passages.get(path)
         if grade < 1 or not isinstance(entry, dict) or entry.get("useful") is False:
             continue
-        if not installer.is_safe_relative_path(path):
-            continue
-        # A skill is judged under its canonical path; the overlay installs it
-        # under whichever tool directories the edition carries.
-        candidates = [path]
-        if path.startswith(CANON_SKILLS):
-            candidates += [tool + path[len(CANON_SKILLS):] for tool in TOOL_SKILLS]
-        text = ""
-        for candidate in candidates:
-            target = corpus / PurePosixPath(candidate)
-            try:
-                if target.is_file():
-                    text = flatten(target.read_text(encoding="utf-8", errors="replace"))
-                    break
-            except OSError:
-                continue
+        target = corpus_file(corpus, path)
+        try:
+            text = flatten(target.read_text(encoding="utf-8", errors="replace")) if target else ""
+        except OSError:
+            text = ""
         if text and any(isinstance(passage, str) and flatten(passage) and flatten(passage) in text
                         for passage in entry.get("passages") or []):
             found.append(path)
@@ -1553,7 +1555,9 @@ class Run:
         print(format_report([("result", out, self.document())]))
         print(f"wrote {out}")
         evaluated = sum(1 for item in self.items.values() if item.get("status") == "ok")
-        return 0 if evaluated or not selected else 1
+        # Nothing evaluated - an empty set, ids that match nothing, every
+        # prompt skipped - is not a measurement, whatever was selected.
+        return 0 if evaluated else 1
 
 
 def command_run(arguments: argparse.Namespace) -> int:

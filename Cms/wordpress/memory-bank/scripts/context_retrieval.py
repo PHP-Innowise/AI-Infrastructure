@@ -2696,12 +2696,41 @@ def _remember_retrieval(
 
 
 def _load_session_deliveries(connection: sqlite3.Connection) -> dict[str, Any]:
+    """What each conversation was handed, normalised entry by entry.
+
+    The record is disposable bookkeeping: a part of it that is not the shape
+    this runtime writes - a list where items belong, a turn that is not a
+    number - is dropped, costing at most one repeated item, rather than
+    failing the turn's retrieval.
+    """
     try:
         raw = load_index_state(connection).get(SESSION_DELIVERIES_KEY)
         stored = json.loads(raw) if raw else {}
-    except (sqlite3.Error, ValueError):
+    except (sqlite3.Error, ValueError, RecursionError):
         return {}
-    return stored if isinstance(stored, dict) else {}
+    if not isinstance(stored, dict):
+        return {}
+    normalized: dict[str, Any] = {}
+    for session, entry in stored.items():
+        if not isinstance(session, str) or not isinstance(entry, dict):
+            continue
+        turn = entry.get("turn")
+        items = entry.get("items")
+        clean: dict[str, Any] = {
+            "turn": turn if type(turn) is int and turn >= 0 else 0,
+            "items": {
+                key: seen
+                for key, seen in (items.items() if isinstance(items, dict) else ())
+                if isinstance(key, str)
+                and isinstance(seen, list)
+                and len(seen) == 2
+                and type(seen[1]) is int
+            },
+        }
+        if isinstance(entry.get("transcript"), dict):
+            clean["transcript"] = entry["transcript"]
+        normalized[session] = clean
+    return normalized
 
 
 def _remember_session_deliveries(

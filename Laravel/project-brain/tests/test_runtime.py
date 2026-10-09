@@ -4816,6 +4816,17 @@ class CapsuleNoiseTest(RuntimeHarness):
             self.assertEqual("Fix deploy   after migration", cleaned)
         self.assertEqual("next line stays", context_cli.sanitize_automatic_query(
             "api_key: 'alpha beta\nnext line stays"))
+        # An HTTP credential goes whatever shape its token takes; a
+        # placeholder in documentation is not one.
+        token = "Zx81Kq0vLm2Np3Qr4St5Uv6Wx7"
+        self.assertEqual("curl fails with   on /orders", context_cli.sanitize_automatic_query(
+            f"curl fails with Authorization: Bearer {token} on /orders"))
+        self.assertEqual("use   for the deploy", context_cli.sanitize_automatic_query(f"use bearer {token} for the deploy"))
+        self.assertEqual("is rejected", context_cli.sanitize_automatic_query(
+            "Authorization: Basic dXNlcjpwYXNzMTIz is rejected"))
+        for placeholder in ("Authorization: Bearer YOUR_API_TOKEN", "Authorization: Bearer <token>",
+                            "Authorization: Bearer $TOKEN", "Bearer authentication for the API"):
+            self.assertEqual(placeholder, context_cli.sanitize_automatic_query(placeholder))
 
 
 class AutomaticWorkingMemoryTest(RuntimeHarness):
@@ -8080,6 +8091,27 @@ class DeliveryTest(RuntimeHarness):
         again = self.refresh(query, "--session-id", "conversation-1")
         self.assertEqual(handed, {item["path"] for item in again["capsule"]["selected"]})
 
+    def test_a_damaged_repeat_record_costs_a_repeat_not_the_turn(self) -> None:
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        query = "order totals rounding discount cents"
+        first = self.refresh(query, "--session-id", "conversation-1")
+        self.assertTrue(first["capsule"]["selected"])
+        for damaged in ({"conversation-1": {"turn": 1, "items": ["bad"]}},
+                        {"conversation-1": {"turn": "bad", "items": {}}},
+                        {"conversation-1": "bad", "conversation-2": {"turn": 2, "items": {"k": "bad"}}}):
+            with self.subTest(damaged=damaged):
+                connection = context_cli.connect(context_cli.default_database(self.repository))
+                try:
+                    with connection:
+                        retrieval.store_index_state(
+                            connection, {retrieval.SESSION_DELIVERIES_KEY: json.dumps(damaged)})
+                finally:
+                    connection.close()
+                again = self.refresh(query, "--session-id", "conversation-1")
+                self.assertTrue(again["capsule"]["selected"] or again["capsule"]["repeated"])
+
     def test_small_talk_retrieves_nothing(self) -> None:
         self.enable_automatic_promotion()
         self.accept_money_decision()
@@ -8702,6 +8734,40 @@ class RecordResultTest(RuntimeHarness):
                 self.record("run-1", data)
         self.assertEqual([], self.records())
         self.assertEqual("", self.task()["progress"])
+
+    def test_a_bearer_token_is_refused_by_the_writer_and_a_direct_query(self) -> None:
+        token = "Zx81Kq0vLm2Np3Qr4St5Uv6Wx7"
+        with self.assertRaises(brain.BrainError):
+            self.record("run-1", self.result(progress=f"Called the API with Authorization: Bearer {token}."))
+        with self.assertRaises(brain.BrainError):
+            self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": f"Send bearer {token} first."}]))
+        self.assertEqual([], self.records())
+        refused = self.run_cli("retrieve", f"why does Authorization: Bearer {token} fail", "--task-id", "TASK-RESULT")
+        self.assertNotEqual(0, refused.returncode)
+        manifests = self.repository / "project-brain/control/retrieval-manifests"
+        for manifest in manifests.glob("*.json") if manifests.is_dir() else []:
+            self.assertNotIn(token, manifest.read_text(encoding="utf-8"))
+
+    def test_a_revised_consequence_updates_what_an_agent_attested(self) -> None:
+        self.record("run-1", self.result())
+        revised = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.assertEqual(["updated"], [item["state"] for item in revised["records"]])
+        self.assertFalse(revised["replayed"])
+        self.assertEqual(1, len(self.records()))
+        self.assertEqual("Retry once, then stop.", self.records()[0]["progress"])
+
+    def test_an_agent_does_not_overwrite_what_a_person_verified(self) -> None:
+        memory_results.record_result(self.repository, "TASK-RESULT", "run-1", self.task()["revision"],
+                                     self.result(), owner="local", reason="Reviewed by a person",
+                                     attestation="person")
+        revised = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.assertEqual(["differs"], [item["state"] for item in revised["records"]])
+        self.assertFalse(revised["replayed"])
+        self.assertEqual(self.LEARNING["consequence"], self.records()[0]["progress"])
+        brain.compact(self.repository)
+        archived = self.record("run-3", self.result(learnings=[{**self.LEARNING, "consequence": "Retry twice."}]))
+        self.assertEqual(["archived-differs"], [item["state"] for item in archived["records"]])
+        self.assertFalse(archived["replayed"])
 
     def test_the_cli_records_a_result_from_a_file(self) -> None:
         request = self.repository / "result.json"

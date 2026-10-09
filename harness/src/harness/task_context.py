@@ -392,7 +392,8 @@ class TaskContext:
                 return {'ok': False, 'saved': {'task': None, 'records': [], 'promotion': None},
                         'skipped': skipped, 'error': 'The runtime returned an unexpected record.'}
         records = [{'id': item.get('id'), 'type': item.get('type'), 'title': item.get('title'),
-                    'status': item.get('status')} for item in outcome.get('records') or [] if isinstance(item, dict)]
+                    'status': item.get('status'), 'state': item.get('state')}
+                   for item in outcome.get('records') or [] if isinstance(item, dict)]
         promotion = outcome.get('promotion') if isinstance(outcome.get('promotion'), dict) else None
         saved = {'task': outcome.get('task') if isinstance(outcome.get('task'), dict) else None,
                  'records': records, 'promotion': promotion}

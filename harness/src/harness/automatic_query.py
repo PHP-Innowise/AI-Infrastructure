@@ -1,4 +1,5 @@
-"""Pure automatic-query adapter shared by memory hooks and Harness (stdlib only)."""
+"""Pure policy shared byte for byte by the memory runtime and the Harness (stdlib only):
+what an automatic query may carry, and which paths a learning may cite."""
 from __future__ import annotations
 
 import re
@@ -33,6 +34,24 @@ SECRET_PATTERNS = {
         r"(?!(?:password|pass|secret|root|test|!?change[-_]?me!?|x{3,}|\*+|\.{2,})@"
         r"|[<${%])"
         r"[^\s@/]{3,}@",
+        re.IGNORECASE,
+    ),
+    # An HTTP credential pasted with a request: the header names the scheme,
+    # whatever shape the opaque token takes. A token has a digit somewhere and
+    # a placeholder (YOUR_TOKEN, <token>, $TOKEN, {token}) does not count.
+    "authorization header": re.compile(
+        r"\b(?:proxy-)?authorization[ \t]*[:=][ \t]*['\"`]?(?:bearer|basic|token|digest)[ \t]+"
+        + _NOT_A_LITERAL + r"(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{8,}",
+        re.IGNORECASE,
+    ),
+    # Basic credentials are base64 and may carry no digit at all.
+    "basic credentials": re.compile(
+        r"\b(?:proxy-)?authorization[ \t]*[:=][ \t]*['\"`]?basic[ \t]+"
+        + _NOT_A_LITERAL + r"[A-Za-z0-9+/]{12,}={0,2}",
+        re.IGNORECASE,
+    ),
+    "bearer token": re.compile(
+        r"\bbearer[ \t]+" + _NOT_A_LITERAL + r"(?=[A-Za-z0-9._~+/-]*\d)[A-Za-z0-9._~+/-]{20,}=*",
         re.IGNORECASE,
     ),
     # A credential key assigned a literal value. The key may carry a snake or
@@ -143,3 +162,47 @@ def sanitize_automatic_query(text: str) -> str:
         if not residue or all(word in CONTACT_WORDS for word in residue):
             return ""
     return text.strip(" \t\r\n,;")
+
+
+# A cited path that names a secret, a key or an environment file.
+SOURCE_PATH_DENYLIST = re.compile(
+    r"(^|/)(\.env(\..+)?|secrets?|id_[a-z0-9]+|[^/]+\.(pem|key|p12|pfx|jks|keystore))$",
+    re.IGNORECASE,
+)
+# Directory names a learning never cites: tooling, dependencies, credentials.
+BLOCKED_SOURCE_PARTS = frozenset({
+    ".git", ".ssh", ".aws", ".kube", "node_modules", "vendor", ".venv",
+    "__pycache__", "secrets", ".secrets", "credentials",
+})
+# Runtime state and derived memory: a learning cites what it was derived
+# from, never memory derived from something else.
+DERIVED_SOURCE_PREFIXES = (
+    "memory-bank/local/", "memory-bank/chunks/", "project-brain/local/",
+    "project-brain/dynamic/", "project-brain/archive/", "project-brain/control/",
+)
+PRIVATE_SOURCE_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".sqlite", ".db"})
+
+
+def source_path_problem(value: str) -> "str | None":
+    """Why a learning may not cite `value`, judged on the path alone, or None.
+
+    Every writer of a learning applies it - the runtime's record-result and
+    the Harness before it chooses a write path - so a source refused on one
+    path is refused on all. Existence and symlinks are each caller's to check
+    against its own root.
+    """
+    head = value.split("#", 1)[0]
+    if SOURCE_PATH_DENYLIST.search(head):
+        return "Sensitive source paths are refused"
+    if head.startswith(DERIVED_SOURCE_PREFIXES):
+        return "Cite canonical project sources, not private runtime state or derived memory"
+    parts = [part for part in head.split("/") if part]
+    name = parts[-1].casefold() if parts else ""
+    suffix = name[name.rfind("."):] if "." in name else ""
+    if (any(part.casefold() in BLOCKED_SOURCE_PARTS or part.casefold().startswith(".env") for part in parts)
+            or suffix in PRIVATE_SOURCE_SUFFIXES or name == "credentials.json"):
+        return "Private or dependency source paths are refused"
+    if head.startswith("/") or ".." in parts or "\\" in head or ":" in head:
+        return "Use project-relative source paths"
+    return None
+
