@@ -183,9 +183,10 @@ withheld), and the score below. `summary` is what `report` prints.
 
 ## What the numbers mean
 
-- **delivered** - item paths of the capsule's three layers, normalised.
-  `useful_delivered` have a grade of 1 or more, `noise_delivered` a grade of
-  0, `unjudged` none.
+- **delivered** - item paths of the capsule's three layers, normalised. The
+  layers of a `refresh` hold what its `capsule_text` shows: an item the
+  rendered text had no room for is left out of them. `useful_delivered` have
+  a grade of 1 or more, `noise_delivered` a grade of 0, `unjudged` none.
 - **existed_useful / could help** - judged-useful paths present in the
   reconstructed corpus (skills always count as present): the turn could have
   been helped.

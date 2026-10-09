@@ -100,6 +100,7 @@ from context_retrieval import (
     RETRIEVAL_GATE_DEFAULT,
     RETRIEVAL_GATE_MODES,
     RETRIEVAL_HOSTS,
+    TOKENIZER,
     query_tokens,
     required_coverage,
     retrieve,
@@ -205,11 +206,6 @@ CAPSULE_RAW_TEXT_PATTERN = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
-# Porter wraps unicode61 so "rounding" matches "round" and "review" matches
-# "reviewer". Without stemming the correct skill is simply missed: a security
-# question did not retrieve the security skill because its title says
-# "Reviewer". Non-English tokens pass through the stemmer unchanged.
-TOKENIZER = "porter unicode61"
 # A skill's identity lives in its declared description, not in its body prose,
 # which reads much alike across skills. Indexing that separately lets ranking
 # weight what a document is *about* over what it happens to mention.
@@ -1447,6 +1443,29 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
     return compacted
 
 
+def synchronize_capsule_views(capsule: dict[str, object]) -> None:
+    """Hold `selected` and `categories` to the documents the layers carry."""
+    selected_paths = {
+        item["path"]
+        for layer in DOCUMENT_LAYERS
+        for item in capsule.get(layer) or []
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    capsule["selected"] = [
+        item
+        for item in capsule.get("selected", [])
+        if isinstance(item, dict) and item.get("path") in selected_paths
+    ]
+    categories = capsule.get("categories")
+    if isinstance(categories, dict):
+        for category, items in categories.items():
+            categories[category] = [
+                item
+                for item in items
+                if isinstance(item, dict) and item.get("path") in selected_paths
+            ]
+
+
 def enforce_governed_capsule_contract(
     capsule: dict[str, object],
 ) -> dict[str, object]:
@@ -1491,27 +1510,6 @@ def enforce_governed_capsule_contract(
             :CAPSULE_WORKING_SOURCE_LIMIT
         ]
 
-    def synchronize_views() -> None:
-        selected_paths = {
-            item["path"]
-            for layer in DOCUMENT_LAYERS
-            for item in compacted[layer]
-            if isinstance(item, dict) and isinstance(item.get("path"), str)
-        }
-        compacted["selected"] = [
-            item
-            for item in compacted.get("selected", [])
-            if isinstance(item, dict) and item.get("path") in selected_paths
-        ]
-        categories = compacted.get("categories")
-        if isinstance(categories, dict):
-            for category, items in categories.items():
-                categories[category] = [
-                    item
-                    for item in items
-                    if isinstance(item, dict) and item.get("path") in selected_paths
-                ]
-
     # Snippets are discovery aids. Bounding each rendered copy leaves the full
     # source and its hash in the auditable manifest while avoiding duplicated
     # aliases consuming the entire capsule.
@@ -1529,7 +1527,7 @@ def enforce_governed_capsule_contract(
         for item in collection:
             if isinstance(item, dict) and isinstance(item.get("snippet"), str):
                 item["snippet"] = item["snippet"][:320]
-    synchronize_views()
+    synchronize_capsule_views(compacted)
 
     while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
         if compacted.get("last_turn"):
@@ -1540,7 +1538,7 @@ def enforce_governed_capsule_contract(
             if compacted[layer]:
                 compacted[layer].pop()
                 compacted["omitted"][layer] += 1
-                synchronize_views()
+                synchronize_capsule_views(compacted)
                 dropped = True
                 break
         if dropped:
@@ -2299,6 +2297,7 @@ def assemble_capsule(
     allow_unprovisioned: bool = False,
     session_id: Optional[str] = None,
     transcript: Optional[str] = None,
+    render: bool = False,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
@@ -2316,6 +2315,10 @@ def assemble_capsule(
     first turns of every branch until the checkpoint provisions it. The
     capsule then carries the retrieval layers with no working state, instead
     of nothing but a warning.
+
+    ``render`` says the caller delivers the rendered text rather than the
+    JSON: a governed capsule then keeps only the items that text shows, and
+    retrieval records only those as delivered (see shown_in_render).
     """
     warnings: list[str] = []
     if refresh_index:
@@ -2356,7 +2359,27 @@ def assemble_capsule(
     local_episodes = search_episodes(
         connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
     )
-    result = retrieve(
+
+    def pack(result: dict[str, object]) -> dict[str, object]:
+        # Inside retrieve(), before it records anything: what the delivered
+        # capsule leaves out is not recorded as handed.
+        deduplicate_capsule_layers(result)
+        result["query_source"] = query_source
+        # The print tail dereferences result["warnings"]; retrieve() has no such key.
+        result["warnings"] = warnings
+        result["last_turn"] = last_turn
+        if binding is None:
+            # Rendered as "working: not recorded yet" plus how far the first
+            # checkpoint is, by the same fields the Cursor warming capsule uses.
+            result["kind"] = "warming"
+            result["task_id"] = task_id
+            result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
+        capsule = enforce_governed_capsule_contract(result)
+        if render:
+            shown_in_render(connection, capsule)
+        return capsule
+
+    return retrieve(
         connection,
         repository,
         request_query,
@@ -2372,19 +2395,8 @@ def assemble_capsule(
         local_episodes=local_episodes,
         session_id=session_id,
         transcript=transcript,
+        pack=pack,
     )
-    deduplicate_capsule_layers(result)
-    result["query_source"] = query_source
-    # The print tail dereferences result["warnings"]; retrieve() has no such key.
-    result["warnings"] = warnings
-    result["last_turn"] = last_turn
-    if binding is None:
-        # Rendered as "working: not recorded yet" plus how far the first
-        # checkpoint is, by the same fields the Cursor warming capsule uses.
-        result["kind"] = "warming"
-        result["task_id"] = task_id
-        result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
-    return enforce_governed_capsule_contract(result)
 
 
 def hook_capsule_query(
@@ -2444,6 +2456,7 @@ def assemble_hook_context(
     task_id: str,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     host: str = "cli",
+    render: bool = False,
 ) -> Optional[dict[str, object]]:
     """Return a governed capsule or a sanitized pre-provision warming capsule."""
     task_id = validate_task_id(task_id)
@@ -2484,6 +2497,7 @@ def assemble_hook_context(
                 gate_mode=gate_mode,
                 host=host,
                 entry_point="hook-context",
+                render=render,
             )
 
     files, excluded = changed_paths(repository)
@@ -2660,6 +2674,40 @@ def render_capsule_lines(
     capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
 ) -> list[str]:
     """The capsule as Claude Code, Codex, Cursor and Harness deliver it."""
+    return _render_capsule(capsule, excerpts)[0]
+
+
+def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) -> None:
+    """Leave in a capsule only the items its rendered text shows.
+
+    The text is held to RENDERED_CAPSULE_LIMIT by dropping whole entries once
+    the excerpts are gone - skills first, then the weakest knowledge - and a
+    dropped entry never reaches the model. Retrieval used to record it as
+    handed all the same, so the next turns left it out as an item that
+    "still applies". The capsule now stops carrying it, retrieval records
+    only what the capsule holds, and the text rendered from the capsule shows
+    every item it holds: they fitted without their excerpts.
+    """
+    _, shown = _render_capsule(capsule, capsule_excerpts(connection, capsule))
+    kept = {id(item) for item in shown}
+    omitted = capsule.get("omitted")
+    for layer in DOCUMENT_LAYERS:
+        items = capsule.get(layer)
+        if not isinstance(items, list):
+            continue
+        capsule[layer] = [
+            item for item in items if not isinstance(item, dict) or id(item) in kept
+        ]
+        dropped = len(items) - len(capsule[layer])
+        if dropped and isinstance(omitted, dict) and isinstance(omitted.get(layer), int):
+            omitted[layer] += dropped
+    synchronize_capsule_views(capsule)
+
+
+def _render_capsule(
+    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
+) -> tuple[list[str], list[dict[str, object]]]:
+    """The rendered lines, and the items they show."""
     excerpts = dict(excerpts or {})
     # Excerpts are document text on its way into a prompt: held to the same
     # personal-data and secret screen as the query. capsule_excerpts already
@@ -2793,7 +2841,7 @@ def render_capsule_lines(
         else:
             break
         lines = assemble()
-    return lines
+    return lines, [item for _, item, _ in entries]
 
 
 def print_capsule(
@@ -3141,9 +3189,9 @@ def retrieval_report(
         "entry_point": dict(sorted(entry_points.items())),
         "empty_selection": empty_selection,
         "local_episode_count": local_episode_count,
-        # Membership counted from the manifest, which records the selection
-        # before the capsule's character ladder may drop an item, so this is
-        # an upper bound on what the model was actually shown.
+        # Membership counted from the manifest, which records what the
+        # delivered capsule carried after its character limits: the rendered
+        # text for a refresh or a printed capsule, the JSON for `--json`.
         "top_paths": dict(
             sorted(paths.items(), key=lambda pair: (-pair[1], pair[0]))[:20]
         ),
@@ -6068,6 +6116,7 @@ def main() -> int:
                     paths=arguments.paths,
                     host=arguments.host,
                     entry_point=arguments.command,
+                    render=not arguments.json,
                 )
                 if arguments.json:
                     print(serialize_capsule(result))
@@ -6083,6 +6132,7 @@ def main() -> int:
                     task_id=arguments.task_id,
                     gate_mode=gate_mode,
                     host=arguments.host,
+                    render=not arguments.json,
                 )
                 if result is None:
                     # A valid current branch with no meaningful change has no
@@ -6157,6 +6207,9 @@ def main() -> int:
                             session_id=arguments.session_id,
                             transcript=arguments.transcript,
                             paths=arguments.paths,
+                            # Every refresh with a query renders: hosts put
+                            # capsule_text in front of the model.
+                            render=True,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh

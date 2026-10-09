@@ -12,7 +12,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import workspace_roots
 from brain_runtime import (
@@ -797,6 +797,15 @@ INDEX_PARITY_KEY = "skill-parity-drift"
 INDEX_GENERATION_KEY = "index-generation"
 TOKEN_FREQUENCY_KEY = "token-frequency-cache"
 TOKEN_FREQUENCY_LIMIT = 4096
+
+# Porter wraps unicode61 so "rounding" matches "round" and "review" matches
+# "reviewer". Without stemming the correct skill is simply missed: a security
+# question did not retrieve the security skill because its title says
+# "Reviewer". Non-English tokens pass through the stemmer unchanged. The
+# excerpt asks the same tokenizer what a word is (term_forms).
+TOKENIZER = "porter unicode61"
+# Words term_forms keeps the tokenizer's answer for, per process.
+TERM_FORM_CACHE_LIMIT = 4096
 
 # Column weights for bm25(): path, layer, kind, title, summary, content.
 # What a document declares itself to be about outranks what its body mentions.
@@ -2081,18 +2090,56 @@ _EXCERPT_LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s|^\|")
 _EXCERPT_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=\S)")
 
 
-def _excerpt_term(word: str) -> str:
-    """One form per word, for counting distinct query terms in a passage.
+_TERM_FORMS: dict[str, str] = {}
+
+
+def term_forms(words: Iterable[str]) -> dict[str, str]:
+    """Each word as the index's tokenizer reads it: its stems, space-joined.
 
     The marks come from the index's own Porter tokenizer, so "sessions" is
-    marked for a request about a "session"; counting the marked words as
-    written would score the two as different terms.
+    marked for a request about a "session", and a query term and the words it
+    marked have to count as one term. A suffix rule of our own could not agree
+    with Porter: it read "classes" as "class" but "class" as "clas", so the
+    rare "class" that answered a question about classes lost that word's
+    weight to two common words in another section. The tokenizer is asked
+    itself, through the vocabulary of an in-memory table; a SQLite without
+    one gets the casefolded word, the same on both sides.
     """
-    word = word.casefold()
-    for suffix in ("ing", "ed", "es", "s"):
-        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
-            return word[: -len(suffix)]
-    return word
+    cached = {word: _TERM_FORMS.get(word) for word in words}
+    missing = [word for word, form in cached.items() if form is None]
+    fresh = _tokenizer_forms(missing) if missing else {}
+    if fresh:
+        if len(_TERM_FORMS) + len(fresh) > TERM_FORM_CACHE_LIMIT:
+            _TERM_FORMS.clear()
+        _TERM_FORMS.update(fresh)
+    return {
+        word: fresh[word] if form is None else form for word, form in cached.items()
+    }
+
+
+def _tokenizer_forms(words: list[str]) -> dict[str, str]:
+    stems: dict[int, list[str]] = {}
+    try:
+        stemmer = sqlite3.connect(":memory:")
+        try:
+            stemmer.execute(
+                f"CREATE VIRTUAL TABLE words USING fts5(word, tokenize = '{TOKENIZER}')"
+            )
+            stemmer.execute(
+                "CREATE VIRTUAL TABLE forms USING fts5vocab(words, 'instance')"
+            )
+            stemmer.executemany(
+                "INSERT INTO words(rowid, word) VALUES (?, ?)", enumerate(words, 1)
+            )
+            for row, term in stemmer.execute(
+                "SELECT doc, term FROM forms ORDER BY doc, offset"
+            ):
+                stems.setdefault(int(row), []).append(str(term))
+        finally:
+            stemmer.close()
+    except sqlite3.Error:
+        return {word: word.casefold() for word in words}
+    return {word: " ".join(stems.get(row, ())) for row, word in enumerate(words, 1)}
 
 
 def _unmarked(text: str) -> str:
@@ -2189,11 +2236,14 @@ def excerpt_weights(connection: sqlite3.Connection, query: str) -> dict[str, flo
     except sqlite3.Error:
         return {}
     frequencies = token_document_frequencies(connection, tokens)
+    forms = term_forms(tokens)
     weights: dict[str, float] = {}
     for token in tokens:
+        key = forms[token]
+        if not key:
+            continue
         frequency = frequencies.get(token) or 1
         weight = max(0.05, math.log((total + 1) / (frequency + 0.5)))
-        key = _excerpt_term(token)
         weights[key] = max(weights.get(key, 0.0), weight)
     return weights
 
@@ -2202,7 +2252,8 @@ def _excerpt_score(
     units: list[str], weights: Optional[dict[str, float]] = None
 ) -> tuple[float, int]:
     found = [word for unit in units for word in _EXCERPT_MARKED.findall(unit)]
-    terms = {_excerpt_term(word) for word in found}
+    forms = term_forms(found)
+    terms = {forms[word] for word in found}
     if weights:
         floor = min(weights.values())
         value = sum(weights.get(term, floor) for term in terms)
@@ -2228,6 +2279,8 @@ def quoted_section(
     handing it again.
     """
     sections = _excerpt_sections(text)
+    # Every marked word asked of the tokenizer at once, not per section.
+    term_forms(_EXCERPT_MARKED.findall(text))
     best: Optional[tuple[tuple[float, int], int]] = None
     first_with_body: Optional[int] = None
     for index, (heading, lines) in enumerate(sections):
@@ -2569,6 +2622,37 @@ def _episode_signature(episode: dict[str, Any]) -> tuple[str, str]:
 
 def _serialized_episode(episode: dict[str, Any]) -> str:
     return json.dumps(episode, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _token_usage(
+    selected: list[dict[str, Any]], episodes: list[dict[str, Any]]
+) -> dict[str, int]:
+    usage = {category: 0 for category in BUDGETS}
+    for item in selected:
+        usage[item["category"]] += item["estimated_tokens"]
+    usage["local_episodes"] = sum(
+        _estimate_tokens(_serialized_episode(episode)) for episode in episodes
+    )
+    usage["total"] = sum(usage.values())
+    usage["target"] = TARGET_BUDGET
+    usage["hard"] = HARD_BUDGET
+    return usage
+
+
+def _shown_items(capsule: dict[str, Any]) -> tuple[set[str], set[Any]]:
+    """The documents (by path) and recorded episodes (by id) a capsule shows."""
+    paths: set[str] = set()
+    episodes: set[Any] = set()
+    for layer in ("procedural", "semantic", "episodic"):
+        items = capsule.get(layer)
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("path"), str):
+                paths.add(item["path"])
+            elif item.get("id") is not None:
+                episodes.add(item["id"])
+    return paths, episodes
 
 
 def _load_last_retrievals(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -3171,6 +3255,7 @@ def retrieve(
     local_episodes: Optional[list[dict[str, Any]]] = None,
     session_id: Optional[str] = None,
     transcript: Optional[str] = None,
+    pack: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Assemble governed context and record the manifest that justifies it.
 
@@ -3187,6 +3272,13 @@ def retrieve(
     not depend on a task. Without a task there is no working state and no
     own record to exclude, and the manifest stays in ignored local state:
     governed history is kept per task.
+
+    ``pack`` turns the result into the capsule as the caller delivers it -
+    the layer and character limits of its JSON, the ceiling of its rendered
+    text - and returns it. Only what it still shows counts as delivered: the
+    conversation's repeat record, the manifest's selection and the token
+    estimates are written after it, and what it left out is excluded as
+    ``capsule-limit``. Without it the whole selection counts as delivered.
     """
     retrieval_started = time.monotonic()
     if limit < 1:
@@ -3401,8 +3493,13 @@ def retrieve(
     session_deliveries = _load_session_deliveries(connection) if session else {}
     session_turn = 0
     repeated: list[dict[str, Any]] = []
+    repeated_episodes: list[dict[str, Any]] = []
     delivery_keys: dict[str, tuple[str, str]] = {}
+    # What earlier turns recorded for the items left out as repeats: a repeat
+    # keeps the turn it was first handed in.
+    still_handed: dict[str, list[Any]] = {}
     transcript_position: Optional[dict[str, Any]] = None
+    compacted = False
     if session:
         previous_entry = session_deliveries.get(session)
         previous_entry = previous_entry if isinstance(previous_entry, dict) else {}
@@ -3412,10 +3509,8 @@ def retrieve(
         compacted, transcript_position = transcript_compacted(previous_entry, transcript)
         if compacted:
             recent = {}
-        fresh_selection = []
-        for item in capsule_selected:
-            key, revision = delivery_identity(connection, item, query)
-            delivery_keys[item["path"]] = (key, revision)
+
+        def handed(key: str, revision: str) -> bool:
             seen = recent.get(key)
             if (
                 isinstance(seen, list)
@@ -3424,10 +3519,28 @@ def retrieve(
                 and isinstance(seen[1], int)
                 and session_turn - seen[1] < SESSION_NOVELTY_TURNS
             ):
+                still_handed[key] = seen
+                return True
+            return False
+
+        fresh_selection = []
+        for item in capsule_selected:
+            key, revision = delivery_identity(connection, item, query)
+            delivery_keys[item["path"]] = (key, revision)
+            if handed(key, revision):
                 repeated.append(item)
             else:
                 fresh_selection.append(item)
         capsule_selected = fresh_selection
+        # A recorded episode is held by the conversation like a document: by
+        # its id at the revision of its content, so an edited one is new.
+        fresh_episodes = []
+        for episode in local_episode_selected:
+            if handed(*_episode_signature(episode)):
+                repeated_episodes.append(episode)
+            else:
+                fresh_episodes.append(episode)
+        local_episode_selected = fresh_episodes
     capsule_paths = {item["path"] for item in capsule_selected}
     layer_excluded = [
         {
@@ -3444,6 +3557,10 @@ def retrieve(
     ]
     layer_excluded.extend(
         {"path": item["path"], "reason": "delivered-this-session"} for item in repeated
+    )
+    layer_excluded.extend(
+        {"path": _episode_signature(episode)[0], "reason": "delivered-this-session"}
+        for episode in repeated_episodes
     )
     selected = capsule_selected
     # Decided here rather than earlier because `selection_identical_to_
@@ -3479,7 +3596,103 @@ def retrieve(
         selected = []
         local_episode_selected = []
         layer_excluded = []
+    manifest_id = new_uuid()
+    if manifest_scope == "governed":
+        manifest_directory = brain_root(repository) / "control" / "retrieval-manifests"
     else:
+        manifest_directory = repository / "memory-bank" / "local" / "retrieval-manifests"
+    manifest_path = manifest_directory / f"{manifest_id}.json"
+    groups = {category: [] for category in BUDGETS}
+    for item in selected:
+        public = _public_item(item)
+        groups[item["category"]].append(public)
+    procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
+    episodic = [
+        item
+        for group in groups.values()
+        for item in group
+        if item["layer"] == "episodic"
+    ][:CAPSULE_EPISODIC_LIMIT]
+    episodic.extend(local_episode_selected[: CAPSULE_EPISODIC_LIMIT - len(episodic)])
+    semantic = [
+        *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
+    ][:CAPSULE_SEMANTIC_LIMIT]
+    result: dict[str, Any] = {
+        "query": query,
+        "task_id": task["external_id"] if task is not None else None,
+        "task_uuid": own_id,
+        "task_revision": task["revision"] if task is not None else None,
+        # Where the full working state lives. The capsule carries a bounded
+        # projection of it, and the record no longer competes for a semantic
+        # slot, so this is how an agent that needs the rest finds it.
+        "task_record": (
+            task_path.relative_to(repository).as_posix()
+            if task_path is not None
+            else None
+        ),
+        "working": None if task is None else {
+            "task_id": task["external_id"], "goal": task["goal"],
+            "phase": task.get("phase"),
+            # Manual progress first, the automatic checkpoint as a labelled
+            # supplement; a task without a checkpoint renders as it always did.
+            "progress": render_current_state(
+                task["progress"], task.get("auto_checkpoint")
+            ),
+            "next_steps": task["next_steps"], "files": task["files"], "sources": task["sources"],
+            "created_at": task["created_at"], "updated_at": task["updated_at"],
+        },
+        "categories": groups,
+        "procedural": procedural,
+        "semantic": semantic,
+        "episodic": episodic,
+        "selected": [_public_item(item) for item in selected],
+        # A layer with no candidate at all is a different fact from a layer
+        # whose candidates were filtered out downstream, and only the first
+        # one means "memory has nothing here". Recorded before any budget or
+        # policy filter runs; `excluded` in the manifest explains the rest.
+        "no_match": no_match,
+        # Relevant items left out because this conversation was handed them
+        # in its last few turns; the rendered capsule says they still apply.
+        "repeated": len(repeated) + len(repeated_episodes),
+        "gate": gate,
+        "token_estimates": _token_usage(selected, local_episode_selected),
+        "manifest": manifest_path.relative_to(repository).as_posix(),
+        "manifest_scope": manifest_scope,
+    }
+    pack_seconds = 0.0
+    if pack is not None:
+        # The capsule as the host gets it: the limits of its JSON and of its
+        # rendered text leave out what does not fit, and what they leave out
+        # was not handed. Recorded as handed, it was suppressed on the next
+        # turns as an item that "still applies" although the conversation
+        # never saw it; so the conversation's record, the manifest and its
+        # token estimates are written from what the capsule shows.
+        pack_started = time.monotonic()
+        result = pack(result)
+        pack_seconds = time.monotonic() - pack_started
+        shown_paths, shown_episodes = _shown_items(result)
+        left_out = [item for item in selected if item["path"] not in shown_paths]
+        left_out_episodes = [
+            episode
+            for episode in local_episode_selected
+            if episode.get("id") not in shown_episodes
+        ]
+        selected = [item for item in selected if item["path"] in shown_paths]
+        local_episode_selected = [
+            episode
+            for episode in local_episode_selected
+            if episode.get("id") in shown_episodes
+        ]
+        layer_excluded.extend(
+            {"path": item["path"], "reason": "capsule-limit"} for item in left_out
+        )
+        layer_excluded.extend(
+            {"path": _episode_signature(episode)[0], "reason": "capsule-limit"}
+            for episode in left_out_episodes
+        )
+    usage = _token_usage(selected, local_episode_selected)
+    result["token_estimates"] = usage
+    if not withheld:
         # Remembered only for a turn that actually delivered, so the next turn
         # compares against the last real retrieval rather than against a skip.
         _remember_retrieval(connection, baseline_key, signature)
@@ -3487,39 +3700,23 @@ def retrieve(
         # A repeat keeps the turn it was first handed in: once that is
         # SESSION_NOVELTY_TURNS behind, it is handed again, which is what a
         # conversation compacted in the meantime needs.
+        handed_now = {
+            delivery_keys[item["path"]][0]: [delivery_keys[item["path"]][1], session_turn]
+            for item in selected
+            if item["path"] in delivery_keys
+        }
+        for episode in local_episode_selected:
+            key, revision = _episode_signature(episode)
+            handed_now[key] = [revision, session_turn]
         _remember_session_deliveries(
             connection,
             session,
             session_turn,
-            {
-                **{
-                    delivery_keys[item["path"]][0]: recent[delivery_keys[item["path"]][0]]
-                    for item in repeated
-                },
-                **{
-                    delivery_keys[item["path"]][0]: [
-                        delivery_keys[item["path"]][1],
-                        session_turn,
-                    ]
-                    for item in selected
-                    if item["path"] in delivery_keys
-                },
-            },
+            {**still_handed, **handed_now},
             session_deliveries,
             transcript_position,
             reset=compacted,
         )
-    usage = {category: 0 for category in BUDGETS}
-    for item in selected:
-        usage[item["category"]] += item["estimated_tokens"]
-    usage["local_episodes"] = sum(
-        _estimate_tokens(_serialized_episode(episode))
-        for episode in local_episode_selected
-    )
-    usage["total"] = sum(usage.values())
-    usage["target"] = TARGET_BUDGET
-    usage["hard"] = HARD_BUDGET
-    manifest_id = new_uuid()
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "id": manifest_id,
@@ -3572,14 +3769,12 @@ def retrieve(
         "phase_seconds": {
             "stat": _phase_value(phase_seconds, "stat"),
             "index": _phase_value(phase_seconds, "index"),
-            "retrieval": round(time.monotonic() - retrieval_started, 6),
+            # The body of retrieve(); packing the capsule is the caller's.
+            "retrieval": round(
+                max(0.0, time.monotonic() - retrieval_started - pack_seconds), 6
+            ),
         },
     }
-    if manifest_scope == "governed":
-        manifest_directory = brain_root(repository) / "control" / "retrieval-manifests"
-    else:
-        manifest_directory = repository / "memory-bank" / "local" / "retrieval-manifests"
-    manifest_path = manifest_directory / f"{manifest_id}.json"
     validate_schema_file(
         repository, "retrieval-manifest.schema.json", manifest
     )
@@ -3593,60 +3788,4 @@ def retrieve(
         _prune_local_manifests(
             manifest_directory, local_manifest_retention(config)
         )
-    groups = {category: [] for category in BUDGETS}
-    for item in selected:
-        public = _public_item(item)
-        groups[item["category"]].append(public)
-    procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
-    episodic = [
-        item
-        for group in groups.values()
-        for item in group
-        if item["layer"] == "episodic"
-    ][:CAPSULE_EPISODIC_LIMIT]
-    episodic.extend(local_episode_selected[: CAPSULE_EPISODIC_LIMIT - len(episodic)])
-    semantic = [
-        *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
-    ][:CAPSULE_SEMANTIC_LIMIT]
-    return {
-        "query": query,
-        "task_id": task["external_id"] if task is not None else None,
-        "task_uuid": own_id,
-        "task_revision": task["revision"] if task is not None else None,
-        # Where the full working state lives. The capsule carries a bounded
-        # projection of it, and the record no longer competes for a semantic
-        # slot, so this is how an agent that needs the rest finds it.
-        "task_record": (
-            task_path.relative_to(repository).as_posix()
-            if task_path is not None
-            else None
-        ),
-        "working": None if task is None else {
-            "task_id": task["external_id"], "goal": task["goal"],
-            "phase": task.get("phase"),
-            # Manual progress first, the automatic checkpoint as a labelled
-            # supplement; a task without a checkpoint renders as it always did.
-            "progress": render_current_state(
-                task["progress"], task.get("auto_checkpoint")
-            ),
-            "next_steps": task["next_steps"], "files": task["files"], "sources": task["sources"],
-            "created_at": task["created_at"], "updated_at": task["updated_at"],
-        },
-        "categories": groups,
-        "procedural": procedural,
-        "semantic": semantic,
-        "episodic": episodic,
-        "selected": [_public_item(item) for item in selected],
-        # A layer with no candidate at all is a different fact from a layer
-        # whose candidates were filtered out downstream, and only the first
-        # one means "memory has nothing here". Recorded before any budget or
-        # policy filter runs; `excluded` in the manifest explains the rest.
-        "no_match": no_match,
-        # Relevant items left out because this conversation was handed them
-        # in its last few turns; the rendered capsule says they still apply.
-        "repeated": len(repeated),
-        "gate": gate,
-        "token_estimates": usage,
-        "manifest": manifest_path.relative_to(repository).as_posix(),
-        "manifest_scope": manifest_scope,
-    }
+    return result
