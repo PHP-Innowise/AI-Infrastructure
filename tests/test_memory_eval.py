@@ -651,6 +651,13 @@ class ScoringTest(unittest.TestCase):
             path.write_text(json.dumps({"p17": [["docs/a.md", 2]]}), encoding="utf-8")
             with self.assertRaisesRegex(memory_eval.EvalError, "'p17'"):
                 memory_eval.load_judgments(path)
+            # A reviewer's note beside the grades is read past; only as text.
+            path.write_text(json.dumps({"p": {"docs/a.md": 2, "_note": "overview prompt; spec and README"}}),
+                            encoding="utf-8")
+            self.assertEqual({"p": {"docs/a.md": 2}}, memory_eval.load_judgments(path))
+            path.write_text(json.dumps({"p": {"docs/a.md": 2, "_note": ["overview"]}}), encoding="utf-8")
+            with self.assertRaisesRegex(memory_eval.EvalError, "_note"):
+                memory_eval.load_judgments(path)
 
     def test_run_refuses_judgments_out_of_range_before_any_work(self) -> None:
         with tempfile.TemporaryDirectory() as name:

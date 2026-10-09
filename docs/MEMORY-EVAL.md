@@ -178,7 +178,9 @@ prompt. `--json` prints the numbers as JSON, `--paths` adds per-path counts.
 and above is useful, 0 is noise. Any other grade (`3`, `-1`, `1.5`, `true`,
 `"2"`, `null`), or a prompt whose judgments are not an object, stops `run`
 before it starts with an error naming the prompt and the path (exit 2): it
-would otherwise count as useful or noise, or leave its document unjudged.
+would otherwise count as useful or noise, or leave its document unjudged. The
+one key that is not a path is `_note`, a reviewer's note as text, which is
+read past.
 Skill paths in any tool tree (`.claude/skills/`, `.cursor/skills/`,
 `.codex/skills/`) count as `.agents/skills/`; two spellings of one path keep
 the higher grade.

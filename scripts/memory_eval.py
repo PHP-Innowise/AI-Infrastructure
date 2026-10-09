@@ -94,6 +94,9 @@ LAYERS = ("semantic", "episodic", "procedural")
 # What a refresh reports per layer; anything else is recorded as "other".
 LAYER_STATES = ("updated", "failed")
 GRADES = (0, 1, 2)
+# The one key of a prompt's judgments that is not a path: the reviewer's note
+# on why the grades are what they are, when it is text.
+NOTE_KEY = "_note"
 CLASSES = ("useful", "noise-only", "unjudged-only", "silent")
 CANON_SKILLS = ".agents/skills/"
 TOOL_SKILLS = (".claude/skills/", ".cursor/skills/", ".codex/skills/")
@@ -1107,6 +1110,9 @@ def stderr_tail(raw: bytes, prompt: str) -> str:
 def load_judgments(path: Path) -> Dict[str, Dict[str, int]]:
     """{prompt id: {path: grade}}, every grade the integer 0, 1 or 2.
 
+    A prompt may carry its reviewer's note as text under `_note`; it is read
+    past, never taken for a path.
+
     Anything else stops the run before it starts: a grade of 3 or -1 counted
     as useful or as noise, and one that is not a number left its document
     unjudged - either way the measures moved without a word.
@@ -1120,6 +1126,8 @@ def load_judgments(path: Path) -> Dict[str, Dict[str, int]]:
             raise EvalError(f"{path}: the judgments of prompt {prompt_id!r} must be an object of {{path: grade}}")
         clean: Dict[str, int] = {}
         for document, grade in grades.items():
+            if document == NOTE_KEY and isinstance(grade, str):
+                continue
             if isinstance(grade, bool) or not isinstance(grade, int) or grade not in GRADES:
                 shown = json.dumps(grade)
                 shown = shown if len(shown) <= 40 else shown[:37] + "..."
