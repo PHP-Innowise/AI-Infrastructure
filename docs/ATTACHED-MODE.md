@@ -116,6 +116,15 @@ On Linux and macOS the state is its owner's alone - directories 0700, files
 tighten a state made before, where it is the accelerator's (never through a
 link, never above the state directory).
 
+The state is never reached through a link. The Harness's state directory (or
+`--state-base`) is taken as named; below it the launcher opens `attached/` and
+the project's directory one inside the other without following a link, and
+reads and writes its record and Claude's system prompt through that
+directory's descriptor. A link at either directory, at `launch/` or at those
+files is refused, and nothing is written. The runtime refuses a state
+directory, or a `project-brain/`, `memory-bank/`, `launch/` or record in it,
+that is a link, and the prompt hook appends nothing through one.
+
 This state belongs to one machine. A team that wants Project Brain and the
 Memory Bank shared through Git installs the edition instead.
 

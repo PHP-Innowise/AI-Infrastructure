@@ -211,6 +211,19 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(0o755, mode(self.state_base / "attached"))
         self.assertEqual(0o644, mode(outside))
 
+    @unittest.skipIf(os.name == "nt" or not shutil.which("true"), "POSIX symbolic links and a POSIX true")
+    def test_run_and_env_refuse_a_linked_state_and_write_nothing(self):
+        state = attach.state_directory(self.project.resolve(), self.state_base)
+        state.parent.mkdir(parents=True)
+        state.symlink_to(self.project, target_is_directory=True)
+        for arguments in (("run", "claude", "--executable", shutil.which("true")), ("env",)):
+            with self.subTest(command=arguments[0]):
+                result = self.run_script(*arguments, "--project", str(self.project), "--state-base",
+                                         str(self.state_base))
+                self.assertEqual(2, result.returncode, result.stdout)
+                self.assertIn(f"{state} is a symbolic link", result.stderr)
+        self.assertEqual(["composer.json"], sorted(path.name for path in self.project.iterdir()))
+
     def test_the_clone_itself_is_refused(self):
         result = self.run_script("env", "--project", str(ROOT))
         self.assertEqual(2, result.returncode)
@@ -219,6 +232,95 @@ class LauncherTests(unittest.TestCase):
     def test_arguments_after_the_separator_belong_to_run_only(self):
         result = self.run_script("env", "--project", str(self.project), "--", "--version")
         self.assertNotEqual(0, result.returncode)
+
+
+@unittest.skipIf(os.name == "nt", "creating a symbolic link needs a privilege on Windows")
+class LinkedStateTests(unittest.TestCase):
+    """The state is never reached, read or written through a link.
+
+    `<state base>/attached/<project>` standing as a link to the project took
+    the launcher's record and Claude's system prompt into the project; one
+    pointing anywhere else took them, and then the runtime's memory, there.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.project = self.root / "shop"
+        write(self.project / "composer.json", json.dumps({"require": {"laravel/framework": "^11.0"}}))
+        self.base = self.root / "state"
+        self.state = attach.state_directory(self.project, self.base)
+        self.elsewhere = self.root / "elsewhere"
+        self.elsewhere.mkdir()
+
+    def names(self, folder):
+        return sorted(path.relative_to(folder).as_posix() for path in folder.rglob("*"))
+
+    def assert_refused(self, prepare, fragment):
+        with self.assertRaises(attach.AttachError) as caught:
+            prepare()
+        self.assertIn(fragment, str(caught.exception))
+
+    def test_a_state_directory_that_is_a_link_takes_no_write(self):
+        self.state.parent.mkdir(parents=True)
+        for pointed in (self.project, self.elsewhere):
+            self.state.symlink_to(pointed, target_is_directory=True)
+            try:
+                for tool in attach.TOOLS:
+                    with self.subTest(pointed=pointed.name, tool=tool):
+                        self.assert_refused(lambda: attach.overlay(tool, "Laravel", self.project, self.state),
+                                            f"{self.state} is a symbolic link")
+                self.assert_refused(lambda: attach.prepare_state("Laravel", self.project, self.state),
+                                    f"{self.state} is a symbolic link")
+            finally:
+                self.state.unlink()
+        self.assertEqual(["composer.json"], self.names(self.project))
+        self.assertEqual([], self.names(self.elsewhere))
+
+    def test_attached_that_is_a_link_takes_no_write(self):
+        self.base.mkdir()
+        (self.base / "attached").symlink_to(self.elsewhere, target_is_directory=True)
+        self.assert_refused(lambda: attach.claude_overlay("Laravel", self.project, self.state),
+                            f"{self.base / 'attached'} is a symbolic link")
+        self.assertEqual([], self.names(self.elsewhere))
+
+    def test_links_inside_the_state_are_refused_and_their_targets_untouched(self):
+        attach.claude_overlay("Laravel", self.project, self.state)
+        record = self.elsewhere / "record.json"
+        record.write_text("{}\n", encoding="utf-8")
+        prompt = self.elsewhere / "prompt.md"
+        prompt.write_text("Someone else's.\n", encoding="utf-8")
+        cases = {
+            attach.STATE_MARKER: record,
+            attach.LAUNCH_DIRECTORY: self.elsewhere,
+            f"{attach.LAUNCH_DIRECTORY}/{attach.CLAUDE_SYSTEM_PROMPT}": prompt,
+        }
+        for name, pointed in cases.items():
+            with self.subTest(name=name):
+                entry = self.state / name
+                kept = self.state / ".kept"
+                entry.rename(kept)
+                entry.symlink_to(pointed, target_is_directory=pointed.is_dir())
+                try:
+                    self.assert_refused(lambda: attach.claude_overlay("Laravel", self.project, self.state),
+                                        f"{entry} is a symbolic link")
+                finally:
+                    entry.unlink()
+                    kept.rename(entry)
+        self.assertEqual("{}\n", record.read_text(encoding="utf-8"))
+        self.assertEqual("Someone else's.\n", prompt.read_text(encoding="utf-8"))
+        self.assertEqual(["prompt.md", "record.json"], self.names(self.elsewhere))
+        self.assertEqual(["composer.json"], self.names(self.project))
+
+    def test_a_base_reached_through_a_link_is_the_persons_own(self):
+        real = self.root / "real-state"
+        real.mkdir()
+        self.base.symlink_to(real, target_is_directory=True)
+        attach.prepare_state("Laravel", self.project, self.state)
+        record = json.loads((real / "attached" / self.state.name / attach.STATE_MARKER).read_text(encoding="utf-8"))
+        self.assertEqual(str(self.project), record["project"])
+        self.assertEqual(0o700, mode(real / "attached"))
 
 
 if __name__ == "__main__":

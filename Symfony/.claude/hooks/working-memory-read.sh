@@ -124,10 +124,19 @@ HOOK_STATUS=$?
 # the Python process was killed before it could append anything itself, so
 # the shell has to write this line or the turn leaves no trace at all. The
 # record carries a status and nothing else — no query, no paths.
-if [ -d "$STATE_DIR/memory-bank/local" ] || mkdir -p "$STATE_DIR/memory-bank/local" 2>/dev/null; then
+# Attached, a state directory that is a symbolic link - or a link on the way
+# to this file - is refused by the runtime (workspace_roots.py), and the line
+# is not appended through it either: it would land wherever the link points.
+HEALTH_DIR="$STATE_DIR/memory-bank/local"
+if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
+  for STATE_ENTRY in "${STATE_DIR%/}" "$STATE_DIR/memory-bank" "$HEALTH_DIR" "$HEALTH_DIR/refresh-health.ndjson"; do
+    [ -L "$STATE_ENTRY" ] && HEALTH_DIR=""
+  done
+fi
+if [ -n "$HEALTH_DIR" ] && { [ -d "$HEALTH_DIR" ] || mkdir -p "$HEALTH_DIR" 2>/dev/null; }; then
   printf '{"at":"%s","hook_status":%s,"source":"hook"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOOK_STATUS" \
-    >> "$STATE_DIR/memory-bank/local/refresh-health.ndjson" 2>/dev/null || true
+    >> "$HEALTH_DIR/refresh-health.ndjson" 2>/dev/null || true
 fi
 
 [ -n "$REPORT" ] || exit 0

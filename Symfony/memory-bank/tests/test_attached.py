@@ -320,6 +320,32 @@ class AttachedLayoutTest(AttachedProject):
                 self.assertIn("ACCELERATOR_", result.stderr)
                 self.assert_project_untouched()
 
+    @unittest.skipIf(os.name == "nt", "creating a symbolic link needs a privilege on Windows")
+    def test_a_state_reached_through_a_link_is_refused(self) -> None:
+        # A state directory standing as a link took the project's memory to
+        # wherever it pointed, and a link at one of its entries took that part.
+        elsewhere = self.state.parent / "elsewhere"
+        elsewhere.mkdir(parents=True)
+        for target in (self.project, elsewhere):
+            with self.subTest(target=target.name):
+                self.state.symlink_to(target, target_is_directory=True)
+                try:
+                    result = self.run_cli("status", "--json")
+                finally:
+                    self.state.unlink()
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(f"{self.state} is a symbolic link", result.stderr)
+                self.assertIn("ACCELERATOR_STATE_DIR", result.stderr)
+                self.assertEqual([], list(elsewhere.iterdir()))
+                self.assert_project_untouched()
+        self.state.mkdir()
+        (self.state / "memory-bank").symlink_to(elsewhere, target_is_directory=True)
+        result = self.run_cli("status", "--json")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(f"{self.state / 'memory-bank'} is a symbolic link", result.stderr)
+        self.assertEqual([], list(elsewhere.iterdir()))
+        self.assertEqual(["memory-bank"], [path.name for path in self.state.iterdir()])
+
 
 class AttachedBootstrapTest(AttachedProject):
     """Two first runs of one state: the hooks of one event start together."""
@@ -518,6 +544,27 @@ class AttachedHooksTest(AttachedProject):
             " M app/Order.php\n", git(self.project, "status", "--porcelain", "--ignored")
         )
         self.assertEqual(self.tooling_database_before, self._stat(self.tooling_database))
+
+    @unittest.skipIf(os.name == "nt", "creating a symbolic link needs a privilege on Windows")
+    def test_the_prompt_hook_writes_nothing_through_a_linked_state(self) -> None:
+        # The runtime refuses such a state; the hook's own health line, which
+        # it appends whatever the runtime answered, went through the link.
+        for target in ("elsewhere", "project"):
+            with self.subTest(target=target):
+                pointed = self.state.parent / target if target == "elsewhere" else self.project
+                pointed.mkdir(parents=True, exist_ok=True)
+                self.state.parent.mkdir(parents=True, exist_ok=True)
+                self.state.symlink_to(pointed, target_is_directory=True)
+                try:
+                    result = self.run_hook(
+                        "working-memory-read.sh", {"prompt": "Explain the saffron checkout flow"}
+                    )
+                finally:
+                    self.state.unlink()
+                self.assertEqual(0, result.returncode, result.stderr)
+                if target == "elsewhere":
+                    self.assertEqual([], list(pointed.iterdir()))
+                self.assert_project_untouched()
 
 
 if __name__ == "__main__":
