@@ -8148,6 +8148,121 @@ class DeliveryTest(RuntimeHarness):
         again = self.refresh(query, "--session-id", "conversation-1")
         self.assertEqual(handed, {item["path"] for item in again["capsule"]["selected"]})
 
+    def test_enforce_hands_another_conversation_what_it_was_never_handed(self) -> None:
+        # The gate's repeat baseline is the task's, not the conversation's:
+        # a second conversation asking the same thing was a "repeat" of the
+        # first and enforce withheld its whole capsule, although nothing had
+        # been handed to it. What a conversation holds is its own record's
+        # call, and a repeat inside one conversation is still left out.
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        query = "order totals rounding discount cents"
+        first = self.refresh(query, "--session-id", "conversation-1", "--gate", "enforce")
+        handed = {item["path"] for item in first["capsule"]["selected"]}
+        self.assertTrue(handed, first["capsule"])
+        other = self.refresh(query, "--session-id", "conversation-2", "--gate", "enforce")
+        self.assertEqual("retrieve", other["capsule"]["gate"]["decision"], other["capsule"]["gate"])
+        self.assertEqual(handed, {item["path"] for item in other["capsule"]["selected"]})
+        self.assertIn("rounding happens only when an amount is displayed", other["capsule_text"])
+        again = self.refresh(query, "--session-id", "conversation-1", "--gate", "enforce")
+        self.assertEqual("skip", again["capsule"]["gate"]["decision"], again["capsule"]["gate"])
+        self.assertEqual([], again["capsule"]["selected"])
+        self.assertEqual(len(handed), again["capsule"]["repeated"])
+        # A caller with no conversation keeps the task's baseline.
+        self.refresh(query, "--gate", "enforce")
+        alone = self.refresh(query, "--gate", "enforce")
+        self.assertEqual("repeat-retrieval", alone["capsule"]["gate"]["reason"], alone["capsule"]["gate"])
+        self.assertEqual([], alone["capsule"]["selected"])
+
+    def test_enforce_hands_back_what_the_conversation_no_longer_holds(self) -> None:
+        # Past the novelty window, or after a compaction, the conversation's
+        # record hands an item again; the gate saw the selection of a turn
+        # that had delivered it and withheld it on that turn and every later
+        # one, since a withheld turn records nothing as handed.
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        query = "order totals rounding discount cents"
+        first = self.refresh(query, "--session-id", "c-novelty", "--gate", "enforce")
+        handed = {item["path"] for item in first["capsule"]["selected"]}
+        self.assertTrue(handed, first["capsule"])
+        for _ in range(retrieval.SESSION_NOVELTY_TURNS - 1):
+            held = self.refresh(query, "--session-id", "c-novelty", "--gate", "enforce")
+            self.assertEqual([], held["capsule"]["selected"])
+        again = self.refresh(query, "--session-id", "c-novelty", "--gate", "enforce")
+        self.assertEqual("retrieve", again["capsule"]["gate"]["decision"], again["capsule"]["gate"])
+        self.assertEqual(handed, {item["path"] for item in again["capsule"]["selected"]})
+
+        folder = tempfile.TemporaryDirectory(prefix="transcript-")
+        self.addCleanup(folder.cleanup)
+        transcript = Path(folder.name) / "transcript.jsonl"
+        transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+        conversation = ("--session-id", "c-compact", "--transcript", str(transcript), "--gate", "enforce")
+        self.assertTrue(self.refresh(query, *conversation)["capsule"]["selected"])
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write('{"type":"system","subtype":"compact_boundary"}\n')
+        compacted = self.refresh(query, *conversation)
+        self.assertEqual("retrieve", compacted["capsule"]["gate"]["decision"], compacted["capsule"]["gate"])
+        self.assertEqual(handed, {item["path"] for item in compacted["capsule"]["selected"]})
+        self.assertIn("rounding happens only when an amount is displayed", compacted["capsule_text"])
+
+    def test_the_structured_capsule_quotes_what_the_text_quotes(self) -> None:
+        # The JSON capsule's snippet was FTS snippet() over the whole file, so
+        # a promoted chunk carried its frontmatter where the rendered capsule
+        # quoted the decision, and its token estimate counted the JSON keys.
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        result = self.refresh("order totals rounding discount cents")
+        chunk = next(
+            item for item in result["capsule"]["semantic"]
+            if "store-money-as-integer-cents" in item["path"]
+        )
+        self.assertEqual(
+            "Totals and discounts are kept in integer cents; floats never hold an "
+            "amount, and rounding happens only when an amount is displayed.",
+            chunk["snippet"],
+        )
+        self.assertIn(chunk["snippet"], result["capsule_text"])
+        self.assertEqual(
+            retrieval._estimate_tokens(chunk["title"] + chunk["snippet"]),
+            chunk["estimated_tokens"],
+        )
+
+    def test_a_match_only_in_frontmatter_quotes_the_opening_of_the_body(self) -> None:
+        # The query's words are in the description, not the prose: the
+        # snippet used to be that frontmatter, and the body's window, scored
+        # nothing everywhere, would have been its last sentence.
+        self.repository.joinpath("specs/ledger.md").write_text(
+            "---\ndescription: Cobalt allocation ledger\n---\n# Bookkeeping\n\n"
+            + " ".join(f"Entry rule {index} keeps the books balanced." for index in range(1, 40))
+            + "\n",
+            encoding="utf-8",
+        )
+        self.start("TASK-DELIVER")
+        result = self.refresh("cobalt allocation ledger")
+        ledger = next(
+            item for item in result["capsule"]["semantic"] if item["path"] == "specs/ledger.md"
+        )
+        self.assertTrue(
+            ledger["snippet"].startswith("Entry rule 1 keeps the books balanced."), ledger["snippet"]
+        )
+        self.assertNotIn("description", ledger["snippet"])
+        self.assertIn("Entry rule 1 keeps the books balanced.", result["capsule_text"])
+
+    def test_a_section_the_query_never_matched_gives_its_opening(self) -> None:
+        text = "# Guide\n\n" + " ".join(
+            f"Step {index} is described here." for index in range(1, 60)
+        ) + "\n"
+        section = retrieval.quoted_section(text, "Guide")
+        window = retrieval.excerpt_window(section["units"], 120)
+        self.assertTrue(window.startswith("Step 1 is described here."), window)
+        self.assertLessEqual(len(window), 120)
+        marked = text.replace("Step 30 is", "\x02Step\x03 30 is")
+        window = retrieval.excerpt_window(retrieval.quoted_section(marked, "Guide")["units"], 120)
+        self.assertTrue(window.startswith("… Step 30 is described here."), window)
+
     def test_a_damaged_repeat_record_costs_a_repeat_not_the_turn(self) -> None:
         self.enable_automatic_promotion()
         self.accept_money_decision()
@@ -8526,8 +8641,10 @@ class DeliveryTest(RuntimeHarness):
     def test_an_item_the_capsule_leaves_out_is_handed_on_the_next_turn(self) -> None:
         # Paths and titles long enough that the capsule's JSON holds two of
         # the three notes. The third was recorded as handed all the same, and
-        # the next turns left it out as an item that "still applies".
-        self.write_dispatch_notes(depth=28, title_words=16)
+        # the next turns left it out as an item that "still applies". (Each
+        # snippet is the note's sentence, not its long heading, hence the
+        # title length; the path is near the file system's name limit.)
+        self.write_dispatch_notes(depth=28, title_words=34)
         self.start("TASK-DELIVER")
         query = "quartz falcon dispatch retries"
         first = self.refresh(query, "--session-id", "c-limit")

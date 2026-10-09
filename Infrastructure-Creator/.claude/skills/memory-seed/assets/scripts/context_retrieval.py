@@ -48,6 +48,11 @@ BUDGETS = {
 TARGET_BUDGET = 8000
 HARD_BUDGET = 12000
 MAX_SNIPPET_CHARS = 1200
+# What a candidate the query ranked quotes of its body (_quote_candidates).
+# The governed capsule keeps 320 characters of every snippet
+# (enforce_governed_capsule_contract), so the window is chosen at that size
+# instead of being cut to it mid-sentence.
+SNIPPET_WINDOW_CHARS = 320
 # What a document whose cited file changed since verification keeps of its
 # relevance: it still ranks, below fresh knowledge of equal fit.
 SOURCE_CHANGED_WEIGHT = 0.5
@@ -2333,8 +2338,11 @@ def excerpt_window(
         score = _excerpt_score(units[start : max(end, start + 1)], weights)
         # Of equal windows the one starting at the match wins: what follows a
         # matching sentence - the rest of a changelog entry, the steps after
-        # a heading line - is what the window is for.
-        if best is None or score >= best[0]:
+        # a heading line - is what the window is for. A section with no match
+        # at all has no such window and gives its opening, as quoted_section
+        # promises plain text does; the latest start won there too, and
+        # quoted the section's last sentence.
+        if best is None or score > best[0] or (score == best[0] and score[1]):
             best = (score, start, end)
     assert best is not None
     _, start, end = best
@@ -2509,8 +2517,7 @@ def _candidates(
     rows = connection.execute(
         """
         SELECT
-            d.path, d.layer, d.kind, d.title,
-            snippet(documents, 5, '[', ']', ' … ', 32) AS snippet,
+            d.rowid AS document_rowid, d.path, d.layer, d.kind, d.title,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
             m.source_fingerprints, m.updated_at, m.confidence, m.attestation,
@@ -2531,11 +2538,9 @@ def _candidates(
         ):
             continue
         item = dict(row)
-        item["snippet"] = str(item["snippet"])[:MAX_SNIPPET_CHARS]
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         item["match"] = match_strength(row["path"], coverage, minimum)
-        item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
         # bm25() reports better matches as more negative, so relevance is its
         # negation; provenance quality and freshness then scale it.
         relevance = max(0.0, -float(item["score"]))
@@ -2561,6 +2566,7 @@ def _candidates(
     # retrieval gate can use.
     for position, item in enumerate(result, start=1):
         item["rank"] = position
+    _quote_candidates(connection, result, query, evidence)
     diagnostics = {
         "informative_terms": len(evidence),
         # The count of candidates admitted on rarity alone rather than the
@@ -2580,6 +2586,68 @@ def _candidates(
         ),
     }
     return result, diagnostics
+
+
+def _quote_candidates(
+    connection: sqlite3.Connection,
+    items: list[dict[str, Any]],
+    query: str,
+    evidence: list[str],
+) -> None:
+    """Give each ranked candidate the stretch of its body the query found.
+
+    The snippet was FTS snippet() over the whole content column, which centres
+    on the densest run of matches: in a promoted chunk that is the JSON
+    frontmatter, whose `title` repeats the heading under it, so the JSON
+    capsule carried `"supersedes": [], "tags": [...]` where the rendered
+    capsule quoted the finding, and the token estimate counted those keys. It
+    is now chosen the way the rendered excerpt is (capsule_excerpts): the
+    document marked by the words that selected it, the section carrying most
+    of them, the window of that section where they are - frontmatter is never
+    a section - and the estimate is of that text. One highlight() over the
+    survivors replaces a snippet() that ran over every match.
+    """
+    rowids = [item.pop("document_rowid") for item in items]
+    texts: dict[int, str] = {}
+    expression = " OR ".join(f'"{token}"' for token in evidence)
+    # In batches that stay inside SQLite's parameter limit, as deletes do.
+    for start in range(0, len(rowids), DELETE_CHUNK):
+        chunk = rowids[start : start + DELETE_CHUNK]
+        placeholders = ", ".join("?" for _ in chunk)
+        try:
+            rows = connection.execute(
+                "SELECT rowid, highlight(documents, 5, ?, ?) FROM documents "
+                f"WHERE documents MATCH ? AND rowid IN ({placeholders})",
+                (EXCERPT_MARK_OPEN, EXCERPT_MARK_CLOSE, expression, *chunk),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        texts.update((row[0], str(row[1] or "")) for row in rows)
+        # A candidate the evidence words do not mark is quoted from its plain
+        # text, which gives its opening prose.
+        missing = [rowid for rowid in chunk if rowid not in texts]
+        if missing:
+            rows = connection.execute(
+                "SELECT rowid, content FROM documents WHERE rowid IN ("
+                + ", ".join("?" for _ in missing)
+                + ")",
+                missing,
+            ).fetchall()
+            texts.update((row[0], str(row[1] or "")) for row in rows)
+    weights = excerpt_weights(connection, query) if items else {}
+    for rowid, item in zip(rowids, items):
+        text = texts.get(rowid, "")
+        section = (
+            quoted_section(text, str(item.get("title") or ""), weights) if text else None
+        )
+        snippet = (
+            excerpt_window(section["units"], SNIPPET_WINDOW_CHARS, weights)
+            if section is not None
+            # No prose at all, only headings: still never the frontmatter.
+            else _body_snippet(_unmarked(text))[:SNIPPET_WINDOW_CHARS]
+        )
+        item["snippet"] = snippet
+        item["estimated_tokens"] = _estimate_tokens(item["title"] + snippet)
 
 
 def _retrieval_signature(
@@ -2786,6 +2854,7 @@ def gate_decision(
     no_match: list[str],
     matched_count: int,
     selected_count: int,
+    conversation: bool = False,
 ) -> dict[str, Any]:
     """Decide whether this turn was worth retrieving for, and say why.
 
@@ -2797,6 +2866,14 @@ def gate_decision(
     Two rules fire today, both deterministic and both computable before any
     document body is opened. Everything else is recorded as a signal for the
     report that will decide whether a third rule is worth having.
+
+    ``conversation`` says the selection has already been held against the
+    conversation's own record of what it was handed: what is left, that
+    conversation does not hold - another one was handed it, or this one lost
+    it to a compaction or to the novelty window. The baseline is the task's,
+    shared by every conversation, so its "repeat" would withhold exactly what
+    the record decided to hand; for such a turn the record is the one notion
+    of "seen", and the baseline only informs the signals.
     """
     query_unchanged = bool(previous) and previous.get("query") == signature["query"]
     selection_identical = (
@@ -2823,6 +2900,11 @@ def gate_decision(
         reason = "no-relevant-match" if matched_count == 0 else "empty-after-filter"
         return {"decision": "skip", "mode": mode, "reason": reason, "signals": signals}
     if query_unchanged and selection_identical and task_revision_unchanged:
+        if conversation:
+            return {
+                "decision": "retrieve", "mode": mode,
+                "reason": "not-held-by-conversation", "signals": signals,
+            }
         return {"decision": "skip", "mode": mode, "reason": "repeat-retrieval", "signals": signals}
     if query_unchanged and selection_identical and not task_revision_unchanged:
         return {"decision": "retrieve", "mode": mode, "reason": "task-changed", "signals": signals}
@@ -2835,9 +2917,10 @@ def _body_snippet(content: str) -> str:
     A durable chunk opens with a JSON metadata block that can run past the
     whole snippet allowance, so an unconditional `substr(content, 1, N)`
     delivers a wall of quoted keys and digests where the reader expects the
-    first sentence. Candidates selected by the query escape this because FTS
-    `snippet()` centres on the match; candidates pulled in by record id or by
-    source path have no match to centre on and need this instead.
+    first sentence. Candidates selected by the query are quoted from the
+    section that matched (_quote_candidates) - FTS `snippet()` centred on the
+    match and the match was often in the frontmatter; candidates pulled in by
+    record id or by source path have no match to centre on and need this.
     """
     if content.startswith("---\n"):
         _, separator, remainder = content[4:].partition("\n---\n")
@@ -3616,6 +3699,8 @@ def retrieve(
         no_match=no_match,
         matched_count=len(candidates) + len(local_episodes) + path_matched_count,
         selected_count=len(selected) + len(local_episode_selected),
+        # The selection above already left out what this conversation holds.
+        conversation=session is not None,
     )
     withheld = gate["mode"] == "enforce" and gate["decision"] == "skip"
     if withheld:
