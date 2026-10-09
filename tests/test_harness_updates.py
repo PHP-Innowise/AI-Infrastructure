@@ -137,6 +137,27 @@ class UpdateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as plain:
             self.assertEqual("unavailable", updates.Updates(plain).check()["state"])
 
+    def test_a_remote_whose_name_has_a_slash_is_checked_and_applied(self):
+        # Git allows a slash in a remote's name. Split at its first slash, team/main/main named a remote team, which
+        # does not exist, and a branch main/main, so every check failed.
+        git(self.clone, "remote", "rename", "origin", "team/main")
+        self.publish("Billing.php", "<?php\n", "Add billing")
+        status = self.updates.check()
+        self.assertEqual(("available", 1, "team/main/main"), (status["state"], status["behind"], status["upstream"]))
+        self.assertEqual("1 new change on team/main/main.", status["detail"])
+        self.updates.apply()
+        self.assertEqual(git(self.other, "rev-parse", "HEAD"), git(self.clone, "rev-parse", "HEAD"))
+        # A fast-forward still: a commit of the clone's own is reported and the clone left as it is.
+        self.updates.resume()
+        self.publish("Cart.php", "<?php\n", "Add the cart")
+        (self.clone / "Local.php").write_text("<?php\n", encoding="utf-8")
+        git(self.clone, "add", "Local.php")
+        git(self.clone, "commit", "-q", "-m", "A local change")
+        before = git(self.clone, "rev-parse", "HEAD")
+        with self.assertRaisesRegex(SessionError, "commit of its own"):
+            self.updates.apply()
+        self.assertEqual(before, git(self.clone, "rev-parse", "HEAD"))
+
     def test_a_page_that_comes_back_checks_once_the_last_check_is_old(self):
         with patch.object(updates.Updates, "check") as check:
             self.updates.poke()

@@ -72,17 +72,21 @@ class Updates:
         return result.stdout.strip() if result.returncode == 0 else None
 
     def _tracking(self):
-        """The remote branch the clone follows, or why it follows none."""
+        """The remote branch the clone follows, or why it follows none.
+
+        It is (remote, branch ref on the remote, upstream): the remote and the ref as Git's configuration has them,
+        and the short name of the remote-tracking ref that holds the branch here, refs/remotes/<upstream>. A remote's
+        name may itself contain a slash, so the short name - team/main/main - is never split back into the two."""
         branch = self._value('symbolic-ref', '--quiet', '--short', 'HEAD')
         if not branch:
             return None, 'This clone is not on a branch, so it has no branch to update from.'
         remote = self._value('config', '--get', f'branch.{branch}.remote')
         merge = self._value('config', '--get', f'branch.{branch}.merge')
         if remote and remote != '.' and merge and merge.startswith('refs/heads/'):
-            return f'{remote}/{merge[len("refs/heads/"):]}', None
+            return (remote, merge, f'{remote}/{merge[len("refs/heads/"):]}'), None
         # A clone of main follows origin's main whether or not the branch was set up to track it.
         if branch == 'main' and self._value('remote', 'get-url', 'origin'):
-            return 'origin/main', None
+            return ('origin', 'refs/heads/main', 'origin/main'), None
         return None, f'The branch {branch} follows no remote branch, so there is nothing to update from.'
 
     def _compute(self, fetch):
@@ -91,14 +95,15 @@ class Updates:
         try:
             if self._value('rev-parse', '--is-inside-work-tree') != 'true':
                 return {**status, 'state': 'unavailable', 'detail': 'This copy of the accelerator is not a Git clone, so it cannot update itself.'}
-            upstream, reason = self._tracking()
+            tracking, reason = self._tracking()
             status.update(branch=self._value('symbolic-ref', '--quiet', '--short', 'HEAD'), version=self._value('rev-parse', '--short', 'HEAD'))
-            if upstream is None:
+            if tracking is None:
                 return {**status, 'state': 'unavailable', 'detail': reason}
+            remote, merge, upstream = tracking
             status['upstream'] = upstream
-            remote, _, branch = upstream.partition('/')
             if fetch:
-                fetched = self._git('fetch', '--quiet', '--no-tags', remote, branch, timeout=FETCH_SECONDS)
+                # The remote and its branch reach Git as two arguments, after `--`: neither is ever read as an option.
+                fetched = self._git('fetch', '--quiet', '--no-tags', '--', remote, merge, timeout=FETCH_SECONDS)
                 if fetched.returncode != 0:
                     return {**status, 'detail': f'Could not check {upstream} for updates: {_reason(fetched)}'}
             counts = self._value('rev-list', '--left-right', '--count', f'HEAD...refs/remotes/{upstream}')

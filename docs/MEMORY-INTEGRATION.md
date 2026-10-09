@@ -23,8 +23,8 @@ If the final reply has no parseable
 `memory-draft`, Harness makes one internal draft-only follow-up in the same native
 session, in plan/read-only mode, without helpers or a new user message. Its limit
 is 30 seconds within the original time/token/USD budget. Missing native identity
-or unmeasurable remaining usage produces an explicit skip. Usage and instruction
-character counts include recovery. `CONTEXT_MEMORY_RECOVERY=1` suppresses memory
+or unmeasurable remaining usage produces an explicit skip. Usage, instruction
+character counts and the context fill include recovery. `CONTEXT_MEMORY_RECOVERY=1` suppresses memory
 hooks. Recovery failure preserves completed work; cancellation keeps cancelled
 status and prevents subsequent writes. An already launched write may finish.
 Reviewed sessions/native Claude commands keep their flow.

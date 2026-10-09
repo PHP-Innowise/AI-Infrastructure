@@ -267,8 +267,10 @@ project.
 
    Codex reads the AGENTS.md chain only up to `project_doc_max_bytes` (32 KiB
    by default). A project's own AGENTS.md with the accelerator's policy block
-   after it passes that, and the policy, coming last, is what gets cut; the
-   Harness also passes the larger budget to its Codex launches.
+   after it passes that, and the policy, coming last, is what gets cut. The
+   Harness also passes a larger budget to a Codex launch whose `AGENTS.md`
+   exceeds the default: its size plus 32 KiB, at least 128 KiB and at most
+   256 KiB, and only for a regular file, never one reached through a link.
 
 3. Confirm `.agents/skills/`, `.codex/hooks.json`, and executable hook scripts
    are present.
