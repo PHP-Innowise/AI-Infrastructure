@@ -314,6 +314,34 @@ published pricing ratios change. Records that are unreadable or lack usable
 usage data are skipped; an absent transcript root or zero billed calls returns
 nonzero.
 
+### `memory_eval.py`
+
+**Purpose and status.** Optional maintainer measurement; source-only, never
+installed, and not run by CI (its tests are, in the `installation` job). It
+measures the prompt-time memory capsule on each project as it was when the
+prompt was written, so knowledge written after a prompt cannot be credited to
+it. See [Memory Evaluation Stand](../docs/MEMORY-EVAL.md).
+
+```bash
+python3 scripts/memory_eval.py run --set SET --judgments JUDGMENTS [--passages PASSAGES] \
+  --projects-root DIR --out RESULT [--edition auto|NAME] [--as-of prompt|now]
+python3 scripts/memory_eval.py report RESULT [--compare OTHER] [--show-unjudged]
+python3 scripts/memory_eval.py realized --project DIR [--since YYYY-MM-DD] [--json]
+```
+
+- **Inputs:** a prompt set, judgments and optional answer passages (client
+  data, kept outside the repository); the projects' Git history and working
+  trees, read-only; for `realized`, Claude Code transcripts and Codex rollouts.
+- **Outputs:** a result JSON of prompt ids, document paths and counts - never
+  prompt text, capsule text or document bodies; reports on stdout.
+- **Dependencies:** Python 3.9+ standard library and `git`; no network. It
+  imports `install_accelerator.py` (inventories, install rules) and
+  `accelerator_attach.py` (edition detection), and runs the edition's own
+  `memory-bank/scripts/context.py`.
+- **Writes:** only its cache (default under the system temporary directory;
+  refused inside the clone) and `--out`.
+- **CI relationship:** `tests/test_memory_eval.py` in the `installation` job.
+
 ### `collect_context.py`
 
 **Purpose and status.** Optional developer-local `code2prompt` wrapper;

@@ -660,6 +660,13 @@ single-word matches without an anchor were noise in six of seven judged cases.
 Requiring the anchor removed 14 of 186 delivered items there without losing a
 useful one.
 
+Measurements like these are only honest on each project as it was when the
+prompt was written: an index of the project's current state lets knowledge
+written after the prompt, often about its own work, answer it. The
+[Memory Evaluation Stand](MEMORY-EVAL.md) (`scripts/memory_eval.py`) rebuilds
+that state, overlays the runtime under test and scores the capsule against
+judged prompts.
+
 ### What a capsule quotes
 
 A delivered project-knowledge item carries text, not just a pointer, and the

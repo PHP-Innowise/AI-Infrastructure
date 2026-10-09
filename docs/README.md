@@ -14,6 +14,7 @@ your situation.
 - **Understand security boundaries:** [Security and Trust Boundaries](SECURITY.md)
 - **Diagnose installation or runtime problems:** [Troubleshooting](TROUBLESHOOTING.md)
 - **Add or change accelerator behavior:** [Extending the Accelerator](EXTENDING.md)
+- **Measure a memory retrieval change on real prompts:** [Memory Evaluation Stand](MEMORY-EVAL.md)
 - **Run orchestrated workflows:** [Orchestrator Commands](ORCHESTRATOR-COMMANDS.md)
 - **Coordinate changes across services:** [System-level AI Coordination](AI-SYSTEM-ORCHESTRATION.md) — stack-neutral catalogs, plans, sequential workers and recovery.
 - **See a complete task lifecycle:** [User Task Workflow Example](examples/USER-TASK-WORKFLOW-EXAMPLE.md)
