@@ -445,21 +445,28 @@ def codex_rollout(native_id, project):
         return None
 
 
-def codex_rollout_tail(native_id, project):
-    """The last 4 MiB of an exec thread's rollout in this project, or None."""
+def codex_rollout_end(native_id, project):
+    """The last 4 MiB of an exec thread's rollout in this project from the start of a line, with the file it was
+    read from and where in it that line starts: (path, position, bytes), or None."""
     opened = codex_rollout(native_id, project)
     if not opened:
         return None
-    stream = opened[0]
+    stream, path = opened
     try:
         with stream:
             # ponytail: inspect only the last 4 MiB; absent/older metadata stays unconfirmed.
             offset = max(stream.tell(), fs.fstat(stream.fileno()).st_size - 4 * 1024 * 1024)
             if offset > stream.tell():
                 stream.seek(offset); stream.readline(4 * 1024 * 1024)
-            return stream.read(4 * 1024 * 1024)
+            return path, stream.tell(), stream.read(4 * 1024 * 1024)
     except (OSError, ValueError):
         return None
+
+
+def codex_rollout_tail(native_id, project):
+    """The last 4 MiB of an exec thread's rollout in this project, or None."""
+    end = codex_rollout_end(native_id, project)
+    return end[2] if end else None
 
 
 def codex_journal_activity(native_id, project, since, until):

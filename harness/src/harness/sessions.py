@@ -584,6 +584,8 @@ class Sessions:
         self.generations = {}
         self.cancelled = set()
         self.stopping = threading.Event()
+        # Why new runs are refused, or None: an update holds them back until the restart it hands over to.
+        self.held = None
         self.knowledge = None
         from .attachments import Attachments
         self.attachments = Attachments(self)
@@ -1080,6 +1082,26 @@ class Sessions:
         return {'project_id': key, 'banks': banks, 'bank_id': bank,
                 'entries': entries, 'truncated': truncated}
 
+    def hold_runs(self, reason):
+        """Refuse every new run with `reason` until release_runs(), unless runs are queued or running: then refuse
+        nothing and return how many are. The count and the hold are one step under the store lock, which every run
+        is queued under, so no run is admitted between them."""
+        with self.lock:
+            running = self.db.execute("SELECT COUNT(*) FROM sessions WHERE status IN ('queued','running')").fetchone()[0]
+            if not running:
+                self.held = reason
+            return running
+
+    def release_runs(self):
+        with self.lock:
+            self.held = None
+
+    def admit(self):
+        """Refuse a new run while runs are held back. Every path that queues a run asks under the store lock it
+        keeps until the run is queued, before it changes anything."""
+        if self.held:
+            raise SessionError(self.held)
+
     def create(self, data, *, _creator=None, _system_run=None, _system_discovery=None):
         if not isinstance(data, dict):
             raise SessionError("Session options must be a JSON object.")
@@ -1156,6 +1178,7 @@ class Sessions:
             budgets['usd'] = fleet['budget_usd']
         sid = str(uuid.uuid4())
         with self.lock:
+            self.admit()
             if self.jobs.full() or self.stopping.is_set():
                 raise SessionError("The run queue is full or the server is stopping.")
             if _creator:
@@ -1261,6 +1284,7 @@ class Sessions:
                 session['workflow'], mode, sdd_settings, session)
             if not sdd_settings and mode != session['mode'] and (session['workflow'] != 'native' or not model_routing):
                 raise SessionError('Changing Workspace mode between turns requires separate planning/editing models.')
+            self.admit()
             if self.jobs.full() or self.stopping.is_set():
                 raise SessionError("The run queue is full or the server is stopping.")
             attached = self.attachments.save(sid, files)
@@ -1296,6 +1320,7 @@ class Sessions:
             self.db.commit()
 
     def _queue_context(self, sid):
+        self.admit()
         if self.jobs.full() or self.stopping.is_set():
             raise SessionError('The run queue is full or the server is stopping.')
         rows = self.db.execute('SELECT data FROM events WHERE session_id=? ORDER BY id DESC', (sid,))
@@ -1315,6 +1340,7 @@ class Sessions:
             self._workspace(session)
             options = {key: session['brain'][key] for key in ('bank', 'task_id', 'record_id', 'create', 'goal') if key in session['brain']}
             self._task_context().validate_options({**options, 'query': query})
+            self.admit()
             if self.jobs.full() or self.stopping.is_set():
                 raise SessionError('The run queue is full or the server is stopping.')
             self._save_brain(sid, {**session['brain'], 'query': query, 'approved': False, 'context_id': None})
@@ -1329,6 +1355,7 @@ class Sessions:
                     or not context_id or brain.get('context_id') != context_id or not brain.get('capsule')):
                 raise SessionError('Review the current prepared context before starting this session.')
             self._workspace(session)
+            self.admit()
             if self.jobs.full() or self.stopping.is_set():
                 raise SessionError('The run queue is full or the server is stopping.')
             self._save_brain(sid, {**brain, 'approved': True})
@@ -1370,6 +1397,7 @@ class Sessions:
                 raise SessionError(fleet_runtime()['detail'])
             if not session['fleet']['dry_run'] and not self.providers.get(session['provider'], {}).get('available'):
                 raise SessionError('The selected provider is unavailable.')
+            self.admit()
             if self.jobs.full() or self.stopping.is_set():
                 raise SessionError('The run queue is full or the server is stopping.')
             if action == 'resume':
@@ -2054,20 +2082,13 @@ class Sessions:
                 self._event(sid, receipt)
             self._event(sid, delegation.summary())
         if tracker:
-            # The whole rollout tail, read once the launch has ended, settles what the live reads saw.
-            if provider == 'codex':
-                # Dividers come only from the live reader, whose list grows in rollout order: its last reads catch what
-                # the rollout gained since the last poll. The tail is the last 4 MiB and may begin inside a long launch,
-                # so its list can start later and would hide or repeat dividers counted by position.
-                if live:
-                    for _ in range(8):  # Each read takes at most 4 MiB.
-                        offset = live.offset
-                        if live.poll(native_id):
-                            tracker.update(live.fill.snapshot())
-                            note_compactions()
-                        if live.offset == offset:
-                            break
-                tracker.update(context_usage.codex_fill(providers.codex_rollout_tail(native_id, project), launch_started_at, time.time()))
+            # Codex: the live reader's fill is the launch's own. Once the launch has ended it reads on, and the rollout's
+            # last 4 MiB only adds the lines past those reads, by their place in the file: that tail may begin inside a
+            # long launch, so it never replaces what the live reads counted. Dividers follow the same list, which only
+            # grows in rollout order, so none is hidden or repeated.
+            if live and live.settle(native_id, time.time()):
+                tracker.update(live.fill.snapshot())
+                note_compactions()
             save_context()
         # A command asked for no memory draft, so there is nothing to save. A session opened for review
         # reviews its context before each turn; its draft is saved like any other, but only an

@@ -306,6 +306,7 @@ class CreatorManager:
             os.close(fd)
         rid = uuid.uuid4().hex
         with self.lock, self.sessions.lock:
+            self.sessions.admit()
             if self.sessions.jobs.full() or self.sessions.stopping.is_set():
                 raise SessionError('The run queue is full or the server is stopping.')
             target, workspace, branch, common = self.sessions._new_workspace(project, data, rid)
@@ -336,6 +337,7 @@ class CreatorManager:
             return self._launch(run, 'scan')
 
     def _launch(self, run, phase):
+        self.sessions.admit()  # before a journal moves or a request is written; create() asks again under its lock
         nonce = uuid.uuid4().hex
         run.pop('message', None)
         journal = self.root/run['id']/'journal'

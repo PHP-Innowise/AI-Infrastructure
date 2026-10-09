@@ -233,6 +233,7 @@ class SystemManager:
                 return self._view(record)
             if view['active']:
                 raise SessionError('Wait for this launch to stop before continuing.')
+            self.sessions.admit()
             system, roots = self._system(record['project_id'], record['config_path'])
             directory = self.root / rid
             plan = execution.load(directory, 'approved-plan.json')

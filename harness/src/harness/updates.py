@@ -4,8 +4,9 @@ The Harness runs from a Git clone of the accelerator, so an update is the branch
 `main` on origin, for a clone made to use the accelerator. A check fetches that branch when the server starts and
 then hourly, and counts the commits the clone lacks. While there are any, the page shows an Update button.
 Updating fast-forwards the clone, rewrites the installed desktop application from it, and restarts the server on
-the new code; the page then reloads itself. Projects attached to the clone take their edition from it, so they are
-updated with it.
+the new code; the page then reloads itself. An update waits until no run is queued or running, and from that check
+to the restart new runs are refused, so none is started only to be interrupted. Projects attached to the clone take
+their edition from it, so they are updated with it.
 
 Only a fast-forward is ever applied. A clone with commits of its own, or local changes in the way, is reported and
 left as it is.
@@ -27,6 +28,8 @@ PAGE_CHECK_SECONDS = 600
 FETCH_SECONDS = 60
 MERGE_SECONDS = 120
 COMMITS_SHOWN = 20
+# What a run asked for while an update is applied is told: the restart that follows would interrupt it.
+HOLD_REASON = 'The Harness is updating and then restarts, which would interrupt a new run. Start it once the page has reloaded.'
 
 
 class UpToDate(SessionError):
@@ -45,10 +48,15 @@ def _reason(result):
 class Updates:
     """The clone's update state, checked in the background, applied on request."""
 
-    def __init__(self, root=ROOT, busy=None):
+    def __init__(self, root=ROOT, hold=None, release=None):
         self.root = Path(root)
-        # How many runs a restart would interrupt; an update waits until there are none.
-        self.busy = busy or (lambda: 0)
+        # hold() counts the runs a restart would interrupt and, when there are none, holds new ones back in the same
+        # step: an update waits until there are none, and none starts between that check and the restart.
+        # release() lets them start again when the update fails or the server does not restart.
+        self.hold = hold or (lambda: 0)
+        self.release = release or (lambda: None)
+        self.held = False
+        self.gate = threading.Lock()
         self.lock = threading.Lock()
         self.applying = threading.Lock()
         self.state = {'state': 'unknown', 'detail': '', 'checked_at': None, 'behind': 0, 'ahead': 0, 'commits': [],
@@ -145,38 +153,57 @@ class Updates:
         self.stopping.set()
 
     def apply(self):
-        """Fast-forward the clone to the branch it follows. The caller then restarts the server on the new code."""
+        """Fast-forward the clone to the branch it follows. New runs are held back from the busy check on: the caller
+        then restarts the server on the new code, or calls resume() when it does not. A failed update resumes them."""
         if not self.applying.acquire(blocking=False):
             raise SessionError('The update is already running.')
         try:
-            running = self.busy()
-            if running:
-                raise SessionError(f'{running} {"run is" if running == 1 else "runs are"} in progress, and updating restarts the '
-                                   'Harness. Let them finish or stop them, then update.')
-            status = self._compute(True)
-            if status['state'] == 'current':
-                with self.lock:
-                    self.state = status
-                raise UpToDate('This clone is already up to date.')
-            if status['state'] != 'available':
-                with self.lock:
-                    self.state = status
-                raise SessionError(status['detail'] or 'There is no update to apply.')
-            with self.lock:
-                self.state = {**status, 'state': 'updating', 'detail': 'Updating…'}
-            merged = self._git('merge', '--ff-only', '--quiet', f'refs/remotes/{status["upstream"]}', timeout=MERGE_SECONDS)
-            if merged.returncode != 0:
-                detail = f'The update could not be applied, and the clone is unchanged: {_reason(merged)}'
-                with self.lock:
-                    self.state = {**status, 'state': 'failed', 'detail': detail}
-                raise SessionError(detail)
-            version = self._value('rev-parse', '--short', 'HEAD')
-            with self.lock:
-                self.state = {**status, 'state': 'updated', 'version': version, 'behind': 0, 'commits': [],
-                              'detail': f'Updated to {version}. The Harness is restarting.'}
-            return {'from': status['version'], 'to': version, 'changes': status['behind']}
+            with self.gate:
+                if self.held:
+                    raise SessionError('An update was applied and the Harness is restarting on it.')
+                running = self.hold()
+                if running:
+                    raise SessionError(f'{running} {"run is" if running == 1 else "runs are"} in progress, and updating restarts the '
+                                       'Harness. Let them finish or stop them, then update.')
+                self.held = True
+            try:
+                return self._fast_forward()
+            except BaseException:
+                self.resume()
+                raise
         finally:
             self.applying.release()
+
+    def resume(self):
+        """Let new runs start again: the update failed, or the server is not restarting on it."""
+        with self.gate:
+            if self.held:
+                self.held = False
+                self.release()
+
+    def _fast_forward(self):
+        status = self._compute(True)
+        if status['state'] == 'current':
+            with self.lock:
+                self.state = status
+            raise UpToDate('This clone is already up to date.')
+        if status['state'] != 'available':
+            with self.lock:
+                self.state = status
+            raise SessionError(status['detail'] or 'There is no update to apply.')
+        with self.lock:
+            self.state = {**status, 'state': 'updating', 'detail': 'Updating…'}
+        merged = self._git('merge', '--ff-only', '--quiet', f'refs/remotes/{status["upstream"]}', timeout=MERGE_SECONDS)
+        if merged.returncode != 0:
+            detail = f'The update could not be applied, and the clone is unchanged: {_reason(merged)}'
+            with self.lock:
+                self.state = {**status, 'state': 'failed', 'detail': detail}
+            raise SessionError(detail)
+        version = self._value('rev-parse', '--short', 'HEAD')
+        with self.lock:
+            self.state = {**status, 'state': 'updated', 'version': version, 'behind': 0, 'commits': [],
+                          'detail': f'Updated to {version}. The Harness is restarting.'}
+        return {'from': status['version'], 'to': version, 'changes': status['behind']}
 
 
 def refresh_application():

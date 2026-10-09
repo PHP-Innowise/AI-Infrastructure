@@ -385,6 +385,12 @@ Only a fast-forward is ever applied, and some states hold the update back:
 | Runs are in progress | The update waits until they finish or are stopped, because a restart would interrupt them. |
 | The clone is not on a branch that follows a remote | Nothing is offered, and the status says why. |
 
+From the update's check that no run is in progress until the server has
+restarted, a new session, follow-up or check is refused with a note to start it
+once the page has reloaded, so the restart interrupts nothing. An update that
+fails or finds nothing to apply, or a server that cannot restart itself, lets
+runs start again.
+
 To keep checks off, set `HARNESS_UPDATE_CHECK=0` in the server's environment.
 
 #### The environment of a desktop launch
@@ -1196,7 +1202,10 @@ Fill, window, growth and free space are the provider's own token counts:
   from `compact_boundary`. A turn on the same model knows its window from the
   earlier one, so a running turn fills in call by call.
 - **Codex:** the counts come from the thread's rollout, read as it grows every
-  two seconds while the turn runs and once more when it ends.
+  two seconds while the turn runs and once more when it ends. That last read goes
+  on from where the previous one stopped; the rollout's last 4 MiB only adds the
+  lines past it, each known by its place in the file, so a turn longer than that
+  keeps its first calls and compactions.
 - **Cursor:** reports none; its turns show `—` and the characters the Harness
   added.
 

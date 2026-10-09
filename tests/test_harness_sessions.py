@@ -1067,6 +1067,30 @@ class SessionTests(unittest.TestCase):
                 with self.assertRaises(sessions.SessionError):
                     restarted.send(sid, "No native session was created")
 
+    def test_held_runs_are_refused_on_every_way_in_until_released(self):
+        manager = self.manager()
+        sid = self.create(manager)
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        blocker = self.create(manager, "sleep")
+        self.wait_for(lambda: manager.get(blocker)["status"] == "running")
+        # A run in progress is counted and nothing is held: an update waits for it.
+        self.assertEqual(1, manager.hold_runs("Held for the update."))
+        self.assertIsNone(manager.held)
+        manager.cancel(blocker)
+        self.settled(manager, blocker)
+        self.assertEqual(0, manager.hold_runs("Held for the update."))
+        before = (len(manager.list()), len(manager.events(sid)), len(self.calls))
+        for attempt in (lambda: self.create(manager), lambda: manager.send(sid, "complete"),
+                        lambda: manager.results.start_check(sid, {"command": "true", "timeout": 2, "snapshot_id": "current"})):
+            with self.assertRaisesRegex(sessions.SessionError, "^Held for the update.$"):
+                attempt()
+        # Refused before anything was written or queued.
+        self.assertEqual(before, (len(manager.list()), len(manager.events(sid)), len(self.calls)))
+        self.assertEqual(("completed", 0), (manager.get(sid)["status"], manager.jobs.unfinished_tasks))
+        manager.release_runs()
+        manager.send(sid, "complete")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+
     def test_model_and_effort_changes_reach_native_resume_and_survive_restart(self):
         manager = self.manager()
         sid = self.create(manager, model="fixture-model", thinking_effort="high",

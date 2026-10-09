@@ -48,7 +48,10 @@ function renderContextUsage(data) {
   box.hidden = !turns.length; if (!turns.length) return;
   if (contextUi.follow || !turns.some(turn => turn.id === contextUi.selected)) contextUi.selected = turns.at(-1).id;
   const index = turns.findIndex(turn => turn.id === contextUi.selected), turn = turns[index];
-  const key = JSON.stringify([turns.map(item => [item.id,item.end,item.window,item.calls,item.running,item.compactions.length,item.cache,item.recorded]),contextUi.selected,[...contextUi.open],contextUi.page,contextPhone.matches]);
+  // The view draws only from these launch fields, so a poll that changed any of them (hook memory, a compaction's
+  // numbers, the ledger a memory follow-up added to) draws it again, and one that changed nothing does not.
+  const key = JSON.stringify([(data?.launches || []).filter(launch => launch.kind === 'native').map(launch => [launch.id,launch.status,launch.started_at,launch.settings?.provider,launch.context]),
+    contextUi.selected,[...contextUi.open],contextUi.page,contextPhone.matches]);
   if (key === contextUi.key) return; contextUi.key = key;
   if (!box.firstChild) buildContextUsage(box);
   $('context-turn-label').textContent = `Turn ${turn.ordinal} · ${memoryClock.time.format(new Date(turn.at))}${turn.running ? ' · running' : ''}`;
@@ -194,6 +197,8 @@ function contextDetails(kind, turn, turns, index) {
   return nodes;
 }
 const bootstrapExcerptBytes = () => state.bootstrap?.runtime?.context_excerpt_bytes || 3000;
+// Everything a turn's column draws: the column is built again when any of it changed.
+const contextColumnKey = turn => JSON.stringify([turn.ordinal,turn.at,turn.start,turn.end,turn.window,turn.peak,turn.running,turn.compactions,turn.recorded,turn.memory,turn.parts]);
 function renderContextTurns(turns) {
   const size = contextPhone.matches ? 6 : 12, pages = Math.max(0,Math.ceil(turns.length / size) - 1); contextUi.page = Math.min(contextUi.page,pages);
   const end = turns.length - contextUi.page * size, shown = turns.slice(Math.max(0,end - size),end);
@@ -211,7 +216,7 @@ function renderContextTurns(turns) {
     column.setAttribute('aria-label',`Turn ${turn.ordinal}, ${memoryClock.time.format(new Date(turn.at))}, ${geometry ? `${percentText(turn.end,turn.window)} of the window${turn.compacted ? ` after compaction from ${fmt.exact(turn.compactions[0].pre).text}` : ''}` : 'not recorded'}${turn.running ? ', running' : ''}`);
     column.addEventListener('click',() => selectContextTurn(turn.id));
     return column;
-  },turn => JSON.stringify([turn.end,turn.window,turn.running,turn.compactions.length,turn.recorded,turn.memory]));
+  },contextColumnKey);
   for (const column of $('context-turns').children) { const on = column.dataset.id === contextUi.selected; column.setAttribute('aria-checked',String(on)); column.tabIndex = on ? 0 : -1; }
 }
 function selectContextTurn(id) { const turns = contextTurns(resultUi.data?.launches || []); contextUi.selected = id; contextUi.follow = id === turns.at(-1)?.id; renderContextUsage(resultUi.data); }

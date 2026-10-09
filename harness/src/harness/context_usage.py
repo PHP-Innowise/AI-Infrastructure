@@ -219,14 +219,6 @@ class CodexFill:
                 'calls': len(self.fills), 'window': self.window, 'compactions': self.compactions[:20]}
 
 
-def codex_fill(tail, since, until):
-    """Context fill of one Codex launch from its rollout tail, read once the launch has ended."""
-    fill = CodexFill(since, until)
-    for line in tail.splitlines() if tail else []:
-        fill.feed(line)
-    return fill.snapshot()
-
-
 class CodexLive:
     """A running Codex launch's rollout, read as it grows: only new complete lines on each poll.
 
@@ -234,6 +226,8 @@ class CodexLive:
     is known; until then, and while the index has no row, a poll costs nothing.
     """
     LIMIT = 4 * 1024 * 1024
+    # Reads of at most LIMIT bytes once the launch has ended; the rollout's last 4 MiB extends past them.
+    SETTLE_READS = 8
 
     def __init__(self, project, since):
         self.project, self.fill = project, CodexFill(since)
@@ -272,6 +266,30 @@ class CodexLive:
         changed = False
         for line in lines:
             changed = self.fill.feed(line) or changed
+        return changed
+
+    def settle(self, native_id, until):
+        """Once the launch has ended: read what the rollout gained since the last poll, then extend the fill with
+        the rollout's last 4 MiB past where those reads stopped. A line is known by where it starts in the file, so
+        it counts once, and the fill is never replaced: the tail can begin inside a long launch, after calls and
+        compactions only the live reads saw. True when the fill changed."""
+        from . import providers
+        self.fill.until, self.retry_at = until, 0.0
+        changed = False
+        for _ in range(self.SETTLE_READS):
+            offset = self.offset
+            changed = self.poll(native_id) or changed
+            if self.offset == offset:
+                break
+        end = providers.codex_rollout_end(native_id, self.project) if native_id else None
+        if end and (self.path is None or end[0] == self.path):
+            _, position, data = end
+            # The live reads fed every complete line before this place in the file.
+            read = self.offset - len(self.partial) if self.path is not None else 0
+            for line in data.split(b'\n'):
+                if position >= read:
+                    changed = self.fill.feed(line) or changed
+                position += len(line) + 1
         return changed
 
 
