@@ -39,6 +39,14 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    **Orchestration** section requires contract-based specialist selection,
    read-only parallelism, serialized writers, bounded capsules, checkpoints,
    and stop-on-failure behavior.
+   The working-memory rules require task-aware retrieval at complex starts,
+   after compaction/scope changes and before uncovered material decisions;
+   source verification; progress/next-step checkpoints at meaningful boundaries;
+   and source-backed reusable findings/decisions at finalization when writes are
+   authorized. Support Harness `memory-draft` and an available Harness Memory MCP
+   without requiring either for an otherwise self-contained target; the fallback
+   is the installed context CLI and its legal record/promotion commands. Report
+   failed/partial saves and distinguish delivered context from agent-reported use.
 3. **Author `DOD.md`** as the Definition of Done: exact non-mutating
    test/lint-check/format-check/static-analysis commands plus affected confirmed
    critical scenarios, denied paths, transitions, and audit checks when a

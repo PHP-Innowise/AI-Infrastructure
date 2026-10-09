@@ -4,6 +4,9 @@
 # Hook type: SessionStart
 # Exit codes: always 0 (informational only)
 
+# Internal draft recovery is part of the current turn, not a new memory session.
+[ "${CONTEXT_MEMORY_RECOVERY:-}" = "1" ] && exit 0
+
 echo "Project Context"
 echo "==============="
 

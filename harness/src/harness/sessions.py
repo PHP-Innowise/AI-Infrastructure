@@ -1541,7 +1541,10 @@ class Sessions:
         if synced and not synced.get('error') and (synced.get('changed') or (synced.get('codex_trust') or {}).get('approved')):
             self._event(sid, {'kind': 'memory', 'ok': True, 'text': accelerator_sync_notice(synced)})
         try:
-            prepared, problem = context.prepare(session), None
+            if not session['brain'].get('query'):
+                prepared, problem = None, 'The automatic query has no safe technical content.'
+            else:
+                prepared, problem = context.prepare(session), None
         except Exception as error:
             prepared = None
             problem = str(error) if isinstance(error, SessionError) else f'the runtime call failed ({type(error).__name__}).'
@@ -1558,9 +1561,12 @@ class Sessions:
                                   'text': 'Project memory was not retrieved for this turn: ' + problem})
             return self.get(sid)
 
-    def _remember(self, sid):
+    def _remember(self, sid, generation):
         """Save what a completed linked run drafted, and say in the conversation what was saved."""
         from . import memory_draft
+        with self.lock:
+            if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
+                return
         latest = memory_draft.latest(self, sid)
         if latest['state'] == 'none':
             return
@@ -1568,9 +1574,11 @@ class Sessions:
             self._event(sid, {'kind': 'memory', 'ok': False, 'text': memory_draft.summary(latest['state'])})
             return
         session = self.get(sid)
+        provenance = memory_draft.usage(latest['draft'], session['brain'].get('capsule'))
         try:
             result = self._task_context(wait=MEMORY_WAIT).save_memory(
-                session, latest['draft'], automatic=True, known=session['brain'].get('remembered') or [])
+                session, latest['draft'], automatic=True, known=session['brain'].get('remembered') or [],
+                generation=generation)
         except Exception as error:
             result = {'ok': False, 'saved': {}, 'skipped': [],
                       'error': str(error) if isinstance(error, SessionError) else f'the runtime call failed ({type(error).__name__}).'}
@@ -1581,7 +1589,13 @@ class Sessions:
                 # Later turns restate what they found; the next save skips what this one recorded.
                 brain = self.get(sid)['brain']
                 self._save_brain(sid, {**brain, 'remembered': ((brain.get('remembered') or []) + saved)[-REMEMBERED:]})
-            self._event(sid, {'kind': 'memory', 'ok': result['ok'], 'text': memory_draft.summary('drafted', result)})
+            notice = memory_draft.summary('drafted', result)
+            if provenance['reported']:
+                notice += (f" Memory use: {provenance['delivered']} pointers delivered; "
+                           f"{len(provenance['reported_used'])} reported used by the agent. This does not prove reading.")
+            self._event(sid, {'kind': 'memory', 'ok': result['ok'], 'text': notice,
+                'delivered_sources': provenance['delivered'], 'reported_used_sources': len(provenance['reported_used']),
+                'attestation': provenance['attestation']})
 
     def _run(self, sid, prompt, generation):
         session = self.get(sid)
@@ -1749,6 +1763,7 @@ class Sessions:
             environment.update(accelerator.environment)
         # Only this launch can say its capsule is in the prompt; never inherit the claim.
         environment.pop('CONTEXT_CAPSULE_DELIVERED', None)
+        environment.pop('CONTEXT_MEMORY_RECOVERY', None)
         if native_command:
             # As in the CLI's own terminal: the project's hooks see no Harness task and deliver memory themselves.
             environment.pop('CONTEXT_TASK_ID', None)
@@ -2029,9 +2044,64 @@ class Sessions:
                 tracker.update(context_usage.codex_fill(providers.codex_rollout_tail(native_id, project), launch_started_at, time.time()))
             save_context()
         # A command asked for no memory draft, so there is nothing to save. A session opened for review
-        # reviews its context before each turn; its draft is saved like any other.
+        # reviews its context before each turn; its draft is saved like any other, but only an
+        # unattended run gets the recovery follow-up when it left no draft.
         if outcome == 'completed' and native_launch and session['brain'] and not native_command:
-            self._remember(sid)
+            from . import memory_draft, memory_recovery
+            latest = memory_draft.latest(self, sid)
+            if latest['state'] in ('missing', 'unreadable') and not reviewed(session['brain']):
+                self._event(sid, {'kind': 'memory', 'ok': True, 'recovery': 'started',
+                    'text': 'The completed run left no usable memory draft. Trying one read-only follow-up in the same native session.'})
+                current = self.get(sid)
+                recovery_cost = providers.RunCost(provider, native_id, (current['cost_totals'] or {}).get(native_id))
+                def observe_recovery(raw, clean):
+                    recovery_cost.observe(raw)
+                    if tracker:
+                        tracker.observe(raw)
+                    if clean.get('kind') == 'usage':
+                        clean = dict(clean)
+                        tokens = providers.total_tokens(clean)
+                        if tokens is not None:
+                            budget_usage['tokens'] = (budget_usage['tokens'] or 0) + tokens
+                        reported = clean.get('cost_usd')
+                        if type(reported) in (int, float) and math.isfinite(reported) and reported >= 0:
+                            own = recovery_cost.own(reported)
+                            remember_total(native_id, recovery_cost.total(reported))
+                            clean.pop('cost_usd', None)
+                            if own is not None:
+                                clean['cost_usd'] = own
+                                budget_usage['cost_usd'] = (budget_usage['cost_usd'] or 0) + own
+                            else:
+                                budget_usage['recovery_cost_unknown'] = True
+                                budget_usage['cost_usd'] = None
+                        self._event(sid, {**clean, 'memory_recovery': True})
+                        if budgets['tokens'] is not None and (budget_usage['tokens'] or 0) >= budgets['tokens']:
+                            budget_usage['limit_reached'] = 'token'
+                        if budgets['usd'] is not None and (budget_usage['cost_usd'] or 0) >= budgets['usd']:
+                            budget_usage['limit_reached'] = 'USD'
+                        save_usage()
+                    return bool(budget_usage['limit_reached'])
+                remaining = run_timeout - (time.monotonic() - started) if run_timeout is not None else None
+                recovery = memory_recovery.recover(self, sid, current, generation, project, environment,
+                    remaining_seconds=remaining, exhausted=bool(budget_usage['limit_reached']), observe=observe_recovery)
+                if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
+                    recovery.update(state='cancelled', reason='Memory recovery was cancelled; no draft was saved.')
+                if recovery.get('launched') and context_record is not None:
+                    # Only counts enter Usage; the recovery prompt remains outside telemetry.
+                    context_record['recovery'] = {'characters': len(memory_recovery.PROMPT), 'state': recovery['state']}
+                    context_record['ledger']['total'] += len(memory_recovery.PROMPT)
+                    context_record['ledger']['instructions'] += len(memory_recovery.PROMPT)
+                self._event(sid, {'kind': 'memory', 'ok': recovery['state'] == 'recovered',
+                    'recovery': recovery['state'], 'text': 'Memory draft recovered.' if recovery['state'] == 'recovered'
+                    else recovery['reason']})
+                if (recovery['state'] == 'recovered' and sid not in self.cancelled and not self.stopping.is_set()
+                        and self.generations.get(sid) == generation):
+                    self._event(sid, {'kind': 'text', 'text': recovery['reply'], 'memory_recovery': True})
+                save_usage()
+                if tracker:
+                    save_context()
+            if sid not in self.cancelled and not self.stopping.is_set() and self.generations.get(sid) == generation:
+                self._remember(sid, generation)
             if provider == 'cursor':
                 # Cursor's headless mode fires no stop hook, so the checkpoint its
                 # own hook would run - files touched, commits, the turn boundary
@@ -2043,9 +2113,15 @@ class Sessions:
                     pass
         # Record the closing event before the terminal status: readers that wait for
         # the status to settle must see the complete event history.
-        self._event(sid, {"kind": "status", "outcome": outcome,
-                          "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
-        self._status(sid, outcome or 'failed')
+        with self.lock:
+            if self.generations.get(sid) == generation:
+                if sid in self.cancelled:
+                    outcome = 'cancelled'
+                elif self.stopping.is_set():
+                    outcome = 'interrupted'
+                self._event(sid, {"kind": "status", "outcome": outcome,
+                    "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
+                self._status(sid, outcome or 'failed')
         # A project keeps only its newest retrieval manifests; fold this launch's into the daily history now.
         if self.knowledge is not None and not (creator or system_run or discovery):
             from . import memory_use

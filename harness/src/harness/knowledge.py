@@ -425,7 +425,7 @@ class KnowledgeManager:
             return arguments + ['--limit', '20' if action == 'search' else '3', '--json', '--', query]
         return arguments + ['--json']
 
-    def _execute(self, command, root, extra=None):
+    def _execute(self, command, root, extra=None, *, _guard=None):
         read_fd, write_fd = os.pipe()
         process = None
         selector = process_runtime.PipeSelector()
@@ -438,8 +438,13 @@ class KnowledgeManager:
             environment['PYTHONUTF8'] = '1'
             environment['PYTHONIOENCODING'] = 'utf-8'
             environment.update(extra or {})
-            process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.sessions.runner_lock, cwd=root, env=environment, stdin=subprocess.DEVNULL,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Cancel and a guarded write are ordered at process launch. An
+            # already launched operation may finish; no next write starts after cancellation.
+            with self.sessions.lock:
+                if _guard is not None:
+                    _guard()
+                process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.sessions.runner_lock, cwd=root, env=environment, stdin=subprocess.DEVNULL,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             self.process = process
             fs.close(read_fd)
             read_fd = None
@@ -560,7 +565,7 @@ class KnowledgeManager:
                 raise SessionError('The installed runtime could not check eligibility. Check record validity and source paths.')
             return {**info, **result}
 
-    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None):
+    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None, _guard=None):
         if not isinstance(data, dict) or not isinstance(data.get('action'), str) or data['action'] not in ACTION_FIELDS:
             raise SessionError('Select a supported knowledge operation.')
         action = data['action']
@@ -612,7 +617,7 @@ class KnowledgeManager:
                         field: data[field] for field in ('source_ids', 'promotion_id') if field in data}}, layout)
                     if eligibility.get('eligible') is not True:
                         raise SessionError('Promote only verified resolved findings or bugs, closed incidents, or accepted decisions with allowed privacy, reusable progress and unchanged sources. Tasks and session transcripts are not durable knowledge.')
-                code, stdout, stderr = self._execute(command, root, layout['environment'])
+                code, stdout, stderr = self._execute(command, root, layout['environment'], **({'_guard': _guard} if _guard is not None else {}))
                 result = json.loads(stdout) if stdout.strip() else None
                 if not isinstance(result, (dict, list)):
                     result = None

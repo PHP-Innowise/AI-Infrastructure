@@ -60,6 +60,7 @@ CANONICAL_EDITIONS = ("Laravel", "Symfony", "PHP Core")
 # prefix wins, so "project-brain/" maps onto itself while "scripts/" and
 # "templates/" move under memory-bank/. Ordered longest-first at use time.
 ASSET_TO_EDITION_PREFIX = {
+    "MCP.md": "memory-bank/MCP.md",
     "scripts/": "memory-bank/scripts/",
     "templates/": "memory-bank/templates/",
     "project-brain/": "project-brain/",
@@ -69,6 +70,7 @@ ASSET_TO_EDITION_PREFIX = {
 # prefix map cannot check: a file that exists only in the edition would
 # otherwise never be looked for.
 REQUIRED_FROM_EDITION = (
+    "memory-bank/MCP.md",
     "memory-bank/scripts/*.py",
     "memory-bank/templates/*",
     "project-brain/PROTOCOL.md",

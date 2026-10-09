@@ -14,6 +14,7 @@ import time
 import uuid
 
 from . import memory_draft
+from .automatic_query import AutomaticQueryError, sanitize_automatic_query
 from .knowledge import KnowledgeBusy, _path, _text
 from .sessions import CAPSULE_LIMIT, SessionError, read_context
 
@@ -35,12 +36,16 @@ def _plain(text):
 
 def message_query(prompt):
     """A message as a retrieval query. The runtime distills it; this only bounds it."""
-    return _plain(prompt).strip().encode('utf-8')[:QUERY_BYTES].decode('utf-8', 'ignore').strip()
+    try:
+        safe = sanitize_automatic_query(_plain(prompt))
+    except AutomaticQueryError as error:
+        raise SessionError(str(error)) from error
+    return safe.encode('utf-8')[:QUERY_BYTES].decode('utf-8', 'ignore').strip()
 
 
 def automatic_goal(prompt):
     """The first line of the first message: what the session was started to do."""
-    line = next((line for line in _plain(prompt).splitlines() if line.strip()), '')
+    line = next((line for line in message_query(prompt).splitlines() if line.strip()), 'Work on the project.')
     line = ' '.join(line.split())
     return line if len(line) <= GOAL_CHARACTERS else line[:GOAL_CHARACTERS - 1].rstrip() + '…'
 
@@ -97,7 +102,13 @@ class TaskContext:
         task_id = _text(data.get('task_id'), 'task ID', 200).strip()
         if not TASK_ID.fullmatch(task_id) or '..' in task_id.split('/'):
             raise SessionError('Enter a valid Brain task ID.')
-        query = _text(data.get('query'), 'context query', QUERY_BYTES)
+        if review:
+            query = _text(data.get('query'), 'context query', QUERY_BYTES)
+        else:
+            value = data.get('query')
+            if not isinstance(value, str) or len(value.encode('utf-8')) > QUERY_BYTES:
+                raise SessionError('Enter a bounded context query.')
+            query = message_query(value)
         create = data.get('create', False)
         if type(create) is not bool:
             raise SessionError('The create-task option must be a boolean.')
@@ -123,9 +134,9 @@ class TaskContext:
             raise SessionError('The session workspace requires an installed governed Brain runtime.')
         return brain, options, workspace, info
 
-    def _call(self, session, options, workspace, action, **fields):
+    def _call(self, session, options, workspace, action, *, _guard=None, **fields):
         result = self._knowledge('run', session['project_id'], {'bank': options['bank'], 'action': action, **fields},
-                                 _root=workspace)
+                                 _root=workspace, **({'_guard': _guard} if _guard is not None else {}))
         if not result.get('ok') or not isinstance(result.get('result'), dict):
             raise SessionError(result.get('error') or 'The Brain runtime did not complete this operation.')
         return result['result']
@@ -303,7 +314,7 @@ class TaskContext:
         return {**result, 'context_id': brain.get('context_id'), 'approved': brain.get('approved') is True,
                 'memory_draft': memory_draft.latest(self.sessions, session['id'])}
 
-    def save_memory(self, session, data, *, automatic=False, known=()):
+    def save_memory(self, session, data, *, automatic=False, known=(), generation=None):
         """Record a memory draft through the runtime's own commands.
 
         The task's progress and next steps are updated first; each kept learning
@@ -337,24 +348,29 @@ class TaskContext:
         saved = {'task': None, 'records': [], 'promotion': None}
         immediate = []
         reason = (memory_draft.AUTOMATIC_REASON if automatic else 'Saved from a reviewed Harness session')
+        def guard():
+            sid = session['id']
+            if (sid in self.sessions.cancelled or self.sessions.stopping.is_set()
+                    or self.sessions.generations.get(sid) != generation):
+                raise SessionError('Memory save was cancelled; no further writes were started.')
+        checked = {'_guard': guard} if generation is not None else {}
         try:
             if draft['progress'] or draft['next_steps']:
                 fields = {'record_id': task['id'], 'revision': task['revision'], 'reason': reason}
                 if draft['progress']:
                     fields['progress'] = draft['progress']
-                if draft['next_steps']:
-                    # The draft is the current plan, so it replaces the list rather
-                    # than appending to steps the run may have finished.
-                    fields.update(next_steps=draft['next_steps'], replace_next_steps=True)
-                updated = self._call(session, options, workspace, 'brain-update', **fields)
+                # The draft is the current plan, including an empty completed
+                # plan; remove steps the run may have finished.
+                fields.update(next_steps=draft['next_steps'], replace_next_steps=True)
+                updated = self._call(session, options, workspace, 'brain-update', **checked, **fields)
                 saved['task'] = {'id': updated.get('id'), 'revision': updated.get('revision')}
             for learning in draft['learnings']:
-                created = self._call(session, options, workspace, 'brain-create',
+                created = self._call(session, options, workspace, 'brain-create', **checked,
                                      record_type=learning['type'],
                                      external_id=memory_draft.external_id(options['task_id'], learning['type']),
                                      title=learning['title'], goal=learning['consequence'],
                                      sources=learning['sources'], authority='observed' if automatic else 'verified')
-                closed = self._call(session, options, workspace, 'brain-update', record_id=created['id'],
+                closed = self._call(session, options, workspace, 'brain-update', **checked, record_id=created['id'],
                                     revision=created['revision'], progress=learning['consequence'],
                                     transition='resolved' if learning['type'] == 'finding' else 'accepted',
                                     reason=reason, **({'authority': 'verified'} if automatic else {}))
@@ -365,7 +381,7 @@ class TaskContext:
                 immediate.extend(item for item in at_once.get('promoted') or [] if isinstance(item, dict))
             if saved['records']:
                 promotion = self._knowledge('run', session['project_id'], {'bank': options['bank'], 'action': 'promote-auto'},
-                                            _root=workspace)
+                                            _root=workspace, **checked)
                 saved['promotion'] = (promotion['result'] if promotion.get('ok') and isinstance(promotion.get('result'), dict)
                                       else {'error': promotion.get('error') or 'Automatic promotion did not run.'})
                 if immediate:

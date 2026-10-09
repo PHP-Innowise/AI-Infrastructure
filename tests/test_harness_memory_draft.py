@@ -28,6 +28,15 @@ class StubSessions:
 
 
 class ParseTests(unittest.TestCase):
+    def test_reported_memory_use_is_bounded_and_never_proves_reading(self):
+        path = 'memory-bank/chunks/known.md'
+        draft = memory_draft.parse(reply({'progress': 'Checked', 'used_memory': [path, path, '../foreign.md']}))
+        evidence = memory_draft.usage(draft, {'semantic': [{'path': path}]})
+        self.assertEqual([path], evidence['reported_used'])
+        self.assertEqual('agent-reported', evidence['attestation'])
+        self.assertEqual(1, evidence['delivered'])
+        self.assertFalse(memory_draft.usage({}, {})['reported'])
+
     def test_the_last_block_is_the_draft_and_it_is_clipped_to_the_form(self):
         earlier = reply({"progress": "stale", "next_steps": [], "learnings": []})
         draft = {"progress": "  Checked   at allocation. ", "next_steps": ["a", "b", "c", "d"],

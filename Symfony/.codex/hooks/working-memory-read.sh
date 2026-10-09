@@ -16,6 +16,8 @@ set -u
 
 # Output: plain text on stdout, which Claude Code and Codex add to the
 # prompt as context.
+# An internal draft-only follow-up must not create another memory turn.
+[ "${CONTEXT_MEMORY_RECOVERY:-}" = "1" ] && exit 0
 
 # A host that puts this turn's Task Capsule into the prompt itself sets
 # CONTEXT_CAPSULE_DELIVERED=1; the Harness does, retrieved for the message
@@ -54,8 +56,9 @@ run() {
 
 # The prompt arrives as JSON on stdin and is passed to the CLI as-is: query
 # distillation (informative terms ranked by rarity in the index) lives in
-# context.py, which also rejects anything that looks like a secret or
-# personal data before the text can reach a query or a manifest. The
+# context.py, and --sanitize there cuts secrets, personal data and pasted
+# transcript prefixes out of the prompt before any of it can reach a query or
+# a manifest; a prompt with nothing left to search gets no capsule. The
 # conversation's session id travels with it, so what this conversation was
 # handed in its last few turns is not handed again, and so does the path of
 # its transcript, where a compaction since the last turn shows.

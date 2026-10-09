@@ -239,3 +239,7 @@ Cms/wordpress/
 ├── tasks/                 # temporary work scaffold
 └── examples/              # source-only worked examples
 ```
+
+## Shared memory in direct clients
+
+The bundled [local Memory MCP](memory-bank/MCP.md) lets Claude Code, Codex and Cursor retrieve and record through the existing project runtime. Connect it per project; keep memory hooks active. Finalize authorized work with sanitized progress and source-backed findings/decisions, and report failed or partial saves.

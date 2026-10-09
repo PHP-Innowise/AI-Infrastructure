@@ -114,6 +114,7 @@ from validate import (
     parse_frontmatter,
     validate_metadata,
     validate_secret_patterns,
+    sanitize_automatic_query as _sanitize_automatic_query,
 )
 
 
@@ -913,6 +914,7 @@ def search_documents(
     limit: int,
     layer: Optional[str] = None,
     relevant_only: bool = False,
+    strong_only: bool = False,
 ) -> list[dict[str, object]]:
     """Search the index.
 
@@ -931,11 +933,14 @@ def search_documents(
     minimum = 0
     if relevant_only:
         tokens = informative_tokens(connection, query_tokens(query))
-        evidence = evidence_tokens(tokens)
-        if not evidence:
+        # Broad skill discovery keeps its routing contract; automatic capsules
+        # use strong_only and must ignore acknowledgements/intent-only terms.
+        if layer != "procedural" or strong_only:
+            tokens = evidence_tokens(tokens)
+        if not tokens:
             return []
-        coverage, distinctive = token_coverage(connection, evidence)
-        minimum = required_coverage(evidence)
+        coverage, distinctive = token_coverage(connection, tokens)
+        minimum = required_coverage(tokens)
         match_expression = " OR ".join(f'"{token}"' for token in tokens)
     else:
         match_expression = fts_query(query)
@@ -945,6 +950,7 @@ def search_documents(
         conditions.append("layer = ?")
         parameters.append(layer)
     parameters.append(limit if not relevant_only else limit * 10)
+    markers = ("", "") if relevant_only else ("[", "]")
     rows = connection.execute(
         f"""
         SELECT
@@ -952,21 +958,20 @@ def search_documents(
             layer,
             kind,
             title,
-            snippet(documents, 5, '[', ']', ' … ', 18) AS snippet
+            snippet(documents, 5, ?, ?, ' … ', 18) AS snippet
         FROM documents
         WHERE {' AND '.join(conditions)}
         ORDER BY bm25(documents), path
         LIMIT ?
         """,
-        parameters,
+        (*markers, *parameters),
     ).fetchall()
     selected = [
         row
         for row in rows
-        if is_relevant(
-            row["path"], coverage, distinctive, minimum, str(row["title"] or ""),
-            anchored=row["layer"] != "procedural",
-        )
+        if is_relevant(row["path"], coverage, distinctive, minimum, str(row["title"] or ""),
+                       anchored=row["layer"] != "procedural")
+        and not (strong_only and coverage.get(row["path"], 0) < minimum)
     ] if relevant_only else rows
     items = [dict(row) for row in selected[:limit]]
     if relevant_only:
@@ -982,6 +987,8 @@ def search_episodes(
     query: str,
     limit: int,
 ) -> list[dict[str, object]]:
+    if not evidence_tokens(query_tokens(query)):
+        return []
     rows = connection.execute(
         """
         SELECT
@@ -1107,6 +1114,14 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
     return " ".join(token for _, token, _ in kept)
 
 
+def sanitize_automatic_query(text: str) -> str:
+    """The prompt an automatic path searches with (`automatic_query`)."""
+    try:
+        return _sanitize_automatic_query(text)
+    except ValidationError as error:
+        raise ContextError(str(error)) from error
+
+
 def reject_capsule_privacy(
     label: str,
     prose: list[str],
@@ -1123,38 +1138,25 @@ def reject_capsule_privacy(
         )
 
 
-def sanitize_prompt(text: str) -> str:
-    """A prompt with what may never reach a query cut out of it.
-
-    Secrets, personal data and transcript-style role prefixes ("stderr:",
-    "user:") are removed; the words around them stay. The automatic paths -
-    every hook, the Harness - pass prompts as people write them, with pasted
-    logs and addresses, and the whole prompt used to be refused: on one real
-    project 35 of 60 first prompts got no memory at all for that reason.
-    """
-    for _ in range(3):
-        before = text
-        for pattern in (*SECRET_PATTERNS.values(), *CAPSULE_PRIVATE_PATTERNS):
-            text = pattern.sub(" ", text)
-        text = CAPSULE_RAW_TEXT_PATTERN.sub(" ", text)
-        if text == before:
-            break
-    return text
-
-
 def validate_direct_query_request(arguments: argparse.Namespace) -> None:
     """Reject unsafe direct queries before opening or mutating local state.
 
     A query a person typed is refused whole, so they see what was wrong. The
     automatic paths pass `refresh --sanitize`, and their prompt is cleaned
-    instead (`sanitize_prompt`); what remains is held to the same checks.
+    instead (`sanitize_automatic_query`); what remains is held to the same
+    checks. A prompt with nothing left to search is withheld, not replaced
+    by the task goal or the branch name.
     """
     if arguments.command in {"context", "retrieve"}:
         query = arguments.query
     elif arguments.command == "refresh":
         query = arguments.query
         if query is not None and getattr(arguments, "sanitize", False):
-            query = arguments.query = sanitize_prompt(query)
+            query = arguments.query = sanitize_automatic_query(query)
+            if not query.strip():
+                arguments.query = None
+                arguments.query_withheld = True
+                return
     else:
         return
     if query is None:
@@ -1320,7 +1322,7 @@ def build_context_packet(
         "warnings": capsule_warnings,
         "omitted": omitted,
     }
-    if not include_retrieval:
+    if not include_retrieval or not evidence_tokens(query_tokens(request_query)):
         return packet
 
     retrieval_query = build_capsule_query(request_query, working)
@@ -1329,7 +1331,7 @@ def build_context_packet(
     episodic_limit = min(limit, CAPSULE_LAYER_LIMITS["episodic"])
     procedural = search_documents(
         connection, request_query, procedural_limit, "procedural",
-        relevant_only=True,
+        relevant_only=True, strong_only=True,
     )
     semantic = search_documents(
         connection, request_query, semantic_limit, "semantic",
@@ -1343,7 +1345,7 @@ def build_context_packet(
         if len(deduplicate_context_items(procedural)) < procedural_limit:
             procedural += search_documents(
                 connection, retrieval_query, procedural_limit, "procedural",
-                relevant_only=True,
+                relevant_only=True, strong_only=True,
             )
         if len(deduplicate_context_items(semantic)) < semantic_limit:
             semantic += search_documents(
@@ -2620,7 +2622,7 @@ def capsule_excerpts(
 
 def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
     if "path" in item:
-        label, title = str(item["path"]), str(item.get("title") or "")
+        label, title = _bounded(item["path"], 260), str(item.get("title") or "")
         if section:
             # The section the excerpt below quotes: a later question answered
             # by another section of the document is handed that one too.
@@ -2638,7 +2640,7 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
     if isinstance(changed, list) and changed:
         marks.append(
             "cited file changed since this was verified: "
-            + ", ".join(str(path) for path in changed[:3])
+            + ", ".join(_bounded(path, 160) for path in changed[:3])
             + " — check it before relying on this"
         )
     suffix = f" ({'; '.join(marks)})" if marks else ""
@@ -2650,6 +2652,27 @@ def render_capsule_lines(
 ) -> list[str]:
     """The capsule as Claude Code, Codex, Cursor and Harness deliver it."""
     excerpts = dict(excerpts or {})
+    # Excerpts are document text on its way into a prompt: held to the same
+    # personal-data and secret screen as the query. capsule_excerpts already
+    # chose and sized them; the bound here only keeps text from elsewhere
+    # inside the ceiling. Each keeps the heading of the section it quotes.
+    for layer in ("semantic", "episodic"):
+        for item in capsule.get(layer) or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", f"episode {item.get('id')}"))
+            raw = excerpts.get(path)
+            if not raw:
+                continue
+            try:
+                safe = sanitize_automatic_query(str(raw))
+            except ContextError:
+                safe = ""
+            limit = max(EXCERPT_CHARACTERS) if layer == "semantic" else EPISODIC_EXCERPT_CHARACTERS
+            excerpt = Excerpt(_bounded(safe, limit))
+            excerpt.heading = getattr(raw, "heading", "")
+            excerpts[path] = excerpt
+
     # The first line is the render marker: the Cursor hooks accept a capsule
     # only if it starts with "working:", which is how a broken render is kept
     # from replacing a good rule now that they no longer parse JSON.
@@ -2665,14 +2688,14 @@ def render_capsule_lines(
     elif working is None:
         head.append("working: unavailable")
     else:
-        head.append(f"working: {working['task_id']} — {working['goal']}")
-        head.extend(working_state_lines(capsule))
+        head.append(f"working: {_bounded(working['task_id'], 200)} — {_bounded(working['goal'], 200)}")
+        head.extend(_bounded(line, 500) for line in working_state_lines(capsule))
     if capsule.get("kind") == "warming":
         head.append(f"warming: {capsule['pending_turns']} turn(s) pending")
-    for warning in capsule["warnings"]:
-        head.append(f"warning: {warning}")
+    for warning in capsule["warnings"][:3]:
+        head.append(f"warning: {_bounded(warning, 160)}")
     if capsule.get("last_turn"):
-        head.append(f"Last turn: {capsule['last_turn']}")
+        head.append(f"Last turn: {_bounded(capsule['last_turn'], 600)}")
     source = capsule.get("query_source")
     if source in ("task", "task-id"):
         # A capsule retrieved on a branch slug and one retrieved on the task's
@@ -2714,7 +2737,7 @@ def render_capsule_lines(
                     kind = "policy"
                 entries.append((layer, item, kind))
     excerpt_of = {
-        id(item): excerpts.get(str(item.get("path"))) for _, item, _ in entries
+        id(item): excerpts.get(str(item.get("path", f"episode {item.get('id')}"))) for _, item, _ in entries
     }
     # Kept when shrinking drops the excerpt: it still says where to look.
     section_of = {
@@ -2756,6 +2779,8 @@ def render_capsule_lines(
             entries.pop(index)
         elif entries:
             entries.pop()
+        elif len(head) > 1:
+            head.pop()
         else:
             break
         lines = assemble()
@@ -4752,6 +4777,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     refresh.add_argument("--limit", type=int, default=3)
+    refresh.add_argument("--path", action="append", default=[], dest="paths",
+        help="also deliver documents citing this canonical source path")
     refresh.add_argument(
         "--ephemeral",
         action="store_true",
@@ -6042,6 +6069,7 @@ def main() -> int:
                             allow_unprovisioned=True,
                             session_id=arguments.session_id,
                             transcript=arguments.transcript,
+                            paths=arguments.paths,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh
@@ -6084,6 +6112,12 @@ def main() -> int:
                     "warnings": warnings,
                     "capsule": capsule,
                 }
+                # A prompt the sanitizer left nothing of is still this turn:
+                # the host learns memory had nothing to search, and the
+                # operator report stays out of the prompt.
+                withheld = bool(getattr(arguments, "query_withheld", False))
+                if withheld:
+                    result["query_withheld"] = True
                 excerpts = (
                     capsule_excerpts(connection, capsule) if capsule is not None else {}
                 )
@@ -6125,7 +6159,7 @@ def main() -> int:
                     # on every prompt: the layer and timing report is only
                     # worth its characters when something is wrong. Without
                     # it, it is the operator's /memory report and stays whole.
-                    per_turn = capsule is not None
+                    per_turn = capsule is not None or withheld
                     healthy = all(
                         layers[layer] == "updated" for layer in DOCUMENT_LAYERS
                     )

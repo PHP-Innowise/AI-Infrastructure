@@ -15,6 +15,9 @@
 
 set -u
 
+# An internal draft-only follow-up must not create another memory turn.
+[ "${CONTEXT_MEMORY_RECOVERY:-}" = "1" ] && exit 0
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # Installed, the accelerator, the project and its state are all ROOT_DIR.
 # Attached - a launcher lends this clone's edition to a project and names it

@@ -211,6 +211,17 @@ class TaskContextTests(unittest.TestCase):
         self.assertTrue(promotion["enabled"], promotion)
         self.assertEqual(1, len(promotion["promoted"]), promotion)
 
+    def test_saved_progress_with_empty_plan_removes_finished_next_steps(self):
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager(); sid = self.linked_run(store)
+        draft = store.brain_info(sid)['memory_draft']['draft']
+        self.assertTrue(store.save_memory(sid, {**draft, 'verified': True})['ok'])
+        self.assertTrue(store.brain_info(sid)['task']['next_steps'])
+        result = store._task_context().save_memory(store.get(sid),
+            {'progress': 'Release coverage finished.', 'next_steps': [], 'learnings': []}, automatic=True)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual([], store.brain_info(sid)['task']['next_steps'])
+
     def test_saving_refuses_unconfirmed_or_unsourced_learnings_and_a_finished_task(self):
         store = self.manager()
         sid = self.linked_run(store)
@@ -267,9 +278,11 @@ class TaskContextTests(unittest.TestCase):
         self.assertRegex(brain["capsule"]["manifest"], r"^memory-bank/local/retrieval-manifests/")
         self.assertEqual(before, sorted(governed.glob("*.json")))
         memory = self.memory_events(store, sid)
-        self.assertEqual([True, False], [event["ok"] for event in memory])
+        self.assertEqual([True, True, False, False], [event["ok"] for event in memory])
         self.assertIn(f"Project memory for this turn: task {brain['task_id']}, ", memory[0]["text"])
-        self.assertEqual(memory_draft.summary("missing"), memory[1]["text"])
+        self.assertEqual(['started', 'failed'], [event['recovery'] for event in memory if 'recovery' in event])
+        self.assertEqual(memory_draft.summary("missing"), memory[-1]["text"])
+        self.assertEqual(2, len(self.calls))  # one bounded recovery; no third launch
         with self.assertRaisesRegex(sessions.SessionError, "for each message by itself"):
             store.prepare_context(sid, "cobalt allocation")
 
@@ -368,6 +381,168 @@ class TaskContextTests(unittest.TestCase):
             knowledge.lock.release()
         self.wait_status(store, sid, "completed")
         self.assertTrue(self.memory_events(store, sid)[0]["ok"])
+
+    def test_missing_draft_recovers_once_without_repeating_the_request(self):
+        self.assert_recovery("no draft")
+
+    def test_reviewed_session_does_not_recover_a_missing_draft(self):
+        from harness import memory_recovery
+        store = self.manager()
+        with patch.object(memory_recovery, 'recover', side_effect=AssertionError('Recovery for reviewed context')):
+            sid = self.linked_run(store)
+        self.assertEqual(1, len(self.calls))
+        self.assertFalse(any('recovery' in e for e in self.memory_events(store, sid)))
+
+    def test_unreadable_draft_recovers_once_without_repeating_the_request(self):
+        self.assert_recovery("```memory-draft\n{oops\n```")
+
+    def assert_recovery(self, initial):
+        self.fake.write_text(FAKE_DRAFT.replace(
+            'print(json.dumps({"type": "thread.started"',
+            'if not os.environ.get("CONTEXT_MEMORY_RECOVERY"):\n    text = ' + repr(initial) + '\nprint(json.dumps({"type": "thread.started"'))
+        store = self.manager()
+        before = len(self.calls)
+        sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, "completed")
+        calls = self.calls[before:]
+        self.assertEqual(2, len(calls))
+        self.assertEqual("native-context-fixture", calls[1]["session_id"])
+        self.assertEqual("plan", calls[1]["mode"])
+        self.assertFalse(calls[1]["agents_enabled"])
+        self.assertIn("Do not repeat the user task", calls[1]["prompt"])
+        self.assertEqual(1, len([e for e in store.events(sid) if e['kind'] == 'user']))
+        self.assertEqual("Check the cobalt allocation rule", store.get(sid)['brain']['query'])
+        findings = [r for r in store.brain_info(sid)['records'] if r['type'] == 'finding']
+        self.assertEqual(1, len(findings))
+        self.assertEqual(['started', 'recovered'], [e['recovery'] for e in self.memory_events(store, sid) if 'recovery' in e])
+
+    def test_valid_empty_draft_is_not_recovered_and_failed_primary_is_not_saved(self):
+        empty = "```memory-draft\n" + json.dumps({'progress': '', 'next_steps': [], 'learnings': []}) + "\n```"
+        self.fake.write_text(FAKE_NATIVE.replace('"RAW ASSISTANT FIXTURE OUTPUT"', repr(empty)))
+        store = self.manager(); before = len(self.calls)
+        sid = store.create(self.automatic(store))['id']; self.wait_status(store, sid, 'completed')
+        self.assertEqual(1, len(self.calls) - before)
+        self.assertFalse(any('recovery' in e for e in self.memory_events(store, sid)))
+        self.fake.write_text(FAKE_NATIVE + "\nsys.exit(1)\n")
+        before = len(self.calls)
+        sid = store.create(self.automatic(store))['id']; self.wait_status(store, sid, 'failed')
+        self.assertEqual(1, len(self.calls) - before)
+        self.assertFalse(any('recovery' in e for e in self.memory_events(store, sid)))
+
+    def test_recovery_cancellation_preserves_cancelled_status_and_saves_nothing(self):
+        from harness import memory_recovery
+        original = memory_recovery.recover
+        def cancel_between_phases(store, sid, *args, **kwargs):
+            store.cancel(sid)
+            return original(store, sid, *args, **kwargs)
+        store = self.manager()
+        with patch.object(memory_recovery, 'recover', cancel_between_phases):
+            sid = store.create(self.automatic(store))['id']
+            self.wait_status(store, sid, 'cancelled')
+        self.assertEqual(1, len(self.calls))
+        self.assertEqual(['started', 'cancelled'], [e['recovery'] for e in self.memory_events(store, sid) if 'recovery' in e])
+        self.assertFalse(any(r['type'] == 'finding' for r in store.brain_info(sid)['records']))
+        self.assertEqual('cancelled', [e['outcome'] for e in store.events(sid) if 'outcome' in e][-1])
+
+    def test_recovery_cancellation_while_child_is_running_saves_nothing(self):
+        self.fake.write_text(FAKE_NATIVE.replace('print(json.dumps({"type": "thread.started"',
+            'if os.environ.get("CONTEXT_MEMORY_RECOVERY"):\n    import time; time.sleep(5)\nprint(json.dumps({"type": "thread.started"'))
+        store = self.manager(); sid = store.create(self.automatic(store))['id']
+        deadline = time.monotonic() + 10
+        while len(self.calls) < 2 and time.monotonic() < deadline: time.sleep(.01)
+        self.assertEqual(2, len(self.calls))
+        store.cancel(sid); self.wait_status(store, sid, 'cancelled')
+        self.assertFalse(any(r['type'] == 'finding' for r in store.brain_info(sid)['records']))
+        self.assertEqual('cancelled', self.memory_events(store, sid)[-1]['recovery'])
+
+    def test_recovery_without_native_id_or_measurable_budget_is_skipped(self):
+        self.fake.write_text(FAKE_NATIVE.replace('print(json.dumps({"type": "thread.started", "thread_id": "native-context-fixture"}), flush=True)', ''))
+        store = self.manager(); sid = store.create(self.automatic(store))['id']; self.wait_status(store, sid, 'completed')
+        self.assertEqual(1, len(self.calls))
+        self.assertIn('skipped', [e.get('recovery') for e in self.memory_events(store, sid)])
+        self.fake.write_text(FAKE_NATIVE)
+        before = len(self.calls)
+        sid = store.create(self.automatic(store, budgets={'tokens': 1000}))['id']; self.wait_status(store, sid, 'completed')
+        self.assertEqual(1, len(self.calls) - before)
+        self.assertIn('skipped', [e.get('recovery') for e in self.memory_events(store, sid)])
+
+    def test_cancellation_after_recovered_reply_before_save_starts_no_write(self):
+        self.fake.write_text(FAKE_DRAFT.replace(
+            'print(json.dumps({"type": "thread.started"',
+            'if not os.environ.get("CONTEXT_MEMORY_RECOVERY"):\n    text = "No draft"\nprint(json.dumps({"type": "thread.started"'))
+        original = TaskContext.save_memory
+        before = []
+        def cancel_before_save(context, session, *args, **kwargs):
+            before.append(context.sessions.brain_info(session['id'])['task'])
+            context.sessions.cancel(session['id'])
+            return original(context, session, *args, **kwargs)
+        store = self.manager()
+        with patch.object(TaskContext, 'save_memory', cancel_before_save):
+            sid = store.create(self.automatic(store))['id']; self.wait_status(store, sid, 'cancelled')
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual(1, len(before))
+        self.assertEqual(before[0], store.brain_info(sid)['task'])
+        self.assertFalse(any(r['type'] == 'finding' for r in store.brain_info(sid)['records']))
+        self.assertEqual('cancelled', [e['outcome'] for e in store.events(sid) if 'outcome' in e][-1])
+
+    def test_claude_recovery_usage_and_prompt_counts_share_original_launch(self):
+        self.fake.write_text('''import json, os, sys
+recovery = bool(os.environ.get("CONTEXT_MEMORY_RECOVERY"))
+print(json.dumps({"type":"system","subtype":"init","session_id":"native-context-fixture","claude_code_version":"2.1.277"}))
+reply = "Done without draft" if not recovery else "```memory-draft\\n" + json.dumps({"progress":"Cobalt checked", "next_steps":[], "learnings":[]}) + "\\n```"
+print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":reply,"session_id":"native-context-fixture","total_cost_usd":1.2 if recovery else 1.0,"usage":{"input_tokens":7 if recovery else 10,"output_tokens":2 if recovery else 3}}))
+''')
+        with patch.object(sessions.providers, 'discover_providers', return_value=[
+                {'id':'claude', 'name':'Fixture', 'available':True, 'executable':str(self.fake)}]):
+            store = self.manager()
+            sid = store.create(self.automatic(store, provider='claude'))['id']; self.wait_status(store, sid, 'completed')
+        self.assertEqual(2, len(self.calls))
+        usage = store.get(sid)['budget_usage']
+        self.assertEqual(22, usage['tokens'])
+        self.assertAlmostEqual(1.2, usage['cost_usd'])
+        self.assertTrue(any(e.get('memory_recovery') for e in store.events(sid) if e['kind']=='usage'))
+        row = store.db.execute('SELECT context FROM launches WHERE session_id=?', (sid,)).fetchone()
+        context = json.loads(row['context'])
+        from harness import memory_recovery
+        self.assertEqual(len(memory_recovery.PROMPT), context['recovery']['characters'])
+        self.assertGreaterEqual(context['ledger']['instructions'], len(memory_recovery.PROMPT))
+
+    def test_automatic_query_is_sanitized_before_goal_and_memory_state(self):
+        from harness.task_context import message_query
+        prompt = "Check CMS768 cobalt allocation for person@example.test; call +370 600 12345"
+        options = TaskContext.validate_options({"bank": "memory-bank", "auto": True}, prompt)
+        self.assertIn("CMS768 cobalt allocation", options["query"])
+        for key in ("query", "goal", "task_id"):
+            self.assertNotIn("person@example.test", options[key])
+            self.assertNotIn("12345", options[key])
+        for private_only in ("person@example.test", "Customer email: person@example.test",
+                             "Call +370 600 12345", "Patient name: Alice Smith",
+                             "Client address: Main Street 7, Vilnius", "Client address: Main Street 7\nVilnius",
+                             "Patient name: Alice; Smith; Fix CMS768",
+                             "Client address: Building A; Vilnius; Fix CMS768"):
+            self.assertEqual("", message_query(private_only))
+        # A secret is cut out, not a reason to drop the turn's memory; a pasted
+        # transcript line loses its role prefix and keeps its words.
+        self.assertEqual("", message_query("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"))
+        self.assertEqual("copied request", message_query("User: copied request"))
+        # The shared adapter has one implementation for installed hooks and Harness.
+        runtime = Path(__file__).resolve().parents[1] / "PHP Core/memory-bank/scripts/automatic_query.py"
+        from harness import automatic_query
+        self.assertEqual(runtime.read_bytes(), Path(automatic_query.__file__).read_bytes())
+
+    def test_pii_only_turn_skips_memory_and_does_not_create_a_task_or_manifest(self):
+        store = self.manager()
+        for private_only in ("person@example.test", "Customer email: person@example.test", "Call +370 600 12345",
+                             "Patient name: Alice Smith", "Client address: Main Street 7, Vilnius"):
+            sid = store.create(self.automatic(store, prompt=private_only))["id"]
+            completed = self.wait_status(store, sid, "completed")
+            self.assertEqual("", completed["brain"]["query"])
+            self.assertIsNone(completed["brain"].get("capsule"))
+            self.assertFalse(list(self.project.glob("**/*retrieval-manifests/*.json")))
+            self.assertFalse(list(self.project.glob("project-brain/dynamic/tasks/*.md")))
+            self.assertTrue(any("no safe technical content" in event.get("text", "")
+                                for event in store.events(sid) if event["kind"] == "memory"))
+            self.assertNotIn("person@example.test", json.dumps(completed["brain"]))
 
     def test_options_name_an_automatic_task_from_the_first_message(self):
         validate = TaskContext.validate_options

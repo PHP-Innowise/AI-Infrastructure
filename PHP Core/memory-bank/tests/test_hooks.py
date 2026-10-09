@@ -611,12 +611,70 @@ class WorkingMemoryRuleTest(unittest.TestCase):
 
 
 class HostDeliveredCapsuleTest(unittest.TestCase):
+    def test_internal_recovery_skips_all_memory_delivery_and_checkpoint_hooks(self):
+        for tool in ('claude', 'codex', 'cursor'):
+            hooks = ['local-context.sh', 'working-memory-write.sh']
+            if tool != 'cursor': hooks.append('working-memory-read.sh')
+            for hook in hooks:
+                with self.subTest(tool=tool, hook=hook):
+                    result = run_hook(tool, hook, {}, env={'CONTEXT_MEMORY_RECOVERY': '1'})
+                    self.assertEqual((0, '', ''), (result.returncode, result.stdout, result.stderr))
+
     """A host that put the turn's capsule into the prompt silences the read hook.
 
     The Harness retrieves for the message alone and sets
     CONTEXT_CAPSULE_DELIVERED=1. A second capsule, distilled from the whole
     prompt the host assembled, would spend the turn's memory budget twice.
     """
+
+    def test_prompt_adapter_sanitizes_before_retrieval_and_skips_pii_only(self) -> None:
+        for tool in ("claude", "codex"):
+            with self.subTest(tool=tool), tempfile.TemporaryDirectory(prefix="safe-prompt-hook-") as temp:
+                root = Path(temp)
+                scripts = root / "memory-bank/scripts"
+                scripts.mkdir(parents=True)
+                for source in (EDITION_ROOT / "memory-bank/scripts").glob("*.py"):
+                    shutil.copy(source, scripts)
+                hooks = root / f".{tool}/hooks"
+                hooks.mkdir(parents=True)
+                shutil.copy(hook_path(tool, "working-memory-read.sh"), hooks)
+                (root / "specs").mkdir()
+                (root / "specs/cobalt.md").write_text("# Cobalt\n\nCobalt allocation requires one owner.\n")
+                (root / "AGENTS.md").write_text("# Policy\n\nCobalt allocation rules.\n")
+                subprocess.run(["git", "init", "--quiet", str(root)], check=True, capture_output=True)
+                environment = {**os.environ, "CONTEXT_TASK_ID": "TASK-HOOK", "CONTEXT_HOOK_BUDGET": "10"}
+                environment.pop("CONTEXT_CAPSULE_DELIVERED", None)
+                environment.pop("CONTEXT_MEMORY_RECOVERY", None)
+                def call(prompt):
+                    return subprocess.run([BASH, str(hooks / "working-memory-read.sh")],
+                        input=json.dumps({"prompt": prompt}), text=True, capture_output=True,
+                        env=environment, cwd=root, timeout=HOOK_TIMEOUT)
+                result = call("Check cobalt allocation for person@example.test; call +370 600 12345")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("allocation requires one owner", result.stdout)
+                self.assertNotIn("person@example.test", result.stdout + result.stderr)
+                manifests = list(root.glob("memory-bank/local/retrieval-manifests/*.json"))
+                self.assertTrue(manifests)
+                for manifest in manifests:
+                    self.assertNotIn("person@example.test", manifest.read_text())
+                    self.assertNotIn("12345", manifest.read_text())
+                    if tool == "codex":
+                        self.assertIn({"path": "AGENTS.md", "reason": "host-loaded"},
+                                      json.loads(manifest.read_text())["excluded"])
+                before = {file.name for file in manifests}
+                for prompt in ("person@example.test", "Customer email: person@example.test",
+                               "Call +370 600 12345", "Patient name: Alice Smith",
+                               "Client address: Main Street 7, Vilnius",
+                               "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"):
+                    skipped = call(prompt)
+                    self.assertEqual((0, "", ""), (skipped.returncode, skipped.stdout, skipped.stderr))
+                self.assertEqual(before, {file.name for file in root.glob("memory-bank/local/retrieval-manifests/*.json")})
+                # A pasted transcript line loses its role prefix and keeps its words.
+                pasted = call("User: cobalt allocation owner")
+                self.assertEqual(0, pasted.returncode, pasted.stderr)
+                self.assertIn("allocation requires one owner", pasted.stdout)
+                for manifest in root.glob("memory-bank/local/retrieval-manifests/*.json"):
+                    self.assertNotIn("User:", manifest.read_text())
 
     def test_read_hook_stands_down_only_when_the_host_delivered_the_capsule(self) -> None:
         with tempfile.TemporaryDirectory(prefix="hook-tests-") as directory:
@@ -629,6 +687,7 @@ class HostDeliveredCapsuleTest(unittest.TestCase):
                     marker = root / "cli-ran"
                     cli = root / "memory-bank/scripts/context.py"
                     cli.parent.mkdir(parents=True)
+                    shutil.copy(EDITION_ROOT / "memory-bank/scripts/automatic_query.py", cli.parent)
                     cli.write_text(
                         "import pathlib\n"
                         f"pathlib.Path({str(marker)!r}).write_text('ran')\n"

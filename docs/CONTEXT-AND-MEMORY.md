@@ -457,9 +457,35 @@ Two things the index deliberately does not carry:
 
 The link is deliberately derived rather than durable. Carrying the same edge
 on the chunk would put it under `chunk_source_digests` and `validate_metadata`,
-where editing the referenced file evicts the chunk as `source-changed` and
-deleting it becomes a permanent bank-validation error reachable from
-`apply_promotion`, `compact` and `validate`.
+where every edit to the referenced file would mark the chunk as changed since
+verification and deleting it becomes a permanent bank-validation error
+reachable from `apply_promotion`, `compact` and `validate`.
+
+#### Written knowledge stays
+
+A resolved finding, a closed incident or an accepted decision leaves the
+index as a record: from then on its chunk is what retrieval serves. Two things
+used to make that hand-over fail for good, and on a real project only 2 of 70
+resolved findings ever reached the Memory Bank:
+
+* **Promotion waited for the turn boundary**, up to five turns after the
+  resolving update. The fix that resolved a finding usually edits the file the
+  finding cites, so by then the citation no longer matched what was verified
+  and promotion refused it. `brain-update` now promotes the record it resolves
+  at once (`promote_on_resolution`), while its citations still say what was
+  checked; a failure is reported and never undoes the update.
+* **Any edit to a cited file evicted the knowledge.** A chunk or record whose
+  cited file changed after verification now stays in retrieval, marked
+  `source_changed` - the capsule says "cited file changed since this was
+  verified" next to it - and ranked at half its score below fresh knowledge.
+  Only a deleted citation (`source-missing`) takes it out. Automatic promotion
+  of a record whose citation changed proceeds, and the chunk keeps the digests
+  taken at verification rather than laundering the edit into a fresh citation.
+
+`validate` lists such records as warnings instead of failing the project, and
+the turns a branch keeps working after its task was completed are dropped with
+a note instead of failing every flush, which had stopped promotion and
+compaction as well.
 
 #### Promotion carries the citation through
 
@@ -479,8 +505,8 @@ Two limits on what is carried:
 
 * **Only `sources`, never `files`.** A record's `files` is Git churn in the
   Git-toplevel frame; merging it would put code paths under
-  `chunk_source_digests`, where the next edit to any of them evicts the chunk
-  as `source-changed`.
+  `chunk_source_digests`, where the next edit to any of them marks the chunk
+  as changed since verification.
 * **Only citations whose file still exists.** A file deleted between review
   and apply would otherwise produce a chunk that fails `validate_metadata` at
   birth, failing a promotion that has nothing to do with that file.
@@ -1054,8 +1080,9 @@ It rebuilds deterministic indexes, validates the result, and restores all
 moves/indexes on failure.
 
 Both validations leave out source freshness. A record whose cited file changed
-after it was written is stale, which retrieval and promotion act on, but moving
-terminal records can neither cause nor cure it. With freshness in, the first
+after it was written is stale - retrieval serves it marked for checking and
+`validate` lists it as a warning - but moving terminal records can neither cause
+nor cure it. With freshness in, the first
 edit to any file a record cited — the living spec behind an accepted decision,
 the code a finding was about — refused every later compaction, manual or
 automatic.

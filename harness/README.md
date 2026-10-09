@@ -1292,7 +1292,7 @@ workspace, or already saved from this session, are left out. Then the project's
 automatic promotion runs once (`context.py promote-auto`), under the runtime's own
 rules and its `automatic_promotion` setting; promoted chunks are tagged
 `auto-promoted`. A second line in the conversation says what was saved, promoted
-or held back. A run that fails or is cancelled saves nothing.
+or held back. A run that fails or is cancelled saves nothing. If a completed normal automatic run omits its draft or returns invalid JSON, one bounded read-only follow-up resumes the same native session to format it. The follow-up shares the launch budget, disables helpers/memory hooks, and never repeats the task; a failed attempt is reported without discarding completed work. The optional used_memory field distinguishes delivered pointers from agent-reported use. See [shared memory integration](../docs/MEMORY-INTEGRATION.md) for direct-client MCP setup.
 
 Choose an existing task, or a new task with your own ID and goal, under **Memory**;
 memory still runs by itself for it. In a project without a governed context
@@ -1388,7 +1388,7 @@ an over-allocation result fails the reviewer instead of claiming the limit held.
 Verification from the repository root:
 
 ```bash
-python3 -m unittest tests.test_harness_providers tests.test_harness_commands tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
+python3 -m unittest tests.test_harness_providers tests.test_harness_commands tests.test_harness_sessions tests.test_harness_web tests.test_harness_process_guard tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_memory_draft tests.test_memory_mcp tests.test_mcp_registration tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash
 harness/.venv/bin/python -m unittest discover -s harness/tests -p 'test_*.py'
 ```
 

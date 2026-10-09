@@ -25,10 +25,10 @@ multi_agent = false
 [agents]
 enabled = false
 
-# MCP servers used by the accelerator (none required today).
-# Add servers here when a workflow needs external systems, e.g.:
-#
-# [mcp_servers.github]
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-github"]
-# enabled = true
+# Project memory is registered automatically; see memory-bank/MCP.md.
+# BEGIN HARNESS MEMORY MCP
+[mcp_servers.harness_memory]
+command = "python3"
+args = ["-c", "# Harness memory bootstrap v1\nimport os, sys, runpy\nfrom pathlib import Path\nhost = sys.argv[1]\nif host not in ('claude', 'codex'):\n    raise SystemExit('Unsupported memory host')\nmarker = '.mcp.json' if host == 'claude' else '.codex/config.toml'\nstart = (Path(os.environ.get('CLAUDE_PROJECT_DIR') or os.getcwd()) if host == 'claude' else Path.cwd()).resolve()\nroot = next((p for p in (start, *start.parents) if (p / marker).is_file()), None)\nif root is None:\n    raise SystemExit('Project MCP configuration not found')\nscript = root / 'memory-bank/scripts/mcp_server.py'\nif not script.is_file():\n    raise SystemExit('Install the memory runtime in this project')\nsys.path.insert(0, str(script.parent))\nsys.argv = [str(script), '--root', str(root), '--host', host]\nrunpy.run_path(str(script), run_name='__main__')", "codex"]
+enabled = true
+# END HARNESS MEMORY MCP

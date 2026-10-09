@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import importlib.util
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -96,6 +98,22 @@ ENTRIES_END = "# END ACCELERATOR MANAGED ENTRIES"
 # wired hook as a direct command, so a hook installed without the bit exits
 # 126 and its effect - a lock released, a command blocked - never happens.
 EXECUTABLE_INSTALL_MODE = 0o755
+MCP_CONFIG_FILES = {'.mcp.json', '.cursor/mcp.json', '.codex/config.toml'}
+MCP_CODEX_BLOCK = re.compile(rb'# BEGIN HARNESS MEMORY MCP\n.*?# END HARNESS MEMORY MCP\n?', re.S)
+
+
+def codex_memory_merge(source: bytes, destination: Path) -> bool:
+    """Merge only the memory block, and only into the accelerator's own config.
+
+    The shipped config also turns Codex hooks on and its built-in agents off;
+    appending the block to a client's config would drop those silently, so a
+    client-owned file stays an ordinary collision.
+    """
+    if b'# BEGIN HARNESS MEMORY MCP' not in source:
+        return False
+    if not destination.is_file():
+        return True
+    return MCP_CODEX_BLOCK.sub(b'', destination.read_bytes()) == MCP_CODEX_BLOCK.sub(b'', source)
 
 
 class InventoryError(Exception):
@@ -317,7 +335,7 @@ def component_for(path: str) -> str:
         ".codex/README.md",
     }:
         return "shared"
-    if path.startswith(".claude/"):
+    if path == '.mcp.json' or path.startswith(".claude/"):
         return "claude"
     if path.startswith(".cursor/"):
         return "cursor"
@@ -545,13 +563,46 @@ def install(
     files = selected_files(data, tools)
     collisions: list[tuple[str, str, str]] = []
     resolutions: dict[str, tuple[str, Path, bytes | None]] = {}
+    mcp, python = None, None
     for component, path in files:
         source_path = data["source_overrides"].get(path, path)
         source = root / edition_path(edition) / PurePosixPath(source_path)
         destination = target / PurePosixPath(path)
+        if path in MCP_CONFIG_FILES:
+            blocked_parent = False
+            for parent in destination.parents:
+                if parent == target: break
+                if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+                    collisions.append((component, path, 'parent-obstruction'))
+                    blocked_parent = True
+                    break
+            if blocked_parent: continue
         if destination.is_symlink():
             collisions.append((component, path, "symlink"))
             continue
+        if path in MCP_CONFIG_FILES and (path != '.codex/config.toml' or codex_memory_merge(source.read_bytes(), destination)):
+            if destination.exists() and not destination.is_file():
+                collisions.append((component, path, 'existing-non-file'))
+                continue
+            try:
+                if mcp is None:
+                    spec = importlib.util.spec_from_file_location('accelerator_memory_mcp_config',
+                        root / edition_path(edition) / 'memory-bank/scripts/mcp_config.py')
+                    mcp = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mcp)
+                    python = mcp.python_command()
+                previous = destination.read_bytes() if destination.exists() else None
+                content = mcp.merge(path, previous, source.read_bytes(), python)
+            except (ValueError, UnicodeError, OSError) as error:
+                collisions.append((component, path, 'cannot-merge:memory-mcp-configuration'))
+                continue
+            if previous is not None:
+                resolutions[path] = ('unchanged' if previous == content else 'merge', destination, content)
+            elif content != source.read_bytes():
+                resolutions[path] = ('copy-as', destination, content)
+            # Parent checks below still apply to new materialized files.
+            if previous is not None:
+                continue
         if destination.exists():
             if not destination.is_file():
                 collisions.append((component, path, "existing-non-file"))
