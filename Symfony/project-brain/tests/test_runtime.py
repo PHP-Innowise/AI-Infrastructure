@@ -3134,6 +3134,63 @@ class EpisodicPillarTest(RuntimeHarness):
             [], list((self.repository / "project-brain/dynamic/events").glob("*.md"))
         )
 
+    def test_a_failed_commit_takes_the_completion_event_with_it(self) -> None:
+        # The event is written before the SQLite commit, and the rollback
+        # restored only files that existed beforehand: a commit that failed on
+        # disk or I/O reopened the task but left a "Completed" event outside
+        # the restored index, so `validate` failed, and the retry could not
+        # write the event of the completion that did happen.
+        task = self.start("TASK-COMMIT-FAILS")
+        events = self.repository / "project-brain/dynamic/events"
+        path, record, _ = brain.find_task(self.repository, "TASK-COMMIT-FAILS")
+        tracked = [
+            path,
+            brain.handoff_path(self.repository, record["id"]),
+            *brain.index_paths(self.repository),
+        ]
+        before = {item: item.read_bytes() for item in tracked}
+        real_connect = sqlite3.connect
+
+        class FailingCommit(sqlite3.Connection):
+            def commit(self) -> None:
+                # Only the completion commits with its event already on disk.
+                if any(events.glob("*.md")):
+                    raise sqlite3.OperationalError("disk I/O error")
+                super().commit()
+
+        with mock.patch.object(
+            sqlite3,
+            "connect",
+            lambda *arguments, **keywords: real_connect(
+                *arguments, factory=FailingCommit, **keywords
+            ),
+        ):
+            code, _, error = self.run_main(
+                "complete", "--task-id", "TASK-COMMIT-FAILS",
+                "--revision", str(task["revision"]),
+                "--outcome", self.OUTCOME, "--verification", self.CHECK,
+            )
+        self.assertEqual(1, code)
+        self.assertIn("disk I/O error", error)
+        self.assertEqual([], list(events.glob("*.md")))
+        self.assertEqual(before, {item: item.read_bytes() for item in tracked})
+        self.assertEqual(
+            "active", brain.get_task(self.repository, "TASK-COMMIT-FAILS")["status"]
+        )
+        validation = self.run_cli("validate", "--json")
+        self.assertEqual(0, validation.returncode, validation.stdout)
+        status = json.loads(self.run_cli("status", "--json").stdout)
+        self.assertEqual((1, 0), (status["working"], status["episodes"]))
+
+        retry = self.run_cli(
+            "complete", "--task-id", "TASK-COMMIT-FAILS",
+            "--revision", str(task["revision"]),
+            "--outcome", self.OUTCOME, "--verification", self.CHECK, "--json",
+        )
+        self.assertEqual(0, retry.returncode, retry.stderr)
+        self.assertIsNotNone(json.loads(retry.stdout)["event_id"], retry.stdout)
+        self.assertEqual(1, len(list(events.glob("*.md"))))
+
 
 class RetrievalReportTest(RuntimeHarness):
     """Manifests were written and never read; this is the reader."""

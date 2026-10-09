@@ -836,6 +836,18 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **A completion whose commit fails no longer leaves its event behind.**
+  `complete` writes the Git-tracked `event` before the SQLite commit, and the
+  rollback restored only files that existed beforehand: the task, its handoff
+  and the indexes. A commit that failed on disk or I/O therefore reopened the
+  task but kept a "Completed ..." event outside the restored index, so
+  `validate` reported the active index as stale, and a retried completion wrote
+  no event of its own (`event_id: null`) because the orphan already held its
+  external ID. The created event is now part of the same compensation. A
+  regression test fails the commit once the event exists and checks that no
+  event remains, the task, handoff and indexes are byte-identical, `validate`
+  is clean, and a retry writes exactly one event.
+
 - **Prompt distillation now preserves terms that exist only in local
   episodes.** The prompt hook previously ranked words against indexed files
   alone, so a natural prompt containing one repository word plus a distinctive

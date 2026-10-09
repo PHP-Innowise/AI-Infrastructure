@@ -177,7 +177,9 @@ record type that reports that something happened rather than what to do about
 it, and it is excluded from promotion for exactly that reason — the record
 fixes a lifecycle transition that occurred and asserts nothing about how to
 act. It is best-effort: a task that completed is never reopened because its
-episode could not be written.
+episode could not be written. The reverse holds as well: a completion that
+fails, up to and including the database commit, takes its event with it, so
+no record reports a completion that did not happen.
 
 `event` is the only record type mapped to the episodic layer. An `incident`
 stays semantic even though it is also a record of something that happened: an
