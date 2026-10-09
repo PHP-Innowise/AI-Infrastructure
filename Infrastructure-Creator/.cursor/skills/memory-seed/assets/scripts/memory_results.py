@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 from brain_runtime import (
+    LIFECYCLES,
     BrainError,
     atomic_json,
     auto_promote,
@@ -288,9 +289,13 @@ def record_result(
                     goal=learning["consequence"],
                 )
                 state = "created"
-            if current["status"] != closed_state or current["authority"] != "verified":
-                # Created just now, or left open by an attempt that stopped
-                # between writing the record and closing it.
+            # Only a record still in its initial state is this result's to
+            # finish: created just now, or left open by an attempt that
+            # stopped between writing and closing it. One that has moved on
+            # since (superseded, under investigation) is someone's later work.
+            unfinished = current["status"] == LIFECYCLES[learning["type"]]["initial"] or (
+                current["status"] == closed_state and current["authority"] != "verified")
+            if unfinished:
                 if owner not in current["authorized_owners"]:
                     raise BrainError("An earlier attempt's record belongs to another owner")
                 current = update_record(

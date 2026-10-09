@@ -8352,6 +8352,21 @@ class RecordResultTest(RuntimeHarness):
         self.assertEqual([("resolved", "verified")], [(r["status"], r["authority"]) for r in self.records()])
         self.assertEqual("Authority checked.", self.task()["progress"])
 
+    def test_a_learning_someone_took_further_is_left_as_it_is(self) -> None:
+        # Only a record still in its initial state is a result's to finish:
+        # one under investigation since is someone's later work.
+        identifier = memory_results.learning_id("TASK-RESULT", self.LEARNING)
+        record = brain.create_record(self.repository, "finding", identifier, self.LEARNING["title"], [],
+                                     self.LEARNING["sources"], owner="local", authority="observed",
+                                     goal=self.LEARNING["consequence"])
+        brain.update_record(self.repository, record["id"], expected_revision=record["revision"],
+                            progress=None, next_steps=[], files=[], sources=[], actor="local",
+                            transition_to="investigating", reason="Under investigation")
+        saved = self.record("run-1", self.result())
+        self.assertEqual(["existing"], [item["state"] for item in saved["records"]])
+        self.assertEqual("investigating", self.records()[0]["status"])
+        self.assertEqual("Authority checked.", self.task()["progress"])
+
     def test_a_stale_revision_writes_nothing(self) -> None:
         revision = self.task()["revision"]
         moved = self.run_cli("update", "--task-id", "TASK-RESULT", "--revision", "auto",
