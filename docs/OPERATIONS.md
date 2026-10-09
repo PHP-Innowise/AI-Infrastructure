@@ -985,8 +985,9 @@ Manifests written before schema version 2 carry no gate, no phase timings, no
 query source and no per-item score. They are counted, and each metric reports
 how many manifests could answer it, rather than silently averaging over the
 subset that can. Path counts come from the manifest's selection, which is
-recorded before the capsule's character ladder may drop an item, so they are
-an upper bound on what the model was shown.
+recorded after the capsule's character limits: an item the rendered text (or,
+for `--json`, the JSON) could not hold is excluded as `capsule-limit` rather
+than counted as shown. Manifests written before that change count it.
 
 The report never contains the query text, in either output mode.
 

@@ -8267,6 +8267,265 @@ class DeliveryTest(RuntimeHarness):
         self.assertIn("specs/quartz.md", paths)
         self.assertNotIn("specs/long.md", paths)
 
+    def test_a_plural_and_its_singular_weigh_the_same_in_the_excerpt(self) -> None:
+        # The index's Porter tokenizer matched "classes" to "class"; the
+        # excerpt read them as "class" and "clas", so the rare word that
+        # answered fell to the lowest weight and a section sharing two common
+        # words with the request was quoted instead.
+        pairs = {
+            "ledger-1": ("classes", "class"),
+            "ledger-2": ("policy", "policies"),
+            "ledger-3": ("businesses", "business"),
+            "ledger-4": ("stopped", "stop"),
+        }
+        specs = self.repository / "specs"
+        for stem, (_, written) in pairs.items():
+            specs.joinpath(f"{stem}.md").write_text(
+                f"# Ledger {stem[-1]}\n\n"
+                f"## Rare details\n\nThe InvoiceMapper {written} is what the "
+                "container resolves first.\n\n"
+                "## Common details\n\nThe billing module wiring lists every "
+                "listener of the billing module.\n",
+                encoding="utf-8",
+            )
+        for index in range(8):
+            specs.joinpath(f"common-{index}.md").write_text(
+                f"# Common {index}\n\nThe billing module note number {index}.\n",
+                encoding="utf-8",
+            )
+        for index in range(10):
+            specs.joinpath(f"other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+        self.start("TASK-DELIVER")
+        for stem, (asked, written) in pairs.items():
+            with self.subTest(asked=asked, written=written):
+                forms = retrieval.term_forms([asked, written])
+                self.assertEqual(forms[asked], forms[written], forms)
+                text = self.refresh(f"billing module {asked}")["capsule_text"]
+                self.assertIn(f"specs/{stem}.md § Rare details", text)
+                self.assertIn(f"The InvoiceMapper {written} is what", text)
+
+    def record_episode(self) -> None:
+        recorded = self.run_cli(
+            "record", "--summary", "Amber viaduct rollout",
+            "--outcome",
+            "The amber viaduct rollout finished after the canary held for an hour.",
+            "--json",
+        )
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+
+    def test_a_recorded_episode_is_handed_once_per_revision(self) -> None:
+        # A recorded episode took no part in the conversation's record: every
+        # turn handed the same one again and counted no repeat.
+        self.start("TASK-DELIVER")
+        self.record_episode()
+        query = "amber viaduct rollout canary"
+        first = self.refresh(query, "--session-id", "repeat-local")
+        self.assertEqual(
+            ["Amber viaduct rollout"],
+            [item.get("summary") for item in first["capsule"]["episodic"]],
+        )
+        self.assertEqual(0, first["capsule"]["repeated"])
+        second = self.refresh(query, "--session-id", "repeat-local")
+        self.assertEqual([], second["capsule"]["episodic"])
+        self.assertEqual(1, second["capsule"]["repeated"])
+        self.assertIn("1 item(s) handed earlier", second["capsule_text"])
+        manifest = json.loads(
+            (self.repository / second["capsule"]["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(0, manifest["local_episode_count"])
+        self.assertIn(
+            {"path": "episode:1", "reason": "delivered-this-session"},
+            manifest["excluded"],
+        )
+        # Another conversation is handed it.
+        other = self.refresh(query, "--session-id", "repeat-other")
+        self.assertEqual(1, len(other["capsule"]["episodic"]))
+        # An episode whose content changed is new to the conversation.
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            with connection:
+                connection.execute(
+                    "UPDATE episodes SET outcome = ? WHERE rowid = 1",
+                    ("The amber viaduct rollout was rolled back when the canary failed.",),
+                )
+        finally:
+            connection.close()
+        changed = self.refresh(query, "--session-id", "repeat-local")
+        self.assertEqual(
+            ["The amber viaduct rollout was rolled back when the canary failed."],
+            [item.get("outcome") for item in changed["capsule"]["episodic"]],
+        )
+        self.assertEqual(0, changed["capsule"]["repeated"])
+
+    def test_a_compacted_conversation_is_handed_its_episode_again(self) -> None:
+        self.start("TASK-DELIVER")
+        self.record_episode()
+        folder = tempfile.TemporaryDirectory(prefix="transcript-")
+        self.addCleanup(folder.cleanup)
+        transcript = Path(folder.name) / "transcript.jsonl"
+        transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+        conversation = ("--session-id", "c-episode", "--transcript", str(transcript))
+        query = "amber viaduct rollout canary"
+
+        def append(record: str) -> None:
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(record + "\n")
+
+        self.assertEqual(1, len(self.refresh(query, *conversation)["capsule"]["episodic"]))
+        append('{"type":"assistant"}')
+        self.assertEqual([], self.refresh(query, *conversation)["capsule"]["episodic"])
+        append('{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}')
+        again = self.refresh(query, *conversation)
+        self.assertEqual(1, len(again["capsule"]["episodic"]))
+        self.assertEqual(0, again["capsule"]["repeated"])
+
+    DISPATCH_NOTES = ("alpha", "bravo", "charlie")
+
+    def write_dispatch_notes(self, depth: int, title_words: int) -> None:
+        specs = self.repository / "specs"
+        for name in self.DISPATCH_NOTES:
+            folder = specs / f"{name}-{'routing-' * depth}"
+            folder.mkdir(parents=True)
+            folder.joinpath("dispatch.md").write_text(
+                f"# {name.capitalize()} quartz falcon dispatch {'handbook ' * title_words}\n\n"
+                f"The {name} quartz falcon dispatch retries stop after three attempts.\n",
+                encoding="utf-8",
+            )
+        for index in range(12):
+            specs.joinpath(f"other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+
+    def shown_notes(self, result: dict) -> list[str]:
+        return [
+            name for name in self.DISPATCH_NOTES
+            if f"specs/{name}-" in result["capsule_text"]
+        ]
+
+    def assert_recorded_as_shown(self, result: dict) -> str:
+        """The capsule, its manifest and its estimates name what the text
+        shows; returns the note that was left out."""
+        shown = self.shown_notes(result)
+        self.assertEqual(2, len(shown), result["capsule_text"])
+        (left_out,) = set(self.DISPATCH_NOTES) - set(shown)
+        capsule = result["capsule"]
+        selected = sorted(item["path"] for item in capsule["selected"])
+        self.assertEqual(
+            shown, [path[len("specs/"):].split("-")[0] for path in selected]
+        )
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(selected, sorted(item["path"] for item in manifest["selected"]))
+        self.assertEqual(
+            ["capsule-limit"],
+            [
+                item["reason"]
+                for item in manifest["excluded"]
+                if item["path"].startswith(f"specs/{left_out}-")
+            ],
+        )
+        self.assertEqual(
+            sum(item["estimated_tokens"] for item in manifest["selected"]),
+            manifest["token_estimates"]["total"],
+        )
+        self.assertEqual(manifest["token_estimates"], capsule["token_estimates"])
+        return left_out
+
+    def test_an_item_the_capsule_leaves_out_is_handed_on_the_next_turn(self) -> None:
+        # Paths and titles long enough that the capsule's JSON holds two of
+        # the three notes. The third was recorded as handed all the same, and
+        # the next turns left it out as an item that "still applies".
+        self.write_dispatch_notes(depth=28, title_words=16)
+        self.start("TASK-DELIVER")
+        query = "quartz falcon dispatch retries"
+        first = self.refresh(query, "--session-id", "c-limit")
+        left_out = self.assert_recorded_as_shown(first)
+        second = self.refresh(query, "--session-id", "c-limit")
+        self.assertEqual([left_out], self.shown_notes(second))
+        self.assertEqual(2, second["capsule"]["repeated"])
+
+    def test_an_item_the_rendered_text_leaves_out_is_handed_on_the_next_turn(self) -> None:
+        # The rendered text drops whole entries once the excerpts are gone,
+        # and an entry it dropped was recorded as handed. A ceiling that holds
+        # the working state and two of the three item lines, measured on a
+        # capsule that shows all three, makes the renderer the one to drop.
+        self.write_dispatch_notes(depth=8, title_words=1)
+        self.start("TASK-DELIVER")
+        arguments = (
+            "refresh", "--query", "quartz falcon dispatch retries",
+            "--task-id", "TASK-DELIVER", "--ephemeral", "--json",
+        )
+
+        def refresh_in_process(*extra: str) -> dict:
+            code, stdout, stderr = self.run_main(*arguments, *extra)
+            self.assertIn(code, (0, 1), stderr)
+            return json.loads(stdout)
+
+        lines = refresh_in_process()["capsule_text"].splitlines()
+        header = lines.index(context_cli.MEMORY_RENDER_HEADER)
+        items = [line for line in lines[header + 1:] if line.startswith("- ")]
+        self.assertEqual(3, len(items), lines)
+        ceiling = sum(len(line) + 1 for line in [*lines[: header + 1], *items[:2]]) + 10
+        with mock.patch.object(context_cli, "RENDERED_CAPSULE_LIMIT", ceiling):
+            first = refresh_in_process("--session-id", "c-render")
+        self.assertLessEqual(len(first["capsule_text"]), ceiling)
+        left_out = self.assert_recorded_as_shown(first)
+        self.assertEqual(1, first["capsule"]["omitted"]["semantic"])
+        second = refresh_in_process("--session-id", "c-render")
+        self.assertEqual([left_out], self.shown_notes(second))
+        self.assertEqual(2, second["capsule"]["repeated"])
+
+    def test_the_capsule_keeps_only_the_items_its_text_shows(self) -> None:
+        # At the real ceiling: a full working state, two warnings and a
+        # last-turn line leave room for some of three long item lines. What
+        # stays in the capsule is exactly what its text shows, each with its
+        # attestation notice.
+        def item(index: int) -> dict:
+            return {
+                "path": f"specs/{'x' * 240}/item-{index}.md", "layer": "semantic",
+                "kind": "spec", "title": f"Item {index} " + "t" * 160, "snippet": "",
+                "category": "evidence", "estimated_tokens": 50, "record_id": None,
+                "conflicts": [], "attestation": "agent",
+            }
+
+        items = [item(index) for index in range(3)]
+        capsule = {
+            "query": "",
+            "working": {
+                "task_id": "TASK-" + "w" * 120, "goal": "g" * 200, "phase": None,
+                "progress": "p" * 400, "next_steps": ["n" * 200] * 3,
+                "files": [f"src/{'f' * 100}{index}.php" for index in range(5)],
+                "sources": [],
+            },
+            "task_record": "project-brain/dynamic/tasks/00000000-0000-4000-8000-000000000000.md",
+            "warnings": ["w" * 160] * 2, "last_turn": "l" * 600,
+            "procedural": [], "semantic": items, "episodic": [],
+            "selected": [dict(entry) for entry in items],
+            "categories": {"evidence": [dict(entry) for entry in items]},
+            "repeated": 0, "no_match": [],
+            "omitted": {"procedural": 0, "semantic": 0, "episodic": 0},
+        }
+        full = "\n".join(context_cli.render_capsule_lines(capsule, {}))
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            context_cli.shown_in_render(connection, capsule)
+        finally:
+            connection.close()
+        kept = [entry["path"] for entry in capsule["semantic"]]
+        self.assertTrue(0 < len(kept) < len(items), kept)
+        self.assertEqual(kept, [entry["path"] for entry in items if entry["path"] in full])
+        self.assertEqual(kept, [entry["path"] for entry in capsule["selected"]])
+        self.assertEqual(kept, [entry["path"] for entry in capsule["categories"]["evidence"]])
+        self.assertEqual(len(items) - len(kept), capsule["omitted"]["semantic"])
+        text = "\n".join(context_cli.render_capsule_lines(capsule, {}))
+        self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+        for path in kept:
+            line = next(line for line in text.splitlines() if path in line)
+            self.assertIn("agent-attested, not reviewed by a person", line)
+
 
 
 class RecordResultTest(RuntimeHarness):

@@ -677,7 +677,10 @@ text is chosen to hold the answer:
   "Sessions" - the words that selected the document choose its excerpt.
 - Each matched term counts by its rarity in the index. A real prompt shares a
   dozen common words with every long section; the entry naming the ticket or
-  the component is the one worth quoting.
+  the component is the one worth quoting. A marked word takes the weight of
+  the request word it matched: both are read as the tokenizer reads them
+  (`term_forms`), so "classes" and "class", or "policy" and "policies", are
+  one term.
 - The section with the most weight is chosen, and within it a window of whole
   sentences that starts where the matches are - a changelog entry runs to a
   kilobyte, and its answer is usually the sentence after the one that matched.
@@ -693,10 +696,14 @@ useful documents instead of 12, in 14 turns instead of 11.
 A conversation is not handed the same thing twice within four turns
 (`refresh --session-id`), and "the same thing" is the section an excerpt came
 from at its revision: a later question answered by another section of a
-document already handed gets that section. A host that compacts a conversation
+document already handed gets that section. A recorded episode is the same
+thing while its id and content are. A host that compacts a conversation
 records it in the transcript the hook is given (`--transcript`): Claude Code
 writes a `compact_boundary` record, Codex a `compacted` one. After one, nothing
 counts as handed any more, because the conversation holds a summary of it.
+Only what the capsule shows counts as handed: an item its rendered text had no
+room for is excluded from the manifest as `capsule-limit` and is handed on a
+later turn.
 
 Both admissions used to arrive looking identical, so the capsule names which
 one applied. A document that carried the required number of distinct query
