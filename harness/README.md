@@ -1047,7 +1047,13 @@ review. The conversation says what changed. The memory server's own entry in
 `.mcp.json`, `.cursor/mcp.json` and the managed block of `.codex/config.toml`
 follows the clone beside the project's own servers. Nothing is read or written
 through a symbolic link inside the project, backups and the sync's record
-included; such a path is reported instead. Set `HARNESS_CODEX_HOOK_TRUST=0` in
+included, even one another process swaps in while the sync runs: each folder
+on a path is opened by descriptor without following links, and a folder
+swapped during a write leaves the file alone. Such a path is reported instead.
+Native Windows has no descriptor-relative file calls in Python, so there each
+folder is checked just before it is used; a link that is there before the sync
+starts is still refused, but the moment between check and write stays open to
+a process that can write to the project. Set `HARNESS_CODEX_HOOK_TRUST=0` in
 the server's environment to leave the approval to `/hooks`.
 
 The folder browser navigates local folders, or takes an absolute path

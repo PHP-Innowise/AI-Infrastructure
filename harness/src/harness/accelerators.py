@@ -268,7 +268,8 @@ class Accelerators:
             except (attach.AttachError, OSError, ValueError) as error:
                 report['codex_trust'] = {'error': str(error)}
                 # Rewired but not approved, the hooks would stop running: the
-                # wiring Codex already approved goes back.
+                # wiring Codex already approved goes back - never through a
+                # link, one swapped in meanwhile included (write_confined).
                 try:
                     if installer.read_confined(path, wiring) != before:
                         installer.write_confined(path, wiring, before)
@@ -276,8 +277,9 @@ class Accelerators:
                                              if item.get('path') != wiring]
                         report['kept'].append({'path': wiring,
                                                'reason': 'Codex could not approve the new wiring; the old one stays'})
-                except (installer.InventoryError, OSError):
-                    pass
+                except (installer.InventoryError, OSError) as restore_error:
+                    report['codex_trust']['not_restored'] = (
+                        f'the approved wiring could not be put back: {restore_error}')
         return report
 
     def keep_all_current(self) -> None:
