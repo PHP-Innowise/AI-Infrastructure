@@ -139,6 +139,123 @@ class SystemTests(unittest.TestCase):
         with self.assertRaises(ai.SystemError):
             self.load().plan("refund", "chg-001", budget=True)
 
+    def declare(self, sid, files, kind="code"):
+        """Write `files` ({path: bytes}) into service `sid` and declare them as its sources."""
+        root = Path(next(s["root"] for s in self.registrations if s["id"] == sid))
+        for name, raw in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(raw)
+        self.update(sid, lambda d: d["sources"].extend({"path": name, "kind": kind} for name in files))
+        return root
+
+    def planned(self, *args, system=None, **kwargs):
+        """A plan, with every file the planner opened while making it: (path, bytes read or None)."""
+        system = system or self.load()
+        opened = []
+        original = ai.read_file
+
+        def counting(root, name, *rest, **options):
+            opened.append([name, None])
+            raw = original(root, name, *rest, **options)
+            opened[-1][1] = len(raw)
+            return raw
+
+        with mock.patch.object(ai, "read_file", counting):
+            plan = system.plan(*args, **kwargs)
+        return plan, opened
+
+    def test_planner_reads_no_source_that_cannot_fit(self):
+        # 100 sources (the spec and 99 of 64 KiB) under the default 8,000
+        # characters: the spec and three fit, and nothing else needs to be read
+        # to know it - in one service or spread over ten.
+        for layout in ("one service", "ten services"):
+            with self.subTest(layout=layout):
+                self.registrations = []
+                parts = []
+                count = 1 if layout == "one service" else 10
+                for index in range(count):
+                    sid = "svc-" + str(index)
+                    self.service(sid, keyword="ledger")
+                    names = {"src/part-%03d.txt" % n: b"x" * 65536 for n in range(99 if count == 1 else 10)}
+                    self.declare(sid, names)
+                    parts += [(sid, name) for name in names]
+                services = sorted({sid for sid, _ in parts})
+                plan, opened = self.planned("ledger", "chg-001", services)
+                included = {(s["service"], s["path"]) for s in plan["context"]["sources"]}
+                self.assertLessEqual(plan["context_chars"], 8000)
+                read = [(name, size) for name, size in opened if size]
+                big = [name for name, size in read if size == 65536]
+                # Only what made it into the context was read in full.
+                self.assertEqual(len(big), len([key for key in included if key[1].startswith("src/")]), big)
+                self.assertTrue(big)
+                omitted = {(s["service"], s["path"]): s["reason"] for s in plan["omitted_sources"]}
+                for key in parts:
+                    self.assertTrue(key in included or omitted.get(key) == "budget", key)
+                self.assertEqual(len(parts), len(included) - len(services) + len(omitted))
+
+    def test_planner_stops_at_its_read_allowance(self):
+        # Sources read and then refused leave the context empty, so they never
+        # fill it; the allowance, not the budget, is what stops the reading.
+        self.service("orders")
+        binary = {"bin/blob-%03d.dat" % n: b"\x00" * 65536 for n in range(40)}
+        self.declare("orders", binary)
+        with mock.patch.object(ai, "MAX_PLAN_READ_BYTES", 10 * 65536, create=True):
+            plan, opened = self.planned("orders", "chg-001", ["orders"], budget=64000)
+        self.assertLessEqual(sum(size or 0 for _, size in opened), 10 * 65536)
+        reasons = [s["reason"] for s in plan["omitted_sources"]]
+        self.assertIn("read_limit", reasons)
+        self.assertEqual(40, len(reasons))
+        self.assertIn("source_read_limit", [w["reason"] for w in plan["warnings"]])
+        # Missing files cost no bytes; the allowance counts the files opened too.
+        # They sort before the binary ones, so they are what spends it here.
+        self.declare("orders", {"a-gone/%03d.md" % n: b"" for n in range(30)})
+        for n in range(30):
+            (self.root / "orders" / ("a-gone/%03d.md" % n)).unlink()
+        with mock.patch.object(ai, "MAX_PLAN_READ_FILES", 12, create=True):
+            plan, opened = self.planned("orders", "chg-001", ["orders"], budget=64000)
+        self.assertEqual(12, len(opened))
+        self.assertEqual([["spec.md", len("Observed behavior for orders.")]], [entry for entry in opened if entry[1] is not None])
+        reasons = {s["path"]: s["reason"] for s in plan["omitted_sources"]}
+        self.assertEqual("ineligible", reasons["a-gone/000.md"])
+        self.assertEqual("read_limit", reasons["a-gone/011.md"])
+        self.assertEqual("read_limit", reasons["bin/blob-000.dat"])
+
+    def test_sources_left_unread_could_not_have_fit(self):
+        # Ruling a source out by its size never loses one that fits: at every
+        # budget the context is the one reading everything would have packed.
+        self.service("orders")
+        files = {}
+        for n in range(12):
+            files["src/a-%02d.txt" % n] = b"y" * (9000 if n % 4 else 600)
+        files["src/b-emoji.txt"] = ("\U0001F600" * 380).encode("utf-8")  # 1,520 bytes, 380 characters
+        files["src/c-quotes.txt"] = b'"' * 300  # each character escapes to two
+        files["src/d-tiny.txt"] = b"z"
+        files["src/e-mixed.txt"] = ("\u00e9\n\\" * 900).encode("utf-8")  # two characters in three escape to two
+        self.declare("orders", files)
+        system = self.load()
+        tiny = 0
+        for budget in range(300, 4200, 17):
+            plan, _ = self.planned("orders", "chg-001", ["orders"], budget=budget, system=system)
+            with mock.patch.object(ai, "least_excerpt", lambda size: 1, create=True):
+                everything, _ = self.planned("orders", "chg-001", ["orders"], budget=budget, system=system)
+            self.assertEqual(everything["context"], plan["context"], budget)
+            self.assertEqual({s["path"] for s in everything["omitted_sources"]},
+                             {s["path"] for s in plan["omitted_sources"]}, budget)
+            tiny += "src/d-tiny.txt" in [s["path"] for s in plan["context"]["sources"]]
+        self.assertTrue(tiny)
+        # Four-byte characters make the size bound exact: a budget one short
+        # rules the file out unread, the exact budget reads and packs it.
+        self.registrations = []
+        root = self.service("emoji")
+        self.declare("emoji", {"src/emoji.txt": files["src/b-emoji.txt"]})
+        (root / "spec.md").write_text("")
+        exact = self.load().plan("emoji", "chg-001", ["emoji"], budget=64000)["context_chars"]
+        plan, opened = self.planned("emoji", "chg-001", ["emoji"], budget=exact)
+        self.assertIn("src/emoji.txt", [s["path"] for s in plan["context"]["sources"]])
+        plan, opened = self.planned("emoji", "chg-001", ["emoji"], budget=exact - 1)
+        self.assertNotIn("src/emoji.txt", [s["path"] for s in plan["context"]["sources"]])
+        self.assertNotIn(["src/emoji.txt", 1520], opened)
+
     def test_snapshot_detects_dirty_code_and_changed_manifest(self):
         root = self.service("orders")
         plan = self.load().plan("orders", "chg-001", ["orders"])

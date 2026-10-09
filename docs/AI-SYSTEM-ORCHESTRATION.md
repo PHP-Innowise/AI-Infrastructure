@@ -181,8 +181,18 @@ characters with an explicit truncation marker. Entries that do not fit are
 omitted as whole entries with `reason: budget`. No service receives a separate
 copy of the global budget.
 
-Each read source is fingerprinted in full, including sources omitted from the
-capsule. Config and all accessible passports are fingerprinted because they
+A source is read only while it can still fit. When the context has no room left
+for even an empty file's entry, or the file's size alone rules it out (a usable
+file of N bytes holds at least N/4 characters), it is omitted with `reason: budget`
+without being read. Reading for one plan stops at 2,000 files or 32 MiB, memory
+citations included: the sources left are omitted with `reason: read_limit` and
+the plan warns `source_read_limit`. Short of that limit the context is the one
+reading every source would pack. Sources read and refused are `reason: ineligible`.
+
+Each read source is fingerprinted in full, including one then omitted from the
+capsule. A source left unread has no fingerprint, so `verify` does not see it
+change; whether it was left out depended only on fingerprinted sources and its
+size. Config and all accessible passports are fingerprinted because they
 influenced routing. Git HEAD is captured for selected services when available;
 content hashes detect dirty changes and Git is read without inherited `GIT_*`
 overrides. A missing HEAD is represented as null, not fabricated.
@@ -261,8 +271,9 @@ python3 -m unittest tests.test_ai_system
 ```
 
 Coverage includes task routing, consumers, cycles/depth, monorepo identity,
-missing/denied sources, shared budgets, dirty-file/commit freshness, strict JSON,
-filesystem boundaries, untrusted content, memory lifecycle and CLI no-clobber.
+missing/denied sources, shared budgets, bounded source reading, dirty-file/commit
+freshness, strict JSON, filesystem boundaries, untrusted content, memory lifecycle
+and CLI no-clobber.
 The CI job runs the same suite on Python 3.9 and the current Python 3 release.
 
 ## Execute a reviewed plan
