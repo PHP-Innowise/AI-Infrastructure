@@ -691,61 +691,79 @@ def install(
     overwrite_paths = {path for _, path, _ in collisions}
     action = "WOULD_COPY" if dry_run else "COPY"
     executable_bits = source_executable_bits(root, edition)
-    for component, path in files:
-        source_path = data["source_overrides"].get(path, path)
-        source = root / edition_path(edition) / PurePosixPath(source_path)
-        destination = target / PurePosixPath(path)
-        if not source.is_file():
-            raise InventoryError(f"source file missing: {source}")
-        # Normal copy semantics carry the working-tree mode, which is exactly
-        # what a checkout without filesystem modes gets wrong; an executable
-        # is therefore given its mode explicitly after the copy.
-        executable = installs_executable(path, source, source_path, executable_bits)
-        if path in resolutions:
-            resolution, resolved_destination, content = resolutions[path]
-            if resolution == "unchanged":
-                if executable and lacks_executable_bit(resolved_destination):
-                    # Identical bytes without the bit - typically a hook from
-                    # an install made before executable bits were enforced.
-                    # The content stays untouched and only the bit is added,
-                    # which destroys nothing, so this happens under every
-                    # collision mode. The Harness reads the repaired mode
-                    # from its staged run and applies exactly that.
-                    if not dry_run:
-                        add_executable_bit(resolved_destination)
-                    relative = resolved_destination.relative_to(target).as_posix()
-                    label = "WOULD_FIX_MODE" if dry_run else "FIX_MODE"
-                    print(f"{label}\t{component}\t{path}\t{relative}")
+    # Every project file this run replaces, with what it held: a run that
+    # fails part way puts them back (put_back).
+    replaced: list[tuple] = []
+    try:
+        for component, path in files:
+            source_path = data["source_overrides"].get(path, path)
+            source = root / edition_path(edition) / PurePosixPath(source_path)
+            destination = target / PurePosixPath(path)
+            if not source.is_file():
+                raise InventoryError(f"source file missing: {source}")
+            # Normal copy semantics carry the working-tree mode, which is exactly
+            # what a checkout without filesystem modes gets wrong; an executable
+            # is therefore given its mode explicitly after the copy.
+            executable = installs_executable(path, source, source_path, executable_bits)
+            if path in resolutions:
+                resolution, resolved_destination, content = resolutions[path]
+                relative = resolved_destination.relative_to(target).as_posix()
+                if resolution == "unchanged":
+                    if executable and lacks_executable_bit(resolved_destination):
+                        # Identical bytes without the bit - typically a hook from
+                        # an install made before executable bits were enforced.
+                        # The content stays untouched and only the bit is added,
+                        # which destroys nothing, so this happens under every
+                        # collision mode. The Harness reads the repaired mode
+                        # from its staged run and applies exactly that.
+                        if not dry_run:
+                            add_executable_bit(resolved_destination)
+                        label = "WOULD_FIX_MODE" if dry_run else "FIX_MODE"
+                        print(f"{label}\t{component}\t{path}\t{relative}")
+                        continue
+                    print(f"UNCHANGED\t{component}\t{path}")
                     continue
-                print(f"UNCHANGED\t{component}\t{path}")
+                if resolution == "kept":
+                    print(f"KEPT\t{component}\t{path}")
+                    continue
+                label = {
+                    "merge": "WOULD_MERGE" if dry_run else "MERGE",
+                    "copy-as": "WOULD_COPY_AS" if dry_run else "COPY_AS",
+                }[resolution]
+                if not dry_run:
+                    if content is None:
+                        resolved_destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, resolved_destination)
+                        if executable:
+                            os.chmod(resolved_destination, EXECUTABLE_INSTALL_MODE)
+                    else:
+                        # A merge holds the project's own content: written
+                        # whole beside the file and renamed over it.
+                        replace_project_file(target, (component, path), relative, content, replaced)
+                print(f"{label}\t{component}\t{path}\t{relative}")
                 continue
-            if resolution == "kept":
-                print(f"KEPT\t{component}\t{path}")
-                continue
-            label = {
-                "merge": "WOULD_MERGE" if dry_run else "MERGE",
-                "copy-as": "WOULD_COPY_AS" if dry_run else "COPY_AS",
-            }[resolution]
+            current_action = "WOULD_OVERWRITE" if dry_run and path in overwrite_paths else action
             if not dry_run:
-                resolved_destination.parent.mkdir(parents=True, exist_ok=True)
-                if content is None:
-                    shutil.copy2(source, resolved_destination)
-                    if executable:
-                        os.chmod(resolved_destination, EXECUTABLE_INSTALL_MODE)
+                if path in overwrite_paths or path in MCP_CONFIG_FILES:
+                    # Replacing a project file, or writing a configuration a
+                    # later merge has to parse: never left half written.
+                    info = source.stat()
+                    replace_project_file(
+                        target, (component, path), path, source.read_bytes(), replaced,
+                        EXECUTABLE_INSTALL_MODE if executable else stat.S_IMODE(info.st_mode),
+                        (info.st_atime_ns, info.st_mtime_ns),
+                    )
                 else:
-                    resolved_destination.write_bytes(content)
-            relative = resolved_destination.relative_to(target).as_posix()
-            print(f"{label}\t{component}\t{path}\t{relative}")
-            continue
-        current_action = "WOULD_OVERWRITE" if dry_run and path in overwrite_paths else action
-        if not dry_run:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            if executable:
-                os.chmod(destination, EXECUTABLE_INSTALL_MODE)
-            if path in overwrite_paths:
-                current_action = "OVERWRITE"
-        print(f"{current_action}\t{component}\t{path}")
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
+                    if executable:
+                        os.chmod(destination, EXECUTABLE_INSTALL_MODE)
+                if path in overwrite_paths:
+                    current_action = "OVERWRITE"
+            print(f"{current_action}\t{component}\t{path}")
+    except BaseException:
+        put_back(target, replaced)
+        raise
     print(
         f"COMPLETE\t{edition}\ttools={','.join(tools)}\tfiles={len(files)}"
         f"\tdry_run={str(dry_run).lower()}"
@@ -878,22 +896,66 @@ def source_commit(root: Path) -> str | None:
 
 
 # A sync reaches every path it reads or writes from the target one folder at
-# a time, looking at each with lstat, so a symbolic link is seen as itself and
-# never followed. Git checks links out, and one standing in for `.cursor`,
-# `memory-bank` or `memory-bank/local` took the sync's writes - its backups of
-# a person's edits and its own record included - to wherever it pointed, with
-# nobody asked: the Harness syncs a project when it opens it. Checking only
-# the last component did not see them. A path such a link or a non-folder
-# stands on is reported and left alone.
+# a time, so a symbolic link is seen as itself and never followed. Git checks
+# links out, and one standing in for `.cursor`, `memory-bank` or
+# `memory-bank/local` took the sync's writes - its backups of a person's edits
+# and its own record included - to wherever it pointed, with nobody asked: the
+# Harness syncs a project when it opens it. Checking only the last component
+# did not see them. A path such a link or a non-folder stands on is reported
+# and left alone.
+#
+# Looking first and then using the path is not enough: a process that can
+# write to the project could swap a folder for a link after the look, and the
+# write followed it - a `.cursor` swapped between the check and the temporary
+# file sent `.cursor/mcp.json` to wherever the link pointed. Where the
+# platform has the descriptor-relative calls, a read or write therefore holds
+# a descriptor of each folder on the way and opens the next component
+# relative to it without following a link (openat with O_NOFOLLOW, mkdirat,
+# fstatat); the temporary file is created, written and renamed through the
+# last folder's descriptor (renameat, unlinkat). A name is resolved once, so
+# a link swapped in afterwards is never followed; a folder swapped while it
+# was written is found before the rename, and the file is left alone.
+#
+# Native Windows has none of these calls in `os.supports_dir_fd`. There each
+# component is still looked at with lstat before the path is used, which
+# keeps out a link that stands there before the sync starts but leaves the
+# window between the look and the write open to a process that can write to
+# the project.
 #
 # Windows reports symbolic links and junctions as reparse points; these are
 # the tags of the two that name another path (IO_REPARSE_TAG_SYMLINK,
 # IO_REPARSE_TAG_MOUNT_POINT).
 LINK_REPARSE_TAGS = (0xA000000C, 0xA0000003)
+# Whether this platform can walk a path by folder descriptors. os.replace is
+# os.rename with replacement semantics and takes the same src_dir_fd and
+# dst_dir_fd; os.supports_dir_fd lists it under rename only.
+_DESCRIPTOR_WALK = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and hasattr(os, "fchmod")
+    and {os.open, os.mkdir, os.stat, os.unlink, os.rename} <= os.supports_dir_fd
+    and os.stat in os.supports_follow_symlinks
+    and os.utime in os.supports_fd
+)
+_PROJECT_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+_FOLDER_FLAGS = _PROJECT_FLAGS | getattr(os, "O_NOFOLLOW", 0)
+_READ_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+_TEMPORARY_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_BINARY", 0)
+)
 
 
 class UnsafePathError(InventoryError):
-    """A project path a sync must not read or write; the message says why."""
+    """A project path that must not be read or written; the message says why."""
 
 
 def _is_link(info: os.stat_result) -> bool:
@@ -901,9 +963,9 @@ def _is_link(info: os.stat_result) -> bool:
 
 
 def _folder_problem(name: str, info: os.stat_result) -> str | None:
-    """Why the component `name` cannot be a folder the sync passes, or None."""
+    """Why the component `name` cannot be a folder a read or write passes, or None."""
     if _is_link(info):
-        return f"{name} is a symbolic link; the sync does not read or write through it"
+        return f"{name} is a symbolic link; the accelerator does not read or write through it"
     if not stat.S_ISDIR(info.st_mode):
         return f"{name} is not a folder"
     return None
@@ -1005,32 +1067,233 @@ def confined_file(target: Path, relative: str) -> bool:
     return relative in confined_files(target, (relative,))
 
 
-def read_confined(target: Path, relative: str) -> bytes | None:
-    """The bytes of a regular file below `target`; None when it is absent.
+def _temporary_name(name: str) -> str:
+    """A name beside `name` for the bytes that will replace it."""
+    return f".{name}.accelerator-{os.getpid()}-{os.urandom(4).hex()}"
 
-    Raises UnsafePathError for a path the sync must not use.
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(descriptor, view):]
+
+
+def _read_stream(descriptor: int) -> tuple[bytes, os.stat_result]:
+    """The bytes and status of an opened regular file; closes it."""
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise UnsafePathError("not a regular file")
+        return handle.read(), info
+
+
+def _entry_problem(folder: int, name: str, shown: str, error: OSError) -> str:
+    """Why the entry `name` of `folder` did not open as a folder."""
+    try:
+        info = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except OSError:
+        info = None
+    # Linux says ENOTDIR for a link opened with O_DIRECTORY|O_NOFOLLOW, other
+    # systems ELOOP or EMLINK: the entry itself says what it is.
+    problem = _folder_problem(shown, info) if info is not None else None
+    return problem or f"{shown} cannot be inspected: {error.strerror or error}"
+
+
+def _open_child(folder: int, name: str, shown: str, create: bool) -> int | None:
+    """A descriptor of the folder `name` inside `folder`, never through a link.
+
+    With `create` a missing folder is made first; mkdirat never follows a link
+    standing at the name it creates, and the new folder is opened as any
+    other. None when it is missing and `create` is false.
     """
+    try:
+        return os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+    except FileNotFoundError:
+        if not create:
+            return None
+    except OSError as error:
+        raise UnsafePathError(_entry_problem(folder, name, shown, error)) from error
+    try:
+        os.mkdir(name, dir_fd=folder)
+    except FileExistsError:
+        pass
+    try:
+        return os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+    except OSError as error:
+        raise UnsafePathError(_entry_problem(folder, name, shown, error)) from error
+
+
+def _open_folder(target: Path, parts: list[str], create: bool) -> int | None:
+    """A descriptor of the folder `parts` names below `target`, or None when it is missing.
+
+    `target` itself is opened as the caller names it; below it, each
+    component is opened relative to the descriptor of the one before it, so
+    no name on the way is resolved twice. Raises UnsafePathError naming a
+    component that is a link or not a folder. The caller closes the result.
+    """
+    folder = os.open(os.fspath(target), _PROJECT_FLAGS)
+    for depth, part in enumerate(parts, 1):
+        try:
+            child = _open_child(folder, part, "/".join(parts[:depth]), create)
+        finally:
+            os.close(folder)
+        if child is None:
+            return None
+        folder = child
+    return folder
+
+
+def _folder_moved(target: Path, parts: list[str], folder: int) -> str | None:
+    """Why `parts` below `target` no longer names the folder `folder` holds, or None."""
+    shown = "/".join(parts) or "the project"
+    try:
+        current = _open_folder(target, parts, create=False)
+    except UnsafePathError as error:
+        return str(error)
+    except OSError as error:
+        return f"{shown} cannot be inspected: {error.strerror or error}"
+    if current is None:
+        return f"{shown} was removed while it was written"
+    try:
+        same = os.path.samestat(os.fstat(current), os.fstat(folder))
+    finally:
+        os.close(current)
+    return None if same else f"{shown} was replaced while it was written"
+
+
+def _not_regular(folder: int, name: str) -> bool:
+    """The entry `name` of `folder` is a link or anything but a regular file."""
+    try:
+        info = os.stat(name, dir_fd=folder, follow_symlinks=False)
+    except OSError:
+        return False
+    return _is_link(info) or not stat.S_ISREG(info.st_mode)
+
+
+def _read_at(target: Path, parts: list[str]) -> tuple[bytes, os.stat_result] | None:
+    """`_read_confined` by folder descriptors."""
+    folder = _open_folder(target, parts[:-1], create=False)
+    if folder is None:
+        return None
+    try:
+        try:
+            descriptor = os.open(parts[-1], _READ_FLAGS, dir_fd=folder)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            if _not_regular(folder, parts[-1]):
+                raise UnsafePathError("not a regular file") from error
+            raise
+    finally:
+        os.close(folder)
+    return _read_stream(descriptor)
+
+
+def _read_by_path(
+    target: Path, relative: str, parts: list[str]
+) -> tuple[bytes, os.stat_result] | None:
+    """`_read_confined` where descriptors cannot walk: look at each component, then open."""
     problem = confinement_problem(target, relative)
     if problem is not None:
         raise UnsafePathError(problem)
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-        | getattr(os, "O_BINARY", 0)
-    )
     try:
-        descriptor = os.open(os.path.join(os.fspath(target), *relative.split("/")), flags)
+        descriptor = os.open(os.path.join(os.fspath(target), *parts), _READ_FLAGS)
     except FileNotFoundError:
         return None
     except OSError as error:
         if error.errno == errno.ELOOP:
             raise UnsafePathError("not a regular file") from error
         raise
-    with os.fdopen(descriptor, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-            raise UnsafePathError("not a regular file")
-        return handle.read()
+    return _read_stream(descriptor)
+
+
+def _read_confined(target: Path, relative: str) -> tuple[bytes, os.stat_result] | None:
+    """The bytes and status of a regular file below `target`; None when it is absent.
+
+    Raises UnsafePathError for a path that must not be used.
+    """
+    parts = _relative_parts(relative)
+    if parts is None:
+        raise UnsafePathError("not a path inside the project")
+    if _DESCRIPTOR_WALK:
+        return _read_at(target, parts)
+    return _read_by_path(target, relative, parts)
+
+
+def read_confined(target: Path, relative: str) -> bytes | None:
+    """The bytes of a regular file below `target`; None when it is absent.
+
+    Raises UnsafePathError for a path the sync must not use.
+    """
+    found = _read_confined(target, relative)
+    return None if found is None else found[0]
+
+
+def _write_at(
+    target: Path,
+    relative: str,
+    parts: list[str],
+    data: bytes,
+    mode: int | None,
+    times: tuple[int, int] | None,
+    durable: bool,
+) -> None:
+    """`write_confined` by folder descriptors."""
+    try:
+        folder = _open_folder(target, parts[:-1], create=True)
+    except FileNotFoundError as error:
+        # A folder on the way went away while the next one was made in it.
+        problem = confinement_problem(target, relative)
+        if problem is not None:
+            raise UnsafePathError(problem) from error
+        raise
+    name = parts[-1]
+    temporary = None
+    try:
+        try:
+            existing = os.stat(name, dir_fd=folder, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None:
+            if _is_link(existing) or not stat.S_ISREG(existing.st_mode):
+                raise UnsafePathError("not a regular file")
+            if mode is None:
+                mode = stat.S_IMODE(existing.st_mode)
+        candidate = _temporary_name(name)
+        # Private until it holds its bytes and the mode it ends with; a new
+        # file without a mode of its own gets the umask's, as any new file.
+        descriptor = os.open(
+            candidate, _TEMPORARY_FLAGS, 0o600 if mode is not None else 0o666, dir_fd=folder
+        )
+        temporary = candidate
+        try:
+            _write_all(descriptor, data)
+            if mode is not None:
+                os.fchmod(descriptor, mode)
+            if times is not None:
+                os.utime(descriptor, ns=times)
+            if durable:
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        moved = _folder_moved(target, parts[:-1], folder)
+        if moved is not None:
+            raise UnsafePathError(moved)
+        os.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
+        temporary = None
+    except FileNotFoundError as error:
+        # The folder held was removed while it was written.
+        moved = _folder_moved(target, parts[:-1], folder)
+        if moved is not None:
+            raise UnsafePathError(moved) from error
+        raise
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=folder)
+            except OSError:
+                pass
+        os.close(folder)
 
 
 def _confined_folders(target: Path, relative: str) -> Path:
@@ -1053,20 +1316,15 @@ def _confined_folders(target: Path, relative: str) -> Path:
     return current
 
 
-def write_confined(
+def _write_by_path(
     target: Path,
     relative: str,
     data: bytes,
-    mode: int | None = None,
-    times: tuple[int, int] | None = None,
+    mode: int | None,
+    times: tuple[int, int] | None,
+    durable: bool,
 ) -> None:
-    """Create or replace a regular file below `target`, never through a link.
-
-    The bytes go to a temporary file beside it, created exclusively so that a
-    link planted under its name cannot take them, which is then renamed over
-    the file. `mode` defaults to the replaced file's, and to the umask's for a
-    new one; `times` are (atime, mtime) in nanoseconds.
-    """
+    """`write_confined` where descriptors cannot walk: look at each component, then write."""
     problem = confinement_problem(target, relative)
     if problem is not None:
         raise UnsafePathError(problem)
@@ -1081,18 +1339,15 @@ def write_confined(
             raise UnsafePathError("not a regular file")
         if mode is None:
             mode = stat.S_IMODE(existing.st_mode)
-    temporary = folder / f".{path.name}.sync-{os.getpid()}-{os.urandom(4).hex()}"
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_BINARY", 0)
-    )
-    descriptor = os.open(temporary, flags, 0o666)
+    temporary = folder / _temporary_name(path.name)
+    descriptor = os.open(temporary, _TEMPORARY_FLAGS, 0o666)
     try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
+        try:
+            _write_all(descriptor, data)
+            if durable:
+                os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
         if mode is not None:
             os.chmod(temporary, mode)
         if times is not None:
@@ -1101,6 +1356,99 @@ def write_confined(
     finally:
         if os.path.lexists(temporary):
             os.unlink(temporary)
+
+
+def write_confined(
+    target: Path,
+    relative: str,
+    data: bytes,
+    mode: int | None = None,
+    times: tuple[int, int] | None = None,
+    *,
+    durable: bool = True,
+) -> None:
+    """Create or replace a regular file below `target`, never through a link.
+
+    The bytes go to a temporary file beside it, created exclusively so that a
+    link planted under its name cannot take them, and are then renamed over
+    the file: a write that fails or is interrupted leaves the old file whole.
+    `durable` also flushes them to disk before the rename, so that a crash
+    cannot leave the file empty either; the sync turns it off for files it
+    can write again from the release. `mode` defaults to the replaced file's,
+    and to the umask's for a new one; `times` are (atime, mtime) in
+    nanoseconds. Raises UnsafePathError when a link or a non-folder stands on
+    the path, or a folder on it is swapped while the file is written (see the
+    note above `LINK_REPARSE_TAGS`).
+    """
+    parts = _relative_parts(relative)
+    if parts is None:
+        raise UnsafePathError("not a path inside the project")
+    if _DESCRIPTOR_WALK:
+        _write_at(target, relative, parts, data, mode, times, durable)
+    else:
+        _write_by_path(target, relative, data, mode, times, durable)
+
+
+# An install that merged into a project's file wrote the merge over it in
+# place: a write that failed part way - a full disk, an interrupted run -
+# left a truncated `.mcp.json` (`{`) where the team's servers had been, and
+# every later install refused to merge into it. A file an install replaces is
+# now written whole beside it and renamed over it (write_confined), and one
+# that fails part way puts back, newest first, the files it had already
+# replaced. Files it created are left: they hold only the release, and the
+# next run finds them identical.
+
+
+def replace_project_file(
+    target: Path,
+    label: tuple[str, str],
+    relative: str,
+    data: bytes,
+    replaced: list,
+    mode: int | None = None,
+    times: tuple[int, int] | None = None,
+) -> None:
+    """Write `data` as `relative` below `target` in one step; record what it replaced.
+
+    `label` is the (component, inventory path) the install reports it under.
+    A replaced file keeps its mode unless `mode` says otherwise, and goes
+    into `replaced` with its bytes and status for put_back.
+    """
+    found = _read_confined(target, relative)
+    write_confined(target, relative, data, mode, times)
+    if found is not None:
+        replaced.append((label, relative, found[0], found[1], data))
+
+
+def put_back(target: Path, replaced: list) -> None:
+    """Restore the files a failed install replaced, newest first.
+
+    A file that no longer holds what the install wrote was changed by
+    someone else since, and stays as it is. Each file is reported as
+    RESTORED (stdout, the action log) or NOT_RESTORED with the reason
+    (stderr); the reports follow the work, so a closed stream cannot stop it.
+    """
+    outcomes = []
+    for (component, path), relative, previous, info, written in reversed(replaced):
+        try:
+            if read_confined(target, relative) != written:
+                outcomes.append((component, path, relative, "changed after the install wrote it"))
+                continue
+            write_confined(
+                target, relative, previous, stat.S_IMODE(info.st_mode),
+                (info.st_atime_ns, info.st_mtime_ns),
+            )
+            outcomes.append((component, path, relative, None))
+        except (InventoryError, OSError) as error:
+            outcomes.append((component, path, relative, str(error)))
+    for component, path, relative, problem in outcomes:
+        try:
+            if problem is None:
+                print(f"RESTORED\t{component}\t{path}\t{relative}")
+            else:
+                print(f"NOT_RESTORED\t{component}\t{path}\t{relative}\t{problem}", file=sys.stderr)
+        except OSError:
+            pass
 
 
 def sync_installation(
@@ -1122,9 +1470,11 @@ def sync_installation(
     is backed up first under memory-bank/local. Never written: anything the
     project's Git tracks, seeded state the project owns, any path - backups
     and the sync's own record included - that a symbolic link or a
-    non-folder inside the project stands on, and - unless `rewire_codex`
-    says the caller re-approves it - the Codex hook wiring, whose trust is a
-    hash of its definitions. Each of those is reported instead.
+    non-folder inside the project stands on, including one swapped in while
+    the sync runs (read_confined, write_confined), and - unless
+    `rewire_codex` says the caller re-approves it - the Codex hook wiring,
+    whose trust is a hash of its definitions. Each of those is reported
+    instead.
     """
     report: dict = {
         "target": str(target), "edition": None, "release": None, "changed": [],
@@ -1178,19 +1528,29 @@ def sync_installation(
         payload: bytes,
         action: str,
         executable: bool,
-        backup: bytes | None = None,
+        backup: tuple[bytes, os.stat_result] | None = None,
         record: bool = True,
+        durable: bool = False,
     ) -> None:
-        """Write one file; `backup` is the content it replaces, saved first."""
+        """Write one file; `backup` is the content it replaces and that
+        file's status, as it was read, saved first.
+
+        Flushed to disk before it replaces anything only where a crash could
+        lose what exists nowhere else: a backup, the only copy of a person's
+        edit once the file is replaced, and a file merged with the project's
+        own content (`durable`). The release's files and the sync's record are
+        written again by the next sync; a flush costs about 10 ms a file on
+        btrfs, so they go without one.
+        """
         if backup is not None:
             saved = f"{SYNC_BACKUP_DIR}/{stamp}/{path}"
             unsafe = confinement_problem(target, saved)
             if unsafe is None and not dry_run:
+                content, original = backup
                 try:
-                    original = os.lstat(target / PurePosixPath(path))
                     write_confined(
-                        target, saved, backup, stat.S_IMODE(original.st_mode),
-                        (original.st_atime_ns, original.st_mtime_ns),
+                        target, saved, content, stat.S_IMODE(original.st_mode),
+                        (original.st_atime_ns, original.st_mtime_ns), durable=True,
                     )
                 except UnsafePathError as error:
                     unsafe = str(error)
@@ -1202,7 +1562,10 @@ def sync_installation(
                 report["backups"].append(saved)
         if not dry_run:
             try:
-                write_confined(target, path, payload, EXECUTABLE_INSTALL_MODE if executable else None)
+                write_confined(
+                    target, path, payload, EXECUTABLE_INSTALL_MODE if executable else None,
+                    durable=durable,
+                )
             except UnsafePathError as error:
                 keep(path, str(error))
                 return
@@ -1266,7 +1629,7 @@ def sync_installation(
         # A merge holds the project's own servers, so it is not recorded as an
         # untouched release: the next sync merges into it again rather than
         # replacing it with the release's file.
-        write(path, merged, action, executable, record=not merged_into_project)
+        write(path, merged, action, executable, record=not merged_into_project, durable=merged_into_project)
 
     for component, path in selected_files(data, [c for c in TOOLS if c in present]):
         if path in SEED_ONLY_PATHS or path in SYNC_SKIPPED_FILES:
@@ -1276,10 +1639,11 @@ def sync_installation(
         payload = source.read_bytes()
         executable = installs_executable(path, source, source_path, executable_bits)
         try:
-            current = read_confined(target, path)
+            found = _read_confined(target, path)
         except UnsafePathError as error:
             keep(path, str(error))
             continue
+        current = None if found is None else found[0]
         exists = current is not None
         if current == payload:
             written[path] = git_blob_id(payload)
@@ -1311,7 +1675,7 @@ def sync_installation(
                     keep(path, "managed block is malformed")
                     continue
                 if merged != current:
-                    write(path, merged, "managed block updated", executable)
+                    write(path, merged, "managed block updated", executable, durable=True)
                 else:
                     written[path] = git_blob_id(current)
                 continue
@@ -1321,13 +1685,14 @@ def sync_installation(
             elif first and text.startswith(first):
                 # The accelerator's own policy, edited in place: the edit is
                 # kept in the backup and the current policy goes live.
-                write(path, payload, "updated over a local edit", executable, backup=current)
+                write(path, payload, "updated over a local edit", executable, backup=found)
             elif path == ".claude/CLAUDE.md":
                 write(
                     path,
                     merge_agents_file(text, source_text).encode("utf-8"),
                     "import added",
                     executable,
+                    durable=True,
                 )
             else:
                 keep(path, "the project's own file")
@@ -1338,7 +1703,7 @@ def sync_installation(
         if pristine:
             write(path, payload, "updated", executable)
         elif is_runtime_file(path):
-            write(path, payload, "updated over a local edit", executable, backup=current)
+            write(path, payload, "updated over a local edit", executable, backup=found)
         else:
             keep(path, "edited in the project")
     if record_problem is not None:
@@ -1363,6 +1728,7 @@ def sync_installation(
                     )
                     + "\n"
                 ).encode("utf-8"),
+                durable=False,
             )
         except UnsafePathError as error:
             keep(SYNC_MANIFEST, f"the sync's record is not written ({error})")

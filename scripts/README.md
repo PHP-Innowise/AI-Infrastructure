@@ -182,8 +182,9 @@ python3 scripts/install_accelerator.py \
   --dry-run
 ```
 
-- **Principal modes:** `--verify-inventories`, `--write-inventories`, or
-  `--edition {Laravel,Symfony,PHP Core,WordPress}` with `--target`.
+- **Principal modes:** `--verify-inventories`, `--write-inventories`,
+  `--edition {Laravel,Symfony,PHP Core,WordPress}` with `--target`, or
+  `--sync` with `--target` (see below).
 - **Selection options:** repeatable `--tool {claude,cursor,codex}`; omission
   selects all tools. `--source-root` points at an alternate source checkout.
 - **Collision options:** `--dry-run`; conservative `--merge-existing`; and
@@ -243,10 +244,35 @@ is written to `ACCELERATOR.md`. Every other differing selected path remains a
 collision. A malformed managed block, symlink, non-file obstruction, or
 conflicting `ACCELERATOR.md` is also refused.
 
-The install transcript is an action log, not a backup and not an automatic
-rollback facility. Its `COMPLETE files=` value counts selected inventory
-entries, including `UNCHANGED` entries. Save the transcript with pipeline
-failure propagation and retain a pre-install VCS/backup recovery point.
+A file the install replaces - a merge into a project file, an `--overwrite`
+collision - and every MCP configuration it writes are written whole beside
+the file, flushed to disk and renamed over it, keeping the replaced file's
+mode: a full disk or an interrupted run leaves the old file as it was, never
+a truncated one a later merge cannot parse. An install that fails part way
+puts back, newest first, the files it had already replaced (`RESTORED` on
+stdout; `NOT_RESTORED` with the reason on stderr for a file someone changed
+after the install wrote it, which is left as it is) and exits nonzero. Files
+it created stay; they hold only the release, and the next run finds them
+identical.
+
+The install transcript is an action log, not a backup. Its
+`COMPLETE files=` value counts selected inventory entries, including
+`UNCHANGED` entries. Save the transcript with pipeline failure propagation
+and retain a pre-install VCS/backup recovery point.
+
+`--sync --target DIR` brings an installed project's untouched accelerator
+files and its runtime up to the clone and prints a JSON report; the Harness
+runs it when it opens a project. It never reads or writes through a symbolic
+link inside the project. Where Python offers descriptor-relative calls
+(`os.supports_dir_fd`: Linux, macOS), every read, write, backup and the sync's
+record walk the path by folder descriptors with `O_NOFOLLOW`, so a folder
+another process swaps for a link while the sync runs is not followed either;
+a folder swapped during a write leaves the file alone, and the path is
+reported under `kept`. Native Windows has no such calls, so there each
+component is checked with `lstat` (junctions included) just before the path
+is used: a link that is there before the sync starts is refused, but the
+moment between the check and the write stays open to a process that can
+write to the project.
 
 ### `context_budget.py`
 

@@ -1,8 +1,10 @@
 """Attached accelerators: a registered project gets an edition lent from this clone, nothing copied into it."""
 
+import contextlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -42,6 +44,52 @@ def link_folder(project, relative, outside, move):
 
 def kept_reasons(report):
     return {item["path"]: item["reason"] for item in report["kept"]}
+
+
+# The temporary file a write creates beside the file it replaces.
+TEMPORARY = re.compile(r"\..+\.accelerator-\d+-[0-9a-f]{8}")
+
+
+def temporaries(root):
+    return sorted(path.name for path in root.rglob("*") if TEMPORARY.fullmatch(path.name))
+
+
+def descriptor_walk():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        import install_accelerator
+    finally:
+        sys.path.pop(0)
+    return install_accelerator._DESCRIPTOR_WALK
+
+
+@contextlib.contextmanager
+def swapped_while_written(project, folder, outside, marker, how="moved", armed=lambda: True):
+    """Make `folder` a link to `outside` as a write creates its temporary file for `marker`.
+
+    After every look the write takes at the path, before its bytes exist:
+    "moved" renames the real folder elsewhere in the project, "removed"
+    deletes it. `armed` says when the write to race has come. Yields the
+    swaps made (at most one).
+    """
+    real_open = os.open
+    swaps = []
+
+    def racing_open(path, flags, *args, **kwargs):
+        name = os.path.basename(os.fsdecode(path))
+        if (not swaps and armed() and flags & os.O_CREAT and flags & os.O_EXCL
+                and TEMPORARY.fullmatch(name) and marker in name):
+            real = project / folder
+            if how == "moved":
+                real.rename(real.with_name(real.name + "-moved"))
+            else:
+                shutil.rmtree(real)
+            real.symlink_to(outside, target_is_directory=True)
+            swaps.append(name)
+        return real_open(path, flags, *args, **kwargs)
+
+    with patch.object(os, "open", racing_open):
+        yield swaps
 
 
 class AttachedAcceleratorTests(unittest.TestCase):
@@ -361,6 +409,36 @@ class InstalledAcceleratorSyncTests(unittest.TestCase):
         self.assertEqual("# an old runtime\n", runtime.read_text(encoding="utf-8"))
         self.assertEqual(before, contents(outside))
 
+    @unittest.skipUnless(descriptor_walk(), "the descriptor walk needs os.supports_dir_fd")
+    def test_a_folder_swapped_while_the_sync_writes_takes_no_write_outside(self):
+        # Another process that can write to the project swaps `.claude` for a
+        # link after the sync looked at the path and before it wrote: the
+        # write followed the link, with nobody watching.
+        (self.project / ".claude/CLAUDE.md").unlink()  # the sync adds it back
+        outside = self.root / "outside"
+        outside.mkdir()
+        with swapped_while_written(self.project, ".claude", outside, "CLAUDE.md.") as swaps:
+            report = self.keep_current("release-1")
+        self.assertEqual(1, len(swaps))
+        self.assertIsNone(report["error"])
+        self.assertEqual({}, contents(outside))
+        self.assertIn(".claude is a symbolic link", kept_reasons(report).get(".claude/CLAUDE.md", ""))
+        self.assertNotIn(".claude/CLAUDE.md", {item["path"] for item in report["changed"]})
+        self.assertEqual([], temporaries(self.project))
+
+    @unittest.skipUnless(descriptor_walk(), "the descriptor walk needs os.supports_dir_fd")
+    def test_the_record_folder_swapped_while_it_is_written_takes_no_write_outside(self):
+        self.keep_current("release-1")  # the sync's record, in memory-bank/local
+        outside = self.root / "outside-local"
+        outside.mkdir()
+        with swapped_while_written(self.project, "memory-bank/local", outside, "accelerator-install.json.",
+                                   how="removed") as swaps:
+            report = self.keep_current("release-2")
+        self.assertEqual(1, len(swaps))
+        self.assertEqual({}, contents(outside))
+        self.assertIn("memory-bank/local is a symbolic link",
+                      kept_reasons(report).get("memory-bank/local/accelerator-install.json", ""))
+
     def test_a_linked_memory_bank_is_not_synced_through(self):
         outside = self.root / "outside-memory"
         link_folder(self.project, "memory-bank", outside, move=True)
@@ -501,6 +579,26 @@ class InstalledCodexSyncTests(unittest.TestCase):
         self.assertNotIn(".codex/hooks.json", {item["path"] for item in report["changed"]})
         self.assertIn("could not approve", {item["path"]: item["reason"] for item in report["kept"]}[".codex/hooks.json"])
         self.assertEqual({"error": "Codex could not list hooks."}, report["codex_trust"])
+
+    @unittest.skipUnless(descriptor_walk(), "the descriptor walk needs os.supports_dir_fd")
+    def test_the_wiring_put_back_never_follows_a_link_swapped_in(self):
+        # Codex refuses the new wiring and the Harness writes the approved one
+        # back itself; `.codex` becomes a link just as it does.
+        outside = self.root / "outside-codex"
+        outside.mkdir()
+        refused = []
+
+        def refuse(*_):
+            refused.append(True)
+            raise self.attach.AttachError("Codex could not list hooks.")
+
+        with swapped_while_written(self.project, ".codex", outside, "hooks.json.", armed=lambda: bool(refused)) as swaps:
+            report, _ = self.keep_current(side_effect=refuse)
+        self.assertEqual(1, len(swaps))
+        self.assertEqual({}, contents(outside))
+        self.assertEqual("Codex could not list hooks.", report["codex_trust"]["error"])
+        self.assertIn(".codex is a symbolic link", report["codex_trust"]["not_restored"])
+        self.assertEqual([], temporaries(self.project))
 
     def test_wiring_behind_a_link_is_neither_rewired_nor_approved(self):
         # The Harness read the wiring through a linked `.codex` and would

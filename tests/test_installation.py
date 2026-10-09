@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import errno
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -15,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_accelerator.py"
@@ -99,6 +103,7 @@ HOOK_WIRING = (".claude/settings.json", ".cursor/hooks.json", ".codex/hooks.json
 # the editions use (bare, "${CLAUDE_PROJECT_DIR}"-anchored, Codex launcher).
 sys.path.insert(0, str(ROOT / "scripts"))
 from check_routes import wired_hook_scripts as scripts_named  # noqa: E402
+import install_accelerator  # noqa: E402  - in-process runs, for the injected faults below
 
 
 def wired_hook_scripts(project: Path) -> list[str]:
@@ -136,6 +141,96 @@ def files_under(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def run_installer(*args: str) -> tuple[int, str, str]:
+    """`install_accelerator.py *args` in this process, so a test can inject a fault."""
+    out, err = io.StringIO(), io.StringIO()
+    with patch.object(sys, "argv", [str(INSTALLER), *args]), contextlib.redirect_stdout(
+        out
+    ), contextlib.redirect_stderr(err):
+        code = install_accelerator.main()
+    return code, out.getvalue(), err.getvalue()
+
+
+def install_quietly(target: Path, edition: str, tools: list[str], merge: bool = False) -> None:
+    with contextlib.redirect_stdout(io.StringIO()):
+        code = install_accelerator.install(ROOT, edition, target, tools, False, False, merge)
+    if code != 0:
+        raise AssertionError(f"install into {target} returned {code}")
+
+
+# A write's temporary file beside the file it replaces: `.<name>.accelerator-<pid>-<hex>`.
+TEMPORARY = re.compile(r"\..+\.accelerator-\d+-[0-9a-f]{8}")
+
+
+def is_temporary(name: str, marker: str) -> bool:
+    return TEMPORARY.fullmatch(name) is not None and marker in name
+
+
+def temporaries(root: Path) -> list[str]:
+    """Temporary files a write left below `root`."""
+    return sorted(path.name for path in root.rglob("*") if TEMPORARY.fullmatch(path.name))
+
+
+@contextlib.contextmanager
+def swapped_while_written(project: Path, folder: str, outside: Path, marker: str, how: str):
+    """Make `folder` a link to `outside` as a write creates its temporary file for `marker`.
+
+    That is after every look the write takes at the path and before its bytes
+    exist anywhere. `how`: "moved" renames the real folder elsewhere in the
+    project, "removed" deletes it. Yields the swaps made (at most one).
+    """
+    real_open = os.open
+    swaps: list[str] = []
+
+    def racing_open(path, flags, *args, **kwargs):
+        name = os.path.basename(os.fsdecode(path))
+        if not swaps and flags & os.O_CREAT and flags & os.O_EXCL and is_temporary(name, marker):
+            real = project / folder
+            if how == "moved":
+                real.rename(real.with_name(real.name + "-moved"))
+            else:
+                shutil.rmtree(real)
+            real.symlink_to(outside, target_is_directory=True)
+            swaps.append(name)
+        return real_open(path, flags, *args, **kwargs)
+
+    with patch.object(os, "open", racing_open):
+        yield swaps
+
+
+@contextlib.contextmanager
+def disk_full_while_written(marker: str, also=None):
+    """The disk fills after the first byte a write puts in its temporary file for `marker`.
+
+    What a full disk or an interrupted run does to a write: the merge used to
+    be written over the file in place, so the first byte was all that was
+    left of it. `also` runs at that moment, as another process would.
+    """
+    real_open, real_write = os.open, os.write
+    doomed: set[int] = set()
+    hit: list[str] = []
+
+    def tracking_open(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        name = os.path.basename(os.fsdecode(path))
+        if not hit and flags & os.O_CREAT and flags & os.O_EXCL and is_temporary(name, marker):
+            doomed.add(descriptor)
+            hit.append(name)
+        return descriptor
+
+    def full_disk(descriptor, data):
+        if descriptor in doomed:
+            doomed.discard(descriptor)
+            real_write(descriptor, bytes(data[:1]))
+            if also is not None:
+                also()
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        return real_write(descriptor, data)
+
+    with patch.object(os, "open", tracking_open), patch.object(os, "write", full_disk):
+        yield hit
 
 
 class InventoryTest(unittest.TestCase):
@@ -1263,6 +1358,262 @@ class McpConfigSyncTest(unittest.TestCase):
                     self.assertIn("memory MCP configuration not merged", kept.get(path, ""))
                     self.assertIn(reason, kept.get(path, ""))
                     self.assertEqual(content, (self.target / path).read_bytes())
+
+
+@unittest.skipUnless(
+    install_accelerator._DESCRIPTOR_WALK,
+    "the descriptor walk needs os.supports_dir_fd; native Windows looks at each component first",
+)
+class SyncRaceTest(unittest.TestCase):
+    """A folder swapped for a link between the sync's look at a path and its write.
+
+    The sync looked at every folder of a path and then wrote by the path: a
+    `.cursor` replaced by a link in between sent `.cursor/mcp.json` to the
+    link's target. Each case swaps the folder the moment the write creates
+    its temporary file - after every look, before the bytes exist - once by
+    moving the real folder elsewhere in the project and once by deleting it,
+    and runs `--sync` as the command line does.
+    """
+
+    HOW = ("moved", "removed")
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="sync race ")
+        self.addCleanup(self._tmp.cleanup)
+
+    def project(self, name: str) -> tuple[Path, Path]:
+        base = Path(self._tmp.name) / name
+        target, outside = base / "project", base / "outside"
+        target.mkdir(parents=True)
+        outside.mkdir()
+        run("git", "init", "--quiet", str(target))
+        install_quietly(target, "Laravel", ["claude", "cursor", "codex"])
+        return target, outside
+
+    def sync(self, target: Path, outside: Path, folder: str, marker: str, how: str) -> dict:
+        with swapped_while_written(target, folder, outside, marker, how) as swaps:
+            code, out, err = run_installer("--source-root", str(ROOT), "--sync", "--target", str(target))
+        self.assertEqual(1, len(swaps), "the write never created its temporary file")
+        self.assertEqual((0, ""), (code, err))
+        return json.loads(out)
+
+    @staticmethod
+    def kept(report: dict) -> dict:
+        return {item["path"]: item["reason"] for item in report["kept"]}
+
+    def test_a_tool_folder_swapped_while_the_sync_writes_into_it(self) -> None:
+        for how in self.HOW:
+            with self.subTest(how=how):
+                target, outside = self.project(f"tool {how}")
+                (target / ".cursor/mcp.json").unlink()  # the sync adds it back
+                report = self.sync(target, outside, ".cursor", "mcp.json.", how)
+                self.assertEqual({}, files_under(outside))
+                self.assertNotIn(".cursor/mcp.json", {item["path"] for item in report["changed"]})
+                self.assertIn(".cursor is a symbolic link", self.kept(report).get(".cursor/mcp.json", ""))
+                self.assertEqual([], temporaries(target))
+
+    def test_the_backup_folder_swapped_while_a_local_edit_is_saved(self) -> None:
+        for how in self.HOW:
+            with self.subTest(how=how):
+                target, outside = self.project(f"backup {how}")
+                install_accelerator.sync_installation(ROOT, target)  # the sync's record
+                runtime = target / "memory-bank/scripts/context.py"
+                edited = runtime.read_text(encoding="utf-8") + "\n# local patch\n"
+                runtime.write_text(edited, encoding="utf-8")
+                report = self.sync(target, outside, "memory-bank/local", "context.py.", how)
+                kept = self.kept(report)
+                self.assertEqual({}, files_under(outside))
+                # Without its backup the edit would be lost, so it stays.
+                reason = kept.get("memory-bank/scripts/context.py", "")
+                self.assertIn("backup cannot be written inside the project", reason)
+                self.assertIn("memory-bank/local is a symbolic link", reason)
+                self.assertEqual(edited, runtime.read_text(encoding="utf-8"))
+                self.assertEqual([], report["backups"])
+                self.assertIn(
+                    "memory-bank/local is a symbolic link",
+                    kept.get(install_accelerator.SYNC_MANIFEST, ""),
+                )
+                self.assertEqual([], temporaries(target))
+
+    def test_the_record_folder_swapped_while_the_record_is_written(self) -> None:
+        for how in self.HOW:
+            with self.subTest(how=how):
+                target, outside = self.project(f"record {how}")
+                report = self.sync(target, outside, "memory-bank/local", "accelerator-install.json.", how)
+                self.assertEqual({}, files_under(outside))
+                self.assertIn(
+                    "memory-bank/local is a symbolic link",
+                    self.kept(report).get(install_accelerator.SYNC_MANIFEST, ""),
+                )
+                self.assertEqual([], temporaries(target))
+
+
+class SyncWithoutDescriptorsTest(unittest.TestCase):
+    """The fallback for a platform whose os.supports_dir_fd lacks the calls (native Windows).
+
+    There each component is looked at with lstat before the path is used: a
+    link that stands there before the sync starts is still refused, and the
+    sync still writes, backs up and records - only the window between the
+    look and the write stays open.
+    """
+
+    def test_links_are_refused_and_everything_else_is_written(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="sync by path ") as raw, patch.object(
+            install_accelerator, "_DESCRIPTOR_WALK", False
+        ):
+            base = Path(raw)
+            target = base / "project"
+            target.mkdir()
+            run("git", "init", "--quiet", str(target))
+            install_quietly(target, "Laravel", ["claude", "cursor"])
+            runtime = target / "memory-bank/scripts/context.py"
+            runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# local patch\n", encoding="utf-8")
+            outside = base / "outside"
+            outside.mkdir()
+            shutil.rmtree(target / ".cursor")
+            (target / ".cursor").symlink_to(outside, target_is_directory=True)
+
+            report = install_accelerator.sync_installation(ROOT, target)
+            kept = {item["path"]: item["reason"] for item in report["kept"]}
+            self.assertIsNone(report["error"])
+            # The shared component's file there: with the link, Cursor's own
+            # files are not counted as installed at all.
+            self.assertIn(".cursor is a symbolic link", kept.get(".cursor/README.md", ""))
+            self.assertEqual({}, files_under(outside))
+            self.assertEqual((ROOT / "Laravel" / "memory-bank/scripts/context.py").read_bytes(), runtime.read_bytes())
+            [backup] = report["backups"]
+            self.assertIn("# local patch", (target / backup).read_text(encoding="utf-8"))
+            self.assertTrue((target / install_accelerator.SYNC_MANIFEST).is_file())
+
+            outside_local = base / "outside-local"
+            (target / "memory-bank/local").rename(outside_local)
+            (target / "memory-bank/local").symlink_to(outside_local, target_is_directory=True)
+            before = files_under(outside_local)
+            runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# another patch\n", encoding="utf-8")
+            report = install_accelerator.sync_installation(ROOT, target)
+            kept = {item["path"]: item["reason"] for item in report["kept"]}
+            self.assertIn("backup cannot be written inside the project", kept.get("memory-bank/scripts/context.py", ""))
+            self.assertIn("memory-bank/local is a symbolic link", kept.get(install_accelerator.SYNC_MANIFEST, ""))
+            self.assertIn("# another patch", runtime.read_text(encoding="utf-8"))
+            self.assertEqual(before, files_under(outside_local))
+
+
+class InterruptedMergeTest(unittest.TestCase):
+    """An install that merges into a project's file and fails part way leaves that file whole.
+
+    The merge was written over the file in place: a disk that filled after
+    the first byte left `{` where a team's `.mcp.json` had been, and every
+    later install refused to merge into it
+    (`cannot-merge:memory-mcp-configuration`).
+    """
+
+    TEAM = {"command": "node", "args": ["team-server.js"]}
+    # A time the install would never give a file, to see it put back.
+    MTIME = 1_577_880_000_000_000_000
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="interrupted merge ")
+        self.addCleanup(self._tmp.cleanup)
+        self.target = Path(self._tmp.name) / "project"
+        self.target.mkdir()
+
+    def own(self, relative: str, content: str, mode: int) -> None:
+        """A file the project had before the install."""
+        path = self.target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        os.chmod(path, mode)
+        os.utime(path, ns=(self.MTIME, self.MTIME))
+
+    def team_config(self) -> str:
+        return json.dumps({"mcpServers": {"team-server": self.TEAM}}, indent=2) + "\n"
+
+    def state(self, paths) -> dict:
+        return {
+            path: (
+                (self.target / path).read_bytes(),
+                stat.S_IMODE((self.target / path).stat().st_mode),
+                (self.target / path).stat().st_mtime_ns,
+            )
+            for path in paths
+        }
+
+    @staticmethod
+    def records(output: str, action: str) -> list[str]:
+        """The inventory paths of an install's `action` records, sorted."""
+        return sorted(line.split("\t")[2] for line in output.splitlines() if line.startswith(action + "\t"))
+
+    def install(self, *tools: str) -> list[str]:
+        command = ["--edition", "Laravel", "--target", str(self.target), "--merge-existing"]
+        for tool in tools:
+            command += ["--tool", tool]
+        return command
+
+    def test_a_merge_that_runs_out_of_space_leaves_the_config_whole(self) -> None:
+        self.own(".mcp.json", self.team_config(), 0o640)
+        before = self.state([".mcp.json"])
+        command = self.install("claude")
+        with disk_full_while_written("mcp.json.") as hit:
+            code, out, err = run_installer(*command)
+        self.assertTrue(hit, "the merge never created its temporary file")
+        self.assertEqual(1, code)
+        self.assertIn("No space left on device", err)
+        self.assertEqual(before, self.state([".mcp.json"]))
+        self.assertEqual([], temporaries(self.target))
+
+        again = run(sys.executable, str(INSTALLER), *command)
+        self.assertEqual(0, again.returncode, again.stderr)
+        self.assertIn("MERGE\tclaude\t.mcp.json\t.mcp.json", again.stdout)
+        servers = json.loads((self.target / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]
+        self.assertEqual(self.TEAM, servers["team-server"])
+        self.assertIn("harness-memory", servers)
+        self.assertEqual(0o640, stat.S_IMODE((self.target / ".mcp.json").stat().st_mode))
+
+    def project_with_own_files(self) -> list[str]:
+        self.own("AGENTS.md", "# Project policy\n\nKeep project behavior.\n", 0o644)
+        self.own(".gitignore", ".env\n/vendor/\n", 0o600)
+        self.own(".mcp.json", self.team_config(), 0o640)
+        self.own(".cursor/mcp.json", self.team_config(), 0o644)
+        return ["AGENTS.md", ".gitignore", ".mcp.json", ".cursor/mcp.json"]
+
+    def test_a_failed_install_puts_back_the_files_it_had_merged(self) -> None:
+        # The Codex configuration is the last MCP file in inventory order, so
+        # the project's policy, ignore list and both MCP configurations have
+        # been merged by the time it fails.
+        owned = self.project_with_own_files()
+        before = self.state(owned)
+        command = self.install("claude", "cursor", "codex")
+        with disk_full_while_written("config.toml.") as hit:
+            code, out, err = run_installer(*command)
+        self.assertTrue(hit, "the install never wrote the Codex configuration")
+        self.assertEqual(1, code)
+        self.assertEqual(sorted(owned), self.records(out, "MERGE"))
+        self.assertEqual(sorted(owned), self.records(out, "RESTORED"))
+        self.assertEqual(before, self.state(owned))
+        self.assertFalse((self.target / ".codex/config.toml").exists())
+        self.assertEqual([], temporaries(self.target))
+
+        again = run(sys.executable, str(INSTALLER), *command)
+        self.assertEqual(0, again.returncode, again.stderr)
+        self.assertEqual(sorted(owned), self.records(again.stdout, "MERGE"))
+        self.assertTrue((self.target / ".codex/config.toml").is_file())
+
+    def test_a_file_changed_after_the_install_wrote_it_is_not_put_back(self) -> None:
+        owned = self.project_with_own_files()
+        command = self.install("claude", "cursor", "codex")
+        edited = '{"mcpServers": {"edited-meanwhile": {"command": "node", "args": []}}}\n'
+
+        def someone_else_edits():
+            (self.target / ".mcp.json").write_text(edited, encoding="utf-8")
+
+        with disk_full_while_written("config.toml.", also=someone_else_edits):
+            code, out, err = run_installer(*command)
+        self.assertEqual(1, code)
+        self.assertEqual(edited, (self.target / ".mcp.json").read_text(encoding="utf-8"))
+        self.assertIn(
+            "NOT_RESTORED\tclaude\t.mcp.json\t.mcp.json\tchanged after the install wrote it", err
+        )
+        self.assertEqual(sorted(set(owned) - {".mcp.json"}), self.records(out, "RESTORED"))
 
 
 class CleanInstallTest(unittest.TestCase):
