@@ -175,6 +175,16 @@ class MemoryMcpTests(unittest.TestCase):
             self.assertFalse(reply['isError'], reply)
         self.assertEqual('Check cobalt allocation', self.cli_call('get', '--task-id', 'TASK-MCP')['goal'])
 
+    def test_a_result_whose_progress_is_not_text_is_refused_before_anything_is_written(self):
+        # The schema says progress is text; null was read as "leave the task
+        # alone" and recorded the learnings with it.
+        revision = self.start()
+        for progress in (None, 42, ['Cobalt allocation checked.']):
+            reply = self.call('memory_record_result', **{**self.draft(revision), 'progress': progress})
+            self.assertTrue(reply['isError'], (progress, reply))
+        self.assertEqual([], list((self.root / 'project-brain/dynamic/findings').glob('*')))
+        self.assertEqual(revision, self.cli_call('get', '--task-id', 'TASK-MCP')['revision'])
+
     def test_shared_replay_survives_local_receipt_deletion_and_current_revision(self):
         import shutil
         draft = self.draft(self.start())

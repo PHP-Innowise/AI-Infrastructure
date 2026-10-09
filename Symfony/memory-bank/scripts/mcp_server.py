@@ -140,6 +140,10 @@ class Memory:
         return self.record(task_id, data)
 
     def record(self, task_id, data):
+        # The schema says progress is text: null is the client's error, not
+        # "leave the task's progress alone", which only an absent key means.
+        if 'progress' in data and not isinstance(data['progress'], str):
+            raise BrainError('progress must be text')
         # The one write path every unattended writer shares: a replay of the
         # same result_id and content finishes a save that stopped half way.
         return record_result(self.root, task_id, data['result_id'], data['revision'],
