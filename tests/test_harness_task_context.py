@@ -108,6 +108,38 @@ for event in ({"type": "thread.started", "thread_id": "native-shell-fixture"},
 """
 
 
+# Codex writes each call's fill to the thread's rollout; the recovery resumes the thread, so its calls follow there.
+FAKE_ROLLOUT = r'''
+import datetime, json, os, pathlib, sqlite3, sys
+sys.stdin.read()
+home = pathlib.Path(os.environ["CODEX_HOME"])
+rollout = home / "sessions" / "rollout-native-context-fixture.jsonl"
+def record(kind, payload):
+    return json.dumps({"type": kind, "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                       "payload": payload}) + "\n"
+def count(fill):
+    return record("event_msg", {"type": "token_count", "info": {"model_context_window": 258400,
+                                                                "last_token_usage": {"input_tokens": fill}}})
+if os.environ.get("CONTEXT_MEMORY_RECOVERY"):
+    # Resumed near the window, the thread compacts before the recovery's call.
+    with rollout.open("a") as handle:
+        handle.write(record("compacted", {"message": ""}) + count(24000))
+    text = "```memory-draft\n" + json.dumps({"progress": "Cobalt checked", "next_steps": [], "learnings": []}) + "\n```"
+else:
+    rollout.parent.mkdir(parents=True)
+    meta = {"type": "session_meta", "payload": {"id": "native-context-fixture", "cwd": os.getcwd(), "source": "exec"}}
+    rollout.write_text(json.dumps(meta) + "\n" + count(12000) + count(240000))
+    with sqlite3.connect(home / "state_5.sqlite") as db:
+        db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)")
+        db.execute("INSERT INTO threads VALUES (?,?,?)", ("native-context-fixture", str(rollout), os.getcwd()))
+    text = "Checked the rule."
+for event in ({"type": "thread.started", "thread_id": "native-context-fixture"},
+              {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+              {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 50, "output_tokens": 10}}):
+    print(json.dumps(event), flush=True)
+'''
+
+
 class TaskContextTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -675,6 +707,25 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
         from harness import memory_recovery
         self.assertEqual(len(memory_recovery.PROMPT), context['recovery']['characters'])
         self.assertGreaterEqual(context['ledger']['instructions'], len(memory_recovery.PROMPT))
+
+    def test_codex_recovery_calls_and_compaction_reach_the_launch_fill(self):
+        # The fill settled before the recovery ran: the recovery's prompt reached the ledger, but its compaction and
+        # call did not reach the fill, which stayed at the launch's 240,000 and two calls, with no divider.
+        self.fake.write_text(FAKE_ROLLOUT)
+        with patch.dict(os.environ, {"CODEX_HOME": str(self.root / "codex-home")}):
+            store = self.manager()
+            sid = store.create(self.automatic(store))["id"]
+            self.wait_status(store, sid, "completed")
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual(["started", "recovered"], [e["recovery"] for e in self.memory_events(store, sid) if "recovery" in e])
+        context = store.results.history(sid)["launches"][0]["context"]
+        from harness import memory_recovery
+        self.assertEqual(len(memory_recovery.PROMPT), context["recovery"]["characters"])
+        fill = context["fill"]
+        self.assertEqual((12000, 24000, 240000, 3, 258400),
+                         (fill["start"], fill["end"], fill["peak"], fill["calls"], fill["window"]))
+        self.assertEqual([{"pre": 240000, "post": 24000, "call": 2}], fill["compactions"])
+        self.assertEqual([{"pre": 240000, "post": 24000}], [event["compaction"] for event in store.events(sid) if "compaction" in event])
 
     def test_automatic_query_is_sanitized_before_goal_and_memory_state(self):
         from harness.task_context import message_query

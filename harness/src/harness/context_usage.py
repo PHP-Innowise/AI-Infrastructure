@@ -272,7 +272,9 @@ class CodexLive:
         """Once the launch has ended: read what the rollout gained since the last poll, then extend the fill with
         the rollout's last 4 MiB past where those reads stopped. A line is known by where it starts in the file, so
         it counts once, and the fill is never replaced: the tail can begin inside a long launch, after calls and
-        compactions only the live reads saw. True when the fill changed."""
+        compactions only the live reads saw. Reads then go on from the tail's end, so settling again - after the
+        memory recovery resumed the thread and Codex appended its calls - adds only those. True when the fill
+        changed."""
         from . import providers
         self.fill.until, self.retry_at = until, 0.0
         changed = False
@@ -283,13 +285,17 @@ class CodexLive:
                 break
         end = providers.codex_rollout_end(native_id, self.project) if native_id else None
         if end and (self.path is None or end[0] == self.path):
-            _, position, data = end
+            path, start, data = end
             # The live reads fed every complete line before this place in the file.
             read = self.offset - len(self.partial) if self.path is not None else 0
+            position = start
             for line in data.split(b'\n'):
                 if position >= read:
                     changed = self.fill.feed(line) or changed
                 position += len(line) + 1
+            # Everything up to the tail's end is counted now, its last line too: the launch that wrote it has ended.
+            if self.path is None or start + len(data) >= self.offset:
+                self.path, self.offset, self.partial = path, start + len(data), b''
         return changed
 
 

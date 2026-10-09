@@ -694,24 +694,42 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
 
 # Codex reads the AGENTS.md chain only up to project_doc_max_bytes, 32 KiB by
 # default. A project's own AGENTS.md with the accelerator's policy block after
-# it passes that, and the policy, coming last, was what got cut.
+# it passes that, and the policy, coming last, was what got cut. The budget is
+# the file plus that default again for the rest of the chain, at least the
+# 128 KiB the editions' .codex/config.toml set.
 CODEX_DOC_DEFAULT = 32768
 CODEX_DOC_BUDGET = 131072
+# Codex reads the chain up to the budget into every call, so a file's size
+# must not raise it without bound: a sparse 2 GiB AGENTS.md asked for 2 GiB and
+# 32 KiB. The ceiling, 256 KiB, holds every real case with room to spare. The
+# AGENTS.md files this repository ships measure 11.3-16.9 KiB (the largest,
+# Infrastructure-Creator's, 17,251 B), and scripts/token_budget.json lets none
+# pass 17,971 B (observed size plus ~5% headroom): with the 32 KiB for the rest
+# of the chain that is under 50 KiB, which leaves a project's own AGENTS.md
+# about 200 KiB in front of the policy block. At the ceiling the instructions
+# alone are some 55,000 tokens of every call (4.76 bytes a token, as
+# scripts/context_budget.py measured AGENTS.md).
+CODEX_DOC_CEILING = 262144
 
 
 def codex_instruction_budget(command: list[str], project: Path) -> list[str]:
-    """Raise Codex's AGENTS.md budget for this launch when the project needs it."""
+    """Raise Codex's AGENTS.md budget for this launch when the project needs it, never past CODEX_DOC_CEILING.
+
+    Only a regular file's own size counts: a link's size is its target's, which can be any file. The first of the two
+    names that exists decides, as the override is what Codex reads when there is one, so a linked override is not
+    passed over for AGENTS.md."""
     size = 0
     for name in ("AGENTS.override.md", "AGENTS.md"):
         try:
-            size = (project / name).stat().st_size
+            info = (project / name).lstat()
         except OSError:
             continue
+        size = info.st_size if stat.S_ISREG(info.st_mode) else 0
         break
     if size <= CODEX_DOC_DEFAULT or "exec" not in command:
         return command
     at = command.index("exec")
-    budget = max(CODEX_DOC_BUDGET, size + CODEX_DOC_DEFAULT)
+    budget = min(CODEX_DOC_CEILING, max(CODEX_DOC_BUDGET, size + CODEX_DOC_DEFAULT))
     return [*command[:at], "-c", f"project_doc_max_bytes={budget}", *command[at:]]
 
 

@@ -427,13 +427,54 @@ class ContextLaunchTests(unittest.TestCase):
             live = context_usage.CodexLive(self.project, now.timestamp() - 1)
             self.assertTrue(live.poll("native-long"))
             self.assertEqual((100000, 20000, 2), tuple(live.fill.snapshot()[key] for key in ("start", "end", "calls")))
-            self.assertTrue(live.settle("native-long", time.time()))
-        # Three reads of 1 MiB stop short of the 5 MiB rollout, and its last 4 MiB begin before they stopped.
+            rollout_end, reads = providers.codex_rollout_end, []
+            with patch.object(providers, "codex_rollout_end", side_effect=lambda *args: reads.append(live.offset) or rollout_end(*args)):
+                self.assertTrue(live.settle("native-long", time.time()))
+        # Three reads of 1 MiB stop short of the 5 MiB rollout, and its last 4 MiB begin before they stopped; reads
+        # then go on from the rollout's end.
         size = rollout.stat().st_size
-        self.assertTrue(size - 4 * 1024 * 1024 < live.offset < size, (size, live.offset))
+        self.assertTrue(size - 4 * 1024 * 1024 < reads[0] < size, (size, reads))
+        self.assertEqual(size, live.offset)
         self.assertEqual([100000, 20000, 25000, 30000, 31000], live.fill.fills)
         self.assertEqual({"start": 100000, "end": 31000, "peak": 100000, "calls": 5, "window": 258400,
                           "compactions": [{"pre": 100000, "post": 20000, "call": 1}]}, live.fill.snapshot())
+
+    def test_a_later_settle_reads_on_from_the_tail_and_counts_no_line_twice(self):
+        # The memory recovery resumes the thread once the launch has settled, and Codex appends its calls to the same
+        # rollout. The first settle fed the tail past where its reads stopped; a second one, after the recovery,
+        # starts from the tail's end, so 30,000 and 31,000 are not read and counted again.
+        home = self.root / "codex-home"
+        (home / "sessions").mkdir(parents=True)
+        rollout = home / "sessions" / "rollout-resumed.jsonl"
+        now = datetime.now(timezone.utc)
+        record = lambda kind, payload: json.dumps({"type": kind, "timestamp": now.isoformat(), "payload": payload})
+        count = lambda fill: record("event_msg", {"type": "token_count", "info": {"model_context_window": 258400,
+                                                                                    "last_token_usage": {"input_tokens": fill}}})
+        output = record("response_item", {"type": "function_call_output", "output": "x" * 4096})
+        mebibyte = (1024 * 1024) // (len(output) + 1)
+        meta = json.dumps({"type": "session_meta", "payload": {"id": "native-resumed", "cwd": str(self.project), "source": "exec"}})
+        lines = [meta, count(100000), count(20000), *[output] * (2 * mebibyte), count(25000),
+                 *[output] * (2 * mebibyte), count(30000), *[output] * mebibyte, count(31000)]
+        rollout.write_text("".join(line + "\n" for line in lines))
+        with closing(sqlite3.connect(home / "state_5.sqlite")) as db:
+            db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)")
+            db.execute("INSERT INTO threads VALUES (?,?,?)", ("native-resumed", str(rollout), str(self.project)))
+            db.commit()
+        with patch.object(context_usage.CodexLive, "LIMIT", 1024 * 1024), patch.object(context_usage.CodexLive, "SETTLE_READS", 2):
+            live = context_usage.CodexLive(self.project, now.timestamp() - 1)
+            self.assertTrue(live.poll("native-resumed"))
+            self.assertTrue(live.settle("native-resumed", time.time()))
+            self.assertEqual([100000, 20000, 25000, 30000, 31000], live.fill.fills)
+            # The recovery's call, appended after the settle.
+            with rollout.open("a") as handle:
+                handle.write(record("event_msg", {"type": "token_count", "info": {
+                    "model_context_window": 258400, "last_token_usage": {"input_tokens": 40000}}}) + "\n")
+            self.assertTrue(live.settle("native-resumed", time.time()))
+            self.assertEqual([100000, 20000, 25000, 30000, 31000, 40000], live.fill.fills)
+            self.assertFalse(live.settle("native-resumed", time.time()))
+        self.assertEqual(rollout.stat().st_size, live.offset)
+        self.assertEqual({"start": 100000, "end": 40000, "peak": 100000, "calls": 6}, {
+            key: live.fill.snapshot()[key] for key in ("start", "end", "peak", "calls")})
 
     def test_codex_fill_grows_while_the_launch_runs(self):
         self.behavior = "slow-codex"

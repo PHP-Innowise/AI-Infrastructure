@@ -1,5 +1,6 @@
 """Provider boundaries, tested offline with documented NDJSON shapes."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -981,6 +982,45 @@ class CodexInstructionBudgetTests(unittest.TestCase):
         command, kept = self.launch({"AGENTS.md": 1_000})
         self.assertEqual(command, kept)
         self.assertEqual(["codex", "resume"], providers.codex_instruction_budget(["codex", "resume"], Path("/nonexistent")))
+
+    def test_the_budget_stops_at_its_ceiling(self):
+        # A sparse 2 GiB AGENTS.md raised the budget to 2 GiB and 32 KiB, and Codex reads up to the budget.
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            with open(project / "AGENTS.md", "wb") as handle:
+                handle.truncate(2 * 1024 ** 3 if os.name == "posix" else 1024 * 1024)
+            command = providers.build_command("codex", "/bin/codex", project, "hello")
+            raised = providers.codex_instruction_budget(command, project)
+        at = raised.index("exec")
+        self.assertEqual(["-c", "project_doc_max_bytes=262144"], raised[at - 2:at])
+        self.assertEqual(262144, providers.CODEX_DOC_CEILING)
+        # Below it: every AGENTS.md the repository may ship (its context-budget ceiling, observed size plus
+        # headroom) with the 32 KiB the budget leaves for the rest of the chain, and the budget the editions set.
+        budgets = json.loads((Path(__file__).resolve().parents[1] / "scripts/token_budget.json").read_text(encoding="utf-8"))
+        largest = max(edition["agents_md_bytes"] for edition in budgets["editions"].values())
+        self.assertLessEqual(largest + providers.CODEX_DOC_DEFAULT, providers.CODEX_DOC_BUDGET)
+        self.assertLess(providers.CODEX_DOC_BUDGET, providers.CODEX_DOC_CEILING)
+
+    def test_only_a_regular_file_raises_the_budget(self):
+        # Its size was read through a link, whose target can be any file: a link to 512 MiB elsewhere asked Codex
+        # for 512 MiB. A linked AGENTS.md, or a linked override, leaves Codex's own budget.
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            target = project / "elsewhere.md"
+            target.write_text("x" * 40_000, encoding="utf-8")
+            command = providers.build_command("codex", "/bin/codex", project, "hello")
+            try:
+                (project / "AGENTS.md").symlink_to(target)
+            except (OSError, NotImplementedError) as error:  # Windows without the right to create links
+                self.skipTest(f"cannot create a symbolic link: {error}")
+            self.assertEqual(command, providers.codex_instruction_budget(command, project))
+            # The override is what Codex reads, so a linked one is not passed over for a long AGENTS.md.
+            (project / "AGENTS.md").unlink()
+            (project / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
+            (project / "AGENTS.override.md").symlink_to(target)
+            self.assertEqual(command, providers.codex_instruction_budget(command, project))
+            (project / "AGENTS.override.md").unlink()
+            self.assertIn("project_doc_max_bytes=131072", providers.codex_instruction_budget(command, project))
 
 
 if __name__ == "__main__":

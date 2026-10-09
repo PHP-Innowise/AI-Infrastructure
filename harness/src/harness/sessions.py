@@ -2138,6 +2138,12 @@ class Sessions:
                     context_record['recovery'] = {'characters': len(memory_recovery.PROMPT), 'state': recovery['state']}
                     context_record['ledger']['total'] += len(memory_recovery.PROMPT)
                     context_record['ledger']['instructions'] += len(memory_recovery.PROMPT)
+                    # Codex: the recovery resumed the thread, so its calls and compactions follow the launch's in the
+                    # same rollout, past where the settle above stopped; settling again adds only those, as Claude's
+                    # tracker took the recovery's messages from its stream.
+                    if live and live.settle(native_id, time.time()):
+                        tracker.update(live.fill.snapshot())
+                        note_compactions()
                 self._event(sid, {'kind': 'memory', 'ok': recovery['state'] == 'recovered',
                     'recovery': recovery['state'], 'text': 'Memory draft recovered.' if recovery['state'] == 'recovered'
                     else recovery['reason']})

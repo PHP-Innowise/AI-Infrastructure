@@ -1211,7 +1211,9 @@ Fill, window, growth and free space are the provider's own token counts:
   two seconds while the turn runs and once more when it ends. That last read goes
   on from where the previous one stopped; the rollout's last 4 MiB only adds the
   lines past it, each known by its place in the file, so a turn longer than that
-  keeps its first calls and compactions.
+  keeps its first calls and compactions. A memory recovery resumes the same
+  thread, so the rollout is read once more after it, from the end of that tail:
+  the recovery's calls count in the turn, and no line twice.
 - **Cursor:** reports none; its turns show `—` and the characters the Harness
   added.
 
