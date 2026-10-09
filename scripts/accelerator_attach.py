@@ -37,13 +37,16 @@ The Harness imports this module; the functions below are its contract.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +62,12 @@ EDITIONS = {
 }
 TOOLS = ("claude", "codex", "cursor")
 STATE_MARKER = "accelerator-attach.json"
+LAUNCH_DIRECTORY = "launch"
+# The state is a project's memory kept outside the project, so it is its
+# owner's alone whatever the umask: directories 0700, files 0600 (POSIX). The
+# runtime keeps what it writes there the same way (secure_attached_state in
+# the edition's memory-bank/scripts/brain_runtime.py).
+PRIVATE_DIRECTORY = 0o700
 # Codex hook events the edition wires, in .codex/hooks.json spelling.
 CODEX_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
 SKILL_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
@@ -122,7 +131,14 @@ def default_state_base() -> Path:
 
 
 def state_directory(project: Path, base: Optional[Path] = None) -> Path:
-    return Path(base or default_state_base()) / "attached" / project_key(project)
+    """The project's state directory, always as an absolute path.
+
+    A relative base is taken from the current directory now, before a launch
+    moves into the project: from there the same words would name another
+    directory, and the runtime refuses a relative ACCELERATOR_STATE_DIR.
+    """
+    base = Path(os.path.abspath(Path(base or default_state_base()).expanduser()))
+    return base / "attached" / project_key(project)
 
 
 def resolve_project(value: Optional[str]) -> Path:
@@ -209,18 +225,79 @@ def environment(edition: str, project: Path, state: Path, repository: Path = REP
     }
 
 
+def _private_directory(path: Path) -> None:
+    """Create `path` and every parent it lacks owner-only, whatever the umask.
+    A directory that exists already is not changed here."""
+    missing = []
+    current = path
+    while not os.path.lexists(current) and current.parent != current:
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, PRIVATE_DIRECTORY)
+        except FileExistsError:
+            continue  # a concurrent launch made it
+        if os.name != "nt":
+            # mkdir's mode passes through the umask; this does not.
+            os.chmod(directory, PRIVATE_DIRECTORY)
+
+
+def _owner_only(path: Path, *, tree: bool = False) -> None:
+    """Take group and other access away from `path` - and with `tree`, from
+    everything under it; best effort. Never through a link and never on
+    another user's file; Windows permissions are not mode bits."""
+    if os.name == "nt":
+        return
+    entries = [path]
+    if tree and path.is_dir() and not path.is_symlink():
+        # os.walk does not descend through a link to a directory.
+        entries += [Path(folder) / name for folder, folders, files in os.walk(path) for name in folders + files]
+    for entry in entries:
+        try:
+            status = entry.lstat()
+            if not stat.S_ISLNK(status.st_mode) and status.st_uid == os.geteuid() and status.st_mode & 0o077:
+                os.chmod(entry, stat.S_IMODE(status.st_mode) & 0o700)
+        except OSError:
+            continue
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Replace `path` whole with an owner-only file: written beside it (mkstemp
+    makes it 0600) and renamed into place, so no reader sees a part."""
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
 def prepare_state(edition: str, project: Path, state: Path) -> None:
     """Create the private state directory and say whose it is.
+
+    The state directory, and any parent it lacks, is created owner-only and
+    what the launcher writes there is 0600, whatever the umask. A state from
+    before that rule is tightened here - the directory and the launcher's own
+    files, never through a link; the runtime tightens its layout itself - and
+    nothing above the state directory is changed.
 
     The runtime fills in the Project Brain and Memory Bank layout itself on
     first use; this only records the project, for a person looking at it.
     """
-    state.mkdir(parents=True, exist_ok=True)
+    _private_directory(state)
+    _owner_only(state)
+    _owner_only(state / LAUNCH_DIRECTORY, tree=True)
     marker = state / STATE_MARKER
     record = {"project": str(project), "edition": edition}
     current = _read_json(marker)
     if {key: current.get(key) for key in record} != record:
-        marker.write_text(json.dumps({**record, "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2) + "\n", encoding="utf-8")
+        _write_private(marker, json.dumps({**record, "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2) + "\n")
+    else:
+        _owner_only(marker)
 
 
 def preamble(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> str:
@@ -317,12 +394,12 @@ def _claude_settings(edition: str, state: Path, repository: Path) -> dict[str, A
 def claude_overlay(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> Overlay:
     home = edition_directory(edition, repository)
     prepare_state(edition, project, state)
-    launch = state / "launch"
-    launch.mkdir(parents=True, exist_ok=True)
+    launch = state / LAUNCH_DIRECTORY
+    _private_directory(launch)
     system_prompt = launch / "claude-system-prompt.md"
     content = preamble(edition, project, state, repository) + "\n" + policy(edition, repository)
     if not system_prompt.is_file() or system_prompt.read_text(encoding="utf-8") != content:
-        system_prompt.write_text(content, encoding="utf-8")
+        _write_private(system_prompt, content)
     return Overlay(
         arguments=["--add-dir", str(home), "--append-system-prompt-file", str(system_prompt)],
         settings=_claude_settings(edition, state, repository),
@@ -646,16 +723,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         argv, passthrough = argv[:index], argv[index + 1:]
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
+    state_base = ("where per-project state directories are kept (default: the Harness's state "
+                  "directory); a relative path is taken from the current directory")
     for name in ("detect", "env", "trust-codex-hooks"):
         command = commands.add_parser(name)
         command.add_argument("--project")
         command.add_argument("--edition", choices=list(EDITIONS))
-        command.add_argument("--state-base", type=Path)
+        command.add_argument("--state-base", type=Path, help=state_base)
     run = commands.add_parser("run")
     run.add_argument("tool", choices=TOOLS)
     run.add_argument("--project")
     run.add_argument("--edition", choices=list(EDITIONS))
-    run.add_argument("--state-base", type=Path)
+    run.add_argument("--state-base", type=Path, help=state_base)
     run.add_argument("--executable")
     for command in (commands.choices["trust-codex-hooks"],):
         command.add_argument("--executable", default="codex")

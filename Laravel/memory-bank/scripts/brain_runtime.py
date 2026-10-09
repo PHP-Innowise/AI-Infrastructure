@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -227,6 +228,108 @@ ATTACHED_STATE_SEEDS = (
     ("project-brain/indexes/archive.json", "project-brain/.install/archive.json"),
     ("memory-bank/INDEX.md", "memory-bank/.install/INDEX.md"),
 )
+# Everything an attached state directory holds: the runtime's layout and the
+# launcher's record of the project (scripts/accelerator_attach.py).
+ATTACHED_STATE_ENTRIES = ("project-brain", "memory-bank", "launch", "accelerator-attach.json")
+# An attached state is a project's memory kept outside the project, so it is
+# its owner's alone: directories 0700 and files 0600, whatever the umask of
+# the shell or the tool that started the runtime. Installed state lives in the
+# project and keeps the project's permissions.
+PRIVATE_DIRECTORY_MODE = 0o700
+
+
+def make_private_directory(path: Path) -> bool:
+    """Create `path` and every parent it lacks owner-only, whatever the umask.
+
+    A directory that exists already is left as it is - above the state it is
+    not the accelerator's; inside, `secure_attached_state` decides. Returns
+    whether `path` itself was created here.
+    """
+    missing: list[Path] = []
+    current = path
+    while not os.path.lexists(current) and current.parent != current:
+        missing.append(current)
+        current = current.parent
+    created = False
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, PRIVATE_DIRECTORY_MODE)
+        except FileExistsError:
+            # A concurrent first run made it.
+            created = False
+            continue
+        created = True
+        if os.name != "nt":
+            # mkdir's mode passes through the umask; this does not.
+            os.chmod(directory, PRIVATE_DIRECTORY_MODE)
+    return created
+
+
+def _open_to_others(path: Path) -> bool:
+    """Whether a group or other user may use this entry, which the current
+    user owns; a link and another user's file are never the runtime's to
+    change, and Windows permissions are not mode bits."""
+    if os.name == "nt":
+        return False
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(status.st_mode)
+        and status.st_uid == os.geteuid()
+        and bool(status.st_mode & 0o077)
+    )
+
+
+def _owner_only(path: Path) -> None:
+    """Take group and other access away from one entry; best effort."""
+    if not _open_to_others(path):
+        return
+    try:
+        os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & 0o700)
+    except OSError:
+        return
+
+
+def secure_attached_state(repository: Path) -> None:
+    """Keep an attached state directory owner-only.
+
+    A missing state directory is created owner-only. One that exists - made
+    before this rule, or touched by a shell with a looser umask - is tightened
+    where it is the accelerator's: each accelerator entry that is open to
+    others, with everything under it, and the directory itself when it holds
+    nothing but accelerator state (a variable can name any directory). Links
+    are never followed, nothing above the state is changed, and another user's
+    file is left alone.
+    """
+    make_private_directory(repository)
+    if os.name == "nt":
+        return
+    try:
+        names = set(os.listdir(repository))
+    except OSError:
+        return
+    for name in ATTACHED_STATE_ENTRIES:
+        entry = repository / name
+        if name not in names or not _open_to_others(entry):
+            continue
+        if entry.is_dir():
+            # os.walk does not descend through a link to a directory.
+            for directory, folders, files in os.walk(entry):
+                for child in folders + files:
+                    _owner_only(Path(directory) / child)
+        # Last: a pass that was cut short is taken up again on the next run.
+        _owner_only(entry)
+    if names <= set(ATTACHED_STATE_ENTRIES):
+        _owner_only(repository)
+
+
+def _missing_attached_state(repository: Path, tooling: Path) -> bool:
+    return any(not (repository / directory).is_dir() for directory in ATTACHED_STATE_DIRECTORIES) or any(
+        not (repository / target).exists() and (tooling / source).is_file()
+        for target, source in ATTACHED_STATE_SEEDS
+    )
 
 
 def ensure_attached_state(repository: Path) -> list[str]:
@@ -234,24 +337,38 @@ def ensure_attached_state(repository: Path) -> list[str]:
 
     Creates only what is missing and never overwrites, so it is safe on every
     run; returns the state paths it created. Installed, it does nothing.
+
+    A session's first runs start together - Claude Code runs the hooks of one
+    event in parallel - and one must never take a seed another is still
+    writing for a finished one: a half-written runtime.json is an invalid
+    configuration. So a seed appears whole or not at all (written beside its
+    place, then renamed into it), and a layout that lacks anything is laid out
+    under the mutation lock, checked again once the lock is held. The lock's
+    own directory is made first, so the lock works in an empty state. All of
+    it is owner-only (`secure_attached_state`).
     """
     if not workspace_roots.is_attached(repository):
         return []
     tooling = workspace_roots.tooling_root(repository)
+    secure_attached_state(repository)
+    if not _missing_attached_state(repository, tooling):
+        return []
     created: list[str] = []
-    for directory in ATTACHED_STATE_DIRECTORIES:
-        path = repository / directory
-        if not path.is_dir():
-            path.mkdir(parents=True, exist_ok=True)
-            created.append(directory + "/")
-    for target, source in ATTACHED_STATE_SEEDS:
-        path = repository / target
-        origin = tooling / source
-        if path.exists() or not origin.is_file():
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(origin.read_bytes())
-        created.append(target)
+    if make_private_directory(brain_root(repository) / "local"):
+        created.append("project-brain/local/")
+    with mutation_lock(repository):
+        for directory in ATTACHED_STATE_DIRECTORIES:
+            if not (repository / directory).is_dir():
+                make_private_directory(repository / directory)
+                created.append(directory + "/")
+        for target, source in ATTACHED_STATE_SEEDS:
+            path = repository / target
+            origin = tooling / source
+            if path.exists() or not origin.is_file():
+                continue
+            make_private_directory(path.parent)
+            atomic_write_bytes(path, origin.read_bytes())
+            created.append(target)
     return created
 
 
@@ -338,13 +455,15 @@ def mutation_lock(repository: Path) -> Iterator[None]:
                 _file_lock(handle, unlock=True)
 
 
-def atomic_write(path: Path, content: str) -> None:
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Replace `path` whole: a reader sees the old content or the new, never
+    a part. The temporary file beside it is owner-only, as mkstemp makes it,
+    and the rename keeps that mode."""
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     temporary = Path(temporary_name)
     try:
-        # newline="\n": Git-tracked records keep LF on Windows too.
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -352,6 +471,12 @@ def atomic_write(path: Path, content: str) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def atomic_write(path: Path, content: str) -> None:
+    # Encoded as written, newlines untranslated: Git-tracked records keep LF
+    # on Windows too.
+    atomic_write_bytes(path, content.encode("utf-8"))
 
 
 def atomic_json(path: Path, value: object) -> None:
