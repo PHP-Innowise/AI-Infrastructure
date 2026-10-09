@@ -37,6 +37,15 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(1, evidence['delivered'])
         self.assertFalse(memory_draft.usage({}, {})['reported'])
 
+    def test_opened_memory_is_what_the_run_read_whichever_copy_of_a_skill(self):
+        capsule = {'semantic': [{'path': 'specs/cobalt.md'}, {'path': 'memory-bank/chunks/MEM-1-x.md'}],
+                   'procedural': [{'path': '.agents/skills/allocation/SKILL.md'}]}
+        evidence = memory_draft.usage({}, capsule, ['specs/cobalt.md', '.claude/skills/allocation/SKILL.md',
+                                                    'src/Other.php'])
+        self.assertEqual(['.agents/skills/allocation/SKILL.md', 'specs/cobalt.md'], evidence['opened'])
+        self.assertEqual(3, evidence['delivered'])
+        self.assertEqual([], memory_draft.usage({}, capsule)['opened'])
+
     def test_the_last_block_is_the_draft_and_it_is_clipped_to_the_form(self):
         earlier = reply({"progress": "stale", "next_steps": [], "learnings": []})
         draft = {"progress": "  Checked   at allocation. ", "next_steps": ["a", "b", "c", "d"],

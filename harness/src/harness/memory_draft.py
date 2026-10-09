@@ -105,15 +105,33 @@ def parse(text):
     return result
 
 
-def usage(draft, capsule):
-    """Safe provenance: delivered pointers and the subset the agent reports using."""
+def _canonical(path):
+    """One name for a skill whichever tool's copy the agent opened."""
+    for tool in (".claude/skills/", ".cursor/skills/", ".codex/skills/"):
+        if path.startswith(tool):
+            return ".agents/skills/" + path[len(tool):]
+    return path
+
+
+def usage(draft, capsule, opened=()):
+    """Safe provenance: what was delivered, what the agent opened, what it reports using.
+
+    `opened` is the run's own record of the files its tools read (the launch
+    receipt), so the second number is observed rather than claimed; the third
+    is the agent's word. Neither proves a claim was used - an agent that
+    already knew the file, or never needed it, opens it or not either way -
+    but delivery alone said nothing at all: pointers handed to agents on real
+    installations were opened once in 290 deliveries.
+    """
     delivered = set()
     for layer in ("procedural", "semantic", "episodic", "selected"):
         for item in (capsule or {}).get(layer) or []:
             if isinstance(item, dict) and isinstance(item.get("path"), str):
                 delivered.add(item["path"])
+    seen = {_canonical(path) for path in opened or () if isinstance(path, str)}
+    opened_delivered = sorted(path for path in delivered if _canonical(path) in seen)
     reported = sorted(delivered.intersection((draft or {}).get("used_memory") or []))
-    return {"delivered": len(delivered), "reported_used": reported,
+    return {"delivered": len(delivered), "opened": opened_delivered, "reported_used": reported,
             "attestation": "agent-reported", "reported": "used_memory" in (draft or {})}
 
 

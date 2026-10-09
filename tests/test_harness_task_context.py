@@ -403,6 +403,9 @@ class TaskContextTests(unittest.TestCase):
         self.assertIn("Saved to project memory: the task's progress and next steps; "
                       "finding “Cobalt allocation needs one owner”.", saved["text"])
         self.assertRegex(saved["text"], r"Promoted to the Memory Bank as MEM-")
+        # What the run's own tools read of the delivered memory, beside what it was handed.
+        self.assertIsInstance(saved["opened_delivered_sources"], int)
+        self.assertLessEqual(saved["opened_delivered_sources"], saved["delivered_sources"])
         chunk = next((self.project / "memory-bank/chunks").glob("MEM-*-*.md"), None)
         self.assertIsNotNone(chunk)
         self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))

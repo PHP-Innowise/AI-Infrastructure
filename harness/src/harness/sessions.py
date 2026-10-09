@@ -1574,7 +1574,15 @@ class Sessions:
             self._event(sid, {'kind': 'memory', 'ok': False, 'text': memory_draft.summary(latest['state'])})
             return
         session = self.get(sid)
-        provenance = memory_draft.usage(latest['draft'], session['brain'].get('capsule'))
+        with self.lock:
+            row = self.db.execute('SELECT receipt FROM launches WHERE id=?', (generation,)).fetchone()
+        try:
+            receipt = json.loads(row[0]) if row and row[0] else {}
+        except ValueError:
+            receipt = {}
+        opened = receipt.get('opened_paths') if isinstance(receipt, dict) else None
+        provenance = memory_draft.usage(latest['draft'], session['brain'].get('capsule'),
+                                        opened if isinstance(opened, list) else ())
         try:
             result = self._task_context(wait=MEMORY_WAIT).save_memory(
                 session, latest['draft'], automatic=True, known=session['brain'].get('remembered') or [],
@@ -1590,11 +1598,15 @@ class Sessions:
                 brain = self.get(sid)['brain']
                 self._save_brain(sid, {**brain, 'remembered': ((brain.get('remembered') or []) + saved)[-REMEMBERED:]})
             notice = memory_draft.summary('drafted', result)
-            if provenance['reported']:
-                notice += (f" Memory use: {provenance['delivered']} pointers delivered; "
-                           f"{len(provenance['reported_used'])} reported used by the agent. This does not prove reading.")
+            if provenance['delivered']:
+                # Opened is what the run's tools read; reported is the agent's word.
+                notice += (f" Memory use: {provenance['delivered']} delivered, "
+                           f"{len(provenance['opened'])} opened by the agent"
+                           + (f", {len(provenance['reported_used'])} reported used" if provenance['reported'] else "")
+                           + ". Neither proves the claim was used.")
             self._event(sid, {'kind': 'memory', 'ok': result['ok'], 'text': notice,
-                'delivered_sources': provenance['delivered'], 'reported_used_sources': len(provenance['reported_used']),
+                'delivered_sources': provenance['delivered'], 'opened_delivered_sources': len(provenance['opened']),
+                'reported_used_sources': len(provenance['reported_used']),
                 'attestation': provenance['attestation']})
 
     def _run(self, sid, prompt, generation):
