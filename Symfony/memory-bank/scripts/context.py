@@ -5325,6 +5325,13 @@ def main() -> int:
         problem = workspace_roots.configuration_error()
         if problem is not None:
             raise ContextError(problem)
+        if workspace_roots.is_attached(repository) and os.name != "nt":
+            # Attached state is the project's memory kept outside it, so it is
+            # its owner's alone: whatever this run creates there - records, the
+            # index database and its journals, logs, receipts - is owner-only,
+            # whatever umask the hook or the tool passed on. Installed state
+            # lives in the project and keeps the project's permissions.
+            os.umask(0o077)
         # Attached, the state directory is created on first use; installed,
         # this does nothing and a missing root stays an error.
         ensure_attached_state(repository)

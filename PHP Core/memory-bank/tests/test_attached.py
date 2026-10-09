@@ -13,9 +13,12 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -39,6 +42,61 @@ def git(directory: Path, *arguments: str) -> str:
         capture_output=True,
         text=True,
     ).stdout
+
+
+def mode(path: Path) -> int:
+    return stat.S_IMODE(path.lstat().st_mode)
+
+
+# A first run that stops half-way through writing one seed's bytes - into
+# whichever file the runtime writes them - until it reads a line.
+FIRST_RUN_STOPPED_IN_A_SEED = r'''
+import io, json, os, sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import brain_runtime
+
+seed = Path(sys.argv[2]).read_bytes()
+real_open = io.open
+stopped = []
+
+
+class StopsHalfway:
+    def __init__(self, handle):
+        self._handle = handle
+
+    def write(self, data):
+        if stopped or bytes(data) != seed:
+            return self._handle.write(data)
+        stopped.append(True)
+        half = len(seed) // 2
+        self._handle.write(seed[:half])
+        self._handle.flush()
+        print("stopped", flush=True)
+        sys.stdin.readline()
+        return half + self._handle.write(seed[half:])
+
+    def __enter__(self):
+        self._handle.__enter__()
+        return self
+
+    def __exit__(self, *details):
+        return self._handle.__exit__(*details)
+
+    def __getattr__(self, name):
+        return getattr(self._handle, name)
+
+
+def opening(file, mode="r", *arguments, **options):
+    handle = real_open(file, mode, *arguments, **options)
+    return StopsHalfway(handle) if "w" in mode and "b" in mode else handle
+
+
+io.open = opening
+created = brain_runtime.ensure_attached_state(Path(os.environ["ACCELERATOR_STATE_DIR"]))
+print(json.dumps(created), flush=True)
+'''
 
 
 class AttachedProject(unittest.TestCase):
@@ -261,6 +319,152 @@ class AttachedLayoutTest(AttachedProject):
                 self.assertNotEqual(0, result.returncode)
                 self.assertIn("ACCELERATOR_", result.stderr)
                 self.assert_project_untouched()
+
+
+class AttachedBootstrapTest(AttachedProject):
+    """Two first runs of one state: the hooks of one event start together."""
+
+    def test_a_second_first_run_never_takes_a_half_written_seed(self) -> None:
+        cases = {
+            # What the review saw: a half-written configuration is invalid.
+            "configuration": ("project-brain/config/runtime.json", "project-brain/config/runtime.json"),
+            "brain index": ("project-brain/.install/active.json", "project-brain/indexes/active.json"),
+            # The last seed: the rest of the layout is there, so only a seed
+            # that is not visible until whole sends the second run to the lock.
+            "memory index": ("memory-bank/.install/INDEX.md", "memory-bank/INDEX.md"),
+        }
+        for label, (source, target) in cases.items():
+            with self.subTest(label):
+                state = self.state.parent / label
+                environment = {**self.environment, "ACCELERATOR_STATE_DIR": str(state)}
+                # The second run is this process: it says when it reaches the
+                # bootstrap lock, which the first run holds while it writes.
+                waiting = threading.Event()
+                real_lock = brain._file_lock
+
+                def lock(handle, unlock=False):
+                    if not unlock:
+                        waiting.set()
+                    return real_lock(handle, unlock)
+
+                outcome: dict = {}
+
+                def second_run() -> None:
+                    try:
+                        outcome["created"] = brain.ensure_attached_state(state)
+                        outcome["mode"] = brain.load_config(state)["mode"]
+                        outcome["seed"] = (state / target).read_bytes()
+                    except Exception as error:  # reported by the assertions below
+                        outcome["error"] = error
+
+                with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
+                    brain, "_file_lock", lock
+                ):
+                    first = subprocess.Popen(
+                        [sys.executable, "-c", FIRST_RUN_STOPPED_IN_A_SEED, str(SCRIPTS), str(EDITION / source)],
+                        cwd=self.project,
+                        env=environment,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        text=True,
+                    )
+                    try:
+                        self.assertEqual("stopped", first.stdout.readline().strip())
+                        second = threading.Thread(target=second_run, daemon=True)
+                        second.start()
+                        deadline = time.monotonic() + 60
+                        while second.is_alive() and not waiting.is_set() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        # Only now does the first run finish its write.
+                        first.stdin.write("go\n")
+                        first.stdin.flush()
+                        second.join(60)
+                        created_by_first = json.loads(first.communicate(timeout=60)[0])
+                    finally:
+                        if first.poll() is None:
+                            first.kill()
+                            first.communicate()
+                self.assertNotIn("error", outcome)
+                self.assertTrue(waiting.is_set(), "the second run waits for the first run's layout")
+                self.assertIn(target, created_by_first)
+                self.assertEqual([], outcome["created"])
+                self.assertEqual((EDITION / source).read_bytes(), outcome["seed"])
+                self.assertEqual(
+                    json.loads((EDITION / "project-brain/config/runtime.json").read_text(encoding="utf-8"))["mode"],
+                    outcome["mode"],
+                )
+                self.assertEqual([], list(state.rglob(".*.*")), "no temporary file is left behind")
+
+
+@unittest.skipIf(os.name == "nt", "POSIX mode bits; Windows keeps its profile's permissions")
+class AttachedPrivacyTest(AttachedProject):
+    """The state is the project's memory kept outside it: its owner's alone."""
+
+    def run_with_umask(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        previous = os.umask(0o022)
+        try:
+            return self.run_cli(*arguments)
+        finally:
+            os.umask(previous)
+
+    def test_state_is_owner_only_whatever_the_umask(self) -> None:
+        for arguments in (
+            ("status", "--json"),
+            ("start", "--task-id", "TASK-PRIVATE", "--goal", "Keep the memory private", "--json"),
+        ):
+            result = self.run_with_umask(*arguments)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+        self.assertTrue((self.state / "memory-bank/local/context.db").is_file())
+        self.assertTrue(list((self.state / "project-brain/dynamic/tasks").glob("*.md")))
+        # The state's parent did not exist either: the runtime made it too.
+        entries = [self.state.parent, self.state, *self.state.rglob("*")]
+        self.assertEqual(
+            {str(path): 0o700 if path.is_dir() else 0o600 for path in entries},
+            {str(path): mode(path) for path in entries},
+        )
+        self.assert_project_untouched()
+
+    def test_an_existing_state_is_tightened_and_nothing_outside_it(self) -> None:
+        self.assertEqual(0, self.run_with_umask("status", "--json").returncode)
+        outside = self.state.parent / "notes.md"
+        outside.write_text("Beside the state, not in it.\n", encoding="utf-8")
+        (self.state / "memory-bank/local/notes.md").symlink_to(outside)
+        # A state from before the rule: everything open to others.
+        for path in [self.state.parent, self.state, *self.state.rglob("*"), outside]:
+            if not path.is_symlink():
+                path.chmod(0o755 if path.is_dir() else 0o644)
+
+        result = self.run_with_umask("status", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        open_to_others = [
+            str(path)
+            for path in [self.state, *self.state.rglob("*")]
+            if not path.is_symlink() and mode(path) & 0o077
+        ]
+        self.assertEqual([], open_to_others)
+        # Neither the directory above the state nor a link's target changes.
+        self.assertEqual(0o755, mode(self.state.parent))
+        self.assertEqual(0o644, mode(outside))
+
+    def test_a_state_directory_holding_other_files_keeps_its_own_mode(self) -> None:
+        # A variable can name any directory; a person's own files in it are
+        # not the accelerator's, and neither is closing the directory to them.
+        self.state.mkdir(parents=True)
+        self.state.chmod(0o755)
+        own = self.state / "notes.md"
+        own.write_text("A person's own file.\n", encoding="utf-8")
+        own.chmod(0o644)
+
+        result = self.run_with_umask("status", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+
+        self.assertEqual(0o755, mode(self.state))
+        self.assertEqual(0o644, mode(own))
+        for name in ("project-brain", "memory-bank"):
+            self.assertEqual(0o700, mode(self.state / name))
+        self.assertEqual(0o600, mode(self.state / "memory-bank/local/context.db"))
 
 
 class AttachedHooksTest(AttachedProject):

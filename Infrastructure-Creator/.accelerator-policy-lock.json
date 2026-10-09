@@ -98,8 +98,8 @@
     ".agents/skills/memory-seed/assets/project-brain/templates/task.md": "54d713e2810c65ad5619fd322ac77869952e3ac041129263d5a13fce4f5e5fd1",
     ".agents/skills/memory-seed/assets/runtime-contract.json": "9fe2c1ce1d3da625581b0c5602381001396a79146f3cbcf45bf25fa4f6a466b0",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "756ad2156920530bf81d8ae4da7474a06d172a80bad1af0e1ca3154919b263c7",
-    ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "593a3e7ae862ed1a966e1ff17eb703a5039d35a6205db7589a1173f3d705c6b8",
-    ".agents/skills/memory-seed/assets/scripts/context.py": "03c02c1d2f63f33240e23fc3b7c1364c4f57c69638e0128a53ecf7789f50a738",
+    ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "c61c16ef29888a040a6248d565467e31c5481b919e12082d002dd96950f8a871",
+    ".agents/skills/memory-seed/assets/scripts/context.py": "6f72a8e75ad6b85c5215ba8985cb05702646f319a5c15fd6f83374395c4da2d0",
     ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "fb1f68947080ccb0f135fdcb26e7371aaceef7e827877a334b3c92e7e465d595",
     ".agents/skills/memory-seed/assets/scripts/mcp_config.py": "966f2e53b693483c3ffa3c809c3a0f9e003c1ac522a71f919ae9a1e1b9892e6e",
     ".agents/skills/memory-seed/assets/scripts/mcp_server.py": "0f7f4709965a197f1abc34279522b8d70a0c42a96e43e86484168cc2a05ea1fd",
@@ -170,7 +170,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "4a87c3ba8c45a3d89f8018e043b7a0736b624b3bb1b481612b9ac064ae010634"
   },
-  "policy_digest": "d09a576528e7747541a4d9394480669825d53e8e1e2c7a9fa5699f0d08e7156a",
+  "policy_digest": "49710e1c5dd4fe6333e4394c3ff7717481bd8104c776c6857b57d55f6bc1abee",
   "release": "2.5.0",
   "schema_version": 1
 }

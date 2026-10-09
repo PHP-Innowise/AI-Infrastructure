@@ -63,7 +63,8 @@ Arguments after `--` go to the CLI unchanged
 (`... run codex -- exec "Review the routes"`). `detect` prints the edition the
 project points to; `--edition` overrides it. `env` prints the three variables
 for another launcher. The terminal and the Harness use the same state directory
-for a project, so they share its memory.
+for a project, so they share its memory; `--state-base DIR` keeps it elsewhere,
+and a relative `DIR` is taken from the directory the launcher runs in.
 
 ## What each tool receives
 
@@ -109,6 +110,11 @@ chunks, the local index, retrieval manifests - is kept in
 project id is the one the Harness lists for the project. The runtime lays the
 directory out on first use from the edition's defaults; detaching keeps it, so
 attaching again picks the memory up.
+
+On Linux and macOS the state is its owner's alone - directories 0700, files
+0600 - whatever the umask: the launcher and the runtime create it that way, and
+tighten a state made before, where it is the accelerator's (never through a
+link, never above the state directory).
 
 This state belongs to one machine. A team that wants Project Brain and the
 Memory Bank shared through Git installs the edition instead.
