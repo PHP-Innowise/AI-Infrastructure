@@ -190,7 +190,9 @@ class MemoryMcpTests(unittest.TestCase):
         sys.path.insert(0, str(self.root / 'memory-bank/scripts'))
         try:
             import memory_results
-            identifier = memory_results.learning_id('TASK-MCP', draft['learnings'][0])
+            import brain_runtime
+            uuid = brain_runtime.find_record(self.root, 'TASK-MCP', record_type='task')[1]['id']
+            identifier = memory_results.learning_id(uuid, draft['learnings'][0])
         finally:
             sys.path.remove(str(self.root / 'memory-bank/scripts'))
         learning = draft['learnings'][0]
@@ -218,6 +220,23 @@ class MemoryMcpTests(unittest.TestCase):
             capture_output=True, text=True, timeout=10)
         replies = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual([-32700, -32602], [r['error']['code'] for r in replies])
+
+    def test_deeply_nested_json_is_a_parse_error_and_the_server_stays_up(self):
+        # Under the 128 KiB message limit, past the parser's recursion depth.
+        deep = '[' * 60000 + ']' * 60000
+        self.assertLess(len(deep), 128 * 1024)
+        messages = [json.dumps({'jsonrpc': '2.0', 'id': 0, 'method': 'initialize',
+                                'params': {'protocolVersion': '2025-06-18', 'capabilities': {},
+                                           'clientInfo': {'name': 'test', 'version': '1'}}}),
+                    json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}),
+                    deep, json.dumps({'jsonrpc': '2.0', 'id': 7, 'method': 'tools/list'})]
+        result = subprocess.run([sys.executable, str(self.server), '--root', str(self.root)],
+            input=''.join(line + '\n' for line in messages), capture_output=True, text=True, timeout=20)
+        self.assertEqual(0, result.returncode, result.stderr)
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(-32700, replies[1]['error']['code'])
+        self.assertEqual(7, replies[2]['id'])
+        self.assertIn('tools', replies[2]['result'])
 
     def test_invalid_jsonrpc_shape_and_repeated_initialize(self):
         replies = self.exchange([[], {'jsonrpc': '1.0', 'method': 'ping', 'id': 1},

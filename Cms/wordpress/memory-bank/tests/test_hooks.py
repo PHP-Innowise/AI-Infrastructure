@@ -669,6 +669,12 @@ class HostDeliveredCapsuleTest(unittest.TestCase):
                     skipped = call(prompt)
                     self.assertEqual((0, "", ""), (skipped.returncode, skipped.stdout, skipped.stderr))
                 self.assertEqual(before, {file.name for file in root.glob("memory-bank/local/retrieval-manifests/*.json")})
+                # A quoted secret goes whole: no tail of it reaches a manifest.
+                quoted = call("Check cobalt allocation password='alpha beta gamma' after the owner change")
+                self.assertEqual(0, quoted.returncode, quoted.stderr)
+                for manifest in root.glob("memory-bank/local/retrieval-manifests/*.json"):
+                    self.assertNotIn("beta gamma", manifest.read_text())
+                    self.assertNotIn("alpha", manifest.read_text())
                 # A pasted transcript line loses its role prefix and keeps its words.
                 pasted = call("User: cobalt allocation owner")
                 self.assertEqual(0, pasted.returncode, pasted.stderr)

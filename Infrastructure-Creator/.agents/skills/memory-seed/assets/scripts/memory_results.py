@@ -22,6 +22,8 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
+import workspace_roots
+from automatic_query import RAW_TEXT_PATTERN
 from brain_runtime import (
     LIFECYCLES,
     BrainError,
@@ -69,6 +71,10 @@ def _text(value: object, label: str, limit: int) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise BrainError(f"{label} must be nonempty text within {limit} characters")
     guard_shared_text(label, [value])
+    # Shared memory holds summaries, never logs or transcripts: a line that
+    # opens like one ("stderr:", "user:") is refused, as a query's is cut.
+    if RAW_TEXT_PATTERN.search(value):
+        raise BrainError(f"{label} looks like a pasted log or transcript; summarize it instead")
     return value.strip()
 
 
@@ -93,7 +99,9 @@ def check_source(root: Path, value: object) -> str:
         raise BrainError("Private or dependency source paths are refused")
     if relative.is_absolute() or ".." in relative.parts or "\\" in head or ":" in head:
         raise BrainError("Use project-relative source paths")
-    current = root
+    # The project's root: the runtime's own when installed, the project the
+    # launcher named when the edition is attached and its state lives apart.
+    current = workspace_roots.project_root(root)
     for part in relative.parts:
         current = current / part
         if current.is_symlink():
@@ -182,13 +190,24 @@ def learning_id(task_id: str, learning: dict[str, Any]) -> str:
     return "learning-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
 
 
-def _existing(root: Path, identifier: str) -> Optional[dict[str, Any]]:
+def _existing(root: Path, identifier: str) -> tuple[Optional[dict[str, Any]], bool]:
+    """The record a learning ID names and whether it is archived.
+
+    Archived records count: compaction moves a record, it does not end its
+    identity, and an archived learning is never reopened by a restatement.
+    """
     try:
-        return find_record(root, identifier)[1]
+        path, record, _ = find_record(root, identifier, include_archive=True)
     except BrainError as error:
         if "not found" not in str(error):
             raise
-        return None
+        return None, False
+    archive = brain_root(root) / "archive"
+    try:
+        path.resolve().relative_to(archive.resolve())
+    except ValueError:
+        return record, False
+    return record, True
 
 
 def writable_task(root: Path, task_id: str, owner: str) -> dict[str, Any]:
@@ -254,10 +273,13 @@ def record_result(
     if attestation not in ATTESTATIONS:
         raise BrainError("attestation must be agent or person")
     result = normalize(root, data)
-    digest = request_digest(task_id, result)
     with mutation_lock(root):
         task = writable_task(root, task_id, owner)
-        receipt = _receipt(root, task_id, result_id)
+        # One task, one namespace: its external ID and its UUID both name it,
+        # so every key below is derived from the UUID the lookup resolved.
+        canonical = task["id"]
+        digest = request_digest(canonical, result)
+        receipt = _receipt(root, canonical, result_id)
         prior = _read_receipt(receipt)
         if prior is not None and prior.get("digest") != digest:
             raise BrainError("Result ID was already used with different content")
@@ -266,9 +288,12 @@ def record_result(
         task_fields = result["progress"] is not None or result["next_steps"] is not None
         update_task = task_fields and prior is None and not _holds(task, result)
         # Everything that can refuse the result is checked before the first
-        # write: a stale revision, and every cited file's fingerprint. The
-        # lock is held to the end, so the revision cannot move in between.
-        if update_task and task["revision"] != revision:
+        # write: a stale revision - for any new result, learnings alone
+        # included, since they too were written against what the agent last
+        # read - and every cited file's fingerprint. Only a result with a
+        # receipt is a proven replay. The lock is held to the end, so the
+        # revision cannot move in between.
+        if prior is None and task["revision"] != revision:
             raise BrainError(
                 f"Stale task revision: expected {revision}, current {task['revision']}. "
                 "Nothing was written; replay this result ID with the current revision."
@@ -278,10 +303,13 @@ def record_result(
         records = []
         wrote = False
         for learning in result["learnings"]:
-            identifier = learning_id(task_id, learning)
-            current = _existing(root, identifier)
+            identifier = learning_id(canonical, learning)
+            current, archived = _existing(root, identifier)
             closed_state = CLOSED_STATE[learning["type"]]
             state = "existing"
+            if archived:
+                records.append(_summary(current, "archived"))
+                continue
             if current is None:
                 current = create_record(
                     root, learning["type"], identifier, learning["title"], [],
@@ -321,8 +349,10 @@ def record_result(
         receipt.parent.mkdir(parents=True, exist_ok=True)
         atomic_json(receipt, {"result_id": result_id, "task_id": task_id, "digest": digest,
                               "task_revision": updated["revision"] if updated else None})
-        promotion = auto_promote(root, owner=owner) if any(
-            item["state"] != "existing" for item in records) else None
+        # Promotion runs for any result with learnings, a replay included:
+        # an attempt interrupted after its records were written must still
+        # reach the Memory Bank, and promotion is itself idempotent.
+        promotion = auto_promote(root, owner=owner) if result["learnings"] else None
     return {
         "task": {"id": updated["id"], "revision": updated["revision"]} if updated else None,
         "records": records,

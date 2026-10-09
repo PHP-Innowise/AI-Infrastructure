@@ -211,6 +211,31 @@ class AttachedLayoutTest(AttachedProject):
             with self.assertRaises(brain.BrainError):
                 brain.fingerprint(self.state, "../../outside.txt")
 
+    def test_a_result_cites_project_files_and_lands_in_the_state(self) -> None:
+        started = self.run_cli("start", "--task-id", "TASK-ATTACHED", "--goal", "Check the order", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+        request = self.state.parent / "result.json"
+        request.write_text(json.dumps({
+            "progress": "Order checked.", "next_steps": [], "verified": True,
+            "learnings": [{"type": "finding", "title": "Orders are final classes",
+                           "consequence": "Extend an order through composition.", "sources": ["app/Order.php"]}],
+        }), encoding="utf-8")
+        recorded = self.run_cli("record-result", "--task-id", "TASK-ATTACHED", "--result-id", "attached-1",
+                                "--revision", "auto", "--input", str(request), "--json")
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.assertEqual(["created"], [item["state"] for item in json.loads(recorded.stdout)["records"]])
+        self.assertEqual(1, len(list((self.state / "project-brain/dynamic/findings").glob("*.md"))))
+        # A citation still may not leave the project.
+        request.write_text(json.dumps({
+            "verified": True,
+            "learnings": [{"type": "finding", "title": "Outside", "consequence": "No.",
+                           "sources": ["../state/shop/project-brain/config/runtime.json"]}],
+        }), encoding="utf-8")
+        refused = self.run_cli("record-result", "--task-id", "TASK-ATTACHED", "--result-id", "attached-2",
+                               "--revision", "auto", "--input", str(request), "--json")
+        self.assertNotEqual(0, refused.returncode)
+        self.assert_project_untouched()
+
     def test_variables_naming_another_copy_leave_the_installed_layout(self) -> None:
         environment = {**self.environment, "ACCELERATOR_HOME": str(self.project)}
         with mock.patch.dict(os.environ, environment, clear=True):

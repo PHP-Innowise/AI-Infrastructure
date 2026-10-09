@@ -4808,6 +4808,14 @@ class CapsuleNoiseTest(RuntimeHarness):
             "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\nwhy does deploy fail"))
         self.assertEqual("", context_cli.sanitize_automatic_query(
             "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE truncated without its footer"))
+        # A quoted value goes whole, whatever the quote, and an unclosed one
+        # to the end of its line: the space inside it is not its end.
+        for quote in ("'", '"', "`"):
+            cleaned = context_cli.sanitize_automatic_query(
+                f"Fix deploy password={quote}alpha beta gamma{quote} after migration")
+            self.assertEqual("Fix deploy   after migration", cleaned)
+        self.assertEqual("next line stays", context_cli.sanitize_automatic_query(
+            "api_key: 'alpha beta\nnext line stays"))
 
 
 class AutomaticWorkingMemoryTest(RuntimeHarness):
@@ -8285,9 +8293,9 @@ class RecordResultTest(RuntimeHarness):
     def records(self, record_type: str = "finding") -> list[dict]:
         return [record for _, record, _ in brain.iter_records(self.repository) if record["type"] == record_type]
 
-    def record(self, result_id: str, data: dict, revision: int | None = None) -> dict:
+    def record(self, result_id: str, data: dict, revision: int | None = None, task: str = "TASK-RESULT") -> dict:
         return memory_results.record_result(
-            self.repository, "TASK-RESULT", result_id,
+            self.repository, task, result_id,
             self.task()["revision"] if revision is None else revision, data,
             owner="local", reason="Saved by the test; agent-attested, not reviewed by a person",
         )
@@ -8324,7 +8332,7 @@ class RecordResultTest(RuntimeHarness):
         self.assertEqual(revision, self.task()["revision"])
 
     def test_a_save_that_stopped_after_writing_a_learning_is_finished_by_its_replay(self) -> None:
-        identifier = memory_results.learning_id("TASK-RESULT", self.LEARNING)
+        identifier = memory_results.learning_id(self.task()["id"], self.LEARNING)
         brain.create_record(self.repository, "finding", identifier, self.LEARNING["title"], [],
                             self.LEARNING["sources"], owner="local", authority="observed",
                             goal=self.LEARNING["consequence"])
@@ -8336,7 +8344,7 @@ class RecordResultTest(RuntimeHarness):
     def test_a_learning_someone_took_further_is_left_as_it_is(self) -> None:
         # Only a record still in its initial state is a result's to finish:
         # one under investigation since is someone's later work.
-        identifier = memory_results.learning_id("TASK-RESULT", self.LEARNING)
+        identifier = memory_results.learning_id(self.task()["id"], self.LEARNING)
         record = brain.create_record(self.repository, "finding", identifier, self.LEARNING["title"], [],
                                      self.LEARNING["sources"], owner="local", authority="observed",
                                      goal=self.LEARNING["consequence"])
@@ -8372,6 +8380,69 @@ class RecordResultTest(RuntimeHarness):
         with self.assertRaisesRegex(brain.BrainError, "verified=true"):
             self.record("run-1", self.result(verified=False))
         self.assertEqual([], self.records())
+
+    def test_the_external_id_and_the_uuid_name_one_result(self) -> None:
+        self.record("run-1", self.result())
+        uuid = self.task()["id"]
+        revision = self.task()["revision"]
+        self.assertTrue(self.record("run-1", self.result(), task=uuid)["replayed"])
+        with self.assertRaisesRegex(brain.BrainError, "different content"):
+            self.record("run-1", self.result(progress="Something else."), task=uuid)
+        self.assertEqual(1, len(self.records()))
+        self.assertEqual(revision, self.task()["revision"])
+
+    def test_an_archived_learning_is_not_written_again(self) -> None:
+        self.record("run-1", self.result())
+        brain.compact(self.repository)
+        self.assertEqual([], self.records())
+        later = self.record("run-2", self.result(progress="Release covered."))
+        self.assertEqual(["archived"], [item["state"] for item in later["records"]])
+        self.assertEqual([], self.records())
+        archived = [record for _, record, _ in brain.iter_records(self.repository, include_archive=True)
+                    if record["type"] == "finding"]
+        self.assertEqual(1, len(archived))
+        self.assertEqual("Release covered.", self.task()["progress"])
+
+    def test_a_stale_revision_refuses_a_result_of_learnings_alone(self) -> None:
+        revision = self.task()["revision"]
+        moved = self.run_cli("update", "--task-id", "TASK-RESULT", "--revision", "auto",
+                             "--progress", "Moved on.", "--json")
+        self.assertEqual(0, moved.returncode, moved.stderr)
+        with self.assertRaisesRegex(brain.BrainError, "Stale task revision"):
+            self.record("run-1", {"learnings": [self.LEARNING], "verified": True}, revision=revision)
+        self.assertEqual([], self.records())
+
+    def test_a_replay_finishes_a_promotion_that_failed(self) -> None:
+        with mock.patch.object(memory_results, "auto_promote", side_effect=brain.BrainError("disk full")):
+            with self.assertRaisesRegex(brain.BrainError, "disk full"):
+                self.record("run-1", self.result())
+        self.assertEqual([], list((self.repository / "memory-bank/chunks").glob("MEM-*.md")))
+        replay = self.record("run-1", self.result())
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(1, len(replay["promotion"]["promoted"]))
+        self.assertEqual(1, len(list((self.repository / "memory-bank/chunks").glob("MEM-*.md"))))
+
+    def test_an_archived_agent_attested_record_keeps_its_mark_when_promoted(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.write_text(json.dumps({"mode": "governed", "automatic_promotion": False}), encoding="utf-8")
+        self.record("run-1", self.result())
+        finding = self.records()[0]
+        brain.compact(self.repository)
+        proposal = brain.create_promotion(self.repository, [finding["id"]], "Cobalt authority",
+                                          "The cobalt authority rule decides allocation.", proposer="local")
+        brain.review_promotion(self.repository, proposal["id"], reviewer="human-reviewer", approve=True)
+        brain.apply_promotion(self.repository, proposal["id"])
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.assertIn("agent-attested", chunk.read_text(encoding="utf-8"))
+
+    def test_a_pasted_log_or_transcript_line_is_refused(self) -> None:
+        for data in (self.result(progress="stderr: synthetic migration failure"),
+                     self.result(next_steps=["user: please rerun it"]),
+                     self.result(learnings=[{**self.LEARNING, "consequence": "log: retries were exhausted"}])):
+            with self.subTest(data=data), self.assertRaisesRegex(brain.BrainError, "log or transcript"):
+                self.record("run-1", data)
+        self.assertEqual([], self.records())
+        self.assertEqual("", self.task()["progress"])
 
     def test_the_cli_records_a_result_from_a_file(self) -> None:
         request = self.repository / "result.json"

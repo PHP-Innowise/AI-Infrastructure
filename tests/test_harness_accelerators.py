@@ -168,6 +168,25 @@ class AttachedAcceleratorTests(unittest.TestCase):
         self.assert_project_untouched()
 
 
+    def test_an_attached_session_records_a_learning_about_a_project_file(self):
+        # The runtime's root is the state; the learning cites the project.
+        manager = KnowledgeManager(self.store)
+        self.addCleanup(manager.close)
+        started = manager.run(self.project_id, {"action": "start", "task_id": "TASK-ATTACHED", "goal": "Check orders"})
+        self.assertTrue(started["ok"], started)
+        recorded = manager.run(self.project_id, {
+            "action": "record-result", "task_id": "TASK-ATTACHED", "result_id": "attached-1",
+            "revision": started["result"]["revision"], "attestation": "agent",
+            "request": {"progress": "Orders checked.", "next_steps": [], "verified": True,
+                        "learnings": [{"type": "finding", "title": "Orders are final",
+                                       "consequence": "Extend an order by composition.",
+                                       "sources": ["app/Order.php"]}]}})
+        self.assertTrue(recorded["ok"], recorded)
+        self.assertEqual(["created"], [item["state"] for item in recorded["result"]["records"]])
+        state = self.root / "state/attached" / self.project_id
+        self.assertEqual(1, len(list((state / "project-brain/dynamic/findings").glob("*.md"))))
+        self.assert_project_untouched()
+
     def test_capsule_paths_may_name_the_attached_edition_only(self):
         from harness.task_context import TaskContext
         skill = (LARAVEL / ".agents/skills/eloquent/SKILL.md").as_posix()

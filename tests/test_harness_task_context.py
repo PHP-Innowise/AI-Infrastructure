@@ -594,6 +594,13 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
                              "Patient name: Alice; Smith; Fix CMS768",
                              "Client address: Building A; Vilnius; Fix CMS768"):
             self.assertEqual("", message_query(private_only))
+        # A quoted secret goes whole from the query and the goal stored in Git.
+        quoted = "Fix CMS768 deploy password='alpha beta gamma' after migration"
+        options = TaskContext.validate_options({"bank": "memory-bank", "auto": True}, quoted)
+        for key in ("query", "goal", "task_id"):
+            self.assertNotIn("beta gamma", options[key])
+            self.assertNotIn("alpha", options[key])
+        self.assertIn("CMS768 deploy", options["query"])
         # A secret is cut out, not a reason to drop the turn's memory; a pasted
         # transcript line loses its role prefix and keeps its words.
         self.assertEqual("", message_query("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"))

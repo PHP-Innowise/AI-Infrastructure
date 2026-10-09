@@ -698,10 +698,20 @@ def modified_at(path: Path) -> datetime:
     return datetime.fromtimestamp(path.stat().st_mtime, UTC)
 
 
-def reconstruct_memory(project: Path, corpus: Path, moment: datetime) -> Dict[str, int]:
+def reconstruct_memory(
+    project: Path, corpus: Path, moment: datetime, updated_after: str = "drop"
+) -> Dict[str, int]:
     """Bring the corpus's memory to `moment`: drop what was written later, add
-    what existed then in the project's working tree only."""
-    counts = {"from_git": 0, "from_worktree": 0, "dropped_future": 0, "undetermined": 0, "updated_after": 0}
+    what existed then in the project's working tree only.
+
+    A working-tree document created before the prompt but edited after it
+    cannot be rewound: its body may hold the very answer the prompt's work
+    produced. `drop` (the default, the strict as-of corpus) leaves it out and
+    counts it as `unreconstructable_updated`; `keep` copies today's body and
+    counts it as `updated_after`, and the run marks the turn contaminated.
+    """
+    counts = {"from_git": 0, "from_worktree": 0, "dropped_future": 0, "undetermined": 0, "updated_after": 0,
+              "unreconstructable_updated": 0}
     promotions = promotion_windows(corpus)
     promotions.update(promotion_windows(project))
     committed: Set[str] = set()
@@ -728,11 +738,15 @@ def reconstruct_memory(project: Path, corpus: Path, moment: datetime) -> Dict[st
             continue
         # A file unmodified since before the prompt existed then, as it is now.
         if (window is not None and window[1] <= moment) or modified <= moment:
+            edited = modified > moment and changed_after(source, kind, moment)
+            if edited and updated_after == "drop":
+                counts["unreconstructable_updated"] += 1
+                continue
             target = corpus / relative
             prepare_parent(corpus, target)
             shutil.copy2(source, target)
             counts["from_worktree"] += 1
-            if modified > moment and changed_after(source, kind, moment):
+            if edited:
                 counts["updated_after"] += 1
         else:
             counts["undetermined"] += 1
@@ -1204,19 +1218,30 @@ def answer_existing(corpus: Path, grades: Dict[str, int], passages: Dict[str, Di
     part that answered it: a changelog's entry, a spec's section written for
     the very work the prompt started. A labelled passage present in the
     corpus's copy is the stricter ceiling for "answer in the capsule text".
+    Skills count like any document, read from wherever the overlay put them,
+    so the ceiling and the numerator cover the same documents.
     """
     found = []
     for path, grade in sorted(grades.items()):
         entry = passages.get(path)
-        if grade < 1 or is_skill(path) or not isinstance(entry, dict) or entry.get("useful") is False:
+        if grade < 1 or not isinstance(entry, dict) or entry.get("useful") is False:
             continue
         if not installer.is_safe_relative_path(path):
             continue
-        target = corpus / PurePosixPath(path)
-        try:
-            text = flatten(target.read_text(encoding="utf-8", errors="replace")) if target.is_file() else ""
-        except OSError:
-            text = ""
+        # A skill is judged under its canonical path; the overlay installs it
+        # under whichever tool directories the edition carries.
+        candidates = [path]
+        if path.startswith(CANON_SKILLS):
+            candidates += [tool + path[len(CANON_SKILLS):] for tool in TOOL_SKILLS]
+        text = ""
+        for candidate in candidates:
+            target = corpus / PurePosixPath(candidate)
+            try:
+                if target.is_file():
+                    text = flatten(target.read_text(encoding="utf-8", errors="replace"))
+                    break
+            except OSError:
+                continue
         if text and any(isinstance(passage, str) and flatten(passage) and flatten(passage) in text
                         for passage in entry.get("passages") or []):
             found.append(path)
@@ -1256,6 +1281,7 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         ),
         "answer_in_text": sum(1 for item in evaluated if item.get("answer_in_text")),
         "answer_could_help": sum(1 for item in evaluated if item.get("answer_could_help")),
+        "contaminated": sum(1 for item in evaluated if item.get("contaminated")),
         "answer_in_text_among_answer_could_help": sum(
             1 for item in evaluated if item.get("answer_could_help") and item.get("answer_in_text")
         ),
@@ -1358,6 +1384,7 @@ class Run:
             "host": arguments.host,
             "as_of": arguments.as_of,
             "clock": "pinned" if self.pinned else "real",
+            "updated_after": arguments.updated_after,
             "timeout": arguments.timeout,
             "set_sha256": sha256_file(arguments.set),
             "judgments_sha256": sha256_file(arguments.judgments),
@@ -1428,7 +1455,9 @@ class Run:
                     raise Skip("no-history")
                 item["commit"] = commit
                 shutil.copytree(materialize(project, tree, self.cache), corpus)
-                item["provenance"] = reconstruct_memory(project, corpus, moment)
+                item["provenance"] = reconstruct_memory(project, corpus, moment, self.arguments.updated_after)
+                # Today's body of a document edited after the prompt is in the corpus.
+                item["contaminated"] = bool(item["provenance"].get("updated_after"))
                 # Configuration, not knowledge: when the commit lacks the
                 # project's runtime.json (a retrieval gate, a privacy scope),
                 # its working-tree copy beats the edition's defaults.
@@ -1561,6 +1590,7 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("useful among could-help", "useful_among_could_help"),
     ("answer in the capsule text", "answer_in_text"),
     ("could answer (a labelled answer existed)", "answer_could_help"),
+    ("contaminated (today's body of a later edit)", "contaminated"),
     ("answer in text among could-answer", "answer_in_text_among_answer_could_help"),
     ("noise-only turns", "noise_only"),
     ("unjudged-only turns", "unjudged_only"),
@@ -1572,7 +1602,7 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("latency p95 (s)", "latency_p95"),
 )
 SHARED_ROWS = {"useful", "answer_in_text", "noise_only", "unjudged_only", "silent", "could_help",
-               "answer_could_help"}
+               "answer_could_help", "contaminated"}
 
 
 def row_value(summary: Dict[str, Any], key: str) -> Optional[float]:
@@ -2139,6 +2169,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("as-of", "real"),
         default="as-of",
         help="as-of: the runtime's clock reads the prompt's instant (default); real: today's",
+    )
+    run.add_argument(
+        "--updated-after",
+        choices=("drop", "keep"),
+        default="drop",
+        help=(
+            "a working-tree memory document created before the prompt but edited after it: "
+            "drop it (default, the strict as-of corpus) or keep today's body and mark the turn contaminated"
+        ),
     )
     run.add_argument("--cache", type=Path, help=f"work and cache directory (default {default_cache()})")
     run.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds per runtime call")

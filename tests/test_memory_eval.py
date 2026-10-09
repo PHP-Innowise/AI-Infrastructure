@@ -350,7 +350,8 @@ class EndToEndTest(unittest.TestCase):
             # A from the commit; D (backdated commit), the chunk and C were
             # written after the prompt; B existed uncommitted; the same-day
             # chunk cannot be placed before or after it.
-            {"from_git": 1, "from_worktree": 1, "dropped_future": 3, "undetermined": 1, "updated_after": 0},
+            {"from_git": 1, "from_worktree": 1, "dropped_future": 3, "undetermined": 1, "updated_after": 0,
+             "unreconstructable_updated": 0},
         )
         self.assertNotIn(CHUNK, p1["existed_useful"])
         self.assertNotIn(CHUNK, p1["delivered"])
@@ -363,7 +364,8 @@ class EndToEndTest(unittest.TestCase):
         p2 = self.result("prompt")["items"]["p2"]
         self.assertEqual(
             p2["provenance"],
-            {"from_git": 3, "from_worktree": 2, "dropped_future": 1, "undetermined": 0, "updated_after": 0},
+            {"from_git": 3, "from_worktree": 2, "dropped_future": 1, "undetermined": 0, "updated_after": 0,
+             "unreconstructable_updated": 0},
         )
 
     def test_as_of_now_includes_the_future_document(self) -> None:
@@ -588,6 +590,21 @@ class ScoringTest(unittest.TestCase):
             scored = memory_eval.score(refresh_result({}), grades, passages, ["CHANGELOG.md"], [])
             self.assertEqual((True, False), (scored["could_help"], scored["answer_could_help"]))
 
+    def test_a_skills_labelled_answer_counts_where_the_overlay_put_it(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            corpus = Path(name)
+            skill = corpus / ".claude/skills/rounding/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("# Rounding\n\nUse half-up   rounding for totals.\n", encoding="utf-8")
+            grades = {".agents/skills/rounding/SKILL.md": 2}
+            passages = {".agents/skills/rounding/SKILL.md": {"useful": True, "passages": ["Use half-up rounding"]}}
+            self.assertEqual([".agents/skills/rounding/SKILL.md"],
+                             memory_eval.answer_existing(corpus, grades, passages))
+            text = "- skill .agents/skills/rounding/SKILL.md — Rounding\n  Use half-up rounding for totals."
+            scored = memory_eval.score(refresh_result({"procedural": [".agents/skills/rounding/SKILL.md"]}, text),
+                                       grades, passages, list(grades), list(grades))
+            self.assertEqual((True, True), (scored["answer_could_help"], scored["answer_in_text"]))
+
     def test_judgments_ignore_what_is_not_an_integer_grade(self) -> None:
         grades = {
             "docs/a.md": 2,
@@ -710,11 +727,16 @@ class ReconstructionTest(unittest.TestCase):
         counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
         self.assertEqual(counts["from_worktree"], 1)
 
-    def test_a_record_edited_after_the_prompt_is_counted(self) -> None:
+    def test_a_record_edited_after_the_prompt_is_left_out_unless_kept(self) -> None:
+        # Its body today may hold the very answer the prompt's work produced.
         text = finding(RECORD_B, "B", "goal", "2026-08-03T08:00:00Z", "b", updated="2026-08-09T08:00:00Z")
         write(self.project, PATH_B, text)
         counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
+        self.assertEqual((counts["from_worktree"], counts["unreconstructable_updated"]), (0, 1))
+        self.assertFalse((self.corpus / PATH_B).exists())
+        counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment, "keep")
         self.assertEqual((counts["from_worktree"], counts["updated_after"]), (1, 1))
+        self.assertTrue((self.corpus / PATH_B).is_file())
 
 
 class OverlayTest(unittest.TestCase):

@@ -3080,7 +3080,10 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         attested = []
         for item in proposal["source_records"]:
             try:
-                attested.append(record_attestation(find_record(repository, item["id"])[1]))
+                # Archived sources too: promotion accepts an archived record,
+                # and its provenance must not drop out on the way.
+                attested.append(record_attestation(
+                    find_record(repository, item["id"], include_archive=True)[1]))
             except BrainError:
                 attested.append("")
         if "agent" in attested:

@@ -204,13 +204,15 @@ def serve(memory, incoming=sys.stdin.buffer, outgoing=sys.stdout):
                 try:
                     value = memory.call(params['name'], params.get('arguments', {}))
                     result = {'content': [{'type': 'text', 'text': json.dumps(value, ensure_ascii=False)}], 'structuredContent': value, 'isError': False}
-                except (BrainError, ValueError, OSError, subprocess.SubprocessError):
+                except (BrainError, ValueError, RecursionError, OSError, subprocess.SubprocessError):
                     # Error text is never the submitted content or a runtime traceback.
                     result = {'content': [{'type': 'text', 'text': 'Memory operation failed. Check arguments, source paths, current revision and runtime health. A save that stopped half way is completed by replaying the same result_id and content, with the current revision.'}], 'isError': True}
             else:
                 outgoing.write(json.dumps({'jsonrpc': '2.0', 'id': identifier, 'error': {'code': -32601, 'message': 'Method not found'}}) + '\n'); outgoing.flush(); continue
             response = {'jsonrpc': '2.0', 'id': identifier, 'result': result}
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError, RecursionError):
+            # A message nested past the parser's depth is a parse error like
+            # any other: answered, and the server stays up for the next one.
             response = {'jsonrpc': '2.0', 'id': identifier, 'error': {'code': -32700, 'message': 'Invalid JSON-RPC message'}}
         except BrainError:
             response = {'jsonrpc': '2.0', 'id': identifier, 'error': {'code': -32602, 'message': 'Invalid request parameters or initialization state'}}

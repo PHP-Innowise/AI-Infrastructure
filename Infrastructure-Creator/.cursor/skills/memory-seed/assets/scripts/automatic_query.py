@@ -70,6 +70,18 @@ RAW_TEXT_PATTERN = re.compile(
     r"stdout|stderr|log)\s*:",
     re.IGNORECASE | re.MULTILINE,
 )
+# A credential assigned a quoted value: the whole literal goes, to its closing
+# quote or, when the quote never closes, to the end of the line. The detection
+# pattern above stops at the first space - enough to refuse a write, but it
+# left "beta gamma'" of `password='alpha beta gamma'` in an automatic query,
+# and from there in a task goal and a manifest.
+QUOTED_CREDENTIAL = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*"
+    r"(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key"
+    r"|access[_-]?token|auth[_-]?token)"
+    r"[ \t]*[:=][ \t]*(['\"`])[^\n]*?(?:\1|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
 # SECRET_PATTERNS recognises a private key by its header line alone; the body
 # under it is the secret, so the whole block goes, to its footer or the end.
 PRIVATE_KEY_BLOCK = re.compile(
@@ -109,6 +121,7 @@ def sanitize_automatic_query(text: str) -> str:
     """
     original = text
     text = PRIVATE_KEY_BLOCK.sub(" ", text)
+    text = QUOTED_CREDENTIAL.sub(" ", text)
     labelled = PRIVATE_PATTERNS["customer identifier"].search(text)
     if labelled:
         text = text[:labelled.start()]

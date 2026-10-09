@@ -133,6 +133,7 @@ python3 scripts/memory_eval.py realized --project ~/Desktop/next --since 2026-09
 | `--ids A,B` / `--limit N` | Evaluate only these ids / the first N selected. |
 | `--as-of prompt\|now` | As of each prompt (default) or the current tree. |
 | `--clock as-of\|real` | Pin the runtime's clock to the prompt (default) or leave it alone. |
+| `--updated-after drop\|keep` | A working-tree memory document created before the prompt but edited after it: leave it out (default, the strict as-of corpus) or copy today's body and mark the turn contaminated. |
 | `--cache DIR` | Work and cache directory; refused inside this clone. |
 | `--timeout SECONDS` | Per runtime call (default 30). A timeout skips the prompt as `refresh-timeout`. |
 | `--keep` | Keep each prompt's corpus and record its path in the item, for debugging. |
@@ -174,7 +175,7 @@ clone's commit, the host, `as_of`, the clock, the SHA-256 of the set,
 judgments and passages files, and the start and finish times. Each item has
 `status` (`ok` or `skipped` with a `reason`), `edition` and `edition_source`,
 `commit`, `provenance` (`from_git`, `from_worktree`, `dropped_future`,
-`undetermined`, `updated_after`; `config_from_worktree` when the working
+`undetermined`, `updated_after`, `unreconstructable_updated`; `config_from_worktree` when the working
 tree's `runtime.json` was used; under `--as-of now`, `future_present`), the
 overlay counts, `history_linked`,
 `refresh` (exit status, seconds, the warm-up's seconds, the runtime's phase
@@ -197,7 +198,9 @@ withheld), and the score below. `summary` is what `report` prints.
   often existed at the prompt without the part that answered it - a changelog
   entry, a spec section written for that very work - so "could help" alone
   overstates what memory could have handed over. "Answer in text among
-  could-answer" is the delivery rate against that stricter ceiling.
+  could-answer" is the delivery rate against that stricter ceiling. Skills
+  count like any document, read where the overlay installed them, so the
+  ceiling and "answer in the capsule text" cover the same documents.
 - **class** - `useful` (at least one useful item), `noise-only` (delivered,
   nothing useful, at least one judged noise), `unjudged-only`, `silent`
   (nothing delivered, or the sanitizer left nothing to search).
@@ -220,10 +223,13 @@ Grow the judgments with `report --show-unjudged`: it lists every delivered
 - Only memory is recovered from the working tree. Uncommitted code, specs and
   task documents at the prompt are not reconstructed; a record or chunk that
   existed then and was deleted since is lost.
-- A record created before the prompt and edited after it carries its newer
-  text (`updated_after` counts the ones that say so); a chunk re-verified
-  after the prompt is refused by the pinned clock as verified "in the
-  future", which errs towards less, not more.
+- A record created before the prompt and edited after it cannot be rewound:
+  its body today may hold the answer the prompt's work produced. By default
+  it is left out (`unreconstructable_updated`), which errs towards less;
+  `--updated-after keep` copies today's body (`updated_after`) and marks the
+  turn `contaminated`, a count `report` prints. A chunk re-verified after the
+  prompt is refused by the pinned clock as verified "in the future", which
+  also errs towards less, not more.
 - The capsule is assembled for the prompt alone: the branch's working task
   is not reconstructed and no session id is passed, so nothing is
   suppressed as already handed.
