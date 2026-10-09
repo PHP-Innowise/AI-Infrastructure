@@ -1196,10 +1196,13 @@ Fill, window, growth and free space are the provider's own token counts:
 - **Cursor:** reports none; its turns show `—` and the characters the Harness
   added.
 
-Memory parts are estimates: capsule JSON at 3.6 characters per token, prose at
-4.7. Session launches of Claude add `--include-hook-events` so hook output can be
-measured. Only its character counts per memory kind are kept, and Codex hooks
-read as *not measured*.
+Memory parts are estimates: the capsule at 3.6 characters per token, prose at
+4.7. The capsule is counted as the prompt carried it: the runtime's rendered text,
+split by its item lines (a Memory bank chunk, a Project Brain record or episode,
+any other path as rules and docs, each with the excerpt under it), or the JSON of a
+runtime that renders none. Session launches of Claude add `--include-hook-events`
+so hook output can be measured; it is split by the same item lines. Only its
+character counts per memory kind are kept, and Codex hooks read as *not measured*.
 
 Each launch stores these numbers in a `context` column, as integers plus the fixed
 context-file names; no prompt, file or hook text. A Fleet or Clash launch row says
@@ -1292,7 +1295,7 @@ workspace, or already saved from this session, are left out. Then the project's
 automatic promotion runs once (`context.py promote-auto`), under the runtime's own
 rules and its `automatic_promotion` setting; promoted chunks are tagged
 `auto-promoted`. A second line in the conversation says what was saved, promoted
-or held back. A run that fails or is cancelled saves nothing. If a completed normal automatic run omits its draft or returns invalid JSON, one bounded read-only follow-up resumes the same native session to format it. The follow-up shares the launch budget, disables helpers/memory hooks, and never repeats the task; a failed attempt is reported without discarding completed work. The optional used_memory field distinguishes delivered pointers from agent-reported use. See [shared memory integration](../docs/MEMORY-INTEGRATION.md) for direct-client MCP setup.
+or held back. A run that fails or is cancelled saves nothing. If a completed normal automatic run omits its draft or returns invalid JSON, one bounded read-only follow-up resumes the same native session to format it. The follow-up shares the launch budget, disables helpers/memory hooks, and never repeats the task; a failed attempt is reported without discarding completed work. The memory line names the delivered items, how many the run's own tools were seen to open (a lower bound when shell commands also ran, unknown when they were its only way to read) and, with the optional used_memory field, how many the agent reports using. See [shared memory integration](../docs/MEMORY-INTEGRATION.md) for direct-client MCP setup.
 
 Choose an existing task, or a new task with your own ID and goal, under **Memory**;
 memory still runs by itself for it. In a project without a governed context

@@ -376,13 +376,17 @@ def _capsule_kinds(capsule, size):
     return characters, counts, sum(size(item) for item in views)
 
 
-def capsule_parts(capsule):
+def capsule_parts(capsule, text=None):
     """Characters a prepared turn's prompt carries for the capsule, by memory kind.
 
-    The prompt inserts the capsule with default JSON separators after a header; the
-    header and the envelope count as Project Brain, so the parts add up to the
-    inserted length.
+    The prompt inserts the runtime's rendered capsule after a header, and its parts
+    come from its item lines, as a hook's output does (context_usage.capsule_text_parts).
+    A runtime that renders none sends the capsule with default JSON separators instead,
+    and its parts come from the JSON items. The header and the envelope count as
+    Project Brain, so either way the parts add up to the inserted length.
     """
+    if isinstance(text, str) and text.strip():
+        return context_usage.capsule_text_parts(BRAIN_CONTEXT_HEADER + capsule_prompt_text(capsule, text) + '\n\n')
     characters, _, _ = _capsule_kinds(capsule, lambda value: len(json.dumps(value, ensure_ascii=False)))
     inserted = len(BRAIN_CONTEXT_HEADER) + len(json.dumps(capsule, ensure_ascii=False)) + 2
     return {'brain': inserted - characters['rules'] - characters['bank'], **characters}
@@ -1446,7 +1450,7 @@ class Sessions:
             prefix += BRAIN_CONTEXT_HEADER + capsule_prompt_text(capsule, text) + '\n\n'
             if isinstance(capsule, dict):
                 meter = capsule_meter(capsule, text)
-                parts['capsule'] = {'characters': meter['characters'], 'inserted': meter['prompt_characters'], 'kinds': capsule_parts(capsule),
+                parts['capsule'] = {'characters': meter['characters'], 'inserted': meter['prompt_characters'], 'kinds': capsule_parts(capsule, text),
                                     'repeats': meter['repeats'], 'dropped': meter['dropped'], 'items': meter['items']}
         # Project context comes from memory: a turn whose prompt carries a capsule has what retrieval found
         # for its message, and the provider loads its own instruction files. Without a capsule, excerpts of
@@ -1580,9 +1584,10 @@ class Sessions:
             receipt = json.loads(row[0]) if row and row[0] else {}
         except ValueError:
             receipt = {}
-        opened = receipt.get('opened_paths') if isinstance(receipt, dict) else None
+        # The ledger's match of the run's successful reads against the delivered memory, not the receipt's
+        # display list of opened paths, which stops at its first 40.
         provenance = memory_draft.usage(latest['draft'], session['brain'].get('capsule'),
-                                        opened if isinstance(opened, list) else ())
+                                        receipt.get('memory') if isinstance(receipt, dict) else None)
         try:
             result = self._task_context(wait=MEMORY_WAIT).save_memory(
                 session, latest['draft'], automatic=True, known=session['brain'].get('remembered') or [],
@@ -1599,13 +1604,11 @@ class Sessions:
                 self._save_brain(sid, {**brain, 'remembered': ((brain.get('remembered') or []) + saved)[-REMEMBERED:]})
             notice = memory_draft.summary('drafted', result)
             if provenance['delivered']:
-                # Opened is what the run's tools read; reported is the agent's word.
-                notice += (f" Memory use: {provenance['delivered']} delivered, "
-                           f"{len(provenance['opened'])} opened by the agent"
-                           + (f", {len(provenance['reported_used'])} reported used" if provenance['reported'] else "")
-                           + ". Neither proves the claim was used.")
+                # Opened is what the run's tools returned, or unknown where they read unseen; reported is the agent's word.
+                notice += ' ' + memory_draft.use_notice(provenance)
             self._event(sid, {'kind': 'memory', 'ok': result['ok'], 'text': notice,
-                'delivered_sources': provenance['delivered'], 'opened_delivered_sources': len(provenance['opened']),
+                'delivered_sources': provenance['delivered'], 'opened_delivered_sources': provenance['opened'],
+                'opened_observation': provenance['observation'],
                 'reported_used_sources': len(provenance['reported_used']),
                 'attestation': provenance['attestation']})
 
@@ -1763,9 +1766,14 @@ class Sessions:
         # Tool targets for the run view and the launch's receipt: native launches only (Workspace, SDD, Plan, Review).
         # Paths are relative to the launch cwd; a worktree's source checkout is also removed from commands and plans,
         # while its files stay outside the worktree.
+        watch = None
+        if native_launch and not native_command and (session.get('brain') or {}).get('capsule'):
+            from . import memory_draft
+            # The memory this prompt delivered: the ledger counts the reads of it that succeed.
+            watch = memory_draft.watch(session['brain']['capsule'])
         enricher = run_activity.Enricher(
             provider, project, session['project_path'], strip=(self.project(session['project_id'])['path'],),
-            home=run_activity.user_home()) if native_launch else None
+            home=run_activity.user_home(), watch=watch, outside=accelerator is not None) if native_launch else None
         def save_receipt():
             # Also when the launch hit its output limit, was cancelled or never started: the counts cover it until then.
             if enricher:

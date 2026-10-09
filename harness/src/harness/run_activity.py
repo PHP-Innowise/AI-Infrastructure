@@ -80,6 +80,8 @@ _ATTACHED_PASSWORD = re.compile(r'(?:^|[\s/;&|(])(?:mysql[\w-]*|mariadb[\w-]*|ss
 _ATTACHED_VALUE = re.compile(r'(?<!\S)-p(?![\s-])\S+')
 READ, EDIT, DELETE, SEARCH = {'read'}, {'edit', 'write', 'multiedit', 'notebookedit'}, {'delete'}, {'grep', 'glob', 'ls'}
 COMMAND, HELPER = {'bash', 'shell'}, {'task', 'agent'}
+# Claude Code's Skill tool hands the agent a skill's SKILL.md; the call names the skill.
+SKILL = 'skill'
 
 
 def redact_command(text):
@@ -183,9 +185,13 @@ class RunLedger:
     a path this launch had not opened or edited); `deleted` covers Codex deletions and
     Cursor's delete tool. Path lists hold project paths in first-touch order; files outside
     the project are counted, each by its own full path, but not listed.
+
+    `watch` is the memory the launch's prompt delivered, as what a read names (a project
+    path, or `skill:<name>` for a Skill load) mapped to the delivered item; `outside` says
+    that memory lives outside the project, as an attached accelerator's does. See `memory`.
     """
 
-    def __init__(self, provider):
+    def __init__(self, provider, watch=None, outside=False):
         self.provider = provider
         self.steps = self.searched = self.commands = self.failed = self.not_run = self.failed_steps = self.helpers = 0
         self.opened, self.edited, self.created, self.deleted, self.patterns = {}, {}, set(), set(), {}
@@ -194,6 +200,10 @@ class RunLedger:
         self.last_commands = deque(maxlen=RECENT_LIMIT)
         self.plan = None
         self.limited = False
+        self.watch = dict(watch) if isinstance(watch, dict) else None
+        self.watch_outside = bool(outside)
+        # Delivered items a read returned, however long the listed paths run; reads reported at all, and outside.
+        self.watched, self.reads, self.outside_reads = set(), 0, 0
 
     def observe(self, label, fields, private=None):
         """Fold in one tool event: its plain label, and the display fields when the provider gave targets.
@@ -249,6 +259,12 @@ class RunLedger:
         entry = {'kind': kind, 'keys': [], 'changes': self._changes(fields, private)}
         if kind in READ and fields.get('path'):
             self.opened.setdefault(key, path)
+            self.reads += 1
+            self.outside_reads += bool(fields.get('outside'))
+            entry['read'] = path
+        elif kind == SKILL and fields.get('detail'):
+            self.reads += 1
+            entry['read'] = 'skill:' + fields['detail']
         elif (kind in EDIT or kind in DELETE) and fields.get('path'):
             existed = private.get('existed')
             created = kind == 'write' and (existed is False if existed is not None
@@ -276,6 +292,9 @@ class RunLedger:
         if not ok:
             self.failed_steps += outcome != 'not_run'
             return
+        if self.watch and entry.get('read') in self.watch:
+            # Only once the tool returned the file: a failed or unanswered read opened nothing.
+            self.watched.add(self.watch[entry['read']])
         changes = self._changes(fields, private) if fields.get('changes') else entry['changes']
         for key, path, kind in entry['keys'] + changes:
             self.edited.setdefault(key, path)
@@ -284,15 +303,41 @@ class RunLedger:
             elif kind == 'delete':
                 self.deleted.add(key)
 
+    def memory(self):
+        """What the run's tools show of the delivered memory they read; None when the prompt delivered none.
+
+        `opened` counts delivered items a tool returned - a Read of the file or of any
+        tool's copy of a skill, a Skill load by name - counted when the call succeeded,
+        however many other files the run read. `unseen` names the ways the run could read
+        without saying what: shell commands, Codex helper agents (their own steps are not
+        streamed) and, for memory kept outside the project, reads outside it. Without them
+        the count is what was observed; beside reads the run did report it is a lower
+        bound; with no reported read at all it says nothing, and is unknown. Shell commands
+        are never parsed for the files they might read.
+        """
+        if self.watch is None:
+            return None
+        unseen = [name for name, count in (('shell', self.commands - self.not_run),
+                                           ('helpers', self.helpers if self.provider == 'codex' else 0),
+                                           ('outside', self.outside_reads if self.watch_outside else 0)) if count]
+        observation = ('lower_bound' if self.reads else 'unknown') if unseen else 'observed'
+        return {'delivered': len(set(self.watch.values())), 'opened': len(self.watched),
+                'observation': observation, 'unseen': unseen}
+
     def receipt(self):
         listed = lambda paths: [path for path in paths.values() if path][:LIST_LIMIT]
-        return {'steps': self.steps, 'opened': len(self.opened), 'opened_paths': listed(self.opened),
-                'edited': len(self.edited), 'edited_paths': listed(self.edited),
-                'created': len(self.created), 'deleted': len(self.deleted),
-                'searched': self.searched, 'patterns': list(self.patterns)[:RECENT_LIMIT],
-                'commands': self.commands, 'failed': self.failed, 'not_run': self.not_run,
-                'failed_steps': self.failed_steps, 'last_commands': [dict(item) for item in self.last_commands],
-                'plan': self.plan, 'helpers': self.helpers, 'limited': self.limited}
+        receipt = {'steps': self.steps, 'opened': len(self.opened), 'opened_paths': listed(self.opened),
+                   'edited': len(self.edited), 'edited_paths': listed(self.edited),
+                   'created': len(self.created), 'deleted': len(self.deleted),
+                   'searched': self.searched, 'patterns': list(self.patterns)[:RECENT_LIMIT],
+                   'commands': self.commands, 'failed': self.failed, 'not_run': self.not_run,
+                   'failed_steps': self.failed_steps, 'last_commands': [dict(item) for item in self.last_commands],
+                   'plan': self.plan, 'helpers': self.helpers, 'limited': self.limited}
+        memory = self.memory()
+        if memory is not None:
+            # Counts only: a delivered item outside the project (an attached accelerator's) has an absolute path.
+            receipt['memory'] = memory
+        return receipt
 
 
 def user_home():
@@ -323,9 +368,10 @@ class Enricher:
     Paths are relative to `root` (the launch cwd) or `alias`. Details and plan text also lose
     the `strip` roots, such as a worktree session's source checkout, whose files still count as
     outside; with `home`, a path under the home folder that no root covers reads `~/…`.
+    `watch` and `outside` describe the memory the prompt delivered (RunLedger).
     """
 
-    def __init__(self, provider, root, alias=None, strip=(), home=None):
+    def __init__(self, provider, root, alias=None, strip=(), home=None, watch=None, outside=False):
         self.provider = provider
         self.root, self.alias, self.home = root, alias, home
         self.roots = [value for value in (root, alias, *strip) if value]
@@ -334,7 +380,7 @@ class Enricher:
         self.last_plan = None
         # The last plan with its item IDs, which a merge update (Cursor's merge: true) changes by ID.
         self.plan_items, self.plan_total = None, 0
-        self.ledger = RunLedger(provider)
+        self.ledger = RunLedger(provider, watch, outside)
 
     def take(self, clean, count, output_bytes):
         """The display fields for one tool label (popping its targets), or None."""

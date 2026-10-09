@@ -12,7 +12,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'harness/src'))
-from harness import providers, run_activity, sessions
+from harness import memory_draft, providers, run_activity, sessions
 from harness.run_activity import Enricher, redact_command, relative, strip_root
 
 POSIX = PurePosixPath('/home/dev/shop')
@@ -415,6 +415,87 @@ class LedgerTests(Replay):
                                              {'id': '2', 'content': 'B', 'status': 'TODO_STATUS_COMPLETED'}]}}}}}, targets=True)
         self.assertEqual({'kind': 'plan', 'items': [{'text': 'A', 'status': 'done', 'id': '1'}, {'text': 'B', 'status': 'done', 'id': '2'}],
                           'total': 2}, events[-1])
+
+    def test_delivered_memory_counts_every_successful_read_past_the_listed_paths(self):
+        capsule = {'semantic': [{'path': 'memory-bank/chunks/MEM-1.md'}, {'path': 'specs/orders.md'}]}
+        enricher = Enricher('claude', POSIX, watch=memory_draft.watch(capsule))
+        events = []
+        for n in range(run_activity.LIST_LIMIT + 1):
+            events += [use(f'toolu_{n}', 'Read', file_path=f'/home/dev/shop/app/F{n}.php'), done(f'toolu_{n}')]
+        events += [use('toolu_m', 'Read', file_path='/home/dev/shop/memory-bank/chunks/MEM-1.md'), done('toolu_m'),
+                   use('toolu_again', 'Read', file_path='memory-bank/chunks/MEM-1.md'), done('toolu_again')]
+        self.take(enricher, 'claude', events)
+        receipt = enricher.ledger.receipt()
+        # The listed paths stop at their cap; the delivered chunk read after it still counts, once.
+        self.assertEqual((run_activity.LIST_LIMIT + 2, run_activity.LIST_LIMIT), (receipt['opened'], len(receipt['opened_paths'])))
+        self.assertNotIn('memory-bank/chunks/MEM-1.md', receipt['opened_paths'])
+        self.assertEqual({'delivered': 2, 'opened': 1, 'observation': 'observed', 'unseen': []}, receipt['memory'])
+        self.assertEqual({'memory-bank/chunks/MEM-1.md'}, enricher.ledger.watched)
+        # A launch whose prompt delivered no memory keeps the receipt it always had.
+        self.assertNotIn('memory', Enricher('claude', POSIX).ledger.receipt())
+
+    def test_a_failed_or_unanswered_read_opens_no_delivered_memory(self):
+        capsule = {'semantic': [{'path': 'specs/orders.md'}, {'path': 'specs/refunds.md'}, {'path': 'specs/tax.md'}]}
+        claude = Enricher('claude', POSIX, watch=memory_draft.watch(capsule))
+        self.take(claude, 'claude', [use('toolu_1', 'Read', file_path='specs/orders.md'), done('toolu_1', failed=True),
+                                     # No answer before the launch ended, and an answer to no call it made.
+                                     use('toolu_2', 'Read', file_path='/home/dev/shop/specs/refunds.md'), done('toolu_9')])
+        receipt = claude.ledger.receipt()
+        self.assertEqual({'delivered': 3, 'opened': 0, 'observation': 'observed', 'unseen': []}, receipt['memory'])
+        # The run view still lists what the run tried to open.
+        self.assertEqual((['specs/orders.md', 'specs/refunds.md'], 1), (receipt['opened_paths'], receipt['failed_steps']))
+        cursor = Enricher('cursor', POSIX, watch=memory_draft.watch(capsule))
+        call = lambda ident, phase, path, **body: {'type': 'tool_call', 'subtype': phase, 'call_id': ident, 'tool_call': {
+            'readToolCall': {'args': {'path': '/home/dev/shop/' + path}, **body}}}
+        self.take(cursor, 'cursor', [call('c1', 'started', 'specs/orders.md'),
+                                     call('c1', 'completed', 'specs/orders.md', result={'error': {'message': 'No such file'}}),
+                                     call('c2', 'started', 'specs/tax.md'),
+                                     call('c2', 'completed', 'specs/tax.md', result={'success': {'content': 'PRIVATE'}})])
+        self.assertEqual({'delivered': 3, 'opened': 1, 'observation': 'observed', 'unseen': []}, cursor.ledger.receipt()['memory'])
+
+    def test_reads_the_run_cannot_show_make_the_count_unknown_or_a_lower_bound(self):
+        capsule = {'semantic': [{'path': 'specs/orders.md'}]}
+        item = lambda phase, **fields: {'type': 'item.' + phase, 'item': fields}
+        sed = "/bin/bash -lc \"sed -n '1,5p' specs/orders.md\""
+
+        def memory(provider, events):
+            enricher = Enricher(provider, POSIX, watch=memory_draft.watch(capsule))
+            self.take(enricher, provider, events)
+            return enricher.ledger.receipt()['memory']
+
+        # Codex reads through its shell; a command's text is never parsed for the files it might read.
+        self.assertEqual({'delivered': 1, 'opened': 0, 'observation': 'unknown', 'unseen': ['shell']}, memory('codex', [
+            item('started', id='item_1', type='command_execution', command=sed, status='in_progress'),
+            item('completed', id='item_1', type='command_execution', command=sed, status='completed', exit_code=0)]))
+        # A declined command never ran, so nothing could read.
+        self.assertEqual('observed', memory('codex', [
+            item('completed', id='item_1', type='command_execution', command=sed, status='declined')])['observation'])
+        # A Codex helper's own steps are not streamed to the launch.
+        self.assertEqual(('unknown', ['helpers']), tuple(memory('codex', [
+            item('started', id='item_5', type='collab_tool_call', tool='spawn_agent', status='in_progress', prompt='PRIVATE')
+        ])[key] for key in ('observation', 'unseen')))
+        # Beside reads the run reported, a command that ran, even a failed one, leaves a lower bound.
+        self.assertEqual({'delivered': 1, 'opened': 1, 'observation': 'lower_bound', 'unseen': ['shell']}, memory('claude', [
+            use('toolu_1', 'Read', file_path='specs/orders.md'), done('toolu_1'),
+            use('toolu_2', 'Bash', command='cat specs/orders.md'), done('toolu_2', failed=True)]))
+
+    def test_a_delivered_skill_counts_whichever_copy_was_read_or_its_skill_load(self):
+        capsule = {'procedural': [{'path': '.agents/skills/orders/SKILL.md'}],
+                   'semantic': [{'path': '.agents/skills/refunds/references/rules.md'}, {'path': 'specs/tax.md'}]}
+        enricher = Enricher('claude', POSIX, watch=memory_draft.watch(capsule))
+        # Claude Code reads a skill with its Skill tool, which names the skill rather than its file.
+        self.take(enricher, 'claude', [use('toolu_1', 'Skill', skill='orders', args='PRIVATE'), done('toolu_1'),
+                                       use('toolu_2', 'Read', file_path='/home/dev/shop/.claude/skills/refunds/references/rules.md'),
+                                       done('toolu_2'), use('toolu_3', 'Skill', skill='tax'), done('toolu_3')])
+        self.assertEqual({'delivered': 3, 'opened': 2, 'observation': 'observed', 'unseen': []}, enricher.ledger.receipt()['memory'])
+        self.assertEqual({'.agents/skills/orders/SKILL.md', '.agents/skills/refunds/references/rules.md'}, enricher.ledger.watched)
+        # An attached accelerator keeps the memory outside the project, where a read is not matched to it.
+        attached = Enricher('claude', POSIX, watch=memory_draft.watch({'semantic': [{'path': 'memory-bank/chunks/MEM-1.md'}]}),
+                            outside=True)
+        self.take(attached, 'claude', [use('toolu_1', 'Read', file_path='/home/dev/.state/shop/memory-bank/chunks/MEM-1.md'),
+                                       done('toolu_1')])
+        self.assertEqual({'delivered': 1, 'opened': 0, 'observation': 'lower_bound', 'unseen': ['outside']},
+                         attached.ledger.receipt()['memory'])
 
     def test_worktree_commands_lose_the_source_checkout_but_its_files_stay_outside(self):
         worktree = PurePosixPath('/state/worktrees/s1/shop')

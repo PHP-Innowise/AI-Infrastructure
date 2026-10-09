@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -13,11 +14,56 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
 from harness import context_usage, providers, sessions
-from harness.context_usage import ContextTracker, codex_fill, hook_parts
+from harness.context_usage import ContextTracker, capsule_text_parts, codex_fill
 
+# A runtime from before excerpts printed each item as '  path — title' under its layer.
 HOOK_TEXT = ("working: T-1 — Retry webhooks\nLast turn: tests passed\nsemantic:\n"
              "  memory-bank/chunks/MEM-0001-retry.md — Retry with backoff\n  specs/payments.md — Payments\n"
              "  project-brain/dynamic/findings/f.md — Finding\nepisodic:\n  episode 12 — Earlier fix\n")
+EDITION_SCRIPTS = Path(__file__).resolve().parents[1] / "PHP Core/memory-bank/scripts"
+RENDER = '''
+import json, sys
+import context
+data = json.load(sys.stdin)
+excerpts = {}
+for path, (text, heading) in data["excerpts"].items():
+    excerpts[path] = context.Excerpt(text)
+    excerpts[path].heading = heading
+print(json.dumps(context.render_capsule_lines(data["capsule"], excerpts)))
+'''
+
+
+def rendered(capsule, excerpts):
+    """The capsule as the edition's own runtime renders it for its hooks and the Harness (render_capsule_lines)."""
+    result = subprocess.run([sys.executable, "-B", "-c", RENDER], cwd=EDITION_SCRIPTS, capture_output=True, text=True,
+                            input=json.dumps({"capsule": capsule, "excerpts": excerpts}), check=True, timeout=60)
+    return "\n".join(json.loads(result.stdout))
+
+
+def item(path, category, layer, title, **extra):
+    return {"path": path, "layer": layer, "kind": "spec", "title": title, "snippet": "", "category": category,
+            "estimated_tokens": 40, "record_id": None, "conflicts": [], **extra}
+
+
+# Every kind of item the renderer prints, with titles, marks and excerpts that carry ' — ' themselves.
+CHUNK = item("memory-bank/chunks/MEM-20260101-aaaaaaaa-retry.md", "durable", "semantic", "Retry with backoff — always")
+SPEC = item("specs/payments.md", "evidence", "semantic", "Payments", attestation="agent")
+FINDING = item("project-brain/dynamic/findings/f.md", "dynamic", "semantic", "Retries double-charge",
+               source_changed=["app/Retry.php"])
+SKILL = item(".agents/skills/payments/SKILL.md", "policy", "procedural", "Payments skill", kind="skill")
+RENDERED_CAPSULE = {
+    "query": "retry webhooks", "task_id": "T-1", "warnings": ["slow refresh"], "last_turn": "tests passed",
+    "task_record": "project-brain/dynamic/tasks/t-1.md",
+    "working": {"task_id": "T-1", "goal": "Retry webhooks", "progress": "Tests pass", "next_steps": ["Ship"],
+                "files": ["app/Retry.php"]},
+    "procedural": [SKILL], "semantic": [CHUNK, SPEC, FINDING],
+    "episodic": [{"id": 12, "summary": "Earlier fix — rolled back"}],
+    "selected": [SKILL, CHUNK, SPEC, FINDING], "categories": {"policy": [SKILL], "durable": [CHUNK], "evidence": [SPEC],
+                                                             "dynamic": [FINDING]}}
+RENDERED_EXCERPTS = {CHUNK["path"]: ["Retry three times — then give up.", "Retry policy — limits"],
+                     SPEC["path"]: ["Payments retry on 5xx responses.", ""],
+                     FINDING["path"]: ["Two retries charged the card twice.", ""],
+                     "episode 12": ["We rolled back the — change.", ""]}
 
 
 def assistant(identity, read, created=0, parent=None, **extra):
@@ -114,7 +160,7 @@ class ContextTrackerTests(unittest.TestCase):
         self.assertEqual({"start": 32000, "end": 31000, "peak": 150000, "calls": 3, "window": 200000,
                           "compactions": [{"pre": 150000, "post": 30000, "call": 2}], "cache_share": .9},
                          {key: snapshot[key] for key in ("start", "end", "peak", "calls", "window", "compactions", "cache_share")})
-        self.assertEqual(hook_parts(HOOK_TEXT), snapshot["hooks"])
+        self.assertEqual(capsule_text_parts(HOOK_TEXT), snapshot["hooks"])
 
     def test_nothing_reported_stays_unknown_not_zero(self):
         tracker = ContextTracker("claude")
@@ -132,10 +178,33 @@ class ContextTrackerTests(unittest.TestCase):
         self.assertEqual(.8, codex.snapshot()["cache_share"])
 
     def test_hook_lines_split_by_memory_kind_and_add_up(self):
-        parts = hook_parts(HOOK_TEXT)
+        parts = capsule_text_parts(HOOK_TEXT)
         self.assertEqual(len(HOOK_TEXT), sum(parts.values()))
         self.assertEqual(len("  memory-bank/chunks/MEM-0001-retry.md — Retry with backoff\n"), parts["bank"])
         self.assertEqual(len("  specs/payments.md — Payments\n"), parts["rules"])
+
+    def test_the_rendered_capsule_splits_by_its_items_and_the_excerpts_under_them(self):
+        # What the runtime renders today: `- memory <path>[ § section] — title`, the excerpt indented under it.
+        text = rendered(RENDERED_CAPSULE, RENDERED_EXCERPTS) + "\n"
+        lines = text.splitlines(keepends=True)
+
+        def block(prefix):
+            index = next(position for position, line in enumerate(lines) if line.startswith(prefix))
+            following = lines[index + 1] if index + 1 < len(lines) else ""
+            return lines[index] + (following if following.startswith("  ") else "")
+
+        bank = block("- memory " + CHUNK["path"])
+        rules = block("- memory " + SPEC["path"]) + block("- skill " + SKILL["path"])
+        # The chunk's line names the section its excerpt quotes; its excerpt and the episode's carry ' — '.
+        self.assertIn(" § Retry policy - limits — Retry with backoff — always\n  Retry three times — then give up.\n", bank)
+        self.assertIn("- history episode 12 — Earlier fix — rolled back\n  We rolled back the — change.\n", text)
+        parts = capsule_text_parts(text)
+        self.assertEqual({"bank": len(bank), "rules": len(rules), "brain": len(text) - len(bank) - len(rules)}, parts)
+        # A Claude hook prints the same render; its memory is split the same way, not all charged to Project Brain.
+        tracker = ContextTracker("claude")
+        self.assertTrue(tracker.observe({"type": "system", "subtype": "hook_response", "hook_event": "UserPromptSubmit",
+                                         "stdout": text, "outcome": "success"}))
+        self.assertEqual(parts, tracker.snapshot()["hooks"])
 
     def test_codex_rollout_keeps_the_launch_window_and_reads_compaction(self):
         now = datetime.now(timezone.utc)
@@ -240,7 +309,7 @@ class ContextLaunchTests(unittest.TestCase):
                           {"name": "README.md", "sent": 7, "full": 7, "characters": 7}], ledger["excerpts"])
         self.assertEqual(ledger["total"] - ledger["message"] - 3007, ledger["instructions"])
         self.assertEqual((32000, 31000, 150000, 3, 200000), (fill["start"], fill["end"], fill["peak"], fill["calls"], fill["window"]))
-        self.assertEqual(hook_parts(HOOK_TEXT), fill["hooks"])
+        self.assertEqual(capsule_text_parts(HOOK_TEXT), fill["hooks"])
         self.assertEqual(({"installed": True, "measured": True, "bytes": None}, [{"name": "CLAUDE.md", "bytes": 270}]),
                          (context["hooks"], context["cli_files"]))
         self.assertEqual({"fill": 31000, "window": 200000, "compacted": True, "running": False},
@@ -255,7 +324,28 @@ class ContextLaunchTests(unittest.TestCase):
         self.assertEqual((200000, None, None), (second["window"], second["end"], second["calls"]))
         self.assertIsNone(manager.results.last_window(session["id"], "another-model"))
 
+    def test_a_rendered_capsule_is_counted_as_the_prompt_carries_it(self):
+        manager = self.manager()
+        text = rendered(RENDERED_CAPSULE, RENDERED_EXCERPTS)
+        session = {"id": None, "workflow": "native", "sdd": None, "project_context": False, "provider": "claude",
+                   "brain": {"capsule": RENDERED_CAPSULE, "capsule_text": text}, "agents_enabled": False,
+                   "agent_count": 3, "thinking_effort": None, "budgets": {}}
+        ledger = {}
+        prompt = manager._prompt(session, "Fix the retry", ledger)
+        self.assert_integers_only(ledger)
+        inserted = sessions.BRAIN_CONTEXT_HEADER + text + "\n\n"
+        self.assertIn(inserted, prompt)
+        self.assertNotIn('"categories"', prompt)
+        capsule = ledger["capsule"]
+        # The memory parts describe the text the provider received, header and envelope as Project Brain.
+        self.assertEqual((len(inserted), len(inserted)), (capsule["inserted"], sum(capsule["kinds"].values())))
+        self.assertEqual(capsule_text_parts(inserted), capsule["kinds"])
+        self.assertTrue(capsule["kinds"]["bank"] and capsule["kinds"]["rules"])
+        # The JSON it replaced repeated every item three times; measuring it overstated the memory sent.
+        self.assertGreater(sum(sessions.capsule_parts(RENDERED_CAPSULE).values()), 2 * capsule["inserted"])
+
     def test_capsule_attachments_and_instructions_add_up_to_the_prompt(self):
+        # A runtime that renders no capsule text: the prompt carries the JSON, and its parts are the JSON's.
         manager = self.manager()
         capsule = {"query": "retry", "working": {"task_id": "T-1", "goal": "Retry — webhooks"},
                    "semantic": [{"path": "memory-bank/chunks/MEM-0001-a.md", "category": "durable", "layer": "semantic", "title": "Retry"}],

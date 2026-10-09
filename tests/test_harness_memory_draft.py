@@ -37,14 +37,46 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(1, evidence['delivered'])
         self.assertFalse(memory_draft.usage({}, {})['reported'])
 
-    def test_opened_memory_is_what_the_run_read_whichever_copy_of_a_skill(self):
-        capsule = {'semantic': [{'path': 'specs/cobalt.md'}, {'path': 'memory-bank/chunks/MEM-1-x.md'}],
-                   'procedural': [{'path': '.agents/skills/allocation/SKILL.md'}]}
-        evidence = memory_draft.usage({}, capsule, ['specs/cobalt.md', '.claude/skills/allocation/SKILL.md',
-                                                    'src/Other.php'])
-        self.assertEqual(['.agents/skills/allocation/SKILL.md', 'specs/cobalt.md'], evidence['opened'])
-        self.assertEqual(3, evidence['delivered'])
-        self.assertEqual([], memory_draft.usage({}, capsule)['opened'])
+    def test_the_watch_names_delivered_memory_as_the_runs_tools_read_it(self):
+        skill = '.claude/skills/allocation/SKILL.md'
+        capsule = {'semantic': [{'path': 'specs/cobalt.md'}], 'procedural': [{'path': skill}],
+                   'selected': [{'path': 'specs/cobalt.md'}], 'episodic': [{'id': 3, 'summary': 'A local episode'}]}
+        # Any tool's copy of a skill is the skill delivered, and so is a Skill load of it by name.
+        self.assertEqual({'specs/cobalt.md': 'specs/cobalt.md', 'skill:allocation': skill,
+                          **{tree + 'allocation/SKILL.md': skill for tree in memory_draft.SKILL_TREES}},
+                         memory_draft.watch(capsule))
+        # An attached accelerator's skill is an absolute path into the clone.
+        attached = memory_draft.watch({'procedural': [{'path': '/clone/PHP Core/.agents/skills/allocation/SKILL.md'}]})
+        self.assertEqual(('/clone/PHP Core/.agents/skills/allocation/SKILL.md',) * 2,
+                         (attached['skill:allocation'], attached['/clone/PHP Core/.codex/skills/allocation/SKILL.md']))
+        self.assertEqual({}, memory_draft.watch(None))
+
+    def test_opened_memory_is_the_receipts_count_and_the_notice_says_what_it_is(self):
+        capsule = {'semantic': [{'path': 'specs/cobalt.md'}, {'path': 'memory-bank/chunks/MEM-1-x.md'}]}
+        draft = {'used_memory': ['specs/cobalt.md', 'specs/elsewhere.md']}
+        record = lambda opened, observation, *unseen: {'delivered': 2, 'opened': opened, 'observation': observation,
+                                                       'unseen': list(unseen)}
+        tail = ', 1 reported used. Neither proves the claim was used.'
+        for read, expected, line in (
+                (record(1, 'observed'), (1, 'observed'), 'Memory use: 2 delivered, 1 opened by the agent' + tail),
+                (record(1, 'lower_bound', 'shell'), (1, 'lower_bound'),
+                 'Memory use: 2 delivered, at least 1 opened by the agent (shell commands not inspected)' + tail),
+                (record(0, 'lower_bound', 'shell', 'outside'), (0, 'lower_bound'),
+                 'Memory use: 2 delivered, none opened with a read tool '
+                 '(shell commands and reads outside the project not inspected)' + tail),
+                (record(0, 'unknown', 'shell', 'helpers'), (None, 'unknown'),
+                 'Memory use: 2 delivered, opening unknown (no read reported; shell commands and helper agents not inspected)' + tail),
+                (None, (None, 'unrecorded'), 'Memory use: 2 delivered, opening not recorded' + tail),
+                (record(5, 'observed'), (2, 'observed'), 'Memory use: 2 delivered, 2 opened by the agent' + tail),
+                (record('1', 'observed'), (None, 'unknown'), 'Memory use: 2 delivered, opening unknown '
+                 '(no read reported; some reads not inspected)' + tail)):
+            with self.subTest(read=read):
+                evidence = memory_draft.usage(draft, capsule, read)
+                self.assertEqual(expected, (evidence['opened'], evidence['observation']))
+                self.assertEqual((2, ['specs/cobalt.md']), (evidence['delivered'], evidence['reported_used']))
+                self.assertEqual(line, memory_draft.use_notice(evidence))
+        self.assertTrue(memory_draft.use_notice(memory_draft.usage({}, capsule, record(0, 'observed'))).endswith(
+            '0 opened by the agent. Neither proves the claim was used.'))
 
     def test_the_last_block_is_the_draft_and_it_is_clipped_to_the_form(self):
         earlier = reply({"progress": "stale", "next_steps": [], "learnings": []})

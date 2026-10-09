@@ -105,34 +105,102 @@ def parse(text):
     return result
 
 
-def _canonical(path):
-    """One name for a skill whichever tool's copy the agent opened."""
-    for tool in (".claude/skills/", ".cursor/skills/", ".codex/skills/"):
-        if path.startswith(tool):
-            return ".agents/skills/" + path[len(tool):]
-    return path
+# Every tool's copy of the skills: a read of any copy is a read of the skill delivered.
+SKILL_TREES = (".agents/skills/", ".claude/skills/", ".cursor/skills/", ".codex/skills/")
+# What the launch receipt says its count of opened memory is (run_activity.RunLedger.memory).
+OBSERVATIONS = ("observed", "lower_bound", "unknown")
+UNSEEN = {"shell": "shell commands", "helpers": "helper agents", "outside": "reads outside the project"}
 
 
-def usage(draft, capsule, opened=()):
-    """Safe provenance: what was delivered, what the agent opened, what it reports using.
-
-    `opened` is the run's own record of the files its tools read (the launch
-    receipt), so the second number is observed rather than claimed; the third
-    is the agent's word. Neither proves a claim was used - an agent that
-    already knew the file, or never needed it, opens it or not either way -
-    but delivery alone said nothing at all: pointers handed to agents on real
-    installations were opened once in 290 deliveries.
-    """
-    delivered = set()
+def delivered(capsule):
+    """The paths of the items a capsule delivered."""
+    paths = set()
     for layer in ("procedural", "semantic", "episodic", "selected"):
         for item in (capsule or {}).get(layer) or []:
             if isinstance(item, dict) and isinstance(item.get("path"), str):
-                delivered.add(item["path"])
-    seen = {_canonical(path) for path in opened or () if isinstance(path, str)}
-    opened_delivered = sorted(path for path in delivered if _canonical(path) in seen)
-    reported = sorted(delivered.intersection((draft or {}).get("used_memory") or []))
-    return {"delivered": len(delivered), "opened": opened_delivered, "reported_used": reported,
-            "attestation": "agent-reported", "reported": "used_memory" in (draft or {})}
+                paths.add(item["path"])
+    return paths
+
+
+def _skill(path):
+    """(the path up to a tool's skill tree, the path inside it), or None outside every tree."""
+    for tree in SKILL_TREES:
+        if path.startswith(tree):
+            return "", path[len(tree):]
+        index = path.find("/" + tree)
+        if index >= 0:
+            return path[:index + 1], path[index + 1 + len(tree):]
+    return None
+
+
+def watch(capsule):
+    """What a run's tools name when they read delivered memory, each mapped to the item delivered.
+
+    The item's own path; for a skill, every tool's copy of the file, and for its
+    SKILL.md a Skill load by name (`skill:<name>`), which is how Claude Code reads
+    a skill. The launch's ledger matches the run's reads against it.
+    """
+    targets = {}
+    for path in sorted(delivered(capsule)):
+        targets.setdefault(path, path)
+        found = _skill(path)
+        if found:
+            prefix, inside = found
+            for tree in SKILL_TREES:
+                targets.setdefault(prefix + tree + inside, path)
+            name, _, file = inside.partition("/")
+            if name and file == "SKILL.md":
+                targets.setdefault("skill:" + name, path)
+    return targets
+
+
+def usage(draft, capsule, read=None):
+    """Safe provenance: what was delivered, what the agent opened, what it reports using.
+
+    `read` is the launch receipt's record of the delivered memory the run's tools
+    returned (run_activity.RunLedger.memory, matched against `watch`), so `opened`
+    is observed rather than claimed. `observation` says what that count is: all
+    the run's tools showed ("observed"), a lower bound when shell commands or
+    helpers also ran ("lower_bound"), or nothing when they were the only way the
+    run read ("unknown"; `opened` is then None, as it is "unrecorded" without a
+    record). `reported_used` is the agent's word. Neither proves a claim was used -
+    an agent that already knew the file, or never needed it, opens it or not either
+    way - but delivery alone said nothing at all: pointers handed to agents on real
+    installations were opened once in 290 deliveries.
+    """
+    paths = delivered(capsule)
+    record = read if isinstance(read, dict) else None
+    observation = (record or {}).get("observation")
+    opened = (record or {}).get("opened")
+    if record is None:
+        observation, opened = "unrecorded", None
+    elif observation not in OBSERVATIONS or type(opened) is not int or opened < 0 or observation == "unknown":
+        observation, opened = "unknown", None
+    else:
+        opened = min(opened, len(paths))
+    unseen = [name for name in (record or {}).get("unseen") or [] if name in UNSEEN]
+    reported = sorted(paths.intersection((draft or {}).get("used_memory") or []))
+    return {"delivered": len(paths), "opened": opened, "observation": observation, "unseen": unseen,
+            "reported_used": reported, "attestation": "agent-reported", "reported": "used_memory" in (draft or {})}
+
+
+def use_notice(provenance):
+    """The conversation's line on a run's memory use: what was delivered, opened and reported used."""
+    opened, observation = provenance["opened"], provenance["observation"]
+    unseen = " and ".join(UNSEEN[name] for name in provenance["unseen"]) or "some reads"
+    if observation == "observed":
+        seen = f"{opened} opened by the agent"
+    elif observation == "lower_bound":
+        seen = (f"at least {opened} opened by the agent" if opened else "none opened with a read tool") + \
+            f" ({unseen} not inspected)"
+    elif observation == "unknown":
+        seen = f"opening unknown (no read reported; {unseen} not inspected)"
+    else:
+        seen = "opening not recorded"
+    text = f"Memory use: {provenance['delivered']} delivered, {seen}"
+    if provenance["reported"]:
+        text += f", {len(provenance['reported_used'])} reported used"
+    return text + ". Neither proves the claim was used."
 
 
 def latest(sessions, sid):
