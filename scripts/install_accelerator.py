@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fnmatch
 import hashlib
 import importlib.util
@@ -99,6 +100,8 @@ ENTRIES_END = "# END ACCELERATOR MANAGED ENTRIES"
 # 126 and its effect - a lock released, a command blocked - never happens.
 EXECUTABLE_INSTALL_MODE = 0o755
 MCP_CONFIG_FILES = {'.mcp.json', '.cursor/mcp.json', '.codex/config.toml'}
+CODEX_CONFIG = '.codex/config.toml'
+MCP_CODEX_BEGIN = b'# BEGIN HARNESS MEMORY MCP'
 MCP_CODEX_BLOCK = re.compile(rb'# BEGIN HARNESS MEMORY MCP\n.*?# END HARNESS MEMORY MCP\n?', re.S)
 
 
@@ -109,11 +112,27 @@ def codex_memory_merge(source: bytes, destination: Path) -> bool:
     appending the block to a client's config would drop those silently, so a
     client-owned file stays an ordinary collision.
     """
-    if b'# BEGIN HARNESS MEMORY MCP' not in source:
+    if MCP_CODEX_BEGIN not in source:
         return False
     if not destination.is_file():
         return True
     return MCP_CODEX_BLOCK.sub(b'', destination.read_bytes()) == MCP_CODEX_BLOCK.sub(b'', source)
+
+
+def load_memory_mcp(root: Path, edition: str):
+    """The edition's MCP configuration merger, from the source clone.
+
+    Install and sync merge with the release's own code, so the entry they
+    write and the entries they recognise as the accelerator's are that
+    release's.
+    """
+    spec = importlib.util.spec_from_file_location(
+        'accelerator_memory_mcp_config',
+        root / edition_path(edition) / 'memory-bank/scripts/mcp_config.py',
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class InventoryError(Exception):
@@ -586,11 +605,10 @@ def install(
                 continue
             try:
                 if mcp is None:
-                    spec = importlib.util.spec_from_file_location('accelerator_memory_mcp_config',
-                        root / edition_path(edition) / 'memory-bank/scripts/mcp_config.py')
-                    mcp = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mcp)
-                    python = mcp.python_command()
+                    # Both or neither: a module kept without its Python sent
+                    # the next configuration into merge() with None.
+                    module = load_memory_mcp(root, edition)
+                    mcp, python = module, module.python_command()
                 previous = destination.read_bytes() if destination.exists() else None
                 content = mcp.merge(path, previous, source.read_bytes(), python)
             except (ValueError, UnicodeError, OSError) as error:
@@ -744,6 +762,8 @@ def install(
 SYNC_MANIFEST = "memory-bank/local/accelerator-install.json"
 SYNC_BACKUP_DIR = "memory-bank/local/accelerator-sync"
 SYNC_MANIFEST_SCHEMA = 1
+# The file whose presence makes a folder an installed accelerator.
+SYNC_RUNTIME_MARKER = "memory-bank/scripts/context.py"
 # The accelerator's runtime: code every memory fix lives in. A project that
 # runs an old copy gets none of them - on six real installations none carried
 # the fixes of the previous week - so a local edit here is backed up and
@@ -783,11 +803,8 @@ def installed_edition(root: Path, target: Path) -> str | None:
             data = load_inventory(edition, root)
         except InventoryError:
             continue
-        present = sum(
-            1
-            for paths in data["installed"].values()
-            for path in paths
-            if (target / PurePosixPath(path)).is_file()
+        present = len(
+            confined_files(target, (path for paths in data["installed"].values() for path in paths))
         )
         counts.append((present, edition))
     counts.sort(reverse=True)
@@ -860,19 +877,230 @@ def source_commit(root: Path) -> str | None:
     return result.stdout.strip() or None if result.returncode == 0 else None
 
 
-def _write_atomically(path: Path, data: bytes, executable: bool) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.sync-{os.getpid()}")
+# A sync reaches every path it reads or writes from the target one folder at
+# a time, looking at each with lstat, so a symbolic link is seen as itself and
+# never followed. Git checks links out, and one standing in for `.cursor`,
+# `memory-bank` or `memory-bank/local` took the sync's writes - its backups of
+# a person's edits and its own record included - to wherever it pointed, with
+# nobody asked: the Harness syncs a project when it opens it. Checking only
+# the last component did not see them. A path such a link or a non-folder
+# stands on is reported and left alone.
+#
+# Windows reports symbolic links and junctions as reparse points; these are
+# the tags of the two that name another path (IO_REPARSE_TAG_SYMLINK,
+# IO_REPARSE_TAG_MOUNT_POINT).
+LINK_REPARSE_TAGS = (0xA000000C, 0xA0000003)
+
+
+class UnsafePathError(InventoryError):
+    """A project path a sync must not read or write; the message says why."""
+
+
+def _is_link(info: os.stat_result) -> bool:
+    return stat.S_ISLNK(info.st_mode) or getattr(info, "st_reparse_tag", 0) in LINK_REPARSE_TAGS
+
+
+def _folder_problem(name: str, info: os.stat_result) -> str | None:
+    """Why the component `name` cannot be a folder the sync passes, or None."""
+    if _is_link(info):
+        return f"{name} is a symbolic link; the sync does not read or write through it"
+    if not stat.S_ISDIR(info.st_mode):
+        return f"{name} is not a folder"
+    return None
+
+
+def _relative_parts(relative: str) -> list[str] | None:
+    """The components of a project-relative path, or None for anything else.
+
+    is_safe_relative_path's rules, checked on the string - the walks below
+    run for every inventory file of every edition, and a PurePosixPath per
+    call was most of their time: no absolute path, no backslash, NUL, empty,
+    '.' or '..' component, and on Windows no drive-relative name.
+    """
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or "\\" in relative
+        or "\x00" in relative
+        or (os.name == "nt" and ":" in relative)
+    ):
+        return None
+    parts = relative.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        return None
+    return parts
+
+
+def confinement_problem(target: Path, relative: str) -> str | None:
+    """Why `relative` must not be read or written below `target`, or None.
+
+    None: every folder on the way that exists is a real folder, and the file
+    is a regular file or absent. The walk stops at the first missing
+    component; a write creates the rest one level at a time.
+    """
+    parts = _relative_parts(relative)
+    if parts is None:
+        return "not a path inside the project"
+    current = os.fspath(target)
+    last = len(parts) - 1
+    for depth, part in enumerate(parts):
+        current = os.path.join(current, part)
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            return f"{'/'.join(parts[:depth + 1])} cannot be inspected: {error.strerror or error}"
+        if depth == last:
+            return None if stat.S_ISREG(info.st_mode) and not _is_link(info) else "not a regular file"
+        if _is_link(info) or not stat.S_ISDIR(info.st_mode):
+            return _folder_problem("/".join(parts[:depth + 1]), info)
+    return None
+
+
+def confined_files(target: Path, paths) -> set[str]:
+    """Those of `paths` that are regular files below `target`, reached without passing a link.
+
+    For the probes that ask this of a whole inventory - which edition is
+    installed, which of its tools: a folder is looked at once, however many
+    files share it. Nothing is written on this answer; every read and write
+    walks its own path again.
+    """
+    base = os.fspath(target)
+    folders: dict[str, bool] = {}
+    found = set()
+    for relative in paths:
+        parts = _relative_parts(relative)
+        if parts is None:
+            continue
+        current, folder, reachable = base, "", True
+        for part in parts[:-1]:
+            current = os.path.join(current, part)
+            folder = f"{folder}/{part}" if folder else part
+            real = folders.get(folder)
+            if real is None:
+                try:
+                    info = os.lstat(current)
+                except OSError:
+                    real = False
+                else:
+                    real = stat.S_ISDIR(info.st_mode) and not _is_link(info)
+                folders[folder] = real
+            if not real:
+                reachable = False
+                break
+        if not reachable:
+            continue
+        try:
+            info = os.lstat(os.path.join(current, parts[-1]))
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and not _is_link(info):
+            found.add(relative)
+    return found
+
+
+def confined_file(target: Path, relative: str) -> bool:
+    """A regular file below `target`, reached without passing a link."""
+    return relative in confined_files(target, (relative,))
+
+
+def read_confined(target: Path, relative: str) -> bytes | None:
+    """The bytes of a regular file below `target`; None when it is absent.
+
+    Raises UnsafePathError for a path the sync must not use.
+    """
+    problem = confinement_problem(target, relative)
+    if problem is not None:
+        raise UnsafePathError(problem)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
     try:
-        temporary.write_bytes(data)
-        if executable:
-            os.chmod(temporary, EXECUTABLE_INSTALL_MODE)
-        elif path.exists():
-            os.chmod(temporary, stat.S_IMODE(path.stat().st_mode))
+        descriptor = os.open(os.path.join(os.fspath(target), *relative.split("/")), flags)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise UnsafePathError("not a regular file") from error
+        raise
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise UnsafePathError("not a regular file")
+        return handle.read()
+
+
+def _confined_folders(target: Path, relative: str) -> Path:
+    """Create the missing folders of `relative` one at a time; return its folder.
+
+    mkdir never follows a link standing at the name it creates, and each
+    folder is looked at again before the next is made inside it.
+    """
+    parts = PurePosixPath(relative).parts[:-1]
+    current = target
+    for depth, part in enumerate(parts, 1):
+        current = current / part
+        try:
+            os.mkdir(current)
+        except FileExistsError:
+            pass
+        problem = _folder_problem("/".join(parts[:depth]), os.lstat(current))
+        if problem is not None:
+            raise UnsafePathError(problem)
+    return current
+
+
+def write_confined(
+    target: Path,
+    relative: str,
+    data: bytes,
+    mode: int | None = None,
+    times: tuple[int, int] | None = None,
+) -> None:
+    """Create or replace a regular file below `target`, never through a link.
+
+    The bytes go to a temporary file beside it, created exclusively so that a
+    link planted under its name cannot take them, which is then renamed over
+    the file. `mode` defaults to the replaced file's, and to the umask's for a
+    new one; `times` are (atime, mtime) in nanoseconds.
+    """
+    problem = confinement_problem(target, relative)
+    if problem is not None:
+        raise UnsafePathError(problem)
+    folder = _confined_folders(target, relative)
+    path = folder / PurePosixPath(relative).name
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    else:
+        if _is_link(existing) or not stat.S_ISREG(existing.st_mode):
+            raise UnsafePathError("not a regular file")
+        if mode is None:
+            mode = stat.S_IMODE(existing.st_mode)
+    temporary = folder / f".{path.name}.sync-{os.getpid()}-{os.urandom(4).hex()}"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0)
+    )
+    descriptor = os.open(temporary, flags, 0o666)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        if mode is not None:
+            os.chmod(temporary, mode)
+        if times is not None:
+            os.utime(temporary, ns=times)
         os.replace(temporary, path)
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
 
 
 def sync_installation(
@@ -888,19 +1116,28 @@ def sync_installation(
     Runs with no question asked, so it only writes what is safe without one:
     files nobody edited (the bytes of some released version, or of what the
     last sync wrote), files the release added to a component the project
-    has, and the managed blocks of AGENTS.md and .claude/CLAUDE.md. The
-    runtime is also replaced over a local edit, which is backed up first
-    under memory-bank/local. Never written: anything the project's Git
-    tracks, seeded state the project owns, and - unless `rewire_codex` says
-    the caller re-approves it - the Codex hook wiring, whose trust is a hash
-    of its definitions. Each of those is reported instead.
+    has, the managed blocks of AGENTS.md and .claude/CLAUDE.md, and the
+    memory server's own entry in an MCP configuration that also holds the
+    project's servers. The runtime is also replaced over a local edit, which
+    is backed up first under memory-bank/local. Never written: anything the
+    project's Git tracks, seeded state the project owns, any path - backups
+    and the sync's own record included - that a symbolic link or a
+    non-folder inside the project stands on, and - unless `rewire_codex`
+    says the caller re-approves it - the Codex hook wiring, whose trust is a
+    hash of its definitions. Each of those is reported instead.
     """
     report: dict = {
         "target": str(target), "edition": None, "release": None, "changed": [],
         "kept": [], "backups": [], "dry_run": dry_run, "error": None,
     }
-    if not (target / "memory-bank/scripts/context.py").is_file():
-        report["error"] = "not an installed accelerator"
+    # A runtime reached only through a link is not this project's: the
+    # Harness, which reads it without following links, does not count it as
+    # installed either.
+    problem = confinement_problem(target, SYNC_RUNTIME_MARKER)
+    if problem is not None or not confined_file(target, SYNC_RUNTIME_MARKER):
+        report["error"] = "not an installed accelerator" + (
+            f" inside the project ({problem})" if problem else ""
+        )
         return report
     edition = installed_edition(root, target)
     if edition is None:
@@ -908,53 +1145,142 @@ def sync_installation(
         return report
     data = load_inventory(edition, root)
     report.update(edition=edition, release=data["release"])
+    existing = confined_files(target, (path for paths in data["installed"].values() for path in paths))
     present = {
         component
         for component, paths in data["installed"].items()
-        if component == "shared"
-        or any((target / PurePosixPath(path)).is_file() for path in paths)
+        if component == "shared" or any(path in existing for path in paths)
     }
     tracked = tracked_paths(target)
-    manifest_path = target / SYNC_MANIFEST
+    record_problem = None
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        known = manifest.get("files") if isinstance(manifest, dict) else None
-        known = known if isinstance(known, dict) else {}
+        recorded = read_confined(target, SYNC_MANIFEST)
+        manifest = json.loads(recorded.decode("utf-8")) if recorded is not None else None
+    except UnsafePathError as error:
+        record_problem, manifest = str(error), None
     except (OSError, ValueError):
-        known = {}
+        manifest = None
+    known = manifest.get("files") if isinstance(manifest, dict) else None
+    known = known if isinstance(known, dict) else {}
     history = released_blob_ids(root, edition)
     executable_bits = source_executable_bits(root, edition)
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     written: dict[str, str] = {}
+    # The release's MCP merger and this machine's Python, loaded on first use,
+    # or why they are unavailable.
+    memory_mcp: tuple | str | None = None
 
     def keep(path: str, reason: str) -> None:
         report["kept"].append({"path": path, "reason": reason})
 
-    def write(path: str, payload: bytes, action: str, executable: bool, backup: bool) -> None:
-        destination = target / PurePosixPath(path)
-        if backup and not dry_run:
-            saved = target / SYNC_BACKUP_DIR / stamp / PurePosixPath(path)
-            saved.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(destination, saved)
-            report["backups"].append(saved.relative_to(target).as_posix())
+    def write(
+        path: str,
+        payload: bytes,
+        action: str,
+        executable: bool,
+        backup: bytes | None = None,
+        record: bool = True,
+    ) -> None:
+        """Write one file; `backup` is the content it replaces, saved first."""
+        if backup is not None:
+            saved = f"{SYNC_BACKUP_DIR}/{stamp}/{path}"
+            unsafe = confinement_problem(target, saved)
+            if unsafe is None and not dry_run:
+                try:
+                    original = os.lstat(target / PurePosixPath(path))
+                    write_confined(
+                        target, saved, backup, stat.S_IMODE(original.st_mode),
+                        (original.st_atime_ns, original.st_mtime_ns),
+                    )
+                except UnsafePathError as error:
+                    unsafe = str(error)
+            if unsafe is not None:
+                # Without its backup a local edit would be lost: it stays.
+                keep(path, f"not replaced: its backup cannot be written inside the project ({unsafe})")
+                return
+            if not dry_run:
+                report["backups"].append(saved)
         if not dry_run:
-            _write_atomically(destination, payload, executable)
+            try:
+                write_confined(target, path, payload, EXECUTABLE_INSTALL_MODE if executable else None)
+            except UnsafePathError as error:
+                keep(path, str(error))
+                return
         report["changed"].append({"path": path, "action": action})
-        written[path] = git_blob_id(payload)
+        if record:
+            written[path] = git_blob_id(payload)
+
+    def memory_config(path: str, previous: bytes | None, payload: bytes) -> bytes:
+        nonlocal memory_mcp
+        if memory_mcp is None:
+            try:
+                module = load_memory_mcp(root, edition)
+                memory_mcp = (module, module.python_command())
+            except (ImportError, OSError, SyntaxError, ValueError) as error:
+                memory_mcp = str(error) or type(error).__name__
+        if isinstance(memory_mcp, str):
+            raise ValueError(memory_mcp)
+        module, python = memory_mcp
+        return module.merge(path, previous, payload, python)
+
+    def sync_memory_config(
+        path: str, current: bytes | None, payload: bytes, pristine: bool, executable: bool
+    ) -> None:
+        """The memory server's entry follows the release; the project's servers stay.
+
+        Install merges these files rather than copying them, so an installed
+        one holding a team's server is not the release's bytes. Treated as an
+        edited file, it kept the memory server it was installed with forever.
+        """
+        merged_into_project = False
+        try:
+            # The release's file as this machine's install would write it.
+            whole = memory_config(path, None, payload)
+            if current is None or pristine or current == whole:
+                merged = whole
+            elif path == CODEX_CONFIG and MCP_CODEX_BEGIN not in current:
+                # A Codex configuration without the managed block is the
+                # project's own; install leaves it alone, and so does a sync.
+                keep(path, "edited in the project")
+                return
+            else:
+                merged, merged_into_project = memory_config(path, current, payload), True
+        except ValueError as error:
+            # Malformed, or the memory server's name taken by another server
+            # or an edited managed block: nothing to merge into safely.
+            keep(path, f"memory MCP configuration not merged: {error}")
+            return
+        unchanged = merged == current or (
+            merged_into_project and path != CODEX_CONFIG and json.loads(merged) == json.loads(current)
+        )
+        if unchanged:
+            if merged_into_project:
+                keep(path, "edited in the project")
+            else:
+                written[path] = git_blob_id(current)
+            return
+        if current is None:
+            action = "added"
+        else:
+            action = "memory server updated" if merged_into_project else "updated"
+        # A merge holds the project's own servers, so it is not recorded as an
+        # untouched release: the next sync merges into it again rather than
+        # replacing it with the release's file.
+        write(path, merged, action, executable, record=not merged_into_project)
 
     for component, path in selected_files(data, [c for c in TOOLS if c in present]):
         if path in SEED_ONLY_PATHS or path in SYNC_SKIPPED_FILES:
             continue
         source_path = data["source_overrides"].get(path, path)
         source = root / edition_path(edition) / PurePosixPath(source_path)
-        destination = target / PurePosixPath(path)
         payload = source.read_bytes()
         executable = installs_executable(path, source, source_path, executable_bits)
-        if destination.is_symlink() or (destination.exists() and not destination.is_file()):
-            keep(path, "not a regular file")
+        try:
+            current = read_confined(target, path)
+        except UnsafePathError as error:
+            keep(path, str(error))
             continue
-        exists = destination.is_file()
-        current = destination.read_bytes() if exists else None
+        exists = current is not None
         if current == payload:
             written[path] = git_blob_id(payload)
             continue
@@ -964,13 +1290,17 @@ def sync_installation(
         if path in TRUST_BOUND_FILES and exists and not rewire_codex:
             keep(path, "Codex hook wiring: a change needs re-approval in Codex /hooks")
             continue
-        if not exists:
-            write(path, payload, "added", executable, False)
-            continue
-        blob = git_blob_id(current)
-        pristine = known.get(path) == blob or (
-            history is not None and blob in history.get(source_path, set())
+        blob = git_blob_id(current) if exists else None
+        pristine = exists and (
+            known.get(path) == blob
+            or (history is not None and blob in history.get(source_path, set()))
         )
+        if path in MCP_CONFIG_FILES and (path != CODEX_CONFIG or MCP_CODEX_BEGIN in payload):
+            sync_memory_config(path, current, payload, pristine, executable)
+            continue
+        if not exists:
+            write(path, payload, "added", executable)
+            continue
         if path in MANAGED_POLICY_FILES:
             text = current.decode("utf-8", "surrogateescape")
             source_text = payload.decode("utf-8")
@@ -981,24 +1311,23 @@ def sync_installation(
                     keep(path, "managed block is malformed")
                     continue
                 if merged != current:
-                    write(path, merged, "managed block updated", executable, False)
+                    write(path, merged, "managed block updated", executable)
                 else:
                     written[path] = git_blob_id(current)
                 continue
             first = source_text.splitlines()[0] if source_text else ""
             if pristine:
-                write(path, payload, "updated", executable, False)
+                write(path, payload, "updated", executable)
             elif first and text.startswith(first):
                 # The accelerator's own policy, edited in place: the edit is
                 # kept in the backup and the current policy goes live.
-                write(path, payload, "updated over a local edit", executable, True)
+                write(path, payload, "updated over a local edit", executable, backup=current)
             elif path == ".claude/CLAUDE.md":
                 write(
                     path,
                     merge_agents_file(text, source_text).encode("utf-8"),
                     "import added",
                     executable,
-                    False,
                 )
             else:
                 keep(path, "the project's own file")
@@ -1007,32 +1336,36 @@ def sync_installation(
             keep(path, "the project's own file")
             continue
         if pristine:
-            write(path, payload, "updated", executable, False)
+            write(path, payload, "updated", executable)
         elif is_runtime_file(path):
-            write(path, payload, "updated over a local edit", executable, True)
+            write(path, payload, "updated over a local edit", executable, backup=current)
         else:
             keep(path, "edited in the project")
-    if not dry_run:
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        _write_atomically(
-            manifest_path,
-            (
-                json.dumps(
-                    {
-                        "schema": SYNC_MANIFEST_SCHEMA,
-                        "edition": edition,
-                        "release": data["release"],
-                        "source_commit": source_commit(root),
-                        "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                        "files": {**known, **written},
-                    },
-                    indent=1,
-                    sort_keys=True,
-                )
-                + "\n"
-            ).encode("utf-8"),
-            False,
-        )
+    if record_problem is not None:
+        keep(SYNC_MANIFEST, f"the sync's record is neither read nor written ({record_problem})")
+    elif not dry_run:
+        try:
+            write_confined(
+                target,
+                SYNC_MANIFEST,
+                (
+                    json.dumps(
+                        {
+                            "schema": SYNC_MANIFEST_SCHEMA,
+                            "edition": edition,
+                            "release": data["release"],
+                            "source_commit": source_commit(root),
+                            "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                            "files": {**known, **written},
+                        },
+                        indent=1,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode("utf-8"),
+            )
+        except UnsafePathError as error:
+            keep(SYNC_MANIFEST, f"the sync's record is not written ({error})")
     return report
 
 

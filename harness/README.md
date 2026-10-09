@@ -1043,7 +1043,11 @@ memory - it brings an installed copy's untouched files and memory runtime up to
 the clone (`scripts/install_accelerator.py --sync`), and, with Codex available,
 approves the accelerator's own Codex hooks in your Codex config, the record
 Codex's `/hooks` review writes; a team's own or edited hook is left for that
-review. The conversation says what changed. Set `HARNESS_CODEX_HOOK_TRUST=0` in
+review. The conversation says what changed. The memory server's own entry in
+`.mcp.json`, `.cursor/mcp.json` and the managed block of `.codex/config.toml`
+follows the clone beside the project's own servers. Nothing is read or written
+through a symbolic link inside the project, backups and the sync's record
+included; such a path is reported instead. Set `HARNESS_CODEX_HOOK_TRUST=0` in
 the server's environment to leave the approval to `/hooks`.
 
 The folder browser navigates local folders, or takes an absolute path

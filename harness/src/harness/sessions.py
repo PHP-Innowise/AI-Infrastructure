@@ -415,7 +415,8 @@ def accelerator_sync_notice(report):
     text += f": {changed} file(s) updated"
     kept = len(report.get('kept') or [])
     if kept:
-        text += f"; {kept} left as they are (edited in the project, tracked by its Git, or Codex hook wiring)"
+        text += (f"; {kept} left as they are (edited in the project, tracked by its Git, Codex hook wiring,"
+                 " or behind a symbolic link)")
     trust = report.get('codex_trust') if isinstance(report.get('codex_trust'), dict) else {}
     if trust.get('approved'):
         text += f"; {trust['approved']} accelerator hook(s) approved for Codex"

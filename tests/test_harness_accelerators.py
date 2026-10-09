@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,26 @@ LARAVEL = ROOT / "Laravel"
 
 def snapshot(root):
     return sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
+
+
+def contents(root):
+    """Every file below `root` with its bytes, to show nothing there changed."""
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def link_folder(project, relative, outside, move):
+    """Put a symbolic link to `outside` where the project's folder was; `move` takes its files along."""
+    folder = project / relative
+    if move:
+        folder.rename(outside)
+    else:
+        shutil.rmtree(folder)
+        outside.mkdir()
+    folder.symlink_to(outside, target_is_directory=True)
+
+
+def kept_reasons(report):
+    return {item["path"]: item["reason"] for item in report["kept"]}
 
 
 class AttachedAcceleratorTests(unittest.TestCase):
@@ -254,6 +275,52 @@ class InstalledAcceleratorSyncTests(unittest.TestCase):
         self.assertIn("brought up to Laravel 2.0.0: 1 file(s) updated", notice)
         self.assertIn("1 left as they are", notice)
 
+    def keep_current(self, version):
+        with patch.object(Accelerators, "source_version", return_value=version):
+            return self.store.accelerators.keep_current(self.project_id)
+
+    def test_a_linked_tool_folder_takes_no_write_outside_the_project(self):
+        # Opening the project synced it: the shared `.cursor/README.md` went
+        # through a link standing where `.cursor` was.
+        outside = self.root / "outside"
+        link_folder(self.project, ".cursor", outside, move=False)
+        report = self.keep_current("release-1")
+        self.assertIsNone(report["error"])
+        self.assertIn(".cursor is a symbolic link", kept_reasons(report).get(".cursor/README.md", ""))
+        self.assertNotIn(".cursor/README.md", {item["path"] for item in report["changed"]})
+        self.assertEqual({}, contents(outside))
+
+    def test_backups_and_the_record_stay_inside_the_project(self):
+        self.keep_current("release-1")  # leaves the sync's record in memory-bank/local
+        outside = self.root / "outside-local"
+        link_folder(self.project, "memory-bank/local", outside, move=True)
+        before = contents(outside)
+        runtime = self.project / "memory-bank/scripts/context.py"
+        runtime.write_text("# an old runtime\n", encoding="utf-8")
+        report = self.keep_current("release-2")
+        kept = kept_reasons(report)
+        # Without its backup the local edit would be lost, so the runtime stays.
+        self.assertIn("backup cannot be written inside the project", kept.get("memory-bank/scripts/context.py", ""))
+        self.assertIn("memory-bank/local is a symbolic link", kept.get("memory-bank/local/accelerator-install.json", ""))
+        self.assertEqual([], report["backups"])
+        self.assertEqual("# an old runtime\n", runtime.read_text(encoding="utf-8"))
+        self.assertEqual(before, contents(outside))
+
+    def test_a_linked_memory_bank_is_not_synced_through(self):
+        outside = self.root / "outside-memory"
+        link_folder(self.project, "memory-bank", outside, move=True)
+        runtime = outside / "scripts/context.py"
+        runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# local marker\n", encoding="utf-8")
+        before = contents(outside)
+        # The Harness reads the runtime without following links: not an
+        # installed project, so opening it syncs nothing...
+        self.assertIsNone(self.keep_current("release-1"))
+        # ...and its sync, called directly, refuses the linked runtime.
+        report = self.store.accelerators._sync_installed(self.project, None)
+        self.assertIn("memory-bank is a symbolic link", report["error"])
+        self.assertEqual(([], [], []), (report["changed"], report["kept"], report["backups"]))
+        self.assertEqual(before, contents(outside))
+
     def test_an_attached_project_is_never_written(self):
         other = self.root / "attached"
         (other / "app").mkdir(parents=True)
@@ -379,6 +446,18 @@ class InstalledCodexSyncTests(unittest.TestCase):
         self.assertNotIn(".codex/hooks.json", {item["path"] for item in report["changed"]})
         self.assertIn("could not approve", {item["path"]: item["reason"] for item in report["kept"]}[".codex/hooks.json"])
         self.assertEqual({"error": "Codex could not list hooks."}, report["codex_trust"])
+
+    def test_wiring_behind_a_link_is_neither_rewired_nor_approved(self):
+        # The Harness read the wiring through a linked `.codex` and would
+        # have written it back there; now it is not the project's wiring.
+        outside = self.root / "outside-codex"
+        link_folder(self.project, ".codex", outside, move=True)
+        before = contents(outside)
+        report, approve = self.keep_current(return_value={"approved": 6, "already": 0, "left": []})
+        approve.assert_not_called()
+        self.assertNotIn("codex_trust", report)
+        self.assertIn(".codex is a symbolic link", kept_reasons(report).get(".codex/hooks.json", ""))
+        self.assertEqual(before, contents(outside))
 
     def test_with_approval_turned_off_the_wiring_waits_for_a_person(self):
         with patch.dict(os.environ, {"HARNESS_CODEX_HOOK_TRUST": "0"}):

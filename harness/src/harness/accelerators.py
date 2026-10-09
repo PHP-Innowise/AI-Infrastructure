@@ -250,10 +250,13 @@ class Accelerators:
             return {'error': str(error)}
 
     def _sync_installed(self, path: Path, codex: Optional[str]) -> dict[str, Any]:
-        hooks = path / '.codex' / 'hooks.json'
+        # Read and restored as the sync writes it: never through a link inside
+        # the project. Wiring reached through one is not rewired, so there is
+        # nothing to approve or put back.
+        wiring = '.codex/hooks.json'
         try:
-            before = hooks.read_bytes() if hooks.is_file() and not hooks.is_symlink() else None
-        except OSError:
+            before = installer.read_confined(path, wiring)
+        except (installer.InventoryError, OSError):
             before = None
         try:
             report = installer.sync_installation(ROOT, path, rewire_codex=codex is not None and before is not None)
@@ -267,13 +270,13 @@ class Accelerators:
                 # Rewired but not approved, the hooks would stop running: the
                 # wiring Codex already approved goes back.
                 try:
-                    if hooks.read_bytes() != before:
-                        hooks.write_bytes(before)
+                    if installer.read_confined(path, wiring) != before:
+                        installer.write_confined(path, wiring, before)
                         report['changed'] = [item for item in report['changed']
-                                             if item.get('path') != '.codex/hooks.json']
-                        report['kept'].append({'path': '.codex/hooks.json',
+                                             if item.get('path') != wiring]
+                        report['kept'].append({'path': wiring,
                                                'reason': 'Codex could not approve the new wiring; the old one stays'})
-                except OSError:
+                except (installer.InventoryError, OSError):
                     pass
         return report
 
