@@ -103,8 +103,10 @@ Use `CONTEXT_TASK_ID`, otherwise the branch task. On detached HEAD, use an expli
 existing task ID. Do not create another task for the same work. Saving runs promotion
 under the existing setting. A learning's record is named by its content, so a retry,
 or a later result restating it, finds that record instead of writing a second one.
-Replaying the same `result_id` and content finishes a save that stopped half way; a
-lost local receipt is covered by the task already holding the result. Different
+Replaying the same `result_id` and content finishes a save that stopped half way and
+never rolls back what was saved since; a lost local receipt is covered by the task
+already holding the result. A learning a person corrected is theirs: no agent
+overwrites it, and a revised learning's chunk supersedes the one promoted before. Different
 content under an existing result ID, stale revisions (refused before anything is
 written), unauthorized actors and private sources are refused. Without MCP,
 `python3 memory-bank/scripts/context.py record-result --task-id ID --result-id RID

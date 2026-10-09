@@ -8805,6 +8805,29 @@ class RecordResultTest(RuntimeHarness):
         for manifest in manifests.glob("*.json") if manifests.is_dir() else []:
             self.assertNotIn(token, manifest.read_text(encoding="utf-8"))
 
+    def test_a_slack_token_or_a_customer_number_never_reaches_shared_memory(self) -> None:
+        # Built here, so no literal token sits in the repository.
+        token = "xox" + "b-" + "123456789012-1234567890123-" + "AbCdEfGhIjKlMnOpQrStUvWx"
+        for data in (self.result(progress=f"Notified the channel with {token}."),
+                     self.result(progress="Fixed the checkout timeout for customer ID 10492."),
+                     self.result(learnings=[{**self.LEARNING, "consequence": "Customer #10492 needs a retry."}])):
+            with self.subTest(data=data), self.assertRaises(brain.BrainError):
+                self.record("run-1", data)
+        self.assertEqual([], self.records())
+        for query in (f"why does {token} fail", "why does customer ID 10492 time out"):
+            refused = self.run_cli("retrieve", query, "--task-id", "TASK-RESULT")
+            self.assertNotEqual(0, refused.returncode, query)
+        prompt = f"Fix the cobalt authority timeout for customer ID 10492; notify with {token}"
+        cleaned = self.run_cli("refresh", "--query", prompt, "--task-id", "TASK-RESULT", "--sanitize", "--json")
+        self.assertIn(cleaned.returncode, (0, 1), cleaned.stderr)
+        stored = "".join(path.read_text(encoding="utf-8") for path in self.repository.rglob("*")
+                         if path.is_file() and path.suffix in (".md", ".json")
+                         and ".git" not in path.relative_to(self.repository).parts)
+        self.assertTrue(list((self.repository / "project-brain/control/retrieval-manifests").glob("*.json")))
+        for text in (stored, cleaned.stdout):
+            self.assertNotIn(token, text)
+            self.assertNotIn("10492", text)
+
     def test_a_revised_consequence_updates_what_an_agent_attested(self) -> None:
         self.record("run-1", self.result())
         revised = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
@@ -8845,6 +8868,138 @@ class RecordResultTest(RuntimeHarness):
                                  "--task-id", "TASK-RESULT", "--ephemeral")
         self.assertEqual(0, refreshed.returncode, refreshed.stderr)
         self.assertRegex(refreshed.stdout, r"Cobalt authority is canonical[^\n]*agent-attested, not reviewed by a person")
+
+    def chunks(self) -> dict:
+        found = {}
+        for path in sorted((self.repository / "memory-bank/chunks").glob("MEM-*.md")):
+            metadata, body = brain._parse_chunk(path)
+            found[metadata["id"]] = {**metadata, "body": body}
+        return found
+
+    def automatic(self, enabled: bool) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.write_text(json.dumps({"mode": "governed", "automatic_promotion": enabled}), encoding="utf-8")
+
+    def stalled(self, finding: dict) -> dict:
+        proposal = brain.create_promotion(self.repository, [finding["id"]], finding["title"],
+                                          brain.promotion_content(finding), proposer="local",
+                                          review_mode="automatic")
+        return brain.auto_review_promotion(self.repository, proposal["id"])
+
+    def test_a_delayed_replay_of_an_older_result_leaves_the_later_revision(self) -> None:
+        self.record("run-1", self.result())
+        self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        revised = self.records()[0]
+        replay = self.record("run-1", self.result())
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(["differs"], [item["state"] for item in replay["records"]])
+        self.assertEqual(("Retry once, then stop.", revised["revision"]),
+                         (self.records()[0]["progress"], self.records()[0]["revision"]))
+
+    def test_a_persons_correction_is_theirs_and_no_agent_overwrites_it(self) -> None:
+        self.record("run-1", self.result())
+        corrected = {**self.LEARNING, "consequence": "Retry once, then stop."}
+        person = memory_results.record_result(
+            self.repository, "TASK-RESULT", "run-2", self.task()["revision"],
+            self.result(learnings=[corrected]), owner="local", reason="Corrected by a person",
+            attestation="person")
+        self.assertEqual(["updated"], [item["state"] for item in person["records"]])
+        finding = self.records()[0]
+        self.assertEqual("person", brain.record_attestation(finding))
+        brain.validate_record(finding)
+        later = self.record("run-3", self.result(learnings=[{**self.LEARNING, "consequence": "Retry forever."}]))
+        self.assertEqual(["differs"], [item["state"] for item in later["records"]])
+        self.assertEqual("Retry once, then stop.", self.records()[0]["progress"])
+
+    def test_a_revised_learning_supersedes_the_chunk_promoted_before(self) -> None:
+        self.record("run-1", self.result())
+        [first] = self.chunks()
+        revised = {**self.LEARNING,
+                   "consequence": "Retry once, then stop; only after that does the cobalt rule decide allocation."}
+        saved = self.record("run-2", self.result(learnings=[revised]))
+        self.assertEqual(1, len(saved["promotion"]["promoted"]), saved["promotion"])
+        successor = saved["promotion"]["promoted"][0]["memory_id"]
+        chunks = self.chunks()
+        self.assertEqual({first, successor}, set(chunks))
+        self.assertEqual(("superseded", successor), (chunks[first]["status"], chunks[first]["superseded_by"]))
+        self.assertEqual(("active", [first]), (chunks[successor]["status"], chunks[successor]["supersedes"]))
+        self.assertIn("Retry once, then stop", chunks[successor]["body"])
+        self.assertIn("agent-attested", chunks[successor]["tags"])
+        self.assertEqual([], brain.validate_bank(self.repository / "memory-bank"))
+        replay = self.record("run-2", self.result(learnings=[revised]))
+        self.assertEqual(([], [], []), (replay["promotion"]["promoted"], replay["promotion"]["failed"],
+                                        replay["promotion"]["closed"]))
+        self.assertEqual({first, successor}, set(self.chunks()))
+
+    def test_a_revision_of_what_a_person_promoted_waits_for_a_person(self) -> None:
+        self.automatic(False)
+        self.record("run-1", self.result())
+        finding = self.records()[0]
+        proposal = brain.create_promotion(self.repository, [finding["id"]], finding["title"],
+                                          brain.promotion_content(finding), proposer="local")
+        brain.review_promotion(self.repository, proposal["id"], reviewer="human-reviewer", approve=True)
+        brain.apply_promotion(self.repository, proposal["id"])
+        self.automatic(True)
+        saved = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.assertEqual([], saved["promotion"]["promoted"])
+        self.assertTrue(any("person's review" in item["reason"] for item in saved["promotion"]["blocked"]),
+                        saved["promotion"]["blocked"])
+        self.assertEqual(["active"], [chunk["status"] for chunk in self.chunks().values()])
+
+    def test_two_promotion_runs_at_once_write_one_proposal_and_one_chunk(self) -> None:
+        self.automatic(False)
+        self.record("run-1", self.result())
+        self.automatic(True)
+        original = brain.create_promotion
+        other: dict = {}
+
+        def racing(*arguments, **keywords):
+            # The other run starts while this one is choosing; before the
+            # fix it finished in the gap and both wrote a proposal.
+            if "thread" not in other:
+                other["thread"] = threading.Thread(
+                    target=lambda: other.update(result=brain.auto_promote(self.repository, owner="local")))
+                other["thread"].start()
+                other["thread"].join(timeout=0.5)
+            return original(*arguments, **keywords)
+
+        with mock.patch.object(brain, "create_promotion", side_effect=racing):
+            first = brain.auto_promote(self.repository, owner="local")
+        other["thread"].join(timeout=30)
+        self.assertFalse(other["thread"].is_alive())
+        self.assertEqual(["applied"], [proposal["status"] for _, proposal in brain.iter_promotions(self.repository)])
+        self.assertEqual(1, len(self.chunks()))
+        self.assertEqual([], first["failed"] + other["result"]["failed"])
+        self.assertEqual(1, len(first["promoted"] + other["result"]["promoted"]))
+
+    def test_a_stalled_promotion_whose_record_moved_on_is_withdrawn(self) -> None:
+        self.automatic(False)
+        self.record("run-1", self.result())
+        proposal = self.stalled(self.records()[0])
+        self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.automatic(True)
+        first = brain.auto_promote(self.repository, owner="local")
+        self.assertEqual([], first["failed"])
+        self.assertEqual([proposal["id"]], [item["promotion_id"] for item in first["closed"]])
+        self.assertEqual(1, len(first["promoted"]))
+        second = brain.auto_promote(self.repository, owner="local")
+        self.assertEqual(([], [], []), (second["promoted"], second["failed"], second["closed"]))
+        self.assertEqual(["applied", "rejected"],
+                         sorted(proposal["status"] for _, proposal in brain.iter_promotions(self.repository)))
+        self.assertIn("Retry once, then stop", next(iter(self.chunks().values()))["body"])
+
+    def test_a_second_proposal_of_a_promoted_revision_is_withdrawn_not_retried(self) -> None:
+        self.automatic(False)
+        self.record("run-1", self.result())
+        finding = self.records()[0]
+        winner, loser = self.stalled(finding), self.stalled(finding)
+        brain.apply_promotion(self.repository, winner["id"])
+        self.automatic(True)
+        result = brain.auto_promote(self.repository, owner="local")
+        self.assertEqual(([], []), (result["failed"], result["promoted"]))
+        self.assertEqual([loser["id"]], [item["promotion_id"] for item in result["closed"]])
+        self.assertEqual(1, len(self.chunks()))
+        self.assertEqual([], brain.auto_promote(self.repository, owner="local")["failed"])
 
     def test_an_older_unattended_save_still_reads_as_the_agents(self) -> None:
         record = {"transitions": [

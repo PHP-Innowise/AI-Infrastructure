@@ -253,6 +253,12 @@ class UnattendedSaveTests(unittest.TestCase):
                          "Automatic promotion is off for this project, so it stays in Project Brain.",
                          memory_draft.summary("drafted", {"ok": True, "saved": {"task": None, "records": [],
                                                           "promotion": {"enabled": False}}, "skipped": []}))
+        # A replay of a save leaves later revisions and removals as they are, and says so.
+        replayed = memory_draft.summary("drafted", {"ok": True, "skipped": [], "saved": {"task": None, "records": [
+            {"type": "finding", "title": "One owner", "state": "differs"},
+            {"type": "decision", "title": "Retry once", "state": "missing"}]}})
+        self.assertIn("Kept as recorded, with a different consequence than this run's: finding “One owner”", replayed)
+        self.assertIn("Removed from project memory since this run saved it: decision “Retry once”.", replayed)
         stopped = memory_draft.summary("drafted", {"ok": False, "error": "The runtime refused content matching its "
                                                    "secret-protection rules.", "saved": {"task": {"id": "t"}, "records": []}})
         self.assertTrue(stopped.endswith("Stopped: The runtime refused content matching its secret-protection rules. "

@@ -17,12 +17,38 @@ _NOT_A_LITERAL = (
     r"|!?change[-_]?me!?|your[-_ ][^\s]*)(?![A-Za-z0-9])"
     r")"
 )
+# Key names a credential is assigned to: DB_PASSWORD=, AWS_SECRET_ACCESS_KEY=,
+# AccountKey= in a connection string.
+_CREDENTIAL_KEYS = (
+    r"(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key"
+    r"|access[_-]?(?:token|key)|auth[_-]?token|refresh[_-]?token|private[_-]?key"
+    r"|account[_-]?key|shared[_-]?access[_-]?key)"
+)
 SECRET_PATTERNS = {
-    "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    "GitHub token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-    "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    "private key": re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"),
+    "GitHub token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{22,})\b"),
+    "GitLab token": re.compile(r"\bgl(?:pat|dt|rt|ptt|cbt|imt|oas|soat|ft|agent)-[A-Za-z0-9_-]{20,}"),
+    # Slack's bot, user, app, refresh and configuration tokens. A placeholder
+    # such as xoxb-your-token has no digit and does not count.
+    "Slack token": re.compile(r"\b(?:xox[abeoprs]|xapp)-(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{10,}"),
+    "Slack webhook": re.compile(
+        r"\bhooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9_/-]{16,}", re.IGNORECASE
+    ),
+    "Discord webhook": re.compile(
+        r"\bdiscord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{30,}", re.IGNORECASE
+    ),
+    "Telegram bot token": re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b"),
+    "AWS access key": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    "Google API key": re.compile(r"\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
+    "Google OAuth token": re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),
     "OpenAI-style token": re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
-    "Stripe secret key": re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b"),
+    "Stripe secret key": re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b"),
+    "npm token": re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"),
+    "PyPI token": re.compile(r"\bpypi-AgE[A-Za-z0-9_-]{50,}"),
+    "Hugging Face token": re.compile(r"\bhf_[A-Za-z0-9]{34,}\b"),
+    "SendGrid key": re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
+    "Shopify token": re.compile(r"\bshp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}\b"),
+    "DigitalOcean token": re.compile(r"\bdo[opr]_v1_[a-f0-9]{64}\b"),
     "JWT": re.compile(r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
     "Laravel application key": re.compile(
         r"\bAPP_KEY[ \t]*=[ \t]*['\"]?base64:[A-Za-z0-9+/]{20,}={0,2}"
@@ -58,10 +84,8 @@ SECRET_PATTERNS = {
     # UPPER_SNAKE prefix (DB_PASSWORD=, MAIL_PASSWORD=, AWS_SECRET_ACCESS_KEY=),
     # which the old `\b` anchor missed; separators stay on one line.
     "assigned credential": re.compile(
-        r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*"
-        r"(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key"
-        r"|access[_-]?token|auth[_-]?token)"
-        r"[ \t]*[:=][ \t]*['\"`]?" + _NOT_A_LITERAL + r"[^\s'\"`]{4,}",
+        r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*" + _CREDENTIAL_KEYS
+        + r"[ \t]*[:=][ \t]*['\"`]?" + _NOT_A_LITERAL + r"[^\s'\"`]{4,}",
         re.IGNORECASE,
     ),
 }
@@ -76,6 +100,19 @@ PRIVATE_PATTERNS = {
     "customer identifier": re.compile(
         r"\b(?:(?:customer|patient)\s+(?:name|address|id)|"
         r"client\s+(?:name|address))\s*[:=]\s*\S+",
+        re.IGNORECASE,
+    ),
+    # A customer's or patient's number without the colon the form above
+    # needs: "customer ID 10492", "customer #10492", "patient no. 77",
+    # "ID клиента 10492", or a bare "customer 10492" of three digits or more.
+    # A query keeps the label and loses the number (`value`).
+    "customer number": re.compile(
+        r"(?<!\w)(?:"
+        r"(?:customer|patient|клиент\w*|пациент\w*)[\s_(\[-]*(?:identifier|id|number|no\.?|nr\.?|номер|№|#)"
+        r"|client[\s_(\[-]*(?:number|no\.?|nr\.?|#)"
+        r"|(?:id|номер|№)\s+(?:клиента|пациента)"
+        r"|(?:customer|patient|клиент\w*|пациент\w*)(?=\s*[#№]?\s*\d{3})"
+        r")[\s:=#№(\[]*(?P<value>[A-Za-z]{0,5}-?\d[\w-]*)",
         re.IGNORECASE,
     ),
 }
@@ -95,16 +132,15 @@ RAW_TEXT_PATTERN = re.compile(
 # left "beta gamma'" of `password='alpha beta gamma'` in an automatic query,
 # and from there in a task goal and a manifest.
 QUOTED_CREDENTIAL = re.compile(
-    r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*"
-    r"(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key"
-    r"|access[_-]?token|auth[_-]?token)"
-    r"[ \t]*[:=][ \t]*(['\"`])[^\n]*?(?:\1|$)",
+    r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*" + _CREDENTIAL_KEYS
+    + r"[ \t]*[:=][ \t]*(['\"`])[^\n]*?(?:\1|$)",
     re.IGNORECASE | re.MULTILINE,
 )
 # SECRET_PATTERNS recognises a private key by its header line alone; the body
 # under it is the secret, so the whole block goes, to its footer or the end.
 PRIVATE_KEY_BLOCK = re.compile(
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?"
+    r"(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
     re.DOTALL,
 )
 # Words that only framed removed data: when nothing else is left, the request
@@ -121,6 +157,13 @@ CONTACT_WORDS = frozenset("""
 
 class AutomaticQueryError(ValueError):
     pass
+
+
+def _cut(match: "re.Match[str]") -> str:
+    """What stays of a match: nothing, or the label in front of its value."""
+    if "value" not in match.re.groupindex:
+        return " "
+    return match.group(0)[: match.start("value") - match.start()] + " "
 
 
 def sanitize_automatic_query(text: str) -> str:
@@ -150,7 +193,7 @@ def sanitize_automatic_query(text: str) -> str:
             text = pattern.sub(" ", text)
         for label, pattern in PRIVATE_PATTERNS.items():
             if label != "customer identifier":
-                text = pattern.sub(" ", text)
+                text = pattern.sub(_cut, text)
         text = RAW_TEXT_PATTERN.sub(" ", text)
         if text == before:
             break

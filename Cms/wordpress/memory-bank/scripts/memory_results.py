@@ -245,8 +245,10 @@ def record_result(
 
     A learning already recorded under its content ID is left as it is
     (`existing`) or, when an earlier attempt stopped before closing it,
-    closed now (`completed`). The task update comes last; a result with a
-    receipt is a replay and leaves the task alone. A stale `revision` is
+    closed now (`completed`). The task update comes last. A result with a
+    receipt is a replay: it leaves the task and every learning as they are
+    now - `differs` where a later save revised one since, `missing` where a
+    record was removed - and only retries promotion. A stale `revision` is
     refused before anything is written; replay the same result ID with the
     current revision.
     """
@@ -297,6 +299,19 @@ def record_result(
                 # consequence is said, not dropped behind "already there".
                 records.append(_summary(current, "archived" if same else "archived-differs"))
                 continue
+            if prior is not None:
+                # A proven replay: this result was recorded in full before its
+                # receipt was written, so whatever its records say now is what
+                # happened since - a later result's revision, a person's
+                # correction - and a delayed retry never rolls that back.
+                # Only the promotion below is tried again.
+                if current is None:
+                    records.append({"id": None, "external_id": identifier, "type": learning["type"],
+                                    "title": learning["title"], "status": None, "revision": None,
+                                    "state": "missing"})
+                else:
+                    records.append(_summary(current, "existing" if same else "differs"))
+                continue
             if current is None:
                 current = create_record(
                     root, learning["type"], identifier, learning["title"], [],
@@ -328,7 +343,9 @@ def record_result(
                 # attested, or a person revises it. What a person verified -
                 # or nobody said who - an agent does not overwrite, and a
                 # record of someone else's or one that has moved on is left
-                # too; the response says so instead of "already there".
+                # too; the response says so instead of "already there". The
+                # revised claim is verified again in the record's ledger, so
+                # a person's correction is the person's from then on.
                 revisable = attestation == "person" or record_attestation(current) == "agent"
                 if (not revisable or owner not in current["authorized_owners"]
                         or current["status"] != closed_state):
@@ -337,7 +354,7 @@ def record_result(
                     current = update_record(
                         root, current["id"], expected_revision=current["revision"],
                         progress=learning["consequence"], next_steps=[], files=[], sources=[],
-                        actor=owner, reason=reason,
+                        actor=owner, reason=reason, reverify=True, attestation=attestation,
                     )
                     state = "updated"
             wrote = wrote or state not in ("existing", "differs")
@@ -363,8 +380,9 @@ def record_result(
         "records": records,
         "promotion": promotion,
         "attestation": attestation,
-        # Nothing was written because the result, every part of it, was
-        # already there - not because a part of it was refused.
-        "replayed": not wrote and not any(
-            item["state"] in ("differs", "archived-differs") for item in records),
+        # A receipt proves the result was recorded before; without one,
+        # nothing was written because every part of it was already there -
+        # not because a part of it was refused.
+        "replayed": prior is not None or (not wrote and not any(
+            item["state"] in ("differs", "archived-differs") for item in records)),
     }

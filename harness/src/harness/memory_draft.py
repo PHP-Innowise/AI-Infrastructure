@@ -379,7 +379,11 @@ def summary(state, result=None):
         text += (" Kept as recorded, with a different consequence than this run's: "
                  + "; ".join(named(r) for r in held)
                  + " (verified by a person, someone else's, archived or moved on).")
-    skipped = [item.get("reason") for item in result.get("skipped") or [] if isinstance(item, dict)]
+    # A replay names a learning it saved before whose record was removed since; it does not write it again.
+    removed = [record for record in records if record.get("state") == "missing"]
+    if removed:
+        text += " Removed from project memory since this run saved it: " + "; ".join(named(r) for r in removed) + "."
+    skipped =[item.get("reason") for item in result.get("skipped") or [] if isinstance(item, dict)]
     if skipped.count("repeated"):
         text += f" {skipped.count('repeated')} learning(s) were already saved from this session."
     if skipped.count("unsourced"):

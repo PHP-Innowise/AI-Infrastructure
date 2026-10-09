@@ -1281,6 +1281,7 @@ def update_record(
     auto_checkpoint: Optional[str] = None,
     reason: str = "Task updated",
     attestation: Optional[str] = None,
+    reverify: bool = False,
     allow_phase_regression: bool = False,
     replace_next_steps: bool = False,
 ) -> dict[str, Any]:
@@ -1306,6 +1307,14 @@ def update_record(
     ledger entry (`record_attestation` reads it back), not into a new record
     field, so a runtime that predates it still accepts the record; promotion
     carries an agent's attestation into the chunk's tags.
+
+    ``reverify`` says the update restates the claim of a record that is
+    already verified - a revised consequence - and ``attestation`` who
+    checked the new claim. The ledger gains another ``observed`` ->
+    ``verified`` entry: the revision is the observation, the attestation its
+    check, and it is the one authority edge every runtime's validator
+    accepts. Without it a person's correction kept the agent's mark from the
+    first verification, and the next agent was free to overwrite it.
 
     ``next_steps`` are appended unless ``replace_next_steps`` makes them the
     whole list: without it a step that was done could never leave, and the
@@ -1351,6 +1360,17 @@ def update_record(
                 }
             )
             record["authority"] = authority
+        if reverify:
+            if authority is not None or record["authority"] != "verified":
+                raise BrainError("Only a verified record's revised claim is verified again")
+            if attestation is None:
+                raise BrainError("Say who checked the revised claim: attestation agent or person")
+            record["transitions"].append(
+                {
+                    "from": "observed", "to": "verified", "at": utc_now(),
+                    "actor": actor, "reason": f"{reason} [attestation:{attestation}]",
+                }
+            )
         if transition_to is not None:
             allowed = LIFECYCLES[record["type"]]["transitions"].get(
                 record["status"], set()
@@ -2331,6 +2351,104 @@ def stalled_automatic_promotions(repository: Path) -> list[tuple[str, dict[str, 
     ]
 
 
+def promotion_ledger(repository: Path) -> tuple[set[str], dict[str, dict[str, Any]]]:
+    """What the promotions say about each record: held, or last promoted alone.
+
+    Held: in a person's review, or promoted together with other records - a
+    synthesis is a person's to revise. Last promoted alone: the newest
+    applied promotion of the record by itself, by the record revision it
+    carried, which a revised record is compared with.
+    """
+    held: set[str] = set()
+    latest: dict[str, dict[str, Any]] = {}
+    for _, proposal in iter_promotions(repository):
+        if not isinstance(proposal, dict) or proposal.get("status") == "rejected":
+            continue
+        sources = [
+            source for source in proposal.get("source_records") or []
+            if isinstance(source, dict) and isinstance(source.get("id"), str)
+            and type(source.get("revision")) is int
+        ]
+        if proposal.get("status") != "applied":
+            if proposal.get("review_mode") != "automatic":
+                held.update(source["id"] for source in sources)
+            continue
+        if len(sources) != 1:
+            held.update(source["id"] for source in sources)
+            continue
+        previous = latest.get(sources[0]["id"])
+        if previous is None or sources[0]["revision"] > previous["source_records"][0]["revision"]:
+            latest[sources[0]["id"]] = proposal
+    return held, latest
+
+
+def _chunk_status(repository: Path, memory_id: object) -> Optional[str]:
+    if not isinstance(memory_id, str):
+        return None
+    try:
+        return str(_find_chunk(repository / "memory-bank", memory_id)[1].get("status"))
+    except BrainError:
+        return None
+
+
+def obsolete_promotion(
+    repository: Path, proposal: dict[str, Any], applied: dict[str, dict[str, Any]]
+) -> Optional[str]:
+    """Why an unapplied automatic promotion can never apply, or None.
+
+    Another promotion already brought its record's revision - or a later one
+    - into the bank, or the record moved on: a revision is never taken back
+    and a record compaction moved never moves back, so `apply_promotion`
+    would refuse it on every retry for good.
+    """
+    source = proposal["source_records"][0]
+    winner = applied.get(source["id"])
+    if (
+        winner is not None
+        and winner.get("id") != proposal.get("id")
+        and winner["source_records"][0]["revision"] >= source["revision"]
+    ):
+        return f"already promoted as {winner.get('destination_memory_id')}"
+    try:
+        path, record, _ = find_record(repository, source["id"], include_archive=True)
+    except BrainError as error:
+        if "not found" in str(error):
+            return "its record no longer exists"
+        return None
+    if record["revision"] != source["revision"]:
+        return f"its record moved on to revision {record['revision']}"
+    if path.relative_to(repository).as_posix() != source["path"]:
+        return "its record moved to " + path.relative_to(repository).as_posix()
+    return None
+
+
+def withdraw_promotion(repository: Path, promotion_id: str, reason: str) -> dict[str, Any]:
+    """Close an automatic promotion that can never apply.
+
+    Left open it was retried, and failed, on every run for good. The schema
+    has no withdrawn state, so it takes the closing state an unapplied
+    proposal has - `rejected`, by nobody, which every reader already takes as
+    "not promoted" - and `conflicts` keeps why, for the audit trail.
+    """
+    path = brain_root(repository) / "control" / "promotions" / f"{promotion_id}.json"
+    with mutation_lock(repository):
+        try:
+            proposal = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise BrainError(f"Promotion not found or invalid: {promotion_id}") from error
+        validate_promotion_record(repository, proposal, expected_id=promotion_id)
+        if proposal.get("review_mode") != "automatic" or proposal.get("status") not in {"proposed", "reviewed"}:
+            raise BrainError("Only an unapplied automatic promotion is withdrawn")
+        proposal["status"] = "rejected"
+        proposal["outcome"] = "rejected"
+        proposal["updated_at"] = utc_now()
+        proposal["revision"] += 1
+        proposal["conflicts"] = list(dict.fromkeys([*proposal["conflicts"], f"withdrawn: {reason}"]))
+        validate_promotion_record(repository, proposal, expected_id=promotion_id)
+        atomic_json(path, proposal)
+        return proposal
+
+
 def promotion_content(record: dict[str, Any]) -> Optional[str]:
     """Build durable content from a record, or None when it says nothing.
 
@@ -2436,6 +2554,7 @@ def promotable_records(
     to notice.
     """
     already = promoted_source_ids(repository)
+    held, applied = promotion_ledger(repository)
     candidates: list[dict[str, Any]] = []
     blocked: list[dict[str, str]] = []
     # Archived records stay promotable. A resolved finding is both promotable
@@ -2448,18 +2567,46 @@ def promotable_records(
             continue
         if only is not None and record["id"] not in only:
             continue
-        if record["id"] in already:
-            continue
         if record["status"] not in PROMOTABLE_STATES.get(record["type"], set()):
             continue
         content = promotion_content(record)
+        supersedes = None
+        if record["id"] in already:
+            # Promoted once. A record revised since - a corrected consequence
+            # - is promoted again, and its chunk supersedes the one promoted
+            # before: excluding the record for good left the bank serving
+            # the old conclusion, marked only "source changed", while the
+            # corrected one never arrived.
+            previous = applied.get(record["id"])
+            if (
+                record["id"] in held
+                or previous is None
+                or content is None
+                or content == previous.get("content")
+                or record["revision"] <= previous["source_records"][0]["revision"]
+            ):
+                continue
+            memory_id = previous.get("destination_memory_id")
+            if previous.get("review_mode") != "automatic":
+                # What a person reviewed is not replaced without one.
+                blocked.append({"record_id": record["id"], "reason": (
+                    f"revised since {memory_id} was promoted after a person's review; "
+                    "propose the revision for review")})
+                continue
+            status = _chunk_status(repository, memory_id)
+            if status != "active":
+                blocked.append({"record_id": record["id"], "reason": (
+                    f"revised since it was promoted, and {memory_id} is {status or 'missing'}; "
+                    "promote the revision by hand if it still holds")})
+                continue
+            supersedes = memory_id
         reason = promotion_eligibility_error(
             repository, record, config, allow_changed_sources=allow_changed_sources
         )
         if reason is not None:
             blocked.append({"record_id": record["id"], "reason": reason})
             continue
-        candidates.append({"record": record, "content": content})
+        candidates.append({"record": record, "content": content, "supersedes": supersedes})
     return candidates, blocked
 
 
@@ -2578,102 +2725,135 @@ def auto_promote(
     reviewer, so the absence of human approval stays visible in both stores.
     `only` restricts the run to the named records - the resolving update
     promotes its own record at once instead of waiting for a turn boundary.
+    A record revised since its promotion is promoted again, and the new
+    chunk supersedes the old one. A stalled promotion that can never apply
+    is withdrawn (`closed`) rather than retried for good.
     """
     config = load_config(repository)
     if not config.get("automatic_promotion"):
         return {
             "enabled": False, "promoted": [], "failed": [],
-            "blocked": [], "skipped": 0,
+            "blocked": [], "closed": [], "skipped": 0,
         }
     promoted: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
-
-    # Retry a promotion that stalled after its record was created, in place.
-    # Creating a second one would leave the first orphaned forever.
-    for promotion_id, proposal in stalled_automatic_promotions(repository):
-        source = proposal["source_records"][0]
-        if only is not None and source["id"] not in only:
-            continue
-        try:
-            if proposal["status"] == "proposed":
-                auto_review_promotion(repository, promotion_id)
-            applied = apply_promotion(repository, promotion_id)
-        except BrainError as error:
-            failed.append({"record_id": source["id"], "reason": str(error)})
-            continue
-        promoted.append(
-            {
-                "record_id": source["id"],
-                "type": source["type"],
-                "memory_id": applied["destination_memory_id"],
-            }
-        )
-
-    candidates, blocked = promotable_records(
-        repository, config, allow_changed_sources=True, only=only
-    )
-    # Re-read on every iteration rather than once before the loop: a single
-    # flush promotes up to `limit` records, so the batch case - one review
-    # producing several findings that say the same thing - is exactly the one
-    # a pre-loop snapshot would miss.
-    threshold = bank_duplicate_ratio(config)
-    existing = active_chunk_texts(repository)
-    for candidate in candidates[:limit]:
-        record = candidate["record"]
-        duplicate = near_duplicate_chunk(
-            f"{record['title']}\n{candidate['content']}", existing, threshold
-        )
-        if duplicate is not None:
-            # The policy "update an existing chunk instead of creating a near
-            # duplicate" had no executor on the automatic path: promotion
-            # never read the bank it writes into. Naming the chunk turns the
-            # block into an instruction.
-            blocked.append(
+    closed: list[dict[str, str]] = []
+    # Choosing a record, proposing it and applying the proposal are one step.
+    # Two runs at once - a Stop hook and a Harness save - each chose the same
+    # record and each wrote a proposal; one chunk was written and the other
+    # proposal stayed `reviewed`, refused on every retry, or wrote a second
+    # chunk of the same record on a later day.
+    with mutation_lock(repository):
+        _, applied = promotion_ledger(repository)
+        # Retry a promotion that stalled after its record was created, in
+        # place: creating a second one would leave the first orphaned. One
+        # that can never apply is withdrawn instead.
+        for promotion_id, proposal in stalled_automatic_promotions(repository):
+            source = proposal["source_records"][0]
+            if only is not None and source["id"] not in only:
+                continue
+            try:
+                obsolete = obsolete_promotion(repository, proposal, applied)
+                if obsolete is not None:
+                    withdraw_promotion(repository, promotion_id, obsolete)
+                    closed.append({"record_id": source["id"], "promotion_id": promotion_id,
+                                   "reason": obsolete})
+                    continue
+                if proposal["status"] == "proposed":
+                    auto_review_promotion(repository, promotion_id)
+                applied_proposal = apply_promotion(repository, promotion_id)
+            except BrainError as error:
+                failed.append({"record_id": source["id"], "reason": str(error)})
+                continue
+            applied[source["id"]] = applied_proposal
+            promoted.append(
                 {
-                    "record_id": record["id"],
-                    "reason": (
-                        f"near-duplicate of {duplicate}; merge or supersede first"
-                    ),
+                    "record_id": source["id"],
+                    "type": source["type"],
+                    "memory_id": applied_proposal["destination_memory_id"],
                 }
             )
-            continue
-        try:
-            proposal = create_promotion(
-                repository,
-                [record["id"]],
-                record["title"],
-                candidate["content"],
-                proposer=owner,
-                review_mode="automatic",
-            )
-            auto_review_promotion(repository, proposal["id"])
-            applied = apply_promotion(repository, proposal["id"])
-        except BrainError as error:
-            # One unpromotable record must not stop the rest, but a systematic
-            # failure — an absent Memory Bank, say — has to stay visible rather
-            # than looking like "nothing was worth promoting".
-            failed.append({"record_id": record["id"], "reason": str(error)})
-            continue
-        promoted.append(
-            {
-                "record_id": record["id"],
-                "type": record["type"],
-                "memory_id": applied["destination_memory_id"],
-            }
+        # A record whose promotion is still open is retried in place on the
+        # next run, never proposed a second time.
+        pending = {
+            proposal["source_records"][0]["id"]
+            for _, proposal in stalled_automatic_promotions(repository)
+        }
+        candidates, blocked = promotable_records(
+            repository, config, allow_changed_sources=True, only=only
         )
-        # The chunk just written is a duplicate candidate for the rest of this
-        # same batch.
-        existing.append(
-            (
-                applied["destination_memory_id"],
-                f"{record['title']}\n{candidate['content']}",
+        candidates = [
+            candidate for candidate in candidates
+            if candidate["record"]["id"] not in pending
+        ]
+        # Re-read on every iteration rather than once before the loop: a
+        # single flush promotes up to `limit` records, so the batch case - one
+        # review producing several findings that say the same thing - is
+        # exactly the one a pre-loop snapshot would miss.
+        threshold = bank_duplicate_ratio(config)
+        existing = active_chunk_texts(repository)
+        for candidate in candidates[:limit]:
+            record = candidate["record"]
+            # A revision is measured against everything but the chunk it
+            # replaces, which it resembles by design.
+            replaces = candidate.get("supersedes")
+            others = [item for item in existing if item[0] != replaces]
+            duplicate = near_duplicate_chunk(
+                f"{record['title']}\n{candidate['content']}", others, threshold
             )
-        )
+            if duplicate is not None:
+                # The policy "update an existing chunk instead of creating a
+                # near duplicate" had no executor on the automatic path:
+                # promotion never read the bank it writes into. Naming the
+                # chunk turns the block into an instruction.
+                blocked.append(
+                    {
+                        "record_id": record["id"],
+                        "reason": (
+                            f"near-duplicate of {duplicate}; merge or supersede first"
+                        ),
+                    }
+                )
+                continue
+            try:
+                proposal = create_promotion(
+                    repository,
+                    [record["id"]],
+                    record["title"],
+                    candidate["content"],
+                    proposer=owner,
+                    review_mode="automatic",
+                )
+                auto_review_promotion(repository, proposal["id"])
+                applied_proposal = apply_promotion(repository, proposal["id"])
+            except BrainError as error:
+                # One unpromotable record must not stop the rest, but a
+                # systematic failure - an absent Memory Bank, say - has to
+                # stay visible rather than looking like "nothing was worth
+                # promoting".
+                failed.append({"record_id": record["id"], "reason": str(error)})
+                continue
+            promoted.append(
+                {
+                    "record_id": record["id"],
+                    "type": record["type"],
+                    "memory_id": applied_proposal["destination_memory_id"],
+                }
+            )
+            # The chunk just written is a duplicate candidate for the rest of
+            # this same batch; the one it superseded no longer is.
+            existing = others + [
+                (
+                    applied_proposal["destination_memory_id"],
+                    f"{record['title']}\n{candidate['content']}",
+                )
+            ]
     return {
         "enabled": True,
         "promoted": promoted,
         "failed": failed,
         "blocked": blocked,
+        "closed": closed,
         "skipped": max(0, len(candidates) - limit),
     }
 
@@ -3187,9 +3367,30 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         # chunk files. The legacy counter file may remain on disk; it is
         # neither read nor written here.
         source_uuid = proposal["source_records"][0]["id"]
-        memory_id = (
-            f"MEM-{today.strftime('%Y%m%d')}-{source_uuid.replace('-', '')[:8]}"
-        )
+        suffix = source_uuid.replace("-", "")[:8]
+        # An automatic promotion of a record the bank already learned from,
+        # at an earlier revision, is that knowledge revised: its chunk
+        # supersedes the earlier one in this same write. Its identifier hashes
+        # the revision in, since the earlier chunk may carry today's date too.
+        predecessor: Optional[tuple[Path, dict[str, Any], str]] = None
+        if automatic and len(proposal["source_records"]) == 1:
+            _, applied = promotion_ledger(repository)
+            previous = applied.get(source_uuid)
+            if previous is not None and previous.get("id") != proposal["id"]:
+                revision = proposal["source_records"][0]["revision"]
+                if previous["source_records"][0]["revision"] >= revision:
+                    raise BrainError(
+                        "Promotion source was already promoted as "
+                        f"{previous.get('destination_memory_id')}"
+                    )
+                predecessor = _find_chunk(bank, str(previous.get("destination_memory_id")))
+                if predecessor[1].get("status") != "active":
+                    raise BrainError(
+                        f"The chunk this promotion revises is {predecessor[1].get('status')}: "
+                        f"{previous.get('destination_memory_id')}"
+                    )
+                suffix = hashlib.sha256(f"{source_uuid}#{revision}".encode("utf-8")).hexdigest()[:8]
+        memory_id = f"MEM-{today.strftime('%Y%m%d')}-{suffix}"
         slug = re.sub(r"[^a-z0-9]+", "-", proposal["title"].lower()).strip("-") or "promoted"
         destination = bank / "chunks" / f"{memory_id}-{slug}.md"
         if destination.exists():
@@ -3232,7 +3433,8 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                     [item["path"] for item in proposal["source_records"]] + inherited
                 )
             ),
-            "supersedes": [], "superseded_by": None,
+            "supersedes": [predecessor[1]["id"]] if predecessor else [],
+            "superseded_by": None,
             # Open-ended validity: the knowledge holds from today until a
             # successor closes it with a valid_to, rather than being deleted.
             "valid_from": today.isoformat(), "valid_to": None,
@@ -3256,9 +3458,18 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
             content if content.startswith(heading) else f"{heading}\n\n{content}",
         )
         before = validate_bank(bank)
-        snapshot = snapshot_files([destination, index_path, promotion_path])
+        snapshot = snapshot_files(
+            [destination, index_path, promotion_path] + ([predecessor[0]] if predecessor else [])
+        )
         try:
             atomic_write(destination, chunk)
+            if predecessor is not None:
+                # Closed the way `retire_chunk` closes one: superseded, linked
+                # to its successor, valid until today. The body is untouched.
+                predecessor[1]["status"] = "superseded"
+                predecessor[1]["superseded_by"] = memory_id
+                predecessor[1]["valid_to"] = today.isoformat()
+                atomic_write(predecessor[0], _render_chunk(predecessor[1], predecessor[2]))
             # The index is derived state: regenerate it from chunk
             # frontmatter instead of appending a row, so the same rendering
             # path serves promotions, manual capture, and post-merge repair.

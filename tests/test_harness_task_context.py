@@ -706,6 +706,27 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
         from harness import automatic_query
         self.assertEqual(runtime.read_bytes(), Path(automatic_query.__file__).read_bytes())
 
+    def test_a_slack_token_and_a_customer_number_stay_out_of_the_goal_and_the_records(self):
+        from harness.task_context import message_query
+        # Built here, so no literal token sits in the repository.
+        token = "xox" + "b-" + "123456789012-1234567890123-" + "AbCdEfGhIjKlMnOpQrStUvWx"
+        prompt = f"Fix CMS768 checkout timeout for customer ID 10492; notify with {token}"
+        options = TaskContext.validate_options({"bank": "memory-bank", "auto": True}, prompt)
+        for key in ("query", "goal", "task_id"):
+            self.assertNotIn(token, options[key])
+            self.assertNotIn("10492", options[key])
+        self.assertIn("CMS768 checkout timeout for customer ID", options["query"])
+        self.assertEqual("", message_query("Call customer #10492"))
+        store = self.manager()
+        sid = store.create(self.automatic(store, prompt=prompt))["id"]
+        completed = self.wait_status(store, sid, "completed")
+        self.assertTrue(completed["brain"]["task"]["id"])
+        stored = self.records_text(self.project / "project-brain") + "".join(
+            path.read_text(encoding="utf-8") for path in self.project.glob("**/*retrieval-manifests/*.json"))
+        self.assertIn("CMS768", stored)
+        self.assertNotIn(token, stored)
+        self.assertNotIn("10492", stored)
+
     def test_pii_only_turn_skips_memory_and_does_not_create_a_task_or_manifest(self):
         store = self.manager()
         for private_only in ("person@example.test", "Customer email: person@example.test", "Call +370 600 12345",
