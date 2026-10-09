@@ -30,8 +30,12 @@ status and prevents subsequent writes. An already launched write may finish.
 Reviewed sessions/native Claude commands keep their flow.
 
 Optional `used_memory` lists up to ten delivered paths whose claims the agent
-checked and used. The notice distinguishes delivered pointers from **agent-reported
-use**; neither proves reading. Telemetry stores counts, not source bodies/path lists.
+checked and used. The notice puts the delivered items beside those the run's own
+tools were seen to open (a Read that returned the file or any tool's copy of a
+skill, a Skill load; *at least* that many when shell commands also ran, *unknown*
+when they were the only way the run read, as for Codex) and beside **agent-reported
+use**; neither proves a claim was used. Telemetry stores counts, not source
+bodies/path lists.
 
 ## Automatic project registration
 

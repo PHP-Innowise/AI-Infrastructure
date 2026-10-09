@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
-from harness import sessions
+from harness import context_usage, sessions
 from harness.knowledge import KnowledgeManager
 from harness.task_context import TaskContext
 from tests.test_harness_knowledge import install_knowledge_fixture, metadata
@@ -59,6 +59,53 @@ print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content
 print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                   "session_id": "native-cursor-fixture", "result": "Checked the rule."}), flush=True)
 '''
+
+
+FAKE_READS = r"""
+import json, os, pathlib, sys
+receipt = pathlib.Path(sys.argv[1])
+receipt.write_text(json.dumps({"cwd": os.getcwd(), "prompt": sys.stdin.read()}))
+draft = {"progress": "The cobalt rule is checked at allocation.", "next_steps": [], "learnings": [],
+         "used_memory": ["specs/authority.md"]}
+text = "Checked the rule.\n\n```memory-draft\n" + json.dumps(draft) + "\n```"
+def emit(event):
+    print(json.dumps(event), flush=True)
+emit({"type": "system", "subtype": "init", "session_id": "native-reads-fixture"})
+# Forty-one other files first: the receipt lists forty opened paths, and the delivered spec comes after them.
+reads = [("app/F%d.php" % number, False) for number in range(41)] + [("specs/authority.md", False)]
+if os.environ.get("FIXTURE_READ_FAILS"):
+    reads = [("specs/authority.md", True)]
+for number, (path, failed) in enumerate(reads):
+    call = "toolu_%d" % number
+    emit({"type": "assistant", "parent_tool_use_id": None, "session_id": "native-reads-fixture", "message": {
+        "id": "msg_" + call, "role": "assistant", "content": [
+            {"type": "tool_use", "id": call, "name": "Read", "input": {"file_path": os.path.join(os.getcwd(), path)}}]}})
+    emit({"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": call, "content": "file text", "is_error": failed}]}})
+emit({"type": "assistant", "parent_tool_use_id": None, "session_id": "native-reads-fixture", "message": {
+    "id": "msg_end", "role": "assistant", "content": [{"type": "text", "text": text}]}})
+emit({"type": "result", "subtype": "success", "is_error": False, "session_id": "native-reads-fixture", "result": text})
+"""
+
+
+FAKE_SHELL = r"""
+import json, os, pathlib, sys
+receipt = pathlib.Path(sys.argv[1])
+receipt.write_text(json.dumps({"cwd": os.getcwd(), "prompt": sys.stdin.read()}))
+draft = {"progress": "The cobalt rule is checked at allocation.", "next_steps": [], "learnings": [],
+         "used_memory": ["specs/authority.md"]}
+text = "Checked the rule.\n\n```memory-draft\n" + json.dumps(draft) + "\n```"
+command = "/bin/bash -lc \"sed -n '1,5p' specs/authority.md\""
+for event in ({"type": "thread.started", "thread_id": "native-shell-fixture"},
+              {"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": command,
+                                                "status": "in_progress"}},
+              {"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": command,
+                                                  "status": "completed", "exit_code": 0,
+                                                  "aggregated_output": "# Cobalt authority"}},
+              {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+              {"type": "turn.completed"}):
+    print(json.dumps(event), flush=True)
+"""
 
 
 class TaskContextTests(unittest.TestCase):
@@ -343,6 +390,17 @@ class TaskContextTests(unittest.TestCase):
         self.assertIn(memory_draft.instruction(), received["prompt"])
         # The project's own read hook stands down for a turn whose capsule is already in the prompt.
         self.assertEqual((brain["task_id"], "1"), (received["task_id"], received["delivered"]))
+        # Usage › Context counts that text, not the JSON it replaced: the parts add up to what was inserted, and the
+        # spec the message retrieved - its item line and the excerpt under it - is rules and docs.
+        inserted = sessions.BRAIN_CONTEXT_HEADER + brain["capsule_text"] + "\n\n"
+        part = store.results.history(sid)["launches"][0]["context"]["ledger"]["capsule"]
+        self.assertEqual((len(inserted), len(inserted)), (part["inserted"], sum(part["kinds"].values())))
+        self.assertEqual(context_usage.capsule_text_parts(inserted), part["kinds"])
+        lines = inserted.split("\n")
+        spec = next(index for index, line in enumerate(lines) if line.startswith("- memory specs/authority.md — "))
+        self.assertTrue(lines[spec + 1].startswith("  "), lines[spec + 1])
+        self.assertEqual(len(lines[spec]) + len(lines[spec + 1]) + 2, part["kinds"]["rules"])
+        self.assertLess(part["inserted"], sum(sessions.capsule_parts(brain["capsule"]).values()))
         # A turn's own retrieval stays in ignored local state, out of the project's history.
         self.assertRegex(brain["capsule"]["manifest"], r"^memory-bank/local/retrieval-manifests/")
         self.assertEqual(before, sorted(governed.glob("*.json")))
@@ -403,9 +461,11 @@ class TaskContextTests(unittest.TestCase):
         self.assertIn("Saved to project memory: the task's progress and next steps; "
                       "finding “Cobalt allocation needs one owner”.", saved["text"])
         self.assertRegex(saved["text"], r"Promoted to the Memory Bank as MEM-")
-        # What the run's own tools read of the delivered memory, beside what it was handed.
-        self.assertIsInstance(saved["opened_delivered_sources"], int)
-        self.assertLessEqual(saved["opened_delivered_sources"], saved["delivered_sources"])
+        # What the run's own tools read of the delivered memory, beside what it was handed. This Codex run ran
+        # no command, so it could read nothing: its zero is observed, not unknown.
+        self.assertEqual((1, 0, "observed"), (saved["delivered_sources"], saved["opened_delivered_sources"],
+                                              saved["opened_observation"]))
+        self.assertIn("Memory use: 1 delivered, 0 opened by the agent. Neither proves the claim was used.", saved["text"])
         chunk = next((self.project / "memory-bank/chunks").glob("MEM-*-*.md"), None)
         self.assertIsNotNone(chunk)
         self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
@@ -422,6 +482,42 @@ class TaskContextTests(unittest.TestCase):
         self.assertTrue(again["ok"], again)
         self.assertIn("1 learning(s) were already saved from this session.", again["text"])
         self.assertEqual(1, len([record for record in store.brain_info(sid)["records"] if record["type"] == "finding"]))
+
+    def test_opened_memory_is_the_runs_successful_reads_or_says_it_cannot_see_them(self):
+        def run(provider, fake, environment=None):
+            # Each run in a project of its own, so one run's saved progress is not the next one's memory.
+            project, number = self.root / f"project-{provider}-{len(self.calls)}", len(self.calls)
+            project.mkdir()
+            install_knowledge_fixture(project)
+            self.fake.write_text(fake)
+            with patch.object(sessions.providers, "discover_providers", return_value=[
+                    {"id": provider, "name": "Offline fixture", "available": True, "executable": str(self.fake)}]), \
+                    patch.dict(os.environ, environment or {}):
+                store = sessions.Sessions(self.root / f"state-{number}", [project], timeout=10)
+                self.managers.append(store)
+                sid = store.create(self.automatic(store, provider=provider))["id"]
+                self.wait_status(store, sid, "completed")
+            receipt = store.results.history(sid)["launches"][0]["receipt"]
+            return self.memory_events(store, sid)[-1], receipt
+
+        # The delivered spec is read after forty-one other files, past the receipt's list of opened paths.
+        saved, receipt = run("claude", FAKE_READS)
+        self.assertEqual((42, 40), (receipt["opened"], len(receipt["opened_paths"])))
+        self.assertNotIn("specs/authority.md", receipt["opened_paths"])
+        self.assertEqual((1, 1, "observed"), (saved["delivered_sources"], saved["opened_delivered_sources"],
+                                              saved["opened_observation"]))
+        self.assertIn("Memory use: 1 delivered, 1 opened by the agent, 1 reported used.", saved["text"])
+        # A read that failed returned nothing, though the run view lists the attempt.
+        saved, receipt = run("claude", FAKE_READS, {"FIXTURE_READ_FAILS": "1"})
+        self.assertEqual((["specs/authority.md"], 0, "observed"), (receipt["opened_paths"], saved["opened_delivered_sources"],
+                                                                   saved["opened_observation"]))
+        # Codex read the spec with sed: its shell is not inspected, so the count is unknown rather than zero.
+        saved, receipt = run("codex", FAKE_SHELL)
+        self.assertEqual((1, None, "unknown"), (saved["delivered_sources"], saved["opened_delivered_sources"],
+                                                saved["opened_observation"]))
+        self.assertEqual({"delivered": 1, "opened": 0, "observation": "unknown", "unseen": ["shell"]}, receipt["memory"])
+        self.assertIn("Memory use: 1 delivered, opening unknown (no read reported; shell commands not inspected), "
+                      "1 reported used.", saved["text"])
 
     def test_memory_that_cannot_be_retrieved_costs_the_turn_its_memory_never_the_turn(self):
         store = self.manager()

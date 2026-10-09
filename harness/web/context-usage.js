@@ -64,7 +64,7 @@ function buildContextUsage(box) {
   const latest = el('button','chip','Latest'); latest.type = 'button'; latest.id = 'context-latest'; latest.hidden = true; latest.addEventListener('click',() => { contextUi.follow = true; renderContextUsage(resultUi.data); });
   const explain = el('button','explain','?'); explain.type = 'button'; explain.setAttribute('aria-expanded','false'); explain.setAttribute('aria-controls','context-help'); explain.setAttribute('aria-label','About context');
   head.append(latest,explain);
-  const help = el('p','knowledge-note','Fill, window, growth and free space are the provider’s own token counts. Memory parts are estimates from characters the Harness sent: capsule JSON at 3.6 characters per token, prose at 4.7. Claude may count 15–35% more. A part that is not zero is drawn at least 2px wide. The CLI compacts before the window is full. Cursor reports no usage.');
+  const help = el('p','knowledge-note','Fill, window, growth and free space are the provider’s own token counts. Memory parts are estimates from characters the Harness sent: the capsule as the prompt carried it at 3.6 characters per token, prose at 4.7. Claude may count 15–35% more. A part that is not zero is drawn at least 2px wide. The CLI compacts before the window is full. Cursor reports no usage.');
   help.id = 'context-help'; help.hidden = true;
   const headline = el('p','context-headline'); headline.id = 'context-headline';
   const lines = el('div','context-lines'); lines.id = 'context-lines';

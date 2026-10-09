@@ -11,6 +11,7 @@ from datetime import datetime
 import json
 import math
 import os
+import re
 import stat
 import time
 
@@ -24,26 +25,44 @@ WRITE_SHARE = .005
 CLI_FILES = {'claude': ('CLAUDE.md', '.claude/CLAUDE.md'), 'codex': ('AGENTS.md',), 'cursor': ('AGENTS.md', 'CLAUDE.md')}
 HOOK_FILES = {'claude': '.claude/settings.json', 'codex': '.codex/hooks.json', 'cursor': '.cursor/hooks.json'}
 CURSOR_RULE = '.cursor/rules/working-memory.mdc'
+# An item of the rendered capsule (render_capsule_lines in memory-bank/scripts/context.py):
+# `- memory|history|skill|policy <path or episode id>[ § section] — title`.
+_ITEM = re.compile(r'- (?:memory|history|skill|policy) (.+?) —(?: |$)')
 
 
 def _count(value):
     return value if type(value) is int and value >= 0 else None
 
 
-def hook_parts(text):
-    """Characters of a rendered capsule by memory kind, from its line shapes.
+def _item_kind(label):
+    path = label.split(' § ', 1)[0].strip()
+    return ('bank' if path.startswith('memory-bank/chunks/') else
+            'brain' if path.startswith(('project-brain/', 'episode ')) else 'rules')
 
-    Item lines are '  path — title'; the bank's chunk paths are Memory bank, Brain
-    paths and local episodes are Project Brain, anything else is rules and docs.
-    The envelope (working:, Last turn:, layer headings, notes) is Project Brain.
+
+def capsule_text_parts(text):
+    """Characters of a rendered capsule by memory kind: what a hook printed or what the Harness inserted.
+
+    An item line is `- memory|history|skill|policy <path> — title`, and the indented
+    excerpt under it belongs to the same item; a runtime from before excerpts printed
+    items as `  <path> — title`. The bank's chunks are Memory bank, Brain records,
+    handoffs and local episodes are Project Brain, anything else (skills, policy,
+    specs, docs) is rules and docs. Everything around the items - the working state,
+    the memory heading, warnings, a header - is Project Brain, so the parts add up
+    to the text's length.
     """
     parts = {'brain': 0, 'bank': 0, 'rules': 0}
+    item = None
     for line in text.splitlines(keepends=True):
-        kind = 'brain'
-        if line.startswith('  ') and ' — ' in line:
-            path = line.strip().split(' — ', 1)[0]
-            kind = ('bank' if path.startswith('memory-bank/chunks/') else
-                    'brain' if path.startswith(('project-brain/', 'episode ')) else 'rules')
+        match = _ITEM.match(line)
+        if match:
+            item = kind = _item_kind(match.group(1))
+        elif item is not None and line.startswith('  '):
+            kind = item
+        elif line.startswith('  ') and ' — ' in line:
+            item, kind = None, _item_kind(line.strip().split(' — ', 1)[0])
+        else:
+            item, kind = None, 'brain'
         parts[kind] += len(line)
     return parts
 
@@ -104,7 +123,7 @@ class ContextTracker:
                 return False
             if kind == 'system' and event.get('subtype') == 'hook_response' and event.get('hook_event') in ('UserPromptSubmit', 'SessionStart'):
                 if isinstance(event.get('stdout'), str) and event['stdout']:
-                    found = hook_parts(event['stdout'])
+                    found = capsule_text_parts(event['stdout'])
                     self.hooks = {name: (self.hooks or {}).get(name, 0) + value for name, value in found.items()}
                     return True
                 return False
