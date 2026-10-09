@@ -46,11 +46,14 @@ import shlex
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+
+# Beside this file; its callers - the command line, the Harness, the tests -
+# all have this directory on sys.path.
+import portable_fs as fs
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -63,11 +66,21 @@ EDITIONS = {
 TOOLS = ("claude", "codex", "cursor")
 STATE_MARKER = "accelerator-attach.json"
 LAUNCH_DIRECTORY = "launch"
+CLAUDE_SYSTEM_PROMPT = "claude-system-prompt.md"
 # The state is a project's memory kept outside the project, so it is its
 # owner's alone whatever the umask: directories 0700, files 0600 (POSIX). The
 # runtime keeps what it writes there the same way (secure_attached_state in
 # the edition's memory-bank/scripts/brain_runtime.py).
 PRIVATE_DIRECTORY = 0o700
+# Below its base the state is reached one directory at a time, each opened
+# inside the one before it and never through a link (portable_fs: openat with
+# O_NOFOLLOW on POSIX, NtCreateFile relative to a handle on Windows).
+_DIRECTORY_FLAGS = os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW
+_READ_FLAGS = os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK | getattr(os, "O_BINARY", 0)
+_NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW | getattr(os, "O_BINARY", 0)
+# Windows reports symbolic links and junctions as reparse points with these
+# tags (IO_REPARSE_TAG_SYMLINK, IO_REPARSE_TAG_MOUNT_POINT).
+_LINK_REPARSE_TAGS = (0xA000000C, 0xA0000003)
 # Codex hook events the edition wires, in .codex/hooks.json spelling.
 CODEX_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
 SKILL_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
@@ -243,37 +256,208 @@ def _private_directory(path: Path) -> None:
             os.chmod(directory, PRIVATE_DIRECTORY)
 
 
-def _owner_only(path: Path, *, tree: bool = False) -> None:
-    """Take group and other access away from `path` - and with `tree`, from
-    everything under it; best effort. Never through a link and never on
-    another user's file; Windows permissions are not mode bits."""
+def _is_link(status: os.stat_result) -> bool:
+    return stat.S_ISLNK(status.st_mode) or getattr(status, "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
+
+
+def _refusal(folder: int, name: str, shown: Path, error: Exception, kind: str) -> AttachError:
+    """Why `name` inside `folder` did not open as the state's `kind`, "directory" or "file"."""
+    try:
+        status = fs.stat(name, dir_fd=folder, follow_symlinks=False)
+    except (OSError, ValueError):
+        try:
+            # Only to say what stands there: Windows' rooted stat refuses a
+            # reparse point outright. Nothing is opened through it.
+            status = os.lstat(shown)
+        except OSError:
+            status = None
+    if status is not None and _is_link(status):
+        return AttachError(f"{shown} is a symbolic link; the accelerator keeps no state through one")
+    wanted = stat.S_ISDIR if kind == "directory" else stat.S_ISREG
+    if status is not None and not wanted(status.st_mode):
+        return AttachError(f"{shown} is not a {kind}")
+    return AttachError(f"{shown} cannot be opened: {getattr(error, 'strerror', None) or error}")
+
+
+def _open_directory(folder: int, name: str, shown: Path, *, create: bool) -> Optional[int]:
+    """A descriptor of the directory `name` inside `folder`, never through a link.
+
+    With `create` a missing one is made owner-only first; mkdir never follows
+    a link standing at the name it makes. None when it is missing and
+    `create` is false. Raises AttachError for a link or anything but a
+    directory.
+    """
+    try:
+        return fs.open(name, _DIRECTORY_FLAGS, dir_fd=folder)
+    except FileNotFoundError:
+        if not create:
+            return None
+    except (OSError, ValueError) as error:
+        raise _refusal(folder, name, shown, error, "directory") from None
+    made = True
+    try:
+        fs.mkdir(name, PRIVATE_DIRECTORY, dir_fd=folder)
+    except FileExistsError:
+        made = False  # a concurrent launch made it
+    except (OSError, ValueError) as error:
+        raise AttachError(f"{shown} cannot be created: {getattr(error, 'strerror', None) or error}") from None
+    try:
+        directory = fs.open(name, _DIRECTORY_FLAGS, dir_fd=folder)
+    except (OSError, ValueError) as error:
+        raise _refusal(folder, name, shown, error, "directory") from None
+    if made and os.name != "nt":
+        try:
+            # mkdir's mode passes through the umask; this does not.
+            os.fchmod(directory, PRIVATE_DIRECTORY)
+        except BaseException:
+            fs.close(directory)
+            raise
+    return directory
+
+
+def _open_base(base: Path) -> Optional[int]:
+    """The state base as named, or None when it is missing."""
+    try:
+        if os.name == "nt":
+            # Windows walks even the base from the drive root and refuses a
+            # reparse point anywhere on it, as the Harness does for its own
+            # state directory (portable_fs, windows_security).
+            return fs.open_target_directory(base)
+        # The person's own setting, so a link in it is theirs to make.
+        return os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        raise AttachError(
+            f"The state base {base} cannot be opened: {getattr(error, 'strerror', None) or error}"
+        ) from None
+
+
+def _open_state(state: Path, *, create: bool) -> Optional[int]:
+    """A descriptor of the state directory, reached without following a link below its base.
+
+    The base - the Harness's state directory or --state-base - is the
+    person's own setting and is taken as named. The two directories below it
+    are the accelerator's (`attached` and the project's own, see
+    state_directory): each is opened inside the one before it, never through
+    a link, and with `create` made owner-only where missing. A link there -
+    `attached/<project>` pointing into the project took the launcher's
+    record and Claude's system prompt into it - is refused (AttachError).
+    None when something is missing and `create` is false.
+    """
+    base = state.parent.parent
+    if create:
+        _private_directory(base)
+    folder = _open_base(base)
+    if folder is None:
+        if create:
+            raise AttachError(f"The state base {base} could not be created")
+        return None
+    for shown in (state.parent, state):
+        try:
+            child = _open_directory(folder, shown.name, shown, create=create)
+        finally:
+            fs.close(folder)
+        if child is None:
+            return None
+        folder = child
+    return folder
+
+
+def _owner_only_descriptor(descriptor: int) -> None:
+    """Take group and other access away from an open directory of this user; best effort."""
     if os.name == "nt":
         return
-    entries = [path]
-    if tree and path.is_dir() and not path.is_symlink():
-        # os.walk does not descend through a link to a directory.
-        entries += [Path(folder) / name for folder, folders, files in os.walk(path) for name in folders + files]
-    for entry in entries:
-        try:
-            status = entry.lstat()
-            if not stat.S_ISLNK(status.st_mode) and status.st_uid == os.geteuid() and status.st_mode & 0o077:
-                os.chmod(entry, stat.S_IMODE(status.st_mode) & 0o700)
-        except OSError:
-            continue
-
-
-def _write_private(path: Path, text: str) -> None:
-    """Replace `path` whole with an owner-only file: written beside it (mkstemp
-    makes it 0600) and renamed into place, so no reader sees a part."""
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.replace(temporary, path)
+        status = os.fstat(descriptor)
+        if status.st_uid == os.geteuid() and status.st_mode & 0o077:
+            os.fchmod(descriptor, stat.S_IMODE(status.st_mode) & 0o700)
+    except OSError:
+        pass
+
+
+def _owner_only_entry(folder: int, name: str) -> None:
+    """The same for the entry `name` inside `folder`: never a link, never
+    another user's file. `folder` is the state's and owner-only by now, so
+    nobody else can put a link in the entry's place meanwhile."""
+    if os.name == "nt":
+        return
+    try:
+        status = os.stat(name, dir_fd=folder, follow_symlinks=False)
+        if not stat.S_ISLNK(status.st_mode) and status.st_uid == os.geteuid() and status.st_mode & 0o077:
+            os.chmod(name, stat.S_IMODE(status.st_mode) & 0o700, dir_fd=folder)
+    except OSError:
+        pass
+
+
+def _owner_only_tree(directory: int) -> None:
+    """The same for an open directory and everything under it, top down, so a
+    directory is closed to others before its own entries are looked at."""
+    if os.name == "nt":
+        return
+    _owner_only_descriptor(directory)
+    try:
+        # fwalk opens each directory inside the one before it and does not
+        # descend through a link.
+        for _, folders, files, inside in os.fwalk(".", dir_fd=directory):
+            for name in folders + files:
+                _owner_only_entry(inside, name)
+    except OSError:
+        pass
+
+
+def _read_at(folder: int, name: str, shown: Path) -> Optional[bytes]:
+    """The bytes of the file `name` inside `folder`, never through a link; None when missing."""
+    try:
+        descriptor = fs.open(name, _READ_FLAGS, dir_fd=folder)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        raise _refusal(folder, name, shown, error, "file") from None
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(fs.fstat(handle.fileno()).st_mode):
+            raise AttachError(f"{shown} is not a file")
+        return handle.read()
+
+
+def _write_private_at(folder: int, name: str, data: bytes) -> None:
+    """Replace `name` inside `folder` whole with an owner-only (0600) file:
+    written beside it and renamed into place through the folder's
+    descriptor, so no reader sees a part and neither name is followed."""
+    temporary = f".{name}.{os.urandom(6).hex()}"
+    descriptor = fs.open(temporary, _NEW_FILE_FLAGS, 0o600, dir_fd=folder)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        fs.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
     except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(temporary)
+        with contextlib.suppress(OSError, ValueError):
+            fs.unlink(temporary, dir_fd=folder)
         raise
+
+
+def _prepare(folder: int, edition: str, project: Path, state: Path) -> None:
+    """prepare_state's work inside the state directory `folder` holds."""
+    _owner_only_descriptor(folder)
+    launch = _open_directory(folder, LAUNCH_DIRECTORY, state / LAUNCH_DIRECTORY, create=False)
+    if launch is not None:
+        try:
+            _owner_only_tree(launch)
+        finally:
+            fs.close(launch)
+    record = {"project": str(project), "edition": edition}
+    current: Any = {}
+    found = _read_at(folder, STATE_MARKER, state / STATE_MARKER)
+    if found is not None:
+        try:
+            current = json.loads(found.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            current = {}
+    if not isinstance(current, dict) or {key: current.get(key) for key in record} != record:
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_private_at(folder, STATE_MARKER, (json.dumps({**record, "since": since}, indent=2) + "\n").encode("utf-8"))
+    else:
+        _owner_only_entry(folder, STATE_MARKER)
 
 
 def prepare_state(edition: str, project: Path, state: Path) -> None:
@@ -285,19 +469,20 @@ def prepare_state(edition: str, project: Path, state: Path) -> None:
     files, never through a link; the runtime tightens its layout itself - and
     nothing above the state directory is changed.
 
+    Nothing here goes through a link: below its base the state is reached
+    one directory at a time without following one, and the record is read
+    and written through the state directory's descriptor (_open_state). A
+    link in the state's place, at `launch` or at the record is refused with
+    AttachError, and nothing is written.
+
     The runtime fills in the Project Brain and Memory Bank layout itself on
     first use; this only records the project, for a person looking at it.
     """
-    _private_directory(state)
-    _owner_only(state)
-    _owner_only(state / LAUNCH_DIRECTORY, tree=True)
-    marker = state / STATE_MARKER
-    record = {"project": str(project), "edition": edition}
-    current = _read_json(marker)
-    if {key: current.get(key) for key in record} != record:
-        _write_private(marker, json.dumps({**record, "since": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, indent=2) + "\n")
-    else:
-        _owner_only(marker)
+    folder = _open_state(state, create=True)
+    try:
+        _prepare(folder, edition, project, state)
+    finally:
+        fs.close(folder)
 
 
 def preamble(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> str:
@@ -393,13 +578,19 @@ def _claude_settings(edition: str, state: Path, repository: Path) -> dict[str, A
 
 def claude_overlay(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> Overlay:
     home = edition_directory(edition, repository)
-    prepare_state(edition, project, state)
-    launch = state / LAUNCH_DIRECTORY
-    _private_directory(launch)
-    system_prompt = launch / "claude-system-prompt.md"
-    content = preamble(edition, project, state, repository) + "\n" + policy(edition, repository)
-    if not system_prompt.is_file() or system_prompt.read_text(encoding="utf-8") != content:
-        _write_private(system_prompt, content)
+    system_prompt = state / LAUNCH_DIRECTORY / CLAUDE_SYSTEM_PROMPT
+    content = (preamble(edition, project, state, repository) + "\n" + policy(edition, repository)).encode("utf-8")
+    folder = _open_state(state, create=True)
+    try:
+        _prepare(folder, edition, project, state)
+        launch = _open_directory(folder, LAUNCH_DIRECTORY, state / LAUNCH_DIRECTORY, create=True)
+        try:
+            if _read_at(launch, CLAUDE_SYSTEM_PROMPT, system_prompt) != content:
+                _write_private_at(launch, CLAUDE_SYSTEM_PROMPT, content)
+        finally:
+            fs.close(launch)
+    finally:
+        fs.close(folder)
     return Overlay(
         arguments=["--add-dir", str(home), "--append-system-prompt-file", str(system_prompt)],
         settings=_claude_settings(edition, state, repository),
@@ -750,6 +941,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         edition = _choose_edition(project, options.edition)
         state = state_directory(project, options.state_base)
         if options.command == "env":
+            # Handed to another launcher, a state reached through a link is
+            # refused here as `run` refuses it; nothing is created.
+            folder = _open_state(state, create=False)
+            if folder is not None:
+                fs.close(folder)
             for key, value in environment(edition, project, state).items():
                 print(f"export {key}={shlex.quote(value)}")
             return 0

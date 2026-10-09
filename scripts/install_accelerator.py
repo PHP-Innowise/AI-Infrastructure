@@ -916,11 +916,18 @@ def source_commit(root: Path) -> str | None:
 # a link swapped in afterwards is never followed; a folder swapped while it
 # was written is found before the rename, and the file is left alone.
 #
-# Native Windows has none of these calls in `os.supports_dir_fd`. There each
-# component is still looked at with lstat before the path is used, which
-# keeps out a link that stands there before the sync starts but leaves the
-# window between the look and the write open to a process that can write to
-# the project.
+# Native Windows has none of these calls in `os.supports_dir_fd`. It used to
+# look at each component with lstat and then write by the path, and the same
+# swap sent `.cursor/mcp.json` outside the project there. The walk now takes
+# the same steps by NT handles (_HandleCalls): each component opened relative
+# to the handle of the folder before it, never through a reparse point, and
+# the temporary file created in and renamed within the last folder's handle.
+# Handles that do not share delete keep a folder from being renamed, but not
+# from being turned into a junction in place while it is empty (that takes
+# only FILE_WRITE_ATTRIBUTES, which no share mode denies): a write by path
+# under held handles could still follow one, a write relative to a handle
+# cannot. Where neither descriptors nor handles are available nothing is
+# written (NO_SAFE_WRITE); a read there still looks at each component first.
 #
 # Windows reports symbolic links and junctions as reparse points; these are
 # the tags of the two that name another path (IO_REPARSE_TAG_SYMLINK,
@@ -952,6 +959,376 @@ _TEMPORARY_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_BINARY", 0)
 )
+# Why a write is refused where neither descriptors nor handles can walk.
+NO_SAFE_WRITE = (
+    "not written: this platform cannot open a folder relative to another, "
+    "so a folder swapped for a link meanwhile would take the write"
+)
+
+
+class _DescriptorCalls:
+    """The calls a walk makes, by folder descriptors (POSIX).
+
+    Each names one component relative to an open folder and never follows a
+    link standing at it. `os` is looked up at every call, so a test that
+    patches os.open sees each open the walk makes.
+    """
+
+    @staticmethod
+    def open_project(target: Path) -> int:
+        return os.open(os.fspath(target), _PROJECT_FLAGS)
+
+    @staticmethod
+    def open_folder(name: str, folder: int) -> int:
+        return os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+
+    @staticmethod
+    def make_folder(name: str, folder: int) -> None:
+        os.mkdir(name, dir_fd=folder)
+
+    @staticmethod
+    def lstat(name: str, folder: int) -> os.stat_result:
+        return os.stat(name, dir_fd=folder, follow_symlinks=False)
+
+    @staticmethod
+    def open_file(name: str, folder: int) -> int:
+        return os.open(name, _READ_FLAGS, dir_fd=folder)
+
+    @staticmethod
+    def create_file(name: str, mode: int, folder: int) -> int:
+        return os.open(name, _TEMPORARY_FLAGS, mode, dir_fd=folder)
+
+    @staticmethod
+    def fstat(descriptor: int) -> os.stat_result:
+        return os.fstat(descriptor)
+
+    @staticmethod
+    def chmod(descriptor: int, mode: int) -> None:
+        os.fchmod(descriptor, mode)
+
+    @staticmethod
+    def set_times(descriptor: int, times: tuple[int, int]) -> None:
+        os.utime(descriptor, ns=times)
+
+    @staticmethod
+    def rename(name: str, new: str, folder: int) -> None:
+        os.replace(name, new, src_dir_fd=folder, dst_dir_fd=folder)
+
+    @staticmethod
+    def unlink(name: str, folder: int) -> None:
+        os.unlink(name, dir_fd=folder)
+
+    @staticmethod
+    def close(descriptor: int) -> None:
+        os.close(descriptor)
+
+
+class _HandleCalls:
+    """The same calls on native Windows, by NT handles.
+
+    A component is opened with NtCreateFile relative to the handle of the
+    folder before it - a RootDirectory and a one-component name - and with
+    FILE_OPEN_REPARSE_POINT, so a symbolic link or junction is opened as
+    itself and refused. The temporary file is created relative to the last
+    folder's handle and renamed within it (FileRenameInformation with that
+    handle as its RootDirectory). Handles share read and write but not
+    delete. scripts/portable_fs.py, which the Harness uses, works the same
+    way; this is a copy because the Harness runs this file alone, from a
+    staging folder that holds no other module. The descriptors returned are
+    the C runtime's, so os.write, os.fsync and os.close work on them.
+    """
+
+    FILE_READ_DATA = FILE_LIST_DIRECTORY = 0x0001
+    FILE_TRAVERSE = 0x0020
+    FILE_READ_ATTRIBUTES = 0x0080
+    DELETE = 0x00010000
+    SYNCHRONIZE = 0x00100000
+    GENERIC_WRITE = 0x40000000
+    FILE_SHARE_READ, FILE_SHARE_WRITE = 0x1, 0x2
+    FILE_OPEN, FILE_CREATE = 1, 2
+    FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE = 0x1, 0x40
+    FILE_SYNCHRONOUS_IO_NONALERT, FILE_OPEN_REPARSE_POINT = 0x20, 0x00200000
+    FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_DIRECTORY = 0x1, 0x10
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT = 0x80, 0x400
+    OBJ_CASE_INSENSITIVE = 0x40
+    FILE_RENAME_INFORMATION, FILE_DISPOSITION_INFORMATION = 10, 13
+    FILE_ATTRIBUTE_TAG_INFO = 9
+    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS = 3, 0x02000000
+    # A reparse point that names another path: symbolic links, junctions.
+    NAME_SURROGATE = 0x20000000
+    # 100-nanosecond FILETIME intervals from 1601 to the Unix epoch.
+    FILETIME_EPOCH = 116444736000000000
+    FOLDER_ACCESS = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+
+    def __init__(self) -> None:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class UnicodeString(ctypes.Structure):
+            _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT),
+                        ("Buffer", wintypes.LPWSTR)]
+
+        class ObjectAttributes(ctypes.Structure):
+            _fields_ = [("Length", wintypes.ULONG), ("RootDirectory", wintypes.HANDLE),
+                        ("ObjectName", ctypes.POINTER(UnicodeString)), ("Attributes", wintypes.ULONG),
+                        ("SecurityDescriptor", wintypes.LPVOID),
+                        ("SecurityQualityOfService", wintypes.LPVOID)]
+
+        class IoStatusBlock(ctypes.Structure):
+            _fields_ = [("Status", ctypes.c_long), ("Information", ctypes.c_size_t)]
+
+        class AttributeTag(ctypes.Structure):
+            _fields_ = [("FileAttributes", wintypes.DWORD), ("ReparseTag", wintypes.DWORD)]
+
+        class HandleInformation(ctypes.Structure):
+            _fields_ = [("dwFileAttributes", wintypes.DWORD), ("ftCreationTime", wintypes.FILETIME),
+                        ("ftLastAccessTime", wintypes.FILETIME), ("ftLastWriteTime", wintypes.FILETIME),
+                        ("dwVolumeSerialNumber", wintypes.DWORD), ("nFileSizeHigh", wintypes.DWORD),
+                        ("nFileSizeLow", wintypes.DWORD), ("nNumberOfLinks", wintypes.DWORD),
+                        ("nFileIndexHigh", wintypes.DWORD), ("nFileIndexLow", wintypes.DWORD)]
+
+        ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = ntdll.NtCreateFile
+        create.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, ctypes.POINTER(ObjectAttributes),
+                           ctypes.POINTER(IoStatusBlock), wintypes.LPVOID, wintypes.ULONG, wintypes.ULONG,
+                           wintypes.ULONG, wintypes.ULONG, wintypes.LPVOID, wintypes.ULONG]
+        create.restype = ctypes.c_long
+        set_information = ntdll.NtSetInformationFile
+        set_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(IoStatusBlock), wintypes.LPVOID,
+                                    wintypes.ULONG, wintypes.ULONG]
+        set_information.restype = ctypes.c_long
+        status_error = ntdll.RtlNtStatusToDosError
+        status_error.argtypes = [ctypes.c_long]
+        status_error.restype = wintypes.ULONG
+        open_path = kernel32.CreateFileW
+        open_path.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                              wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        open_path.restype = wintypes.HANDLE
+        attribute_tag = kernel32.GetFileInformationByHandleEx
+        attribute_tag.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        attribute_tag.restype = wintypes.BOOL
+        information = kernel32.GetFileInformationByHandle
+        information.argtypes = [wintypes.HANDLE, ctypes.POINTER(HandleInformation)]
+        information.restype = wintypes.BOOL
+        set_time = kernel32.SetFileTime
+        set_time.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+                             ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME)]
+        set_time.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        self._ctypes, self._msvcrt, self._wintypes = ctypes, msvcrt, wintypes
+        self._structures = (UnicodeString, ObjectAttributes, IoStatusBlock, AttributeTag, HandleInformation)
+        self._create, self._set_information, self._status_error = create, set_information, status_error
+        self._open_path, self._attribute_tag, self._information = open_path, attribute_tag, information
+        self._set_time, self._close_handle = set_time, close_handle
+        self._invalid = ctypes.c_void_p(-1).value
+
+    # -- the handles behind the C runtime's descriptors ----------------------
+
+    def _handle(self, descriptor: int):
+        return self._wintypes.HANDLE(self._msvcrt.get_osfhandle(descriptor))
+
+    def _last_error(self) -> OSError:
+        return self._ctypes.WinError(self._ctypes.get_last_error())
+
+    def _attributes(self, handle) -> tuple[int, int]:
+        """The attributes and the reparse tag of an open handle."""
+        tag = self._structures[3]()
+        if not self._attribute_tag(handle, self.FILE_ATTRIBUTE_TAG_INFO, self._ctypes.byref(tag),
+                                   self._ctypes.sizeof(tag)):
+            raise self._last_error()
+        return tag.FileAttributes, tag.ReparseTag
+
+    @staticmethod
+    def _component(name: str) -> str:
+        if (not name or name in (".", "..") or any(character in name for character in "/\\:")
+                or name[-1] in " ." or any(ord(character) < 32 for character in name)):
+            raise OSError(errno.EINVAL, "not a single file name", name)
+        return name
+
+    def _open(self, name: str, folder: int, access: int, disposition: int, options: int,
+              crt_flags: int, *, reparse: bool = False) -> int:
+        """A C runtime descriptor of `name` inside `folder`, never through a reparse point.
+
+        `reparse` lets a reparse point be opened as itself (to describe or
+        delete it); otherwise one is refused with ELOOP.
+        """
+        ctypes, wintypes = self._ctypes, self._wintypes
+        unicode_string, object_attributes, io_status_block = self._structures[:3]
+        text = self._component(name)
+        size = len(text.encode("utf-16-le"))
+        if size > 0xFFFF:
+            raise OSError(errno.ENAMETOOLONG, "file name too long", text)
+        buffer = ctypes.create_unicode_buffer(text)
+        unicode = unicode_string(size, size, ctypes.cast(buffer, wintypes.LPWSTR))
+        attributes = object_attributes(ctypes.sizeof(object_attributes), self._handle(folder),
+                                       ctypes.pointer(unicode), self.OBJ_CASE_INSENSITIVE, None, None)
+        handle, status = wintypes.HANDLE(), io_status_block()
+        result = self._create(
+            ctypes.byref(handle), access, ctypes.byref(attributes), ctypes.byref(status), None,
+            self.FILE_ATTRIBUTE_NORMAL, self.FILE_SHARE_READ | self.FILE_SHARE_WRITE, disposition,
+            options | self.FILE_OPEN_REPARSE_POINT | self.FILE_SYNCHRONOUS_IO_NONALERT, None, 0,
+        )
+        if result < 0:
+            raise ctypes.WinError(self._status_error(result) or errno.EIO)
+        try:
+            if not reparse and self._attributes(handle)[0] & self.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise OSError(errno.ELOOP, "a reparse point is not followed", text)
+            return self._msvcrt.open_osfhandle(handle.value, crt_flags)
+        except BaseException:
+            self._close_handle(handle)
+            raise
+
+    def _set(self, descriptor: int, buffer, length: int, information_class: int) -> None:
+        status = self._structures[2]()
+        result = self._set_information(self._handle(descriptor), self._ctypes.byref(status), buffer,
+                                       length, information_class)
+        if result < 0:
+            raise self._ctypes.WinError(self._status_error(result) or errno.EIO)
+
+    # -- the calls ------------------------------------------------------------
+
+    def open_project(self, target: Path) -> int:
+        """The project as its caller names it, as os.open does on POSIX."""
+        handle = self._open_path(os.fspath(target), self.FOLDER_ACCESS,
+                                 self.FILE_SHARE_READ | self.FILE_SHARE_WRITE, None,
+                                 self.OPEN_EXISTING, self.FILE_FLAG_BACKUP_SEMANTICS, None)
+        if handle in (None, self._invalid):
+            raise self._last_error()
+        try:
+            if not self._attributes(handle)[0] & self.FILE_ATTRIBUTE_DIRECTORY:
+                raise NotADirectoryError(errno.ENOTDIR, "not a folder", os.fspath(target))
+            return self._msvcrt.open_osfhandle(handle, os.O_BINARY)
+        except BaseException:
+            self._close_handle(handle)
+            raise
+
+    def open_folder(self, name: str, folder: int) -> int:
+        return self._open(name, folder, self.FOLDER_ACCESS, self.FILE_OPEN, self.FILE_DIRECTORY_FILE,
+                          os.O_BINARY)
+
+    def make_folder(self, name: str, folder: int) -> None:
+        os.close(self._open(name, folder, self.FOLDER_ACCESS, self.FILE_CREATE, self.FILE_DIRECTORY_FILE,
+                            os.O_BINARY))
+
+    def lstat(self, name: str, folder: int) -> os.stat_result:
+        descriptor = self._open(name, folder, self.FILE_READ_ATTRIBUTES | self.SYNCHRONIZE, self.FILE_OPEN,
+                                0, os.O_BINARY, reparse=True)
+        try:
+            return self.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def open_file(self, name: str, folder: int) -> int:
+        return self._open(name, folder, self.FILE_READ_DATA | self.FILE_READ_ATTRIBUTES | self.SYNCHRONIZE,
+                          self.FILE_OPEN, self.FILE_NON_DIRECTORY_FILE, os.O_RDONLY | os.O_BINARY)
+
+    def create_file(self, name: str, mode: int, folder: int) -> int:
+        # GENERIC_WRITE covers the data, the flush and the times.
+        return self._open(name, folder, self.GENERIC_WRITE | self.FILE_READ_ATTRIBUTES, self.FILE_CREATE,
+                          self.FILE_NON_DIRECTORY_FILE, os.O_WRONLY | os.O_BINARY)
+
+    def fstat(self, descriptor: int) -> os.stat_result:
+        """Status from the handle: a link (S_IFLNK) for a name-surrogate reparse point."""
+        handle = self._handle(descriptor)
+        attributes, tag = self._attributes(handle)
+        data = self._structures[4]()
+        if not self._information(handle, self._ctypes.byref(data)):
+            raise self._last_error()
+        reparse = bool(attributes & self.FILE_ATTRIBUTE_REPARSE_POINT)
+        if reparse and tag & self.NAME_SURROGATE:
+            mode = stat.S_IFLNK | 0o777
+        elif attributes & self.FILE_ATTRIBUTE_DIRECTORY:
+            mode = stat.S_IFDIR | 0o777
+        else:
+            mode = stat.S_IFREG | (0o444 if attributes & self.FILE_ATTRIBUTE_READONLY else 0o666)
+
+        def nanoseconds(filetime) -> int:
+            value = (filetime.dwHighDateTime << 32) | filetime.dwLowDateTime
+            return max(0, (value - self.FILETIME_EPOCH) * 100)
+
+        atime, mtime, ctime = (nanoseconds(data.ftLastAccessTime), nanoseconds(data.ftLastWriteTime),
+                               nanoseconds(data.ftCreationTime))
+        return os.stat_result(
+            (mode, (data.nFileIndexHigh << 32) | data.nFileIndexLow, data.dwVolumeSerialNumber,
+             data.nNumberOfLinks, 0, 0, (data.nFileSizeHigh << 32) | data.nFileSizeLow,
+             atime // 1_000_000_000, mtime // 1_000_000_000, ctime // 1_000_000_000),
+            {"st_atime_ns": atime, "st_mtime_ns": mtime, "st_ctime_ns": ctime,
+             "st_reparse_tag": tag if reparse else 0},
+        )
+
+    @staticmethod
+    def chmod(descriptor: int, mode: int) -> None:
+        """Windows has no POSIX mode bits; a new file takes its folder's ACL."""
+
+    def set_times(self, descriptor: int, times: tuple[int, int]) -> None:
+        stamps = []
+        for value in times:
+            ticks = max(0, value // 100 + self.FILETIME_EPOCH)
+            stamps.append(self._wintypes.FILETIME(ticks & 0xFFFFFFFF, ticks >> 32))
+        accessed, modified = stamps
+        if not self._set_time(self._handle(descriptor), None, self._ctypes.byref(accessed),
+                              self._ctypes.byref(modified)):
+            raise self._last_error()
+
+    def rename(self, name: str, new: str, folder: int) -> None:
+        ctypes = self._ctypes
+        descriptor = self._open(name, folder, self.DELETE | self.SYNCHRONIZE | self.FILE_READ_ATTRIBUTES,
+                                self.FILE_OPEN, self.FILE_NON_DIRECTORY_FILE, os.O_BINARY)
+        try:
+            # FILE_RENAME_INFORMATION: ReplaceIfExists, padded to a handle;
+            # RootDirectory; FileNameLength; FileName.
+            encoded = self._component(new).encode("utf-16-le")
+            root = ctypes.sizeof(self._wintypes.HANDLE)
+            length = root + ctypes.sizeof(self._wintypes.HANDLE)
+            offset = length + ctypes.sizeof(self._wintypes.ULONG)
+            body = ctypes.create_string_buffer(offset + len(encoded))
+            body[0] = b"\x01"
+            ctypes.c_void_p.from_address(ctypes.addressof(body) + root).value = self._msvcrt.get_osfhandle(folder)
+            ctypes.c_ulong.from_address(ctypes.addressof(body) + length).value = len(encoded)
+            ctypes.memmove(ctypes.addressof(body) + offset, encoded, len(encoded))
+            self._set(descriptor, body, len(body), self.FILE_RENAME_INFORMATION)
+        finally:
+            os.close(descriptor)
+
+    def unlink(self, name: str, folder: int) -> None:
+        descriptor = self._open(name, folder, self.DELETE | self.SYNCHRONIZE | self.FILE_READ_ATTRIBUTES,
+                                self.FILE_OPEN, self.FILE_NON_DIRECTORY_FILE, os.O_BINARY, reparse=True)
+        try:
+            deleting = self._ctypes.c_ubyte(1)
+            self._set(descriptor, self._ctypes.byref(deleting), 1, self.FILE_DISPOSITION_INFORMATION)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def close(descriptor: int) -> None:
+        os.close(descriptor)
+
+
+def _handle_calls() -> _HandleCalls | None:
+    """The NT handle calls on native Windows; None anywhere else, or where they cannot load."""
+    if os.name != "nt":
+        return None
+    try:
+        return _HandleCalls()
+    except (ImportError, OSError, AttributeError):
+        return None
+
+
+_DESCRIPTOR_CALLS = _DescriptorCalls()
+_HANDLE_CALLS = _handle_calls()
+
+
+def _relative_calls():
+    """The calls a walk makes on this platform, or None where it has none to make.
+
+    Read at each walk, so a test can take the descriptors away
+    (`_DESCRIPTOR_WALK`) and put other calls in the handles' place.
+    """
+    return _DESCRIPTOR_CALLS if _DESCRIPTOR_WALK else _HANDLE_CALLS
 
 
 class UnsafePathError(InventoryError):
@@ -1078,19 +1455,19 @@ def _write_all(descriptor: int, data: bytes) -> None:
         view = view[os.write(descriptor, view):]
 
 
-def _read_stream(descriptor: int) -> tuple[bytes, os.stat_result]:
+def _read_stream(calls, descriptor: int) -> tuple[bytes, os.stat_result]:
     """The bytes and status of an opened regular file; closes it."""
     with os.fdopen(descriptor, "rb") as handle:
-        info = os.fstat(handle.fileno())
+        info = calls.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise UnsafePathError("not a regular file")
         return handle.read(), info
 
 
-def _entry_problem(folder: int, name: str, shown: str, error: OSError) -> str:
+def _entry_problem(calls, folder: int, name: str, shown: str, error: OSError) -> str:
     """Why the entry `name` of `folder` did not open as a folder."""
     try:
-        info = os.stat(name, dir_fd=folder, follow_symlinks=False)
+        info = calls.lstat(name, folder)
     except OSError:
         info = None
     # Linux says ENOTDIR for a link opened with O_DIRECTORY|O_NOFOLLOW, other
@@ -1099,7 +1476,7 @@ def _entry_problem(folder: int, name: str, shown: str, error: OSError) -> str:
     return problem or f"{shown} cannot be inspected: {error.strerror or error}"
 
 
-def _open_child(folder: int, name: str, shown: str, create: bool) -> int | None:
+def _open_child(calls, folder: int, name: str, shown: str, create: bool) -> int | None:
     """A descriptor of the folder `name` inside `folder`, never through a link.
 
     With `create` a missing folder is made first; mkdirat never follows a link
@@ -1107,23 +1484,23 @@ def _open_child(folder: int, name: str, shown: str, create: bool) -> int | None:
     other. None when it is missing and `create` is false.
     """
     try:
-        return os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+        return calls.open_folder(name, folder)
     except FileNotFoundError:
         if not create:
             return None
     except OSError as error:
-        raise UnsafePathError(_entry_problem(folder, name, shown, error)) from error
+        raise UnsafePathError(_entry_problem(calls, folder, name, shown, error)) from error
     try:
-        os.mkdir(name, dir_fd=folder)
+        calls.make_folder(name, folder)
     except FileExistsError:
         pass
     try:
-        return os.open(name, _FOLDER_FLAGS, dir_fd=folder)
+        return calls.open_folder(name, folder)
     except OSError as error:
-        raise UnsafePathError(_entry_problem(folder, name, shown, error)) from error
+        raise UnsafePathError(_entry_problem(calls, folder, name, shown, error)) from error
 
 
-def _open_folder(target: Path, parts: list[str], create: bool) -> int | None:
+def _open_folder(calls, target: Path, parts: list[str], create: bool) -> int | None:
     """A descriptor of the folder `parts` names below `target`, or None when it is missing.
 
     `target` itself is opened as the caller names it; below it, each
@@ -1131,23 +1508,23 @@ def _open_folder(target: Path, parts: list[str], create: bool) -> int | None:
     no name on the way is resolved twice. Raises UnsafePathError naming a
     component that is a link or not a folder. The caller closes the result.
     """
-    folder = os.open(os.fspath(target), _PROJECT_FLAGS)
+    folder = calls.open_project(target)
     for depth, part in enumerate(parts, 1):
         try:
-            child = _open_child(folder, part, "/".join(parts[:depth]), create)
+            child = _open_child(calls, folder, part, "/".join(parts[:depth]), create)
         finally:
-            os.close(folder)
+            calls.close(folder)
         if child is None:
             return None
         folder = child
     return folder
 
 
-def _folder_moved(target: Path, parts: list[str], folder: int) -> str | None:
+def _folder_moved(calls, target: Path, parts: list[str], folder: int) -> str | None:
     """Why `parts` below `target` no longer names the folder `folder` holds, or None."""
     shown = "/".join(parts) or "the project"
     try:
-        current = _open_folder(target, parts, create=False)
+        current = _open_folder(calls, target, parts, create=False)
     except UnsafePathError as error:
         return str(error)
     except OSError as error:
@@ -1155,44 +1532,48 @@ def _folder_moved(target: Path, parts: list[str], folder: int) -> str | None:
     if current is None:
         return f"{shown} was removed while it was written"
     try:
-        same = os.path.samestat(os.fstat(current), os.fstat(folder))
+        same = os.path.samestat(calls.fstat(current), calls.fstat(folder))
     finally:
-        os.close(current)
+        calls.close(current)
     return None if same else f"{shown} was replaced while it was written"
 
 
-def _not_regular(folder: int, name: str) -> bool:
+def _not_regular(calls, folder: int, name: str) -> bool:
     """The entry `name` of `folder` is a link or anything but a regular file."""
     try:
-        info = os.stat(name, dir_fd=folder, follow_symlinks=False)
+        info = calls.lstat(name, folder)
     except OSError:
         return False
     return _is_link(info) or not stat.S_ISREG(info.st_mode)
 
 
-def _read_at(target: Path, parts: list[str]) -> tuple[bytes, os.stat_result] | None:
-    """`_read_confined` by folder descriptors."""
-    folder = _open_folder(target, parts[:-1], create=False)
+def _read_at(calls, target: Path, parts: list[str]) -> tuple[bytes, os.stat_result] | None:
+    """`_read_confined` by folder descriptors or handles."""
+    folder = _open_folder(calls, target, parts[:-1], create=False)
     if folder is None:
         return None
     try:
         try:
-            descriptor = os.open(parts[-1], _READ_FLAGS, dir_fd=folder)
+            descriptor = calls.open_file(parts[-1], folder)
         except FileNotFoundError:
             return None
         except OSError as error:
-            if _not_regular(folder, parts[-1]):
+            if _not_regular(calls, folder, parts[-1]):
                 raise UnsafePathError("not a regular file") from error
             raise
     finally:
-        os.close(folder)
-    return _read_stream(descriptor)
+        calls.close(folder)
+    return _read_stream(calls, descriptor)
 
 
 def _read_by_path(
     target: Path, relative: str, parts: list[str]
 ) -> tuple[bytes, os.stat_result] | None:
-    """`_read_confined` where descriptors cannot walk: look at each component, then open."""
+    """`_read_confined` where nothing can walk: look at each component, then open.
+
+    Nothing is written there (NO_SAFE_WRITE), so a link swapped in between
+    can show the sync another file but cannot take anything it writes.
+    """
     problem = confinement_problem(target, relative)
     if problem is not None:
         raise UnsafePathError(problem)
@@ -1204,7 +1585,7 @@ def _read_by_path(
         if error.errno == errno.ELOOP:
             raise UnsafePathError("not a regular file") from error
         raise
-    return _read_stream(descriptor)
+    return _read_stream(_DESCRIPTOR_CALLS, descriptor)
 
 
 def _read_confined(target: Path, relative: str) -> tuple[bytes, os.stat_result] | None:
@@ -1215,8 +1596,9 @@ def _read_confined(target: Path, relative: str) -> tuple[bytes, os.stat_result] 
     parts = _relative_parts(relative)
     if parts is None:
         raise UnsafePathError("not a path inside the project")
-    if _DESCRIPTOR_WALK:
-        return _read_at(target, parts)
+    calls = _relative_calls()
+    if calls is not None:
+        return _read_at(calls, target, parts)
     return _read_by_path(target, relative, parts)
 
 
@@ -1230,6 +1612,7 @@ def read_confined(target: Path, relative: str) -> bytes | None:
 
 
 def _write_at(
+    calls,
     target: Path,
     relative: str,
     parts: list[str],
@@ -1238,9 +1621,9 @@ def _write_at(
     times: tuple[int, int] | None,
     durable: bool,
 ) -> None:
-    """`write_confined` by folder descriptors."""
+    """`write_confined` by folder descriptors or handles."""
     try:
-        folder = _open_folder(target, parts[:-1], create=True)
+        folder = _open_folder(calls, target, parts[:-1], create=True)
     except FileNotFoundError as error:
         # A folder on the way went away while the next one was made in it.
         problem = confinement_problem(target, relative)
@@ -1251,7 +1634,7 @@ def _write_at(
     temporary = None
     try:
         try:
-            existing = os.stat(name, dir_fd=folder, follow_symlinks=False)
+            existing = calls.lstat(name, folder)
         except FileNotFoundError:
             existing = None
         if existing is not None:
@@ -1262,100 +1645,36 @@ def _write_at(
         candidate = _temporary_name(name)
         # Private until it holds its bytes and the mode it ends with; a new
         # file without a mode of its own gets the umask's, as any new file.
-        descriptor = os.open(
-            candidate, _TEMPORARY_FLAGS, 0o600 if mode is not None else 0o666, dir_fd=folder
-        )
+        descriptor = calls.create_file(candidate, 0o600 if mode is not None else 0o666, folder)
         temporary = candidate
         try:
             _write_all(descriptor, data)
             if mode is not None:
-                os.fchmod(descriptor, mode)
+                calls.chmod(descriptor, mode)
             if times is not None:
-                os.utime(descriptor, ns=times)
+                calls.set_times(descriptor, times)
             if durable:
                 os.fsync(descriptor)
         finally:
-            os.close(descriptor)
-        moved = _folder_moved(target, parts[:-1], folder)
+            calls.close(descriptor)
+        moved = _folder_moved(calls, target, parts[:-1], folder)
         if moved is not None:
             raise UnsafePathError(moved)
-        os.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
+        calls.rename(temporary, name, folder)
         temporary = None
     except FileNotFoundError as error:
         # The folder held was removed while it was written.
-        moved = _folder_moved(target, parts[:-1], folder)
+        moved = _folder_moved(calls, target, parts[:-1], folder)
         if moved is not None:
             raise UnsafePathError(moved) from error
         raise
     finally:
         if temporary is not None:
             try:
-                os.unlink(temporary, dir_fd=folder)
+                calls.unlink(temporary, folder)
             except OSError:
                 pass
-        os.close(folder)
-
-
-def _confined_folders(target: Path, relative: str) -> Path:
-    """Create the missing folders of `relative` one at a time; return its folder.
-
-    mkdir never follows a link standing at the name it creates, and each
-    folder is looked at again before the next is made inside it.
-    """
-    parts = PurePosixPath(relative).parts[:-1]
-    current = target
-    for depth, part in enumerate(parts, 1):
-        current = current / part
-        try:
-            os.mkdir(current)
-        except FileExistsError:
-            pass
-        problem = _folder_problem("/".join(parts[:depth]), os.lstat(current))
-        if problem is not None:
-            raise UnsafePathError(problem)
-    return current
-
-
-def _write_by_path(
-    target: Path,
-    relative: str,
-    data: bytes,
-    mode: int | None,
-    times: tuple[int, int] | None,
-    durable: bool,
-) -> None:
-    """`write_confined` where descriptors cannot walk: look at each component, then write."""
-    problem = confinement_problem(target, relative)
-    if problem is not None:
-        raise UnsafePathError(problem)
-    folder = _confined_folders(target, relative)
-    path = folder / PurePosixPath(relative).name
-    try:
-        existing = os.lstat(path)
-    except FileNotFoundError:
-        existing = None
-    else:
-        if _is_link(existing) or not stat.S_ISREG(existing.st_mode):
-            raise UnsafePathError("not a regular file")
-        if mode is None:
-            mode = stat.S_IMODE(existing.st_mode)
-    temporary = folder / _temporary_name(path.name)
-    descriptor = os.open(temporary, _TEMPORARY_FLAGS, 0o666)
-    try:
-        try:
-            _write_all(descriptor, data)
-            if durable:
-                os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        if mode is not None:
-            os.chmod(temporary, mode)
-        if times is not None:
-            os.utime(temporary, ns=times)
-        os.replace(temporary, path)
-    finally:
-        if os.path.lexists(temporary):
-            os.unlink(temporary)
+        calls.close(folder)
 
 
 def write_confined(
@@ -1377,16 +1696,17 @@ def write_confined(
     can write again from the release. `mode` defaults to the replaced file's,
     and to the umask's for a new one; `times` are (atime, mtime) in
     nanoseconds. Raises UnsafePathError when a link or a non-folder stands on
-    the path, or a folder on it is swapped while the file is written (see the
-    note above `LINK_REPARSE_TAGS`).
+    the path, when a folder on it is swapped while the file is written, and
+    on a platform that can walk a path neither by descriptors nor by handles
+    (see the note above `LINK_REPARSE_TAGS`).
     """
     parts = _relative_parts(relative)
     if parts is None:
         raise UnsafePathError("not a path inside the project")
-    if _DESCRIPTOR_WALK:
-        _write_at(target, relative, parts, data, mode, times, durable)
-    else:
-        _write_by_path(target, relative, data, mode, times, durable)
+    calls = _relative_calls()
+    if calls is None:
+        raise UnsafePathError(NO_SAFE_WRITE)
+    _write_at(calls, target, relative, parts, data, mode, times, durable)
 
 
 # An install that merged into a project's file wrote the merge over it in
@@ -1471,10 +1791,11 @@ def sync_installation(
     project's Git tracks, seeded state the project owns, any path - backups
     and the sync's own record included - that a symbolic link or a
     non-folder inside the project stands on, including one swapped in while
-    the sync runs (read_confined, write_confined), and - unless
-    `rewire_codex` says the caller re-approves it - the Codex hook wiring,
-    whose trust is a hash of its definitions. Each of those is reported
-    instead.
+    the sync runs (read_confined, write_confined), anything at all on a
+    platform that can walk a path neither by folder descriptors nor by
+    handles (NO_SAFE_WRITE), and - unless `rewire_codex` says the caller
+    re-approves it - the Codex hook wiring, whose trust is a hash of its
+    definitions. Each of those is reported instead.
     """
     report: dict = {
         "target": str(target), "edition": None, "release": None, "changed": [],

@@ -112,5 +112,69 @@ class PortableFsTests(unittest.TestCase):
                                 for entry in entries))
 
 
+@unittest.skipUnless(os.name == 'nt', 'native Windows: the installer walks a path by NT handles there')
+class InstallerHandleCallsTests(unittest.TestCase):
+    """scripts/install_accelerator.py carries its own copy of these calls.
+
+    The Harness runs the installer alone from a staging folder, so it cannot
+    import this module; on Windows its reads and writes walk by the copy
+    (`_HandleCalls`), which only a native runner can exercise.
+    """
+
+    def setUp(self):
+        import install_accelerator
+        self.installer = install_accelerator
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.project = self.root / 'project'
+        self.project.mkdir()
+        self.outside = self.root / 'outside'
+        self.outside.mkdir()
+        (self.outside / 'sentinel.txt').write_text('outside', encoding='utf-8')
+
+    def test_the_walk_takes_the_handle_calls(self):
+        self.assertIsNotNone(self.installer._HANDLE_CALLS)
+        self.assertIs(self.installer._HANDLE_CALLS, self.installer._relative_calls())
+
+    def test_write_read_replace_and_times(self):
+        times = (1_577_880_000_000_000_000, 1_577_880_000_000_000_000)
+        self.installer.write_confined(self.project, '.cursor/rules/mcp.json', b'first', times=times)
+        path = self.project / '.cursor' / 'rules' / 'mcp.json'
+        self.assertEqual(b'first', path.read_bytes())
+        self.assertEqual(times[1], path.stat().st_mtime_ns)
+        self.installer.write_confined(self.project, '.cursor/rules/mcp.json', b'second', durable=False)
+        self.assertEqual(b'second', self.installer.read_confined(self.project, '.cursor/rules/mcp.json'))
+        self.assertIsNone(self.installer.read_confined(self.project, '.cursor/rules/missing.json'))
+        # Renamed into place: no temporary file is left beside it.
+        self.assertEqual(['mcp.json'], sorted(entry.name for entry in path.parent.iterdir()))
+
+    def test_a_junction_on_the_path_is_refused(self):
+        junction = self.project / '.cursor'
+        status = os.system('cmd /d /c mklink /J "' + str(junction) + '" "' + str(self.outside) + '" >NUL')
+        self.assertEqual(status, 0)
+        for attempt in (lambda: self.installer.write_confined(self.project, '.cursor/mcp.json', b'{}'),
+                        lambda: self.installer.read_confined(self.project, '.cursor/sentinel.txt')):
+            with self.assertRaises(self.installer.UnsafePathError) as caught:
+                attempt()
+            self.assertIn('.cursor is a symbolic link', str(caught.exception))
+        self.assertEqual(['sentinel.txt'], sorted(entry.name for entry in self.outside.iterdir()))
+
+    def test_a_folder_held_cannot_be_renamed(self):
+        (self.project / '.cursor').mkdir()
+        calls = self.installer._HANDLE_CALLS
+        project = calls.open_project(self.project)
+        try:
+            folder = calls.open_folder('.cursor', project)
+            try:
+                with self.assertRaises(PermissionError):
+                    os.rename(self.project / '.cursor', self.project / 'moved')
+            finally:
+                calls.close(folder)
+        finally:
+            calls.close(project)
+        os.rename(self.project / '.cursor', self.project / 'moved')
+
+
 if __name__ == '__main__':
     unittest.main()

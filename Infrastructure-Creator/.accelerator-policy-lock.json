@@ -106,7 +106,7 @@
     ".agents/skills/memory-seed/assets/scripts/memory_results.py": "98313c7d5571d900c2b553fc747d95710df78dfde0cb00e0f6a3595f626d1aa3",
     ".agents/skills/memory-seed/assets/scripts/telemetry.py": "e67ab23577fedacd824247d6e94f2983bcb4ba668dd6c0cf05d77d454f815ab3",
     ".agents/skills/memory-seed/assets/scripts/validate.py": "6a7b0c9905689a6c9aa7523da6bb72ddfb48bf60eecdbc8a3f364e7bcea40d93",
-    ".agents/skills/memory-seed/assets/scripts/workspace_roots.py": "db4bf1c626d29896b36fc4d397a4ac5430172d914502fc3007233fd89e2009c1",
+    ".agents/skills/memory-seed/assets/scripts/workspace_roots.py": "2c5d8fd0cc8ed0ef03975fd1ccb1aa1cc05a15170c2687d19d6d066d2170fd12",
     ".agents/skills/memory-seed/assets/templates/chunk.md": "172c3300e6c5f3ed7fd22a673f7681ec7649338bb50e64f178fe5792b49295ea",
     ".agents/skills/policy-forge/SKILL.md": "93f82000b1fc6b309d667b0231c36dcd22c71f7a5ff8208c1ae8794d19b46cad",
     ".agents/skills/profile-synthesizer/SKILL.md": "2d28fe8ed040852855fd56a8b0d1543b743cf1f2f8110b5c87a9ca68cd44327b",
@@ -170,7 +170,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "4a87c3ba8c45a3d89f8018e043b7a0736b624b3bb1b481612b9ac064ae010634"
   },
-  "policy_digest": "a6d320155e5a3f628f3f87ca40dd802ffde4cf2c5dac0b5001e62966f011c78d",
+  "policy_digest": "ab472bd521eb8ceb8cab1e9860ec8b8ce0ce09742d17207a4d776e0590754235",
   "release": "2.5.0",
   "schema_version": 1
 }

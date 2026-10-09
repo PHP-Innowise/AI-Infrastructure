@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import functools
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,12 @@ HOME_VARIABLE = "ACCELERATOR_HOME"
 STATE_VARIABLE = "ACCELERATOR_STATE_DIR"
 PROJECT_VARIABLE = "ACCELERATOR_PROJECT_DIR"
 STATE_PREFIXES = ("project-brain/", "memory-bank/")
+# What an attached state directory holds of the accelerator's: the runtime's
+# layout and the launcher's record and launch files.
+STATE_ENTRIES = ("project-brain", "memory-bank", "launch", "accelerator-attach.json")
+# Windows reports symbolic links and junctions as reparse points with these
+# tags (IO_REPARSE_TAG_SYMLINK, IO_REPARSE_TAG_MOUNT_POINT).
+LINK_REPARSE_TAGS = (0xA000000C, 0xA0000003)
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,27 @@ def _names_this_copy() -> bool:
         return False
 
 
+def linked_state_entry(state: Path) -> Optional[Path]:
+    """The state directory, or an accelerator entry in it, that is a symbolic link.
+
+    A state directory standing as a link took the project's memory - and
+    the launcher's record and Claude's system prompt - to wherever it
+    pointed, the project itself included; a link at one of its entries took
+    that part. Looked at before the runtime writes anything: the state is
+    its owner's alone (0700), and the launcher makes it without following a
+    link (scripts/accelerator_attach.py), so nobody else can put one there
+    afterwards. Directories above the state are the person's own setting.
+    """
+    for path in (state, *(state / name for name in STATE_ENTRIES)):
+        try:
+            status = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISLNK(status.st_mode) or getattr(status, "st_reparse_tag", 0) in LINK_REPARSE_TAGS:
+            return path
+    return None
+
+
 def configuration_error() -> Optional[str]:
     """Why the attached variables cannot be honoured, or None.
 
@@ -92,6 +120,12 @@ def configuration_error() -> Optional[str]:
         return f"{STATE_VARIABLE} and {PROJECT_VARIABLE} must be absolute paths"
     if not project.is_dir():
         return f"{PROJECT_VARIABLE} is not an existing directory: {project}"
+    linked = linked_state_entry(state)
+    if linked is not None:
+        return (
+            f"{linked} is a symbolic link; the attached state ({STATE_VARIABLE}) "
+            "is never reached through one"
+        )
     try:
         if project.resolve() == state.resolve():
             return f"{STATE_VARIABLE} must not be the project itself"
