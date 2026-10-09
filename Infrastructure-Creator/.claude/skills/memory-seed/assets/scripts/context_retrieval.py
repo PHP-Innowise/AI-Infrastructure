@@ -2493,6 +2493,15 @@ def _candidates(
     # Re-rank the BM25 window: the raw score breaks adjusted ties so the
     # ordering stays deterministic even when every weight is neutral.
     result.sort(key=lambda item: (-item["adjusted_score"], item["score"], item["path"]))
+    best_by_layer: dict[str, float] = {}
+    for item in result:
+        best_by_layer.setdefault(item["layer"], item["adjusted_score"])
+    result = [
+        item
+        for item in result
+        if item["adjusted_score"]
+        >= RELATIVE_SCORE_FLOOR * best_by_layer[item["layer"]]
+    ]
     # Rank is stamped here, on the lexically ranked list, rather than after
     # filtering: a position in the post-filter list says where a survivor
     # landed, not how well it answered the query, which is the only reading a
@@ -2518,33 +2527,6 @@ def _candidates(
         ),
     }
     return result, diagnostics
-
-
-def _apply_score_floor(
-    candidates: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """Leave out the tail of each layer, measured against what can be delivered.
-
-    The bar is a share of the best candidate that survived the privacy,
-    freshness and host filters: a task's own record or a host-loaded file that
-    will never be delivered used to set it, and cut answers that would have
-    been delivered. A path the request linked explicitly and conflicting
-    evidence stay whatever they score.
-    """
-    def exempt(item: dict[str, Any]) -> bool:
-        return bool(item.get("selection") or item.get("conflicts") or item.get("match") == "conflict")
-
-    best: dict[str, float] = {}
-    for item in candidates:
-        if not exempt(item):
-            best[item["layer"]] = max(best.get(item["layer"], 0.0), float(item.get("adjusted_score") or 0.0))
-    kept, excluded = [], []
-    for item in candidates:
-        if exempt(item) or float(item.get("adjusted_score") or 0.0) >= RELATIVE_SCORE_FLOOR * best.get(item["layer"], 0.0):
-            kept.append(item)
-        else:
-            excluded.append({"path": item["path"], "reason": "score-floor"})
-    return kept, excluded
 
 
 def _retrieval_signature(
@@ -3356,8 +3338,7 @@ def retrieve(
             filter_excluded.append({"path": item["path"], "reason": "host-loaded"})
         else:
             kept.append(item)
-    filtered, tail_excluded = _apply_score_floor(kept)
-    filter_excluded.extend(tail_excluded)
+    filtered = kept
     selected, budget_excluded, usage, escalation_reason = _apply_budgets(filtered)
     # Skills and policy, strong matches only: every host loads its own skill
     # catalogue and picks from it, agents opened none of 148 skill pointers

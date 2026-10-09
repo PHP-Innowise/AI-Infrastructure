@@ -4763,28 +4763,11 @@ class CapsuleNoiseTest(RuntimeHarness):
         try:
             retrieval.index_documents(connection, self.repository, rows)
             candidates, _ = retrieval._candidates(connection, "cobalt allocation")
-            candidates, _ = retrieval._apply_score_floor(candidates)
         finally:
             connection.close()
         paths = {item["path"] for item in candidates}
         self.assertIn("specs/best.md", paths)
         self.assertNotIn("specs/tail.md", paths)
-
-    def test_floor_preserves_explicit_links_and_conflicting_evidence(self) -> None:
-        candidates = [
-            {"path": "specs/best.md", "layer": "semantic", "adjusted_score": 100},
-            {"path": "specs/weak.md", "layer": "semantic", "adjusted_score": 1},
-            {"path": "memory-bank/chunks/linked.md", "layer": "semantic", "adjusted_score": 0,
-             "selection": "path-link"},
-            {"path": "project-brain/dynamic/findings/conflict.md", "layer": "semantic",
-             "adjusted_score": 0, "match": "conflict"},
-            {"path": "specs/history.md", "layer": "episodic", "adjusted_score": 1},
-        ]
-        kept, excluded = retrieval._apply_score_floor(candidates)
-        self.assertEqual({"specs/best.md", "memory-bank/chunks/linked.md",
-                          "project-brain/dynamic/findings/conflict.md", "specs/history.md"},
-                         {item["path"] for item in kept})
-        self.assertEqual([{"path": "specs/weak.md", "reason": "score-floor"}], excluded)
 
     def test_next_question_receives_a_different_excerpt_from_the_same_file(self) -> None:
         self.repository.joinpath("specs/allocation.md").write_text(
@@ -8270,8 +8253,6 @@ class DeliveryTest(RuntimeHarness):
         connection = context_cli.connect(context_cli.default_database(self.repository))
         try:
             candidates, _ = retrieval._candidates(connection, "quartz falcon")
-            # The floor runs on what survives the delivery filters.
-            candidates, _ = retrieval._apply_score_floor(candidates)
         finally:
             connection.close()
         paths = [item["path"] for item in candidates]
