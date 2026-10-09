@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -126,6 +127,15 @@ def wired_hook_scripts(project: Path) -> list[str]:
 
 def is_executable(path: Path) -> bool:
     return bool(path.stat().st_mode & stat.S_IXUSR) and os.access(path, os.X_OK)
+
+
+def files_under(root: Path) -> dict[str, bytes]:
+    """Every file below `root` with its bytes, to show nothing there changed."""
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 class InventoryTest(unittest.TestCase):
@@ -803,12 +813,30 @@ class InstallSyncTest(unittest.TestCase):
         self.assertEqual(0, installed.returncode, installed.stderr)
 
     def sync(self, *extra: str) -> dict:
+        returncode, report = self.sync_result(*extra)
+        self.assertEqual(0, returncode, report)
+        return report
+
+    def sync_result(self, *extra: str) -> tuple[int, dict]:
         result = run(
             sys.executable, str(INSTALLER), "--source-root", str(self.clone),
             "--sync", "--target", str(self.target), *extra,
         )
-        self.assertEqual(0, result.returncode, result.stderr)
-        return json.loads(result.stdout)
+        self.assertEqual("", result.stderr)
+        return result.returncode, json.loads(result.stdout)
+
+    def link(self, relative: str, outside: Path, move: bool) -> None:
+        """Put a symbolic link to `outside` where the project's folder was.
+
+        `move` takes the folder's files along; otherwise `outside` is empty.
+        """
+        folder = self.target / relative
+        if move:
+            folder.rename(outside)
+        else:
+            shutil.rmtree(folder)
+            outside.mkdir()
+        folder.symlink_to(outside, target_is_directory=True)
 
     def release(self, path: str, text: str) -> None:
         source = self.clone / "Symfony" / path
@@ -906,7 +934,11 @@ class InstallSyncTest(unittest.TestCase):
         local = self.target / config
         local.write_text(local.read_text(encoding="utf-8") + "model = \"team\"\n", encoding="utf-8")
         self.release(config, "# another note\n")
-        self.assertEqual("edited in the project", self.kept(self.sync()).get(config))
+        # Appended after the managed block, the team's key is TOML of the
+        # memory server's own table: the release's merger refuses that table,
+        # and the file stays the project's to reconcile.
+        reason = self.kept(self.sync()).get(config, "")
+        self.assertIn("memory MCP configuration not merged", reason)
         self.assertIn('model = "team"', local.read_text(encoding="utf-8"))
 
     def test_rewiring_codex_needs_a_sync(self) -> None:
@@ -950,6 +982,77 @@ class InstallSyncTest(unittest.TestCase):
         self.assertEqual("# edited\n", runtime.read_text(encoding="utf-8"))
         self.assertFalse((self.target / "memory-bank/local/accelerator-install.json").exists())
 
+    def test_a_linked_tool_folder_is_not_written_through(self) -> None:
+        # A checkout can carry a link where `.cursor` was. Only the last
+        # component was checked, so the missing `.cursor/README.md` was
+        # "added" - through the link, outside the project.
+        outside = Path(self._tmp.name) / "outside"
+        self.link(".cursor", outside, move=False)
+        for extra in (("--dry-run",), ()):
+            with self.subTest(dry_run=bool(extra)):
+                report = self.sync(*extra)
+                self.assertIsNone(report["error"])
+                self.assertNotIn(".cursor/README.md", self.actions(report))
+                self.assertIn(
+                    ".cursor is a symbolic link", self.kept(report).get(".cursor/README.md", "")
+                )
+                self.assertEqual({}, files_under(outside))
+        # A file where a folder belongs is no way through either.
+        (self.target / ".cursor").unlink()
+        (self.target / ".cursor").write_text("the project's file\n", encoding="utf-8")
+        report = self.sync()
+        self.assertEqual(".cursor is not a folder", self.kept(report).get(".cursor/README.md"))
+        self.assertEqual("the project's file\n", (self.target / ".cursor").read_text(encoding="utf-8"))
+
+    def test_a_linked_memory_bank_is_not_synced_through(self) -> None:
+        # Through the link, the runtime "was" installed: a local edit outside
+        # the project was replaced, and its backup and the sync's record were
+        # written outside too.
+        outside = Path(self._tmp.name) / "outside-memory"
+        self.link("memory-bank", outside, move=True)
+        runtime = outside / "scripts/context.py"
+        runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# local marker\n", encoding="utf-8")
+        before = files_under(outside)
+        for extra in (("--dry-run",), ()):
+            with self.subTest(dry_run=bool(extra)):
+                returncode, report = self.sync_result(*extra)
+                self.assertEqual(1, returncode)
+                self.assertIn("memory-bank is a symbolic link", report["error"])
+                self.assertEqual(([], [], []), (report["changed"], report["kept"], report["backups"]))
+                self.assertEqual(before, files_under(outside))
+
+    def test_backups_and_the_record_stay_inside_the_project(self) -> None:
+        # With `memory-bank` itself in place the runtime is the project's,
+        # but its backups and the sync's record live under memory-bank/local.
+        self.sync()  # records what the install wrote
+        outside = Path(self._tmp.name) / "outside-local"
+        self.link("memory-bank/local", outside, move=True)
+        before = files_under(outside)
+        runtime = self.target / "memory-bank/scripts/context.py"
+        edited = runtime.read_text(encoding="utf-8") + "\n# local patch\n"
+        runtime.write_text(edited, encoding="utf-8")
+        skill = self.target / ".agents/skills/memory/SKILL.md"
+        skill.unlink()
+        for extra in (("--dry-run",), ()):
+            with self.subTest(dry_run=bool(extra)):
+                report = self.sync(*extra)
+                kept = self.kept(report)
+                # Without its backup the local edit would be lost, so it stays.
+                self.assertIn(
+                    "backup cannot be written inside the project",
+                    kept.get("memory-bank/scripts/context.py", ""),
+                )
+                self.assertIn(
+                    "memory-bank/local is a symbolic link",
+                    kept.get("memory-bank/local/accelerator-install.json", ""),
+                )
+                self.assertEqual([], report["backups"])
+                self.assertEqual(edited, runtime.read_text(encoding="utf-8"))
+                self.assertEqual(before, files_under(outside))
+                # The rest of the project still follows the release.
+                self.assertEqual("added", self.actions(report).get(".agents/skills/memory/SKILL.md"))
+        self.assertTrue(skill.is_file())
+
     def test_a_folder_without_an_install_is_refused(self) -> None:
         empty = Path(self._tmp.name) / "empty"
         empty.mkdir()
@@ -987,6 +1090,179 @@ class InstallSyncTest(unittest.TestCase):
                 ".agents/skills/memory/SKILL.md"
             ),
         )
+
+
+class McpConfigSyncTest(unittest.TestCase):
+    """The memory server's entry follows the release beside a project's own servers.
+
+    Install merges these configurations instead of copying them, so one that
+    also holds a team's server is never the release's bytes, and a sync that
+    treated it as an edited file kept its memory server at the install's
+    version forever.
+    """
+
+    MCP = {"claude": ".mcp.json", "cursor": ".cursor/mcp.json", "codex": ".codex/config.toml"}
+    TEAM = {"command": "node", "args": ["team-server.js"]}
+    TEAM_TABLE = '\n[mcp_servers.team]\ncommand = "node"\nargs = ["team-server.js"]\n'
+    BLOCK = re.compile(rb"# BEGIN HARNESS MEMORY MCP\n.*?# END HARNESS MEMORY MCP\n?", re.S)
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="mcp sync ")
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        self.clone = base / "clone"
+        shutil.copytree(ROOT / "install" / "inventories", self.clone / "install" / "inventories")
+        shutil.copytree(ROOT / "Symfony", self.clone / "Symfony")
+        self.target = base / "project"
+        self.target.mkdir()
+        run("git", "init", "--quiet", str(self.target))
+        for host in ("claude", "cursor"):
+            config = self.target / self.MCP[host]
+            config.parent.mkdir(exist_ok=True)
+            config.write_text(json.dumps({"mcpServers": {"team-server": self.TEAM}}, indent=2) + "\n")
+        installed = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--edition", "Symfony", "--tool", "claude", "--tool", "cursor", "--tool", "codex",
+            "--merge-existing", "--target", str(self.target),
+        )
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        # The team adds a server of its own to the Codex configuration too: a
+        # table after the managed block, so it is TOML of its own.
+        codex = self.target / self.MCP["codex"]
+        codex.write_text(codex.read_text(encoding="utf-8") + self.TEAM_TABLE, encoding="utf-8")
+        self.sync()  # records what the install wrote
+
+    def sync(self, *extra: str) -> dict:
+        result = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--sync", "--target", str(self.target), *extra,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def released(self):
+        """The release's MCP merger, as the sync loads it from the clone."""
+        spec = importlib.util.spec_from_file_location(
+            "released_mcp_config", self.clone / "Symfony/memory-bank/scripts/mcp_config.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def publish_bootstrap(self, version: int):
+        """A release that changes the memory server's launcher, shipped as install ships it."""
+        path = self.clone / "Symfony/memory-bank/scripts/mcp_config.py"
+        text = path.read_text(encoding="utf-8")
+        current = re.search(r"# Harness memory bootstrap v\d+\n", text).group(0)
+        path.write_text(
+            text.replace(current, f"# Harness memory bootstrap v{version}\n# release {version}\n", 1),
+            encoding="utf-8",
+        )
+        released = self.released()
+        (self.clone / "Symfony" / self.MCP["claude"]).write_bytes(released.template("claude"))
+        shipped = self.clone / "Symfony" / self.MCP["codex"]
+        block = self.BLOCK.search(shipped.read_bytes()).group(0)
+        shipped.write_bytes(shipped.read_bytes().replace(block, released.codex_block().encode()))
+        return released
+
+    def servers(self, host: str) -> dict:
+        return json.loads((self.target / self.MCP[host]).read_text(encoding="utf-8"))["mcpServers"]
+
+    def mcp_actions(self, report: dict) -> dict:
+        return {item["path"]: item["action"] for item in report["changed"] if item["path"] in self.MCP.values()}
+
+    def mcp_kept(self, report: dict) -> dict:
+        return {item["path"]: item["reason"] for item in report["kept"] if item["path"] in self.MCP.values()}
+
+    def test_the_memory_server_follows_the_release_beside_the_projects_servers(self) -> None:
+        released = self.publish_bootstrap(2)
+        python = released.python_command()
+        # Cursor's entry has no bootstrap; an install on a machine whose
+        # Python answered to another name holds an older entry of ours.
+        other = next(candidate for candidate in released.PYTHONS if candidate != python)
+        cursor = self.target / self.MCP["cursor"]
+        data = json.loads(cursor.read_text(encoding="utf-8"))
+        data["mcpServers"]["harness-memory"] = released.entry("cursor", other)
+        cursor.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        before = {path: (self.target / path).read_bytes() for path in self.MCP.values()}
+        expected = {path: "memory server updated" for path in self.MCP.values()}
+
+        preview = self.sync("--dry-run")
+        self.assertEqual(expected, self.mcp_actions(preview))
+        self.assertEqual(before, {path: (self.target / path).read_bytes() for path in self.MCP.values()})
+
+        report = self.sync()
+        self.assertEqual(expected, self.mcp_actions(report))
+        for host in ("claude", "cursor"):
+            with self.subTest(host=host):
+                servers = self.servers(host)
+                self.assertEqual(released.entry(host, python), servers["harness-memory"])
+                self.assertEqual(self.TEAM, servers["team-server"])
+        codex = (self.target / self.MCP["codex"]).read_text(encoding="utf-8")
+        self.assertIn(released.codex_block(python), codex)
+        self.assertIn("bootstrap v2", codex)
+        self.assertTrue(codex.endswith(self.TEAM_TABLE))
+        self.assertIn("hooks = true", codex)
+
+        # A merged file is the project's, not an untouched release: the next
+        # release merges into it again instead of replacing it whole.
+        released = self.publish_bootstrap(3)
+        report = self.sync()
+        self.assertEqual(
+            {self.MCP["claude"]: "memory server updated", self.MCP["codex"]: "memory server updated"},
+            self.mcp_actions(report),
+        )
+        self.assertEqual({self.MCP["cursor"]: "edited in the project"}, self.mcp_kept(report))
+        self.assertEqual(self.TEAM, self.servers("claude")["team-server"])
+        self.assertIn("bootstrap v3", self.servers("claude")["harness-memory"]["args"][1])
+        codex = (self.target / self.MCP["codex"]).read_text(encoding="utf-8")
+        self.assertIn("bootstrap v3", codex)
+        self.assertTrue(codex.endswith(self.TEAM_TABLE))
+
+        # Current, the files are left alone and named as the project's.
+        report = self.sync()
+        self.assertEqual({}, self.mcp_actions(report))
+        self.assertEqual({path: "edited in the project" for path in self.MCP.values()}, self.mcp_kept(report))
+
+    def test_a_project_config_without_the_memory_server_gets_it(self) -> None:
+        claude = self.target / self.MCP["claude"]
+        claude.write_text(json.dumps({"mcpServers": {"team-server": self.TEAM}}, indent=2) + "\n")
+        report = self.sync()
+        self.assertEqual({self.MCP["claude"]: "memory server updated"}, self.mcp_actions(report))
+        released = self.released()
+        self.assertEqual(
+            {"team-server": self.TEAM, "harness-memory": released.entry("claude", released.python_command())},
+            self.servers("claude"),
+        )
+
+    def test_a_malformed_config_or_a_foreign_memory_server_is_left_alone(self) -> None:
+        self.publish_bootstrap(2)
+        codex = self.target / self.MCP["codex"]
+        broken = {
+            # Not JSON any more.
+            self.MCP["claude"]: (b'{"mcpServers": {"team-server": ', "Invalid MCP JSON configuration"),
+            # Another server under the memory server's name.
+            self.MCP["cursor"]: (
+                json.dumps({"mcpServers": {"harness-memory": self.TEAM}}, indent=2).encode() + b"\n",
+                "belongs to another server",
+            ),
+            # The managed block edited by hand.
+            self.MCP["codex"]: (
+                codex.read_bytes().replace(b"enabled = true\n# END", b"enabled = false\n# END"),
+                "Managed memory MCP block was edited",
+            ),
+        }
+        for path, (content, _) in broken.items():
+            (self.target / path).write_bytes(content)
+        for extra in (("--dry-run",), ()):
+            with self.subTest(dry_run=bool(extra)):
+                report = self.sync(*extra)
+                self.assertEqual({}, self.mcp_actions(report))
+                kept = self.mcp_kept(report)
+                for path, (content, reason) in broken.items():
+                    self.assertIn("memory MCP configuration not merged", kept.get(path, ""))
+                    self.assertIn(reason, kept.get(path, ""))
+                    self.assertEqual(content, (self.target / path).read_bytes())
 
 
 class CleanInstallTest(unittest.TestCase):
