@@ -603,6 +603,11 @@ retrieval:
 - `empty-after-filter` skips when something matched but nothing remained
   deliverable;
 - `repeat-retrieval` skips an unchanged query, selection and task revision;
+- `not-held-by-conversation` retrieves what would be a repeat for a turn of a
+  conversation (a host-supplied session ID): its own delivery record has
+  already left out what it holds, so it does not hold what remains - another
+  conversation was handed it, or this one lost it to a compaction or the
+  novelty window;
 - `task-changed` retrieves when the query and selection match but the task
   revision moved;
 - `new-selection` retrieves every other non-empty result;
@@ -615,6 +620,10 @@ without changing its path, changing a local episode, or advancing the task
 therefore cannot be mistaken for a repeat from another client or lifecycle
 state. The bounded baseline lives in the disposable index, and a skip never
 overwrites it — otherwise the turn after a skip would compare against nothing.
+The baseline is shared by every conversation of a task, so it decides repeats
+only for a caller without a session ID; within a conversation the conversation's
+record of what it was handed is the one notion of "seen", and a turn whose
+every item it holds skips as `empty-after-filter`.
 
 The mode comes from `--gate`, then `CONTEXT_RETRIEVAL_GATE`, then
 `retrieval_gate` in `runtime.json`, and defaults to `shadow`. In `shadow` the

@@ -122,10 +122,15 @@ class Memory:
                 raise BrainError('Memory capsule is unavailable; check runtime health')
             return result
         if name == 'memory_checkpoint':
+            # Checked before the task is looked up: a goal that is not text is
+            # the client's error whether or not the task exists, and its state
+            # must not decide whether the client hears about it.
+            goal = text(data['goal'], 'goal', 200) if 'goal' in data else None
             # Provision only on an explicit write, even when the first task has no Git delta.
             with mutation_lock(self.root):
                 if self.existing(task_id) is None:
-                    goal = text(data.get('goal'), 'goal for a new task', 200)
+                    if goal is None:
+                        raise BrainError('A new task needs a goal')
                     create_task(self.root, task_id, goal, [], [], owner=self.owner)
                 task = self.task(task_id)
             self.cli('rebind', '--task-id', task_id, '--record', task['id'])

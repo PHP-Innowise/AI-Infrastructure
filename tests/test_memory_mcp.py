@@ -98,6 +98,30 @@ class MemoryMcpTests(unittest.TestCase):
         changed = self.call('memory_record_result', **{**draft, 'progress': 'Different result'})
         self.assertTrue(changed['isError'])
 
+    def test_a_retrieved_memory_carries_its_finding_not_its_frontmatter(self):
+        # The structured snippet was FTS snippet() over the whole file, and in
+        # a promoted chunk the densest run of matches is the JSON block whose
+        # title repeats the heading: the client got `"supersedes": [],
+        # "tags": [...]`, cut before the finding, and a token estimate of
+        # that, while the rendered capsule quoted the finding itself.
+        draft = self.draft(self.start())
+        self.assertFalse(self.call('memory_record_result', **draft)['isError'])
+        found = self.call('memory_retrieve', task_id='TASK-MCP', query='cobalt allocation')
+        self.assertFalse(found['isError'], found)
+        result = found['structuredContent']
+        capsule = result['capsule']
+        chunk = next(item for item in capsule['semantic'] if item['path'].startswith('memory-bank/chunks/'))
+        self.assertEqual(draft['learnings'][0]['consequence'], chunk['snippet'])
+        self.assertIn(chunk['snippet'], result['capsule_text'])
+        self.assertEqual((len(chunk['title'] + chunk['snippet']) + 3) // 4, chunk['estimated_tokens'])
+        delivered = [item for layer in ('procedural', 'semantic', 'episodic') for item in capsule[layer]]
+        estimates = capsule['token_estimates']
+        self.assertEqual(sum(item.get('estimated_tokens', 0) for item in delivered) + estimates['local_episodes'],
+                         estimates['total'])
+        manifest = json.loads((self.root / capsule['manifest']).read_text(encoding='utf-8'))
+        recorded = {item['path']: item['estimated_tokens'] for item in manifest['selected']}
+        self.assertEqual(chunk['estimated_tokens'], recorded[chunk['path']])
+
     def test_concurrent_replay_has_one_record(self):
         draft = self.draft(self.start())
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -123,6 +147,33 @@ class MemoryMcpTests(unittest.TestCase):
         self.assertFalse(checkpoint['isError'], checkpoint)
         draft = self.draft(checkpoint['structuredContent']['revision'])
         self.assertFalse(self.call('memory_record_result', **draft)['isError'])
+
+    def test_checkpoint_checks_the_goal_it_was_given_whatever_the_task_state(self):
+        # The schema says goal is text. It was checked only when the call
+        # created the task, so goal=42 was refused for a new task and accepted
+        # for an existing one: the task's state, not what the client sent,
+        # decided whether the client heard about its error.
+        bad_goals = (42, None, '', '   ', ['Check cobalt allocation'], {'text': 'Check'}, 'x' * 201)
+
+        def checkpoints(task_id):
+            return [{'jsonrpc': '2.0', 'id': index, 'method': 'tools/call',
+                     'params': {'name': 'memory_checkpoint', 'arguments': {'task_id': task_id, 'goal': goal}}}
+                    for index, goal in enumerate(bad_goals, 1)]
+
+        replies = self.exchange(checkpoints('TASK-NEW'))
+        self.assertEqual([True] * len(bad_goals), [reply['result']['isError'] for reply in replies], replies)
+        self.assertEqual([], list((self.root / 'project-brain/dynamic/tasks').glob('*')))
+        created = self.call('memory_checkpoint', task_id='TASK-MCP', goal='Check cobalt allocation')
+        self.assertFalse(created['isError'], created)
+        before = self.cli_call('get', '--task-id', 'TASK-MCP')
+        replies = self.exchange(checkpoints('TASK-MCP'))
+        self.assertEqual([True] * len(bad_goals), [reply['result']['isError'] for reply in replies], replies)
+        self.assertEqual(before, self.cli_call('get', '--task-id', 'TASK-MCP'))
+        # A goal that is text, or none at all, still checkpoints an existing task.
+        for arguments in ({'goal': 'Check cobalt allocation again'}, {}):
+            reply = self.call('memory_checkpoint', task_id='TASK-MCP', **arguments)
+            self.assertFalse(reply['isError'], reply)
+        self.assertEqual('Check cobalt allocation', self.cli_call('get', '--task-id', 'TASK-MCP')['goal'])
 
     def test_shared_replay_survives_local_receipt_deletion_and_current_revision(self):
         import shutil
