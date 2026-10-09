@@ -24,6 +24,22 @@ The Unreleased section below was consolidated from the three edition
 changelogs when this file was introduced; entries that describe one
 edition's own files remain in that edition's changelog.
 
+## 2026-10-08 — Bounded, relevant memory capsules
+
+- Limit automatic procedural context to one strong match; discard incidental rare-word matches without a title/path or identifier anchor, and omit acknowledgement-only retrieval. Explicit skill discovery keeps its measured routing contract.
+- Trim eligible candidate tails at 30% of the best score in each layer, after privacy/freshness/host filtering; preserve explicit source links and conflicting evidence, and record omissions in manifests.
+- Render already-filtered project excerpts under a 3,600-character ceiling, retain source-change warnings, and allow different questions to receive different excerpts from the same file.
+- Share a dependency-free automatic-query adapter between installed hooks and Harness: remove recognized personal-data spans before building queries/goals, skip PII-only requests, and continue refusing secrets/raw transcripts. Direct CLI/MCP requests and shared writes retain strict validation.
+
+## 2026-10-08 — Consistent project memory across coding clients
+
+- Require targeted memory retrieval after compaction/scope changes and source-backed result recording at authorized work boundaries across the four editions and generated policy.
+- Register Memory MCP automatically for selected clients during installation/generation, preserving other servers, refusing foreign name conflicts, detecting Python (including native Windows), and using portable launchers across nested directories/worktrees. Harness setup previews and publishes these supported merges.
+- Bundle a dependency-free, project-scoped Memory MCP for Claude Code, Codex and Cursor, with warming/source-linked retrieval, first-turn task provisioning, revision-checked result recording, shared intent/completion evidence for safe replay and partial-save reporting, source/actor boundaries, and existing automatic promotion.
+- Accept native MCP request metadata during tool discovery and calls, while refusing malformed metadata; verify discovery and direct calls against the actual Codex app-server.
+- Recover a missing/invalid Harness memory draft once through a read-only continuation of the same native session, within shared budgets. Preserve cancellation and native identity, suppress memory hooks during recovery, include its usage/context counts, and distinguish delivered pointers from agent-reported use.
+- Add protocol, persistence, recovery and isolation regressions and per-client connection instructions in docs/MEMORY-INTEGRATION.md.
+
 ## Unreleased
 
 - **Written knowledge stays.** On a real installation 68 of 70 resolved findings never became durable memory: a resolved record leaves the index for its chunk, promotion waited up to five turns for the turn boundary, and by then the fix had edited the file the finding cites, so promotion refused it for good and the knowledge was served nowhere. An end-to-end run through the hooks reproduced it: record a finding, keep editing its source, and no later session or other client sees it, while `validate` fails.

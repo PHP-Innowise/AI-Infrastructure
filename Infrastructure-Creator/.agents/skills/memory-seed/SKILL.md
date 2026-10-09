@@ -34,7 +34,7 @@ Into the required generation root, create:
 - `memory-bank/README.md`, `memory-bank/INDEX.md`, `memory-bank/.memory-counter` (written fresh)
 - `memory-bank/runtime-contract.json` (copied verbatim from `assets/runtime-contract.json`)
 - `memory-bank/templates/chunk.md` (copied verbatim from `assets/templates/chunk.md`)
-- `memory-bank/scripts/context.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py` (copied verbatim from `assets/scripts/`)
+- `memory-bank/scripts/context.py`, `memory-bank/scripts/brain_runtime.py`, `memory-bank/scripts/context_retrieval.py`, `memory-bank/scripts/validate.py`, `memory-bank/scripts/telemetry.py`, `memory-bank/scripts/mcp_server.py`, `memory-bank/scripts/mcp_config.py` (copied verbatim from `assets/scripts/`)
 - `memory-bank/local/.gitkeep` (gitignored machine-local state: the disposable SQLite index `context.db`, turn buffers, ephemeral manifests)
 - `memory-bank/chunks/MEM-{NNNN}-{short-slug}.md` per seeded chunk (starting at `MEM-0001`)
 
@@ -64,7 +64,8 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 ## Process
 
 1. **Read profile section 12 first** - it is the authoritative seed plan, already reviewed by the user. Cross-check it against confirmed facts in sections 2-8, including canonical source authority, durable invariants, lifecycles, permissions, audit obligations, integration contracts, and sanitized incident-prevention rules.
-2. **Bootstrap `memory-bank/`:** write `README.md` (fresh prose naming the target and its memory contract: authority hierarchy, layout, what belongs here, retrieval, creating/updating a chunk, lifecycle, security, and the runtime CLI - `python3 memory-bank/scripts/context.py --help`), copy `assets/runtime-contract.json` to `memory-bank/runtime-contract.json`, copy `templates/chunk.md` and all five `assets/scripts/*.py` verbatim, and create empty gitignored `local/`. Treat the contract's `required_skeleton` paths as required generation outputs and its `creatable` paths as runtime-created; do not require creatable files to pre-exist.
+2. **Bootstrap `memory-bank/`:** write `README.md` (fresh prose naming the target and its memory contract: authority hierarchy, layout, what belongs here, retrieval, creating/updating a chunk, lifecycle, security, and the runtime CLI - `python3 memory-bank/scripts/context.py --help`), copy `assets/runtime-contract.json` to `memory-bank/runtime-contract.json`, copy `assets/MCP.md` to `memory-bank/MCP.md`, copy `templates/chunk.md` and all seven `assets/scripts/*.py` verbatim, and create empty gitignored `local/`. Treat the contract's `required_skeleton` paths as required generation outputs and its `creatable` paths as runtime-created; do not require creatable files to pre-exist.
+   Register project Memory MCP in staging by running the copied `mcp_config.py --root GENERATION_ROOT` with one `--tool` per selected client. Include its `.mcp.json` (Claude), `.cursor/mcp.json` (Cursor), and `.codex/config.toml` (Codex) outputs in the explicit write plan/manifest. The helper detects Python and generates portable worktree-aware launchers, preserving other servers/settings and refusing a foreign same-name server. Existing Codex hooks/features stay; hook-forge must retain this managed MCP block when it supplies them. Registration does not grant client trust or bypass tool approval.
 3. **Bootstrap `project-brain/`:** copy the whole `assets/project-brain/` skeleton verbatim (including `.gitkeep` placeholders and both empty `[]` indexes), then materialize `config/runtime.json` from the template with the two substitutions above (framework slug + canonical edition).
 4. **Seed one chunk per row in section 12's preview table**, starting at `MEM-0001`, in the same order. Fill frontmatter exactly per `templates/chunk.md` (JSON frontmatter; `valid_from`/`valid_to` are optional temporal-validity keys - seed chunks normally set `valid_from` to the seed date and leave `valid_to` null). Each chunk represents one cohesive concept and links all canonical sources that prove it. It may group tightly related facts (for example, a lifecycle's statuses, confirmed transitions, guards, permission, and audit consequence) but MUST NOT copy full specs, schemas, permission matrices, test inventories, incident narratives, or logs. If revalidation surfaces a new confirmed concept or invalidates a previewed one, report drift rather than silently reconciling it.
 
@@ -115,7 +116,7 @@ All other `runtime.json` values are shipped defaults (`mode: governed`, `automat
 - [MEM-0001: title (source)]
 - ...
 
-**Runtime:** memory-bank/scripts/ (context.py, brain_runtime.py, context_retrieval.py, validate.py - verbatim)
+**Runtime:** memory-bank/scripts/ (context.py, brain_runtime.py, context_retrieval.py, validate.py, telemetry.py, mcp_server.py, mcp_config.py - verbatim)
 **Project Brain:** project-brain/ skeleton (framework slug: [slug], canonical edition: [.agents/.claude/.cursor])
 **Counter:** [value]
 **validate.py:** [pass/fail] | **context.py validate:** [pass/fail] | **context.py status:** [pass/fail]

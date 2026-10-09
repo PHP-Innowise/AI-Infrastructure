@@ -16,10 +16,14 @@
       "README.md",
       "VERSION",
       "memory-bank/INDEX.md",
+      "memory-bank/MCP.md",
       "memory-bank/README.md",
+      "memory-bank/scripts/automatic_query.py",
       "memory-bank/scripts/brain_runtime.py",
       "memory-bank/scripts/context.py",
       "memory-bank/scripts/context_retrieval.py",
+      "memory-bank/scripts/mcp_config.py",
+      "memory-bank/scripts/mcp_server.py",
       "memory-bank/scripts/telemetry.py",
       "memory-bank/scripts/validate.py",
       "memory-bank/templates/chunk.md",
@@ -272,7 +276,8 @@
       ".claude/skills/web-design-guidelines/SKILL.md",
       ".claude/skills/woocommerce/SKILL.md",
       ".claude/skills/wp-cli/SKILL.md",
-      ".claude/skills/writing-plans/SKILL.md"
+      ".claude/skills/writing-plans/SKILL.md",
+      ".mcp.json"
     ],
     "cursor": [
       ".cursor/DOD.md",
@@ -375,6 +380,7 @@
       ".cursor/hooks/subagent-dispatch.sh",
       ".cursor/hooks/subagent-gate.sh",
       ".cursor/hooks/working-memory-write.sh",
+      ".cursor/mcp.json",
       ".cursor/rules/accelerator-workflow.mdc",
       ".cursor/rules/php-standards.mdc",
       ".cursor/rules/safety-and-verification.mdc",

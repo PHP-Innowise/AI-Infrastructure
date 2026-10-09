@@ -14,6 +14,9 @@
 
 set -u
 
+# An internal draft-only follow-up must not create another memory turn.
+[ "${CONTEXT_MEMORY_RECOVERY:-}" = "1" ] && exit 0
+
 # A host that puts this turn's Task Capsule into the prompt itself sets
 # CONTEXT_CAPSULE_DELIVERED=1; the Harness does, retrieved for the message
 # alone. A second capsule here would be distilled from that whole prompt and
@@ -35,14 +38,14 @@ run() {
   fi
 }
 
-# The prompt arrives as JSON on stdin and is passed to the CLI as-is: query
-# distillation (informative terms ranked by rarity in the index) lives in
-# context.py, which also rejects anything that looks like a secret or
-# personal data before the text can reach a query or a manifest.
+# Remove recognized personal-data spans in memory before constructing a query.
+# The CLI still validates the safe result; secrets/raw conversations are refused.
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
 QUERY=$(python3 -c '
 import json
 import sys
+sys.path.insert(0, sys.argv[1])
+from automatic_query import sanitize_automatic_query
 
 try:
     prompt = json.load(sys.stdin).get("prompt", "")
@@ -50,8 +53,11 @@ except (AttributeError, UnicodeDecodeError, ValueError):
     prompt = ""
 if not isinstance(prompt, str):
     prompt = ""
-print(prompt)
-' 2>/dev/null)
+print(sanitize_automatic_query(prompt))
+' "$ROOT_DIR/memory-bank/scripts" 2>/dev/null)
+
+# A refused/PII-only prompt must not fall back to the task goal or branch name.
+[ -n "$QUERY" ] || exit 0
 
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
 

@@ -205,7 +205,7 @@
     ".claude/settings.json": "10174f53707a2e4926a82dbba31b3da3967c1e31790836a04f139fc412d3b518",
     ".claude/skills/SKILL FLOW.md": "886a5eeebd80ce356d32442f137795f0bd73b564ff4e4c1c28e054846e86abf5",
     ".claude/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    ".codex/config.toml": "b5b55edf7a3ec408d6983cfe3ee958f4889ecd033c16b53d5c53948c4cee4112",
+    ".codex/config.toml": "08a3a136676887ecc1a08687b5ca11066a9b817da2b8a4e8deb89f829156d85d",
     ".codex/hooks.json": "62d7c3281a618e3344c9a8c541dc66b4496dc3761e4fb8006902578ed9ee073f",
     ".cursor/hooks.json": "850254308d2f7c159282ccb1426487a70a491404430b62b5099ba2fcd7cdeb05",
     ".cursor/rules/accelerator-workflow.mdc": "ccd9981be92179bf32946b0110c5004d8af404e420ba868dbbf72d5586410cc4",
@@ -213,9 +213,9 @@
     ".cursor/rules/safety-and-verification.mdc": "5e8cb5bfd3d427836e521417a2a7e68bd1b3a00a25a1d174df61b29e5471344f",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    "AGENTS.md": "b6f66b0b5436a5d52d7016851b06f5380880fe519b2149f91980bc7d2085336c"
+    "AGENTS.md": "6f02ec8fe12cd2a3ecc6cb5c4520a634a060d7794a5f56b689724c5138a099ee"
   },
-  "policy_digest": "babe475217c3fd5133d6ac6f8478709939ccfa6110bb9aad2c3b0cac2797044d",
+  "policy_digest": "d4577a67279e33573f35d5a0ffa573254ad5e791eb5fc65949d61912ad107f45",
   "release": "2.0.0",
   "schema_version": 1
 }

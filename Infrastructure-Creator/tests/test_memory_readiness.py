@@ -286,9 +286,8 @@ class StagedBankSourceResolutionTest(unittest.TestCase):
         bank = self.staging / "memory-bank"
         (bank / "chunks").mkdir(parents=True)
         (bank / "scripts").mkdir(parents=True)
-        (bank / "scripts/validate.py").write_text(
-            self.BANK_VALIDATOR.read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        for name in ("validate.py", "automatic_query.py"):
+            (bank / "scripts" / name).write_bytes(self.BANK_VALIDATOR.with_name(name).read_bytes())
         frontmatter = {
             "id": "MEM-0001",
             "title": "Publishing writes only under an explicit flag",

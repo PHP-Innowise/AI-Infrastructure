@@ -27,6 +27,9 @@ EDITIONS = tuple(EDITION_PATHS)
 TOOLS = ("claude", "cursor", "codex")
 TIMEOUT = 90
 REQUIRED_SHARED = (
+    "memory-bank/scripts/mcp_config.py",
+    "memory-bank/scripts/mcp_server.py",
+    "memory-bank/MCP.md",
     "AGENTS.md",
     "memory-bank/README.md",
     "memory-bank/INDEX.md",
@@ -37,8 +40,8 @@ REQUIRED_SHARED = (
     "project-brain/scripts/validate.py",
 )
 REQUIRED_TOOLS = {
-    "claude": (".claude/hooks/bash-validator.sh", ".claude/skills/memory-bank/SKILL.md"),
-    "cursor": (".cursor/hooks/bash-validator.sh", ".cursor/skills/memory-bank/SKILL.md"),
+    "claude": (".mcp.json", ".claude/hooks/bash-validator.sh", ".claude/skills/memory-bank/SKILL.md"),
+    "cursor": (".cursor/mcp.json", ".cursor/hooks/bash-validator.sh", ".cursor/skills/memory-bank/SKILL.md"),
     "codex": (".codex/hooks/bash-validator.sh", ".agents/skills/memory-bank/SKILL.md"),
 }
 REQUIRED_SOURCE_EXCLUSIONS = (

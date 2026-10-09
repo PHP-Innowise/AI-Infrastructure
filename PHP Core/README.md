@@ -204,6 +204,9 @@ Prefer explicit, minimal structure over framework imitation:
 
 ## Project Brain And Memory Bank
 
+The bundled [local Memory MCP](memory-bank/MCP.md) lets Claude Code, Codex and Cursor retrieve and record through the existing project runtime. Connect it per project; keep memory hooks active. Finalize authorized work with sanitized progress and source-backed findings/decisions, and report failed or partial saves.
+
+
 Use `memory` in Codex or `/memory` in Claude/Cursor for an argument-free, authority-aware refresh: governed mode validates Project Brain and rebuilds the disposable source index without creating a second task record. Use `checkpoint` or `/checkpoint` for progress capture; it defers to revision-checked Project Brain updates in governed mode and writes local Working Memory only when lightweight mode is explicitly configured. Neither command completes a task or applies a promotion.
 
 Governed Project Brain mode is the default for non-trivial work. `project-brain/` is the shared authority for active tasks, handoffs, findings, bugs, incidents, decisions, events, retrieval manifests, conflicts, and promotion proposals. The ignored SQLite database is only a disposable index plus local binding/cache in this mode.

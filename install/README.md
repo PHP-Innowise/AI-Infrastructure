@@ -94,6 +94,14 @@ Available tool values are:
 - `--tool codex` for `.agents/` and `.codex/`.
 
 Repeat `--tool` to select multiple integrations. Omit it to install all three.
+
+The selected clients automatically receive project Memory MCP registration:
+`.mcp.json` for Claude, `.cursor/mcp.json` for Cursor, and a managed table in
+`.codex/config.toml` for Codex. The installer detects Python with SQLite FTS5
+and uses portable launchers across worktrees and nested directories. It merges
+only the memory entry, preserves other servers/settings, and refuses a foreign
+same-name entry even under `--overwrite`. Native workspace trust/tool approval
+remains under client control. See [memory integration](../docs/MEMORY-INTEGRATION.md).
 Shared policy, workflow, Memory Bank, and Project Brain files are included with
 every selection. Tool selection narrows native integration trees; it does not
 re-add source-only files excluded from the production payload.

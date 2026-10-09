@@ -48,7 +48,7 @@ MAX_SNIPPET_CHARS = 1200
 # What a document whose cited file changed since verification keeps of its
 # relevance: it still ranks, below fresh knowledge of equal fit.
 SOURCE_CHANGED_WEIGHT = 0.5
-CAPSULE_PROCEDURAL_LIMIT = 2
+CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
 CAPSULE_EPISODIC_LIMIT = 1
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
@@ -501,6 +501,7 @@ CROSS_EDITION_PATHS = {
 # md5 comparison of the editions before the manifest was frozen.
 CROSS_EDITION_CORE_MANIFEST = (
     "memory-bank/scripts/*.py",
+    "memory-bank/MCP.md",
     "memory-bank/tests/*.py",
     # The chunk template is the shape every durable memory is written to, and
     # nothing framework-specific appears in it. It sat outside every gate
@@ -597,6 +598,40 @@ LAST_RETRIEVAL_KEY = "last-retrieval"
 LAST_RETRIEVAL_RETENTION = 200
 REFRESH_HEALTH_RETENTION = 500
 STOPWORD_DOCUMENT_RATIO = 0.5
+EVIDENCE_STOPWORDS = frozenset(
+    """
+    a about above after again against all am an and any are aren as at be
+    because been before being below between both but by can cannot could
+    couldn did didn do does doesn doing don down during each few for from
+    further had hadn has hasn have haven having he her here hers herself him
+    himself his how i if in into is isn it its itself just let me more most
+    mustn my myself no nor not now of off on once only or other ought our
+    ours ourselves out over own same shan she should shouldn so some such than
+    that the their theirs them themselves then there these they this those
+    through to too under until up very was wasn we were weren what when where
+    which while who whom why will with won would wouldn you your yours
+    yourself yourselves s t ll re ve d m o y also anything everything
+    something someone anyone please thanks thank ok okay yes yeah sure get got
+    make made want need like one two way thing things still again really
+    и в во не что он на я с со как а то все она так его но да ты к у же вы
+    за бы по только ее мне было вот от меня еще нет о из ему теперь когда
+    даже ну вдруг ли если уже или ни быть был него до вас нибудь опять уж
+    вам ведь там потом себя ничего ей может они тут где есть надо ней для мы
+    тебя их чем была сам чтоб без будто чего раз тоже себе под будет ж тогда
+    кто этот того потому этого какой совсем ним здесь этом один почти мой тем
+    чтобы нее сейчас были куда зачем всех никогда можно при наконец два об
+    другой хоть после над больше тот через эти нас про всего них какая много
+    разве три эту моя впрочем хорошо свою этой перед иногда лучше чуть том
+    нельзя такой им более всегда конечно всю между это эта мои давай
+    пожалуйста спасибо ок сделай сделать нужно какие
+    good great nice fine cool perfect awesome excellent done look looks
+    looking seems seem works working continue proceed go ahead lets right
+    correct thx cheers hi hello hey bye agreed approve approved lgtm
+    отлично супер класс готово продолжай продолжи продолжить дальше норм
+    нормально верно понятно ясно ага угу привет пока согласен
+    """.split()
+)
+RELATIVE_SCORE_FLOOR = 0.3
 MIN_TOKEN_COVERAGE = 2
 DISTINCTIVE_DOCUMENT_RATIO = 0.1
 MAPPED_COMMIT_PATTERN = re.compile(r"^mapped_commit:\s*([0-9a-fA-F]{7,40})\s*$", re.M)
@@ -1725,6 +1760,11 @@ def token_document_frequencies(
     return result
 
 
+def evidence_tokens(tokens: list[str]) -> list[str]:
+    """The tokens that may count as evidence of relevance."""
+    return [token for token in tokens if token.casefold() not in EVIDENCE_STOPWORDS]
+
+
 def informative_tokens(
     connection: sqlite3.Connection, tokens: list[str]
 ) -> list[str]:
@@ -1753,17 +1793,18 @@ def informative_tokens(
 
 def token_coverage(
     connection: sqlite3.Connection, tokens: list[str]
-) -> tuple[dict[str, int], set[str]]:
+) -> tuple[dict[str, int], dict[str, list[str]]]:
     """Count distinct query terms per document, and note distinctive matches.
 
     Counting terms equally punishes exactly the wrong document. A focused note
     that contains only the one term that matters scores 1, while a document
     sharing two unremarkable words scores 2 — so the answer loses to the noise.
-    A term rare in this corpus is treated as evidence on its own.
+    A term rare in this corpus may be evidence on its own; ``distinctive``
+    maps each document to the rare terms it matched, for is_relevant to judge.
     """
     total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0] or 1
     coverage: dict[str, int] = {}
-    distinctive: set[str] = set()
+    distinctive: dict[str, list[str]] = {}
     for token in tokens:
         try:
             rows = connection.execute(
@@ -1775,21 +1816,45 @@ def token_coverage(
         for row in rows:
             coverage[row[0]] = coverage.get(row[0], 0) + 1
             if rare:
-                distinctive.add(row[0])
+                distinctive.setdefault(row[0], []).append(token)
     return coverage, distinctive
 
 
-def is_relevant(
-    path: str, coverage: dict[str, int], distinctive: set[str], minimum: int
-) -> bool:
-    """A document qualifies on distinctive evidence or on breadth of match.
+_ANCHOR_SHAPE = re.compile(r"\d|[a-z][A-Z]|^[A-Z][a-z]+[A-Z]|_")
 
-    Admitting a distinctive single match lets some noise back in on queries no
-    document covers. That is the cheaper error: a spurious result wastes a
-    slot, while a hidden one denies the agent an answer the project already
-    holds.
+
+def is_anchor(token: str, where: Iterable[str] = ()) -> bool:
+    """Whether a query term names something rather than being a word that is
+    merely rare here: an identifier-shaped term, or a word of the document's
+    own path or title (``where``, casefolded words)."""
+    return bool(_ANCHOR_SHAPE.search(token)) or token.casefold() in set(where)
+
+
+def is_relevant(
+    path: str,
+    coverage: dict[str, int],
+    distinctive: dict[str, list[str]],
+    minimum: int,
+    title: str = "",
+    *,
+    anchored: bool = True,
+) -> bool:
+    """A document qualifies on breadth of match, or on one rare term that names
+    something.
+
+    One incidental rare word is insufficient. A rare term that is an anchor -
+    a number, an identifier from code, a word of the document's own path or
+    title - still admits it, because a spurious result wastes a slot while a
+    hidden one denies the agent an answer the project already holds.
+    ``anchored=False`` skips the anchor test - for skills, which a capsule
+    never delivers on a weak match and which explicit retrieval still ranks.
     """
-    return path in distinctive or coverage.get(path, 0) >= minimum
+    if coverage.get(path, 0) >= minimum:
+        return True
+    if not anchored:
+        return path in distinctive
+    where = re.findall(r"\w+", f"{path} {title}".casefold())
+    return any(is_anchor(token, where) for token in distinctive.get(path, ()))
 
 
 def match_strength(path: str, coverage: dict[str, int], minimum: int) -> str:
@@ -1871,14 +1936,16 @@ def _candidates(
     for cannot recompute them without repeating the work.
     """
     ensure_metadata_tables(connection)
-    tokens = informative_tokens(connection, query_tokens(query))
+    tokens = evidence_tokens(informative_tokens(connection, query_tokens(query)))
+    if not tokens:
+        return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None}
     coverage, distinctive = token_coverage(connection, tokens)
     minimum = required_coverage(tokens)
     rows = connection.execute(
         """
         SELECT
             d.path, d.layer, d.kind, d.title,
-            snippet(documents, 5, '[', ']', ' … ', 32) AS snippet,
+            snippet(documents, 5, '', '', ' … ', 32) AS snippet,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
             m.source_fingerprints, m.updated_at, m.confidence,
@@ -1893,7 +1960,8 @@ def _candidates(
     ).fetchall()
     result = []
     for row in rows:
-        if not is_relevant(row["path"], coverage, distinctive, minimum):
+        if not is_relevant(row["path"], coverage, distinctive, minimum,
+                           str(row["title"] or ""), anchored=row["layer"] != "procedural"):
             continue
         item = dict(row)
         item["snippet"] = str(item["snippet"])[:MAX_SNIPPET_CHARS]
@@ -1936,6 +2004,25 @@ def _candidates(
         ),
     }
     return result, diagnostics
+
+
+def _apply_score_floor(
+    candidates: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Trim the eligible tail per layer; explicit links and conflicts stay."""
+    best: dict[str, float] = {}
+    for item in candidates:
+        if item.get("selection") or item.get("conflicts") or item.get("match") == "conflict":
+            continue
+        best[item["layer"]] = max(best.get(item["layer"], 0.0), float(item.get("adjusted_score") or 0.0))
+    kept, excluded = [], []
+    for item in candidates:
+        if (item.get("selection") or item.get("conflicts") or item.get("match") == "conflict"
+                or float(item.get("adjusted_score") or 0.0) >= RELATIVE_SCORE_FLOOR * best.get(item["layer"], 0.0)):
+            kept.append(item)
+        else:
+            excluded.append({"path": item["path"], "reason": "score-floor"})
+    return kept, excluded
 
 
 def _retrieval_signature(
@@ -2663,9 +2750,12 @@ def retrieve(
             filter_excluded.append({"path": item["path"], "reason": "working-task"})
         elif item["path"] in loaded:
             filter_excluded.append({"path": item["path"], "reason": "host-loaded"})
+        elif item["category"] == "policy" and item.get("match") == "distinctive":
+            filter_excluded.append({"path": item["path"], "reason": "weak-skill"})
         else:
             kept.append(item)
-    filtered = kept
+    filtered, tail_excluded = _apply_score_floor(kept)
+    filter_excluded.extend(tail_excluded)
     selected, budget_excluded, usage, escalation_reason = _apply_budgets(filtered)
     procedural_ranked = [
         item for item in selected if item["category"] == "policy"

@@ -83,7 +83,9 @@ memory-seed; policy-forge/skill-forge if not already run.
 
 ## Guardrails
 
+- MUST make local-context and both working-memory hooks exit without work when `CONTEXT_MEMORY_RECOVERY=1`; a draft-only recovery must not retrieve, checkpoint, or render another capsule.
 - MUST generate hooks ONLY for the selected editions, each wired through its own mechanism (settings.json / hooks.json / hooks.json+config.toml).
+- MUST preserve memory-seed's managed Memory MCP block in `.codex/config.toml`; project MCP registration is emitted by the copied `mcp_config.py` for selected clients, using portable paths and detected Python. Do not replace other MCP servers or set client trust/approval.
 - MUST block a destructive command ONLY when the profile confirms that tool is present (no `terraform destroy`/`kubectl delete`/migration-reset rules without section 5/2 evidence).
 - MUST ensure every script passes `bash -n` and is `chmod +x`.
 - MUST use second timeouts for Claude and Cursor, and no matcher/timeout for Codex.

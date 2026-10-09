@@ -268,6 +268,8 @@ HARNESS_TESTS_NEWER = (
     "tests.test_harness_memory_use",
     "tests.test_harness_context_usage",
     "tests.test_harness_memory_draft",
+    "tests.test_memory_mcp",
+    "tests.test_mcp_registration",
     "tests.test_portable_fs",
     "tests.test_windows_security",
     "tests.test_windows_commands",

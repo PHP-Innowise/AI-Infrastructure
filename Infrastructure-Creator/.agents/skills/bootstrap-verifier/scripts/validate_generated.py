@@ -53,6 +53,7 @@ Exit code 0 = pass, non-zero = failures (printed to stderr).
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -853,6 +854,32 @@ def validate_memory_readiness(payload: object, errors: list) -> None:
         )
 
 
+def validate_memory_mcp(target: Path, editions: list, files: dict, errors: list) -> None:
+    """New generated runtimes must register the selected native clients."""
+    relative = 'memory-bank/scripts/mcp_config.py'
+    if not is_owned(files, relative):
+        return  # Legacy bundles keep their existing runtime contract.
+    try:
+        spec = importlib.util.spec_from_file_location('generated_memory_mcp_config', target / relative)
+        config = importlib.util.module_from_spec(spec); spec.loader.exec_module(config)
+        for host in editions:
+            name = config.PATHS[host]
+            if not is_owned(files, name):
+                errors.append(f'{name}: Memory MCP registration is not manifest-owned')
+                continue
+            value = (target / name).read_bytes()
+            config.merge(name, value, value)  # Reject foreign keys, duplicate tables and altered blocks.
+            if host == 'codex':
+                valid = any(config.codex_block(p).encode() in value
+                    for p in (('python3', []), ('python', []), ('py', ['-3'])))
+            else:
+                entry = config._json(value).get('mcpServers', {}).get('harness-memory')
+                valid = config._owned(entry, host)
+            if not valid: errors.append(f'{name}: portable Memory MCP registration is missing or changed')
+    except (OSError, ValueError, ImportError):
+        errors.append('Memory MCP registration could not be validated')
+
+
 def validate_memory_runtime(target: Path, files: dict, errors: list) -> None:
     """The context-brain runtime and project-brain skeleton, plus smoke runs."""
     scripts_dir = target / "memory-bank" / "scripts"
@@ -1183,6 +1210,7 @@ def main() -> int:
     validate_hook_wiring(target, editions, files, errors)
     validate_required_wiring(target, editions, files, errors)
     validate_claude_policy_import(target, editions, errors)
+    validate_memory_mcp(target, editions, files, errors)
     validate_memory_bank(
         target,
         files,

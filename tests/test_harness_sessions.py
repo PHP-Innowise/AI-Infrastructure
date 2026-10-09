@@ -835,8 +835,10 @@ class SessionTests(unittest.TestCase):
                 manager.db.commit()
         # Automatic memory: the command gets no Harness capsule, task or capsule claim, and leaves no draft to save.
         link({"task_id": "T-auto", "bank": "memory-bank", "review": False, "capsule": {"task_id": "T-auto"}})
+        from harness import memory_recovery
         with patch.object(sessions.Sessions, "_recall", side_effect=AssertionError("recall for a command")), \
-                patch.object(sessions.Sessions, "_remember", side_effect=AssertionError("remember for a command")):
+                patch.object(sessions.Sessions, "_remember", side_effect=AssertionError("remember for a command")), \
+                patch.object(memory_recovery, "recover", side_effect=AssertionError("recovery for a command")):
             manager.send(sid, "/php-review src")
             self.assertEqual(self.settled(manager, sid)["status"], "completed")
         self.assertEqual(self.calls[-1]["prompt"], "/php-review src")

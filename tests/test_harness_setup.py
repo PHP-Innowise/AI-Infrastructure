@@ -106,6 +106,52 @@ class SetupTests(unittest.TestCase):
     def options(self, **changes):
         return {"project_id": self.project_id, "edition": "PHP Core", "tools": ["cursor"], **changes}
 
+    def test_memory_mcp_merges_publish_without_exposing_other_server_values(self):
+        from tests.test_mcp_registration import mcp
+        source_edition = self.source / 'PHP Core'
+        helper = 'memory-bank/scripts/mcp_config.py'
+        (source_edition / helper).write_bytes((Path(__file__).resolve().parents[1] / 'PHP Core' / helper).read_bytes())
+        catalog_file = self.source / 'install/inventories/php-core.json'
+        catalog = json.loads(catalog_file.read_text())
+        catalog['installed']['shared'].append(helper); catalog['installed']['shared'].sort()
+        for host, relative in mcp.PATHS.items():
+            destination = source_edition / relative; destination.parent.mkdir(parents=True, exist_ok=True)
+            if host == 'codex': destination.write_bytes(destination.read_bytes() + mcp.template(host))
+            else:
+                destination.write_bytes(mcp.template(host))
+                catalog['installed'][host].append(relative); catalog['installed'][host].sort()
+            target = self.project / relative; target.parent.mkdir(parents=True, exist_ok=True)
+            # A client's own Codex config is a collision; the accelerator's own one is merged.
+            if host == 'codex': target.write_bytes(destination.read_bytes().replace(
+                mcp.codex_block().encode(), mcp.codex_block(('py', ['-3'])).encode()))
+            else: target.write_text(json.dumps({'mcpServers': {'other': {'command': 'keep', 'env': {'NOTE': 'opaque-preview-marker'}}}}))
+        catalog_file.write_text(json.dumps(catalog))
+        preview = self.manager.preview(self.options(tools=list(mcp.PATHS)))
+        self.assertNotIn('opaque-preview-marker', json.dumps(preview))
+        self.assertEqual(set(mcp.PATHS.values()), {item['path'] for item in preview['files']
+            if item['path'] in mcp.PATHS.values() and item['action'] == 'merge'})
+        self.manager.install({'preview_id': preview['preview_id']})
+        for host, relative in mcp.PATHS.items():
+            value = (self.project / relative).read_text()
+            if host != 'codex': self.assertIn('opaque-preview-marker', value)
+            self.assertIn('harness_memory' if host == 'codex' else 'harness-memory', value)
+        self.native.assert_not_called()
+
+    def test_memory_mcp_summary_never_hides_other_config_changes(self):
+        from harness import setup as setup_module
+        block = b'# BEGIN HARNESS MEMORY MCP\n[mcp_servers.harness_memory]\n# END HARNESS MEMORY MCP\n'
+        shipped = b'[features]\nhooks = true\n\n' + block
+        created, _ = setup_module._diff(b'', shipped, '.codex/config.toml')
+        self.assertIn('hooks = true', created)
+        replaced, _ = setup_module._diff(b'model = "x"\n', shipped, '.codex/config.toml')
+        self.assertIn('hooks = true', replaced)
+        merged, _ = setup_module._diff(b'model = "x"\n', b'model = "x"\n\n' + block, '.codex/config.toml')
+        self.assertTrue(merged.startswith('Register/update the local project Memory MCP'))
+        other = b'{"mcpServers": {"other": {"env": {"K": "secret-value"}}}}'
+        added = json.dumps({'mcpServers': {**json.loads(other)['mcpServers'], 'harness-memory': {}}}).encode()
+        summary, _ = setup_module._diff(other, added, '.mcp.json')
+        self.assertNotIn('secret-value', summary)
+
     @staticmethod
     def snapshot(root):
         return {path.relative_to(root).as_posix(): (path.read_bytes(), path.stat().st_mode & 0o777)

@@ -118,7 +118,32 @@ def _write_stage(root, name, value):
     path.chmod(value['mode'] & 0o777)
 
 
+def _memory_entry_only(before, after, name):
+    """Whether the change touches nothing but the memory MCP entry."""
+    if name == '.codex/config.toml':
+        return bool(before) and (installer.MCP_CODEX_BLOCK.sub(b'', before).rstrip()
+                           == installer.MCP_CODEX_BLOCK.sub(b'', after).rstrip())
+    try:
+        old, new = json.loads(before), json.loads(after)
+    except (ValueError, UnicodeError):
+        return False
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return False
+    for value in (old, new):
+        if isinstance(value.get('mcpServers'), dict):
+            value['mcpServers'] = {key: server for key, server in value['mcpServers'].items() if key != 'harness-memory'}
+            if not value['mcpServers']:
+                del value['mcpServers']
+    return old == new
+
+
 def _diff(before, after, name):
+    if name in installer.MCP_CONFIG_FILES and _memory_entry_only(before, after, name):
+        # Native MCP files may contain another server's inline credentials.
+        # Show the owned operation, never neighbouring configuration values.
+        return (('Register/update the local project Memory MCP with a portable Python launcher. '
+                 'Preserve other native settings and servers; their values are omitted.')
+                if before != after else '', False)
     try:
         old, new = before.decode('utf-8'), after.decode('utf-8')
     except UnicodeError:
@@ -481,7 +506,7 @@ class SetupManager:
                             handle.flush(); os.fsync(handle.fileno())
                         self._check_directories(target_fd, preview['target_dirs'])
                         if action == 'merge':
-                            if name not in {'AGENTS.md', '.gitignore', '.gitattributes'}:
+                            if name not in {'AGENTS.md', '.gitignore', '.gitattributes', *installer.MCP_CONFIG_FILES}:
                                 raise SessionError('The installer proposed an unsupported merge.')
                             if _metadata(_read(target_fd, name)) != preview['before'].get(name):
                                 raise SessionError('A supported merge target changed after preflight.')

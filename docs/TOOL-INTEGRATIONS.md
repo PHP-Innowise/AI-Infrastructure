@@ -250,9 +250,7 @@ project.
    skipped until it is trusted again.
 6. Start a new session and confirm the metadata-only session hook runs.
 
-The shipped config does not require an MCP server. Do not add the commented
-MCP example unless a real workflow needs that server and the team has reviewed
-its command, credentials, and data boundary.
+The installer registers the bundled [local Memory MCP](MEMORY-INTEGRATION.md) for each selected client. Portable project launchers resolve the actual worktree; other servers/settings remain intact. Client trust and tool approval still follow the client's own settings. External MCP integrations remain opt-in.
 
 Codex hook tool identifiers and input payload keys can vary by client version.
 The shipped scripts read the documented command/path keys and fail open when a

@@ -443,7 +443,7 @@ hard ceiling, with an escalation reason. Privacy, authority, lifecycle, owner,
 and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
 
-The delivered capsule has a separate final contract in both modes: at most 2
+The delivered capsule has a separate final contract in both modes: at most 1
 procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
 Its working state carries the three newest next steps, the eight newest
 files, and four sources.
@@ -453,7 +453,16 @@ Claude Code, Codex, and Cursor — opens with `working: <task> — <goal>` and
 then the task's state, each line bounded and left out when empty: `phase:`,
 `progress:` (manual progress, then the automatic checkpoint, at most 400
 characters), one `next:` line per step, `recent files:` (the five newest), and
-in governed mode `task record:`, the path of the full record.
+in governed mode `task record:`, the path of the full record. Selected project
+knowledge/history also carries its already-filtered excerpt. The complete text
+is capped at 3,600 characters; excerpts shrink first, then optional entries.
+Source-change and weak-match caveats stay beside the source.
+
+Acknowledgements alone do not retrieve. Procedural context admits one strong
+match; a weak semantic match needs a title/path term or an identifier-shaped
+term. Eligible candidate tails below 30% of the best score in their own layer
+leave as `score-floor`, after privacy/freshness/host filtering. Explicit source
+links and conflicting evidence stay eligible.
 
 Two kinds of candidate never take a slot, and both are recorded in the
 manifest's `excluded`. The task's own record and handoff leave as
@@ -465,9 +474,10 @@ Code, `AGENTS.md` for Codex. The default `--host cli` excludes neither.
 It also reports the quality of what it found. `no-match: <layers>` names the
 layers where no candidate passed the relevance test — measured before any
 filter or budget runs, so it never claims memory was empty when something was
-withheld. `weak-match: <path>` marks an item admitted on a single rare term
-rather than on covering the query. Both lines are printed after the opening
-`working:` line, which the Cursor hooks use as the render marker.
+withheld. `(weak match)` marks an anchored item admitted on a single rare
+term rather than on covering the query. Empty-layer diagnostics appear only
+when no optional knowledge is delivered. The opening `working:` line remains
+the Cursor render marker.
 
 Side effects in governed mode: creates
 `project-brain/control/retrieval-manifests/<uuid>.json`, a Git-trackable

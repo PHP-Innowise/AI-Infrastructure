@@ -81,7 +81,11 @@
       "project-brain/control/promotions/",
       "project-brain/control/retrieval-manifests/",
       "project-brain/archive/",
-      "project-brain/local/"
+      "project-brain/local/",
+      "memory-bank/scripts/mcp_server.py",
+      "memory-bank/scripts/mcp_config.py",
+      "memory-bank/MCP.md",
+      "memory-bank/scripts/automatic_query.py"
     ],
     "creatable": [
       {

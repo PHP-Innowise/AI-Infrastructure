@@ -37,11 +37,13 @@ REQUEST = (
     '"next_steps": ["the next action"], '
     '"learnings": [{"type": "finding" or "decision", "title": "one line", '
     '"consequence": "the reusable rule or decision, one or two sentences", '
-    '"sources": ["project-relative file that proves it"]}]}. '
+    '"sources": ["project-relative file that proves it"]}], '
+    '"used_memory": ["retrieved capsule path whose claim you checked and used"]}. '
     "Use at most 3 next steps and at most 3 learnings. A learning is durable, reusable "
     "knowledge you verified in a project file during this run, not progress and not a "
     "guess; use [] when there is none. Never include secrets, personal data, logs or "
     "transcripts. "
+    "List at most 10 used_memory paths; [] is valid. This is your report of use, not proof of reading. "
 )
 REVIEWED = "A person reviews the draft before anything is saved."
 AUTOMATIC = ("The Harness saves the draft to project memory as written, with no review, "
@@ -92,11 +94,28 @@ def parse(text):
         }
         if learning["title"] and learning["consequence"]:
             learnings.append(learning)
-    return {
+    result = {
         "progress": _clip(data.get("progress"), PROGRESS_LIMIT),
         "next_steps": [step for step in (_clip(item, STEP_LIMIT) for item in steps) if step][:STEP_COUNT],
         "learnings": learnings[:LEARNING_COUNT],
     }
+    if "used_memory" in data:
+        values = data["used_memory"] if isinstance(data["used_memory"], list) else []
+        result["used_memory"] = list(dict.fromkeys(value.strip() for value in values
+            if isinstance(value, str) and value.strip() and len(value) <= 1024))[:SOURCE_COUNT]
+    return result
+
+
+def usage(draft, capsule):
+    """Safe provenance: delivered pointers and the subset the agent reports using."""
+    delivered = set()
+    for layer in ("procedural", "semantic", "episodic", "selected"):
+        for item in (capsule or {}).get(layer) or []:
+            if isinstance(item, dict) and isinstance(item.get("path"), str):
+                delivered.add(item["path"])
+    reported = sorted(delivered.intersection((draft or {}).get("used_memory") or []))
+    return {"delivered": len(delivered), "reported_used": reported,
+            "attestation": "agent-reported", "reported": "used_memory" in (draft or {})}
 
 
 def latest(sessions, sid):
@@ -131,7 +150,7 @@ def _source(value):
 
 def submission(data):
     """A reviewed draft as the page sends it, held to the limits saving relies on."""
-    if not isinstance(data, dict) or set(data) - {"progress", "next_steps", "learnings", "verified"}:
+    if not isinstance(data, dict) or set(data) - {"progress", "next_steps", "learnings", "verified", "used_memory"}:
         raise SessionError("Invalid memory draft.")
     progress = data.get("progress", "")
     if not isinstance(progress, str) or len(progress) > PROGRESS_LIMIT:

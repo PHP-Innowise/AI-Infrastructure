@@ -19,7 +19,11 @@ SPEC = importlib.util.spec_from_file_location("memory_bank_validate", MODULE_PAT
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Cannot load memory-bank validator")
 VALIDATOR = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(VALIDATOR)
+sys.path.insert(0, str(MODULE_PATH.parent))
+try:
+    SPEC.loader.exec_module(VALIDATOR)
+finally:
+    sys.path.pop(0)
 
 
 class MemoryBankValidatorTest(unittest.TestCase):

@@ -353,7 +353,8 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK", "--ephemeral",
         )
         self.assertEqual(0, rendered.returncode, rendered.stderr)
-        self.assertIn("weak-match: README.md", rendered.stdout)
+        self.assertNotIn("README.md", rendered.stdout)
+        self.assertIn("specs/plover.md — Plover (weak match)", rendered.stdout)
 
         payload = self.run_cli(
             "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK",
@@ -366,13 +367,14 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             for item in capsule[layer]
             if "path" in item
         }
-        self.assertEqual("distinctive", strengths.get("README.md"), capsule)
+        self.assertNotIn("README.md", strengths)
+        self.assertEqual("distinctive", strengths.get("specs/plover.md"), capsule)
         manifest = json.loads(
             (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
         )
         self.assertEqual(
             "distinctive",
-            {item["path"]: item["match"] for item in manifest["selected"]}["README.md"],
+            {item["path"]: item["match"] for item in manifest["selected"]}["specs/plover.md"],
             manifest,
         )
 
@@ -4101,6 +4103,16 @@ class PathLinkedRetrievalTest(DocumentLinkTest):
             for item in capsule.get(layer) or []
         }
 
+    def test_rendered_path_link_contains_the_filtered_body(self) -> None:
+        payload = self.capsule("--path", self.SOURCE)
+        result = self.run_cli("retrieve", self.SOURCE_WORDS, "--task-id", "TASK-PATH",
+                              "--path", self.SOURCE)
+        self.assertEqual(0, result.returncode, result.stderr)
+        for item in payload["semantic"]:
+            if item["path"] in self.chunk_paths():
+                phrase = " ".join(item["snippet"].split())
+                self.assertIn(phrase[:100], result.stdout)
+
     def test_without_the_flag_the_chunks_stay_unreachable(self) -> None:
         # The baseline the flag is measured against.
         self.assertEqual(set(), self.chunk_paths() & self.delivered(self.capsule()))
@@ -4557,7 +4569,7 @@ class WorkingStateCapsuleTest(RuntimeHarness):
             return {item["path"] for item in payload["procedural"]}, manifest["excluded"]
 
         paths, _ = procedural("cli")
-        self.assertEqual({"AGENTS.md", "CLAUDE.md"}, paths)
+        self.assertEqual({"AGENTS.md"}, paths)
         paths, excluded = procedural("claude")
         self.assertEqual(set(), paths)
         self.assertIn({"path": "CLAUDE.md", "reason": "host-loaded"}, excluded)
@@ -4625,6 +4637,177 @@ class WorkingStateCapsuleTest(RuntimeHarness):
         )
         self.assertEqual(0, cleared.returncode, cleared.stderr)
         self.assertEqual([], json.loads(cleared.stdout)["next_steps"])
+
+
+class CapsuleNoiseTest(RuntimeHarness):
+    def capsule(self, query: str) -> dict:
+        result = self.run_cli("refresh", "--query", query, "--task-id", "TASK-NOISE",
+                              "--host", "codex", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)["capsule"]
+
+    def test_render_delivers_the_filtered_excerpt_and_preserves_source_warning(self) -> None:
+        capsule = {"working": None, "warnings": [], "procedural": [], "episodic": [],
+                   "semantic": [{"path": "specs/cobalt.md", "title": "Cobalt",
+                                 "snippet": "The cobalt allocation requires one owner.",
+                                 "source_changed": ["src/Guard.php"]}]}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            context_cli.print_capsule(capsule)
+        self.assertTrue(output.getvalue().startswith("working:"))
+        self.assertIn("allocation requires one owner", output.getvalue())
+        self.assertIn("cited file changed", output.getvalue())
+
+    def test_excerpt_preserves_array_syntax_from_the_source(self) -> None:
+        self.repository.joinpath("specs/array.md").write_text(
+            "# Allocation\n\nCobalt values[owner] must exist before allocation.\n")
+        result = self.run_cli("refresh", "--query", "cobalt values", "--task-id", "TASK-NOISE", "--ephemeral")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("values[owner]", result.stdout)
+
+    def test_render_is_bounded_and_never_publishes_private_excerpt_text(self) -> None:
+        capsule = {"working": {"task_id": "TASK-NOISE", "goal": "Apply cobalt",
+                               "progress": "p" * 2000, "next_steps": ["s" * 2000] * 3,
+                               "files": ["src/" + "f" * 300] * 5}, "warnings": [],
+                   "procedural": [], "episodic": [],
+                   "semantic": [{"path": "specs/cobalt.md", "title": "Cobalt",
+                                 "snippet": "cobalt " * 300 + "person@example.test"}]}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            context_cli.print_capsule(capsule)
+        self.assertLessEqual(len(output.getvalue()), 3600)
+        self.assertNotIn("person@example.test", output.getvalue())
+        self.assertTrue(output.getvalue().startswith("working: TASK-NOISE"))
+
+    def test_chat_does_not_retrieve_documents_or_history(self) -> None:
+        self.repository.joinpath("specs/chat.md").write_text("# Chat\n\nThanks, looks good.\n")
+        capsule = self.capsule("thanks looks good")
+        self.assertFalse(any(capsule[layer] for layer in context_cli.DOCUMENT_LAYERS), capsule)
+
+    def test_weak_skills_are_omitted_but_an_exact_identifier_survives(self) -> None:
+        skill = self.repository / ".agents/skills/xanthic/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: xanthic\ndescription: xanthic workflows\n---\n# Xanthic\n")
+        self.repository.joinpath("specs/other.md").write_text("# Rollover\n\nRollover is separate.\n")
+        self.repository.joinpath("specs/identifier.md").write_text("# Allocation\n\nCMS768 needs one owner.\n")
+        for number in range(15):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(
+                f"# Filler {number}\n\nOrdinary records.\n")
+        self.assertEqual([], self.capsule("xanthic rollover")["procedural"])
+        capsule = self.capsule("CMS768 rollover")
+        self.assertIn("specs/identifier.md", [item["path"] for item in capsule["semantic"]])
+
+    def test_weak_incidental_word_is_not_evidence_of_the_requested_topic(self) -> None:
+        self.repository.joinpath("specs/unrelated.md").write_text("# Allocation\n\nMentions xanthic.\n")
+        self.repository.joinpath("specs/other.md").write_text("# Rollover\n\nRollover is separate.\n")
+        for number in range(15):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(f"# Filler {number}\n\nOrdinary records.\n")
+        capsule = self.capsule("xanthic rollover")
+        self.assertNotIn("specs/unrelated.md", [item["path"] for item in capsule["semantic"]])
+
+    def test_lightweight_task_query_does_not_restore_a_weak_skill(self) -> None:
+        skill = self.repository / ".agents/skills/xanthic/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: xanthic\ndescription: xanthic workflows\n---\n# Xanthic\n")
+        self.repository.joinpath("specs/rollover.md").write_text("# Rollover\n\nRollover is separate.\n")
+        for number in range(15):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(f"# Filler {number}\n\nOrdinary records.\n")
+        started = self.run_cli("--mode", "lightweight", "start", "--task-id", "TASK-LITE",
+                               "--goal", "xanthic rollover")
+        self.assertEqual(0, started.returncode, started.stderr)
+        result = self.run_cli("--mode", "lightweight", "context", "cobalt",
+                              "--task-id", "TASK-LITE", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], json.loads(result.stdout)["procedural"])
+
+    def test_lightweight_acknowledgement_keeps_state_without_goal_fallback_retrieval(self) -> None:
+        started = self.run_cli("--mode", "lightweight", "start", "--task-id", "TASK-LITE",
+                               "--goal", "cobalt authority")
+        self.assertEqual(0, started.returncode, started.stderr)
+        result = self.run_cli("--mode", "lightweight", "context", "thanks looks good",
+                              "--task-id", "TASK-LITE", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        capsule = json.loads(result.stdout)
+        self.assertEqual("cobalt authority", capsule["working"]["goal"])
+        self.assertFalse(any(capsule[layer] for layer in context_cli.DOCUMENT_LAYERS), capsule)
+
+    def test_only_one_strong_skill_is_delivered(self) -> None:
+        for name in ("first", "second"):
+            skill = self.repository / f".agents/skills/{name}/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(f"---\nname: {name}\ndescription: cobalt allocation\n---\n# {name}\n\ncobalt allocation\n")
+        self.assertEqual(1, len(self.capsule("cobalt allocation")["procedural"]))
+
+    def test_relative_floor_is_per_layer_and_keeps_the_best_memory(self) -> None:
+        rows = []
+        for path, layer, title, repetitions in (
+            (".agents/skills/strong/SKILL.md", "procedural", "Cobalt allocation", 1),
+            ("specs/best.md", "semantic", "Cobalt allocation", 1),
+            ("specs/tail.md", "semantic", "Unrelated", 400)):
+            content = "cobalt allocation " + "ordinary material " * repetitions
+            source = self.repository / path
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(content)
+            rows.append((path, layer, "skill" if layer == "procedural" else "spec", title, title, content))
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            retrieval.index_documents(connection, self.repository, rows)
+            candidates, _ = retrieval._candidates(connection, "cobalt allocation")
+            candidates, _ = retrieval._apply_score_floor(candidates)
+        finally:
+            connection.close()
+        paths = {item["path"] for item in candidates}
+        self.assertIn("specs/best.md", paths)
+        self.assertNotIn("specs/tail.md", paths)
+
+    def test_floor_preserves_explicit_links_and_conflicting_evidence(self) -> None:
+        candidates = [
+            {"path": "specs/best.md", "layer": "semantic", "adjusted_score": 100},
+            {"path": "specs/weak.md", "layer": "semantic", "adjusted_score": 1},
+            {"path": "memory-bank/chunks/linked.md", "layer": "semantic", "adjusted_score": 0,
+             "selection": "path-link"},
+            {"path": "project-brain/dynamic/findings/conflict.md", "layer": "semantic",
+             "adjusted_score": 0, "match": "conflict"},
+            {"path": "specs/history.md", "layer": "episodic", "adjusted_score": 1},
+        ]
+        kept, excluded = retrieval._apply_score_floor(candidates)
+        self.assertEqual({"specs/best.md", "memory-bank/chunks/linked.md",
+                          "project-brain/dynamic/findings/conflict.md", "specs/history.md"},
+                         {item["path"] for item in kept})
+        self.assertEqual([{"path": "specs/weak.md", "reason": "score-floor"}], excluded)
+
+    def test_next_question_receives_a_different_excerpt_from_the_same_file(self) -> None:
+        self.repository.joinpath("specs/allocation.md").write_text(
+            "# Allocation\n\nCobalt allocation requires one owner.\n\n"
+            + "Ordinary background. " * 200
+            + "\n\nRelease requires the dragonfly token.\n")
+        first = self.run_cli("refresh", "--query", "cobalt allocation", "--task-id", "TASK-NOISE",
+                             "--ephemeral")
+        second = self.run_cli("refresh", "--query", "dragonfly release", "--task-id", "TASK-NOISE",
+                              "--ephemeral")
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertIn("allocation requires one owner", first.stdout)
+        self.assertIn("Release requires the dragonfly token", second.stdout)
+
+    def test_automatic_query_sanitization_keeps_the_technical_subject(self) -> None:
+        safe = context_cli.sanitize_automatic_query(
+            "Fix CMS768 allocation for person@example.test, call +370 600 12345; Customer id: 10492")
+        self.assertIn("CMS768 allocation", safe)
+        for private in ("person@example.test", "12345", "10492"):
+            self.assertNotIn(private, safe)
+        for private_only in ("person@example.test", "Customer email: person@example.test",
+                             "Call +370 600 12345", "Patient name: Alice Smith",
+                             "Client address: Main Street 7, Vilnius",
+                             "Client address: Main Street 7\nVilnius",
+                             "Patient name: Alice; Smith; Fix CMS768",
+                             "Client address: Building A; Vilnius; Fix CMS768"):
+            self.assertEqual("", context_cli.sanitize_automatic_query(private_only))
+        self.assertIn("CMS768 allocation", context_cli.sanitize_automatic_query(
+            "Fix CMS768 allocation; Patient name: Alice; Smith"))
+        for unsafe in ("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456", "User: copied request"):
+            with self.assertRaises(context_cli.ContextError):
+                context_cli.sanitize_automatic_query(unsafe)
 
 
 class AutomaticWorkingMemoryTest(RuntimeHarness):
