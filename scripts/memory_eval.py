@@ -1158,6 +1158,7 @@ def score(
     grades: Dict[str, int],
     passages: Dict[str, Dict[str, Any]],
     existed_useful: Sequence[str],
+    answer_existed: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """Score one refresh result. Paths and counts only: no capsule text."""
     result = result if isinstance(result, dict) else {}
@@ -1175,6 +1176,8 @@ def score(
         "unjudged": unjudged,
         "existed_useful": list(existed_useful),
         "could_help": bool(existed_useful),
+        "answer_existed": list(answer_existed),
+        "answer_could_help": bool(answer_existed),
         "answer_in_text": answer_in_text(useful, passages, text),
         "query_withheld": withheld,
         "capsule_chars": len(text),
@@ -1190,6 +1193,32 @@ def existing_useful(corpus: Path, grades: Dict[str, int]) -> List[str]:
         if is_skill(path) or (
             installer.is_safe_relative_path(path) and (corpus / PurePosixPath(path)).is_file()
         ):
+            found.append(path)
+    return found
+
+
+def answer_existing(corpus: Path, grades: Dict[str, int], passages: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Judged-useful documents whose labelled answer was already in them.
+
+    Judgments are per file, and a file can exist at the prompt without the
+    part that answered it: a changelog's entry, a spec's section written for
+    the very work the prompt started. A labelled passage present in the
+    corpus's copy is the stricter ceiling for "answer in the capsule text".
+    """
+    found = []
+    for path, grade in sorted(grades.items()):
+        entry = passages.get(path)
+        if grade < 1 or is_skill(path) or not isinstance(entry, dict) or entry.get("useful") is False:
+            continue
+        if not installer.is_safe_relative_path(path):
+            continue
+        target = corpus / PurePosixPath(path)
+        try:
+            text = flatten(target.read_text(encoding="utf-8", errors="replace")) if target.is_file() else ""
+        except OSError:
+            text = ""
+        if text and any(isinstance(passage, str) and flatten(passage) and flatten(passage) in text
+                        for passage in entry.get("passages") or []):
             found.append(path)
     return found
 
@@ -1226,6 +1255,10 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             1 for item in evaluated if item.get("could_help") and item.get("class") == "useful"
         ),
         "answer_in_text": sum(1 for item in evaluated if item.get("answer_in_text")),
+        "answer_could_help": sum(1 for item in evaluated if item.get("answer_could_help")),
+        "answer_in_text_among_answer_could_help": sum(
+            1 for item in evaluated if item.get("answer_could_help") and item.get("answer_in_text")
+        ),
         "noise_only": classes.get("noise-only", 0),
         "unjudged_only": classes.get("unjudged-only", 0),
         "silent": classes.get("silent", 0),
@@ -1417,6 +1450,7 @@ class Run:
             item["overlay"] = overlay(corpus, edition)
             grades = self.judgments.get(prompt["id"], {})
             existed = existing_useful(corpus, grades)
+            answered = answer_existing(corpus, grades, self.passages.get(prompt["id"], {}))
             env = runtime_env(self.cache, moment, moment if self.pinned else None)
             objects = repository.history(self.cache, parent) if parent else None
             branch = f"eval/{safe_name(prompt['id'])}"
@@ -1451,7 +1485,7 @@ class Run:
             }
             if result is None:
                 raise Skip("refresh-timeout" if refresh["exit"] is None else "refresh-error")
-            item.update(score(result, grades, self.passages.get(prompt["id"], {}), existed))
+            item.update(score(result, grades, self.passages.get(prompt["id"], {}), existed, answered))
             item["status"] = "ok"
         except Skip as skip:
             item["reason"] = skip.reason
@@ -1526,6 +1560,8 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("could help (a useful document existed)", "could_help"),
     ("useful among could-help", "useful_among_could_help"),
     ("answer in the capsule text", "answer_in_text"),
+    ("could answer (a labelled answer existed)", "answer_could_help"),
+    ("answer in text among could-answer", "answer_in_text_among_answer_could_help"),
     ("noise-only turns", "noise_only"),
     ("unjudged-only turns", "unjudged_only"),
     ("silent turns", "silent"),
@@ -1535,7 +1571,8 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("latency p50 (s)", "latency_p50"),
     ("latency p95 (s)", "latency_p95"),
 )
-SHARED_ROWS = {"useful", "answer_in_text", "noise_only", "unjudged_only", "silent", "could_help"}
+SHARED_ROWS = {"useful", "answer_in_text", "noise_only", "unjudged_only", "silent", "could_help",
+               "answer_could_help"}
 
 
 def row_value(summary: Dict[str, Any], key: str) -> Optional[float]:
@@ -1553,6 +1590,8 @@ def row_cell(summary: Dict[str, Any], key: str) -> str:
         return _share(int(value), int(summary.get("evaluated") or 0))
     if key == "useful_among_could_help":
         return f"{int(value)}/{int(summary.get('could_help') or 0)}"
+    if key == "answer_in_text_among_answer_could_help":
+        return f"{int(value)}/{int(summary.get('answer_could_help') or 0)}"
     if key.startswith("latency"):
         return f"{value:.3f}"
     if key.startswith("mean"):

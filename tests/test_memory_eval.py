@@ -569,6 +569,25 @@ class ScoringTest(unittest.TestCase):
         # Only a useful delivered document's passage counts.
         self.assertFalse(found([], passage("rounded"), text))
 
+    def test_an_answer_written_after_the_prompt_is_not_one_that_existed(self) -> None:
+        # The file existed at the prompt; the entry that answered it did not.
+        with tempfile.TemporaryDirectory() as name:
+            corpus = Path(name)
+            (corpus / "CHANGELOG.md").write_text("# Changelog\n\n- Older entry.\n", encoding="utf-8")
+            (corpus / "docs").mkdir()
+            (corpus / "docs/a.md").write_text("Totals are rounded\nhalf-up.\n", encoding="utf-8")
+            grades = {"CHANGELOG.md": 2, "docs/a.md": 1, ".agents/skills/x/SKILL.md": 2, "docs/gone.md": 2}
+            passages = {
+                "CHANGELOG.md": {"useful": True, "passages": ["the entry written for this very work"]},
+                "docs/a.md": {"useful": True, "passages": ["totals are rounded half-up"]},
+                "docs/gone.md": {"useful": True, "passages": ["anything"]},
+            }
+            self.assertEqual(["docs/a.md"], memory_eval.answer_existing(corpus, grades, passages))
+            self.assertEqual(["CHANGELOG.md", "docs/a.md"],
+                             [path for path in memory_eval.existing_useful(corpus, grades) if "/skills/" not in path])
+            scored = memory_eval.score(refresh_result({}), grades, passages, ["CHANGELOG.md"], [])
+            self.assertEqual((True, False), (scored["could_help"], scored["answer_could_help"]))
+
     def test_judgments_ignore_what_is_not_an_integer_grade(self) -> None:
         grades = {
             "docs/a.md": 2,

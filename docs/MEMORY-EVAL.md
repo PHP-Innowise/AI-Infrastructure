@@ -192,6 +192,12 @@ withheld), and the score below. `summary` is what `report` prints.
 - **answer in the capsule text** - a passage of a useful delivered document
   is, whitespace-normalised and case-folded, a substring of `capsule_text`,
   the text a model reads. Delivering a pointer is not delivering the answer.
+- **answer_existed / could answer** - judged-useful documents whose labelled
+  passage is already in the corpus's copy. Judgments are per file, and a file
+  often existed at the prompt without the part that answered it - a changelog
+  entry, a spec section written for that very work - so "could help" alone
+  overstates what memory could have handed over. "Answer in text among
+  could-answer" is the delivery rate against that stricter ceiling.
 - **class** - `useful` (at least one useful item), `noise-only` (delivered,
   nothing useful, at least one judged noise), `unjudged-only`, `silent`
   (nothing delivered, or the sanitizer left nothing to search).
