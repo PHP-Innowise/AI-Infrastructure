@@ -16,6 +16,9 @@ Cursor: `/` at the start lists the project's Cursor skills; a message that start
 Every CLI: commands its terminal offers and its print mode does not (`/cost`, `/status`, `/resume`, `/memory`,
 `/login`, `/help`, `/diff`) open the Harness view that does the same (NAVIGATION). A command of the same name from
 the CLI or the project, such as an accelerator's `/memory`, wins.
+
+An accelerator attached to the project from this clone adds its commands and skills as its launch does
+(Catalog.catalogue); the composer lists them and a message is routed with them, from the same catalogue.
 """
 from __future__ import annotations
 
@@ -406,35 +409,45 @@ class Catalog:
         taken = {name for item in commands for name in [item['name'], *(item.get('aliases') or [])]}
         return commands + [{**item, 'aliases': [], 'kind': 'page'} for item in NAVIGATION if item['name'] not in taken]
 
+    def catalogue(self, provider, cwd, settings=None, project_id=None, newer_than=None):
+        """The entries the CLI in `cwd` takes - Claude Code's commands, or Codex's or Cursor's skills - and an error.
+        An accelerator attached to `project_id` adds its own as its launch does: Claude Code is asked with the
+        edition's `--add-dir`, and the edition's Codex and Cursor skills follow the CLI's or the project's own, which
+        keep their names. The composer lists this and a message is routed against it: what is offered is recognised."""
+        home = self.sessions.accelerators.home(project_id, cwd) if project_id else None
+        if provider == 'claude':
+            return self.claude(cwd, settings or claude_settings(), newer_than, extra=('--add-dir', str(home)) if home else ())
+        if provider == 'codex':
+            skills, error = self.codex(cwd)
+            listed = [{key: item[key] for key in ('name', 'description', 'path')} for item in skills]
+        elif provider == 'cursor':
+            listed, error = [item for item in workspace_skills(cwd, provider)[0] if item['user']], None
+        else:
+            raise SessionError('Choose a provider.')
+        attached = self.sessions.accelerators.skills(project_id, provider) if home else []
+        names = {item['name'] for item in listed}
+        return listed + [item for item in attached if item['name'] not in names], error
+
     def listing(self, provider, cwd, settings=None, project_id=None):
         """What the composer offers: `commands` after a leading `/`, `skills` after `$` (Codex).
-        An accelerator attached to `project_id` adds its own, as the launch will."""
-        home = self.sessions.accelerators.home(project_id, cwd) if project_id else None
-        attached = self.sessions.accelerators.skills(project_id, provider) if home else []
+        An accelerator attached to `project_id` adds its own, as the launch will (catalogue)."""
         if provider == 'claude':
-            extra = ('--add-dir', str(home)) if home else ()
-            native, error = self.claude(cwd, settings or claude_settings(), extra=extra)
+            native, error = self.catalogue(provider, cwd, settings, project_id)
             commands = [{**item, 'kind': 'page' if item['name'] in CLAUDE_PAGE else 'native',
                          'action': CLAUDE_PAGE.get(item['name'])} for item in native]
             return {'provider': provider, 'commands': self._navigation(commands), 'skills': [], 'error': error}
         if provider == 'codex':
-            skills, error = self.codex(cwd)
+            skills, error = self.catalogue(provider, cwd, project_id=project_id)
             commands = [{'name': item['name'], 'description': item['description'], 'hint': item['hint'], 'aliases': [],
                          'kind': 'page' if item['action'] else 'prompt', 'action': item['action']} for item in CODEX_COMMANDS]
             commands += [{'name': item['name'], 'description': item['description'], 'hint': item['hint'], 'aliases': [],
                           'kind': 'prompt', 'action': None} for item in codex_prompts()]
-            listed = [{key: item[key] for key in ('name', 'description', 'path')} for item in skills]
-            names = {item['name'] for item in listed}
-            listed += [item for item in attached if item['name'] not in names]
-            return {'provider': provider, 'commands': self._navigation(commands), 'skills': listed, 'error': error}
+            return {'provider': provider, 'commands': self._navigation(commands), 'skills': skills, 'error': error}
         if provider == 'cursor':
-            skills, _ = workspace_skills(cwd, provider)
-            commands = [{'name': item['name'], 'description': item['description'], 'hint': item['hint'], 'aliases': [],
-                         'kind': 'skill', 'action': None} for item in skills if item['user']]
-            names = {item['name'] for item in commands}
-            commands += [{'name': item['name'], 'description': item['description'], 'hint': '', 'aliases': [],
-                          'kind': 'skill', 'action': None} for item in attached if item['name'] not in names]
-            return {'provider': provider, 'commands': self._navigation(commands), 'skills': [], 'error': None}
+            skills, error = self.catalogue(provider, cwd, project_id=project_id)
+            commands = [{'name': item['name'], 'description': item['description'], 'hint': item.get('hint', ''), 'aliases': [],
+                         'kind': 'skill', 'action': None} for item in skills]
+            return {'provider': provider, 'commands': self._navigation(commands), 'skills': [], 'error': error}
         raise SessionError('Choose a provider.')
 
     @staticmethod
@@ -460,17 +473,18 @@ class Catalog:
 
     def route(self, session, message):
         """How a message reaches the CLI. `native`: the message goes as typed (a Claude Code command). `text`: the
-        message, possibly expanded (a Codex prompt or /init), goes with the Harness context and the skill requests."""
-        provider, cwd = session['provider'], Path(session['project_path'])
+        message, possibly expanded (a Codex prompt or /init), goes with the Harness context and the skill requests.
+        Names resolve against the catalogue the composer lists, an attached accelerator's entries included."""
+        provider, cwd, project_id = session['provider'], Path(session['project_path']), session.get('project_id')
         route = {'mode': 'text', 'text': message, 'requests': [], 'notice': None}
         leading = LEADING.match(message or '')
         name = leading.group(1) if leading else None
         if provider == 'claude' and name:
             settings = claude_settings(session['agents_enabled'], session['agent_count'], session['thinking_effort'])
-            commands, error = self.claude(cwd, settings)
+            commands, error = self.catalogue(provider, cwd, settings, project_id)
             known = {alias: item['name'] for item in commands for alias in [item['name'], *item['aliases']]}
             if name not in known and not error:
-                commands, error = self.claude(cwd, settings, newer_than=RECHECK_SECONDS)
+                commands, error = self.catalogue(provider, cwd, settings, project_id, newer_than=RECHECK_SECONDS)
                 known = {alias: item['name'] for item in commands for alias in [item['name'], *item['aliases']]}
             self.check(provider, message, {alias: CLAUDE_PAGE[target] for alias, target in known.items() if target in CLAUDE_PAGE})
             if name in known:
@@ -489,7 +503,7 @@ class Catalog:
                 route.update(text=INIT_PROMPT + (f'\n\nAlso: {extra}' if extra else ''), notice='Sent Codex /init as its instruction.')
             mentioned = [match.group(1) for match in MENTION.finditer(CODE.sub(' ', message or ''))]
             if mentioned:
-                skills, error = self.codex(cwd)
+                skills, error = self.catalogue(provider, cwd, project_id=project_id)
                 by_name = {item['name']: item for item in skills}
                 requests = []
                 for skill in mentioned:
@@ -502,7 +516,7 @@ class Catalog:
                 notice = f'Codex skills requested: {names}.' if names else f'Codex could not list its skills ({error}).' if error else None
                 route['notice'] = ' '.join(part for part in (route['notice'], notice) if part) or None
         elif provider == 'cursor' and name:
-            skills = {item['name']: item for item in workspace_skills(cwd, provider)[0] if item['user']}
+            skills = {item['name']: item for item in self.catalogue(provider, cwd, project_id=project_id)[0]}
             if name in skills:
                 route.update(requests=[skills[name]], notice=f'Cursor skill requested: {name}.')
         return route

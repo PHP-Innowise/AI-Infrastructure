@@ -94,9 +94,22 @@ def edition_directory(edition: str, repository: Path = REPOSITORY) -> Path:
     return directory
 
 
-def project_key(project: Path) -> str:
-    """The project's identity, shared with the Harness's project registry."""
-    return hashlib.sha256(os.path.normcase(str(project)).encode()).hexdigest()[:16]
+def canonical_project(project: Path | str) -> Path:
+    """The one spelling of a project directory that its identity comes from.
+
+    Absolute, `~` expanded, symbolic links and `..` resolved as the system
+    resolves them, without repeated or trailing separators - and without the
+    leading `//` that POSIX also accepts for the root. `/srv/shop`,
+    `//srv/shop`, `/srv/shop/` and a link to it are one project.
+    """
+    return Path(project).expanduser().resolve()
+
+
+def project_key(project: Path | str) -> str:
+    """The project's identity, shared with the Harness's project registry: the
+    same for every spelling of one directory, so the browser and this launcher
+    keep one state directory for it."""
+    return hashlib.sha256(os.path.normcase(str(canonical_project(project))).encode()).hexdigest()[:16]
 
 
 def default_state_base() -> Path:
@@ -113,7 +126,7 @@ def state_directory(project: Path, base: Optional[Path] = None) -> Path:
 
 
 def resolve_project(value: Optional[str]) -> Path:
-    project = Path(value or os.getcwd()).expanduser().resolve()
+    project = canonical_project(value or os.getcwd())
     if not project.is_dir():
         raise AttachError(f"The project is not a directory: {project}")
     if project == REPOSITORY or REPOSITORY in project.parents or project in REPOSITORY.parents:
