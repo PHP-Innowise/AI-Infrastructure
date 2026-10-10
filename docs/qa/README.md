@@ -8,8 +8,8 @@ the package checksum manifest, and fail before writing output if any source is
 missing or inconsistent:
 
 ```bash
-/tmp/accelerator-qa-venv/bin/python scripts/qa/build_disposition_ledger.py
-/tmp/accelerator-qa-venv/bin/python scripts/qa/reconstruct_workbook.py \
+scripts/qa/.venv/bin/python scripts/qa/build_disposition_ledger.py
+scripts/qa/.venv/bin/python scripts/qa/reconstruct_workbook.py \
   --output /tmp/Accelerator-TestCases.reconstructed.xlsx
 ```
 
@@ -19,18 +19,21 @@ the approved sanitized package from the Accelerator Team and place it at
 Verify its `SHA256SUMS.txt` before use. See
 [`SOURCE-EVIDENCE-HANDOFF.md`](SOURCE-EVIDENCE-HANDOFF.md).
 
-Install the workbook dependency in an isolated environment:
+Install the workbook dependency in an isolated environment. Use this path:
+`python3 scripts/check.py` runs the `qa-tooling` job with
+`scripts/qa/.venv/bin/python`, and skips it (naming these two commands) when
+that venv is absent; Git ignores the folder.
 
 ```bash
-python3 -m venv /tmp/accelerator-qa-venv
-/tmp/accelerator-qa-venv/bin/python -m pip install -r requirements-qa.txt
+python3 -m venv scripts/qa/.venv
+scripts/qa/.venv/bin/python -m pip install -r requirements-qa.txt
 ```
 
 List or run the deterministic cases:
 
 ```bash
-/tmp/accelerator-qa-venv/bin/python scripts/qa/run_tc_ai.py --list
-/tmp/accelerator-qa-venv/bin/python scripts/qa/run_tc_ai.py \
+scripts/qa/.venv/bin/python scripts/qa/run_tc_ai.py --list
+scripts/qa/.venv/bin/python scripts/qa/run_tc_ai.py \
   --run-id RUN-20260803-001
 ```
 
@@ -42,7 +45,7 @@ After a complete evidence run, apply the reviewed owner/disposition policy and
 bind reproduced Codex evidence into the working ledger:
 
 ```bash
-/tmp/accelerator-qa-venv/bin/python scripts/qa/apply_disposition_decisions.py
+scripts/qa/.venv/bin/python scripts/qa/apply_disposition_decisions.py
 ```
 
 The reproducible policy is recorded in `disposition-decisions.json`.
@@ -60,7 +63,7 @@ status replacement.
 Validate working artifacts:
 
 ```bash
-/tmp/accelerator-qa-venv/bin/python scripts/qa/validate_qa_artifacts.py \
+scripts/qa/.venv/bin/python scripts/qa/validate_qa_artifacts.py \
   --skip-run-evidence
 ```
 

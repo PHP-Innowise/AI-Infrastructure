@@ -1775,41 +1775,58 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
-- **The `compaction:` line reports what the rendered capsule cuts, and the
-  ceiling no longer removes it.** The line counted only what the JSON budget
-  and the governed contract dropped, while the rendered text - the only form
-  Claude Code, Codex and Cursor read - cut again: progress to its first 399
-  characters, five of the task's files, the goal and each next step past
-  their bounds, the last of five long paths in half, and every working source.
-  A 1,100-character progress therefore reached the model without the step it
-  ended on and with no compaction line, and a task with 20 files showed 5 and
-  reported 12 omitted. `rendered_working_state` now returns those cuts and
-  the line adds them to the JSON counters (20 files: 15 omitted); progress
-  keeps its opening and its end, as `truncate_progress` does for the JSON;
-  path lines stop at a whole path; and a `sources:` line shows the task's
-  cited sources, the ones the line asks the model to re-read. At the
-  3,600-character ceiling the line used to go whole before any entry, so a
-  capsule whose JSON had dropped results read as complete exactly when it was
-  tightest; it now gives up its counts for a fixed `compaction: lossy view`
-  marker, which is never dropped and goes in before the first entry the
-  ceiling drops. The marker costs about 100 characters in a capsule the
-  ceiling cuts; the drop order (excerpts, the line's counts, skills, related
-  knowledge, the weakest knowledge) and the 8,000/3,600 limits are unchanged,
-  and `shown_in_render` still records exactly what the text shows. Tests in
-  `memory-bank/tests/test_context.py` and the `WorkingStateCapsuleTest`,
-  `RelatedItemBudgetTest` and `DeliveryTest` cases in
-  `project-brain/tests/test_runtime.py`; the generator asset follows.
+- **`install_accelerator.py --sync` no longer applies part of a release over
+  the runtime or hook wiring it keeps.** The sync, which the Harness runs by
+  itself on every installed project, writes no file the project's Git tracks
+  but did add the files a newer release brought. On a committed install of
+  the release before the context handoff it added the `context-save` and
+  `context-load` skills and commands, `context_handoff.py`,
+  `context_continuity.py` and the continuity hooks, and kept the older
+  `context.py`, `.claude/settings.json`, `.cursor/hooks.json` and
+  `.codex/hooks.json`: `/context-save` failed with "invalid choice:
+  'context-save'", no tool ran the new hooks, and the memory server it added
+  beside an older `brain_runtime.py` crashed on import. Now every write is
+  planned first and the release is applied only as far as what it runs
+  follows (`HOOK_WIRING`, `apply_release`): while a runtime file
+  (`memory-bank/scripts`, `project-brain/scripts`, `project-brain/schemas`)
+  stays at the project's version, nothing else of the release is written; a
+  tool's new hooks wait for its wiring, and the wiring for a new hook that
+  cannot be written; the runtime is written first, and a part of it that
+  fails holds back the rest. Each such file is listed under `kept` with a
+  reason starting `held back:`, and the report's new `partial` field says the
+  project is not at the release (null otherwise). A committed install takes a
+  release through a commit (a reinstall with `--overwrite`, reviewed and
+  committed), as `scripts/README.md` now says. The Harness keeps restoring
+  Codex's approved wiring when it cannot approve a new one; the new Codex
+  hook scripts that sync wrote then stay unwired until the next approval.
+  Tests: `tests/test_installation.py` (`SyncOfAnOlderReleaseTest`: a clone
+  publishes the release before the handoff and then the current one; a
+  committed install of the older one takes nothing, as a dry run and with
+  `--rewire-codex`; an uncommitted one takes everything; new hooks wait for
+  tracked Claude wiring and for Codex wiring awaiting approval; the wiring
+  waits for a hook behind a link. `InstallSyncTest`: a runtime whose backup
+  cannot be written now holds back the rest).
 
-- **A project built inside an edition keeps its work under `Task/`.** The
-  practiceperfect branches built an application inside `Laravel/` and
-  `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
-  and governed Brain records in the editions' own `specs/`, `codebase/`,
-  `memory-bank/chunks/` and `project-brain/`. There the editions' hooks and
-  index read them as the edition's memory (the Symfony session hook counted
-  six chunks and reported `brain-validation=invalid`), the installer listed
-  the specs as distribution files, the Laravel index masked three values in a
-  schema spec, and two of its PHP snippets failed the lint. The 52 files now
-  sit at the same relative paths under `<Edition>/Task/project-work/`, with
-  the project's `specs/MANIFEST.md` and `.memory-counter` beside them; the
-  editions' own copies are back to their seeds. `scripts/check_php_snippets.py`
-  no longer lints `Task/` material, which the installer already excludes.
+- **The installation job has room to finish.** On PR #44 it ran 577 s of its
+  600 s limit on a hosted runner: the per-edition install checks doubled with
+  the context handoff, and its harness step varies by more than 100 s between
+  runs. `timeout-minutes` is now 20 in `.github/workflows/ci.yml` and
+  `scripts/check.py`, and `tests/test_check.py` (`test_timeouts_match_ci`)
+  fails when a group's limit differs from its job's.
+
+- **The merge archive's Windows file calls run in CI.** `harness.chat_merge`
+  creates, reads, removes and recovers a merged chat's archive through folder
+  handles, NT handles on Windows, but its tests ran only in the Linux job:
+  they build a whole in-process Harness store and assert POSIX modes and
+  links. `tests/test_harness_merge_archive.py` drives the same functions
+  against the record table alone, without POSIX-only assertions and with a
+  junction where POSIX uses a link, and runs in the `windows-harness` job and
+  in the Linux harness step.
+
+- **CLAUDE.md and the QA guides name the venv the `qa-tooling` check uses.**
+  CLAUDE.md still called the repository's tooling standard-library only and
+  gave no recipe for `scripts/qa/.venv`, and `docs/qa/` built the venv at
+  `/tmp/accelerator-qa-venv`, where `scripts/check.py` never looks, so the QA
+  checks were skipped before a push. CLAUDE.md now names both venv
+  exceptions and has a QA block beside the harness one, and the QA guides use
+  `scripts/qa/.venv`.

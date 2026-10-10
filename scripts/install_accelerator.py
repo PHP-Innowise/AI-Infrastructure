@@ -803,14 +803,34 @@ SYNC_RUNTIME_MARKER = "memory-bank/scripts/context.py"
 # runs an old copy gets none of them - on six real installations none carried
 # the fixes of the previous week - so a local edit here is backed up and
 # replaced rather than left to keep the project on the old behaviour.
-RUNTIME_SYNC_PATTERNS = (
+CORE_RUNTIME_PATTERNS = (
     "memory-bank/scripts/*.py",
     "project-brain/scripts/*.py",
     "project-brain/schemas/*.json",
+)
+RUNTIME_SYNC_PATTERNS = CORE_RUNTIME_PATTERNS + (
     ".claude/hooks/working-memory-*.sh",
     ".codex/hooks/working-memory-*.sh",
     ".cursor/hooks/working-memory-*.sh",
 )
+# What a release's files lean on. Its skills, commands, hooks and memory
+# server run its own runtime (a skill calls a `context.py` subcommand the
+# release added, the memory server imports a function the release added to
+# `brain_runtime.py`), and a tool runs only the hooks its wiring names. A
+# project whose Git tracks its install kept the runtime and the wiring at the
+# release it committed while the sync added the newer release's files: the
+# agent saw /context-save, which failed with "invalid choice: 'context-save'",
+# and a memory server that crashed on import. So when a runtime file stays
+# at the project's version, nothing else of the release is written either;
+# when a tool's wiring stays, neither are the new hooks it would run; and when
+# a new hook is not written, neither is the wiring that would run it. Each
+# such file is reported under `kept` as held back, and the report as partial.
+HOOK_WIRING = {
+    ".claude/settings.json": ".claude/hooks/",
+    ".cursor/hooks.json": ".cursor/hooks/",
+    ".codex/hooks.json": ".codex/hooks/",
+}
+HELD_BACK = "held back"
 # Codex runs a project hook only while the stored hash of its definition
 # matches, so rewriting this switches every hook off until it is approved
 # again. It is rewritten only for a caller that re-approves the accelerator's
@@ -900,6 +920,18 @@ def tracked_paths(target: Path) -> set[str]:
 
 def is_runtime_file(path: str) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in RUNTIME_SYNC_PATTERNS)
+
+
+def is_core_runtime_file(path: str) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in CORE_RUNTIME_PATTERNS)
+
+
+def hook_wiring_of(path: str) -> str | None:
+    """The wiring file that runs the hook script at `path`, if it is one."""
+    for wiring, folder in HOOK_WIRING.items():
+        if path.startswith(folder):
+            return wiring
+    return None
 
 
 def source_commit(root: Path) -> str | None:
@@ -1816,10 +1848,17 @@ def sync_installation(
     handles (NO_SAFE_WRITE), and - unless `rewire_codex` says the caller
     re-approves it - the Codex hook wiring, whose trust is a hash of its
     definitions. Each of those is reported instead.
+
+    A release is never applied in part over what its files run (see
+    HOOK_WIRING): while a runtime file stays at the project's version, the
+    release's other files are held back too, and a tool's new hooks wait for
+    its wiring, as the wiring waits for them. Held-back files are reported
+    under `kept`, and `partial` then says why the project is not at the
+    release; it is None when nothing was held back.
     """
     report: dict = {
         "target": str(target), "edition": None, "release": None, "changed": [],
-        "kept": [], "backups": [], "dry_run": dry_run, "error": None,
+        "kept": [], "backups": [], "dry_run": dry_run, "error": None, "partial": None,
     }
     # A runtime reached only through a link is not this project's: the
     # Harness, which reads it without following links, does not count it as
@@ -1864,6 +1903,14 @@ def sync_installation(
     def keep(path: str, reason: str) -> None:
         report["kept"].append({"path": path, "reason": reason})
 
+    # What the release would write, in the order found: (path, payload,
+    # action, executable, backup, record, durable). Written only once every
+    # file has been looked at, so that a file whose runtime or wiring stays
+    # behind can be held back (HOOK_WIRING).
+    pending: list[tuple] = []
+    # Release files the project does not have (or cannot be read safely).
+    absent: set[str] = set()
+
     def write(
         path: str,
         payload: bytes,
@@ -1873,8 +1920,26 @@ def sync_installation(
         record: bool = True,
         durable: bool = False,
     ) -> None:
-        """Write one file; `backup` is the content it replaces and that
-        file's status, as it was read, saved first.
+        """Plan one write; `backup` is the content it replaces and that
+        file's status, as it was read, saved first."""
+        if backup is not None:
+            unsafe = confinement_problem(target, f"{SYNC_BACKUP_DIR}/{stamp}/{path}")
+            if unsafe is not None:
+                # Without its backup a local edit would be lost: it stays.
+                keep(path, f"not replaced: its backup cannot be written inside the project ({unsafe})")
+                return
+        pending.append((path, payload, action, executable, backup, record, durable))
+
+    def apply(
+        path: str,
+        payload: bytes,
+        action: str,
+        executable: bool,
+        backup: tuple[bytes, os.stat_result] | None,
+        record: bool,
+        durable: bool,
+    ) -> bool:
+        """Write one planned file; False when it stays as it is.
 
         Flushed to disk before it replaces anything only where a crash could
         lose what exists nowhere else: a backup, the only copy of a person's
@@ -1896,9 +1961,8 @@ def sync_installation(
                 except UnsafePathError as error:
                     unsafe = str(error)
             if unsafe is not None:
-                # Without its backup a local edit would be lost: it stays.
                 keep(path, f"not replaced: its backup cannot be written inside the project ({unsafe})")
-                return
+                return False
             if not dry_run:
                 report["backups"].append(saved)
         if not dry_run:
@@ -1909,10 +1973,11 @@ def sync_installation(
                 )
             except UnsafePathError as error:
                 keep(path, str(error))
-                return
+                return False
         report["changed"].append({"path": path, "action": action})
         if record:
             written[path] = git_blob_id(payload)
+        return True
 
     def memory_config(path: str, previous: bytes | None, payload: bytes) -> bytes:
         nonlocal memory_mcp
@@ -1982,10 +2047,13 @@ def sync_installation(
         try:
             found = _read_confined(target, path)
         except UnsafePathError as error:
+            absent.add(path)
             keep(path, str(error))
             continue
         current = None if found is None else found[0]
         exists = current is not None
+        if not exists:
+            absent.add(path)
         if current == payload:
             written[path] = git_blob_id(payload)
             continue
@@ -2047,6 +2115,7 @@ def sync_installation(
             write(path, payload, "updated over a local edit", executable, backup=found)
         else:
             keep(path, "edited in the project")
+    apply_release(pending, absent, report, keep, apply)
     if record_problem is not None:
         keep(SYNC_MANIFEST, f"the sync's record is neither read nor written ({record_problem})")
     elif not dry_run:
@@ -2074,6 +2143,79 @@ def sync_installation(
         except UnsafePathError as error:
             keep(SYNC_MANIFEST, f"the sync's record is not written ({error})")
     return report
+
+
+def apply_release(pending: list[tuple], absent: set[str], report: dict, keep, apply) -> None:
+    """Write the planned files, holding back what would run against files left behind.
+
+    `pending` holds the planned writes, `absent` the release files the project
+    lacks; `keep` reports a file left as it is and `apply` writes one, False
+    when it could not. See HOOK_WIRING for why a file is held back.
+    """
+    left = {item["path"]: item["reason"] for item in report["kept"]}
+    held: dict[str, str] = {}
+
+    def hold(path: str, reason: str) -> None:
+        held.setdefault(path, f"{HELD_BACK}: {reason}")
+
+    def hold_hooks_of(wiring: str, reason: str) -> None:
+        for item in pending:
+            if item[0] in absent and hook_wiring_of(item[0]) == wiring:
+                hold(item[0], reason)
+
+    stale = sorted(path for path in left if is_core_runtime_file(path))
+    if stale:
+        for item in pending:
+            hold(item[0], f"the runtime stays at the project's version ({stale[0]}: {left[stale[0]]})")
+    planned = {item[0] for item in pending}
+    for wiring in HOOK_WIRING:
+        if wiring in left:
+            hold_hooks_of(wiring, f"the hook wiring {wiring} stays at the project's version ({left[wiring]})")
+            continue
+        missing = sorted(path for path in left if path in absent and hook_wiring_of(path) == wiring)
+        if missing and wiring in planned:
+            reason = f"a new hook it would run is not written ({missing[0]}: {left[missing[0]]})"
+            hold(wiring, reason)
+            hold_hooks_of(wiring, f"its wiring {wiring} is held back: {reason}")
+    # The runtime first: a part of it that cannot be written holds back the
+    # rest, which would otherwise mix two releases' modules. A tool's new
+    # hooks before everything else, its wiring last: the wiring waits for
+    # them. Where nothing can be written at all (NO_SAFE_WRITE) every write
+    # is refused on its own and none is half done, so each keeps its reason.
+    can_write = _relative_calls() is not None
+
+    def rank(item: tuple) -> int:
+        path = item[0]
+        if is_core_runtime_file(path):
+            return 0
+        if path in HOOK_WIRING:
+            return 3
+        return 1 if path in absent and hook_wiring_of(path) is not None else 2
+
+    order = sorted(pending, key=rank)
+    held_back = 0
+    for index, item in enumerate(order):
+        path = item[0]
+        if path in held:
+            keep(path, held[path])
+            held_back += 1
+            continue
+        if apply(*item) or not can_write:
+            continue
+        reason = next(entry["reason"] for entry in reversed(report["kept"]) if entry["path"] == path)
+        if is_core_runtime_file(path):
+            for later in order[index + 1:]:
+                hold(later[0], f"the runtime is not fully written ({path}: {reason})")
+        elif rank(item) == 1:
+            wiring = hook_wiring_of(path)
+            reason = f"a new hook it would run is not written ({path}: {reason})"
+            hold(wiring, reason)
+            hold_hooks_of(wiring, f"its wiring {wiring} is held back: {reason}")
+    if held_back:
+        report["partial"] = (
+            f"{held_back} file(s) of release {report['release']} held back: what they run "
+            "stays at the project's version here; each is listed under kept"
+        )
 
 
 def parse_args() -> argparse.Namespace:

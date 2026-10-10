@@ -9,14 +9,17 @@ projects: ready-made policy/skill/agent/hook bundles for Laravel, Symfony,
 framework-neutral PHP Core, and WordPress, plus `Infrastructure-Creator/`, a generator that scans
 a *target* PHP project and builds a bespoke accelerator for it. There is no
 application code, no Composer install, and no PHP runtime to execute here — the
-repository's own tests and tooling are Python (standard library only) and shell.
+repository's own tests and tooling are Python and shell, on the standard library
+only; the two exceptions bring their own venv and pinned dependencies: the QA
+artifact tooling in `scripts/qa/` (`scripts/qa/.venv`, `requirements-qa.txt`) and
+the optional `harness/` graph runtime (`harness/.venv`).
 
 ```
 Laravel/, Symfony/, PHP Core/    # framework ready-to-use editions
 Cms/wordpress/                   # WordPress ready-to-use edition
 Infrastructure-Creator/          # generator that builds a bespoke edition for a target project
 install/                         # installer docs + versioned inventories
-scripts/                         # repo-level build/install/measurement/CI tools (Python, stdlib only)
+scripts/                         # repo-level build/install/measurement/CI tools (Python, stdlib only; scripts/qa/ has its own venv)
 harness/                         # optional external LangGraph batch orchestrator (own venv, own deps)
 tests/                           # repository-level tests (installation, mirrors, framework semantics)
 docs/                            # shared documentation (CI, adoption, tool integration, operations)
@@ -33,7 +36,10 @@ others — verify a change is meaningful for the target stack before porting it.
 ## Commands
 
 All commands run from the repository root unless noted. Requirements: Python 3
-(3.9+), `git`, `bash`, and `shellcheck` and `php` for two lint steps.
+(3.9+), `git`, `bash`, and `shellcheck` and `php` for two lint steps; the
+`qa-tooling` and `harness-fleet` jobs also need their venvs (see "QA artifact
+tooling" and "Optional external harness" below), and without them `check.py`
+skips those steps.
 
 ### Before pushing: run what CI runs
 
@@ -219,6 +225,19 @@ python3 -m unittest tests.test_harness_fleet
 `python3 scripts/check.py` runs the last two; without `harness/.venv` the graph
 tests skip and it prints the commands that create the venv (`--strict` fails
 instead).
+
+### QA artifact tooling (separate venv and deps; CI job `qa-tooling`)
+
+```bash
+python3 -m venv scripts/qa/.venv
+scripts/qa/.venv/bin/python -m pip install -r requirements-qa.txt   # pinned openpyxl and jsonschema
+scripts/qa/.venv/bin/python -m unittest discover -s scripts/qa/tests
+scripts/qa/.venv/bin/python scripts/qa/validate_qa_artifacts.py --skip-run-evidence
+```
+
+`python3 scripts/check.py` runs the last two with exactly this interpreter;
+without `scripts/qa/.venv` it skips them and prints the commands that create
+it (`--strict` fails instead). `docs/qa/README.md` says what the tools do.
 
 ### Context collection bundler (for pasting a slice of this repo into another model)
 

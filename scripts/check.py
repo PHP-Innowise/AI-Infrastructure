@@ -268,6 +268,7 @@ HARNESS_TESTS = (
 # fails under --strict.
 HARNESS_TESTS_NEWER = (
     "tests.test_harness_merge",
+    "tests.test_harness_merge_archive",
     "tests.test_harness_run_activity",
     "tests.test_harness_commands",
     "tests.test_harness_process_runtime",
@@ -301,6 +302,7 @@ WINDOWS_HARNESS_TESTS = (
     "tests.test_harness_windows",
     "tests.test_harness_launcher",
     "tests.test_harness_process_runtime",
+    "tests.test_harness_merge_archive",
     "tests.test_portable_fs",
     "tests.test_windows_security",
     "tests.test_windows_commands",
@@ -461,7 +463,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
             name="installation",
             title="installation",
             job="installation",
-            timeout_minutes=10,
+            timeout_minutes=20,
             weight=100,
             commands=(
                 step(
