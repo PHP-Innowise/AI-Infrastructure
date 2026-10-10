@@ -716,8 +716,9 @@ class Sessions:
         return result
 
     # What the sidebar shows of a session: which one, where it stands and how it runs. No capsules, results or fill.
+    # The Merge picker reads these too: Creator, Clash, System Orchestration and AI discovery runs are not chats to merge.
     SUMMARY_FIELDS = ('id', 'title', 'project_id', 'status', 'created_at', 'updated_at', 'provider', 'model',
-                      'thinking_effort', 'mode', 'workflow', 'clash', 'creator')
+                      'thinking_effort', 'mode', 'workflow', 'clash', 'creator', 'system_run', 'system_discovery')
 
     def summaries(self):
         """The newest sessions as list entries, read in one query; the page fetches a session in full when it opens it."""
@@ -726,7 +727,7 @@ class Sessions:
         result = []
         for row in rows:
             item = dict(row)
-            for field in ('clash', 'creator'):
+            for field in ('clash', 'creator', 'system_run', 'system_discovery'):
                 item[field] = json.loads(item[field]) if item[field] else None
             result.append({**item, 'summary': True})
         return result
@@ -1166,7 +1167,32 @@ class Sessions:
             row = self.db.execute('SELECT bundle FROM session_merges WHERE session_id=?', (sid,)).fetchone()
         if not row:
             raise SessionError('This task has no merged source archive.')
+        if not row['bundle']:
+            raise SessionError('The saved context of this merged task was deleted.')
         return json.loads(row['bundle'])
+
+    def delete_merge_archive(self, sid):
+        """Delete a merged task's saved copy of its chats, freeing its share of merge storage. The task, its
+        conversation, its source summary and the original chats stay; it can no longer restart from the copy."""
+        from . import chat_merge
+        with self.lock:
+            session = self.get(sid)
+            if not session.get('merge'):
+                raise SessionError('This task has no merged source archive.')
+            if session['merge'].get('archive_deleted_at'):
+                return session
+            if session['status'] in (*ACTIVE, 'awaiting_context', 'awaiting_approval'):
+                raise SessionError('Wait for this task to finish, or cancel it, before deleting its saved context.')
+            summary = {**session['merge'], 'archive_deleted_at': now()}
+            with self.db:
+                self.db.execute("UPDATE session_merges SET bundle='',context='',summary=? WHERE session_id=?",
+                                (json.dumps(summary), sid))
+            try:
+                chat_merge.cleanup(self, sid)
+            except OSError:
+                pass  # A folder that cannot be removed now is removed at the next start.
+            self._event(sid, {'kind': 'status', 'text': 'The saved copy of the merged chats was deleted; the original chats are unchanged.'})
+            return self.get(sid)
 
     def restart_merge(self, sid):
         """Rerun a merged task's first message when no native session was created; its sources stay as saved."""
@@ -1174,6 +1200,8 @@ class Sessions:
             session = self.get(sid)
             if not session.get('merge') or session['native_session_id'] or session['status'] not in ('interrupted', 'failed'):
                 raise SessionError('Only an interrupted or failed merged task without a native session can restart.')
+            if session['merge'].get('archive_deleted_at'):
+                raise SessionError('This merged task\'s saved context was deleted, so it cannot restart. Merge the chats again.')
             self.admit()
             if self.jobs.full() or self.stopping.is_set():
                 raise SessionError('The run queue is full or the server is stopping.')
@@ -1183,6 +1211,10 @@ class Sessions:
             first = self.db.execute('SELECT data FROM events WHERE session_id=? ORDER BY id LIMIT 1', (sid,)).fetchone()
             event = json.loads(first['data']) if first else {}
             prompt = validate_prompt(event.get('text') if event.get('kind') == 'user' else None)
+            from . import chat_merge
+            # A first launch refuses an archive that no longer matches its record; the record is the saved copy.
+            if chat_merge.restore(self, sid):
+                self._event(sid, {'kind': 'status', 'text': 'The saved archive file was missing or changed; it was rewritten from the saved record.'})
             self.cancelled.discard(sid)
             generation = self.generations[sid] = uuid.uuid4().hex
             self._status(sid, 'queued')
@@ -1263,7 +1295,12 @@ class Sessions:
             raise SessionError('Fleet settings require the Fleet review workflow.')
         if dry_run and (model is not None or effort is not None):
             raise SessionError('Offline dry-run does not use a model or thinking effort.')
-        brain = self._task_context().validate_options(data['brain'], prompt) if 'brain' in data else None
+        if _merge and 'brain' in data:
+            from . import chat_merge
+            # A merged task's memory reads the chats' subjects with its instruction, which is often the prefilled one.
+            brain = self._task_context().validate_options(data['brain'], chat_merge.memory_text(_merge['bundle'], prompt))
+        else:
+            brain = self._task_context().validate_options(data['brain'], prompt) if 'brain' in data else None
         if dry_run and brain:
             raise SessionError('Offline dry-run cannot link or change a Project Brain task.')
         # An omitted budget object uses the API default; explicit null values mean no cap.

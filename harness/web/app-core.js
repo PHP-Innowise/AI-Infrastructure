@@ -143,7 +143,8 @@ const projectGitState = {projectId:null,data:null,pending:false,error:null,epoch
 const projectWorktreeState = {projectId:null,data:null,pending:false,error:null,epoch:0,controller:null,preferred:''};
 const fleetUi = {lenses:new Set(),initialized:false,reviewers:new Map(),stage:null,resultKey:null,reportOpenedFor:null};
 // Merge chats: the new task's chosen sources while it is a draft, with the request identity its retries reuse.
-const mergeUi = {draft:null,selected:new Set(),archiveEpoch:0,sourcesKey:null};
+// `deleteArmed` is the merged task whose saved context waits for a second, confirming click.
+const mergeUi = {draft:null,selected:new Set(),archiveEpoch:0,sourcesKey:null,deleteArmed:null};
 const active = session => session && ['queued','running'].includes(session.status);
 const isFleetSession = session => session?.workflow === 'fleet-review';
 const statusLabel = value => ({queued:'Queued',running:'Running',completed:'Process complete',failed:'Failed',cancelled:'Cancelled',interrupted:'Interrupted',awaiting_context:'Review context',awaiting_approval:'Awaiting approval',rejected:'Report rejected'})[value] || value || 'Ready';
@@ -1300,7 +1301,7 @@ $('agent-count').addEventListener('input',updateControls);
 $('prompt').addEventListener('keydown',event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); if (!$('send').disabled) $('session-form').requestSubmit(); } });
 function stopPolling() { clearTimeout(state.pollTimer); state.pollTimer = null; state.pollController?.abort(); state.pollController = null; }
 function newSession(prompt = '', projectId = $('project').value, show = true) {
-  saveSessionPreferences(); discardMergeDraft(); closeMergeArchive();
+  saveSessionPreferences(); discardMergeDraft(); closeMergeArchive(); mergeUi.deleteArmed = null;
   clearAttachments();
   stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); state.stepCalls.clear(); runView.reset(); $('events').replaceChildren(); $('prompt').value = prompt;
   sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); sddSlugTouched = false; $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height');
@@ -1318,7 +1319,9 @@ $('new-session').addEventListener('click',() => { if (!state.pending) newSession
 const MERGE_PROMPT = 'Continue the work from these chats. Keep each chat’s decisions and progress, name any conflicts between them, and propose the next steps.';
 const mergeSourceEligible = (session, projectId) => session.project_id === projectId && !['queued','running','awaiting_context','awaiting_approval'].includes(session.status)
   && !session.creator && !session.clash && !session.fleet && !session.system_run && !session.system_discovery && !isFleetSession(session);
-const mergeRestartable = session => Boolean(session?.merge && !session.native_session_id && ['interrupted','failed'].includes(session.status));
+const mergeRestartable = session => Boolean(session?.merge && !session.merge.archive_deleted_at && !session.native_session_id && ['interrupted','failed'].includes(session.status));
+// A finished merged task's saved copy of its chats can be deleted to free merge storage; a run may still read it.
+const mergeDeletable = session => Boolean(session?.merge && !session.merge.archive_deleted_at && !active(session) && !['awaiting_context','awaiting_approval'].includes(session.status));
 function discardMergeDraft() { mergeUi.draft = null; mergeUi.sourcesKey = null; }
 function closeMergeArchive() {
   mergeUi.archiveEpoch++; $('merge-archive-content').hidden = true; $('merge-archive-content').replaceChildren();
@@ -1338,14 +1341,22 @@ function renderMergeContext() {
   $('merge-context').hidden = !merge;
   if (!merge) { mergeUi.sourcesKey = null; return; }
   const restartable = !draft && mergeRestartable(state.selected), count = merge.sources.length;
+  const deleted = !draft && Boolean(merge.archive_deleted_at), deletable = !draft && mergeDeletable(state.selected);
+  if (mergeUi.deleteArmed && (!deletable || mergeUi.deleteArmed !== state.selectedId)) mergeUi.deleteArmed = null;
+  const armed = deletable && mergeUi.deleteArmed === state.selectedId;
   $('merge-context-title').textContent = draft ? `New task from ${count} chats` : `Merged from ${count} chats`;
-  // A started task needs only its sources; the note explains a draft and a task that can restart.
+  // A started task needs only its sources; the note explains a draft, a deletion to confirm, a deleted copy and a task that can restart.
   $('merge-context-note').textContent = draft ? 'Describe the new task below and choose its provider. It starts in this project folder with a saved copy of these chats’ messages; the chats stay as they are.'
+    : armed ? 'Delete this task’s saved copy of the merged chats? It frees merge storage and cannot be undone. The task and its conversation stay and the original chats are unchanged, but the agent can no longer read the copy and the task cannot restart from it.'
+    : deleted ? 'The saved copy of these chats was deleted to free merge storage; the agent can no longer read it. The original chats are unchanged.'
     : restartable ? 'The provider never started a conversation for this task. Restart runs its first message again with the same saved chats; check any partial work first.' : '';
   $('merge-context-note').hidden = !$('merge-context-note').textContent;
   $('merge-clear').hidden = !draft; $('merge-clear').disabled = pending;
-  $('merge-restart').hidden = !restartable; $('merge-restart').disabled = pending || !state.bootstrap || state.authFailed;
-  $('merge-archive').hidden = Boolean(draft);
+  $('merge-restart').hidden = !restartable || armed; $('merge-restart').disabled = pending || !state.bootstrap || state.authFailed;
+  $('merge-archive').hidden = Boolean(draft) || deleted || armed;
+  $('merge-delete').hidden = !deletable; $('merge-delete').disabled = pending || !state.bootstrap || state.authFailed;
+  $('merge-delete').textContent = armed ? 'Delete saved copy' : 'Delete saved context'; $('merge-delete').classList.toggle('danger',armed);
+  $('merge-delete-keep').hidden = !armed; $('merge-delete-keep').disabled = pending;
   const key = JSON.stringify([draft ? 'draft' : state.selectedId,merge.sources.map(source => [source.id,source.title,source.provider,source.branch]),pending]);
   if (mergeUi.sourcesKey === key) return; mergeUi.sourcesKey = key;
   $('merge-context-sources').replaceChildren(...merge.sources.map(source => {
@@ -1393,7 +1404,7 @@ async function openMergePicker() {
     box.addEventListener('change',() => { if (box.checked) mergeUi.selected.add(session.id); else mergeUi.selected.delete(session.id); renderMergeSelection(); });
     choice.append(box,info); $('merge-options').append(choice);
   }
-  if (options.length < 2) $('merge-options').append(el('p','knowledge-note','Finish at least two chats in this project to merge them. Running, Creator, Fleet, Clash and System Orchestration sessions are not listed.'));
+  if (options.length < 2) $('merge-options').append(el('p','knowledge-note','Finish at least two chats in this project to merge them. Running chats and Creator, Fleet, Clash, System Orchestration and AI discovery runs are not listed.'));
   renderMergeSelection(); $('merge-picker').showModal();
 }
 $('merge-chats').addEventListener('click',openMergePicker);
@@ -1421,6 +1432,16 @@ $('merge-restart').addEventListener('click',async () => {
   catch (error) { if (sid === state.selectedId) showError('composer-error',textError(error)); }
   finally { state.pending = null; updateControls(); }
 });
+$('merge-delete').addEventListener('click',async () => {
+  const sid = state.selectedId; if (state.pending || !mergeDeletable(state.selected)) return;
+  // The first click asks; the second deletes.
+  if (mergeUi.deleteArmed !== sid) { mergeUi.deleteArmed = sid; updateControls(); return; }
+  mergeUi.deleteArmed = null; closeMergeArchive(); state.pending = 'delete-merge'; showError('composer-error',''); updateControls();
+  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/delete-merge-context`,{method:'POST',body:{}}); if (data.session) upsert(data.session); if (sid === state.selectedId) { stopPolling(); state.pending = null; await pollSession(state.epoch); } }
+  catch (error) { if (sid === state.selectedId) showError('composer-error',textError(error)); }
+  finally { state.pending = null; updateControls(); }
+});
+$('merge-delete-keep').addEventListener('click',() => { mergeUi.deleteArmed = null; updateControls(); $('merge-delete').focus(); });
 $('merge-archive').addEventListener('click',async () => {
   if (!$('merge-archive-content').hidden) { closeMergeArchive(); return; }
   const sid = state.selectedId, epoch = ++mergeUi.archiveEpoch; if (!sid) return;
@@ -1637,10 +1658,12 @@ async function pollSession(epoch) {
 }
 async function selectSession(id) {
   if (state.pending) return;
-  discardMergeDraft(); if (id !== state.selectedId) closeMergeArchive();
+  // Saved while a merge draft still holds the form: its forced native task in the project folder is not the
+  // project's preference, so the save skips it. Saved after the draft ended, those values would replace it.
+  saveSessionPreferences(); discardMergeDraft(); if (id !== state.selectedId) { closeMergeArchive(); mergeUi.deleteArmed = null; }
   if (id !== state.selectedId) { sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height'); }
   clearAttachments();
-  saveSessionPreferences(); ++preferenceEpoch; restoringSessionPreferences = false;
+  ++preferenceEpoch; restoringSessionPreferences = false;
   // The list holds summaries; a session's settings come from its full record, which the first poll brings.
   const listed = state.sessions.find(item => item.id === id);
   stopPolling(); const epoch = ++state.epoch; state.selectedId = id; state.selected = listed && !listed.summary ? listed : null; state.eventIds.clear(); state.assistantTexts.clear(); state.stepCalls.clear(); state.loading = true;

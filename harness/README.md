@@ -40,7 +40,8 @@ file-read permissions still apply; an agent that cannot read the full archive
 must report the limitation. Claude receives access to the individual archive
 directory. This is not a read-only filesystem boundary in Edit mode: changing
 that file makes the next first-launch integrity check fail, while the database
-snapshot remains available in the UI.
+snapshot remains available in the UI. **Restart merged task** rewrites a
+missing or changed archive file from that snapshot before it runs again.
 
 Otherwise a merged task is an ordinary new session: project memory works as it
 does for any new session, and helpers, models and budgets are chosen as usual.
@@ -51,11 +52,22 @@ command, which would reach the CLI without the merged context. The launch sets
 `context-load merge` for that client is not consumed by this Harness task; the
 project's hooks keep capturing its chat.
 
-Running chats and Creator, Fleet, Clash or System Orchestration runs cannot be
-selected. A source is limited to 512 KiB of visible messages and 10,000 events;
-an archive to 2 MiB; stored archives to 128 and 64 MiB of serialized history.
-Exceeding a limit rejects the new merge without truncating or deleting saved
-context. Archives live privately in the Harness state directory and SQLite,
+Automatic project memory names the merged chats: the Brain task goal and the
+first turn's memory query start with the chats' titles (a merged chat by the
+chats it merged) and carry their first requests before the new instruction,
+which is often the prefilled one. The first message stays as written.
+
+Running chats and Creator, Fleet, Clash, System Orchestration or AI discovery
+runs are not listed and cannot be selected. A source is limited to 512 KiB of
+visible messages and 10,000 events; an archive to 2 MiB. Saved archives of all
+projects in one state directory are limited to 128 and 64 MiB of serialized
+history; a nested merge stores its inherited archives again. Exceeding a limit
+rejects the new merge without truncating or deleting saved context. To free
+storage, open a finished merged task you no longer need to restart and choose
+**Delete saved context**, then confirm. That removes its saved copy of the
+chats; the task, its conversation, its source list and the original chats stay,
+but the agent can no longer read the copy and the task cannot restart from it.
+Archives live privately in the Harness state directory and SQLite,
 outside project Git. Retries with the same request identity create at most one
 task. A merged task that stopped before its provider created a native session
 (after a server restart, a full queue or a failed start) offers **Restart merged

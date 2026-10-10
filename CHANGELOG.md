@@ -1775,6 +1775,48 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **Harness merge storage can be freed: a merged task's saved context can be
+  deleted.** Saved merge archives were capped at 128 and 64 MiB for the whole
+  state directory, and nothing ever removed one, so after the 128th merge
+  every new merge was refused for good. A finished merged task now offers
+  **Delete saved context** (asked twice in the panel above the composer;
+  `POST /api/sessions/<id>/delete-merge-context`). It empties the saved
+  bundle and removes the archive folder; the task, its conversation, its
+  source list and the original chats stay. Only saved copies count towards
+  the quota, the refusal says how to free it, and a nested merge of such a
+  task records `inherited_context_deleted` instead of the copy. A deleted
+  copy cannot restart or start a first launch, and a folder whose removal
+  failed is removed at the next start.
+
+- **Leaving a Harness merge draft keeps the project's new-session defaults.**
+  `selectSession()` ended the draft before saving the form, so the values
+  the draft forces (native workflow, project folder, Clash off) replaced the
+  project's saved defaults after every successful merge, or when a history
+  item was opened during a draft. It now saves first, while the draft guard
+  still skips them, as `newSession()` already did.
+
+- **The Merge picker no longer lists System Orchestration runs and AI
+  scans.** The picker filters the session list, which holds summaries, and
+  the summaries had no `system_run` or `system_discovery`; such runs were
+  offered and only refused on submit. `Sessions.SUMMARY_FIELDS` now carries
+  both.
+
+- **Restart merged task rewrites a missing or changed archive from its
+  record.** A first launch refuses an archive file that no longer matches the
+  database record, and Restart requeued the same failing launch indefinitely.
+  `restart_merge()` now rewrites the file from the record first (through
+  rooted descriptors; a link in the folder's place is refused, not followed)
+  and says so in the conversation.
+
+- **A merged task's project memory names the merged chats.** With automatic
+  memory, the first message became the Brain task goal and the first turn's
+  query, and for most merges that is the prefilled "Continue the work from
+  these chats..." with no subject. The goal and query now start with the
+  merged chats' titles (a merged chat by the chats it merged) and carry their
+  first requests, so the task ID reads like
+  `harness/merged-design-the-payment-retry-...`. The first message itself
+  stays as written.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
