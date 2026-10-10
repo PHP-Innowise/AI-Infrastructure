@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>app</directory>
+        </include>
+    </source>
+    <php>
+        <!--
+            force="true" on every entry that the container also sets as a real
+            environment variable. Without it PHPUnit leaves the existing value
+            alone, and the suite silently runs against the development
+            database — which a single RefreshDatabase test would then wipe.
+
+            PostgreSQL, not the sqlite default: Row-Level Security is the
+            tenancy mechanism for this product, and sqlite has none. A suite on
+            sqlite would report every tenancy test as passing while proving
+            nothing. The test database is created, granted and migrated by
+            `make test-db`, which runs as the owner role.
+        -->
+        <env name="APP_ENV" value="testing" force="true"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4" force="true"/>
+        <env name="BROADCAST_CONNECTION" value="null"/>
+        <env name="CACHE_STORE" value="array" force="true"/>
+        <env name="DB_CONNECTION" value="pgsql" force="true"/>
+        <env name="DB_DATABASE" value="practiceperfect_test" force="true"/>
+        <env name="DB_URL" value=""/>
+        <!--
+            `server`, not only `env`. Laravel's Env repository consults
+            $_SERVER before $_ENV, and Compose exports these as real
+            environment variables, so forcing $_ENV alone leaves the container's
+            own DB_DATABASE winning and the suite runs against the development
+            database. Verified by probe, not assumed.
+        -->
+        <server name="DB_CONNECTION" value="pgsql" force="true"/>
+        <server name="DB_DATABASE" value="practiceperfect_test" force="true"/>
+        <env name="MAIL_MAILER" value="array" force="true"/>
+        <env name="QUEUE_CONNECTION" value="sync" force="true"/>
+        <env name="SESSION_DRIVER" value="array" force="true"/>
+        <env name="PULSE_ENABLED" value="false"/>
+        <env name="TELESCOPE_ENABLED" value="false"/>
+        <env name="NIGHTWATCH_ENABLED" value="false"/>
+    </php>
+</phpunit>
