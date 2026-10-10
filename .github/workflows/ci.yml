@@ -61,6 +61,26 @@ jobs:
             python3 "$test_file"
           done
 
+  qa-tooling:
+    name: qa-tooling
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: requirements-qa.txt
+      - name: Install pinned workbook and schema dependencies
+        run: |
+          python3 -m venv scripts/qa/.venv
+          scripts/qa/.venv/bin/python -m pip install -r requirements-qa.txt
+      - name: Test QA artifact tooling
+        run: scripts/qa/.venv/bin/python -m unittest discover -s scripts/qa/tests
+      - name: Validate QA schemas and case catalog
+        run: scripts/qa/.venv/bin/python scripts/qa/validate_qa_artifacts.py --skip-run-evidence
+
   parity:
     name: "parity (${{ matrix.edition }})"
     runs-on: ubuntu-latest

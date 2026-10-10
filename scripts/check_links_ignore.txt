@@ -8,3 +8,11 @@
 # client has not provided in this repository, so links resolving into
 # Task/ are exempt rather than "fixed" by rewriting client documents.
 */Task/*
+
+# The QA evidence reports quote TC-043's intentionally broken-link fixtures
+# outside a fenced block. These four paths are test data, not documentation
+# destinations; scope exemptions to their exact resolved locations.
+docs/also-missing.md
+docs/target
+docs/Accelerator-TestEvidence-Submission/also-missing.md
+docs/Accelerator-TestEvidence-Submission/target

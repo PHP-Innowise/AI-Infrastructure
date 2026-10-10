@@ -103,6 +103,7 @@ GHA_BASH = ("bash", "--noprofile", "--norc", "-eo", "pipefail", "-c")
 GHA_PWSH = ("pwsh", "-NoProfile", "-NonInteractive", "-Command")
 
 HARNESS_PY = "harness/.venv/bin/python"
+QA_PY = "scripts/qa/.venv/bin/python"
 TOOL_HINTS = {
     "shellcheck": "GitHub's ubuntu runner preinstalls it; install it from your package manager",
     "php": "GitHub's ubuntu runner preinstalls it; install php-cli",
@@ -110,6 +111,7 @@ TOOL_HINTS = {
     "bwrap": "install bubblewrap",
     "python3.9": "CI pins this job to Python 3.9; put a python3.9 on PATH (for example `uv python install 3.9`)",
     HARNESS_PY: "python3 -m venv harness/.venv && harness/.venv/bin/python -m pip install -e harness",
+    QA_PY: "python3 -m venv scripts/qa/.venv && scripts/qa/.venv/bin/python -m pip install -r requirements-qa.txt",
 }
 
 
@@ -387,6 +389,21 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
             timeout_minutes=10,
             weight=90,
             commands=tuple(c for suite in EDITION_TEST_SUITES for c in _suite_commands(root, suite)),
+        ),
+        Group(
+            name="qa-tooling",
+            title="qa-tooling",
+            job="qa-tooling",
+            timeout_minutes=10,
+            weight=20,
+            note="CI first builds scripts/qa/.venv with the pinned requirements-qa.txt; locally that venv must exist",
+            commands=(
+                step("Test QA artifact tooling", f"{QA_PY} -m unittest discover -s scripts/qa/tests"),
+                step(
+                    "Validate QA schemas and case catalog",
+                    f"{QA_PY} scripts/qa/validate_qa_artifacts.py --skip-run-evidence",
+                ),
+            ),
         ),
         Group(
             name="parity",

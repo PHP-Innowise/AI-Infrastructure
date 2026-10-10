@@ -1,0 +1,2308 @@
+{
+  "generated_at": "2026-08-06T08:27:54Z",
+  "records": [
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-001.log",
+      "evidence_sha256": "223bf7d013013c307db54a551f045748df3cb7af91ca994c6feca944f9bf2ab8",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-001|TC-001|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-001",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-001",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-002.log",
+      "evidence_sha256": "adcec68a082b39f06508a00b7a1b4135ffb7c20789f28816e3db11bfe2bc1c4a",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-002|TC-002|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-002",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-002",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-003.log",
+      "evidence_sha256": "6bc395d78e68d45705ae896255f113930252805006b1522399db5a536150eb93",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "PHP Core",
+      "historical_result": "Pass",
+      "identity": "RUN-003|TC-003|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-003",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-003",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "accelerator-finding",
+      "evidence_path": "logs/original/TC-004.log",
+      "evidence_sha256": "7f27bffef458c5a59b5055497de6f73dd15a90c924e25c0b3f80436276937c80",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Partial",
+      "identity": "RUN-004|TC-004|DEF-001",
+      "namespaced_defect_id": "DEF-001",
+      "native_client_requirement": "cursor",
+      "original_defect_id": "DEF-001",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_hook_context_warms_four_turns_then_switches_to_governed"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-004",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-004",
+      "tested_commit": "3a02537",
+      "tool": "Cursor"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-005.log",
+      "evidence_sha256": "2096be5f9b34ed14119821c1a5f3c61f03f8102adf6dbe655840c2678af2537c",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-005|TC-005|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-005",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-005",
+      "tested_commit": "3a02537",
+      "tool": "Codex"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-007.log",
+      "evidence_sha256": "d7a81f1e39ff3234a35384d1c0c907c5edc4480d2e7fdcd80fe9e962de496996",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Partial",
+      "identity": "RUN-006|TC-007|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-006",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-007",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "accelerator-finding",
+      "evidence_path": "logs/original/TC-008.log",
+      "evidence_sha256": "3afa2d11cf40c84f1b8c0127ddbbdeddbec2e96239c77b1273321276094bea2f",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Partial",
+      "identity": "RUN-007|TC-008|DEF-002",
+      "namespaced_defect_id": "DEF-002",
+      "native_client_requirement": "claude-code",
+      "original_defect_id": "DEF-002",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_manifest_owned_placeholder_fails"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-007",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-008",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "accelerator-finding",
+      "evidence_path": "logs/original/TC-014.log",
+      "evidence_sha256": "738808a646cb60614b23e4e4a6f97969d554daff101c0eff6fd4d84f79901b94",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Partial",
+      "identity": "RUN-008|TC-014|DEF-003",
+      "namespaced_defect_id": "DEF-003",
+      "native_client_requirement": "claude-code",
+      "original_defect_id": "DEF-003",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_unmanifested_team_placeholders_are_ignored_in_full_and_merge",
+        "test_untracked_team_agents_file_is_not_opened_or_stamp_checked"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-008",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-014",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-015.log",
+      "evidence_sha256": "d76e53aacd12a0f1b5ad548abcf0afb4c182e8b16b44dca9dc993333131cdb78",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Partial",
+      "identity": "RUN-009|TC-015|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-009",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-015",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-016.log",
+      "evidence_sha256": "9da4c4e2fdbcc4464322fb2f054a5e5fdb98dd66dbd1863c22104cac394c9048",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Partial",
+      "identity": "RUN-010|TC-016|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "cursor",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-010",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-016",
+      "tested_commit": "3a02537",
+      "tool": "Cursor"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-017.log",
+      "evidence_sha256": "716117eded8690cace90b8803e098324409b01e78ed43a8c2d0132fdd23f278f",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Partial",
+      "identity": "RUN-011|TC-017|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-011",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-017",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-028.log",
+      "evidence_sha256": "9fd0e01d6413cf7a9d4543a1f5b368f7710bab4fbb4bfbccd83a68bba8134e04",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-012|TC-028|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-012",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-028",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-029.log",
+      "evidence_sha256": "8fa86cf6e861e08571d839ad45f04542905856bd9f256a9acd7e4d6c5cc63e55",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-029.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-013|TC-029|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-013",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-029",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "accelerator-finding",
+      "evidence_path": "logs/original/TC-030.log",
+      "evidence_sha256": "597abb087daba847870d81aa693a00f9e60cb1f1f9b8d2d6671db74004d9092e",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Partial",
+      "identity": "RUN-014|TC-030|DEF-004",
+      "namespaced_defect_id": "DEF-004",
+      "native_client_requirement": "claude-code",
+      "original_defect_id": "DEF-004",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_no_cat_or_json_extractor_warns_once_and_fails_open"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-014",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-030",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-032.log",
+      "evidence_sha256": "d1df3b7a742f32c95899443d94f1173f4d782b5724802c4d8e20155c3dae8350",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Partial",
+      "identity": "RUN-015|TC-032|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-015",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-032",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-033.log",
+      "evidence_sha256": "8ef2e7f5372167e807b3dfcd7b0bf55125a1a4912cf2ad49cb0a63b25b9fe851",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-033.log",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-016|TC-033|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-016",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-033",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-034.log",
+      "evidence_sha256": "247e30728900a7d1a151072ada178ae6253e8fde6addd252c533d9cf7ed97998",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-034.log",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-017|TC-034|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-017",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-034",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-035.log",
+      "evidence_sha256": "6eb4d302a3b3fcfdb3a99f0ceb8d61437252b9dd53a71fe4db7ea0fb446116fe",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-035.log",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-018|TC-035|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-018",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-035",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-036.log",
+      "evidence_sha256": "eb16fe44b0b7de99977bec6e8cdc967f201232708d70fa183cfbe5e5fa78fbe9",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-036.log",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-019|TC-036|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-019",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-036",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-039.log",
+      "evidence_sha256": "6e4b2efc729f7ea26d00394bfa77fc07c744a9bb3cc09b958708176111c39463",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-039.log",
+      "framework": "PHP Core",
+      "historical_result": "Pass",
+      "identity": "RUN-020|TC-039|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-020",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-039",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-041.log",
+      "evidence_sha256": "89ea1cebca35def5543ad8199c8b98684721c4986bd26f71d372af6162fe752c",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-041.log",
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Pass",
+      "identity": "RUN-021|TC-041|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-021",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-041",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-042.log",
+      "evidence_sha256": "8319520f2150650842173923e170c80f74f342b0e19b4fd2ef9e6d217ad099c9",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-042.log",
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Pass",
+      "identity": "RUN-022|TC-042|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-022",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-042",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-043.log",
+      "evidence_sha256": "00adc9a1bad990f068f617216b2b77487c6763df5ab39eef282d6fd2e6342ee3",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-043.log",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-023|TC-043|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-023",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-043",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-044.log",
+      "evidence_sha256": "a8d47bc9ea2f2074376574af6ff5eb63bf6820e08f10a60685d5d517641037b4",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-044.log",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-024|TC-044|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-024",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-044",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-048.log",
+      "evidence_sha256": "3425ddd26a9e1e06f076f59776f5dca5140eab4debc399c48a7684d43ebbe69b",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Blocked",
+      "identity": "RUN-025|TC-048|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-025",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-048",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-049.log",
+      "evidence_sha256": "53c4c8e121d94e350df0f07d8760eb1062cc6d4fe9815e967e8d826408048147",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-049.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-026|TC-049|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-026",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-049",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-050.log",
+      "evidence_sha256": "9417c14377777cc09912c7066bc47832ce94c861e5ebbf4b0b6e7c1697c0c381",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-027|TC-050|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-027",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-050",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-051.log",
+      "evidence_sha256": "7a588966f20b539a21ae08dce1ab997c0cf4f691e5868be11971b6a3584b1ba8",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-051.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-028|TC-051|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-028",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-051",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-052.log",
+      "evidence_sha256": "9ea657148d0569b41f9bcf82dbe8accf35ec0ed95777fad3f072013132bc4bf5",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-029|TC-052|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-029",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-052",
+      "tested_commit": "3a02537",
+      "tool": "Codex"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-053.log",
+      "evidence_sha256": "89fc7eeac195f90f088f840c06b7015d1bd9f9119f009e043f2bdbbec5b8c712",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-030|TC-053|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-030",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-053",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-054.log",
+      "evidence_sha256": "1904dbb99e8b383dcdf51ac57ce4a710b5b88fe80709d4e8c618e90d4c7ed9f4",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-031|TC-054|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-031",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-054",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-055.log",
+      "evidence_sha256": "25b3db3ef264b447f616c9f39155463e1915e5787f554654e1c87e4d35de61ce",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-055.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-032|TC-055|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-032",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-055",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-056.log",
+      "evidence_sha256": "abedaf573405abe0c5de39b77b3b825014ced252763b939da24e4426fd50c610",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Blocked",
+      "identity": "RUN-033|TC-056|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-033",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-056",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-057.log",
+      "evidence_sha256": "62b7e5e42efedc2f0ccd95e21c93854092c49ad730f5177d4d762cbacc52fba4",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Blocked",
+      "identity": "RUN-034|TC-057|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-034",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-057",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-058.log",
+      "evidence_sha256": "a4b42427d0eb93b5ca7bcd8c41bb19b7406cce12836e5136d1e84ddbac400854",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Blocked",
+      "identity": "RUN-035|TC-058|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-035",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-058",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-059.log",
+      "evidence_sha256": "e58e15ef5a80d4ba1e641a55f010eec33a33f7977df45bb745320d7147cb431d",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-036|TC-059|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-036",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-059",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-060.log",
+      "evidence_sha256": "dda0fd87fbcf236384d13d8d83313026be40872d7c8e0646a0bdbfe709440ae6",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-060.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-037|TC-060|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-037",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-060",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "accelerator-finding",
+      "evidence_path": "logs/original/TC-061.log",
+      "evidence_sha256": "fcd79129eb12200a702db32e8152a053c7aad09d34eb4a07ff20a812c474e4dd",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Partial",
+      "identity": "RUN-038|TC-061|DEF-005",
+      "namespaced_defect_id": "DEF-005",
+      "native_client_requirement": "none",
+      "original_defect_id": "DEF-005",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_canonical_and_alias_phases_round_trip_canonically",
+        "test_legacy_execution_phase_is_readable_and_migrates_on_update"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-038",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-061",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-062.log",
+      "evidence_sha256": "3896f85d33c6c551d1ffb7b4f7abb42fceb20b6df4de20e8c2c04520042248d9",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-062.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-039|TC-062|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-039",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-062",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-063.log",
+      "evidence_sha256": "a603408732e5ddf27729f85d3df94fdc3d9f7fdfd16ca8df080589bb82de96a4",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-063.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-040|TC-063|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-040",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-063",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-064.log",
+      "evidence_sha256": "13bba671102cd46fbc725f0451d3cb567b696047b87298ca4901d4ae40e1e1b9",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-064.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-041|TC-064|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-041",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-064",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-065.log",
+      "evidence_sha256": "e4c8d1e07804c1add8115fa3829a6886987143370588b498a65bb1b8735b2fb8",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-042|TC-065|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-042",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-065",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "accelerator-finding",
+      "evidence_path": "logs/original/TC-066.log",
+      "evidence_sha256": "42d4bdad31aa82e361a68760c67f22033caf71d33fbaed980d551b1d01bb05b5",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-043|TC-066|DEF-006",
+      "namespaced_defect_id": "DEF-006",
+      "native_client_requirement": "claude-code",
+      "original_defect_id": "DEF-006",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_direct_queries_reject_before_database_or_manifest_mutation",
+        "test_governed_capsule_enforces_layer_and_character_contract_deterministically"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-043",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-066",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-067.log",
+      "evidence_sha256": "86a85cf8191a67042bbd68e4fdc25d275e08bbdacd5f6f5edfc99e391bbddbb8",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-044|TC-067|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-044",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-067",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-068.log",
+      "evidence_sha256": "5b0cd9edd191df27bbf2dcbcd4bbee354b8fe5832e36724c1ca5502e4791fe23",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-068.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-045|TC-068|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-045",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-068",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-069.log",
+      "evidence_sha256": "53efe271944882b0c94e6c5b8e2e270de3e5f4f83d0b299060b2ace905f58fb0",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-069.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-046|TC-069|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-046",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-069",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "historical-evidence-pass",
+      "evidence_path": "logs/original/TC-070.log",
+      "evidence_sha256": "da7b507568d5569b47f3349016e0c6ac2a8fd29bce2d3e0dbd9ae7d4c6596add",
+      "evidence_status": "available-original",
+      "final_disposition": "accepted-historical-pass",
+      "final_evidence_path": "docs/Accelerator-TestEvidence-Submission/logs/original/TC-070.log",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-047|TC-070|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "historical-evidence-acceptance",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-047",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-070",
+      "tested_commit": "3a02537",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-071.log",
+      "evidence_sha256": "1b4358c7768f62ad1573a634bde06b53a0379a48420cc42ef0ce0381d06cf958",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-048|TC-071|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "cursor",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-048",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-071",
+      "tested_commit": "3a02537",
+      "tool": "Cursor"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-072.log",
+      "evidence_sha256": "38122c3a7b9d6224e7f66b1cd812914ef7d2ea3e48c8d78d2408a1c66f428edc",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Laravel",
+      "historical_result": "Partial",
+      "identity": "RUN-049|TC-072|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-049",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-072",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": null,
+      "evidence_path": "logs/original/TC-006.log",
+      "evidence_sha256": "56e74f5098bf479128afe4d0d3c22cede21cc2439bd9bcc7f5b8803ec267afa8",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Partial",
+      "identity": "RUN-050|TC-006|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": null,
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-050",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-006",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-073.log",
+      "evidence_sha256": "8d47b9e435dbc202e9b4acbb8f93cfa482118d5dcaeb4c515afcff00d208ee41",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-051|TC-073|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-051",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-073",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "accelerator-finding",
+      "evidence_path": "logs/original/TC-021.log",
+      "evidence_sha256": "1b598d6a12592de515120cbda7b13438bc987347524bc2aea5cbcb3ab441d342",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-052|TC-021|DEF-007",
+      "namespaced_defect_id": "DEF-007",
+      "native_client_requirement": "claude-code",
+      "original_defect_id": "DEF-007",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "post-remediation-verification",
+      "required_regressions": [
+        "test_canonical_and_alias_phases_round_trip_canonically",
+        "test_legacy_execution_phase_is_readable_and_migrates_on_update"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-052",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-021",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "external-client-finding",
+      "evidence_path": "logs/original/TC-022.log",
+      "evidence_sha256": "8fae8827d29da95742cbccccf0d190a323ec11e443a6874f7c242505ed643ccd",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-053|TC-022|DEF-008",
+      "namespaced_defect_id": "DEF-008",
+      "native_client_requirement": "claude-code",
+      "original_defect_id": "DEF-008",
+      "owner": "External Client Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "external-client",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-053",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-022",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-023.log",
+      "evidence_sha256": "61206f3a99cb71545ffd65685e9d88bc11960da3423842384eef77d675bfa1c9",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-054|TC-023|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-054",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-023",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "native-client-verification",
+      "evidence_path": "logs/original/TC-025.log",
+      "evidence_sha256": "3bb783b650492a3f6c8c64958e5200222d7c69c3fed412d860219de44438e362",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-055|TC-025|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "native-client-closure",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-055",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-025",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "external-client-finding",
+      "evidence_path": "logs/original/TC-040.log",
+      "evidence_sha256": "0571a18c255c4aa34b895d747027f529a596fbc03f8af5257e94ee89bd67920e",
+      "evidence_status": "available-original",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Partial",
+      "identity": "RUN-056|TC-040|DEF-009",
+      "namespaced_defect_id": "DEF-009",
+      "native_client_requirement": "claude-code",
+      "original_defect_id": "DEF-009",
+      "owner": "External Client Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "external-client",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-056",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-040",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "external-client-finding",
+      "evidence_path": "transcripts/RUN-057-TC-074-sanitized.md",
+      "evidence_sha256": "cfaa9151cb2d01157102e8d908790290ffda40b51fee8f5aae6464cd0b2444b7",
+      "evidence_status": "withheld-sensitive",
+      "final_disposition": null,
+      "final_evidence_path": null,
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-057|TC-074|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "claude-code",
+      "original_defect_id": null,
+      "owner": "External Client Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "manifests/historical-runs.json"
+        ]
+      },
+      "remediation_workstream": "external-client",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-057",
+      "source_evidence_status": "package-verified",
+      "source_group": "historical-57",
+      "test_case_id": "TC-074",
+      "tested_commit": "3a02537",
+      "tool": "Claude Code"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-001/run.json",
+      "evidence_sha256": "7329f1be46ce180f0dcdd618bb9f0f91a091ca59fe606f46bec62d641f1dffa3",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-unmodified-pass",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-001",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-001|TC-AI-001|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-001",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-001",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-002/run.json",
+      "evidence_sha256": "35a0e3f7b75bd6100ec4f0c6db56e34fbe78acbbdb6b2a6c9a61a81c9d969007",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-unmodified-pass",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-002",
+      "framework": "Laravel",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-002|TC-AI-002|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-002",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-002",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-003/run.json",
+      "evidence_sha256": "4b5be603908d06ba67cfca1562f8bd3393f09dde8f80da82e652c81edc8635b4",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-unmodified-pass",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-003",
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-003|TC-AI-003|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-003",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-003",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-004/run.json",
+      "evidence_sha256": "58a5f447130ca02db63f15196a506d49196cc0d453b952b9e78b197706c88b08",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-unmodified-pass",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-004",
+      "framework": "Symfony",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-004|TC-AI-004|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-004",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-004",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-005/run.json",
+      "evidence_sha256": "f147eacd0707f70fde56c0c777d772953069f31c2e3c1e1f657df182b913a18f",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-unmodified-pass",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-005",
+      "framework": "PHP Core",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-005|TC-AI-005|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-005",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-005",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-006/run.json",
+      "evidence_sha256": "e59b19d905e46d65df59e3b6aee628fbac852f11aea86a1b65bb8a4956d1d24f",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-unmodified-pass",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-006",
+      "framework": "PHP Core",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-006|TC-AI-006|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-006",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-006",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-007/run.json",
+      "evidence_sha256": "71d3e813cf825980e63c1ac14e18e4fa7f6216019e99a99a5432b217dd1a2374",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-unmodified-pass",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-007",
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-007|TC-AI-007|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-007",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-007",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-008/run.json",
+      "evidence_sha256": "c748cc1199fd86fb79302c5a5c41351ca02d4f1b70f130beb1a562160a5d7760",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": null,
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-008",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-008|TC-AI-008|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-20260803-008",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-008",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "hybrid",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-009/run.json",
+      "evidence_sha256": "a26d43944a96a352db1394849e1aff8ee321c4e857bfb28b4925a0428f18fb5b",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": null,
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-009",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-009|TC-AI-009|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [
+        "governed"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-20260803-009",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-009",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "hybrid",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-010/run.json",
+      "evidence_sha256": "bd53dd51bfc7309a75b580bc48a9f6b2eeb4027eb23a87c5a7b6940f94cac82f",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": null,
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-010",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-010|TC-AI-010|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [
+        "lightweight|checkpoint"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-20260803-010",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-010",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "hybrid",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-011/run.json",
+      "evidence_sha256": "eb3e1a8c7cea356ba7a328c415320b9ba2350a9e7f0668bc008b4462b49a517c",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": null,
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-011",
+      "framework": "Cross-stack",
+      "historical_result": "Fail",
+      "identity": "RUN-20260803-011|TC-AI-011|DEF-AI-001",
+      "namespaced_defect_id": "DEF-AI-001",
+      "native_client_requirement": "codex",
+      "original_defect_id": "DEF-001",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [
+        "test_.*(reviewed|automatic).*promotion|test_.*promotion.*(review|disabled)"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-20260803-011",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-011",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "hybrid",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-012/run.json",
+      "evidence_sha256": "207f820bdc799f08866501ba3643a573fc690247fae32df5342e0c521c06a2ec",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": null,
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-012",
+      "framework": "Cross-stack",
+      "historical_result": "Fail",
+      "identity": "RUN-20260803-012|TC-AI-012|DEF-AI-002",
+      "namespaced_defect_id": "DEF-AI-002",
+      "native_client_requirement": "codex",
+      "original_defect_id": "DEF-002",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [
+        "test_.*(merge_candidate_without_complet|completion_requires_an_explicit|concurrent_completion_cas)"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-20260803-012",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-012",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-013/run.json",
+      "evidence_sha256": "4d2e36b5009b7c1acd41b8e8f58cd63ca541793b44570880528c1e4e7e61ab17",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "closed-rejected-finding",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-013",
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-013|TC-AI-013|DEF-AI-003",
+      "namespaced_defect_id": "DEF-AI-003",
+      "native_client_requirement": "codex",
+      "original_defect_id": "DEF-003",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [
+          "Current Test Runs defect cell is blank; the rejected Defects row supplies original DEF-003."
+        ],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [
+        "test_.*relative.*target|test_.*absolute.*target"
+      ],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-013",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-013",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "hybrid",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-014/run.json",
+      "evidence_sha256": "319cabaae1e3edecd08425ffec29ad0326c0935643ffd4553141d35c9bbb7b19",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": null,
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-014",
+      "framework": "Infrastructure-Creator",
+      "historical_result": "Partial",
+      "identity": "RUN-20260803-014|TC-AI-014|DEF-AI-004",
+      "namespaced_defect_id": "DEF-AI-004",
+      "native_client_requirement": "codex",
+      "original_defect_id": "DEF-004",
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [
+        "test_.*generate.*revalidate_lifecycle"
+      ],
+      "review_status": "pending",
+      "run_id": "RUN-20260803-014",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-014",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-015/run.json",
+      "evidence_sha256": "dc74c62df503a9aa6ac202a78c4560ef85d4b32a3814d4e9fd4e3e551c3056f5",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": null,
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-015",
+      "framework": "Cross-stack",
+      "historical_result": "Pass",
+      "identity": "RUN-20260803-015|TC-AI-015|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-20260803-015",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-015",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-016/run.json",
+      "evidence_sha256": "902c739e4fb3e693478f9b90f534811c9ec0596ea27646191dc0bd977e121900",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-after-remediation",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-016",
+      "framework": "Laravel",
+      "historical_result": "Partial",
+      "identity": "RUN-20260803-016|TC-AI-016|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "codex",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [
+        "test_.*frozen_retrieval_corpus",
+        "\"queries\""
+      ],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-016",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-016",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Codex"
+    },
+    {
+      "classification": "deterministic",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-017/run.json",
+      "evidence_sha256": "cc0727c3e719fdf902fa990370387cfae1f0de60d25c0c1f636500d740c7de61",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": "verified-after-remediation",
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-017",
+      "framework": "Cross-stack",
+      "historical_result": "Blocked",
+      "identity": "RUN-20260803-017|TC-AI-017|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "none",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [
+        "test_.*telemetry.*(configured_off|disabled|sanitized)",
+        "\"events\""
+      ],
+      "review_status": "approved",
+      "run_id": "RUN-20260803-017",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-017",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Cross-tool"
+    },
+    {
+      "classification": "native",
+      "evidence_path": "docs/qa/evidence/RUN-20260803-018/run.json",
+      "evidence_sha256": "f18456b4c8203226ab5e701360b77f5549ae272c353c06268355bbfb65e58bc9",
+      "evidence_status": "newly-reproduced",
+      "final_disposition": null,
+      "final_evidence_path": "docs/qa/evidence/RUN-20260803-018",
+      "framework": "Cross-stack",
+      "historical_result": "Blocked",
+      "identity": "RUN-20260803-018|TC-AI-018|NONE",
+      "namespaced_defect_id": null,
+      "native_client_requirement": "multiple",
+      "original_defect_id": null,
+      "owner": "Accelerator Team",
+      "provenance": {
+        "conflicts": [],
+        "sources": [
+          "Accelerator TestCases.xlsx"
+        ]
+      },
+      "remediation_workstream": "codex-18-remediation",
+      "required_regressions": [],
+      "review_status": "pending",
+      "run_id": "RUN-20260803-018",
+      "source_evidence_status": "newly-reproduced",
+      "source_group": "codex-18",
+      "test_case_id": "TC-AI-018",
+      "tested_commit": "7c1cce290a4c87cf4029ce5c09b624d19c661c9a",
+      "tool": "Cross-tool"
+    }
+  ],
+  "release_ready": false,
+  "repository_commit": "767dad8a58eaf321bfb6bacbc553dce5d2001e57",
+  "schema_version": "1.0.0",
+  "source_checksums": {
+    "ACCELERATOR-TEST-EVIDENCE-REPORT.md": "b0f900c9b96399ce0ff78b029ee546f62df5776a127d1ff34209f3ea044112ce",
+    "Accelerator TestCases.xlsx": "6c2b4934f05818fe4ee0971ab0c8f8db2be257f2d1a1c2673813165941ea268e",
+    "SHA256SUMS.txt": "4579be425dacafda4466f6b1bc7d2e00a83e15eb628b7daa1b65ba7f907b5c6f",
+    "manifests/bwb_cases.json": "545349e1bf5271980deb822e3467b02a5f04077002e0afceacf9eee2d1dba2f6",
+    "manifests/cases_map.json": "56e6332c7c2efa45ee899bd880762857f568084a50392e20007972cbc9813e6d",
+    "manifests/defects.json": "17b172e406c8506417ae9b5959f083d87a4bf0072c26fee94ef7683e21da1fdb",
+    "manifests/historical-othersheets.json": "35f4742526dbf15b5f3948f22c2ed4efa13a84afdecf3ddbd23b2dc2a958bf73",
+    "manifests/historical-runs.json": "a2b31d35cfaf73eaffc8ccc9ec2941bfd27b830a99bde6bd2b1ebae7b5253644",
+    "manifests/historical-testcases.json": "e38a4d0e9bc5bac0672ebd7af7dcbfc22619b1c738cf273067d1d162772246cd",
+    "manifests/workbook-snapshot-20260803-2002.xlsx": "e6846459f794eca8ddb392e3e8dec8564253e0e2d1ddb67eff5ec1665a040b67"
+  }
+}

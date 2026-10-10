@@ -8,6 +8,8 @@ runs only when dispatched by hand, on a self-hosted Windows runner. Most jobs
 need nothing beyond the Python standard library, `bash` and Git. The
 exceptions: `lint` uses the runner's preinstalled `shellcheck` and `php`;
 `harness-fleet` pip-installs the optional graph runtime into a venv;
+`qa-tooling` pip-installs the pinned `openpyxl` and `jsonschema` from
+[`requirements-qa.txt`](../requirements-qa.txt) into a venv of its own;
 `system-orchestration` installs bubblewrap with `sudo apt-get` and lifts the
 runner's AppArmor restriction on unprivileged user namespaces; and
 `windows-harness` also uses `actions/setup-node`.
@@ -33,6 +35,7 @@ jobs are listed and skipped on Linux and macOS.
 | Job | What it verifies |
 |---|---|
 | `tests` | The unit-test files of nine suites, in a matrix: `memory-bank/tests` and `project-brain/tests` of Laravel, Symfony, PHP Core and WordPress, plus `Infrastructure-Creator/tests`. Each suite runs file by file and stops at its first failing file. |
+| `qa-tooling` | The QA artifact tooling under `scripts/qa/` on its own venv (`scripts/qa/.venv`, the pinned [`requirements-qa.txt`](../requirements-qa.txt)): synthetic tests for ledger/workbook refusal, strict schemas, composite defect identity, evidence arithmetic/checksums and native-host skips, then the schemas and the `TC-AI` case catalog (`scripts/qa/validate_qa_artifacts.py --skip-run-evidence`). |
 | `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, PHP Core, and WordPress; on the Laravel leg also generator-asset parity (`scripts/asset_parity.py --check`) and its regression tests. |
 | `mirrors` | Every per-tool mirror matches its canon (`scripts/build_mirrors.py --check`), plus the mirror executor's regression tests. Also that every hook script and root launcher that must be executable is 100755 in the Git index (`tests/test_file_modes.py`); that every shipped `bash-validator.sh` copy blocks and allows the shared corpus (`tests/fixtures/bash-validator-corpus.json`) and keeps its generic section byte-identical (`tests/test_bash_validator_corpus.py`); and that every hook wiring, command/agent/flow route and skill reachability resolves (`scripts/check_routes.py`, exceptions in `scripts/check_routes_allowlist.json`), with its regression tests. |
 | `infrastructure-creator-reliability` | Under Python 3.9, the floor: the complete Infrastructure-Creator suite (`unittest discover`), the canonical reference-catalog contracts, and the Infrastructure-Creator mirrors. |
@@ -96,6 +99,26 @@ python3 -m unittest tests.test_harness_fleet
 
 `check.py` runs the last two; without `harness/.venv` it skips the graph tests
 and prints the commands that create the venv (`--strict` fails instead).
+
+### QA artifact tooling
+
+Use an isolated environment so the runtime editions retain their
+standard-library-only dependency contract:
+
+```bash
+python3 -m venv scripts/qa/.venv
+scripts/qa/.venv/bin/python -m pip install -r requirements-qa.txt
+scripts/qa/.venv/bin/python -m unittest discover -s scripts/qa/tests
+scripts/qa/.venv/bin/python scripts/qa/validate_qa_artifacts.py --skip-run-evidence
+```
+
+`check.py` runs the last two; without `scripts/qa/.venv` it skips them and
+prints the commands that create the venv (`--strict` fails instead).
+
+CI validates the strict schemas, the complete `TC-AI-001..018` catalog, and the
+staged disposition ledger and reconstructed workbook. It skips only run
+evidence, which remains intentionally untracked. The release gate omits the
+skip flag and adds `--release`.
 
 ### parity
 

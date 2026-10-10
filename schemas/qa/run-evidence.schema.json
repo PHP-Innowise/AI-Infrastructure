@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://php-innowise.example/schemas/qa/run-evidence.schema.json",
+  "title": "Deterministic or native run evidence summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "test_case_id",
+    "classification",
+    "started_at",
+    "ended_at",
+    "status",
+    "commands",
+    "assertions",
+    "native"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^RUN-20260803-[0-9]{3}$"
+    },
+    "test_case_id": {
+      "type": "string",
+      "pattern": "^TC-AI-[0-9]{3}$"
+    },
+    "classification": {
+      "enum": [
+        "deterministic",
+        "hybrid",
+        "native"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed",
+        "skipped"
+      ]
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "argv",
+          "cwd",
+          "started_at",
+          "ended_at",
+          "exit_code",
+          "stdout_path",
+          "stderr_path"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "argv": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "stdout_path": {
+            "type": "string",
+            "pattern": "^stdout/"
+          },
+          "stderr_path": {
+            "type": "string",
+            "pattern": "^stderr/"
+          }
+        }
+      }
+    },
+    "assertions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executed",
+        "passed",
+        "failed",
+        "skipped",
+        "items"
+      ],
+      "properties": {
+        "executed": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "status",
+              "message"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "skipped"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "native": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "status",
+        "reason"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "not-applicable",
+            "passed",
+            "failed",
+            "skipped"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

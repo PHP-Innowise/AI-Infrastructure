@@ -292,6 +292,9 @@ CI_ONLY_SETUP = (
     # absent (and fails it under --strict).
     re.compile(r"^python3 -m venv harness/\.venv$"),
     re.compile(r"^harness/\.venv/bin/python -m pip install\b"),
+    # The same for the QA tooling's pinned workbook and schema libraries.
+    re.compile(r"^python3 -m venv scripts/qa/\.venv$"),
+    re.compile(r"^scripts/qa/\.venv/bin/python -m pip install\b"),
     # Prints the tool's version into the log; it checks nothing.
     re.compile(r"^shellcheck --version$"),
 )
