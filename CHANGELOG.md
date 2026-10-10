@@ -1775,6 +1775,77 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **A chat capture and a merge delivery stay inside the hook budget however
+  long the branch's chats are.** Every prompt and stop re-read all of the
+  branch's snapshots and ran the full secret scan over each (up to eight
+  times 4 MiB), and scanned the new text twice; delivering a merge re-scanned
+  every frozen source of an archive of up to 32 MiB. Eight chats of 3.5 MB
+  took about 9 s per capture and per delivery, so `timeout 5` killed the
+  capture after it wrote its snapshot but before it evicted one - the
+  8-per-branch cap stopped holding and each later turn cost more - and killed
+  the delivery before it claimed the pending merge, which then cost every new
+  session 5 s and delivered nothing. Each turn's new text is now scanned once;
+  snapshots and archives are read back by the sha256 recorded when their text
+  passed the scan; eviction runs first, from file modification times, without
+  opening a snapshot. `--event merge` (a command, no hook budget) scans its
+  sources again under the current patterns before freezing them, and the few
+  kilobytes a new task receives, and each `list` preview, are scanned once
+  more. Both paths now take about 0.1-0.2 s beside eight 3.5 MB chats; the
+  continuity tests time them against half the default budget.
+
+- **`.context-handoff/` keeps itself out of Git.** `install_accelerator.py
+  --sync`, which the Harness runs for every installed project, wires the
+  continuity hook into a project installed before it existed but keeps that
+  project's own `.gitignore`, so the visible chat text it then captured showed
+  up as untracked files a `git add -A` would commit. The store now writes its
+  own `.gitignore` containing `*` when it is created, or on the next capture
+  into a store that predates it, and never writes through a symlink there.
+
+- **Chat snapshots are bounded across branches, not only per branch.**
+  Eviction looked only at the current branch's valid snapshots, so those of
+  deleted branches, of a checkout that had moved (its `repository_id` no longer
+  matched) and of a pattern added since stayed on disk for good, as did a
+  temporary file of a write the hook budget killed. Each capture now keeps 64
+  snapshots per checkout and drops any idle for 30 days, besides eight per
+  branch; the hook READMEs and `docs/CONTEXT-HANDOFF.md` state the bounds.
+
+- **A Codex chat's snapshot starts with what the person typed.** Codex
+  records the project's AGENTS.md (`# AGENTS.md instructions for ...`),
+  `<environment_context>`, skills, hook prompts and notifications as
+  user-role messages, and the projection kept them as `User:` text: every
+  Codex chat of a project opened with the same AGENTS.md text, so the `list`
+  previews the `context-load merge` skill selects from were identical, and a
+  merged preview spent its first third of each source on policy. Such parts
+  (one lowercase-tagged element, or the AGENTS.md block) are dropped now; a
+  `<pasted_content>` paste is the person's and stays.
+
+- **`list` and `merge` fail explicitly when chat continuity is disabled.**
+  With `CONTEXT_CONTINUITY_DISABLED` set, or a state root that does not exist,
+  both returned 0 with no output, so an agent following the skill reported a
+  merge as prepared that was never written. They now exit 1 with `Context merge
+  failed:` and the reason, as `docs/CONTEXT-HANDOFF.md` promised; the hook
+  events stay silent.
+
+- **A committed handoff loads in a CRLF checkout.** Git for Windows' default
+  `core.autocrlf=true` checks a committed `tasks/TASK-NNN/context-save-*.md`
+  out with CRLF, and `context-load` refused it as "missing JSON frontmatter".
+  A handoff that does not validate as read is now checked once more with CRLF
+  turned back into LF, and its digests decide; a transcript that already held
+  CRLF, which Git leaves alone, keeps its bytes.
+
+- **`context-save --topic` and `--task-id` refuse personal data.** Both went
+  into the tracked handoff after only the secret scan, while the curated
+  fields beside them also refuse personal data; an email address in the topic
+  was saved. They are screened like the curated fields, on save and on load.
+
+- **`context-save` works in a project outside Git.** Every cited file was
+  checked with `git check-ignore`, which exits 128 outside a repository, so a
+  handoff citing any file failed with "cannot verify source ignore rules" -
+  in a project without Git and when loading a handoff from a copy without
+  `.git`. Without Git metadata there are no ignore rules to honour and the
+  files are fingerprinted directly; where `.git` exists, a check that cannot
+  run still refuses.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks

@@ -199,6 +199,20 @@ def _safe_relative_path(repository: Path, value: str) -> tuple[str, Path]:
     return normalized, path
 
 
+def _under_git(repository: Path) -> bool:
+    """Whether Git would find a repository for this project.
+
+    Ignore rules exist only there. A project outside Git - or a copy of one
+    without its `.git`, the portable case a handoff exists for - has none,
+    so its cited files are fingerprinted without asking Git. Where Git metadata
+    is present, an ignore check that cannot run still refuses.
+    """
+    if os.environ.get("GIT_DIR"):
+        return True
+    current = repository.absolute()
+    return any(os.path.lexists(directory / ".git") for directory in (current, *current.parents))
+
+
 def _is_ignored(repository: Path, relative: str) -> bool:
     try:
         completed = subprocess.run(
@@ -220,12 +234,13 @@ def fingerprint_files(repository: Path, values: list[str]) -> list[dict[str, obj
         raise HandoffError("at most 256 source files may be referenced")
     fingerprints: list[dict[str, object]] = []
     seen: set[str] = set()
+    ignore_rules = bool(values) and _under_git(repository)
     for value in values:
         relative, path = _safe_relative_path(repository, value)
         if relative in seen:
             raise HandoffError(f"file paths must be unique: {relative}")
         seen.add(relative)
-        if _is_ignored(repository, relative):
+        if ignore_rules and _is_ignored(repository, relative):
             raise HandoffError(f"file path is ignored and cannot be included: {relative}")
         if path.exists() and not path.is_file():
             raise HandoffError(f"file path is not a regular file: {relative}")
@@ -277,7 +292,7 @@ def _read_transcript(path: Path) -> bytes:
     return transcript
 
 
-def _load_markdown(path: Path) -> tuple[dict[str, object], bytes]:
+def _read_handoff(path: Path) -> bytes:
     try:
         text = _read_regular(path, "handoff", HANDOFF_MAX_BYTES)
         decoded = text.decode("utf-8")
@@ -286,6 +301,10 @@ def _load_markdown(path: Path) -> tuple[dict[str, object], bytes]:
     except UnicodeDecodeError as error:
         raise HandoffError("handoff must be valid UTF-8") from error
     _reject_secrets("handoff", [decoded])
+    return text
+
+
+def _parse_markdown(text: bytes) -> tuple[dict[str, object], bytes]:
     if not text.startswith(b"---\n"):
         raise HandoffError("handoff is missing JSON frontmatter")
     try:
@@ -296,6 +315,33 @@ def _load_markdown(path: Path) -> tuple[dict[str, object], bytes]:
     if not isinstance(metadata, dict):
         raise HandoffError("handoff frontmatter must be an object")
     return metadata, body
+
+
+def _parse_handoff(text: bytes) -> tuple[dict[str, object], dict[str, object], bytes | None]:
+    """Metadata, curated context and transcript of a handoff's bytes.
+
+    A handoff is written with LF line endings and its digests cover those
+    bytes. A checkout that converts line endings (Git for Windows' default
+    core.autocrlf=true) hands back every LF as CRLF, so a file that does not
+    validate as it is read is tried once more with CRLF turned back into LF;
+    the digests then decide. Git leaves a file alone that already held CRLF,
+    so a transcript's own CRLF survives in the first reading.
+    """
+    readings = [text]
+    if b"\r\n" in text:
+        normalized = text.replace(b"\r\n", b"\n")
+        readings = [normalized, text] if text.startswith(b"---\r\n") else [text, normalized]
+    failure: HandoffError | None = None
+    for reading in readings:
+        try:
+            metadata, body = _parse_markdown(reading)
+            context, transcript = _validate_metadata(metadata, body)
+        except HandoffError as error:
+            failure = failure or error
+            continue
+        return metadata, context, transcript
+    assert failure is not None
+    raise failure
 
 
 def _validate_metadata(metadata: dict[str, object], body: bytes) -> tuple[dict[str, object], bytes | None]:
@@ -322,6 +368,7 @@ def _validate_metadata(metadata: dict[str, object], body: bytes) -> tuple[dict[s
         raise HandoffError("handoff source client is invalid")
     if metadata["task_id"] is not None and not isinstance(metadata["task_id"], str):
         raise HandoffError("handoff task ID is invalid")
+    _reject_sensitive("topic and task ID", [value for value in (metadata["topic"], metadata["task_id"]) if isinstance(value, str)])
     repository = metadata["repository"]
     if not isinstance(repository, dict) or set(repository) != {"branch", "commit"}:
         raise HandoffError("handoff repository provenance is invalid")
@@ -394,6 +441,9 @@ def save_handoff(
         raise HandoffError("--transcript is required when --detail full")
     if detail != "full" and transcript_path is not None:
         raise HandoffError("--transcript is valid only when --detail full")
+    # The labels go into the same tracked file as the curated fields and
+    # follow the same policy: no secrets, no personal data.
+    _reject_sensitive("topic and task ID", [value for value in (topic, task_id) if isinstance(value, str)])
     context = validate_curated_context(_read_curated_json(Path(input_json)), detail)
     fingerprints = fingerprint_files(repository, context["files"])  # type: ignore[arg-type]
     _reject_symlink_parents(output, include_leaf=True)
@@ -454,8 +504,7 @@ def save_handoff(
 
 
 def load_handoff(repository: Path, input_path: Path, *, include_transcript: bool = False) -> dict[str, object]:
-    metadata, body = _load_markdown(input_path)
-    context, transcript = _validate_metadata(metadata, body)
+    metadata, context, transcript = _parse_handoff(_read_handoff(input_path))
     source = metadata["repository"]
     assert isinstance(source, dict)
     drift: list[dict[str, object]] = []

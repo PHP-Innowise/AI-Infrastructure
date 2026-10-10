@@ -239,6 +239,86 @@ class ContextHandoffTest(unittest.TestCase):
         self.assertNotIn("example.org", result.stderr)
         self.assertFalse(self.output.exists())
 
+    def test_a_handoff_checked_out_with_crlf_line_endings_still_loads(self) -> None:
+        """Git for Windows' default core.autocrlf=true turns a committed handoff's LF into CRLF."""
+        tasks = self.root / "tasks/TASK-001"
+        summary = tasks / "context-save-1.md"
+        self.assertEqual(0, self.save(summary).returncode)
+        lf_export = self.root / "lf.txt"
+        lf_export.write_bytes(b"Visible line one\nline two\n")
+        self.assertEqual(0, self.save(tasks / "context-save-2.md", "full", "--transcript", str(lf_export)).returncode)
+        crlf_export = self.root / "crlf.txt"
+        crlf_export.write_bytes(b"Exported on Windows\r\nsecond line\r\n")
+        self.assertEqual(0, self.save(tasks / "context-save-3.md", "full", "--transcript", str(crlf_export)).returncode)
+        self.git("add", "tasks")
+        self.git("commit", "-qm", "handoffs")
+        clone = Path(self.tmp.name + "-clone")
+        self.addCleanup(shutil.rmtree, clone, True)
+        subprocess.run(["git", "-c", "core.autocrlf=true", "clone", "-q", str(self.root), str(clone)], check=True)
+        self.assertIn(b"\r\n", (clone / "tasks/TASK-001/context-save-1.md").read_bytes())
+        expected = {"context-save-1.md": None, "context-save-2.md": "Visible line one\nline two\n",
+                    "context-save-3.md": "Exported on Windows\r\nsecond line\r\n"}
+        for name, transcript in expected.items():
+            with self.subTest(name=name):
+                loaded = subprocess.run([sys.executable, str(SCRIPT), "--root", str(clone), "context-load", "--input",
+                                         f"tasks/TASK-001/{name}", "--include-transcript", "--json"],
+                                        text=True, capture_output=True)
+                self.assertEqual(0, loaded.returncode, loaded.stderr)
+                payload = json.loads(loaded.stdout)
+                self.assertEqual("Continue the handoff.", payload["context"]["goal"])
+                self.assertEqual(transcript, payload.get("transcript"))
+        # Converting the line endings is not a licence to change the text.
+        tampered = (clone / "tasks/TASK-001/context-save-1.md")
+        tampered.write_bytes(tampered.read_bytes().replace(b"First pass complete.", b"First pass completed"))
+        self.assertNotEqual(0, subprocess.run([sys.executable, str(SCRIPT), "--root", str(clone), "context-load",
+                                               "--input", str(tampered)], capture_output=True).returncode)
+
+    def test_topic_and_task_id_follow_the_personal_data_policy(self) -> None:
+        email = "jane.doe" + "@" + "example.com"
+        for extra in (("--topic", f"call {email} about invoices"), ("--topic", "invoices", "--task-id", email)):
+            with self.subTest(extra=extra):
+                result = self.save(self.output, "topic", *extra)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("personal data", result.stderr)
+                self.assertNotIn(email, result.stderr)
+                self.assertFalse(self.output.exists())
+        self.assertEqual(0, self.save(self.output, "topic", "--topic", "invoices", "--task-id", "TASK-001").returncode)
+        # A label edited into a saved handoff is refused on load as well.
+        raw = self.output.read_bytes()
+        self.output.write_bytes(raw.replace(b'"topic": "invoices"', b'"topic": "%s"' % email.encode(), 1))
+        loaded = self.load()
+        self.assertNotEqual(0, loaded.returncode)
+        self.assertIn("personal data", loaded.stderr)
+
+    def test_a_project_outside_git_saves_and_loads_cited_files(self) -> None:
+        project = Path(self.tmp.name + "-plain")
+        project.mkdir()
+        self.addCleanup(shutil.rmtree, project, True)
+        self.assertNotEqual(0, subprocess.run(["git", "-C", str(project), "rev-parse", "--git-dir"],
+                                              capture_output=True).returncode)
+        (project / "index.php").write_text("<?php echo 1;\n")
+        self.input.write_text(json.dumps(self.data(files=["index.php"])), encoding="utf-8")
+
+        def plain(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run([sys.executable, str(SCRIPT), "--root", str(project), *args], text=True, capture_output=True)
+
+        saved = plain("context-save", "--input", str(self.input), "--output", "tasks/handoff.md",
+                      "--detail", "summary", "--source-client", "claude")
+        self.assertEqual(0, saved.returncode, saved.stderr)
+        (project / "index.php").write_text("<?php echo 2;\n")
+        loaded = plain("context-load", "--input", "tasks/handoff.md", "--json")
+        self.assertEqual(0, loaded.returncode, loaded.stderr)
+        self.assertEqual(["index.php"], [item["path"] for item in json.loads(loaded.stdout)["drift"] if item["kind"] == "file"])
+        # A handoff saved in a checkout loads from a copy without its .git.
+        self.write_input(files=["source.txt"])
+        self.assertEqual(0, self.save().returncode)
+        copy = Path(self.tmp.name + "-copy")
+        shutil.copytree(self.root, copy, ignore=shutil.ignore_patterns(".git"))
+        self.addCleanup(shutil.rmtree, copy, True)
+        copied = subprocess.run([sys.executable, str(SCRIPT), "--root", str(copy), "context-load", "--input",
+                                 "handoff.md", "--json"], text=True, capture_output=True)
+        self.assertEqual(0, copied.returncode, copied.stderr)
+
     def test_attached_layout_reads_the_project_and_never_writes_into_the_state(self) -> None:
         state = Path(self.tmp.name + "-state")
         state.mkdir()
