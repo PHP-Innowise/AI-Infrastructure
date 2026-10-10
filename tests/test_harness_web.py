@@ -159,6 +159,18 @@ class HarnessWebTests(unittest.TestCase):
         status,resumed,_=self.post(restart,{})
         self.assertEqual(200,status); self.assertEqual('queued',resumed['session']['status'])
         self.assertEqual(target['id'],resumed['session']['id'])
+        # Deleting the saved copy frees merge storage once no run can read it; it needs the token and no body.
+        delete='/api/sessions/' + target['id'] + '/delete-merge-context'
+        self.assertEqual(400,self.post(delete,{})[0])
+        self.server.sessions._status(target['id'],'failed')
+        self.assertEqual(403,self.post(delete,{},headers={'X-Harness-Token':None})[0])
+        self.assertEqual(400,self.post(delete,{'unexpected':True})[0])
+        self.assertEqual(400,self.post(delete+'?unexpected=1',{})[0])
+        status,deleted,_=self.post(delete,{})
+        self.assertEqual(200,status); self.assertTrue(deleted['session']['merge']['archive_deleted_at'])
+        self.assertEqual(source_ids,[source['id'] for source in deleted['session']['merge']['sources']])
+        self.assertEqual(400,self.request('/api/sessions/' + target['id'] + '/merge')[0])
+        self.assertEqual(400,self.post(restart,{})[0])
 
     def test_session_attachments_are_validated_bound_to_messages_and_downloaded_as_data(self):
         body = 'Требования <script>example</script>\n'.encode() * 2000

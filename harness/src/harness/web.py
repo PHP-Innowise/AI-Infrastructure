@@ -482,6 +482,9 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith('/api/sessions/') and path.endswith('/restart-merge') and len(path.split('/')) == 5:
                 if data or urlsplit(self.path).query: raise SessionError('Invalid merge restart request.')
                 self.reply(200, {'session': store.restart_merge(path.split('/')[3])})
+            elif path.startswith('/api/sessions/') and path.endswith('/delete-merge-context') and len(path.split('/')) == 5:
+                if data or urlsplit(self.path).query: raise SessionError('Invalid saved context deletion request.')
+                self.reply(200, {'session': store.delete_merge_archive(path.split('/')[3])})
             elif path == '/api/sessions':
                 self.reply(201, {'session': store.create(data)})
             elif path == '/api/projects':

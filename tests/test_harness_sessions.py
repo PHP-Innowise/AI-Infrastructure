@@ -221,7 +221,11 @@ class SessionTests(unittest.TestCase):
         final=self.settled(manager,row['id'])
         self.assertEqual(('failed',None),(final['status'],final['native_session_id']))
         self.assertEqual(launched,len(self.calls))
-        self.assertIn('The saved merge archive changed or is unavailable.',[event.get('text') for event in manager.events(row['id'])])
+        self.assertTrue(any(str(event.get('text')).startswith('The saved merge archive changed or is unavailable.') for event in manager.events(row['id'])))
+        # Restart rewrites the archive from its record, so the run it queues reaches the provider.
+        manager.restart_merge(row['id'])
+        self.settled(manager,row['id'])
+        self.assertEqual(launched+1,len(self.calls))
 
     def test_sdd_phases_validate_documents_resume_and_retain_launch_settings(self):
         from harness import sdd

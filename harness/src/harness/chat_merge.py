@@ -2,7 +2,9 @@
 
 A merge freezes the user and assistant messages the Harness shows for 2-8 inactive ordinary chats of one
 project. The bundle is kept twice: as the record in SQLite (session_merges) and as a private file the agent
-can read (state_dir/merges/<task>/context.json). A launch refuses a file that no longer matches the record.
+can read (state_dir/merges/<task>/context.json). A launch refuses a file that no longer matches the record;
+Restart merged task rewrites it from the record. Deleting a task's saved context empties the record's bundle
+(the row and its source summary stay) and frees its share of the storage quota.
 Files are created, read and removed through rooted descriptors (filesystem.fs), so a link planted in the
 state directory is never followed, on POSIX or Windows.
 """
@@ -22,6 +24,8 @@ MAX_ARCHIVES = 128
 MAX_STORED_BYTES = 64 * 1024 * 1024
 MAX_EVENTS = 10000
 PREVIEW_BYTES = 16000
+# How much of each chat's first request project memory reads with a merged task's instruction.
+MEMORY_REQUEST_CHARACTERS = 300
 ARCHIVE = 'context.json'
 # The events the conversation shows as messages: the user's turns, the agent's text and a successful result.
 # A memory-recovery reply answers a prompt the conversation never shows, so it stays out.
@@ -99,14 +103,45 @@ def prepare(store, source_ids, project_id):
         source.update({'event_watermark': watermark, 'messages': messages,
                        'history_kind': 'Harness-visible messages; native exports, tools and attachments are not included'})
         inherited = store.db.execute('SELECT bundle FROM session_merges WHERE session_id=?', (sid,)).fetchone()
-        if inherited:
+        if inherited and inherited['bundle']:
             source['inherited_context'] = json.loads(inherited['bundle'])
+        elif inherited:
+            # A merged chat whose saved copy was deleted: its own messages are here, the chats it merged are not.
+            source['inherited_context_deleted'] = True
         source['sha256'] = hashlib.sha256(encoded(source)).hexdigest()
         sources.append(source)
     bundle = {'version': 1, 'captured_at': now(), 'project_id': project_id, 'conflicts': 'not-evaluated', 'sources': sources}
     if len(encoded(bundle)) > MAX_BUNDLE_BYTES:
         raise SessionError('The merged archive exceeds 2 MiB. Select fewer or smaller chats.')
     return bundle
+
+
+def memory_text(bundle, prompt):
+    """What project memory reads for a merged task: the chats' subjects, then the new instruction.
+
+    The instruction alone is often the prefilled request to continue "these chats", which names no subject.
+    The first line becomes an automatic task's goal and ID; the whole text is the first turn's query. The
+    task's first message stays as written. A merged chat's title is its own instruction, so the chats it
+    merged name it instead."""
+    titles = []
+
+    def collect(sources, depth):
+        for source in sources:
+            inherited = source.get('inherited_context')
+            if depth < 8 and isinstance(inherited, dict) and inherited.get('sources'):
+                collect(inherited['sources'], depth + 1)
+                continue
+            title = '“' + ' '.join(str(source.get('title') or 'Untitled chat').split()) + '”'
+            if title not in titles:
+                titles.append(title)
+    collect(bundle['sources'], 0)
+    requests = []
+    for source in bundle['sources']:
+        first = ' '.join(next((m['text'] for m in source['messages'] if m['role'] == 'user'), '').split())
+        if first:
+            requests.append(first[:MEMORY_REQUEST_CHARACTERS])
+    lines = [line for line in str(prompt).strip().splitlines() if line.strip()] or ['']
+    return '\n'.join(['Merged ' + ', '.join(titles) + ': ' + lines[0], *requests, *lines[1:]])
 
 
 def summary(bundle):
@@ -176,9 +211,12 @@ def persist(store, sid, prepared):
     """Write the archive and its record; the caller's transaction commits the record with the task."""
     from .sessions import SessionError
     body = encoded(prepared['bundle'])
-    usage = store.db.execute('SELECT count(*),coalesce(sum(length(cast(bundle AS BLOB))),0) FROM session_merges').fetchone()
+    # Saved copies count until a person deletes them; a task whose copy was deleted keeps only its summary.
+    usage = store.db.execute("SELECT count(*),coalesce(sum(length(cast(bundle AS BLOB))),0) FROM session_merges WHERE bundle!=''").fetchone()
     if usage[0] >= MAX_ARCHIVES or usage[1] + len(body) > MAX_STORED_BYTES:
-        raise SessionError('Saved merge storage is full; existing archives have been preserved.')
+        raise SessionError(f'Saved merge storage is full ({MAX_ARCHIVES} saved contexts or {MAX_STORED_BYTES // (1024 * 1024)} MiB '
+                           'for all projects). Delete the saved context of merged tasks you no longer need, then merge '
+                           'again; existing archives have been preserved.')
     root = _root(store, create=True)
     try:
         fs.mkdir(sid, 0o700, dir_fd=root)
@@ -236,9 +274,49 @@ def launch_context(store, sid):
         row = store.db.execute('SELECT context,bundle FROM session_merges WHERE session_id=?', (sid,)).fetchone()
     if not row:
         return ''
+    if not row['bundle']:
+        raise SessionError('This merged task\'s saved context was deleted; merge the chats again to start from them.')
     if read(store, sid) != row['bundle'].encode('utf-8'):
-        raise SessionError('The saved merge archive changed or is unavailable.')
+        raise SessionError('The saved merge archive changed or is unavailable. Restart merged task rewrites it from the saved record.')
     return row['context']
+
+
+def restore(store, sid):
+    """Rewrite a task's archive from its record when the file is missing or changed; the caller holds the store
+    lock. True when it was rewritten. A link in the folder's or the file's place is refused, never followed."""
+    from .sessions import SessionError
+    row = store.db.execute('SELECT bundle FROM session_merges WHERE session_id=?', (sid,)).fetchone()
+    if not row or not row['bundle']:
+        return False
+    body = row['bundle'].encode('utf-8')
+    if read(store, sid) == body:
+        return False
+    root = _root(store, create=True)
+    try:
+        try:
+            fs.mkdir(sid, 0o700, dir_fd=root)
+        except FileExistsError:
+            pass
+        folder = _folder(root, sid)
+        try:
+            try:
+                # Removes a link, a hard link or a changed file by its name; nothing behind it is touched.
+                fs.unlink(ARCHIVE, dir_fd=folder)
+            except FileNotFoundError:
+                pass
+            descriptor = fs.open(ARCHIVE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, 0o600, dir_fd=folder)
+            with os.fdopen(descriptor, 'wb') as handle:
+                handle.write(body); handle.flush(); os.fsync(handle.fileno())
+        finally:
+            fs.close(folder)
+    except OSError as error:
+        raise SessionError('The saved merge archive could not be rewritten from its record: its folder in the Harness '
+                           'state directory is not a plain folder or cannot be written.') from error
+    finally:
+        fs.close(root)
+    if read(store, sid) != body:
+        raise SessionError('The saved merge archive could not be rewritten from its record.')
+    return True
 
 
 def directories(store, sid):
@@ -283,7 +361,7 @@ def cleanup(store, sid):
 
 
 def recover(store):
-    """Remove crash-window orphans only while the store owns the runner lock."""
+    """Remove crash-window orphans and deleted contexts' folders only while the store owns the runner lock."""
     try:
         root = _root(store)
     except Exception:
@@ -291,7 +369,8 @@ def recover(store):
     if root is None:
         return
     try:
-        retained = {row[0] for row in store.db.execute('SELECT session_id FROM session_merges')}
+        # A task whose saved context was deleted keeps its row but not its folder: a removal that failed is retried here.
+        retained = {row[0] for row in store.db.execute("SELECT session_id FROM session_merges WHERE bundle!=''")}
         for name in fs.listdir(root):
             if not identity(name) or name in retained:
                 continue
