@@ -411,6 +411,24 @@
       "note": "SQL piped into a client"
     },
     {
+      "command": "grep 'DROP TABLE' schema.sql | mysql app_db",
+      "expect": "block",
+      "editions": "all",
+      "note": "a search selecting SQL for a client"
+    },
+    {
+      "command": "echo 'TRUNCATE TABLE users' | grep TRUNCATE | psql app",
+      "expect": "block",
+      "editions": "all",
+      "note": "echo feeding a search feeding a client"
+    },
+    {
+      "command": "git grep -h 'DELETE FROM users;' -- dump.sql | sqlite3 app.db",
+      "expect": "block",
+      "editions": "all",
+      "note": "git grep output executed by sqlite3"
+    },
+    {
       "command": "mysql app <<'SQL'\nDROP TABLE users;\nSQL",
       "expect": "block",
       "editions": "all",
