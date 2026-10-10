@@ -51,9 +51,9 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 
 **Tests:** the shared corpus `tests/fixtures/bash-validator-corpus.json` in the accelerator repository runs every case through every shipped copy (`.claude`, `.cursor`, `.codex`) and its host's payload shape.
 
-**Repetition guard:** below the framework rules, every command that passed them is counted per exact command string in `/tmp/claude-loop-detection-<repo-key>/`, the directory `loop-detection.sh` uses and the SessionStart hook clears. The same command a sixth time warns, a twelfth time blocks with a pointer to `/debugger`; any change to the command starts its own count. A command loop touches no file, so the edit counter cannot see it.
+**Repetition guard:** below the framework rules, every command that passed them is counted per exact command string and per session (the payload's `session_id`) in `${TMPDIR:-/tmp}/claude-loop-detection-<uid>-<repo-key>/`, the per-user directory `loop-detection.sh` uses. The same command a sixth time warns, a twelfth time blocks with a pointer to `/debugger`; any change to the command starts its own count, and so does a file edit `loop-detection.sh` recorded since the command last ran - edit-and-rerun is progress. The warning reaches the model: the hook exits 0 with `hookSpecificOutput.additionalContext`, which Claude Code adds next to the tool result (text on stderr with a non-blocking exit code would reach only the user). A read-only status query standing alone - `gh pr checks/status/view`, `gh run list/view/watch`, `git status`, `docker [compose] ps/logs`, `kubectl get/describe/logs`, `tail`, optionally after `sleep N &&` and piped into filters - is polling, not a loop, and is not counted. Two sessions in one checkout keep separate counts, and a session start clears only its own counters and any left untouched for a day. The counter directory is created private (mode 700); one that is a symbolic link or belongs to another user turns the count off, a counter that is a symbolic link is never read or written, and a count is read as base-10 digits only. A command loop touches no file, so the edit counter cannot see it.
 
-**Return:** 0 = safe command, 1 = warning (sixth identical command), 2 = block
+**Return:** 0 = safe command (from the sixth identical run with the warning as JSON `additionalContext`), 2 = block
 
 ### PreToolUse (Agent|Task): Subagent Gate
 **Script:** `subagent-gate.sh`
@@ -64,14 +64,18 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 
 ### SubagentStop: Subagent Dispatch Observer
 **Script:** `subagent-dispatch.sh`
-**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`, one sanitized line from the final assistant message) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3, the context runtime, or a resolvable task. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported on stdout and stderr, so a flow does not read the gap as an unfinished agent.
+**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`, one sanitized line from the final assistant message) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3, the context runtime, or a resolvable task. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported in one line - its exit status and the last line of its error - on stdout and stderr. Claude Code shows a SubagentStop hook's output to no conversation the orchestrator reads (on exit 0 it goes to the debug log), so the report is also left in the ignored `memory-bank/local/unrecorded-completions`, and the same script, wired on `PostToolUse` for `Agent|Task`, hands it to the orchestrator as `additionalContext` when the agent returns - so a flow does not read the gap as an unfinished agent.
 **Return:** Always 0 (observation must never break a turn)
 
-### PostToolUse (Edit): Loop Detection
+### PostToolUse (Agent|Task): Subagent Dispatch Relay
+**Script:** `subagent-dispatch.sh`, the same script
+**Purpose:** When an agent returns, hands the orchestrator any completion the SubagentStop run could not record (at most the last 20), once, as `additionalContext`. It records and releases nothing itself.
+
+### PostToolUse (Edit|Write|MultiEdit|NotebookEdit): Loop Detection
 **Script:** `loop-detection.sh`
-**Purpose:** Tracks edit count per file per session. Detects doom loops.
-**Return:** 0 = normal, 1 = warning at 7 edits, 2 = block at 10 edits
-**Tracking:** Uses `/tmp/claude-loop-detection/` and resets at `SessionStart`.
+**Purpose:** Tracks edit count per file per session (the payload's `session_id`). Detects doom loops. Every edit it records also restarts the Bash Validator's repetition count for the commands run before it.
+**Return:** 0 = normal (from the seventh edit with the warning as JSON `additionalContext`, which reaches the model), 2 = block at 10 edits
+**Tracking:** `${TMPDIR:-/tmp}/claude-loop-detection-<uid>-<repo-key>/`, created private; a session start clears that session's counters and any left untouched for a day. A linked or foreign directory turns the count off, and a linked counter is never followed.
 
 ### Notification: Desktop Alert
 **Purpose:** Desktop notification when Claude needs user attention.
@@ -82,7 +86,7 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 | Code | Meaning |
 |------|---------|
 | `0` | Success, continue |
-| `1` | Warning, continue (logged) |
+| `1` | Non-blocking error: Claude Code shows the first line of stderr to the user, never to the model. A warning the model must see exits `0` with JSON `hookSpecificOutput.additionalContext` instead. |
 | `2` | Block operation (shows error) |
 
 ## Tuning Strategy

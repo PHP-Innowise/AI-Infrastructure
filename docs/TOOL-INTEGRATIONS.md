@@ -182,8 +182,13 @@ prompts. The one documented exception is Cursor's `sessionStart`, which
 additionally re-renders `.cursor/rules/working-memory.mdc` (see above) -
 silently, to the file only, never into the session banner.
 
-Hook return conventions are `0` to continue, `1` for a non-blocking warning
-where supported, and `2` to block. Timeouts are seconds in both Cursor's
+Hook return conventions are `0` to continue and `2` to block. Any other exit
+is a non-blocking error, which Claude Code and Codex show to the user and never
+to the model, so a warning the agent has to read exits `0` with JSON
+`hookSpecificOutput.additionalContext` on stdout - the edit-loop and
+repetition warnings do. Cursor documents no such channel for `afterFileEdit` or
+for a command `beforeShellExecution` lets run, so its copies of those two hooks
+warn with `1` and the warning stays the user's. Timeouts are seconds in both Cursor's
 `hooks.json` and Claude Code's `settings.json`; Codex hooks carry no timeout
 field. Preserve the native values and schemas when synchronizing hooks.
 

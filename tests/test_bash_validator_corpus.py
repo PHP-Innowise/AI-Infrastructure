@@ -114,8 +114,8 @@ def codex_payload(command: str, cwd: Path) -> dict:
 PAYLOADS = {".claude": claude_payload, ".cursor": cursor_payload, ".codex": codex_payload}
 
 # The edition hooks count identical commands per session (the repetition
-# guard) under /tmp/<host>-loop-detection-<key>, keyed by the Git root of the
-# working directory. Run from an edition, every case would add to the counters
+# guard) under ${TMPDIR:-/tmp}/<host>-loop-detection-<uid>-<key>, keyed by the
+# Git root of the working directory. Run from an edition, every case would add to the counters
 # of this checkout - and of a live session in it - and a rerun of the suite
 # would cross the warning threshold. The hooks run from a scratch directory
 # outside any repository instead; its counters are removed with it. Within one
@@ -142,7 +142,11 @@ def tearDownModule() -> None:
         return
     key = counter_key(SCRATCH)
     for host in HOST_DIRS:
-        shutil.rmtree(Path("/tmp") / "{}-loop-detection-{}".format(host.lstrip("."), key), ignore_errors=True)
+        base = Path(os.environ.get("TMPDIR") or "/tmp")
+        shutil.rmtree(
+            base / "{}-loop-detection-{}-{}".format(host.lstrip("."), os.geteuid(), key),
+            ignore_errors=True,
+        )
     shutil.rmtree(SCRATCH, ignore_errors=True)
 
 

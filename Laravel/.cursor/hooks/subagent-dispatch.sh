@@ -2,6 +2,8 @@
 # Subagent completion observer for orchestrated flows.
 # Hook event: SubagentStop (Claude Code) / subagentStop (Cursor); the Codex
 # mirror exists for parity but stays unregistered while multi-agent is off.
+# Claude Code also runs it on PostToolUse for the Agent tool, where it only
+# relays a failed completion write to the orchestrator (see below).
 # Exit codes: always 0 (observation must never break a turn).
 #
 # When a subagent finishes, append a `completion` entry to the task's agent
@@ -68,6 +70,40 @@ print(walk(payload), end="")' "$key" 2>/dev/null
   fi
 }
 
+# Where a failed completion write waits for the orchestrator. Claude Code
+# hands the output of a SubagentStop hook to no conversation the orchestrator
+# reads - on exit 0 its stdout goes to the debug log, and additionalContext
+# there continues the subagent, not its parent. Its documented way to add
+# context to the parent after a subagent returns is a PostToolUse hook on the
+# Agent tool, so the report is also left here, and this script, wired there
+# too, hands it on. Ignored local state; a symbolic link anywhere on the way
+# is refused, as it is for the refresh health record.
+UNRECORDED_DIR="$STATE_DIR/memory-bank/local"
+UNRECORDED="$UNRECORDED_DIR/unrecorded-completions"
+unrecorded_path_safe() {
+  for entry in "${STATE_DIR%/}" "$STATE_DIR/memory-bank" "$UNRECORDED_DIR" "$UNRECORDED"; do
+    [ -L "$entry" ] && return 1
+  done
+  return 0
+}
+
+EVENT=$(extract_string hook_event_name)
+if [ "$EVENT" = "PostToolUse" ]; then
+  # The relay: nothing is recorded or released here - the subagent's own stop
+  # already ran. At most the last 20 reports, taken whole: a report written
+  # while this runs lands in a new file for the next relay.
+  [ -f "$UNRECORDED" ] && unrecorded_path_safe || exit 0
+  command -v python3 > /dev/null 2>&1 || exit 0
+  TAKEN="$UNRECORDED.relay.$$"
+  mv -f "$UNRECORDED" "$TAKEN" 2>/dev/null || exit 0
+  REPORT=$(tail -n 20 "$TAKEN" 2>/dev/null)
+  rm -f "$TAKEN" 2>/dev/null
+  [ -n "$REPORT" ] || exit 0
+  printf '%s' "$REPORT" | python3 -c 'import json, sys
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": sys.stdin.read()}}))' 2>/dev/null
+  exit 0
+fi
+
 AGENT=$(extract_string agent_type)
 [ -n "$AGENT" ] || AGENT=$(extract_string subagent_type)
 [ -z "$AGENT" ] && exit 0
@@ -124,12 +160,21 @@ case "$DISPATCH_ERROR" in
 esac
 
 if [ "$DISPATCH_STATUS" -ne 0 ]; then
-  DETAIL=$(printf '%s' "$DISPATCH_ERROR" | tr '\n\t' '  ' | cut -c1-160)
+  # One bounded line, the last non-blank one, as working-memory-read.sh takes
+  # it: an uncaught exception ends with its name and message, while its first
+  # line is only "Traceback (most recent call last):".
+  DETAIL=$(printf '%s\n' "$DISPATCH_ERROR" | grep -v '^[[:space:]]*$' | tail -n 1 | tr '\t' ' ' | cut -c1-160)
   MESSAGE="subagent-dispatch: completion of \"$AGENT\" was NOT recorded in the \
 channel (exit $DISPATCH_STATUS${DETAIL:+ — $DETAIL}). Record it with \
 \`context.py msg-dispatch --event complete\` before trusting msg-read."
   echo "$MESSAGE"
   echo "$MESSAGE" >&2
+  # Claude Code only (Cursor names the event subagentStop and has no relay):
+  # leave the report for the PostToolUse relay above.
+  if [ "$EVENT" = "SubagentStop" ] && unrecorded_path_safe \
+    && { [ -d "$UNRECORDED_DIR" ] || mkdir -p "$UNRECORDED_DIR" 2>/dev/null; }; then
+    printf '%s\n' "$MESSAGE" >> "$UNRECORDED" 2>/dev/null || true
+  fi
 fi
 
 exit 0

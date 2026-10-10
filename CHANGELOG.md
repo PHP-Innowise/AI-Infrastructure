@@ -1775,6 +1775,88 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **The repetition guard and the edit counter no longer trust a counter
+  directory someone else made.** Both kept their counts in
+  `/tmp/<host>-loop-detection-<repo-key>/`, a predictable name they accepted
+  whoever had created it, and read and wrote the counters through symbolic
+  links: another user on a shared host could plant a counter of 11 that
+  blocked a first `php artisan test`, or link `cmd-<md5 of "git status">` to
+  `~/.bashrc` and have the next `git status` overwrite it with a number.
+  `loop-detection.sh` also fed a stored count to shell arithmetic, so a planted
+  `a[$(cmd)]` ran `cmd`, and in the guard a stored `08` aborted the arithmetic
+  and turned the guard off for that command. The counters now live in
+  `${TMPDIR:-/tmp}/<host>-loop-detection-<uid>-<repo-key>/`, created with mode
+  700; one that is a symbolic link or belongs to another user turns the count
+  off, a counter that is a symbolic link is never read or written, and a count
+  is accepted only as digits, read in base 10. The same in all four editions
+  and all three hosts.
+
+- **A command's repetition count is its session's, and polling is not a
+  loop.** The count was keyed by the command and the checkout alone: every
+  Claude Code, Codex or Harness session in one checkout added to it, and a new
+  session's start wiped the counts of every session still running there. Counters are now keyed by the payload's `session_id` (Cursor
+  `conversation_id`), and `local-context.sh` deletes only its own session's
+  counters and those untouched for a day; the edit counts of
+  `loop-detection.sh` are per session the same way. A read-only status query
+  standing alone - `gh pr checks/status/view`, `gh run list/view/watch`,
+  `git status`, `docker [compose] ps/logs`, `kubectl get/describe/logs`,
+  `tail`, optionally after `sleep N &&` and piped into filters - is no longer
+  counted: waiting for CI was refused on the twelfth poll. Chained with
+  anything else it counts as before.
+
+- **An edit by Codex, or by Claude Code's `Write`, restarts a command's
+  repetition count.** The count restarts when `loop-detection.sh` recorded an
+  edit since the command last ran, but Codex edits through `apply_patch`,
+  whose payload has no `file_path`, and Claude Code ran the hook for `Edit`
+  only. On Codex a fix-and-rerun loop was refused from its twelfth run, and
+  on Claude Code whenever the fix was a `Write`. `loop-detection.sh` now
+  counts every file an `apply_patch` call names on its `*** Add File:`,
+  `*** Update File:` and `*** Move to:` lines, and a `NotebookEdit`'s
+  `notebook_path`; `.claude/settings.json` wires it for
+  `Edit|Write|MultiEdit|NotebookEdit`.
+
+- **The repetition and edit-loop warnings reach the model on Claude Code and
+  Codex.** Both warned on stderr or stdout with exit 1, which Claude Code and
+  Codex treat as a non-blocking hook error shown to the user only, so the
+  agent first met either guard at its block. Their Claude and Codex copies
+  now exit 0 with `hookSpecificOutput.additionalContext`, which both hosts
+  add to the model's context next to the tool result, as their hook
+  documentation says. Cursor documents no such channel for `afterFileEdit` or
+  for a shell command it lets run (`agent_message` accompanies a denial), so
+  its copies still warn with exit 1 and the warning stays the user's; the
+  hook READMEs and `docs/TOOL-INTEGRATIONS.md` say so.
+
+- **Cursor no longer serves another task's working memory after a failed
+  render.** The stop and session-start hooks removed the rule
+  `.cursor/rules/working-memory.mdc` only when `hook-context` said the branch
+  had no context (status 3); a failure, a timeout, a broken render or an
+  enforce-mode skip kept the rule whichever task it named, and the prompt
+  hook never touched it without a capsule. After `git switch` to a branch
+  whose render kept failing - a name with `#` is enough, because the task ID
+  is refused - Cursor sent the previous branch's capsule with every prompt.
+  All three hooks now keep a rule they did not rewrite only when its header
+  names the current task, and remove it otherwise; an enforce-mode skip still
+  never empties the current task's rule.
+
+- **A lost subagent completion reaches the orchestrator and names its error.**
+  `subagent-dispatch.sh` reported a failed `msg-dispatch` on stdout and stderr
+  from `SubagentStop`, where Claude Code shows a hook's output to nobody but
+  the debug log, and the report quoted the first 160 characters of the error:
+  for an uncaught exception, `Traceback (most recent call last):` and the
+  install path. The report now quotes the error's last non-blank line, as
+  `working-memory-read.sh` does, and on Claude Code it is also left in the
+  ignored `memory-bank/local/unrecorded-completions`; the same script, wired
+  on `PostToolUse` for `Agent|Task` (the event Claude Code documents for
+  adding context to the parent after a subagent returns), hands it to the
+  orchestrator once as `additionalContext`. Cursor's report stays in its
+  hooks output.
+
+- **The hook READMEs describe the repetition guard as it runs.** The Cursor
+  READMEs listed only exit codes 0 and 2 for a validator that exits 1 on its
+  warning, and no README said that an edit restarts the count; they now give
+  each host's exit codes and warning channel, the edit reset, polling, the
+  session keying and the counter directory.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks

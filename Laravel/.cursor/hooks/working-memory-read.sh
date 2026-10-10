@@ -155,11 +155,11 @@ fi
 # Attached, .cursor/rules is the shared clone's own folder; the launcher
 # delivers the capsule in the prompt instead.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
-[ -n "$REPORT" ] || exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 RULE_HEADER="Session context retrieved for a recent prompt (task: $TASK_ID)."
-CAPSULE=$(printf '%s' "$REPORT" | python3 -c '
+CAPSULE=""
+[ -n "$REPORT" ] && CAPSULE=$(printf '%s' "$REPORT" | python3 -c '
 import json
 import sys
 
@@ -186,8 +186,7 @@ if sys.argv[2] in held.splitlines() and items(text) <= items(held):
     sys.exit(0)
 sys.stdout.write(text)
 ' "$RULE_FILE" "$RULE_HEADER" 2>/dev/null)
-[ -n "$CAPSULE" ] || exit 0
-if mkdir -p "$RULES_DIR" 2>/dev/null; then
+if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
   TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
   if [ -n "$TMP_RULE" ]; then
     {
@@ -205,5 +204,14 @@ if mkdir -p "$RULES_DIR" 2>/dev/null; then
     rm -f "$TMP_RULE" 2>/dev/null
   fi
 fi
+# A prompt that rendered nothing - the refresh failed, timed out or carried no
+# capsule, or the rule already held everything it retrieved - keeps the rule in
+# place only when its header names this task. Another task's rule (a switched
+# branch whose refresh keeps failing) would otherwise go out with this prompt
+# as its working memory.
+[ -n "$TASK_ID" ] && {
+  grep -qxF "$RULE_HEADER" "$RULE_FILE" 2>/dev/null \
+    || grep -qxF "Session context as of end of previous turn (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null
+} || rm -f "$RULE_FILE" 2>/dev/null
 
 exit 0
