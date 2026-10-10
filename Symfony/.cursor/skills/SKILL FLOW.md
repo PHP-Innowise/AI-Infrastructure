@@ -104,7 +104,9 @@ current-step files, not the parent conversation.
 The returning handoff contains only:
 
 - work completed;
-- decisions made;
+- decisions made, each with the constraint or rationale that binds it, so a
+  later compaction cannot keep the decision and drop its reason;
+- requested scope left uncovered, and why - silence here reads as done;
 - files changed or examined;
 - controller/service/repository placement when implementation is involved;
 - verification evidence;

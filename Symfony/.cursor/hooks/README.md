@@ -23,7 +23,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### beforeShellExecution: Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive and secret-exposing shell commands: force push (including `--force-with-lease` and `+refspec`), hard reset, forced clean, `git branch -D`, hook bypass (`--no-verify`, `git commit -n`), recursive `rm` of root/home/working-tree paths, destructive SQL outside read-only searches, destructive `gh` calls, Composer auth tokens, printing `.env` files, and this edition's framework commands (listed in `BV_FRAMEWORK_RULES` at the end of `bash-validator.sh` in this directory). The command is parsed like a shell would split it, so chains, `$(...)`, `sh -c`, `eval`, wrappers such as `sudo`/`env`/`xargs` and console abbreviations do not hide a command. It is a guard against accidental destruction, not a sandbox: a script written to disk and run later is not inspected.
+**Purpose:** Blocks destructive and secret-exposing shell commands: force push (including `--force-with-lease` and `+refspec`), hard reset, forced clean, `git branch -D`, hook bypass (`--no-verify`, `git commit -n`), recursive `rm` of root/home/working-tree paths, destructive SQL outside read-only searches, destructive `gh` calls, Composer auth tokens, printing `.env` files, and this edition's framework commands (listed in `BV_FRAMEWORK_RULES` at the end of `bash-validator.sh` in this directory). The command is parsed like a shell would split it, so chains, `$(...)`, `sh -c`, `eval`, wrappers such as `sudo`/`env`/`xargs` and console abbreviations do not hide a command. It is a guard against accidental destruction, not a sandbox: a script written to disk and run later is not inspected. The same command a sixth time in a session warns and a twelfth time blocks, since the edit counter cannot see a command loop.
 **Input key:** `.command` (Cursor supplies the full command string).
 **Return:** `0` = safe, `2` = block.
 
@@ -37,7 +37,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### subagentStop: Subagent Dispatch Observer
 **Script:** `subagent-dispatch.sh`
-**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3 or the context runtime.
+**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3 or the context runtime. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported in one line on stdout and stderr.
 **Return:** Always exit 0, no JSON output (observation only)
 
 ### afterFileEdit: File Naming Validator

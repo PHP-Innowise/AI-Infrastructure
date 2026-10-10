@@ -16,6 +16,20 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - **`memory-seed` asset: `--phase quality`.** A generated project's runtime
   accepts the Phase Map's "Quality" as an alias stored as `verification`;
   the asset's `PROTOCOL.md` says so (see the root `CHANGELOG.md`).
+- **`memory-seed` asset: a compacted capsule says so, and failure records
+  carry a localization.** The runtime a generated project carries renders a
+  `compaction:` line whenever its Task Capsule omitted or truncated content,
+  keeps both ends of a truncated progress narrative, and counts what the
+  governed projection hides. The Project Brain bug, finding and incident
+  templates gain a `Localization` section that names its components inline,
+  since a generated `STABILIZATION.md` need not define them. The Cursor mirror
+  rule for the read hook's delivery block (`_WM_DELIVERY_PROMPT`) now matches
+  the editions' block, which reports a failed refresh. Synced with
+  `scripts/asset_parity.py --write`; `.claude`/`.cursor` mirrors and the policy
+  lock regenerated (the lock also picks up
+  `bootstrap-verifier/scripts/validate_skill_quality.py`, whose recorded hash
+  was already stale). `hook-forge` is unchanged: generated read and dispatch
+  hooks still exit silently on a failed refresh or completion write.
 - **`memory-seed` asset: the capsule carries no skill.** A generated project's runtime no longer puts a skill or instruction file in the Task Capsule; the pick is recorded in the manifest as `host-listed`, and the asset's `PROTOCOL.md` and Brain README say so (see the root `CHANGELOG.md`). Policy lock regenerated.
 - **`memory-seed` asset: file edges.** A generated project's runtime links an active task's touched files and lets automatic retrieval add one document linked to a path the request names or the task touched; the asset's manifest schema and `PROTOCOL.md` follow (see the root `CHANGELOG.md`). Policy lock regenerated.
 - **`memory-seed` asset: an edited citation marks a record instead of evicting it.** A generated project's runtime keeps a Brain record whose cited file changed, marked and ranked down, and leaves out only one whose citation is gone or undigested; the asset's `PROTOCOL.md` says so (see the root `CHANGELOG.md`). Policy lock regenerated.

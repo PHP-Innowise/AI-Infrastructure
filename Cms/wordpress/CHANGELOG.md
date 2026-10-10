@@ -35,6 +35,16 @@ context-runtime changes are also recorded in the repository-root changelog.
   enabled and remain explicitly marked as unreviewed; otherwise an independent
   human review is required.
 
+- `STABILIZATION.md` localizes a failure before naming its root cause, as the
+  other three editions do: a `Localization` section (the components an agent
+  interacts with, the earliest unrecovered failure, blame that follows
+  behavior rather than opportunity), a `Routing` table from the blamed side to
+  the repair that can work, `Edge:` and `Blame:` in the rule template, and two
+  worked examples. The Project Brain bug, finding and incident templates this
+  edition shares with them point here. `bash-validator.sh` gains the shared
+  repetition guard below its framework rules. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
+
 ## 2.0.0 - 2026-08-24
 
 ### Added

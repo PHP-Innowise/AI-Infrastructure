@@ -9,7 +9,8 @@
 # relying on the orchestrating conversation to remember, and release the
 # write-agent lock the subagent gate took for a write-capable agent. Both
 # steps degrade to no-ops without python3, without the context runtime, or
-# without a resolvable task.
+# without a resolvable task. A completion write that fails for any other
+# reason is reported on stdout and stderr, never swallowed.
 
 set -u
 
@@ -100,13 +101,35 @@ NOTE=$(extract_string last_assistant_message)
 NOTE=$(printf '%s' "$NOTE" | tr '\n\t' '  ' | sed 's/\\[nt]/ /g; s/  */ /g; s/^ //; s/ $//' | cut -c1-160)
 
 if command -v timeout > /dev/null 2>&1; then
-  timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" --root "$STATE_DIR" \
+  DISPATCH_ERROR=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" --root "$STATE_DIR" \
     msg-dispatch --task-id "$TASK_ID" --agent "$AGENT" --event complete \
-    ${NOTE:+--note "$NOTE"} > /dev/null 2>&1
+    ${NOTE:+--note "$NOTE"} 2>&1 > /dev/null)
 else
-  python3 "$CONTEXT_CLI" --root "$STATE_DIR" \
+  DISPATCH_ERROR=$(python3 "$CONTEXT_CLI" --root "$STATE_DIR" \
     msg-dispatch --task-id "$TASK_ID" --agent "$AGENT" --event complete \
-    ${NOTE:+--note "$NOTE"} > /dev/null 2>&1
+    ${NOTE:+--note "$NOTE"} 2>&1 > /dev/null)
+fi
+DISPATCH_STATUS=$?
+
+# A journal that fails silently is worse than one that does not exist: the
+# orchestrator is told completions are recorded automatically, so a lost
+# write leaves it reading an incomplete channel as a complete one. Report and
+# still exit 0 - observation must never break a turn.
+case "$DISPATCH_ERROR" in
+  # No task for this branch, or a project in lightweight mode, means no
+  # channel and no orchestrator reading it: nothing was lost, so there is
+  # nothing to report. Every other failure is a completion the channel should
+  # have held and does not.
+  *"task not found"*|*"require governed mode"*) DISPATCH_STATUS=0 ;;
+esac
+
+if [ "$DISPATCH_STATUS" -ne 0 ]; then
+  DETAIL=$(printf '%s' "$DISPATCH_ERROR" | tr '\n\t' '  ' | cut -c1-160)
+  MESSAGE="subagent-dispatch: completion of \"$AGENT\" was NOT recorded in the \
+channel (exit $DISPATCH_STATUS${DETAIL:+ — $DETAIL}). Record it with \
+\`context.py msg-dispatch --event complete\` before trusting msg-read."
+  echo "$MESSAGE"
+  echo "$MESSAGE" >&2
 fi
 
 exit 0
