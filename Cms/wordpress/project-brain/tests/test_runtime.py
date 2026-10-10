@@ -294,7 +294,10 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "# Changelog\n\n## Unreleased\n\ncobalt authority rollout.\n",
             encoding="utf-8",
         )
-        self.repository.joinpath("specs/authority.md").write_text(
+        # A file of its own: editing the task's cited spec would now keep the
+        # task and its handoff indexed (changed, not evicted) and move the
+        # document frequencies this test relies on.
+        self.repository.joinpath("specs/cobalt.md").write_text(
             "# Authority\n\ncobalt authority specification detail.\n",
             encoding="utf-8",
         )
@@ -2604,7 +2607,9 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         self.assertIn("conflict pair", manifest["escalation_reason"])
 
-    def test_stale_source_is_filtered_before_reindex_and_retrieval(self) -> None:
+    def test_a_record_whose_cited_source_was_edited_stays_indexed(self) -> None:
+        # An edit to a cited file used to evict the record at the next index.
+        # It stays, and retrieval marks it (see ChangedSourceRecordTest).
         task = brain.create_task(
             self.repository,
             "TASK-STALE",
@@ -2617,23 +2622,9 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.repository.joinpath("specs/authority.md").write_text(
             "# Changed\n\nCobalt content drifted.\n", encoding="utf-8"
         )
-        database = self.repository / "memory-bank/local/context.db"
-        connection = context_cli.connect(database)
-        try:
-            packet = retrieval.retrieve(
-                connection, self.repository, "cobalt", task["id"], limit=3
-            )
-        finally:
-            connection.close()
-        self.assertFalse(
-            any(item.get("record_id") == task["id"] for item in packet["selected"])
-        )
         reindexed = json.loads(self.run_cli("index", "--json").stdout)
-        self.assertTrue(
-            any(
-                item["reason"] == "stale" and task["id"] in item["path"]
-                for item in reindexed["excluded"]
-            )
+        self.assertFalse(
+            any(task["id"] in item["path"] for item in reindexed["excluded"]), reindexed["excluded"]
         )
 
     def test_manifest_nested_schema_is_enforced_adversarially(self) -> None:
@@ -5523,6 +5514,121 @@ class WorkingStateCapsuleTest(RuntimeHarness):
         )
         self.assertEqual(0, cleared.returncode, cleared.stderr)
         self.assertEqual([], json.loads(cleared.stdout)["next_steps"])
+
+
+class ChangedSourceRecordTest(RuntimeHarness):
+    """A record whose cited file was edited is kept and marked; one whose cited
+    file is gone, or was never digested, is left out."""
+
+    def reader(self) -> None:
+        self.start("TASK-READER")
+
+    def retrieve(self, query: str) -> dict:
+        result = self.run_cli("retrieve", query, "--task-id", "TASK-READER", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def manifest(self, capsule: dict) -> dict:
+        return json.loads((self.repository / capsule["manifest"]).read_text(encoding="utf-8"))
+
+    def test_a_record_whose_cited_file_changed_stays_indexed_and_marked(self) -> None:
+        self.repository.joinpath("specs/quota.md").write_text("# Quota\n\nBurst limits.\n", encoding="utf-8")
+        decision = brain.create_record(
+            self.repository, "decision", "DEC-COBALT", "Cobalt quota guard is canonical", [],
+            ["specs/quota.md"], owner="alice", authority="verified",
+            goal="Cobalt quota guard rejects burst traffic",
+        )
+        path = brain.dynamic_path(self.repository, decision).relative_to(self.repository).as_posix()
+        self.reader()
+        before = {item["path"]: item for item in self.manifest(self.retrieve("cobalt quota guard"))["selected"]}
+        self.assertIn(path, before)
+        self.repository.joinpath("specs/quota.md").write_text("# Quota\n\nThe rule was rewritten.\n",
+                                                              encoding="utf-8")
+        reindex = json.loads(self.run_cli("index", "--json").stdout)
+        self.assertNotIn(path, [item["path"] for item in reindex["excluded"]])
+        capsule = self.retrieve("cobalt quota guard")
+        delivered = {item["path"]: item for item in capsule["semantic"]}
+        self.assertEqual(["specs/quota.md"], delivered[path]["source_changed"])
+        after = {item["path"]: item for item in self.manifest(capsule)["selected"]}
+        self.assertTrue(after[path]["source_changed"])
+        self.assertLess(after[path]["score"], before[path]["score"])
+
+    def test_a_record_whose_cited_file_is_gone_is_excluded_as_source_missing(self) -> None:
+        self.repository.joinpath("specs/retired.md").write_text("# Retired\n\nZirconium retry window.\n",
+                                                                encoding="utf-8")
+        finding = brain.create_record(
+            self.repository, "finding", "FIND-ZR", "Zirconium retry window", [], ["specs/retired.md"],
+            owner="alice", goal="Zirconium retry window",
+        )
+        path = brain.dynamic_path(self.repository, finding).relative_to(self.repository).as_posix()
+        self.repository.joinpath("specs/retired.md").unlink()
+        reindex = json.loads(self.run_cli("index", "--json").stdout)
+        self.assertIn({"path": path, "reason": "source-missing"}, reindex["excluded"])
+        self.reader()
+        selected = [item["path"] for item in self.manifest(self.retrieve("zirconium retry window"))["selected"]]
+        self.assertNotIn(path, selected)
+
+    def test_eligibility_tells_an_edited_citation_from_a_deleted_or_undigested_one(self) -> None:
+        record = brain.create_record(
+            self.repository, "finding", "FIND-ELIGIBLE", "Eligibility probe", [], ["specs/authority.md"],
+            owner="alice",
+        )
+        config = brain.load_config(self.repository)
+        self.repository.joinpath("specs/authority.md").write_text("# Authority\n\nEdited.\n", encoding="utf-8")
+        with mock.patch.object(brain, "fingerprint", side_effect=AssertionError("hashed")):
+            self.assertEqual((True, "eligible"), brain.record_is_eligible(self.repository, record, config))
+        self.repository.joinpath("specs/extra.md").write_text("# Extra\n", encoding="utf-8")
+        undigested = {**record, "sources": [*record["sources"], "specs/extra.md"]}
+        self.assertEqual((False, "source-undigested"),
+                         brain.record_is_eligible(self.repository, undigested, config))
+        self.repository.joinpath("specs/authority.md").unlink()
+        self.assertEqual((False, "source-missing"), brain.record_is_eligible(self.repository, record, config))
+
+    def test_an_event_whose_cited_file_changed_is_delivered_with_the_mark(self) -> None:
+        self.repository.joinpath("specs/rollout.md").write_text("# Rollout\n\nPlan.\n", encoding="utf-8")
+        event = brain.create_record(
+            self.repository, "event", "EVENT-COBALT", "Completed cobalt quota rollout", [],
+            ["specs/rollout.md"], owner="alice", goal="Cobalt quota guard rollout shipped to production",
+        )
+        path = brain.dynamic_path(self.repository, event).relative_to(self.repository).as_posix()
+        self.repository.joinpath("specs/rollout.md").write_text("# Rollout\n\nPlan changed.\n", encoding="utf-8")
+        result = self.run_cli("refresh", "--query", "cobalt quota rollout", "--task-id", "TASK-HISTORY",
+                              "--host", "codex", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        delivered = {item.get("path"): item for item in payload["capsule"]["episodic"]}
+        self.assertEqual(["specs/rollout.md"], delivered[path]["source_changed"])
+        self.assertIn(path, payload["capsule_text"])
+        self.assertIn("cited file changed: specs/rollout.md", payload["capsule_text"])
+
+    def test_validate_says_which_citations_retrieval_still_serves(self) -> None:
+        self.repository.joinpath("specs/retired.md").write_text("# Retired\n", encoding="utf-8")
+        edited = brain.create_record(self.repository, "finding", "FIND-EDITED", "Edited citation", [],
+                                     ["specs/authority.md"], owner="alice")
+        gone = brain.create_record(self.repository, "finding", "FIND-GONE", "Gone citation", [],
+                                   ["specs/retired.md"], owner="alice")
+        self.repository.joinpath("specs/authority.md").write_text("# Authority\n\nEdited.\n", encoding="utf-8")
+        self.repository.joinpath("specs/retired.md").unlink()
+        text = self.run_cli("validate")
+        self.assertEqual(0, text.returncode, text.stdout + text.stderr)
+        edited_path = str(brain.dynamic_path(self.repository, edited))
+        gone_path = str(brain.dynamic_path(self.repository, gone))
+        self.assertIn(f"{edited_path}: a cited source changed after the record was written; "
+                      "retrieval serves it marked for checking", text.stdout)
+        self.assertIn(f"{gone_path}: a cited source no longer exists; retrieval leaves the record out",
+                      text.stdout)
+        as_json = json.loads(self.run_cli("validate", "--json").stdout)
+        self.assertEqual(sorted([edited_path, gone_path]), sorted(as_json["stale"]))
+
+    def test_a_changed_citation_mark_names_one_file_and_counts_the_rest(self) -> None:
+        capsule = {"working": None, "warnings": [], "procedural": [], "episodic": [],
+                   "semantic": [{"path": "specs/cobalt.md", "title": "Cobalt", "snippet": "x",
+                                 "source_changed": ["src/A.php", "src/B.php", "src/C.php"]}]}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            context_cli.print_capsule(capsule)
+        self.assertIn("cited file changed: src/A.php +2 more", output.getvalue())
+        self.assertNotIn("src/B.php", output.getvalue())
 
 
 class CapsuleNoiseTest(RuntimeHarness):

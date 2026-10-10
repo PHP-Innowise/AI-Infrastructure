@@ -232,8 +232,10 @@ and must be verified against the cited current source.
 
 Raw conversations, prompts, responses, hidden reasoning, logs, credentials,
 secrets, customer or personal data, and unredacted incident payloads do not
-belong in any of these stores. Ignored, private, unauthorized, stale,
-superseded, terminal, or invalid records are excluded as applicable.
+belong in any of these stores. Ignored, private, unauthorized, superseded,
+terminal, or invalid records, and records whose cited source was deleted, are
+excluded as applicable; a record whose cited file changed is kept and marked
+for checking.
 
 ### Governed User Flow
 

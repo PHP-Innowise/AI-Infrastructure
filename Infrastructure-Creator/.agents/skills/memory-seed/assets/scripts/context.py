@@ -59,7 +59,7 @@ from brain_runtime import (
     rollback_created_record,
     review_promotion,
     apply_promotion,
-    stale_records,
+    stale_record_states,
     restore_record_state,
     snapshot_record_state,
     update_record,
@@ -2713,10 +2713,12 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
         marks.append("agent-attested, not reviewed by a person")
     changed = item.get("source_changed")
     if isinstance(changed, list) and changed:
+        # One path and a count: a changed citation keeps records in the
+        # capsule now, and three long paths per item ate the excerpts.
+        more = f" +{len(changed) - 1} more" if len(changed) > 1 else ""
         marks.append(
-            "cited file changed since this was verified: "
-            + ", ".join(_bounded(path, 160) for path in changed[:3])
-            + " — check it before relying on this"
+            f"cited file changed: {_bounded(str(changed[0]), 120)}{more}; "
+            "check it before relying on this"
         )
     suffix = f" ({'; '.join(marks)})" if marks else ""
     return f"- {kind} {label} — {_bounded(title, 160)}{suffix}"
@@ -6473,8 +6475,10 @@ def main() -> int:
                 # it marked for checking. It is listed, and does not fail the
                 # project the way a broken record does.
                 errors = validate_repository(repository, check_freshness=False)
-                stale = stale_records(repository)
-                result = {"valid": not errors, "errors": errors, "stale": stale}
+                states = stale_record_states(repository)
+                result = {
+                    "valid": not errors, "errors": errors, "stale": [path for path, _ in states],
+                }
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
@@ -6482,11 +6486,20 @@ def main() -> int:
                         print(error)
                     if not errors:
                         print("Project Brain validation passed.")
-                    for path in stale:
-                        print(
-                            f"Warning: {path}: a cited source changed after the "
-                            "record was written; retrieval marks it for checking"
+                    for path, state in states:
+                        where = (
+                            " (archived: never retrieved)"
+                            if "/project-brain/archive/" in path.replace("\\", "/") else ""
                         )
+                        reading = {
+                            "changed": "a cited source changed after the record was written; "
+                                       "retrieval serves it marked for checking",
+                            "source-missing": "a cited source no longer exists; "
+                                              "retrieval leaves the record out",
+                            "source-undigested": "a cited source has no stored digest; "
+                                                 "retrieval leaves the record out",
+                        }[state]
+                        print(f"Warning: {path}: {reading}{where}")
                 return 0 if not errors else 1
 
             if arguments.command == "parity":

@@ -13,7 +13,9 @@ Engine is a disposable lexical index and local binding/cache.
   append-only transition history.
 - Only an authorized owner may mutate a record. Stale expected revisions fail.
 - Privacy, owner, authority, lifecycle, supersession, archive, and source
-  freshness checks happen before indexing and again before retrieval.
+  freshness checks happen before indexing and again before retrieval. A
+  deleted citation keeps a record out of the index; an edited one keeps it
+  in, marked and ranked down.
 - Canonical project sources outrank Project Brain, Memory Bank, and local
   indexes. Conflicts are retained explicitly.
 - Terminal records are moved, never deleted. Active and archived records are

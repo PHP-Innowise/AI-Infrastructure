@@ -6,6 +6,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`memory-seed` asset: an edited citation marks a record instead of evicting it.** A generated project's runtime keeps a Brain record whose cited file changed, marked and ranked down, and leaves out only one whose citation is gone or undigested; the asset's `PROTOCOL.md` says so (see the root `CHANGELOG.md`). Policy lock regenerated.
 - **`memory-seed` asset: recorded history has its own slot.** A generated project's capsule carries the changelog and one Project Brain event or local episode, found by a search of its own; the governed contract is 1/3/2 and the asset's `PROTOCOL.md` and Brain README say so (see the root `CHANGELOG.md`). Policy lock regenerated.
 - **`memory-seed` asset: a skill's sub-file vacates the procedural slot.** A generated project's capsule never offers a skill's references, agents or rules file as the procedural item, and does not hand the slot to a weaker skill (see the root `CHANGELOG.md`). Policy lock regenerated.
 - **`memory-seed` asset: a credential masks a value, not a document.** The runtime a generated project carries indexes a repository document with each detected secret value replaced by `[redacted: <label>]` instead of dropping the whole document (see the root `CHANGELOG.md`). Policy lock regenerated.

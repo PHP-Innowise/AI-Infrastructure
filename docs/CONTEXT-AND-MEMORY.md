@@ -402,8 +402,11 @@ document once. Invalid UTF-8 aborts the refresh without replacing the prior
 index.
 
 For Brain records, eligibility is checked before insertion. Private,
-disallowed-privacy, disallowed-authority, terminal, superseded, stale, or
-invalid records are excluded with safe reason metadata. Handoffs are indexed
+disallowed-privacy, disallowed-authority, terminal, superseded, or invalid
+records, and records whose cited source was deleted (`source-missing`) or never
+digested (`source-undigested`), are excluded with safe reason metadata. A record
+whose cited file was edited is indexed; retrieval marks it `source_changed` and
+ranks it at half its score, as it does a chunk. Handoffs are indexed
 only when their task is eligible and the handoff validates against it.
 
 Indexing replaces the FTS document and metadata tables transactionally. It does
@@ -934,8 +937,9 @@ filtered out.
 Freshness has three checks:
 
 - the indexed document's current hash must match the hash stored when indexed;
-- for Brain records and handoffs, cited source paths must still match the
-  stored source fingerprints;
+- for Brain records, handoffs and chunks, a cited source that no longer exists
+  excludes the document; one whose digest moved on keeps it, marked
+  `source_changed` and ranked at `SOURCE_CHANGED_WEIGHT`;
 - for a codebase map under `codebase/`, the commits landed on its
   `mapped_scope` since its `mapped_commit` must stay within
   `codebase_map_max_drift`.

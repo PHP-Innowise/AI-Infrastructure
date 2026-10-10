@@ -26,6 +26,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A Brain record whose cited file was edited stays retrievable, marked.**
+  Any edit to a cited file used to evict the record at the next index -
+  accepted decisions, open findings and events alike - and its source links
+  with it; on the evaluation 77 record admissions with sources were all
+  excluded this way. The record is now indexed, and retrieval marks it
+  `source_changed` and ranks it at half its score, as it already did chunks.
+  Only a citation that no longer exists (`source-missing`) or was never
+  digested (`source-undigested`) keeps a record out, checked by existence
+  alone so the per-turn rebuild hashes no cited file. `validate` says which
+  case each warning is, and the capsule's mark names one file and counts the
+  rest.
+
 - **Recorded history has its own slot and its own search.** The capsule's
   episodic layer carries the changelog and one Project Brain event or local
   episode; they used to share one slot, which the changelog held on every
