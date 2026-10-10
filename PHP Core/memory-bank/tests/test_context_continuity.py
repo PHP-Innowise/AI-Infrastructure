@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,6 +21,14 @@ SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "context_continuity.p
 EDITION = SCRIPT.parents[2]
 sys.path.insert(0, str(SCRIPT.parent))
 import context_continuity as runtime
+
+
+# The hook adapters run the runtime under `timeout ${CONTEXT_HOOK_BUDGET:-5}`.
+# A turn must finish well inside it on a loaded machine, so the tests allow
+# half of it.
+HOOK_BUDGET_SECONDS = 5.0
+# A long chat: under the 4 MiB a snapshot may hold, and secret-free.
+LARGE_TEXT = ("Visible progress on the billing module: the rounding test now passes.\n" * 50_000)[:3_500_000]
 
 
 def clean_environment(**extra: str) -> dict[str, str]:
@@ -58,6 +69,26 @@ class ContextContinuityTest(unittest.TestCase):
             args.extend(["--source-session", session])
         return subprocess.run(args, capture_output=True, timeout=10, env=environment or clean_environment())
 
+    def seed(self, session: str, content: str, *, branch: str | None = None, age: float = 0.0,
+             repository_id: str | None = None) -> Path:
+        """Write a snapshot as capture would, without capturing it."""
+        branch = branch or runtime._branch(self.root)
+        record = {
+            "schema_version": runtime.SNAPSHOT_VERSION,
+            "repository_id": repository_id or runtime._repository_id(self.root),
+            "branch": branch, "commit": None, "session": f"claude:{session}", "host": "claude",
+            "kind": "event-history", "captured_at": datetime.now(timezone.utc).isoformat(),
+            "content": content, "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+        path = runtime._snapshot_path(self.root, branch, record["session"])
+        runtime._atomic_json(path, record)
+        moment = time.time() - age
+        os.utime(path, (moment, moment))
+        return path
+
+    def snapshots(self) -> list[Path]:
+        return sorted((self.root / ".context-handoff").glob("*.json"))
+
     def merged(self, host: str, *sessions: str) -> bytes:
         """Merge the captured chats into a brand-new task and return what it receives.
 
@@ -72,6 +103,170 @@ class ContextContinuityTest(unittest.TestCase):
         self.targets += 1
         target = f"merged-target-{self.targets}"
         return self.invoke(host, "restore", {"session_id": target, "conversation_id": target}).stdout
+
+    # -- hook budget ----------------------------------------------------------
+
+    def test_capture_scans_only_the_new_text(self) -> None:
+        """Earlier snapshots were scanned when captured; their digest stands for that scan."""
+        for number in range(8):
+            self.seed(f"long-{number}", LARGE_TEXT, age=100 - number)
+        scanned: list[int] = []
+        original = runtime._reject_secrets
+
+        def counting(text: str) -> None:
+            scanned.append(len(text))
+            original(text)
+
+        with patch.object(runtime, "_reject_secrets", counting):
+            runtime.capture(self.root, "claude", {"session_id": "new", "prompt": "A short new prompt."})
+            runtime.capture(self.root, "claude", {"session_id": "new", "last_assistant_message": "A short answer."})
+        self.assertLess(sum(scanned), 1_000, scanned)
+        self.assertEqual(8, len(self.snapshots()))
+        self.assertIn("A short answer.", json.loads(runtime._snapshot_path(
+            self.root, runtime._branch(self.root), "claude:new").read_text())["content"])
+
+    def test_a_capture_beside_long_chats_fits_the_hook_budget_and_evicts(self) -> None:
+        for number in range(8):
+            self.seed(f"long-{number}", LARGE_TEXT, age=100 - number)
+        oldest = runtime._snapshot_path(self.root, runtime._branch(self.root), "claude:long-0")
+        started = time.monotonic()
+        result = self.invoke("claude", "hook", {"hook_event_name": "UserPromptSubmit", "session_id": "new", "prompt": "Next step?"})
+        elapsed = time.monotonic() - started
+        self.assertEqual((0, b"", b""), (result.returncode, result.stdout, result.stderr))
+        self.assertLess(elapsed, HOOK_BUDGET_SECONDS / 2)
+        self.assertEqual(8, len(self.snapshots()))
+        self.assertFalse(oldest.exists())
+
+    def test_delivering_a_large_merge_fits_the_hook_budget(self) -> None:
+        branch = runtime._branch(self.root)
+        sources = [json.loads(self.seed(f"long-{number}", LARGE_TEXT + f"Chat {number} ends here.").read_text())
+                   for number in range(8)]
+        runtime._merge_directory(self.root)
+        pending = runtime._pending_path(self.root, branch, "claude")
+        runtime._atomic_json(pending, runtime._bundle(self.root, branch, sources))
+        self.assertLess(pending.stat().st_size, runtime.MAX_MERGE_BYTES)
+        started = time.monotonic()
+        result = self.invoke("claude", "hook", {"hook_event_name": "SessionStart", "session_id": "target", "source": "startup"})
+        elapsed = time.monotonic() - started
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertLess(elapsed, HOOK_BUDGET_SECONDS / 2)
+        text = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Source 8 |", text)
+        self.assertIn("Chat 7 ends here.", text)
+        self.assertFalse(pending.exists())
+        # Resuming re-reads the bound archive by digest, without a scan.
+        with patch.object(runtime, "_reject_secrets", side_effect=AssertionError("rescanned")):
+            again = runtime.restore(self.root, "claude", {"session_id": "target", "source": "resume"})
+        self.assertEqual(8, len(again["bundle"]["sources"]))
+
+    def test_a_secret_stored_before_its_pattern_existed_is_never_listed_merged_or_delivered(self) -> None:
+        """Trusting the digest at delivery still never hands a recognised secret to a model."""
+        secret = "api_key=" + "older-snapshot-value"
+        self.seed("old", "User:\n" + secret)
+        self.seed("fine", "User:\nVisible.")
+        listing = {item["session"]: item["preview"] for item in json.loads(self.invoke("claude", "list").stdout)}
+        self.assertNotIn("older-snapshot-value", json.dumps(listing))
+        self.assertEqual("User:\nVisible.", listing["claude:fine"])
+        self.assertEqual(1, self.prepare("claude:old", "claude:fine").returncode)
+        branch = runtime._branch(self.root)
+        sources = [json.loads(runtime._snapshot_path(self.root, branch, f"claude:{name}").read_text()) for name in ("old", "fine")]
+        runtime._merge_directory(self.root)
+        runtime._atomic_json(runtime._pending_path(self.root, branch, "claude"), runtime._bundle(self.root, branch, sources))
+        delivered = self.invoke("claude", "restore", json_output=True)
+        self.assertEqual((0, b""), (delivered.returncode, delivered.stdout))
+
+    # -- storage hygiene ------------------------------------------------------
+
+    def test_the_store_keeps_itself_out_of_git_without_the_project_gitignore(self) -> None:
+        """An installer sync wires the hook but keeps the project's own .gitignore."""
+        self.assertFalse((self.root / ".gitignore").exists())
+        self.invoke("claude", "capture", {"session_id": "a", "prompt": "Customer question about invoices."})
+        status = subprocess.run(["git", "-C", str(self.root), "status", "--porcelain", "--untracked-files=all"],
+                                capture_output=True, text=True, check=True)
+        self.assertEqual("", status.stdout)
+        snapshot = self.snapshots()[0].relative_to(self.root)
+        ignored = subprocess.run(["git", "-C", str(self.root), "check-ignore", "-q", "--", str(snapshot)])
+        self.assertEqual(0, ignored.returncode)
+        # A store an earlier version created gets the file on its next capture.
+        marker = self.root / ".context-handoff/.gitignore"
+        marker.unlink()
+        self.invoke("claude", "capture", {"session_id": "a", "last_assistant_message": "Answered."})
+        self.assertIn("*", marker.read_text().splitlines())
+        # A planted symlink is never written through.
+        marker.unlink()
+        outside = self.root / "outside-ignore"
+        marker.symlink_to(outside)
+        self.invoke("claude", "capture", {"session_id": "b", "prompt": "Another chat."})
+        self.assertFalse(outside.exists())
+
+    def test_retention_is_bounded_across_branches_and_moved_checkouts(self) -> None:
+        day = 24 * 60 * 60
+        for number in range(70):
+            self.seed(f"feature-{number}", f"Work on feature {number}.", branch=f"feature-{number}", age=day + number)
+        expired = self.seed("idle", "Idle for weeks.", branch="old-feature", age=31 * day)
+        moved = self.seed("moved", "Captured before the checkout moved.", repository_id="0" * 64, age=31 * day)
+        store = self.root / ".context-handoff"
+        leftover = store / (".%s.tmp123" % runtime._snapshot_path(self.root, "main", "claude:x").name)
+        leftover.write_text("{}")
+        self.invoke("claude", "capture", {"session_id": "current", "prompt": "Current work."})
+        names = {path.name for path in self.snapshots()}
+        self.assertEqual(64, len(names))
+        self.assertIn(runtime._snapshot_path(self.root, runtime._branch(self.root), "claude:current").name, names)
+        self.assertIn(runtime._snapshot_path(self.root, "feature-0", "claude:feature-0").name, names)
+        self.assertNotIn(runtime._snapshot_path(self.root, "feature-69", "claude:feature-69").name, names)
+        for gone in (expired, moved, leftover):
+            self.assertFalse(gone.exists(), gone.name)
+
+    # -- projection -----------------------------------------------------------
+
+    def test_codex_projection_drops_the_context_codex_injects(self) -> None:
+        """Every Codex chat opens with AGENTS.md and environment_context; the person typed neither."""
+        def rollout(name: str, question: str) -> Path:
+            def user(*parts: str) -> dict[str, object]:
+                return {"type": "response_item", "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": part} for part in parts]}}
+            path = self.root / f"{name}.jsonl"
+            path.write_text("\n".join(json.dumps(record) for record in [
+                {"type": "session_meta", "payload": {"id": name, "cwd": str(self.root)}},
+                user(f"# AGENTS.md instructions for {self.root}\n\n<INSTRUCTIONS>\nPolicy text.\n</INSTRUCTIONS>",
+                     f"<environment_context>\n  <cwd>{self.root}</cwd>\n</environment_context>"),
+                user("<skill>\n<name>review</name>\nSkill body.\n</skill>"),
+                user(question),
+                user('<pasted_content id="1a2b">\nThe pasted stack trace.\n</pasted_content id="1a2b">'),
+                {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": f"Answer to {name}."}]}},
+            ]) + "\n", encoding="utf-8")
+            return path
+        for name, question in (("rounding", "How should invoice totals round?"), ("export", "Why is the CSV export empty?")):
+            result = self.invoke("codex", "hook", {"hook_event_name": "Stop", "session_id": name,
+                                                   "transcript_path": str(rollout(name, question))})
+            self.assertEqual(0, result.returncode, result.stderr)
+        previews = {item["session"]: item["preview"] for item in json.loads(self.invoke("codex", "list").stdout)}
+        self.assertTrue(previews["codex:rounding"].startswith("User:\nHow should invoice totals round?"), previews)
+        self.assertTrue(previews["codex:export"].startswith("User:\nWhy is the CSV export empty?"), previews)
+        content = json.loads(runtime._snapshot_path(self.root, runtime._branch(self.root), "codex:rounding").read_text())["content"]
+        for injected in ("AGENTS.md instructions", "Policy text.", "<environment_context>", "Skill body."):
+            self.assertNotIn(injected, content)
+        self.assertIn("The pasted stack trace.", content)
+        self.assertIn("Answer to rounding.", content)
+
+    # -- explicit failures ----------------------------------------------------
+
+    def test_list_and_merge_say_so_when_continuity_is_disabled(self) -> None:
+        for session in ("a", "b"):
+            self.invoke("codex", "capture", {"session_id": session, "prompt": f"Chat {session}."})
+        disabled = clean_environment(CONTEXT_CONTINUITY_DISABLED="1")
+        listed = self.invoke("codex", "list", environment=disabled)
+        merged = self.prepare("codex:a", "codex:b", environment=disabled)
+        for result in (listed, merged):
+            self.assertEqual((1, b""), (result.returncode, result.stdout))
+            self.assertIn(b"CONTEXT_CONTINUITY_DISABLED", result.stderr)
+        self.assertFalse((self.root / ".context-handoff/merges").exists())
+        missing = self.prepare("codex:a", "codex:b", root=self.root / "missing")
+        self.assertEqual(1, missing.returncode)
+        self.assertIn(b"not a directory", missing.stderr)
+        # Hooks stay silent and successful.
+        self.assertEqual((0, b"", b""), tuple(getattr(self.invoke("codex", "capture", {"session_id": "a", "prompt": "x"}, environment=disabled), field) for field in ("returncode", "stdout", "stderr")))
 
     # -- automatic capture, explicit delivery ---------------------------------
 

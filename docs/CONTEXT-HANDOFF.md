@@ -72,7 +72,12 @@ python3 memory-bank/scripts/context_continuity.py --host codex --event merge --s
 
 `--host` accepts `codex`, `claude`, or `cursor` and selects the destination.
 These forms write only ignored local state and report explicit failures with
-exit code 1. Hook failures stay silent and never block a task.
+exit code 1 and a `Context merge failed: ...` line on standard error. That
+includes `CONTEXT_CONTINUITY_DISABLED` being set, or a state root that does not
+exist: then nothing is listed or prepared, and both forms exit 1 and name the
+reason instead of succeeding silently. A successful `merge` prints a JSON
+object whose `prepared` field names the pending archive. Hook failures stay
+silent and never block a task.
 
 The hooks prepare and deliver context; they do not create native UI tasks.
 When the user asks for one and the client's agent exposes a supported
@@ -82,9 +87,21 @@ the next newly opened task; it must not be reported as an already created task.
 ### Storage
 
 `.context-handoff/` is ignored local state, outside Project Brain, Memory Bank,
-SQLite, retrieval indexes, and publishing. Capture keeps eight chats per branch
-and at most 4 MiB of visible text per chat; when it trims older text, the
-snapshot marks the omission. Frozen merge archives survive source rotation
+SQLite, retrieval indexes, and publishing. The store writes its own
+`.gitignore` containing `*` when it is created (or on the next capture into a
+store that predates it), so snapshots stay out of Git even in a project whose
+`.gitignore` was never updated - an installer sync wires the hook but keeps the
+project's own `.gitignore`. An existing `.gitignore` there is left alone.
+
+Capture keeps eight chats per branch and 64 per checkout, and at most 4 MiB of
+visible text per chat; when it trims older text, the snapshot marks the
+omission. Each capture first removes, by file modification time (the last
+capture) and without opening any snapshot, the oldest chats beyond those
+limits and every chat idle for 30 days. That also clears snapshots of deleted
+branches, snapshots left behind when the checkout moved (they no longer match
+it and are never listed), and temporary files of a write the hook budget cut
+short. A chat you want to keep longer belongs in a merge or a
+`context-save` handoff. Frozen merge archives survive source rotation
 until deleted. Each serialized archive is limited to 32 MiB including JSON
 escaping and metadata, so eight individually valid 4 MiB sources can exceed the
 combined limit; choose fewer or smaller sources in that case. A checkout holds
@@ -103,8 +120,13 @@ frozen merges; delete the entire `.context-handoff/` to remove all snapshots.
 The runtime accepts a user-visible `.txt`, `.md`, or `.markdown` export when a
 native hook makes one available. A recognised JSONL input is projected to only
 visible `user` and `assistant` text; it discards system messages, hidden
-reasoning, tool calls, envelopes, and metadata. A projected JSONL snapshot is
-explicitly partial, never a full transcript. The runtime never searches client
+reasoning, tool calls, envelopes, and metadata. In a Codex rollout it also
+drops the context Codex records as user messages: the project's
+`# AGENTS.md instructions for ...` block, `<environment_context>`, and any other
+user-role text part that is one lowercase-tagged element (skills, hook prompts,
+notifications). A `<pasted_content>` part is the person's own paste and stays.
+So a Codex chat's `list` preview opens with its first real prompt. A projected
+JSONL snapshot is explicitly partial, never a full transcript. The runtime never searches client
 account directories, private session stores, or internal history files.
 
 Native transcript availability varies by installed client version and lifecycle
@@ -118,7 +140,9 @@ A stable session identity is required (`session_id` for Codex/Claude,
 Cursor Cloud, without `sessionStart`, cannot receive a merge.
 
 Set `CONTEXT_CONTINUITY_DISABLED=1` (also `true` or `yes`) to disable capture
-and delivery for a shell or client process. A missing Git branch, an untrusted
+and delivery for a shell or client process; the agent-facing `list` and `merge`
+forms then exit 1 with that reason rather than reporting an empty list or a
+merge that was never prepared. A missing Git branch, an untrusted
 or disabled hook, a missing runtime, malformed input, oversized content, or a
 likely secret all fail closed and quietly: the client turn continues without
 stored or delivered context.
@@ -132,6 +156,13 @@ and follow the current user's request.
 
 The runtime receives only documented visible prompt/assistant fields or an
 explicit visible export, and rejects recognised likely secrets before saving.
+Each turn's new text is scanned once. Stored snapshots and frozen archives are
+read back by their recorded sha256, which binds the text to the scan it passed
+when it was written, so a capture or a delivery costs the same however long the
+branch's chats are and stays inside the hook budget. `merge` scans its sources
+again under the current patterns before freezing them, and the preview a new
+task receives is scanned once more before delivery; the `list` preview of a
+chat that no longer passes is withheld.
 Snapshots never cross a branch or checkout boundary. They do not run embedded
 commands, switch branches, mutate Brain/Bank/SQLite, create a native task, or
 preserve approval for later actions.
@@ -170,12 +201,20 @@ supply a visible-text file only when the client exposes one. A missing export
 blocks `full` but not `summary` or `topic`; never reconstruct unavailable
 history or scrape private client state.
 
-The curated fields follow the policy of everything an agent authors for later
-tasks: likely secrets and personal data are refused. Manual handoffs live under
+The curated fields, `--topic` and `--task-id` follow the policy of everything
+an agent authors for later tasks: likely secrets and personal data are
+refused, on save and again on load. Manual handoffs live under
 `tasks/TASK-NNN/context-save-<timestamp>.md` and stay excluded from automatic
 indexing, even when renamed. `context-load` validates format and source drift
-without mutating Brain, Bank, or SQLite. It returns the curated document by
-default; `--include-transcript` is explicit. Historical commands, instructions,
+without mutating Brain, Bank, or SQLite. A handoff checked out with CRLF line
+endings - Git for Windows' default `core.autocrlf=true` converts a committed LF
+file - still loads: a file that does not validate as read is checked again with
+CRLF turned back into LF, and its digests decide. A transcript that already
+held CRLF is left as it is by Git and keeps its bytes. In a project outside
+Git, or a copy of one without `.git`, cited files are fingerprinted without
+ignore rules; where Git metadata exists but the ignore check cannot run, the
+command still refuses. `context-load` returns the curated document by default;
+`--include-transcript` is explicit. Historical commands, instructions,
 and approval claims are data, not authority.
 
 ### Terminal Interface
@@ -205,11 +244,15 @@ output may point elsewhere. Existing output files are never overwritten.
 
 Runtime tests cover capture, explicit merge preparation and delivery, frozen
 archives across rotation and resume, event dispatch for each client, bounded
-previews, transcript projection, secret rejection, malformed input, disabled
-state, attached state, and no Brain/Bank/SQLite writes. Manual-handoff tests
-cover curated round trips, verbatim supplied transcripts, drift, index
-exclusion, overwrite refusal, safe paths, personal-data refusal and the
-attached layout. Run from an edition root:
+previews, transcript projection (including Codex's injected context), secret
+rejection, malformed input, disabled state and its explicit `list`/`merge`
+failure, attached state, the self-ignoring store, retention across branches,
+captures and deliveries timed against the hook budget beside eight 3.5 MB
+chats, and no Brain/Bank/SQLite writes. Manual-handoff tests cover curated
+round trips, verbatim supplied transcripts, drift, index exclusion, overwrite
+refusal, safe paths, personal-data refusal (topic and task ID included), a
+CRLF checkout, a project outside Git and the attached layout. Run from an
+edition root:
 
 ```bash
 python3 memory-bank/tests/test_context_continuity.py

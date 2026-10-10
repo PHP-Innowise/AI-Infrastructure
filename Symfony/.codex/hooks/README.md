@@ -86,7 +86,9 @@ background and carries no approval. Both halves fail open under
 `CONTEXT_HOOK_BUDGET` (default 5 seconds). `CONTEXT_CONTINUITY_DISABLED=1`
 turns them off; `CONTEXT_CONTINUITY_RESTORE_DISABLED=1`, which the Harness sets
 for its own merged tasks, skips only the delivery. Storage is bounded: eight
-chats per branch, 4 MiB of visible text per chat, and 128 merge archives /
-256 MiB per checkout with 32 MiB per archive; a full store refuses a new merge
-and never blocks a turn. The repository's context-handoff guide lists the
+chats per branch and 64 per checkout, none kept 30 days past its last capture,
+4 MiB of visible text per chat, and 128 merge archives / 256 MiB per checkout
+with 32 MiB per archive; a full store refuses a new merge and never blocks a
+turn. The store writes its own `.gitignore`, so it stays out of Git even where
+the project's `.gitignore` does not name it. The repository's context-handoff guide lists the
 limits of each client.
