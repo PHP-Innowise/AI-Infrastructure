@@ -262,7 +262,19 @@ and retain a pre-install VCS/backup recovery point.
 
 `--sync --target DIR` brings an installed project's untouched accelerator
 files and its runtime up to the clone and prints a JSON report; the Harness
-runs it when it opens a project. It never reads or writes through a symbolic
+runs it when it opens a project. It never applies part of a release over
+what that release's files run: while a runtime file (`memory-bank/scripts`,
+`project-brain/scripts`, `project-brain/schemas`) stays at the project's
+version - the project's Git tracks it, or it cannot be written safely - the
+release's other files are held back too, because its skills, commands, hooks
+and memory server call that runtime; a tool's new hooks wait for its wiring
+(`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json`), and the
+wiring waits for a new hook that cannot be written. Each held-back file is
+listed under `kept` with a reason starting `held back:`, and `partial` says
+the project is not at the release (it is `null` otherwise). A project that
+commits its accelerator therefore takes a release through a commit: reinstall
+it over the project (`--edition <edition> --target DIR --overwrite`, after a
+`--dry-run`), review the diff and commit it. It never reads or writes through a symbolic
 link inside the project. Where Python offers descriptor-relative calls
 (`os.supports_dir_fd`: Linux, macOS), every read, write, backup and the sync's
 record walk the path by folder descriptors with `O_NOFOLLOW`, so a folder

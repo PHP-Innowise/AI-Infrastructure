@@ -1775,6 +1775,38 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **`install_accelerator.py --sync` no longer applies part of a release over
+  the runtime or hook wiring it keeps.** The sync, which the Harness runs by
+  itself on every installed project, writes no file the project's Git tracks
+  but did add the files a newer release brought. On a committed install of
+  the release before the context handoff it added the `context-save` and
+  `context-load` skills and commands, `context_handoff.py`,
+  `context_continuity.py` and the continuity hooks, and kept the older
+  `context.py`, `.claude/settings.json`, `.cursor/hooks.json` and
+  `.codex/hooks.json`: `/context-save` failed with "invalid choice:
+  'context-save'", no tool ran the new hooks, and the memory server it added
+  beside an older `brain_runtime.py` crashed on import. Now every write is
+  planned first and the release is applied only as far as what it runs
+  follows (`HOOK_WIRING`, `apply_release`): while a runtime file
+  (`memory-bank/scripts`, `project-brain/scripts`, `project-brain/schemas`)
+  stays at the project's version, nothing else of the release is written; a
+  tool's new hooks wait for its wiring, and the wiring for a new hook that
+  cannot be written; the runtime is written first, and a part of it that
+  fails holds back the rest. Each such file is listed under `kept` with a
+  reason starting `held back:`, and the report's new `partial` field says the
+  project is not at the release (null otherwise). A committed install takes a
+  release through a commit (a reinstall with `--overwrite`, reviewed and
+  committed), as `scripts/README.md` now says. The Harness keeps restoring
+  Codex's approved wiring when it cannot approve a new one; the new Codex
+  hook scripts that sync wrote then stay unwired until the next approval.
+  Tests: `tests/test_installation.py` (`SyncOfAnOlderReleaseTest`: a clone
+  publishes the release before the handoff and then the current one; a
+  committed install of the older one takes nothing, as a dry run and with
+  `--rewire-codex`; an uncommitted one takes everything; new hooks wait for
+  tracked Claude wiring and for Codex wiring awaiting approval; the wiring
+  waits for a hook behind a link. `InstallSyncTest`: a runtime whose backup
+  cannot be written now holds back the rest).
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks

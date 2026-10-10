@@ -1191,9 +1191,17 @@ class InstallSyncTest(unittest.TestCase):
                 self.assertEqual([], report["backups"])
                 self.assertEqual(edited, runtime.read_text(encoding="utf-8"))
                 self.assertEqual(before, files_under(outside))
-                # The rest of the project still follows the release.
-                self.assertEqual("added", self.actions(report).get(".agents/skills/memory/SKILL.md"))
-        self.assertTrue(skill.is_file())
+                # The release's other files would run against the runtime
+                # that stays: they wait for it, and the report says so.
+                self.assertNotIn(".agents/skills/memory/SKILL.md", self.actions(report))
+                self.assertTrue(
+                    kept.get(".agents/skills/memory/SKILL.md", "").startswith(
+                        "held back: the runtime stays at the project's version "
+                        "(memory-bank/scripts/context.py: not replaced"
+                    )
+                )
+                self.assertIn("held back", report["partial"])
+        self.assertFalse(skill.exists())
 
     def test_a_folder_without_an_install_is_refused(self) -> None:
         empty = Path(self._tmp.name) / "empty"
@@ -1232,6 +1240,212 @@ class InstallSyncTest(unittest.TestCase):
                 ".agents/skills/memory/SKILL.md"
             ),
         )
+
+
+class SyncOfAnOlderReleaseTest(unittest.TestCase):
+    """A sync never leaves a project with a newer release's files over its older runtime or wiring.
+
+    A project whose Git tracked an install of the release before the context
+    handoff synced to the next one: the sync added the context-save and
+    context-load skills, commands, modules and continuity hooks, and kept the
+    tracked context.py and hook wiring of the older release. The agent saw
+    /context-save, which failed with "invalid choice: 'context-save'", and
+    no tool ran the continuity hooks. Here a clone publishes that older
+    release and then the current one, as two commits, so its history knows
+    the older release's files the way a real clone's does.
+    """
+
+    # The files the context handoff added to the editions.
+    HANDOFF = ("context-save", "context-load", "context-continuity", "context_handoff", "context_continuity")
+    TOOLS = ("claude", "codex")
+    GIT = ("git", "-c", "user.name=sync test", "-c", "user.email=sync-test@example.invalid",
+           "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null")
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._tmp = tempfile.TemporaryDirectory(prefix="sync of an older release ")
+        base = Path(cls._tmp.name)
+        cls.clone, cls.older = base / "clone", base / "older"
+        ignore = shutil.ignore_patterns("__pycache__")
+        shutil.copytree(ROOT / "install" / "inventories", cls.clone / "install" / "inventories")
+        shutil.copytree(ROOT / "Symfony", cls.clone / "Symfony", ignore=ignore)
+        inventory_file = cls.clone / "install" / "inventories" / "symfony.json"
+        data = json.loads(inventory_file.read_text(encoding="utf-8"))
+        cls.new_files = sorted(
+            path
+            for component in ("shared", *cls.TOOLS)
+            for path in data["installed"][component]
+            if any(name in path for name in cls.HANDOFF)
+        )
+        assert len(cls.new_files) >= 8, cls.new_files
+        # The older release: none of the handoff's files, its own context.py,
+        # and wiring that runs no continuity hook.
+        for component, paths in data["installed"].items():
+            data["installed"][component] = [path for path in paths if path not in cls.new_files]
+        inventory_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        edition = cls.clone / "Symfony"
+        for path in cls.new_files:
+            (edition / path).unlink()
+        runtime = edition / "memory-bank/scripts/context.py"
+        runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# the release before the handoff\n", encoding="utf-8")
+        for wiring in (".claude/settings.json", ".codex/hooks.json"):
+            path = edition / wiring
+            hooks = json.loads(path.read_text(encoding="utf-8"))
+            for groups in hooks["hooks"].values():
+                for group in groups:
+                    group["hooks"] = [hook for hook in group["hooks"] if "context-continuity" not in hook["command"]]
+            path.write_text(json.dumps(hooks, indent=2) + "\n", encoding="utf-8")
+        cls.git(cls.clone, "init", "--quiet")
+        cls.git(cls.clone, "add", "-A")
+        cls.git(cls.clone, "commit", "--quiet", "-m", "older release")
+        shutil.copytree(cls.clone, cls.older)
+        # The current release, published over it.
+        shutil.copytree(ROOT / "Symfony", edition, ignore=ignore, dirs_exist_ok=True)
+        shutil.copy2(ROOT / "install" / "inventories" / "symfony.json", inventory_file)
+        cls.git(cls.clone, "add", "-A")
+        cls.git(cls.clone, "commit", "--quiet", "-m", "current release")
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls._tmp.cleanup()
+
+    @classmethod
+    def git(cls, where: Path, *arguments: str) -> None:
+        result = run(*cls.GIT, "-C", str(where), *arguments)
+        if result.returncode != 0:
+            raise AssertionError(f"git {' '.join(arguments)}: {result.stderr}")
+
+    def project(self, name: str, tracked: tuple[str, ...] = ()) -> Path:
+        """A project with the older release installed; `tracked` paths staged in its Git ("." for all)."""
+        target = Path(self._tmp.name) / name
+        target.mkdir()
+        self.git(target, "init", "--quiet")
+        tools = [argument for tool in self.TOOLS for argument in ("--tool", tool)]
+        installed = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.older),
+            "--edition", "Symfony", *tools, "--target", str(target),
+        )
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        for path in self.new_files:
+            self.assertFalse((target / path).exists(), path)
+        if tracked:
+            self.git(target, "add", "--", *tracked)
+        if tracked == (".",):
+            self.git(target, "commit", "--quiet", "-m", "Install the accelerator")
+        return target
+
+    def sync(self, target: Path, *extra: str) -> dict:
+        result = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--sync", "--target", str(target), *extra,
+        )
+        self.assertEqual((0, ""), (result.returncode, result.stderr), result.stdout)
+        return json.loads(result.stdout)
+
+    @staticmethod
+    def kept(report: dict) -> dict:
+        return {item["path"]: item["reason"] for item in report["kept"]}
+
+    def released(self, path: str) -> bytes:
+        return (self.clone / "Symfony" / path).read_bytes()
+
+    @staticmethod
+    def accelerator_files(target: Path) -> dict[str, bytes]:
+        """The project's files but its Git and the sync's own record and backups."""
+        return {
+            path: content for path, content in files_under(target).items()
+            if not path.startswith((".git/", "memory-bank/local/"))
+        }
+
+    def test_a_committed_install_takes_none_of_a_release_its_runtime_cannot_follow(self) -> None:
+        target = self.project("committed", tracked=(".",))
+        runtime = "memory-bank/scripts/context.py"
+        before = self.accelerator_files(target)
+        for extra in ((), ("--rewire-codex",), ("--dry-run",)):
+            with self.subTest(extra=extra):
+                report = self.sync(target, *extra)
+                kept = self.kept(report)
+                self.assertIn("tracked by the project's Git", kept.get(runtime, ""))
+                self.assertEqual([], report["changed"])
+                for path in self.new_files:
+                    self.assertFalse((target / path).exists(), path)
+                    self.assertTrue(
+                        kept.get(path, "").startswith(
+                            f"held back: the runtime stays at the project's version ({runtime}: tracked"
+                        ),
+                        (path, kept.get(path)),
+                    )
+                self.assertTrue(
+                    report["partial"].startswith(f"{len(self.new_files)} file(s) of release "), report["partial"]
+                )
+                self.assertEqual(before, self.accelerator_files(target))
+
+    def test_an_install_nobody_committed_takes_the_whole_release(self) -> None:
+        target = self.project("untracked")
+        report = self.sync(target, "--rewire-codex")
+        self.assertIsNone(report["partial"], report["kept"])
+        changed = {item["path"]: item["action"] for item in report["changed"]}
+        # The clone's history knows the older context.py: an untouched release.
+        self.assertEqual("updated", changed.get("memory-bank/scripts/context.py"))
+        for path in (*self.new_files, "memory-bank/scripts/context.py", ".claude/settings.json", ".codex/hooks.json"):
+            self.assertEqual(self.released(path), (target / path).read_bytes(), path)
+        for path in self.new_files:
+            self.assertEqual("added", changed.get(path), path)
+
+    def test_new_hooks_wait_for_the_wiring_that_runs_them(self) -> None:
+        # Codex: the wiring stays until it can be approved again.
+        target = self.project("codex wiring")
+        hook = ".codex/hooks/context-continuity.sh"
+        report = self.sync(target)
+        kept = self.kept(report)
+        self.assertIn("re-approval", kept.get(".codex/hooks.json", ""))
+        self.assertTrue(kept.get(hook, "").startswith("held back: the hook wiring .codex/hooks.json stays"), kept.get(hook))
+        self.assertFalse((target / hook).exists())
+        self.assertTrue(report["partial"].startswith("1 file(s) of release "), report["partial"])
+        # The rest of the release, Claude's new hook and wiring among them, went in.
+        for path in self.new_files:
+            if path != hook:
+                self.assertEqual(self.released(path), (target / path).read_bytes(), path)
+        self.assertEqual(self.released(".claude/settings.json"), (target / ".claude/settings.json").read_bytes())
+        report = self.sync(target, "--rewire-codex")
+        self.assertIsNone(report["partial"])
+        self.assertEqual(self.released(hook), (target / hook).read_bytes())
+
+        # Claude: the wiring the project's Git tracks stays, and so does the hook.
+        target = self.project("claude wiring", tracked=(".claude/settings.json",))
+        hook = ".claude/hooks/context-continuity.sh"
+        report = self.sync(target, "--rewire-codex")
+        kept = self.kept(report)
+        self.assertIn("tracked", kept.get(".claude/settings.json", ""))
+        self.assertTrue(
+            kept.get(hook, "").startswith("held back: the hook wiring .claude/settings.json stays"), kept.get(hook)
+        )
+        self.assertFalse((target / hook).exists())
+        self.assertTrue((target / ".claude/skills/context-save/SKILL.md").is_file())
+        self.assertTrue((target / ".codex/hooks/context-continuity.sh").is_file())
+
+    def test_wiring_waits_for_a_new_hook_that_cannot_be_written(self) -> None:
+        # A link where the new hook goes: the sync neither reads nor writes
+        # through it, so the wiring that would run the hook stays too.
+        target = self.project("hook behind a link")
+        hook = ".claude/hooks/context-continuity.sh"
+        outside = Path(self._tmp.name) / "outside-hook.sh"
+        outside.write_text("#!/bin/sh\n", encoding="utf-8")
+        (target / hook).symlink_to(outside)
+        report = self.sync(target, "--rewire-codex")
+        kept = self.kept(report)
+        self.assertEqual("not a regular file", kept.get(hook))
+        self.assertTrue(
+            kept.get(".claude/settings.json", "").startswith(
+                f"held back: a new hook it would run is not written ({hook}: "
+            ),
+            kept.get(".claude/settings.json"),
+        )
+        self.assertNotEqual(self.released(".claude/settings.json"), (target / ".claude/settings.json").read_bytes())
+        self.assertEqual("#!/bin/sh\n", outside.read_text(encoding="utf-8"))
+        self.assertTrue(report["partial"].startswith("1 file(s) of release "), report["partial"])
+        # Codex's side has no such link and follows the release.
+        self.assertEqual(self.released(".codex/hooks.json"), (target / ".codex/hooks.json").read_bytes())
 
 
 class McpConfigSyncTest(unittest.TestCase):
