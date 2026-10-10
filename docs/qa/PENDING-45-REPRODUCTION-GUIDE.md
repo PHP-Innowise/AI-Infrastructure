@@ -53,9 +53,9 @@ checksum-verified package described in
 ## Codex Cases
 
 ```bash
-/tmp/accelerator-qa-venv/bin/python scripts/qa/run_tc_ai.py --list
+scripts/qa/.venv/bin/python scripts/qa/run_tc_ai.py --list
 
-/tmp/accelerator-qa-venv/bin/python scripts/qa/run_tc_ai.py \
+scripts/qa/.venv/bin/python scripts/qa/run_tc_ai.py \
   --run-id RUN-20260803-XXX \
   --output-root docs/qa/evidence-<developer>
 ```

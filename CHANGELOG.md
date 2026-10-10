@@ -1823,6 +1823,14 @@ edition's own files remain in that edition's changelog.
   junction where POSIX uses a link, and runs in the `windows-harness` job and
   in the Linux harness step.
 
+- **CLAUDE.md and the QA guides name the venv the `qa-tooling` check uses.**
+  CLAUDE.md still called the repository's tooling standard-library only and
+  gave no recipe for `scripts/qa/.venv`, and `docs/qa/` built the venv at
+  `/tmp/accelerator-qa-venv`, where `scripts/check.py` never looks, so the QA
+  checks were skipped before a push. CLAUDE.md now names both venv
+  exceptions and has a QA block beside the harness one, and the QA guides use
+  `scripts/qa/.venv`.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks

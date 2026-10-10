@@ -35,7 +35,7 @@ External Client Team.
 After installing `requirements-qa.txt` in the documented QA environment:
 
 ```bash
-/tmp/accelerator-qa-venv/bin/python scripts/qa/reconstruct_workbook.py \
+scripts/qa/.venv/bin/python scripts/qa/reconstruct_workbook.py \
   --output /tmp/Accelerator-TestCases.reconstructed.xlsx
 ```
 
