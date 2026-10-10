@@ -6,6 +6,19 @@ repository-level maintainer tool: it is never installed into a project, it
 calls no model and no network, and CI runs only its tests
 (`tests/test_memory_eval.py`), never the stand itself.
 
+Source-linked expansion runs automatically without a runtime flag. Each
+successful item keeps only safe `source_links` counters from the local manifest
+before its corpus is removed. The repository-only `memory_graph_pilot.py`
+compares a committed baseline with the working tree using the same scorer and
+inputs; its baseline contains all four installable editions so `--edition auto`
+works for real projects too. Runtime version, materialization and scorer digest
+identify each run.
+In addition to the existing Boolean `answer_in_text`, passage counts measure
+all distinct normalized answers that existed in the prompt-time source bytes
+and were actually delivered. The summary's `answer_passage_recall` is their
+micro ratio; a legacy result without these counts reports them unavailable.
+No answer text is added to result JSON.
+
 ## Why it exists
 
 The read hook (`working-memory-read.sh`) puts a Task Capsule - excerpts of
@@ -16,8 +29,9 @@ resolved, the chunk promoted from it - was then "retrieved" for it. That
 leakage from the future inflated the useful turns three to four times. Every
 change to retrieval must be measured on the project as it was at the prompt;
 this stand rebuilds that state, overlays the runtime under test from this
-clone, runs the refresh the hook runs, and scores the result against human
-judgments.
+clone, runs the refresh the hook runs, and scores the result against curated
+judgments. Record who authored the labels when that evidence is available;
+existing labels with unknown provenance must not be described as human judgments.
 
 ## What a run does, per prompt
 
@@ -32,7 +46,12 @@ Nothing is written into the project. All work happens in the cache (default
    that tree, then copied into a per-prompt corpus. `git archive` is not used:
    it applies the tree's `export-ignore` and `export-subst` attributes, which
    PHP packages commonly set on `docs/` and `tests/`. Symlinks and submodules
-   are not materialized.
+   are not materialized. Environment files, credentials, private-key/database
+   suffixes and dependency/cache directories follow the canonical automatic-query
+   source denylist: they are withheld before blob reads and before working-tree
+   copies, including `--as-of now`. Public trees use the `public-trees-v1` cache
+   namespace so an older unfiltered tree cannot be reused. Project Brain and
+   Memory Bank remain eligible; they are the state this stand measures.
 2. **Memory as of the prompt.** Client projects often do not commit their
    memory, so the stand keeps what the commit has, drops what was created
    after the prompt, and adds what existed then in the working tree only:
@@ -166,6 +185,15 @@ hook's output (a `hook_success` `UserPromptSubmit` attachment; in Codex, a
 developer message that starts like a capsule) and ends at the next human
 prompt. `--json` prints the numbers as JSON, `--paths` adds per-path counts.
 
+For a real historical comparison, freeze each project's reachable Git head and
+eligible working-tree memory once, preserving modification times, and point both
+versions at those copies. Match the input hashes, host, selected edition,
+historical commit, clock and reconstruction provenance before comparing scores.
+Use a separate cache for each version. Keep a development set and a holdout set
+separate in reports; do not tune against their combined score. A surviving
+working-tree memory copy and today's runtime configuration cannot establish the
+complete historical working tree, even when both versions use identical inputs.
+
 ## Data formats
 
 **Set** - a JSON list; other keys (`session`, `cwd`, ...) are ignored:
@@ -235,6 +263,14 @@ is what `report` prints.
   `context.py retrieve` calls and Memory MCP `memory_retrieve` calls by the
   agent; and, as a baseline, documents of those kinds the agent opened that
   the capsule did not deliver.
+
+`realized` records a tool's path references without checking whether the tool
+successfully read that file; mentions are textual matches. Neither measures
+knowledge use or final-answer quality. For confirmed opens, pair tool starts
+with successful completions using the Harness activity ledger and retain its
+`observed`, `lower_bound` or `unknown` status. A capsule may already carry the
+answer without requiring a file read. Existing receipts without memory telemetry
+establish missing observation, rather than zero use.
 
 Grow the judgments with `report --show-unjudged`: it lists every delivered
 `(id, path)` pair without a grade.

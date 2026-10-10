@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-from tests.test_harness_knowledge import install_knowledge_fixture, metadata
+from tests.test_harness_knowledge import install_knowledge_fixture, metadata, source_link_fixture
 
 
 class MemoryMcpTests(unittest.TestCase):
@@ -121,6 +121,23 @@ class MemoryMcpTests(unittest.TestCase):
         manifest = json.loads((self.root / capsule['manifest']).read_text(encoding='utf-8'))
         recorded = {item['path']: item['estimated_tokens'] for item in manifest['selected']}
         self.assertEqual(chunk['estimated_tokens'], recorded[chunk['path']])
+
+    def test_first_retrieve_automatically_delivers_source_linked_answers(self):
+        query, paths = source_link_fixture(self.root)
+        response = self.call('memory_retrieve', task_id='TASK-AUTO-SOURCES', query=query)
+        self.assertFalse(response['isError'], response)
+        result = response['structuredContent']
+        selected = {item['path']: item for item in result['capsule']['semantic']}
+        self.assertTrue(paths <= set(selected))
+        manifest = json.loads((self.root / result['capsule']['manifest']).read_text())
+        hashes = {item['path']: item['source_hash'] for item in manifest['selected']}
+        for path in paths:
+            self.assertEqual('source-link', selected[path]['selection'])
+            self.assertEqual(hashlib.sha256((self.root / path).read_bytes()).hexdigest(),
+                             hashes[path])
+        self.assertIn('Floating point never touches', result['capsule_text'])
+        self.assertEqual(2, manifest['source_links']['delivered'])
+        self.assertNotIn('mode', manifest['source_links'])
 
     def test_concurrent_replay_has_one_record(self):
         draft = self.draft(self.start())

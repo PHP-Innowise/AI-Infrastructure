@@ -26,6 +26,42 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **Automatic excerpts keep the evidence they score, and related knowledge can
+  share a current code source.** Adjacent FTS highlights retain each term's
+  weight; exact section-score ties prefer body evidence; oversized sentences
+  select a bounded matching stretch and are scored only on visible terms.
+  Strong semantic matches also reach indexed neighbours independently citing
+  the same current canonical source fingerprint. The source itself need not be
+  indexed. Private/derived paths, missing or changed fingerprints, symlinks and
+  large sources do not establish this relation. Indexed per-source reads cap
+  distinct neighbours without materializing duplicate citation products;
+  at most 32 source references per anchor can establish the relation. Runtime filters, conflict checks, direct-hit
+  priority and nonrecursive budgets still apply. No user setting is introduced.
+
+- **Source-linked knowledge is retrieved automatically.** Every normal
+  capsule retrieval follows one existing citation edge from at most two strong,
+  allowed semantic matches, examines at most 32 rows and proposes at most three
+  neighbours. There is no graph activation mode or user setting. Hooks, Memory
+  MCP, Harness, first-turn and lightweight retrieval use the common filtering
+  and bounded delivery pipeline. Direct matches keep priority, promoted graph
+  chunks cannot suppress their direct source and conflicting neighbours are
+  excluded. Manifests carry safe counters without a mode. Repository-only
+  `memory_graph_pilot.py` compares committed baseline and working-tree runtime
+  versions with the same scorer and synthetic inputs, including future and
+  irrelevant-citation controls. No Neo4j dependency is introduced.
+
+- **Historical memory evaluation withholds private source files before reading
+  them.** Git-tree materialization and current-worktree copies apply the shared
+  source denylist to environment files, credentials, private-key/database
+  suffixes and dependency/cache paths. The new public-tree cache namespace
+  prevents reuse of older unfiltered snapshots. Project-owned memory remains
+  eligible. The comparison baseline includes all four installable editions,
+  allowing automatic edition detection on real project inputs. Regression
+  coverage proves private blob IDs are never read and private worktree files
+  are never copied. Evaluation documentation distinguishes curated labels,
+  delivery, successful opens and unknown knowledge use.
+
+
 - **Third review of the unified memory branch: replays, a person's correction, revised knowledge in the bank, promotion runs at once, and more secrets.** Each finding was reproduced first; every regression test fails on the previous code.
   - **A delayed replay no longer rolls back a later revision.** A result whose receipt matched still went through the revision step, so saving A (X), then B (Y) of the same learning, then retrying A put X back and raised the record's revision. A proven replay now leaves every learning as it is - reported `existing`, `differs` where a later save revised it, `missing` where the record was removed - and only retries promotion; `replayed` is true for it.
   - **A person's correction is theirs.** A revision recorded with `attestation: person` updated the consequence but kept the agent's mark from the first verification, because the runtime recorded attestation only on the observed -> verified step, so the next agent could overwrite it. `update_record(..., reverify=True)` now verifies a revised claim again in the record's ledger - another observed -> verified entry, the one authority edge every runtime's validator accepts - and `record_result` uses it for every revision, so `record_attestation` reads who checked the current claim.

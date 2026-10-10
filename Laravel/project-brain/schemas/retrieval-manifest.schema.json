@@ -38,7 +38,7 @@
           "estimated_tokens": {"type": "integer", "minimum": 1},
           "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "match": {"enum": ["covered", "distinctive", "conflict"]},
-          "selection": {"enum": ["path-link"]},
+          "selection": {"enum": ["path-link", "source-link"]},
           "source_changed": {"type": "boolean"},
           "score": {"type": "number", "minimum": 0},
           "rank": {"type": ["integer", "null"], "minimum": 1}
@@ -76,6 +76,16 @@
       }
     },
     "provider": {"type": "string", "minLength": 1},
+    "source_links": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchors", "candidates", "delivered"],
+      "properties": {
+        "anchors": {"type": "integer", "minimum": 0, "maximum": 2},
+        "candidates": {"type": "integer", "minimum": 0, "maximum": 3},
+        "delivered": {"type": "integer", "minimum": 0, "maximum": 3}
+      }
+    },
     "query_source": {"enum": ["prompt", "task", "task-id", "explicit"]},
     "host": {"enum": ["cli", "claude", "codex", "cursor"]},
     "entry_point": {"enum": ["context", "retrieve", "refresh", "hook-context"]},

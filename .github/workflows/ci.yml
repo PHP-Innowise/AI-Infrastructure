@@ -176,7 +176,7 @@ jobs:
         # The stand runs on client prompts and stays out of CI; its as-of
         # reconstruction, edition overlay, scoring, report and transcript
         # parsing run here on a synthetic project, with one real refresh.
-        run: python3 -m unittest tests.test_memory_eval
+        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.

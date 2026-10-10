@@ -446,6 +446,65 @@ justifiable only for a relationship that no shared source expresses, and no
 such case has been measured. It is recorded here beside the embeddings
 negative so the question is not reopened without new evidence.
 
+#### Automatic source-linked knowledge
+
+Every Task Capsule retrieval automatically follows the existing `sources[]`
+relations. Users do not select a graph mode, enable a flag or maintain edges.
+Native hooks for Claude Code, Codex and Cursor, Memory MCP and Harness use the
+same runtime. A first prompt can retrieve before its task is provisioned;
+lightweight capsules use the same policy-checked expansion. A hook without a
+prompt or substantive task state has no lexical seed to expand.
+
+From at most two strong, allowed lexical semantic matches, the runtime follows
+reverse citations or a shared canonical source revision to durable chunks or
+dynamic records. A common code file need not be indexed: both documents must
+declare it, have matching fingerprints and still match its current digest.
+Private/derived paths, symlinks, Windows junctions and sources over 8 MiB cannot establish a shared
+relation. The runtime examines at most 32 neighbour rows (duplicates in shared
+citations count as one document), considers at most 32 canonical source references
+per anchor and checks that bounded pool for each shared neighbour. A covering
+index reads each reference in path order with the remaining neighbour allowance;
+it does not materialize the product of citations. Current source digests are
+cached within the retrieval, and at most three neighbours are proposed. Weak/distinctive seeds
+are not expanded. Every anchor and neighbour passes privacy, owner, authority,
+lifecycle and source-hash checks. Records with outgoing or incoming conflicts
+are excluded from this expansion until whole-component admission can preserve both sides within the
+budget. There is no recursive traversal through a neighbour.
+
+Excerpt scoring counts each tokenizer term even when FTS5 groups adjacent
+matches into one highlight. Exact section-score ties favour matches in the
+body. Oversized sentences are scored on the bounded text actually quoted,
+with context before the match, so invisible words cannot win a window that
+then cuts the answer away. Document admission and the capsule ceiling stay
+under the same policy and budgets.
+
+Direct matches and explicit `--path` items keep priority. A source-linked
+promoted chunk cannot suppress its direct source record. Normal budgets,
+session novelty and the 3,600-character renderer apply. `no_match` still means
+that the lexical query found nothing in that layer. Delivered neighbours carry
+`selection: source-link`; manifests record only safe `source_links` counters
+(anchors/candidates/delivered), without a mode or withheld neighbour paths/counts.
+
+The relation establishes provenance; it does not prove relevance to every
+query. The synthetic comparison includes a relevant source with an irrelevant
+citing chunk, so this limitation remains measured rather than hidden.
+
+Maintainers can compare a committed runtime with the automatic working tree
+on identical synthetic prompt-time snapshots:
+
+```bash
+python3 scripts/memory_graph_pilot.py --out-dir /tmp/source-link-comparison
+```
+
+The directory must be new and outside the clone. Baseline defaults to `HEAD`;
+`--baseline-ref COMMIT` selects another local version for measurement. This
+option belongs to repository evaluation tooling and is not installed into a
+project. Baseline files are read as exact Git blobs, while both runs use the
+current scorer. Inputs, judgments, future controls and runtime digests are
+saved alongside `baseline.json` and `automatic.json`. The comparison measures
+source-link delivery, not Neo4j performance or autonomous use of a delivered
+fact by an agent.
+
 Two things the index deliberately does not carry:
 
 * **`source_fingerprints`.** `sources_are_fresh` requires the fingerprint path

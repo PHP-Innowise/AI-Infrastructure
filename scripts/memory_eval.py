@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -472,9 +473,34 @@ class Repository:
         return mirror / "objects"
 
 
+
+_SNAPSHOT_POLICY = None
+
+
+def snapshot_path_allowed(relative: str) -> bool:
+    """Never read environment/credential/dependency files into an evaluation."""
+    global _SNAPSHOT_POLICY
+    if _SNAPSHOT_POLICY is None:
+        path = ROOT / "PHP Core/memory-bank/scripts/automatic_query.py"
+        spec = importlib.util.spec_from_file_location("memory_eval_snapshot_policy", path)
+        if spec is None or spec.loader is None:
+            raise EvalError("Snapshot source policy is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _SNAPSHOT_POLICY = module
+    parts = PurePosixPath(relative).parts
+    return not (
+        _SNAPSHOT_POLICY.SOURCE_PATH_DENYLIST.search(relative)
+        or any(part.casefold() in _SNAPSHOT_POLICY.BLOCKED_SOURCE_PARTS
+               or part.casefold().startswith(".env") for part in parts)
+        or PurePosixPath(relative).suffix.casefold() in _SNAPSHOT_POLICY.PRIVATE_SOURCE_SUFFIXES
+        or (parts and parts[-1].casefold() == "credentials.json")
+    )
+
 def materialize(project: Path, tree: str, cache: Path) -> Path:
-    """The committed files of `tree`, exactly, in `cache/trees/<tree>` (reused)."""
-    target = cache / "trees" / tree
+    """Exact public blobs of `tree`; private paths are withheld before reading."""
+    # A new namespace prevents reuse of snapshots predating the source policy.
+    target = cache / "public-trees-v1" / tree
     if target.is_dir():
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -495,6 +521,8 @@ def materialize(project: Path, tree: str, cache: Path) -> Path:
                 continue
             path = PurePosixPath(raw.decode("utf-8", "surrogateescape"))
             if path.is_absolute() or any(part in ("", ".", "..", ".git") for part in path.parts):
+                continue
+            if not snapshot_path_allowed(path.as_posix()):
                 continue
             blobs.setdefault(fields[2], []).append((path, fields[0] == b"100755"))
         with BlobReader(project) as reader:
@@ -554,6 +582,8 @@ def snapshot_worktree(project: Path, target: Path) -> Path:
                 for name in files:
                     relatives.add((Path(directory) / name).relative_to(project).as_posix())
         for relative in sorted(relatives):
+            if not snapshot_path_allowed(relative):
+                continue
             parts = PurePosixPath(relative).parts
             if ".git" in parts or any(relative.startswith(local + "/") for local in LOCAL_STATE):
                 continue
@@ -1191,6 +1221,17 @@ def answer_in_text(useful: Sequence[str], passages: Dict[str, Dict[str, Any]], c
     return False
 
 
+def labelled_passages(paths: Sequence[str], passages: Dict[str, Dict[str, Any]]) -> Set[str]:
+    """Unique normalized answers, not duplicated labels or source pointers."""
+    return {
+        flatten(value) for path in paths
+        if isinstance(passages.get(path), dict) and passages[path].get("useful") is not False
+        for value in (passages[path].get("passages")
+                      if isinstance(passages[path].get("passages"), list) else [])
+        if isinstance(value, str) and flatten(value)
+    }
+
+
 def classify(delivered: Sequence[str], useful: Sequence[str], noise: Sequence[str], withheld: bool) -> str:
     if withheld or not delivered:
         return "silent"
@@ -1207,6 +1248,8 @@ def score(
     passages: Dict[str, Dict[str, Any]],
     existed_useful: Sequence[str],
     answer_existed: Sequence[str] = (),
+    *,
+    expected_passages: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """Score one refresh result. Paths and counts only: no capsule text."""
     result = result if isinstance(result, dict) else {}
@@ -1216,6 +1259,10 @@ def score(
     noise = [path for path in delivered if path in grades and grades[path] < 1]
     unjudged = [path for path in delivered if path not in grades]
     text = result.get("capsule_text") if isinstance(result.get("capsule_text"), str) else ""
+    expected = (expected_passages if expected_passages is not None
+                else labelled_passages(answer_existed, passages))
+    delivered_answers = labelled_passages(useful, passages) & expected
+    haystack = flatten(text)
     return {
         "class": classify(delivered, useful, noise, withheld),
         "delivered": delivered,
@@ -1227,6 +1274,8 @@ def score(
         "answer_existed": list(answer_existed),
         "answer_could_help": bool(answer_existed),
         "answer_in_text": answer_in_text(useful, passages, text),
+        "answer_passages_existed": len(expected),
+        "answer_passages_delivered": sum(value in haystack for value in delivered_answers),
         "query_withheld": withheld,
         "capsule_chars": len(text),
     }
@@ -1282,6 +1331,47 @@ def answer_existing(corpus: Path, grades: Dict[str, int], passages: Dict[str, Di
     return found
 
 
+def existing_answer_passages(corpus: Path, paths: Sequence[str], passages: Dict[str, Dict[str, Any]]) -> Set[str]:
+    found: Set[str] = set()
+    for path in paths:
+        target = corpus_file(corpus, path)
+        try:
+            text = flatten(target.read_text(encoding="utf-8", errors="replace")) if target else ""
+        except OSError:
+            text = ""
+        found.update(value for value in labelled_passages([path], passages) if value in text)
+    return found
+
+
+def source_link_stats(corpus: Path, result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Keep only safe counters before the evaluator removes the local manifest."""
+    capsule = result.get("capsule")
+    reference = capsule.get("manifest") if isinstance(capsule, dict) else None
+    if not isinstance(reference, str) or not re.fullmatch(
+        r"(?:memory-bank/local|project-brain/control)/retrieval-manifests/[0-9a-f-]{36}\.json", reference,
+    ):
+        return None
+    target = corpus_file(corpus, reference)
+    if target is None or not target.resolve().is_relative_to(corpus.resolve()):
+        return None
+    try:
+        if target.stat().st_size > 512 * 1024:
+            return None
+        document = read_json(target)
+    except (OSError, EvalError):
+        return None
+    stats = document.get("source_links") if isinstance(document, dict) else None
+    if not isinstance(stats, dict):
+        return None
+    clean = {}
+    for key, maximum in (("anchors", 2), ("candidates", 3), ("delivered", 3)):
+        value = stats.get(key)
+        if type(value) is not int or not 0 <= value <= maximum:
+            return None
+        clean[key] = value
+    return clean
+
+
 def percentile(values: Sequence[float], share: float) -> Optional[float]:
     if not values:
         return None
@@ -1294,6 +1384,12 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     skipped = Counter(str(item.get("reason") or "unknown") for item in items.values() if item.get("status") != "ok")
     classes = Counter(str(item.get("class")) for item in evaluated)
     count = len(evaluated)
+    passage_measured = bool(evaluated) and all(
+        type(item.get(key)) is int for item in evaluated
+        for key in ("answer_passages_existed", "answer_passages_delivered")
+    )
+    passage_total = sum(item["answer_passages_existed"] for item in evaluated) if passage_measured else None
+    passage_delivered = sum(item["answer_passages_delivered"] for item in evaluated) if passage_measured else None
 
     def mean(key: str) -> Optional[float]:
         return round(sum(len(item.get(key) or []) for item in evaluated) / count, 3) if count else None
@@ -1315,6 +1411,9 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         ),
         "answer_in_text": sum(1 for item in evaluated if item.get("answer_in_text")),
         "answer_could_help": sum(1 for item in evaluated if item.get("answer_could_help")),
+        "answer_passages_existed": passage_total,
+        "answer_passages_delivered": passage_delivered,
+        "answer_passage_recall": round(passage_delivered / passage_total, 4) if passage_total else None,
         "contaminated": sum(1 for item in evaluated if item.get("contaminated")),
         "answer_in_text_among_answer_could_help": sum(
             1 for item in evaluated if item.get("answer_could_help") and item.get("answer_in_text")
@@ -1555,7 +1654,14 @@ class Run:
                 raise Skip("refresh-timeout")
             if refresh["exit"] != 0 or result is None:
                 raise Skip("refresh-error")
-            item.update(score(result, grades, self.passages.get(prompt["id"], {}), existed, answered))
+            graph_stats = source_link_stats(corpus, result)
+            if graph_stats is not None:
+                item["refresh"]["source_links"] = graph_stats
+            prompt_passages = self.passages.get(prompt["id"], {})
+            item.update(score(
+                result, grades, prompt_passages, existed, answered,
+                expected_passages=existing_answer_passages(corpus, answered, prompt_passages),
+            ))
             item["status"] = "ok"
         except Skip as skip:
             item["reason"] = skip.reason
@@ -1632,6 +1738,9 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("could help (a useful document existed)", "could_help"),
     ("useful among could-help", "useful_among_could_help"),
     ("answer in the capsule text", "answer_in_text"),
+    ("answer passages existed", "answer_passages_existed"),
+    ("answer passages delivered", "answer_passages_delivered"),
+    ("answer passage recall", "answer_passage_recall"),
     ("could answer (a labelled answer existed)", "answer_could_help"),
     ("contaminated (today's body of a later edit)", "contaminated"),
     ("answer in text among could-answer", "answer_in_text_among_answer_could_help"),
@@ -1667,6 +1776,8 @@ def row_cell(summary: Dict[str, Any], key: str) -> str:
         return f"{int(value)}/{int(summary.get('could_help') or 0)}"
     if key == "answer_in_text_among_answer_could_help":
         return f"{int(value)}/{int(summary.get('answer_could_help') or 0)}"
+    if key == "answer_passage_recall":
+        return f"{value:.1%}"
     if key.startswith("latency"):
         return f"{value:.3f}"
     if key.startswith("mean"):
@@ -1724,7 +1835,10 @@ def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
             values = [row_value(summary, key) for summary in (summaries if key in COVERAGE_ROWS else paired)]
             if len(values) == 2 and values[0] is not None and values[1] is not None:
                 change = values[1] - values[0]
-                row += (f"{change:+.3f}" if key.startswith(("mean", "latency")) else f"{int(change):+d}").rjust(cell)
+                delta = (f"{change * 100:+.1f}pp" if key == "answer_passage_recall"
+                         else f"{change:+.3f}" if key.startswith(("mean", "latency"))
+                         else f"{int(change):+d}")
+                row += delta.rjust(cell)
             else:
                 row += "-".rjust(cell)
         lines.append(row)

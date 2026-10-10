@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import hashlib
+from bisect import bisect_left, bisect_right
 import json
 import math
 import re
 import sqlite3
+import stat
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -21,6 +23,7 @@ from brain_runtime import (
     atomic_json,
     brain_root,
     find_task,
+    fingerprint,
     handoff_path,
     iter_records,
     load_config,
@@ -36,6 +39,7 @@ from brain_runtime import (
     validate_record,
     validate_schema_file,
 )
+from automatic_query import source_path_problem
 
 
 BUDGETS = {
@@ -723,6 +727,12 @@ CODE_SPAN_PATTERN = re.compile(r"`+[^`]*`+")
 # this one's.
 RETRIEVAL_GATE_MODES = ("off", "shadow", "enforce")
 RETRIEVAL_GATE_DEFAULT = "shadow"
+# Every retrieval expands declared source links, one hop from at most two
+# strong, eligible semantic matches. There is no graph activation setting.
+GRAPH_ANCHOR_LIMIT = 2
+GRAPH_ROW_LIMIT = 32
+GRAPH_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
+GRAPH_CANDIDATE_LIMIT = CAPSULE_SEMANTIC_LIMIT
 # One index_state row holding a JSON map of task UUID -> last retrieval, not
 # one row per task: nothing prunes index_state (it is upsert-only), so a key
 # per task would grow for the life of the database.
@@ -894,6 +904,12 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
             "ALTER TABLE document_metadata "
             "ADD COLUMN attestation TEXT NOT NULL DEFAULT ''"
         )
+    # Reverse conflict checks visit only the rows that declare a conflict,
+    # without JSON extensions or a full scan of ordinary source metadata.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS document_metadata_conflicts "
+        "ON document_metadata(conflicts) WHERE conflicts != '[]'"
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS task_bindings(
@@ -951,6 +967,10 @@ def ensure_metadata_tables(connection: sqlite3.Connection) -> None:
     # The whole point is the reverse direction: given a source, who cites it.
     connection.execute(
         "CREATE INDEX IF NOT EXISTS document_links_ref ON document_links(ref_path)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS document_links_source_path "
+        "ON document_links(ref_path, ref_kind, path)"
     )
     connection.execute(
         """
@@ -2244,12 +2264,10 @@ def excerpt_weights(connection: sqlite3.Connection, query: str) -> dict[str, flo
     forms = term_forms(tokens)
     weights: dict[str, float] = {}
     for token in tokens:
-        key = forms[token]
-        if not key:
-            continue
         frequency = frequencies.get(token) or 1
         weight = max(0.05, math.log((total + 1) / (frequency + 0.5)))
-        weights[key] = max(weights.get(key, 0.0), weight)
+        for key in forms[token].split():
+            weights[key] = max(weights.get(key, 0.0), weight)
     return weights
 
 
@@ -2258,7 +2276,15 @@ def _excerpt_score(
 ) -> tuple[float, int]:
     found = [word for unit in units for word in _EXCERPT_MARKED.findall(unit)]
     forms = term_forms(found)
-    terms = {forms[word] for word in found}
+    # FTS5 merges adjacent matches into one highlight. Its visual grouping
+    # must not turn two query terms into one unknown, low-weight phrase.
+    return _excerpt_term_score([term for word in found for term in forms[word].split()], weights)
+
+
+def _excerpt_term_score(
+    found: list[str], weights: Optional[dict[str, float]] = None
+) -> tuple[float, int]:
+    terms = set(found)
     if weights:
         floor = min(weights.values())
         value = sum(weights.get(term, floor) for term in terms)
@@ -2286,7 +2312,7 @@ def quoted_section(
     sections = _excerpt_sections(text)
     # Every marked word asked of the tokenizer at once, not per section.
     term_forms(_EXCERPT_MARKED.findall(text))
-    best: Optional[tuple[tuple[float, int], int]] = None
+    best: Optional[tuple[tuple[float, int, float, int], int]] = None
     first_with_body: Optional[int] = None
     for index, (heading, lines) in enumerate(sections):
         units = _excerpt_units(lines)
@@ -2294,7 +2320,10 @@ def quoted_section(
             continue
         if first_with_body is None:
             first_with_body = index
-        score = _excerpt_score([heading, *units], weights)
+        # A heading can identify a section without repeating its words in
+        # the prose. Preserve that evidence, resolving exact ties in favour
+        # of terms in the text the capsule can actually quote.
+        score = (*_excerpt_score([heading, *units], weights), *_excerpt_score(units, weights))
         if best is None or score > best[0]:
             best = (score, index)
     if best is None or first_with_body is None:
@@ -2315,6 +2344,54 @@ def quoted_section(
     }
 
 
+def _excerpt_piece(
+    unit: str, budget: int, weights: Optional[dict[str, float]]
+) -> tuple[tuple[float, int], str, int, int]:
+    """A bounded slice of an oversized sentence, scored on visible matches.
+
+    Windows begin around marked words, not every character. Binary searches
+    restrict scoring to the marks inside each window; the fixed character
+    budget bounds that work even for a very long paragraph.
+    """
+    text = _unmarked(unit)
+    words: list[tuple[int, int, str]] = []
+    removed = 0
+    for mark in _EXCERPT_MARKED.finditer(unit):
+        offset = mark.start() - removed
+        for word in re.finditer(r"\w+", mark.group(1)):
+            words.append((offset + word.start(), offset + word.end(), word.group(0)))
+        removed += 2
+    forms = term_forms(word for _, _, word in words)
+    starts = [start for start, _, _ in words]
+    ends = [end for _, end, _ in words]
+    positions = {0}
+    for start, end, _ in words:
+        positions.update((max(0, start - budget // 3), start, max(0, end - budget)))
+    best: Optional[tuple[tuple[float, int], int, int, int]] = None
+    for position in sorted(positions):
+        left = position
+        if left and not text[left - 1].isspace():
+            space = text.rfind(" ", 0, left + 1)
+            left = space + 1 if space >= 0 else left
+        right = min(len(text), left + budget)
+        if right < len(text) and not text[right].isspace():
+            space = text.rfind(" ", left, right)
+            if space > left:
+                right = space
+        first, last = bisect_left(starts, left), bisect_right(ends, right)
+        found = [term for _, _, word in words[first:last] for term in forms[word].split()]
+        score = _excerpt_term_score(found, weights)
+        # Keep context before the first visible match (a qualifier or a
+        # condition), without sacrificing any stronger evidence that fits.
+        distance = abs(starts[first] - left - budget // 3) if first < last else 0
+        if (best is None or score > best[0]
+                or (score == best[0] and score[1] and distance < best[1])):
+            best = score, distance, left, right
+    assert best is not None
+    score, _, left, right = best
+    return score, text[left:right].strip(), left, right
+
+
 def excerpt_window(
     units: list[str], limit: int, weights: Optional[dict[str, float]] = None
 ) -> str:
@@ -2329,13 +2406,18 @@ def excerpt_window(
     if len(whole) <= limit:
         return whole
     budget = max(1, limit - 4)
-    best: Optional[tuple[tuple[float, int], int, int]] = None
+    best: Optional[tuple[tuple[float, int], int, int, Optional[tuple[str, int, int]]]] = None
     for start in range(len(units)):
         end, size = start, 0
         while end < len(units) and size + len(plain[end]) + (1 if end > start else 0) <= budget:
             size += len(plain[end]) + (1 if end > start else 0)
             end += 1
-        score = _excerpt_score(units[start : max(end, start + 1)], weights)
+        piece = None
+        if end == start:
+            score, text, left, right = _excerpt_piece(units[start], budget, weights)
+            piece = text, left, right
+        else:
+            score = _excerpt_score(units[start:end], weights)
         # Of equal windows the one starting at the match wins: what follows a
         # matching sentence - the rest of a changelog entry, the steps after
         # a heading line - is what the window is for. A section with no match
@@ -2343,9 +2425,14 @@ def excerpt_window(
         # promises plain text does; the latest start won there too, and
         # quoted the section's last sentence.
         if best is None or score > best[0] or (score == best[0] and score[1]):
-            best = (score, start, end)
+            best = (score, start, end, piece)
     assert best is not None
-    _, start, end = best
+    _, start, end, piece = best
+    if piece is not None:
+        text, left, right = piece
+        prefix = "… " if left or start else ""
+        suffix = " …" if right < len(plain[start]) or start + 1 < len(units) else ""
+        return (prefix + text + suffix)[:limit]
     if start > 0 and plain[start - 1].endswith(":"):
         lead = len(plain[start - 1]) + 1
         size = sum(len(part) + 1 for part in plain[start:end]) - 1
@@ -2354,23 +2441,6 @@ def excerpt_window(
             size -= len(plain[end]) + 1
         if size + lead <= budget:
             start -= 1
-    if end <= start:
-        # One unit longer than the window: cut it around its first match.
-        unit = units[start]
-        opening = unit.find(EXCERPT_MARK_OPEN)
-        text = _unmarked(unit)
-        offset = len(_unmarked(unit[:opening])) if opening >= 0 else 0
-        left = max(0, offset - budget // 3)
-        if left:
-            space = text.rfind(" ", 0, left + 1)
-            left = space + 1 if space > 0 else left
-        piece = text[left : left + budget]
-        if left + budget < len(text):
-            space = piece.rfind(" ")
-            piece = piece[:space] if space > budget // 2 else piece
-        prefix = "… " if left or start else ""
-        suffix = " …" if left + len(piece) < len(text) or start + 1 < len(units) else ""
-        return (prefix + piece.strip() + suffix)[:limit]
     text = " ".join(plain[start:end])
     return ("… " if start else "") + text + (" …" if end < len(units) else "")
 
@@ -3112,6 +3182,7 @@ def linked_documents(
     reference: str,
     *,
     prefix: bool = False,
+    max_rows: Optional[int] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Every eligible document that declares `reference` among its sources.
 
@@ -3134,6 +3205,8 @@ def linked_documents(
     else:
         predicate = "l.ref_path = ?"
         parameters = (reference,)
+    if max_rows is not None and (type(max_rows) is not int or max_rows < 1):
+        raise RetrievalError("Source-link row limit must be a positive integer")
     rows = connection.execute(
         f"""
         SELECT
@@ -3147,8 +3220,8 @@ def linked_documents(
         JOIN document_metadata AS m ON m.path = l.path
         WHERE {predicate}
         ORDER BY d.path, l.ref_path
-        """,
-        parameters,
+        """ + (" LIMIT ?" if max_rows is not None else ""),
+        (*parameters, max_rows) if max_rows is not None else parameters,
     ).fetchall()
     candidates = []
     for row in rows:
@@ -3157,6 +3230,232 @@ def linked_documents(
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         candidates.append(item)
     return _runtime_filter(repository, candidates, config)
+
+
+def _shared_source_documents(
+    connection: sqlite3.Connection,
+    repository: Path,
+    config: dict[str, Any],
+    anchor: dict[str, Any],
+    max_rows: int,
+    current_digests: dict[str, Optional[str]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Indexed neighbours declaring the same current canonical source revision.
+
+    The common file need not be indexed. It is evidence for the relation,
+    never a delivered item or another traversal seed. Missing digests and
+    private/derived paths cannot establish this relation.
+    """
+    declared = {entry.get("path"): entry.get("sha256")
+                for entry in anchor.get("source_fingerprints") or [] if isinstance(entry, dict)}
+    references = sorted(key for key, digest in declared.items()
+        if isinstance(key, str) and source_path_problem(key) is None
+        and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest))[:GRAPH_ROW_LIMIT]
+    paths: set[str] = set()
+    for reference in references:
+        if connection.execute(
+            "SELECT 1 FROM document_links WHERE path = ? AND ref_path = ? AND ref_kind = 'source'",
+            (anchor["path"], reference),
+        ).fetchone() is None:
+            continue
+        # A fixed-source covering index produces path order without sorting
+        # the entire citation fanout. Exclusions and returned paths are both
+        # bounded; duplicate references cannot multiply the neighbour rows.
+        excluded = sorted(paths | {anchor["path"]})
+        placeholders = ",".join("?" for _ in excluded)
+        found = connection.execute(
+            "SELECT path FROM document_links INDEXED BY document_links_source_path "
+            "WHERE ref_path = ? AND ref_kind = 'source' "
+            f"AND path NOT IN ({placeholders}) ORDER BY path LIMIT ?",
+            (reference, *excluded, max_rows - len(paths)),
+        ).fetchall()
+        paths.update(row["path"] for row in found)
+        if len(paths) >= max_rows:
+            break
+    if not paths:
+        return [], 0
+    # Hydrate only the bounded pool, scanning the document table once rather
+    # than joining every repeated citation to its full document/metadata.
+    rows = connection.execute(
+        """
+        SELECT d.path, d.layer, d.kind, d.title,
+            m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+            m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
+            m.updated_at, m.confidence, m.attestation
+        FROM documents AS d JOIN document_metadata AS m ON m.path = d.path
+        WHERE d.path IN (""" + ",".join("?" for _ in paths) + ") ORDER BY d.path",
+        tuple(sorted(paths)),
+    ).fetchall()
+    candidates = []
+    for row in rows:
+        item = dict(row)
+        item["conflicts"] = json.loads(item["conflicts"])
+        item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        peer = {entry.get("path"): entry.get("sha256")
+                for entry in item["source_fingerprints"] if isinstance(entry, dict)}
+        # The row limit counts distinct neighbours, not duplicate citations.
+        # A separate bounded witness check keeps any current shared revision,
+        # rather than choosing an arbitrary MIN(ref_path) for the neighbour.
+        for reference in references:
+            expected = declared[reference]
+            if peer.get(reference) != expected:
+                continue
+            witness = connection.execute(
+                "SELECT 1 FROM document_links AS a JOIN document_links AS b ON b.ref_path = a.ref_path "
+                "WHERE a.path = ? AND b.path = ? AND a.ref_path = ? "
+                "AND a.ref_kind = 'source' AND b.ref_kind = 'source' LIMIT 1",
+                (anchor["path"], item["path"], reference),
+            ).fetchone()
+            if witness is None:
+                continue
+            if reference not in current_digests:
+                digest = None
+                try:
+                    # Check unresolved components too: fingerprint() resolves
+                    # containment, but an in-project symlink can still name a key.
+                    source = workspace_roots.roots(repository).project
+                    linked = False
+                    for component in Path(reference).parts:
+                        source /= component
+                        status = source.lstat()
+                        if (stat.S_ISLNK(status.st_mode)
+                                or getattr(status, "st_reparse_tag", 0) in workspace_roots.LINK_REPARSE_TAGS):
+                            linked = True
+                            break
+                    if not linked and source.is_file() and source.stat().st_size <= GRAPH_SOURCE_BYTE_LIMIT:
+                        digest = fingerprint(repository, reference)["sha256"]
+                except (BrainError, OSError, ValueError):
+                    pass
+                current_digests[reference] = digest
+            if current_digests[reference] == expected:
+                candidates.append(item)
+                break
+    eligible, _ = _runtime_filter(repository, candidates, config)
+    return eligible, len(paths)
+
+
+def source_link_candidates(
+    connection: sqlite3.Connection,
+    repository: Path,
+    anchors: list[dict[str, Any]],
+    seen: set[str],
+) -> list[dict[str, Any]]:
+    """The same policy-checked expansion for lightweight lexical results.
+
+    Those search results lack governed metadata. Rehydrate their first strong
+    semantic matches before traversal; a cached row alone is never authority.
+    """
+    hydrated = []
+    for anchor in [item for item in anchors if item.get("match", "covered") == "covered"][:GRAPH_ANCHOR_LIMIT]:
+        row = connection.execute(
+            """
+            SELECT d.path, d.layer, d.kind, d.title,
+                m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+                m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
+                m.updated_at, m.confidence, m.attestation
+            FROM documents AS d JOIN document_metadata AS m ON m.path = d.path
+            WHERE d.path = ?
+            """, (anchor["path"],),
+        ).fetchone()
+        if row is None or row["layer"] != "semantic":
+            continue
+        item = dict(row)
+        item["conflicts"] = json.loads(item["conflicts"])
+        item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        hydrated.append(item)
+    candidates, _ = _source_link_candidates(
+        connection, repository, load_config(repository), hydrated, seen,
+    )
+    return [_public_item(item) for item in candidates]
+
+
+def _has_incoming_conflict(connection: sqlite3.Connection, record_id: Optional[str]) -> bool:
+    """One-way declarations are conflicts too; cached doubt withholds expansion.
+
+    A refresh removes expired/deleted metadata. Until then a cached declaration
+    is sufficient to hold the graph addition, without disclosing its partner.
+    UUIDs are quoted complete JSON strings, not substring or wildcard matches.
+    """
+    return record_id is not None and connection.execute(
+        "SELECT 1 FROM document_metadata WHERE conflicts != '[]' "
+        "AND instr(conflicts, ?) > 0 LIMIT 1", ('"' + record_id + '"',),
+    ).fetchone() is not None
+
+
+def _source_link_candidates(
+    connection: sqlite3.Connection,
+    repository: Path,
+    config: dict[str, Any],
+    anchors: list[dict[str, Any]],
+    seen: set[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Bounded declared relations; every seed and neighbour is runtime-checked.
+
+    Reverse citations and a shared current source revision form relations;
+    candidates are never traversed again. Neither is a new graph authority.
+    Withheld neighbours never become bridges; diagnostics contain only counts.
+    A SQL row cap also bounds work when a source has thousands of citations.
+    """
+    stats: dict[str, Any] = {
+        "anchors": 0, "examined": 0, "eligible": 0,
+        "withheld": 0, "truncated": False,
+    }
+    candidates: list[dict[str, Any]] = []
+    current_digests: dict[str, Optional[str]] = {}
+    for anchor in anchors[:GRAPH_ANCHOR_LIMIT]:
+        if anchor.get("conflicts") or _has_incoming_conflict(connection, anchor.get("record_id")):
+            continue
+        # Recheck at the traversal boundary, including edits since seed search.
+        eligible, _ = _runtime_filter(repository, [dict(anchor)], config)
+        if not eligible:
+            continue
+        remaining = GRAPH_ROW_LIMIT - stats["examined"]
+        if remaining <= 0:
+            stats["truncated"] = True
+            break
+        linked, withheld = linked_documents(
+            connection, repository, config, anchor["path"], max_rows=remaining,
+        )
+        stats["anchors"] += 1
+        count = len(linked) + len(withheld)
+        stats["examined"] += count
+        stats["withheld"] += len(withheld)
+        # A full row allowance means the walk may be incomplete, even when
+        # the last row happened to be the source's last citation.
+        stats["truncated"] |= count == remaining
+        remaining -= count
+        if remaining > 0:
+            shared, shared_rows = _shared_source_documents(
+                connection, repository, config, anchor, remaining, current_digests,
+            )
+            linked.extend(shared)
+            stats["examined"] += shared_rows
+            stats["truncated"] |= shared_rows == remaining
+        for item in linked:
+            if (item["path"] in seen or item["layer"] != "semantic"
+                    or item["category"] not in ("durable", "dynamic")
+                    or item["conflicts"]
+                    or _has_incoming_conflict(connection, item.get("record_id"))):
+                # A graph-only conflict component may need more semantic
+                # slots than remain. Until admission is component-aware, do
+                # not introduce either side through automatic expansion.
+                continue
+            seen.add(item["path"])
+            stats["eligible"] += 1
+            if len(candidates) >= GRAPH_CANDIDATE_LIMIT:
+                stats["truncated"] = True
+                continue
+            content = connection.execute(
+                "SELECT content FROM documents WHERE path = ?", (item["path"],),
+            ).fetchone()
+            item["snippet"] = _body_snippet(str(content["content"]))
+            item["match"] = None
+            item["selection"] = "source-link"
+            item["adjusted_score"] = 0.0
+            item["rank"] = None
+            item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
+            candidates.append(item)
+    return candidates, stats
 
 
 def _apply_budgets(
@@ -3334,9 +3633,7 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     if item.get("match") not in (None, "covered"):
         public["match"] = item["match"]
     if item.get("selection"):
-        # Only ever present when the caller passed `--path`, so it costs
-        # nothing on an ordinary turn, and on those turns it is the difference
-        # between "your words found this" and "the file you named did".
+        # Distinguish a declared relation from a lexical query match.
         public["selection"] = item["selection"]
     if item.get("source_changed"):
         # The cited files edited since this knowledge was verified: the
@@ -3442,6 +3739,11 @@ def retrieve(
     # again keeps fresh knowledge of equal fit ahead of it. Stable, so
     # nothing else moves.
     filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
+    graph_anchors = [
+        item for item in filtered
+        if item["layer"] == "semantic" and item.get("match") == "covered"
+        and (task is None or item.get("record_id") != task["id"])
+    ]
     # Injected here and nowhere earlier. `matched_layers` and `no_match` above
     # are claims about the QUERY — the capsule's `no-match:` line and the
     # gate's `signals.no_match` both read them that way — and a path link is
@@ -3463,13 +3765,20 @@ def retrieve(
         # Ahead of the query's own matches, because `_apply_budgets` and the
         # per-layer ladder both honour input order and the caller named these.
         filtered = [*linked, *filtered]
+    graph_candidates, graph_stats = _source_link_candidates(
+        connection, repository, config, graph_anchors,
+        {item["path"] for item in filtered},
+    )
+    # Related knowledge fills remaining capacity after direct matches and
+    # explicit paths; provenance alone never gives it priority over them.
+    filtered.extend(graph_candidates)
     # A promoted chunk and the record it was promoted from say the same thing,
     # and both used to take a slot. The chunk is the durable form, so the
     # record yields to it.
     promoted_from = {
         str(source.get("path"))
         for item in filtered
-        if item.get("kind") == "memory"
+        if item.get("kind") == "memory" and item.get("selection") != "source-link"
         for source in item.get("source_fingerprints") or []
         if isinstance(source, dict)
     }
@@ -3731,6 +4040,9 @@ def retrieve(
     semantic = [
         *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
     ][:CAPSULE_SEMANTIC_LIMIT]
+    # Category grouping must not move related knowledge ahead of direct
+    # hits when the renderer spends its character allowance.
+    semantic.sort(key=lambda item: item.get("selection") == "source-link")
     result: dict[str, Any] = {
         "query": query,
         "task_id": task["external_id"] if task is not None else None,
@@ -3872,6 +4184,13 @@ def retrieve(
         "excluded": [*filter_excluded, *budget_excluded, *layer_excluded],
         "token_estimates": usage,
         "provider": provider or config["provider"],
+        "source_links": {
+            # Raw row/withheld counts would reveal protected citations. Only
+            # allowed seeds and the bounded, allowed proposal are public.
+            "anchors": graph_stats["anchors"],
+            "candidates": len(graph_candidates),
+            "delivered": sum(item.get("selection") == "source-link" for item in selected),
+        },
         "escalation_reason": escalation_reason,
         # Where the query came from, and what the turn spent getting here.
         # A manifest that records only the selection cannot answer whether a

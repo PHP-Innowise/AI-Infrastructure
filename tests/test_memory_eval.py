@@ -457,7 +457,7 @@ class EndToEndTest(unittest.TestCase):
 
     def test_the_cache_holds_no_leftover_corpus(self) -> None:
         self.assertEqual(list((self.cache / "runs").iterdir()), [])
-        self.assertTrue(any((self.cache / "trees").iterdir()))
+        self.assertTrue(any((self.cache / "public-trees-v1").iterdir()))
         self.assertTrue(any((self.cache / "history").iterdir()))
 
 
@@ -541,6 +541,53 @@ def passage(*texts: str, useful: bool = True) -> Dict[str, Dict[str, Any]]:
 
 class ScoringTest(unittest.TestCase):
     GRADES = {"docs/a.md": 2, "docs/b.md": 0, ".agents/skills/coder/SKILL.md": 1}
+
+    def test_counts_distinct_existing_passages_in_delivered_text(self) -> None:
+        passages = {"docs/a.md": {"useful": True, "passages": ["First answer.", "  first  answer. ", "Second answer."]}}
+        result = refresh_result({"semantic": ["docs/a.md"]})
+        result["capsule_text"] = "First answer."
+        one = memory_eval.score(result, self.GRADES, passages, ["docs/a.md"], ["docs/a.md"])
+        self.assertEqual(2, one["answer_passages_existed"])
+        self.assertEqual(1, one["answer_passages_delivered"])
+        result["capsule_text"] += " Second answer."
+        two = memory_eval.score(result, self.GRADES, passages, ["docs/a.md"], ["docs/a.md"])
+        self.assertEqual(2, two["answer_passages_delivered"])
+        result["capsule_text"] = "docs/a.md"
+        pointer = memory_eval.score(result, self.GRADES, passages, ["docs/a.md"], ["docs/a.md"])
+        self.assertEqual(0, pointer["answer_passages_delivered"])
+        one.update(status="ok")
+        two.update(status="ok")
+        summary = memory_eval.summarize({"one": one, "two": two})
+        self.assertEqual(4, summary["answer_passages_existed"])
+        self.assertEqual(3, summary["answer_passages_delivered"])
+        self.assertEqual(0.75, summary["answer_passage_recall"])
+        self.assertEqual("75.0%", memory_eval.row_cell(summary, "answer_passage_recall"))
+        self.assertIsNone(memory_eval.summarize({"legacy": {"status": "ok"}})["answer_passage_recall"])
+
+    def test_passage_ceiling_uses_actual_prompt_time_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            corpus = Path(temporary)
+            write(corpus, "docs/a.md", "First answer.")
+            passages = {"docs/a.md": {"passages": ["First answer.", "Future answer."]}}
+            expected = memory_eval.existing_answer_passages(corpus, ["docs/a.md"], passages)
+            result = refresh_result({"semantic": ["docs/a.md"]})
+            result["capsule_text"] = "First answer. Future answer."
+            scored = memory_eval.score(result, self.GRADES, passages, ["docs/a.md"],
+                                       ["docs/a.md"], expected_passages=expected)
+            self.assertEqual(1, scored["answer_passages_existed"])
+            self.assertEqual(1, scored["answer_passages_delivered"])
+
+    def test_keeps_only_bounded_safe_graph_manifest_counters(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            corpus = Path(temporary)
+            reference = "memory-bank/local/retrieval-manifests/11111111-1111-4111-8111-111111111111.json"
+            stats = {"anchors": 1, "candidates": 2, "delivered": 0}
+            write(corpus, reference, json.dumps({"source_links": {**stats, "withheld_path": "private/source.md"}}))
+            result = {"capsule": {"manifest": reference}}
+            self.assertEqual(stats, memory_eval.source_link_stats(corpus, result))
+            write(corpus, reference, json.dumps({"source_links": {**stats, "candidates": 100}}))
+            self.assertIsNone(memory_eval.source_link_stats(corpus, result))
+            self.assertIsNone(memory_eval.source_link_stats(corpus, {"capsule": {"manifest": "../private/source.md"}}))
 
     def test_classes(self) -> None:
         cases = [
@@ -854,6 +901,43 @@ class RefreshOutcomeTest(unittest.TestCase):
 
 class ReconstructionTest(unittest.TestCase):
     """reconstruct_memory without Git or a runtime."""
+
+    def test_snapshots_never_read_private_blobs_or_copy_private_worktree_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            project = build_ledger(base)
+            private = (".env", "config/.env.local", "credentials/token.json", "config/example.key")
+            for relative in private:
+                write(project, relative, "synthetic private sentinel")
+            git(project, "add", ".")
+            git(project, "commit", "-m", "Private sentinel paths", when=T2)
+            ids = {subprocess.check_output(["git", "-C", str(project), "rev-parse", "HEAD:" + path]).strip()
+                   for path in private}
+            reads = []
+            original = memory_eval.BlobReader.read
+
+            def read(reader, blob):
+                reads.append(blob)
+                return original(reader, blob)
+
+            tree = memory_eval.Repository(project).tree(memory_eval.Repository(project).head())
+            with mock.patch.object(memory_eval.BlobReader, "read", read):
+                snapshot = memory_eval.materialize(project, tree, base / "cache")
+            self.assertTrue(ids.isdisjoint(reads), "private Git blobs must not be opened")
+            self.assertTrue((snapshot / "docs/billing.md").is_file())
+            self.assertTrue(all(not (snapshot / path).exists() for path in private))
+            copied = []
+            original_copy = memory_eval.shutil.copy2
+
+            def copy(source, destination, *args, **kwargs):
+                copied.append(Path(source).relative_to(project).as_posix())
+                return original_copy(source, destination, *args, **kwargs)
+
+            with mock.patch.object(memory_eval.shutil, "copy2", copy):
+                current = memory_eval.snapshot_worktree(project, base / "current")
+            self.assertTrue(set(private).isdisjoint(copied))
+            self.assertTrue(all(not (current / path).exists() for path in private))
+            self.assertTrue((current / "docs/billing.md").is_file())
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

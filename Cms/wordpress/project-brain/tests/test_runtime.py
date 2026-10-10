@@ -4128,6 +4128,624 @@ class DocumentLinkTest(BankFixture):
         self.assertEqual(self.chunk_paths(), self.link_paths(self.SOURCE))
 
 
+class SharedSourceExpansionTest(BankFixture):
+    SOURCE = "src/Settlement.php"
+    QUERY = "saffron ledger"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repository.joinpath("src").mkdir(exist_ok=True)
+        self.source = self.repository / self.SOURCE
+        self.source.write_text("Canonical settlement rule.\n", encoding="utf-8")
+        digest = brain.fingerprint(self.repository, self.SOURCE)
+        self.first = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "saffron-ledger", "Saffron ledger keeps integer amounts.",
+            sources=[self.SOURCE], source_digests=[digest],
+        )
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[self.SOURCE + "#L1"], source_digests=[digest],
+        )
+        self.start("TASK-SHARED")
+        self.assertEqual(0, self.run_cli("index").returncode)
+
+    def capsule(self) -> dict:
+        result = self.run_cli("retrieve", self.QUERY, "--task-id", "TASK-SHARED", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def paths(self, capsule: dict) -> set:
+        return {item["path"] for item in capsule["semantic"]}
+
+    def test_common_unindexed_source_automatically_delivers_the_related_answer(self) -> None:
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM documents WHERE path = ?", (self.SOURCE,)).fetchone()[0])
+        finally:
+            connection.close()
+        capsule = self.capsule()
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(capsule))
+        self.assertEqual(self.first.relative_to(self.repository).as_posix(), capsule["semantic"][0]["path"])
+        related = next(item for item in capsule["semantic"] if item["path"] == self.second.relative_to(self.repository).as_posix())
+        self.assertEqual("source-link", related["selection"])
+        result = self.run_cli("refresh", "--query", self.QUERY, "--task-id", "TASK-SHARED", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Refunds require dual approval.", json.loads(result.stdout)["capsule_text"])
+
+    def test_a_changed_shared_source_does_not_bridge_its_former_revision(self) -> None:
+        self.source.write_text("A revised canonical rule.\n", encoding="utf-8")
+        capsule = self.capsule()
+        self.assertIn(self.first.relative_to(self.repository).as_posix(), self.paths(capsule))
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(capsule))
+
+    def test_duplicate_common_references_do_not_displace_another_neighbour(self) -> None:
+        sources = []
+        for index in range(32):
+            relative = f"src/Proof{index:02d}.php"
+            self.repository.joinpath(relative).write_text("Canonical proof.\n", encoding="utf-8")
+            sources.append(relative)
+        digests = [brain.fingerprint(self.repository, item) for item in sources]
+        self.first = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "saffron-ledger", "Saffron ledger keeps integer amounts.",
+            sources=sources, source_digests=digests,
+        )
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=sources, source_digests=digests,
+        )
+        other = self.write_chunk(
+            "MEM-20260101-dddddddd", "audit-consequence", "Audits require archival reconciliation.",
+            sources=[sources[0]], source_digests=[digests[0]],
+        )
+        capsule = self.capsule()
+        self.assertIn(other.relative_to(self.repository).as_posix(), self.paths(capsule))
+        self.assertLessEqual(len(capsule["semantic"]), retrieval.CAPSULE_SEMANTIC_LIMIT)
+
+    def test_line_ending_changes_preserve_the_same_source_revision(self) -> None:
+        self.source.write_bytes(b"Canonical settlement rule.\r\n")
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_wide_duplicate_fanout_does_not_materialize_the_citation_product(self) -> None:
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            anchor_path = self.first.relative_to(self.repository).as_posix()
+            references = [f"src/MissingProof{index:02d}.php" for index in range(32)]
+            anchor = dict(connection.execute("SELECT * FROM document_metadata WHERE path = ?", (anchor_path,)).fetchone())
+            anchor["source_fingerprints"] = [{"path": item, "sha256": "f" * 64} for item in references]
+            exemplar = dict(connection.execute("SELECT * FROM documents WHERE path = ?", (anchor_path,)).fetchone())
+            metadata = dict(connection.execute("SELECT * FROM document_metadata WHERE path = ?", (anchor_path,)).fetchone())
+            metadata["source_fingerprints"] = json.dumps(anchor["source_fingerprints"])
+            peer_paths = [f"memory-bank/chunks/fanout-{index:04d}.md" for index in range(3000)]
+            for table, template in (("documents", exemplar), ("document_metadata", metadata)):
+                columns = tuple(template)
+                connection.executemany(
+                    f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                    [tuple(peer if column == "path" else template[column] for column in columns) for peer in peer_paths],
+                )
+            connection.executemany("INSERT INTO document_links VALUES (?, ?, 'source')",
+                [(item, reference) for item in [anchor_path, *peer_paths] for reference in references])
+            ticks = 0
+
+            def bounded_work() -> int:
+                nonlocal ticks
+                ticks += 1
+                # Deterministic VM work allowance, not a wall-clock assertion.
+                return int(ticks > 50)
+
+            connection.set_progress_handler(bounded_work, 10000)
+            try:
+                neighbours, examined = retrieval._shared_source_documents(
+                    connection, self.repository, brain.load_config(self.repository), anchor, 32, {},
+                )
+            finally:
+                connection.set_progress_handler(None, 0)
+            self.assertEqual([], neighbours)  # Missing canonical proofs cannot establish a bridge.
+            self.assertEqual(32, examined)
+        finally:
+            connection.close()
+
+    def test_a_later_current_common_reference_can_prove_the_relation(self) -> None:
+        other = "src/ZApproval.php"
+        self.repository.joinpath(other).write_text("A current approval rule.\n", encoding="utf-8")
+        digests = [brain.fingerprint(self.repository, item) for item in (self.SOURCE, other)]
+        self.first = self.write_chunk("MEM-20260101-bbbbbbbb", "saffron-ledger", "Saffron ledger keeps integer amounts.",
+            sources=[self.SOURCE, other], source_digests=digests)
+        self.second = self.write_chunk("MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[self.SOURCE, other], source_digests=[{"path": self.SOURCE, "sha256": "f" * 64}, digests[1]])
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_lightweight_retrieval_uses_the_same_shared_source_relation(self) -> None:
+        result = self.run_cli("--mode", "lightweight", "context", self.QUERY, "--task-id", "TASK-SHARED", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(json.loads(result.stdout)))
+
+    def test_attached_source_proof_uses_the_project_and_not_the_state_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shared-source-project-") as temporary:
+            project = Path(temporary)
+            project.joinpath("src").mkdir()
+            project.joinpath(self.SOURCE).write_bytes(self.source.read_bytes())
+            self.source.write_text("A decoy source in the state root.\n", encoding="utf-8")
+            connection = context_cli.connect(context_cli.default_database(self.repository))
+            try:
+                with mock.patch.dict(os.environ, {"ACCELERATOR_HOME": str(EDITION),
+                        "ACCELERATOR_STATE_DIR": str(self.repository), "ACCELERATOR_PROJECT_DIR": str(project)}):
+                    candidates, _ = retrieval._candidates(connection, self.QUERY)
+                    anchors, _ = retrieval._runtime_filter(self.repository, candidates, brain.load_config(self.repository))
+                    neighbours, _ = retrieval._source_link_candidates(
+                        connection, self.repository, brain.load_config(self.repository), anchors,
+                        {item["path"] for item in anchors},
+                    )
+            finally:
+                connection.close()
+            self.assertIn(self.second.relative_to(self.repository).as_posix(), {item["path"] for item in neighbours})
+
+    def test_a_peer_without_owner_permission_stays_out_of_public_results(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        baseline = self.capsule()
+        before = json.loads((self.repository / baseline["manifest"]).read_text())["source_links"]
+        config.write_text(json.dumps({"allowed_privacy": ["public", "restricted"], "owners": ["*"]}))
+        private = brain.create_record(
+            self.repository, record_type="finding", external_id="FINDING-PRIVATE", title="Private approval rationale", goal="A separate approval constraint.",
+            owner="denied-owner", privacy="restricted", authority="observed", files=[], sources=[self.SOURCE],
+        )
+        self.assertEqual(0, self.run_cli("index").returncode)
+        config.write_text(json.dumps({"allowed_privacy": ["public", "restricted"], "owners": ["allowed-owner"]}))
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            capsule = context_cli.assemble_capsule(connection, self.repository, mode="governed", query=self.QUERY,
+                task_id="TASK-SHARED", limit=3, ephemeral=True, refresh_index=False)
+        finally:
+            connection.close()
+        denied = brain.dynamic_path(self.repository, private).relative_to(self.repository).as_posix()
+        report = json.loads((self.repository / capsule["manifest"]).read_text())
+        self.assertNotIn(denied, self.paths(capsule))
+        self.assertNotIn(denied, {item["path"] for item in report["excluded"]})
+        self.assertEqual(before, report["source_links"])
+
+    def test_an_incoming_conflict_blocks_a_shared_source_neighbour(self) -> None:
+        peer = brain.create_record(
+            self.repository, "finding", "FINDING-SHARED", "Refund approval rationale", [], [self.SOURCE],
+            owner="local", goal="Refund approval needs a separate check.",
+        )
+        peer_path = brain.dynamic_path(self.repository, peer).relative_to(self.repository).as_posix()
+        self.assertIn(peer_path, self.paths(self.capsule()))
+        brain.create_record(
+            self.repository, "finding", "FINDING-CONFLICT", "Alternative approval rationale", [], ["specs/authority.md"],
+            owner="local", goal="An alternative approval check.", conflicts=[peer["id"]],
+        )
+        self.assertNotIn(peer_path, self.paths(self.capsule()))
+
+    def test_an_in_project_source_symlink_does_not_establish_a_bridge(self) -> None:
+        target = self.repository / "src/Sentinel.php"
+        target.write_bytes(self.source.read_bytes())
+        self.source.unlink()
+        self.source.symlink_to(target)
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_windows_link_reparse_tags_cannot_establish_a_bridge(self) -> None:
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        original_lstat = Path.lstat
+        try:
+            candidates, _ = retrieval._candidates(connection, self.QUERY)
+            anchors, _ = retrieval._runtime_filter(self.repository, candidates, brain.load_config(self.repository))
+            anchor = next(item for item in anchors if item["path"] == self.first.relative_to(self.repository).as_posix())
+            for tag in retrieval.workspace_roots.LINK_REPARSE_TAGS:
+                def linked_status(candidate: Path):
+                    status = original_lstat(candidate)
+                    return mock.Mock(st_mode=status.st_mode, st_reparse_tag=tag) if candidate == self.source else status
+
+                with self.subTest(tag=tag), mock.patch.object(Path, "lstat", linked_status), \
+                        mock.patch.object(retrieval, "fingerprint", wraps=brain.fingerprint) as fingerprint:
+                    neighbours, _ = retrieval._shared_source_documents(
+                        connection, self.repository, brain.load_config(self.repository), anchor, 32, {},
+                    )
+                    self.assertEqual([], neighbours)
+                    fingerprint.assert_not_called()
+        finally:
+            connection.close()
+
+    def test_derived_memory_does_not_establish_a_shared_source_bridge(self) -> None:
+        reference = self.chunk.relative_to(self.repository).as_posix()
+        digest = brain.fingerprint(self.repository, reference)
+        self.first = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "saffron-ledger", "Saffron ledger keeps integer amounts.",
+            sources=[reference], source_digests=[digest],
+        )
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[reference], source_digests=[digest],
+        )
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_missing_fingerprints_do_not_create_a_shared_source_bridge(self) -> None:
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.", sources=[self.SOURCE],
+        )
+        capsule = self.capsule()
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(capsule))
+
+    def test_different_source_revisions_do_not_establish_a_shared_relation(self) -> None:
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[self.SOURCE], source_digests=[{"path": self.SOURCE, "sha256": "f" * 64}],
+        )
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_a_shared_source_neighbour_does_not_become_another_anchor(self) -> None:
+        other = self.repository / "src/Validation.php"
+        other.write_text("A separate validation rule.\n", encoding="utf-8")
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[self.SOURCE, "src/Validation.php"],
+            source_digests=[brain.fingerprint(self.repository, item) for item in (self.SOURCE, "src/Validation.php")],
+        )
+        third = self.write_chunk(
+            "MEM-20260101-dddddddd", "transitive-consequence", "A transitive fact.",
+            sources=["src/Validation.php"], source_digests=[brain.fingerprint(self.repository, "src/Validation.php")],
+        )
+        capsule = self.capsule()
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(capsule))
+        self.assertNotIn(third.relative_to(self.repository).as_posix(), self.paths(capsule))
+
+
+class GraphExpansionTest(DocumentLinkTest):
+    """Every normal retrieval follows allowed source links automatically."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.start("TASK-GRAPH")
+        self.assertEqual(0, self.run_cli("index").returncode)
+
+    def capsule(self, query: str = "", *extra: str) -> dict:
+        result = self.run_cli(
+            "retrieve", query or self.SOURCE_WORDS, "--task-id", "TASK-GRAPH",
+            "--ephemeral", "--json", *extra,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def baseline(self) -> dict:
+        # A test-only control; installed runtime has no graph switch.
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            with mock.patch.object(retrieval, "_source_link_candidates", return_value=(
+                [], {"anchors": 0},
+            )):
+                return context_cli.assemble_capsule(
+                    connection, self.repository, mode="governed", query=self.SOURCE_WORDS,
+                    task_id="TASK-GRAPH", limit=3, ephemeral=True,
+                )
+        finally:
+            connection.close()
+
+    def delivered(self, capsule: dict) -> set:
+        return {
+            item["path"] for layer in ("procedural", "semantic", "episodic")
+            for item in capsule.get(layer) or []
+        }
+
+    def manifest(self, capsule: dict) -> dict:
+        report = json.loads((self.repository / capsule["manifest"]).read_text())
+        brain.validate_schema_file(self.repository, "retrieval-manifest", report)
+        return report
+
+    def test_standard_retrieval_expands_without_a_user_setting(self) -> None:
+        baseline = self.baseline()
+        expanded = self.capsule()
+        self.assertEqual(set(), self.chunk_paths() & self.delivered(baseline))
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(expanded))
+        stats = self.manifest(expanded)["source_links"]
+        self.assertEqual({"anchors", "candidates", "delivered"}, set(stats))
+        self.assertEqual(2, stats["candidates"])
+        self.assertEqual(2, stats["delivered"])
+        self.assertEqual(baseline["no_match"], expanded["no_match"])
+        for command in ("context", "retrieve", "refresh"):
+            help_text = self.run_cli(command, "--help")
+            self.assertEqual(0, help_text.returncode)
+            self.assertNotIn("graph-expansion", help_text.stdout)
+
+    def test_automatic_delivery_quotes_bodies_without_a_lexical_rank(self) -> None:
+        baseline = self.baseline()
+        expanded = self.capsule()
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(expanded))
+        report = self.manifest(expanded)
+        self.assertEqual(2, report["source_links"]["delivered"])
+        for item in report["selected"]:
+            if item["path"] in self.chunk_paths():
+                self.assertEqual("source-link", item["selection"])
+                self.assertIsNone(item["rank"])
+                self.assertNotIn("match", item)
+        rendered = self.run_cli(
+            "refresh", "--query", self.SOURCE_WORDS, "--task-id", "TASK-GRAPH",
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        text = json.loads(rendered.stdout)["capsule_text"]
+        self.assertIn("floating point", text)
+        self.assertIn("refund can never exceed", text)
+        self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+        self.assertEqual(baseline["no_match"], expanded["no_match"])
+
+    def test_no_lexical_seed_never_creates_a_graph_answer(self) -> None:
+        capsule = self.capsule("vermilion semaphore")
+        self.assertEqual(set(), self.chunk_paths() & self.delivered(capsule))
+        self.assertEqual(0, self.manifest(capsule)["source_links"]["candidates"])
+
+    def test_stale_neighbours_are_withheld_without_reporting_their_paths(self) -> None:
+        self.first.write_text(self.first.read_text() + "\nChanged after indexing.\n")
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            binding = context_cli.governed_binding(connection, "TASK-GRAPH")
+            capsule = retrieval.retrieve(
+                connection, self.repository, self.SOURCE_WORDS, binding["task_uuid"],
+                limit=3, manifest_scope="local",
+            )
+        finally:
+            connection.close()
+        first = self.first.relative_to(self.repository).as_posix()
+        self.assertNotIn(first, self.delivered(capsule))
+        self.assertNotIn(first, {item["path"] for item in self.manifest(capsule)["excluded"]})
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.delivered(capsule))
+
+    def test_a_forbidden_citation_does_not_change_public_graph_diagnostics(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps({"allowed_privacy": ["public"]}), encoding="utf-8",
+        )
+        before = self.manifest(self.capsule())["source_links"]
+        # Index under the old team policy, then narrow it without rebuilding:
+        # cached edges must not publish a record the current policy withholds.
+        config.write_text(json.dumps({"allowed_privacy": ["public", "team"]}))
+        private = brain.create_record(
+            self.repository, record_type="finding", external_id="FINDING-PRIVATE",
+            title="Private rationale", goal="A private rationale with no query terms.",
+            owner="local", privacy="team", authority="observed",
+            files=[],
+            sources=[self.SOURCE],
+        )
+        self.assertEqual(0, self.run_cli("index").returncode)
+        private_path = brain.dynamic_path(self.repository, private).relative_to(self.repository).as_posix()
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            self.assertGreater(connection.execute(
+                "SELECT COUNT(*) FROM document_links WHERE path = ?", (private_path,),
+            ).fetchone()[0], 0, "the withheld edge must really be cached")
+        finally:
+            connection.close()
+        config.write_text(json.dumps({"allowed_privacy": ["public"]}))
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            after_capsule = context_cli.assemble_capsule(
+                connection, self.repository, mode="governed", query=self.SOURCE_WORDS,
+                task_id="TASK-GRAPH", limit=3, ephemeral=True, refresh_index=False,
+            )
+        finally:
+            connection.close()
+        after = self.manifest(after_capsule)
+        self.assertEqual(before, after["source_links"])
+        self.assertNotIn(private_path, self.delivered(after_capsule))
+        self.assertNotIn(private_path, {item["path"] for item in after["excluded"]})
+
+    def test_graph_items_obey_session_suppression_and_source_revision(self) -> None:
+        def refresh(session: str) -> dict:
+            result = self.run_cli(
+                "refresh", "--query", self.SOURCE_WORDS, "--task-id", "TASK-GRAPH",
+                "--session-id", session,
+                "--ephemeral", "--json",
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            return json.loads(result.stdout)["capsule"]
+
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(refresh("graph-a")))
+        self.assertEqual(set(), self.chunk_paths() & self.delivered(refresh("graph-a")))
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(refresh("graph-b")))
+        self.first.write_text(self.first.read_text() + "\nThe stored total also has an audit trail.\n")
+        changed = self.delivered(refresh("graph-a"))
+        self.assertIn(self.first.relative_to(self.repository).as_posix(), changed)
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), changed)
+
+    def test_one_hop_does_not_expand_a_graph_neighbour_again(self) -> None:
+        third = self.write_chunk(
+            "MEM-20260101-dddddddd", "second-hop", "A consequence only of the other memory.",
+            sources=[self.first.relative_to(self.repository).as_posix()],
+        )
+        expanded = self.capsule()
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(expanded))
+        self.assertNotIn(third.relative_to(self.repository).as_posix(), self.delivered(expanded))
+
+    def test_direct_semantic_matches_keep_full_slots_and_render_priority(self) -> None:
+        first_expanded = self.capsule()
+        self.assertEqual("source-link", first_expanded["semantic"][-1]["selection"])
+        self.assertNotEqual("source-link", first_expanded["semantic"][0].get("selection"))
+        for name in ("second", "third"):
+            self.repository.joinpath(f"specs/{name}.md").write_text(
+                f"# {name}\n\nThe {self.SOURCE_WORDS} rule has an independent explanation.\n",
+            )
+        baseline = self.baseline()
+        expanded = self.capsule()
+        self.assertEqual(3, len(baseline["semantic"]))
+        self.assertEqual(self.delivered(baseline), self.delivered(expanded))
+        self.assertEqual(0, self.manifest(expanded)["source_links"]["delivered"])
+
+    def test_source_link_cannot_suppress_its_direct_source_record(self) -> None:
+        self.first.unlink()
+        self.second.unlink()
+        record = brain.create_record(
+            self.repository, "finding", "FINDING-DIRECT", self.SOURCE_WORDS,
+            [], [self.SOURCE], owner="local", goal=self.SOURCE_WORDS,
+        )
+        path = brain.dynamic_path(self.repository, record).relative_to(self.repository).as_posix()
+        derived = self.write_chunk(
+            "MEM-20260101-eeeeeeee", "derived", "A reusable consequence with unrelated vocabulary.",
+            sources=[path], source_digests=[brain.fingerprint(self.repository, path)],
+        )
+        baseline = self.baseline()
+        self.assertIn(path, self.delivered(baseline))
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            linked, _ = retrieval.linked_documents(
+                connection, self.repository, brain.load_config(self.repository), path,
+            )
+        finally:
+            connection.close()
+        derived_path = derived.relative_to(self.repository).as_posix()
+        candidate = next(item for item in linked if item["path"] == derived_path)
+        self.assertEqual([path], [source["path"] for source in candidate["source_fingerprints"]])
+        expanded = self.capsule()
+        self.assertIn(derived_path, self.delivered(expanded))
+        self.assertIn(path, self.delivered(expanded))
+        self.assertNotIn(path, {item["path"] for item in self.manifest(expanded)["excluded"]
+                                if item["reason"] == "promoted-to-chunk"})
+
+    def test_optional_conflict_component_is_not_admitted_one_side_only(self) -> None:
+        # Leave exactly one slot after the two direct sources. Before the
+        # guard, the graph record occupied it and its conflict partner lost.
+        self.first.unlink()
+        self.second.unlink()
+        self.repository.joinpath("specs/second.md").write_text(
+            f"# Companion\n\nThe {self.SOURCE_WORDS} rule has a second direct explanation.\n",
+        )
+        partner = brain.create_record(
+            self.repository, "finding", "FINDING-PARTNER", "Alternative rationale",
+            [], ["specs/authority.md"], owner="local", goal="A distinct alternative rationale.",
+        )
+        record = brain.create_record(
+            self.repository, "finding", "FINDING-CONFLICT", "Disputed rationale",
+            [], [self.SOURCE], owner="local", goal="A disputed rationale.", conflicts=[partner["id"]],
+        )
+        paths = {brain.dynamic_path(self.repository, item).relative_to(self.repository).as_posix()
+                 for item in (record, partner)}
+        baseline = self.baseline()
+        self.assertEqual({self.SOURCE, "specs/second.md"},
+                         {item["path"] for item in baseline["semantic"]})
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            linked, _ = retrieval.linked_documents(
+                connection, self.repository, brain.load_config(self.repository), self.SOURCE,
+            )
+        finally:
+            connection.close()
+        candidate = next(item for item in linked if item["record_id"] == record["id"])
+        self.assertEqual([partner["id"]], candidate["conflicts"])
+        expanded = self.capsule()
+        self.assertEqual(set(), paths & self.delivered(baseline))
+        self.assertEqual(set(), paths & self.delivered(expanded))
+        self.assertTrue(self.delivered(baseline) <= self.delivered(expanded))
+
+    def test_incoming_one_way_conflict_is_not_admitted_through_a_source(self) -> None:
+        self.first.unlink()
+        self.second.unlink()
+        candidate = brain.create_record(
+            self.repository, "finding", "FINDING-INCOMING", "Stored consequence",
+            [], [self.SOURCE], owner="local", goal="A stored consequence.",
+        )
+        partner = brain.create_record(
+            self.repository, "finding", "FINDING-DECLARATION", "Alternative explanation",
+            [], ["specs/authority.md"], owner="local", goal="An alternative explanation.",
+            conflicts=[candidate["id"]],
+        )
+        self.assertEqual([], candidate["conflicts"])
+        self.assertEqual([candidate["id"]], partner["conflicts"])
+        paths = {brain.dynamic_path(self.repository, item).relative_to(self.repository).as_posix()
+                 for item in (candidate, partner)}
+        expanded = self.capsule()
+        self.assertEqual(set(), paths & self.delivered(expanded))
+        self.assertEqual(0, self.manifest(expanded)["source_links"]["candidates"])
+        response = self.run_cli("--mode", "lightweight", "context", self.SOURCE_WORDS,
+                                "--task-id", "TASK-GRAPH", "--json")
+        self.assertEqual(0, response.returncode, response.stderr)
+        self.assertEqual(set(), paths & self.delivered(json.loads(response.stdout)))
+
+    def test_row_and_candidate_limits_bound_a_wide_source(self) -> None:
+        for number in range(40):
+            self.write_chunk(
+                f"MEM-20260101-{number:08x}", f"wide-{number}",
+                "A stored consequence without any query vocabulary.", sources=[self.SOURCE],
+            )
+        self.assertEqual(0, self.run_cli("index").returncode)
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            config = brain.load_config(self.repository)
+            candidates, _ = retrieval._candidates(connection, self.SOURCE_WORDS)
+            anchors, _ = retrieval._runtime_filter(self.repository, candidates, config)
+            linked, stats = retrieval._source_link_candidates(
+                connection, self.repository, config, anchors, set(),
+            )
+            again, repeated = retrieval._source_link_candidates(
+                connection, self.repository, config, anchors, set(),
+            )
+        finally:
+            connection.close()
+        self.assertLessEqual(stats["anchors"], retrieval.GRAPH_ANCHOR_LIMIT)
+        self.assertEqual(retrieval.GRAPH_ROW_LIMIT, stats["examined"])
+        self.assertEqual(retrieval.GRAPH_CANDIDATE_LIMIT, len(linked))
+        self.assertTrue(stats["truncated"])
+        self.assertEqual([item["path"] for item in linked], [item["path"] for item in again])
+        self.assertEqual(stats, repeated)
+
+
+    def test_refresh_all_hosts_and_first_turn_expand_automatically(self) -> None:
+        for host in ("claude", "codex", "cursor"):
+            for task in ("TASK-GRAPH", "TASK-FIRST-TURN"):
+                with self.subTest(host=host, task=task):
+                    response = self.run_cli(
+                        "refresh", "--query", self.SOURCE_WORDS, "--task-id", task,
+                        "--host", host, "--ephemeral", "--json",
+                    )
+                    self.assertEqual(0, response.returncode, response.stderr)
+                    result = json.loads(response.stdout)
+                    self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(result["capsule"]))
+                    self.assertIn("floating point", result["capsule_text"])
+
+    def test_bound_hook_context_expands_without_a_graph_setting(self) -> None:
+        task = "TASK-AUTO-HOOK"
+        response = self.run_cli("start", "--task-id", task, "--goal", self.SOURCE_WORDS)
+        self.assertEqual(0, response.returncode, response.stderr)
+        response = self.run_cli("hook-context", "--task-id", task, "--json")
+        self.assertEqual(0, response.returncode, response.stderr)
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(json.loads(response.stdout)))
+
+    def test_lightweight_context_and_bound_hook_expand_automatically(self) -> None:
+        task = "TASK-AUTO-LITE"
+        response = self.run_cli("--mode", "lightweight", "start", "--task-id", task, "--goal", self.SOURCE_WORDS)
+        self.assertEqual(0, response.returncode, response.stderr)
+        for arguments in (("context", self.SOURCE_WORDS), ("hook-context",)):
+            response = self.run_cli("--mode", "lightweight", *arguments, "--task-id", task, "--json")
+            self.assertEqual(0, response.returncode, response.stderr)
+            result = json.loads(response.stdout)
+            self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(result))
+            self.assertEqual(self.SOURCE, result["semantic"][0]["path"])
+            self.assertLessEqual(len(response.stdout), context_cli.CAPSULE_CHARACTER_LIMIT + 1)
+
+    def test_lightweight_expansion_rechecks_cached_neighbours(self) -> None:
+        self.first.write_text(self.first.read_text() + "\nChanged after indexing.\n")
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            result = context_cli.assemble_capsule(
+                connection, self.repository, mode="lightweight", query=self.SOURCE_WORDS,
+                task_id="TASK-GRAPH", limit=3, ephemeral=True, refresh_index=False,
+            )
+        finally:
+            connection.close()
+        self.assertNotIn(self.first.relative_to(self.repository).as_posix(), self.delivered(result))
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.delivered(result))
+
+    def test_distinctive_but_weak_source_is_not_a_graph_seed(self) -> None:
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            candidates, _ = retrieval._candidates(connection, self.SOURCE_WORDS)
+            anchors = [item for item in candidates if item["path"] == self.SOURCE]
+            self.assertEqual(1, len(anchors))
+            anchors[0]["match"] = "distinctive"
+            self.assertEqual([], retrieval.source_link_candidates(
+                connection, self.repository, anchors, set(),
+            ))
+        finally:
+            connection.close()
+
+
 class PathLinkedRetrievalTest(DocumentLinkTest):
     """`retrieve --path`: the link index used during retrieval, not beside it.
 
@@ -4175,9 +4793,8 @@ class PathLinkedRetrievalTest(DocumentLinkTest):
                 phrase = phrase.removeprefix("# " + str(item["title"])).strip()
                 self.assertIn(phrase[:80], result.stdout)
 
-    def test_without_the_flag_the_chunks_stay_unreachable(self) -> None:
-        # The baseline the flag is measured against.
-        self.assertEqual(set(), self.chunk_paths() & self.delivered(self.capsule()))
+    def test_without_a_path_hint_automatic_source_links_reach_the_chunks(self) -> None:
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(self.capsule()))
 
     def test_the_flag_delivers_what_the_query_could_not_reach(self) -> None:
         self.assertEqual(
@@ -8060,6 +8677,39 @@ class MetadataTelemetryTest(RuntimeHarness):
 
 
 
+class ExcerptWindowTest(unittest.TestCase):
+    def test_adjacent_highlights_keep_each_terms_evidence_weight(self) -> None:
+        weights = {"cobalt": 3.0, "escrow": 4.0}
+        self.assertEqual((7.0, 2), retrieval._excerpt_score(["\x02cobalt escrow\x03"], weights))
+        self.assertEqual((7.0, 2), retrieval._excerpt_score(["\x02cobalt\x03 \x02escrow\x03"], weights))
+
+    def test_equal_section_scores_prefer_evidence_in_the_body(self) -> None:
+        text = "# Ledger escrow\n\nBackground notes only.\n\n## Settlement\n\nLedger escrow requires dual approval."
+        excerpt = context_cli.best_excerpt(text, {"ledger", "escrow"}, 120)
+        self.assertIn("requires dual approval", excerpt)
+        self.assertNotIn("Background notes", excerpt)
+
+    def test_a_precise_heading_keeps_priority_over_generic_body_evidence(self) -> None:
+        text = "# \x02SEC4711\x03\n\nUse dual approval.\n\n## Overview\n\n\x02ledger\x03 background notes."
+        section = retrieval.quoted_section(text, weights={"sec4711": 5.0, "ledger": 0.2})
+        self.assertEqual("SEC4711", section["heading"])
+
+    def test_a_long_sentence_quotes_the_strongest_matching_stretch(self) -> None:
+        text = "# Ledger\n\nledger " + "administrative background " * 80 + "cobalt escrow requires dual approval"
+        for limit in (120, 320, 800):
+            with self.subTest(limit=limit):
+                excerpt = context_cli.best_excerpt(text, {"ledger", "cobalt", "escrow"}, limit, "Ledger")
+                self.assertIn("cobalt escrow requires dual approval", excerpt)
+                self.assertLessEqual(len(excerpt), limit)
+
+    def test_window_score_counts_only_evidence_that_fits(self) -> None:
+        huge = "\x02ledger\x03 " + "background " * 25 + "\x02cobalt\x03 " + "background " * 25 + "\x02escrow\x03"
+        answer = "Clearing \x02cobalt\x03 \x02escrow\x03 requires dual approval."
+        excerpt = retrieval.excerpt_window([huge, answer], 120)
+        self.assertIn("requires dual approval", excerpt)
+        self.assertLessEqual(len(excerpt), 120)
+
+
 class DeliveryTest(RuntimeHarness):
     """What a host actually puts in front of the model on each turn."""
 
@@ -8331,6 +8981,16 @@ class DeliveryTest(RuntimeHarness):
         self.assertTrue(excerpt.startswith("Refunds: Refunds are issued"), excerpt)
         self.assertNotIn("Webhook", excerpt)
         self.assertLessEqual(len(context_cli.best_excerpt(content, set(), 30)), 30)
+
+    def test_render_quotes_a_late_match_in_one_oversized_sentence(self) -> None:
+        self.repository.joinpath("specs/escrow.md").write_text(
+            "# Ledger\n\nledger " + "administrative background " * 80
+            + "cobalt escrow requires dual approval\n", encoding="utf-8",
+        )
+        self.start("TASK-DELIVER")
+        result = self.refresh("ledger cobalt escrow")
+        self.assertIn("cobalt escrow requires dual approval", result["capsule_text"])
+        self.assertLessEqual(len(result["capsule_text"]), context_cli.RENDERED_CAPSULE_LIMIT)
 
     def write_auth_guide(self) -> None:
         filler = " ".join(

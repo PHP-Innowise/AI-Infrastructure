@@ -94,6 +94,7 @@ from context_retrieval import (
     excerpt_window,
     is_relevant,
     linked_documents,
+    source_link_candidates,
     marked_document,
     match_strength,
     quoted_section,
@@ -1295,6 +1296,7 @@ def deduplicate_capsule_layers(capsule: dict[str, object]) -> None:
 
 def build_context_packet(
     connection: sqlite3.Connection,
+    repository: Path,
     query: str,
     task_id: Optional[str],
     limit: int,
@@ -1373,6 +1375,10 @@ def build_context_packet(
         )
         if not found
     ]
+    semantic += source_link_candidates(
+        connection, repository, semantic,
+        {str(item["path"]) for item in semantic},
+    )
     packet["procedural"] = deduplicate_context_items(procedural)[:procedural_limit]
     packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
     packet["episodic"] = deduplicate_context_items(episodic)[:episodic_limit]
@@ -2335,6 +2341,7 @@ def assemble_capsule(
     if mode == "lightweight":
         result = build_context_packet(
             connection,
+            repository,
             query,
             task_id,
             limit,
@@ -2463,16 +2470,19 @@ def assemble_hook_context(
     task_id = validate_task_id(task_id)
     reject_capsule_privacy("Task Capsule request", [], [task_id])
     if mode == "lightweight":
-        if find_working_task(connection, task_id) is not None:
+        local_task = find_working_task(connection, task_id)
+        if local_task is not None:
+            working, _ = project_working_task(local_task)
+            query = build_capsule_query("", working) or task_id
             return assemble_capsule(
                 connection,
                 repository,
                 mode=mode,
-                query=task_id,
+                query=query,
                 task_id=task_id,
                 limit=3,
                 ephemeral=True,
-                query_source="task-id",
+                query_source="task",
                 gate_mode=gate_mode,
                 host=host,
                 entry_point="hook-context",

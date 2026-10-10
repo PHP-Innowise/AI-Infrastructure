@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
 from harness import context_usage, sessions
 from harness.knowledge import KnowledgeManager
 from harness.task_context import TaskContext
-from tests.test_harness_knowledge import install_knowledge_fixture, metadata
+from tests.test_harness_knowledge import install_knowledge_fixture, metadata, source_link_fixture
 
 
 FAKE_NATIVE = r'''
@@ -396,6 +396,20 @@ class TaskContextTests(unittest.TestCase):
 
     def memory_events(self, store, sid):
         return [event for event in store.events(sid) if event["kind"] == "memory"]
+
+    def test_automatic_launch_receives_source_linked_answers_without_settings(self):
+        query, paths = source_link_fixture(self.project)
+        store = self.manager()
+        sid = store.create(self.automatic(store, prompt=query))['id']
+        session = self.wait_status(store, sid, 'completed')
+        self.assertFalse(session['brain']['review'])
+        received = json.loads(self.calls[0]['receipt'].read_text())
+        self.assertIn('Floating point never touches', received['prompt'])
+        self.assertIn('A refund can never exceed', received['prompt'])
+        selected = {item['path']: item for item in session['brain']['capsule']['semantic']}
+        self.assertTrue(paths <= set(selected))
+        self.assertTrue(all(selected[path]['selection'] == 'source-link' for path in paths))
+        self.assertNotIn('awaiting_context', {event.get('status') for event in store.events(sid)})
 
     def test_unattended_memory_reaches_the_launch_without_a_step_from_a_person(self):
         from harness import memory_draft
