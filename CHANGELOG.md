@@ -26,6 +26,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A Windows sync can create files.** The installer's descriptor-relative
+  `create_file` asked `NtCreateFile` for synchronous I/O without naming
+  `SYNCHRONIZE` in the access mask; the call checks the requested mask before
+  generic rights are mapped and answered "The parameter is incorrect", so no
+  new file could be written by a Windows `--sync`. The two desktop-app tests
+  that read a login shell's POSIX PATH are skipped on Windows, where the
+  application does not read one.
+
 - **The Task Capsule carries no skill.** In real sessions of the five
   evaluated projects agents took none of the 71 skills a capsule named (no
   Skill call, no `SKILL.md` read on those turns), and used accelerator skills
