@@ -1814,6 +1814,15 @@ edition's own files remain in that edition's changelog.
   `scripts/check.py`, and `tests/test_check.py` (`test_timeouts_match_ci`)
   fails when a group's limit differs from its job's.
 
+- **The merge archive's Windows file calls run in CI.** `harness.chat_merge`
+  creates, reads, removes and recovers a merged chat's archive through folder
+  handles, NT handles on Windows, but its tests ran only in the Linux job:
+  they build a whole in-process Harness store and assert POSIX modes and
+  links. `tests/test_harness_merge_archive.py` drives the same functions
+  against the record table alone, without POSIX-only assertions and with a
+  junction where POSIX uses a link, and runs in the `windows-harness` job and
+  in the Linux harness step.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
