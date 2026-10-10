@@ -1273,18 +1273,14 @@ bv_program_rules() {
   esac
 }
 
-# SQL text is data in a search, and in the cat/echo/printf that feeds one -
-# unless the input also runs SQL (grep 'DROP TABLE' dump.sql | mysql app),
-# where the search is what selects the statements the client executes.
+# SQL text is data in a search, and in the cat/echo/printf that feeds one.
 bv_sql_check() {
   local parent=${BV_SEG_PARENT[BV_CUR]}
-  if ! bv_sql_runs; then
-    [[ $BV_SEARCH != *",$BV_PROG,"* ]] || return 0
-    case $BV_PROG in
-      cat|echo|printf)
-        (( parent < 0 )) || [[ $BV_SEARCH != *",${BV_SEG_PROG[parent]},"* ]] || return 0 ;;
-    esac
-  fi
+  [[ $BV_SEARCH != *",$BV_PROG,"* ]] || return 0
+  case $BV_PROG in
+    cat|echo|printf)
+      (( parent < 0 )) || [[ $BV_SEARCH != *",${BV_SEG_PROG[parent]},"* ]] || return 0 ;;
+  esac
   bv_rule_sql "${BV_SEG_WORDS[BV_CUR]}${BV_SEG_DOC[BV_CUR]}"
 }
 

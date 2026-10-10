@@ -1775,20 +1775,6 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
-- **A search that feeds an SQL client no longer passes `bash-validator.sh`.**
-  SQL text in a `grep`/`rg`/`git grep` segment, and in the `cat`/`echo`/
-  `printf` feeding one, was exempt from the destructive-SQL rules so that
-  reading the memory core's source is not refused - but the exemption held
-  even when the same input ran an SQL client, so
-  `grep 'DROP TABLE' schema.sql | mysql app_db` passed. The exemption now
-  applies only when no simple command of the input runs SQL; the generic
-  section changes identically in the four editions and Infrastructure-Creator,
-  with three blocked cases added to `tests/fixtures/bash-validator-corpus.json`.
-  The case came from an unpushed fix in a nested worktree written against the
-  earlier validator; its other half, exempting `sed -n` and `awk`, is not
-  carried over, because `sed`'s `e` command and `awk`'s `system()` run
-  commands.
-
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
