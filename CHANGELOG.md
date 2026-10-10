@@ -26,6 +26,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **The Task Capsule carries no skill.** In real sessions of the five
+  evaluated projects agents took none of the 71 skills a capsule named (no
+  Skill call, no `SKILL.md` read on those turns), and used accelerator skills
+  on 1.1% of Claude turns at all; every host lists its skills and loads its
+  instruction files itself. The procedural line only took room from
+  answer-bearing excerpts. Ranking still picks one and the manifest records it
+  as `host-listed`; `search` still returns skills; lightweight mode follows.
+  `AGENTS.md` (four editions), the `project-brain` skill, `PROTOCOL.md` and the
+  READMEs say so.
+
 - **The memory evaluation stand reads project knowledge and skill routing
   apart.** Agents in real sessions followed none of the 71 skills a capsule
   named and used accelerator skills on 1.1% of Claude turns, while skills were

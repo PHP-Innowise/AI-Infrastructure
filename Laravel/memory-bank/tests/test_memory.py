@@ -151,7 +151,7 @@ class MemoryIntegrationTest(unittest.TestCase):
         required_policy = (
             "Task Capsule",
             "3,600 characters",
-            "one Procedural",
+            "left to the host's own list",
             "three Semantic",
             "two Episodic",
             "MUST NOT pass the parent conversation",

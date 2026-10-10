@@ -61,7 +61,7 @@ class FrameworkSemanticPreservationTest(unittest.TestCase):
         ):
             self.assertIn(phase, brain)
         self.assertIn("merge completion candidate is advisory", brain.lower())
-        self.assertIn("at most 1 procedural (a strong match), 3 semantic, and 2 episodic", brain)
+        self.assertIn("at most 3 semantic and 2 episodic items", brain)
         self.assertIn("8,000 serialized characters", brain)
         self.assertIn("automatic_promotion=false", brain)
         self.assertIn("brain-create", brain)

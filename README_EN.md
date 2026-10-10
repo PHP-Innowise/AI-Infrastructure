@@ -298,7 +298,8 @@ At the start of a complex request and before a complex phase handoff, the agent
 derives a concise sanitized retrieval query and builds a Task Capsule from
 optional Working Memory and `context` retrieval. The raw request is not copied
 into the packet. The complete packet is capped at 8,000 Unicode characters and
-contains at most one Procedural, three Semantic, and two Episodic results.
+contains at most three Semantic and two Episodic results and no Procedural item:
+skills are left to the host's own list.
 Retrieved entries are short snippets with source paths; the next agent reads a
 full source only when its current step requires it.
 

@@ -105,7 +105,6 @@ from context_retrieval import (
     source_link_candidates,
     marked_document,
     match_strength,
-    procedural_slot_eligible,
     quoted_section,
     refresh_health_retention,
     RETRIEVAL_GATE_DEFAULT,
@@ -1402,11 +1401,10 @@ def build_context_packet(
     )
     # The governed capsule's rule: a skill's sub-file vacates the slot rather
     # than handing it to a weaker skill.
-    packet["procedural"] = [
-        item
-        for item in deduplicate_context_items(procedural)[:procedural_limit]
-        if procedural_slot_eligible(str(item.get("kind") or ""), str(item["path"]))
-    ]
+    # The governed capsule's rule: hosts list their skills and load their
+    # instruction files themselves, so no procedural item is carried. The
+    # search above still runs, for `no_match`.
+    packet["procedural"] = []
     packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
     packet["episodic"] = deduplicate_context_items(episodic)[:episodic_limit]
     return packet
@@ -1503,7 +1501,8 @@ def synchronize_capsule_views(capsule: dict[str, object]) -> None:
 def enforce_governed_capsule_contract(
     capsule: dict[str, object],
 ) -> dict[str, object]:
-    """Apply the shared 1/3/2 and 8,000-character contract to governed output."""
+    """Apply the shared layer limits and 8,000-character contract to governed
+    output: no procedural item reaches it (see retrieve), 3 semantic, 2 episodic."""
     compacted = json.loads(serialize_capsule(capsule))
     compacted["procedural"] = compacted.get("procedural", [])[
         :CAPSULE_LAYER_LIMITS["procedural"]

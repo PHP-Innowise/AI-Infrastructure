@@ -72,7 +72,7 @@ Use global `--mode lightweight` only by explicit choice and place it before the 
 - The public agent interface is only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`; `context` may exist solely as a compatibility alias.
 - Retrieval applies privacy, owner, authority, lifecycle, supersession, and source-freshness filters before selection.
 - Treat SQLite/BM25 output and the context packet as discovery aids. Verify cited sources before implementation or decisions.
-- Keep bounded snippets and category budgets. Delivered capsules allow at most 1 procedural (a strong match), 3 semantic, and 2 episodic items (the changelog and one recorded event) and 8,000 serialized characters; the rendered text a host reads stays under 3,600. Do not bypass the internal conflict ceiling or omit an escalation reason.
+- Keep bounded snippets and category budgets. Delivered capsules allow at most 3 semantic and 2 episodic items (the changelog and one recorded event), no procedural item (hosts list skills), and 8,000 serialized characters; the rendered text a host reads stays under 3,600. Do not bypass the internal conflict ceiling or omit an escalation reason.
 - Preserve relevant conflicting records together and report excluded/stale/private candidates only as safe metadata.
 - Require a committed retrieval manifest for governed retrieval. The manifest records selection/exclusion metadata, not hidden reasoning or source bodies.
 

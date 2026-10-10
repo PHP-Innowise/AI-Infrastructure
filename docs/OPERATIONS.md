@@ -445,9 +445,9 @@ hard ceiling, with an escalation reason. Privacy, authority, lifecycle, owner,
 and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
 
-The delivered capsule has a separate final contract: at most 1 procedural, 3
-semantic, and 2 episodic items (the changelog and one recorded event or
-episode; lightweight mode keeps one) and 8,000 serialized characters.
+The delivered capsule has a separate final contract: at most 3 semantic and 2
+episodic items (the changelog and one recorded event or episode; lightweight
+mode keeps one), no procedural item, and 8,000 serialized characters.
 Its working state carries the three newest next steps, the eight newest
 files, and four sources.
 
@@ -475,9 +475,11 @@ manifest's `excluded`. The task's own record and handoff leave as
 Code, `AGENTS.md` for Codex. The default `--host cli` excludes neither. A file
 under a skills tree other than a skill's own `SKILL.md` (`references/`,
 `agents/`, `rules/`, an `AGENTS.md` inside a skill, `SKILL FLOW.md`) never takes
-the procedural slot: when one ranks first the slot stays empty, with no
-next-skill refill, and the file leaves as `skill-subfile`. `search` still finds
-it.
+the procedural pick: when one ranks first it leaves as `skill-subfile`, with
+no next-skill refill. The capsule carries no procedural item at all - hosts
+list their skills and load their instruction files - and the pick a skill or
+instruction file would have been is recorded as `host-listed`. `search` still
+finds skills.
 
 It also reports the quality of what it found. `no-match: <layers>` names the
 layers where no candidate passed the relevance test — measured before any

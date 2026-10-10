@@ -62,7 +62,9 @@ SNIPPET_WINDOW_CHARS = 320
 # What a document whose cited file changed since verification keeps of its
 # relevance: it still ranks, below fresh knowledge of equal fit.
 SOURCE_CHANGED_WEIGHT = 0.5
-# One: see `procedural_ranked` in `retrieve`.
+# The one skill or instruction file ranking picks per turn. The capsule does
+# not carry it (see `retrieve`): the manifest records the pick as
+# `host-listed`, so routing stays measurable.
 CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
 # Repository history the main query ranks: the changelog.
@@ -4547,6 +4549,14 @@ def retrieve(
         if not procedural_slot_eligible(item["kind"], item["path"])
     }
     procedural_ranked = [item for item in head if item["path"] not in vacated_paths]
+    # Nor does the pick go into the capsule. Every host lists its skills and
+    # loads its instruction files itself, and in real sessions agents took
+    # none of the 71 skills a capsule named - no Skill call, no SKILL.md read
+    # on those turns - while accelerator skills were used on 1.1% of Claude
+    # turns at all. The line cost room the answer-bearing excerpts need; the
+    # pick stays in the manifest as `host-listed` and `search` finds skills.
+    listed_paths = {item["path"] for item in procedural_ranked}
+    procedural_ranked = []
     # The semantic layer is built from categories and the episodic layer from
     # the layer column, and the two taxonomies overlap: `category_for` has no
     # `changelog` branch, so CHANGELOG.md is category 'evidence' AND layer
@@ -4666,6 +4676,7 @@ def retrieve(
             "reason": (
                 "episodic-layer" if item["layer"] == "episodic"
                 else "skill-subfile" if item["path"] in vacated_paths
+                else "host-listed" if item["path"] in listed_paths
                 else "layer-limit"
             ),
         }

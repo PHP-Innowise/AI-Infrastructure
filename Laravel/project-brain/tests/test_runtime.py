@@ -5443,18 +5443,22 @@ class WorkingStateCapsuleTest(RuntimeHarness):
             )
             return {item["path"] for item in payload["procedural"]}, manifest["excluded"]
 
-        paths, _ = procedural("cli")
-        # One procedural slot: the better of the two, both being candidates.
-        self.assertEqual(1, len(paths))
-        self.assertLessEqual(paths, {"AGENTS.md", "CLAUDE.md"})
+        paths, excluded = procedural("cli")
+        # No procedural item is carried; the pick - the better of the two,
+        # both being candidates - is recorded.
+        self.assertEqual(set(), paths)
+        picks = {entry["path"] for entry in excluded if entry["reason"] == "host-listed"}
+        self.assertEqual(1, len(picks))
+        self.assertLessEqual(picks, {"AGENTS.md", "CLAUDE.md"})
         paths, excluded = procedural("claude")
         self.assertEqual(set(), paths)
         self.assertIn({"path": "CLAUDE.md", "reason": "host-loaded"}, excluded)
         # Claude Code also loads what CLAUDE.md imports.
         self.assertIn({"path": "AGENTS.md", "reason": "host-loaded"}, excluded)
         paths, excluded = procedural("codex")
-        self.assertEqual({"CLAUDE.md"}, paths)
+        self.assertEqual(set(), paths)
         self.assertIn({"path": "AGENTS.md", "reason": "host-loaded"}, excluded)
+        self.assertIn({"path": "CLAUDE.md", "reason": "host-listed"}, excluded)
 
     def test_claude_imports_skip_code_and_paths_outside_the_repository(self) -> None:
         docs = self.repository / "docs"
@@ -6078,12 +6082,19 @@ class CapsuleNoiseTest(RuntimeHarness):
         self.assertEqual("cobalt authority", capsule["working"]["goal"])
         self.assertFalse(any(capsule[layer] for layer in context_cli.DOCUMENT_LAYERS), capsule)
 
-    def test_only_one_strong_skill_is_delivered(self) -> None:
+    def test_no_skill_is_delivered_and_one_is_recorded_as_the_pick(self) -> None:
+        # Hosts list skills themselves and agents took none a capsule named:
+        # the capsule carries none, and the manifest names the one pick.
         for name in ("first", "second"):
             skill = self.repository / f".agents/skills/{name}/SKILL.md"
             skill.parent.mkdir(parents=True)
             skill.write_text(f"---\nname: {name}\ndescription: cobalt allocation\n---\n# {name}\n\ncobalt allocation\n")
-        self.assertEqual(1, len(self.capsule("cobalt allocation")["procedural"]))
+        capsule = self.capsule("cobalt allocation")
+        self.assertEqual([], capsule["procedural"])
+        manifest = json.loads((self.repository / capsule["manifest"]).read_text(encoding="utf-8"))
+        picks = [entry["path"] for entry in manifest["excluded"] if entry["reason"] == "host-listed"]
+        self.assertEqual(1, len(picks))
+        self.assertTrue(picks[0].startswith(".agents/skills/"))
 
     def test_relative_floor_is_per_layer_and_keeps_the_best_memory(self) -> None:
         rows = []
@@ -6243,10 +6254,11 @@ class SkillSubfileSlotTest(RuntimeHarness):
                 self.assertEqual([], payload["capsule"]["procedural"])
                 self.assertIn({"path": subfile, "reason": "skill-subfile"}, manifest["excluded"])
 
-    def test_a_skill_entry_file_still_holds_the_slot(self) -> None:
+    def test_a_skill_entry_file_is_still_the_recorded_pick(self) -> None:
         self.corpus(strong_skill=True)
         payload, manifest = self.refresh()
-        self.assertEqual([self.SKILL], [item["path"] for item in payload["capsule"]["procedural"]])
+        self.assertEqual([], payload["capsule"]["procedural"])
+        self.assertIn({"path": self.SKILL, "reason": "host-listed"}, manifest["excluded"])
         self.assertNotIn("skill-subfile", [entry["reason"] for entry in manifest["excluded"]])
 
     def test_lightweight_capsule_applies_the_same_rule(self) -> None:

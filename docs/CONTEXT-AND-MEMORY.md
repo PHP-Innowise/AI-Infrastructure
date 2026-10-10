@@ -753,6 +753,19 @@ tree - not a score threshold. The sub-files stay indexed: `search` returns
 them. On a vacated turn `no-match` still reports that the procedural layer
 matched, as it does for a skill admitted on one rare term.
 
+**2026-10-10: the capsule carries no skill.** Measured in the real sessions of
+the five evaluated projects since January: on the 71 Claude Code turns where a
+capsule named an accelerator skill, the agent made no Skill call and read no
+`SKILL.md` at all; accelerator skills were used on 24 of 2,265 Claude turns
+(1.1%), and on Codex mostly because the user typed `$code-reviewer`. Of the 35
+graded core prompts with a useful skill, the agent used any accelerator skill
+on 4. Every host lists its skills and loads its instruction files itself, so
+the procedural line only took room from the excerpts that carry answers. The
+procedural ranking still runs: its pick is recorded in the manifest as
+`host-listed` (a sub-file pick as `skill-subfile`), `no_match` still reports
+the layer, and `search` returns skills. The evaluation stand reports skill
+routing apart from project knowledge (`skill_*`, `knowledge_*`).
+
 ### The retrieval gate
 
 Restraint above was all about the document: which files are relevant enough to
@@ -1079,9 +1092,9 @@ measurement.
 The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
-policy filtering, the delivered capsule is independently capped at 1
-procedural, 3 semantic, and 2 episodic items (the changelog and one recorded
-event or episode) and 8,000 serialized characters. Snippets are
+policy filtering, the delivered capsule is independently capped at 3 semantic
+and 2 episodic items (the changelog and one recorded event or episode) and
+8,000 serialized characters; it carries no procedural item. Snippets are
 deterministically shortened as needed.
 
 A selected local episode shares the recorded-history slot with events. Its estimate is

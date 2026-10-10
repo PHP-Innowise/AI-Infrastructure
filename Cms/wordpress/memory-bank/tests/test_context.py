@@ -1713,7 +1713,9 @@ class ContextEngineTest(unittest.TestCase):
         self.assertTrue(
             all(item["layer"] == "episodic" for item in payload["episodic"])
         )
-        self.assertEqual(["AGENTS.md"], [item["path"] for item in payload["procedural"]])
+        # Hosts load their instruction files and list their skills: the
+        # packet carries no procedural item even when AGENTS.md matches.
+        self.assertEqual([], payload["procedural"])
         self.assertEqual(["README.md"], [item["path"] for item in payload["semantic"]])
         self.assertEqual("CHANGELOG.md", payload["episodic"][0]["path"])
 

@@ -5,6 +5,8 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- The Task Capsule carries no skill pointer: hosts list skills themselves and agents took none a capsule named. `AGENTS.md`, the `project-brain` skill, `PROTOCOL.md` and the READMEs say so. Details in the root [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
+
 - The Task Capsule's episodic layer carries two items: the changelog and one recorded event or local episode, found by its own search. `AGENTS.md`, the `project-brain` skill, `PROTOCOL.md` and the READMEs say so. Details in the root [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
 
 ### Added
