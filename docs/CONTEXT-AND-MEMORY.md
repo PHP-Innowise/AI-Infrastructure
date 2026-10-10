@@ -652,6 +652,18 @@ an acceptable skill reaches the capsule on Symfony golden-en .59 instead of
 .71, because the second slot is gone; the ranking itself (hit@1, hit@2) is
 unchanged, and so is the routing floor, which measures ranking.
 
+**2026-10-10: a skill's sub-file never holds the procedural slot.** Files a
+`SKILL.md` sends the agent to - `references/`, `agents/`, `rules/`, an
+`AGENTS.md` inside a skill, a note at the tree's root such as `SKILL FLOW.md` -
+were useful 1 time in 185 judgments on 121 graded prompts, against 71 in 627
+for `SKILL.md`. When one heads the procedural ranking the slot stays empty and
+the manifest records `skill-subfile`; it is not refilled, because on the 19
+replayed turns where a sub-file held the slot the next skill down was useful on
+none (5 noise, 6 unjudged). The rule is structural - the file's place in its
+tree - not a score threshold. The sub-files stay indexed: `search` returns
+them. On a vacated turn `no-match` still reports that the procedural layer
+matched, as it does for a skill admitted on one rare term.
+
 ### The retrieval gate
 
 Restraint above was all about the document: which files are relevant enough to

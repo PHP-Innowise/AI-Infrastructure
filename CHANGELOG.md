@@ -26,6 +26,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A skill's sub-files no longer take the capsule's procedural slot.**
+  References, agents, rules files, an `AGENTS.md` inside a skill and
+  `SKILL FLOW.md` were useful 1 time in 185 judgments against 71 in 627 for
+  `SKILL.md`. When one ranks first the slot stays empty - the next skill down
+  was useful on none of the 19 replayed turns - and the manifest records
+  `skill-subfile`. Lightweight mode applies the same rule. They remain
+  searchable with `search`.
+
 - **A document with a detected credential is masked in the index, not
   dropped.** One placeholder-shaped development credential in a code block
   (`password: admin`) used to take a whole README out of retrieval; on the

@@ -66,6 +66,31 @@ CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
 CAPSULE_EPISODIC_LIMIT = 1
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
+# The one file of a skill a host lists and invokes. Everything else indexed from
+# a skills tree - references/, agents/, rules/, an AGENTS.md inside a skill, a
+# note at the tree's root such as `SKILL FLOW.md` - is material a SKILL.md sends
+# the agent to. It stays indexed for `search`, but never holds the capsule's
+# procedural slot: on 121 graded prompts such files were useful 1 time in 185
+# judgments against 71 in 627 for SKILL.md, and on the 19 turns one held the
+# slot the next skill down was useful on none.
+SKILL_ENTRY_FILENAME = "SKILL.md"
+
+
+def procedural_slot_eligible(kind: str, path: str) -> bool:
+    """Whether a procedural document may hold the capsule's procedural slot.
+
+    Root policy (AGENTS.md, CLAUDE.md) may; a skill document only if it is a
+    skill's entry file. Keys are POSIX on every platform and an attached
+    tooling key is absolute, so the basename is the last segment.
+    """
+    if kind != "skill":
+        return True
+    directory, _, name = path.rpartition("/")
+    # A SKILL.md lying directly in a skills tree belongs to no skill.
+    return name == SKILL_ENTRY_FILENAME and not any(
+        directory == f"{tool}/skills" or directory.endswith(f"/{tool}/skills")
+        for tool in SKILL_EDITIONS
+    )
 # Skills whose body documents the host tool itself rather than a workflow this
 # repository owns. `skill-creator` instructs the agent to drive its own product
 # CLI - `codex exec`, `cursor-agent --print`, `claude -p` - with different
@@ -3880,6 +3905,16 @@ def retrieve(
         for item in selected
         if item["category"] == "policy" and item.get("match") != "distinctive"
     ]
+    # A skill's own sub-file at the head of that ranking does not hand its slot
+    # down: the next skill is a weaker match for a request whose best
+    # procedural match was a detail inside some skill (19 replayed turns:
+    # refilling added 0 useful skills and 5 noise).
+    head = procedural_ranked[:CAPSULE_PROCEDURAL_LIMIT]
+    vacated_paths = {
+        item["path"] for item in head
+        if not procedural_slot_eligible(item["kind"], item["path"])
+    }
+    procedural_ranked = [item for item in head if item["path"] not in vacated_paths]
     # The semantic layer is built from categories and the episodic layer from
     # the layer column, and the two taxonomies overlap: `category_for` has no
     # `changelog` branch, so CHANGELOG.md is category 'evidence' AND layer
@@ -3987,7 +4022,9 @@ def retrieve(
             # A document held back because its own layer will carry it is not
             # a document that ran out of room.
             "reason": (
-                "episodic-layer" if item["layer"] == "episodic" else "layer-limit"
+                "episodic-layer" if item["layer"] == "episodic"
+                else "skill-subfile" if item["path"] in vacated_paths
+                else "layer-limit"
             ),
         }
         for item in selected

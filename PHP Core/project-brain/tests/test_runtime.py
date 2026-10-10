@@ -5543,6 +5543,120 @@ class CapsuleNoiseTest(RuntimeHarness):
             self.assertEqual(placeholder, context_cli.sanitize_automatic_query(placeholder))
 
 
+class SkillSubfileSlotTest(RuntimeHarness):
+    """A skill's sub-file never holds the procedural slot, and does not hand
+    it to a weaker skill; `search` still finds it."""
+
+    QUERY = "reconcile the cobalt allocation ledger"
+    SKILL = ".agents/skills/alpha/SKILL.md"
+    SUBFILE = ".agents/skills/beta/references/cobalt-ledger.md"
+
+    def corpus(self, subfile: str = SUBFILE, strong_skill: bool = False) -> None:
+        skill = self.repository / self.SKILL
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        description = "cobalt allocation ledger" if strong_skill else "ledger reconciliation workflow"
+        skill.write_text(
+            f"---\nname: alpha\ndescription: {description}\n---\n\n"
+            f"# {'Cobalt allocation ledger' if strong_skill else 'Alpha'}\n\n"
+            "Reconcile entries; a cobalt allocation is checked once.\n",
+            encoding="utf-8",
+        )
+        target = self.repository / subfile
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            ("# Note\n\nA ledger note.\n" if strong_skill else
+             "# Cobalt allocation ledger\n\nThe cobalt allocation ledger lists every cobalt "
+             "allocation; reconcile the cobalt allocation ledger nightly.\n"),
+            encoding="utf-8",
+        )
+        for number in range(15):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(
+                f"# Filler {number}\n\nUnrelated filler paragraph number {number} about tooling.\n",
+                encoding="utf-8",
+            )
+
+    def refresh(self) -> tuple[dict, dict]:
+        result = self.run_cli("refresh", "--query", self.QUERY, "--task-id", "TASK-SUB",
+                              "--ephemeral", "--gate", "off", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        manifest = json.loads((self.repository / payload["capsule"]["manifest"]).read_text(encoding="utf-8"))
+        return payload, manifest
+
+    def test_a_skill_subfile_never_holds_the_procedural_slot_and_is_not_refilled(self) -> None:
+        self.corpus()
+        self.assertEqual(0, self.run_cli("index").returncode)
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            candidates, _ = retrieval._candidates(connection, self.QUERY, 30)
+        finally:
+            connection.close()
+        ranked = [item["path"] for item in candidates if item["category"] == "policy"]
+        self.assertEqual([self.SUBFILE, self.SKILL], ranked[:2])
+        payload, manifest = self.refresh()
+        capsule = payload["capsule"]
+        self.assertEqual([], capsule["procedural"])
+        for layer in ("semantic", "episodic"):
+            self.assertNotIn(self.SUBFILE, [item.get("path") for item in capsule[layer]])
+        self.assertIn({"path": self.SUBFILE, "reason": "skill-subfile"}, manifest["excluded"])
+        self.assertIn({"path": self.SKILL, "reason": "layer-limit"}, manifest["excluded"])
+        self.assertNotIn(self.SUBFILE, payload["capsule_text"])
+        found = self.run_cli("search", "cobalt allocation ledger", "--layer", "procedural", "--json")
+        self.assertEqual(0, found.returncode, found.stderr)
+        self.assertIn(self.SUBFILE, found.stdout)
+
+    def test_every_non_entry_file_of_a_skills_tree_is_a_subfile(self) -> None:
+        for subfile in (
+            ".agents/skills/beta/agents/cobalt-ledger.md",
+            ".agents/skills/beta/rules/cobalt-ledger.md",
+            ".agents/skills/beta/AGENTS.md",
+            ".agents/skills/SKILL FLOW.md",
+        ):
+            with self.subTest(subfile=subfile):
+                self.tearDown()
+                self.setUp()
+                self.corpus(subfile)
+                payload, manifest = self.refresh()
+                self.assertEqual([], payload["capsule"]["procedural"])
+                self.assertIn({"path": subfile, "reason": "skill-subfile"}, manifest["excluded"])
+
+    def test_a_skill_entry_file_still_holds_the_slot(self) -> None:
+        self.corpus(strong_skill=True)
+        payload, manifest = self.refresh()
+        self.assertEqual([self.SKILL], [item["path"] for item in payload["capsule"]["procedural"]])
+        self.assertNotIn("skill-subfile", [entry["reason"] for entry in manifest["excluded"]])
+
+    def test_lightweight_capsule_applies_the_same_rule(self) -> None:
+        self.corpus()
+        started = self.run_cli("--mode", "lightweight", "start", "--task-id", "TASK-LITE", "--goal", "ledger")
+        self.assertEqual(0, started.returncode, started.stderr)
+        result = self.run_cli("--mode", "lightweight", "context", self.QUERY, "--task-id", "TASK-LITE", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        capsule = json.loads(result.stdout)
+        capsule = capsule.get("capsule", capsule)
+        self.assertEqual([], capsule["procedural"])
+        for layer in ("semantic", "episodic"):
+            self.assertNotIn(self.SUBFILE, [item.get("path") for item in capsule[layer]])
+
+    def test_procedural_slot_eligibility(self) -> None:
+        for kind, path in (
+            ("policy", "AGENTS.md"), ("policy", "CLAUDE.md"),
+            ("skill", ".agents/skills/review/SKILL.md"),
+            ("skill", "/home/u/clone/PHP Core/.agents/skills/review/SKILL.md"),
+            ("skill", ".codex/skills/group/nested/SKILL.md"),
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(retrieval.procedural_slot_eligible(kind, path))
+        for path in (
+            ".agents/skills/review/references/guide.md", ".agents/skills/review/AGENTS.md",
+            ".agents/skills/SKILL FLOW.md", ".agents/skills/review/skill.md",
+            ".agents/skills/SKILL.md", "/home/u/clone/PHP Core/.claude/skills/SKILL.md",
+            ".agents/skills/review/references/SKILL.md.md",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(retrieval.procedural_slot_eligible("skill", path))
+
+
 class SecretMaskingDeliveryTest(RuntimeHarness):
     """A document with a detected credential is delivered with the value
     masked, fresh, and the value reaches no output."""

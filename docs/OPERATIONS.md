@@ -466,12 +466,17 @@ term. Eligible candidate tails below 30% of the best score in their own layer
 leave as `score-floor`, after privacy/freshness/host filtering. Explicit source
 links and conflicting evidence stay eligible.
 
-Two kinds of candidate never take a slot, and both are recorded in the
+Three kinds of candidate never take a slot, and all are recorded in the
 manifest's `excluded`. The task's own record and handoff leave as
 `working-task`: the state above already carries them. With `--host claude` or
 `--host codex` the instruction files that host loads by itself leave as
 `host-loaded` — `CLAUDE.md` and whatever it imports with `@path` for Claude
-Code, `AGENTS.md` for Codex. The default `--host cli` excludes neither.
+Code, `AGENTS.md` for Codex. The default `--host cli` excludes neither. A file
+under a skills tree other than a skill's own `SKILL.md` (`references/`,
+`agents/`, `rules/`, an `AGENTS.md` inside a skill, `SKILL FLOW.md`) never takes
+the procedural slot: when one ranks first the slot stays empty, with no
+next-skill refill, and the file leaves as `skill-subfile`. `search` still finds
+it.
 
 It also reports the quality of what it found. `no-match: <layers>` names the
 layers where no candidate passed the relevance test — measured before any

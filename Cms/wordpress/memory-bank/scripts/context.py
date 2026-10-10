@@ -98,6 +98,7 @@ from context_retrieval import (
     source_link_candidates,
     marked_document,
     match_strength,
+    procedural_slot_eligible,
     quoted_section,
     refresh_health_retention,
     RETRIEVAL_GATE_DEFAULT,
@@ -1407,7 +1408,13 @@ def build_context_packet(
         connection, repository, semantic,
         {str(item["path"]) for item in semantic},
     )
-    packet["procedural"] = deduplicate_context_items(procedural)[:procedural_limit]
+    # The governed capsule's rule: a skill's sub-file vacates the slot rather
+    # than handing it to a weaker skill.
+    packet["procedural"] = [
+        item
+        for item in deduplicate_context_items(procedural)[:procedural_limit]
+        if procedural_slot_eligible(str(item.get("kind") or ""), str(item["path"]))
+    ]
     packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
     packet["episodic"] = deduplicate_context_items(episodic)[:episodic_limit]
     return packet
