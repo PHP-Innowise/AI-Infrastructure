@@ -72,7 +72,7 @@
     ".agents/skills/multisite/SKILL.md": "d7ceec27477660d9c11437258098ebe292ff2a4fac56afca4656a3de4dc3f116",
     ".agents/skills/performance-optimization/SKILL.md": "1d1bd80f5270eaec21df548a481a2cdc47daed735f6219a960cdbb18cffdf3fe",
     ".agents/skills/plugin-development/SKILL.md": "2bcbd5d9bbd72ebe7960f5ff30b93612f12116e5c74c73c52faf91345f97fa4b",
-    ".agents/skills/project-brain/SKILL.md": "bade87b5ff72977dd632a7916f2da5331bef312aecb4488ffbd9cb82f99788b3",
+    ".agents/skills/project-brain/SKILL.md": "deb901e8430fe7546452cd170ead644ea7f02fbbebefe0f0b4d92bdf64184887",
     ".agents/skills/refactorer/SKILL.md": "a2ab765498fcd82b4507326afcb159e30ceee552098669b530f562564544bbbc",
     ".agents/skills/reflect/SKILL.md": "00849ecc55d1a55e276b6d30ab4183927968042f8055af14eb6ce4de17efc3d4",
     ".agents/skills/release/SKILL.md": "d1e3974dbda492d48c66b44c3c9b7ee89a512a37d064cfc7c5af1d2986fa3598",
@@ -259,7 +259,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "a35701c0217250fcb9ba87f883ee3d29d1a88b7a1426cbe4c1da97604993bfef"
   },
-  "policy_digest": "64da039cb534d4f6a1bc29008f15bc3dcd40132ef9fa506b4a2e84cce1498608",
+  "policy_digest": "9b1366d616c8287bdf2b19c9ac55ed5f312f8359b79b078c9e1d25de706da318",
   "release": "2.0.0",
   "schema_version": 1
 }

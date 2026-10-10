@@ -15,7 +15,7 @@ Operate the shared, repository-backed control plane in `project-brain/` through 
 1. Canonical policy, specs, current code, configuration, migrations, and tests establish truth and always outrank retrieved context.
 2. `project-brain/` owns shared active tasks, handoffs, findings, bugs, incidents, decisions, events, retrieval manifests, conflicts, and promotion proposals.
 3. `memory-bank/` owns governed reusable consequences, not active progress. SQLite is a disposable index plus local binding/cache in governed mode.
-4. Never claim automatic prompt injection. Indexing and retrieval happen only through explicit CLI calls.
+4. The prompt hook injects a Task Capsule into every prompt (in Cursor through the `working-memory.mdc` rule it renders) and the Stop hook checkpoints changed files into the task; any other retrieval or write is an explicit CLI or memory MCP call. The capsule is a discovery aid: the sources it cites decide.
 5. Never write raw prompts, responses, chain-of-thought, command output, secrets, customer data, personal data, or unredacted incident payloads.
 
 ## Select One Operation

@@ -272,6 +272,55 @@ class HarnessMergeTests(unittest.TestCase):
         goal=self.store.merge(request)['brain']['goal']
         self.assertTrue(goal.startswith('Merged “Design the payment retry queue”, “Webhook idempotency keys”, “Order export CSV”: '),goal)
 
+    def test_a_written_instruction_leads_a_merged_tasks_goal_and_the_titles_follow(self):
+        # The server leaves out the page's prefilled instruction by its text, so the two must stay equal.
+        self.assertEqual(MERGE_PROMPT,chat_merge.PREFILLED_INSTRUCTION)
+        sources=[self.source(title) for title in (
+            'Investigate why the payment retry queue double-charges customers after a gateway timeout and a retry',
+            'Add idempotency keys to the webhook handler so that repeated deliveries are ignored safely by every consumer',
+            'Review the refund flow for partial captures and make sure the ledger stays balanced after each refund')]
+        instruction='Implement one shared idempotency layer used by retry, webhook and refund.'
+        for prompt in (instruction,MERGE_PROMPT+'\n'+instruction,MERGE_PROMPT+' '+instruction):
+            with self.subTest(prompt=prompt):
+                request=self.request(sources); request['destination'].update(prompt=prompt,brain={'bank':'memory-bank','auto':True})
+                brain=self.store.merge(request)['brain']
+                # Long titles cannot push the person's own words out of the goal or the task ID.
+                self.assertTrue(brain['goal'].startswith(instruction+' (merged “Investigate why the payment retry'),brain['goal'])
+                self.assertTrue(brain['task_id'].startswith('harness/implement-one-shared-idempotency-layer-'),brain['task_id'])
+                self.assertIn(instruction,brain['query']); self.assertIn('ledger stays balanced',brain['query'])
+                # The prefilled boilerplate names no subject; memory does not search for it.
+                self.assertNotIn('Continue the work',brain['goal']+brain['query'])
+
+    def test_a_merged_chat_whose_saved_copy_was_deleted_is_still_named_by_the_chats_it_merged(self):
+        def merge(ids):
+            request=self.request(ids); request['destination'].update(prompt=MERGE_PROMPT,brain={'bank':'memory-bank','auto':True})
+            row=self.store.merge(request); self.store._status(row['id'],'completed'); return row
+        first=merge([self.source('Payment retry queue'),self.source('Webhook idempotency')])
+        self.store.delete_merge_archive(first['id'])
+        second=merge([first['id'],self.source('Order export CSV')])
+        self.assertTrue(second['brain']['goal'].startswith('Merged “Payment retry queue”, “Webhook idempotency”, “Order export CSV”: '),second['brain']['goal'])
+        self.assertTrue(second['brain']['task_id'].startswith('harness/merged-payment-retry-queue-'),second['brain']['task_id'])
+        inherited=self.store.merge_archive(second['id'])['sources'][0]
+        self.assertTrue(inherited['inherited_context_deleted']); self.assertEqual(['Payment retry queue','Webhook idempotency'],inherited['inherited_subjects'])
+        # A deleted nested merge keeps every chat it was about, its own deleted source's included.
+        self.store.delete_merge_archive(second['id'])
+        goal=merge([second['id'],self.source('Invoice PDF')])['brain']['goal']
+        self.assertTrue(goal.startswith('Merged “Payment retry queue”, “Webhook idempotency”, “Order export CSV”, “Invoice PDF”: '),goal)
+
+    def test_deleting_a_saved_context_leaves_files_it_did_not_write_and_says_where(self):
+        row=self.store.merge(self.request([self.source('A'),self.source('B')]))
+        folder=chat_merge.archive_path(self.store,row['id']).parent
+        # An agent with access to the folder (Claude's --add-dir in Edit mode) wrote a file there.
+        (folder/'notes.md').write_text('agent notes'); self.store._status(row['id'],'completed')
+        self.store.delete_merge_archive(row['id'])
+        self.assertEqual(['notes.md'],sorted(path.name for path in folder.iterdir()))
+        note=[event['text'] for event in self.store.events(row['id']) if event['kind']=='status'][-1]
+        self.assertIn('left in place',note); self.assertIn(str(folder),note)
+        # Unknown files are never removed recursively, not even at the next start; the storage is free all the same.
+        self.store.close(); self.store=sessions.Sessions(self.root/'state',[self.project,self.other])
+        self.assertTrue((folder/'notes.md').exists())
+        self.assertEqual(0,self.store.db.execute("SELECT count(*) FROM session_merges WHERE bundle!=''").fetchone()[0])
+
     @unittest.skipUnless(shutil.which('node'),'Merge picker check requires Node')
     def test_merge_picker_leaves_out_system_runs_it_reads_from_session_summaries(self):
         from harness import web

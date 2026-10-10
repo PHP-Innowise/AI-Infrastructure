@@ -74,7 +74,8 @@ class ContextHandoffTest(unittest.TestCase):
         export.write_bytes("Visible UTF-8: ž\r\nno final newline".encode("utf-8"))
         full = self.root / "full.md"
         self.assertEqual(0, self.save(full, "full", "--transcript", str(export)).returncode)
-        self.assertEqual(export.read_bytes(), full.read_bytes().split(b"<!-- context-handoff-transcript-v1 -->\n", 1)[1])
+        encoded = full.read_bytes().split(b"<!-- context-handoff-transcript-v2 -->\n", 1)[1]
+        self.assertEqual(export.read_bytes(), json.loads(encoded.decode("utf-8")).encode("utf-8"))
         default = json.loads(self.load(full).stdout)
         self.assertNotIn("transcript", default)
         included = self.load(full, "--include-transcript")
@@ -250,7 +251,9 @@ class ContextHandoffTest(unittest.TestCase):
         crlf_export = self.root / "crlf.txt"
         crlf_export.write_bytes(b"Exported on Windows\r\nsecond line\r\n")
         self.assertEqual(0, self.save(tasks / "context-save-3.md", "full", "--transcript", str(crlf_export)).returncode)
-        self.git("add", "tasks")
+        # Normalize on commit as well as checkout, as in a Laravel skeleton.
+        (self.root / ".gitattributes").write_text("* text=auto\n")
+        self.git("add", ".gitattributes", "tasks")
         self.git("commit", "-qm", "handoffs")
         clone = Path(self.tmp.name + "-clone")
         self.addCleanup(shutil.rmtree, clone, True)

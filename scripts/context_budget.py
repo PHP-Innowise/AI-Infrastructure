@@ -84,9 +84,12 @@ Usage:
 --check reads scripts/token_budget.json ({"editions": {name: {category:
 ceiling}}}), compares every measured value against its ceiling and exits 1
 on any excess (or on a budget file that is missing, unreadable, or out of
-sync with the editions on disk). Ceilings are the observed values + ~5%
-headroom, so the gate catches regressions without flagging normal noise;
-after a deliberate slimming, tighten them to the new observed values + ~5%.
+sync with the editions on disk). The stated policy is observed values plus
+~5% headroom, so the gate catches regressions without flagging normal noise,
+and after a deliberate slimming ceilings are tightened to the new observed
+values plus ~5%. In practice some ceilings were raised by exactly one change's
+growth and sit a few bytes above the measured value; --headroom lists what is
+left.
 
 Python 3 stdlib only.
 """
@@ -436,10 +439,13 @@ def headroom(measurements: dict[str, dict]) -> int:
     procedural pillar that can only add rules needs that number in front of
     whoever is adding one.
 
-    No warning threshold is printed on purpose. `token_budget.json` sets every
-    ceiling at the observed value plus about five per cent, so headroom is
-    ~4.8 % of the ceiling by construction and a percentage warning would fire
-    on every category at once, which is the same as no warning at all.
+    No warning threshold is printed on purpose. `token_budget.json` states a
+    policy of observed value plus about five per cent, but ceilings were raised
+    inconsistently (some refit to observed + 5 %, others by exactly one
+    change's growth), so headroom runs from a few bytes to just under 5 % of
+    the ceiling. A warning at the policy's own threshold would fire on every
+    category at once, which is the same as no warning at all; the byte count
+    is what a rule author needs.
     """
     try:
         ceilings = json.loads(BUDGET_FILE.read_text(encoding="utf-8"))["editions"]

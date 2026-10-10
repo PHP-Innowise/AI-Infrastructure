@@ -4,7 +4,8 @@ A merge freezes the user and assistant messages the Harness shows for 2-8 inacti
 project. The bundle is kept twice: as the record in SQLite (session_merges) and as a private file the agent
 can read (state_dir/merges/<task>/context.json). A launch refuses a file that no longer matches the record;
 Restart merged task rewrites it from the record. Deleting a task's saved context empties the record's bundle
-(the row and its source summary stay) and frees its share of the storage quota.
+(the row, its source summary and the titles of the chats it was about stay) and frees its share of the storage
+quota.
 Files are created, read and removed through rooted descriptors (filesystem.fs), so a link planted in the
 state directory is never followed, on POSIX or Windows.
 """
@@ -26,6 +27,10 @@ MAX_EVENTS = 10000
 PREVIEW_BYTES = 16000
 # How much of each chat's first request project memory reads with a merged task's instruction.
 MEMORY_REQUEST_CHARACTERS = 300
+# The instruction the page prefills for a merged task (MERGE_PROMPT in web/app-core.js; a test keeps them equal).
+# It names no subject, so project memory leaves it out.
+PREFILLED_INSTRUCTION = ('Continue the work from these chats. Keep each chat’s decisions and progress, '
+                         'name any conflicts between them, and propose the next steps.')
 ARCHIVE = 'context.json'
 # The events the conversation shows as messages: the user's turns, the agent's text and a successful result.
 # A memory-recovery reply answers a prompt the conversation never shows, so it stays out.
@@ -102,12 +107,15 @@ def prepare(store, source_ids, project_id):
         source = {key: session.get(key) for key in ('id', 'title', 'provider', 'branch', 'workspace', 'created_at', 'updated_at', 'status')}
         source.update({'event_watermark': watermark, 'messages': messages,
                        'history_kind': 'Harness-visible messages; native exports, tools and attachments are not included'})
-        inherited = store.db.execute('SELECT bundle FROM session_merges WHERE session_id=?', (sid,)).fetchone()
+        inherited = store.db.execute('SELECT bundle,summary FROM session_merges WHERE session_id=?', (sid,)).fetchone()
         if inherited and inherited['bundle']:
             source['inherited_context'] = json.loads(inherited['bundle'])
         elif inherited:
-            # A merged chat whose saved copy was deleted: its own messages are here, the chats it merged are not.
+            # A merged chat whose saved copy was deleted: its own messages are here, the chats it merged only by name.
+            kept = json.loads(inherited['summary'] or '{}')
             source['inherited_context_deleted'] = True
+            source['inherited_subjects'] = kept.get('subjects') or [
+                item.get('title') or 'Untitled chat' for item in kept.get('sources') or [] if isinstance(item, dict)]
         source['sha256'] = hashlib.sha256(encoded(source)).hexdigest()
         sources.append(source)
     bundle = {'version': 1, 'captured_at': now(), 'project_id': project_id, 'conflicts': 'not-evaluated', 'sources': sources}
@@ -116,32 +124,41 @@ def prepare(store, source_ids, project_id):
     return bundle
 
 
-def memory_text(bundle, prompt):
-    """What project memory reads for a merged task: the chats' subjects, then the new instruction.
-
-    The instruction alone is often the prefilled request to continue "these chats", which names no subject.
-    The first line becomes an automatic task's goal and ID; the whole text is the first turn's query. The
-    task's first message stays as written. A merged chat's title is its own instruction, so the chats it
-    merged name it instead."""
+def subjects(sources, depth=0):
+    """The titles of the chats merged sources are about. A merged chat's title is its own instruction, often the
+    prefilled one, so the chats it merged name it instead: from its saved copy, or from the titles its record
+    kept when that copy was deleted."""
     titles = []
+    for source in sources:
+        inherited = source.get('inherited_context')
+        if depth < 8 and isinstance(inherited, dict) and isinstance(inherited.get('sources'), list) and inherited['sources']:
+            names = subjects(inherited['sources'], depth + 1)
+        else:
+            kept = source.get('inherited_subjects')
+            names = [' '.join(name.split()) for name in kept if isinstance(name, str) and name.strip()] if isinstance(kept, list) else []
+        for name in names or [' '.join(str(source.get('title') or 'Untitled chat').split())]:
+            if name not in titles:
+                titles.append(name)
+    return titles
 
-    def collect(sources, depth):
-        for source in sources:
-            inherited = source.get('inherited_context')
-            if depth < 8 and isinstance(inherited, dict) and inherited.get('sources'):
-                collect(inherited['sources'], depth + 1)
-                continue
-            title = '“' + ' '.join(str(source.get('title') or 'Untitled chat').split()) + '”'
-            if title not in titles:
-                titles.append(title)
-    collect(bundle['sources'], 0)
+
+def memory_text(bundle, prompt):
+    """What project memory reads for a merged task: its instruction, the chats' titles and their first requests.
+
+    The first line becomes an automatic task's goal and ID; the whole text is the first turn's query. The task's
+    first message stays as written. An instruction the person wrote leads, as for any new session, and the
+    titles follow it; the prefilled instruction around it names no subject and is left out. When the prefilled
+    instruction is all there is, the titles lead it."""
+    names = ', '.join('“' + name + '”' for name in subjects(bundle['sources']))
     requests = []
     for source in bundle['sources']:
         first = ' '.join(next((m['text'] for m in source['messages'] if m['role'] == 'user'), '').split())
         if first:
             requests.append(first[:MEMORY_REQUEST_CHARACTERS])
-    lines = [line for line in str(prompt).strip().splitlines() if line.strip()] or ['']
-    return '\n'.join(['Merged ' + ', '.join(titles) + ': ' + lines[0], *requests, *lines[1:]])
+    own = [line.strip() for line in str(prompt).replace(PREFILLED_INSTRUCTION, '\n').splitlines() if line.strip()]
+    if own:
+        return '\n'.join([own[0] + ' (merged ' + names + ')', *own[1:], *requests])
+    return '\n'.join(['Merged ' + names + ': ' + PREFILLED_INSTRUCTION, *requests])
 
 
 def summary(bundle):
@@ -369,7 +386,8 @@ def recover(store):
     if root is None:
         return
     try:
-        # A task whose saved context was deleted keeps its row but not its folder: a removal that failed is retried here.
+        # A task whose saved context was deleted keeps its row but not its folder: one still holding nothing or only
+        # the archive is removed here. Files someone else wrote there (an agent with access to the folder) stay.
         retained = {row[0] for row in store.db.execute("SELECT session_id FROM session_merges WHERE bundle!=''")}
         for name in fs.listdir(root):
             if not identity(name) or name in retained:

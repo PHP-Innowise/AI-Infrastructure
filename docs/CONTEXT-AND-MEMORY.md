@@ -93,8 +93,12 @@ automated turn flush performs the same restoration. Lightweight tasks and local
 episodes remain machine-local and cannot be reconstructed after deletion.
 
 The active provider is local `sqlite-fts5`: network access and embeddings are
-disabled. An external provider entry exists only as a disabled contract. The
-runtime does not include automatic prompt injection.
+disabled. An external provider entry exists only as a disabled contract.
+Retrieval is not only on request: each edition's prompt hook injects a bounded
+Task Capsule into every request (Cursor reads it from the rendered
+`.cursor/rules/working-memory.mdc`), and the local memory MCP server
+(`memory-bank/scripts/mcp_server.py`, see `memory-bank/MCP.md`) offers the
+same runtime to the client as tools.
 
 ### Memory Bank
 

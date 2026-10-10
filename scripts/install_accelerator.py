@@ -831,6 +831,10 @@ HOOK_WIRING = {
     ".codex/hooks.json": ".codex/hooks/",
 }
 HELD_BACK = "held back"
+# Why a sync leaves a file the project's Git tracks, and how a person takes
+# the release then: `--sync --update-tracked` writes it by the same rules,
+# for review and a commit.
+TRACKED_REASON = "tracked by the project's Git: take it with --sync --update-tracked, then review and commit"
 # Codex runs a project hook only while the stored hash of its definition
 # matches, so rewriting this switches every hook off until it is approved
 # again. It is rewritten only for a caller that re-approves the accelerator's
@@ -1830,6 +1834,7 @@ def sync_installation(
     dry_run: bool = False,
     stamp: str | None = None,
     rewire_codex: bool = False,
+    update_tracked: bool = False,
 ) -> dict:
     """Bring an installed project's accelerator files up to this clone.
 
@@ -1847,7 +1852,11 @@ def sync_installation(
     platform that can walk a path neither by folder descriptors nor by
     handles (NO_SAFE_WRITE), and - unless `rewire_codex` says the caller
     re-approves it - the Codex hook wiring, whose trust is a hash of its
-    definitions. Each of those is reported instead.
+    definitions. Each of those is reported instead. `update_tracked` is a
+    person asking for the files the project's Git tracks too, by the same
+    rules (an edited file still stays), to review and commit: the way a
+    project that commits its accelerator takes a release. Nothing that runs
+    unattended passes it.
 
     A release is never applied in part over what its files run (see
     HOOK_WIRING): while a runtime file stays at the project's version, the
@@ -1881,7 +1890,7 @@ def sync_installation(
         for component, paths in data["installed"].items()
         if component == "shared" or any(path in existing for path in paths)
     }
-    tracked = tracked_paths(target)
+    tracked = set() if update_tracked else tracked_paths(target)
     record_problem = None
     try:
         recorded = read_confined(target, SYNC_MANIFEST)
@@ -2058,7 +2067,7 @@ def sync_installation(
             written[path] = git_blob_id(payload)
             continue
         if path in tracked:
-            keep(path, "tracked by the project's Git: update it through a commit")
+            keep(path, TRACKED_REASON)
             continue
         if path in TRUST_BOUND_FILES and exists and not rewire_codex:
             keep(path, "Codex hook wiring: a change needs re-approval in Codex /hooks")
@@ -2216,6 +2225,11 @@ def apply_release(pending: list[tuple], absent: set[str], report: dict, keep, ap
             f"{held_back} file(s) of release {report['release']} held back: what they run "
             "stays at the project's version here; each is listed under kept"
         )
+        if any(reason == TRACKED_REASON for reason in left.values()):
+            report["partial"] += (
+                "; the project's Git tracks part of the release: take it with --sync "
+                "--update-tracked, then review and commit"
+            )
 
 
 def parse_args() -> argparse.Namespace:
@@ -2243,6 +2257,12 @@ def parse_args() -> argparse.Namespace:
         help="with --sync, also update an untouched .codex/hooks.json; Codex then "
         "runs the hooks only after they are approved again in /hooks",
     )
+    parser.add_argument(
+        "--update-tracked",
+        action="store_true",
+        help="with --sync, also write files the project's Git tracks, by the same "
+        "rules (an edited file stays); review the diff and commit it",
+    )
     parser.add_argument("--target", type=Path)
     parser.add_argument("--tool", action="append", choices=TOOLS)
     parser.add_argument("--dry-run", action="store_true")
@@ -2260,6 +2280,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--inventory-out requires --write-inventories")
     if args.rewire_codex and not args.sync:
         parser.error("--rewire-codex requires --sync")
+    if args.update_tracked and not args.sync:
+        parser.error("--update-tracked requires --sync")
     return args
 
 
@@ -2285,6 +2307,7 @@ def main() -> int:
                 resolve_write_target(args.target),
                 dry_run=args.dry_run,
                 rewire_codex=args.rewire_codex,
+                update_tracked=args.update_tracked,
             )
             print(json.dumps(report, indent=1, ensure_ascii=False))
             return 1 if report["error"] else 0

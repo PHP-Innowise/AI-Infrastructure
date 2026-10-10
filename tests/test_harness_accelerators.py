@@ -377,6 +377,32 @@ class InstalledAcceleratorSyncTests(unittest.TestCase):
             "changed": [{"path": "a", "action": "updated"}], "kept": [{"path": "b", "reason": "x"}]})
         self.assertIn("brought up to Laravel 2.0.0: 1 file(s) updated", notice)
         self.assertIn("1 left as they are", notice)
+        # Nothing to tell, or a sync that failed: no line at all.
+        self.assertIsNone(sessions.accelerator_sync_notice({"edition": "Laravel", "changed": [], "kept": []}))
+        self.assertIsNone(sessions.accelerator_sync_notice({"error": "not an installed accelerator", "changed": [1]}))
+
+    def test_the_conversation_is_told_when_the_release_was_held_back(self):
+        # A project whose Git tracks its install: the sync wrote nothing, and
+        # before it said nothing either.
+        tracked = self.installer.TRACKED_REASON
+        notice = sessions.accelerator_sync_notice({
+            "edition": "Laravel", "release": "2.0.0", "changed": [],
+            "kept": [{"path": "memory-bank/scripts/context.py", "reason": tracked},
+                     {"path": ".claude/skills/context-save/SKILL.md",
+                      "reason": f"held back: the runtime stays at the project's version (x: {tracked})"},
+                     {"path": ".claude/commands/context-save.md", "reason": "held back: the same"}],
+            "partial": "2 file(s) of release 2.0.0 held back"})
+        self.assertIn("was not brought up to Laravel 2.0.0: 0 file(s) updated", notice)
+        self.assertIn("2 held back because the runtime or hook wiring they need stays", notice)
+        self.assertIn("1 left as they are", notice)
+        self.assertIn("--sync --update-tracked", notice)
+        notice = sessions.accelerator_sync_notice({
+            "edition": "Laravel", "release": "2.0.0", "changed": [{"path": "a", "action": "added"}],
+            "kept": [{"path": "b", "reason": "held back: a new hook it would run is not written"}],
+            "partial": "1 file(s) of release 2.0.0 held back"})
+        self.assertIn("was partly brought up to Laravel 2.0.0: 1 file(s) updated; 1 held back", notice)
+        self.assertNotIn("left as they are", notice)
+        self.assertNotIn("--update-tracked", notice)
 
     def keep_current(self, version):
         with patch.object(Accelerators, "source_version", return_value=version):
@@ -579,6 +605,11 @@ class InstalledCodexSyncTests(unittest.TestCase):
         self.assertNotIn(".codex/hooks.json", {item["path"] for item in report["changed"]})
         self.assertIn("could not approve", {item["path"]: item["reason"] for item in report["kept"]}[".codex/hooks.json"])
         self.assertEqual({"error": "Codex could not list hooks."}, report["codex_trust"])
+        # The new wiring's hooks do not run: the project is not at the release,
+        # and the conversation and the project's sync record say so.
+        self.assertIn("Codex could not approve the new hook wiring", report["partial"])
+        self.assertEqual(report["partial"], self.store.accelerators.get(self.project_id)["sync"]["partial"])
+        self.assertIn("was not brought up to Laravel", sessions.accelerator_sync_notice(report))
 
     @unittest.skipUnless(descriptor_walk(), "the descriptor walk needs os.supports_dir_fd")
     def test_the_wiring_put_back_never_follows_a_link_swapped_in(self):

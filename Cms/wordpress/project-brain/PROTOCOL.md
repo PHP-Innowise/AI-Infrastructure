@@ -118,8 +118,13 @@ UUID even when they do not match the query. Conflict pairs may exceed normal
 category/target budgets up to the hard ceiling, with an explicit escalation
 reason; privacy, owner, authority, lifecycle, and freshness filters still win.
 
-No network service, MCP server, embedding store, or automatic prompt injection
-is part of this runtime.
+No network service or embedding store is part of this runtime. Retrieval also
+runs without a command: the prompt hook injects the capsule above into every
+request (Cursor reads it from the `working-memory.mdc` rule the hook renders),
+unless the host delivered it and set `CONTEXT_CAPSULE_DELIVERED=1`. The local
+memory MCP server, `memory-bank/scripts/mcp_server.py`, is a stdio subprocess
+of the client whose four tools call `memory-bank/scripts/context.py` in
+governed mode; see `memory-bank/MCP.md`.
 
 ## Messages
 

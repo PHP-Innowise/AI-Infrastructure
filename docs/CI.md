@@ -253,17 +253,18 @@ reported rather than checked, so the step never overstates its coverage.
 The budget step measures each edition's startup context price and compares it
 against the per-edition ceilings in
 [`scripts/token_budget.json`](../scripts/token_budget.json). Its stated policy
-is observed values + ~5% headroom, but ceilings are raised by exactly the
-growth a change justifies, so several sit a few bytes above the measured
-value and a small addition can fail; `--headroom` lists what each category
-has left. The startup price is `AGENTS.md`
-plus every listing the tool shows the model before any work happens: skill
-descriptors from the canon `.agents/skills`, the `.claude/commands` listing,
-and the `.claude/agents` listing. All of it is paid on every session of the
-edition, used or not, which is what makes a rarely-invoked skill or agent
-expensive rather than cheap. `frontmatter_bytes` and `body_bytes` are gated
-alongside as file facts — the first a superset of the descriptors including
-orchestration keys the model never sees, the second the per-invocation cost.
+is observed values + ~5% headroom, but ceilings have been raised
+inconsistently - some refit to observed + 5%, others by exactly one change's
+growth - so headroom runs from a few bytes to just under 5% of the ceiling and
+a small addition can fail; `--headroom` lists what each category has left.
+The startup price is `AGENTS.md` plus every listing the tool shows the model
+before any work happens: skill descriptors from the canon `.agents/skills`,
+the `.claude/commands` listing, and the `.claude/agents` listing. All of it
+is paid on every session of the edition, used or not, which is what makes a
+rarely-invoked skill or agent expensive rather than cheap. `frontmatter_bytes`
+and `body_bytes` are gated alongside as file facts — the first a superset of
+the descriptors including orchestration keys the model never sees, the second
+the per-invocation cost.
 
 Every startup category counts the text a tool renders to the model, not the
 file that carries it: a frontmatter field contributes its value with the key,

@@ -187,6 +187,10 @@ python3 scripts/install_accelerator.py \
   `--sync` with `--target` (see below).
 - **Selection options:** repeatable `--tool {claude,cursor,codex}`; omission
   selects all tools. `--source-root` points at an alternate source checkout.
+- **Sync options:** `--rewire-codex` also updates an untouched
+  `.codex/hooks.json` (approve it again in Codex `/hooks`);
+  `--update-tracked` also writes files the project's Git tracks, for a
+  person to review and commit. `--dry-run` reports without writing.
 - **Collision options:** `--dry-run`; conservative `--merge-existing`; and
   destructive `--overwrite`, which is for explicit maintainer-controlled use,
   not normal adoption.
@@ -271,11 +275,24 @@ and memory server call that runtime; a tool's new hooks wait for its wiring
 (`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json`), and the
 wiring waits for a new hook that cannot be written. Each held-back file is
 listed under `kept` with a reason starting `held back:`, and `partial` says
-the project is not at the release (it is `null` otherwise). A project that
-commits its accelerator therefore takes a release through a commit: reinstall
-it over the project (`--edition <edition> --target DIR --overwrite`, after a
-`--dry-run`), review the diff and commit it. It never reads or writes through a symbolic
-link inside the project. Where Python offers descriptor-relative calls
+the project is not at the release (it is `null` otherwise).
+
+A project that commits its accelerator takes a release through a commit:
+`--sync --update-tracked --target DIR` (`--dry-run` first) writes the files
+the project's Git tracks too, by the same rules - a file still holding a
+released version, the runtime (a local edit backed up under
+`memory-bank/local`), the managed blocks of `AGENTS.md` and
+`.claude/CLAUDE.md` - and leaves every edited file, the project's own
+`README.md` and `.gitignore`, its seeded state and the tools it did not
+install as they are. Add `--rewire-codex` when the project uses Codex and
+approve the hooks again in Codex `/hooks`. Then review the report and
+`git diff` and commit. Do not reinstall with `--overwrite` for this: it
+replaces the project's own `AGENTS.md`, `README.md` and `.gitignore` and its
+edited skills, and without the original `--tool` selection it adds every
+tool. Nothing unattended (the Harness included) passes `--update-tracked`.
+
+The sync never reads or writes through a symbolic link inside the project.
+Where Python offers descriptor-relative calls
 (`os.supports_dir_fd`: Linux, macOS), every read, write, backup and the sync's
 record walk the path by folder descriptors with `O_NOFOLLOW`, so a folder
 another process swaps for a link while the sync runs is not followed either;
@@ -311,9 +328,11 @@ python3 scripts/context_budget.py --headroom
 - **`--headroom`:** prints the bytes remaining under each ceiling,
   tightest first, and always exits 0. It is what a rule author needs
   before adding a paragraph to a gated file. No percentage warning is
-  printed: `token_budget.json` sets every ceiling at the observed value
-  plus about five per cent, so headroom is ~4.8 % of the ceiling by
-  construction and a 5 % warning would fire on every category at once.
+  printed: `token_budget.json` states a policy of observed value plus about
+  five per cent, but ceilings were raised inconsistently (some refit to
+  observed + 5 %, others by exactly one change's growth), so headroom runs
+  from a few bytes to just under 5 % of the ceiling. A 5 % warning would fire
+  on every category at once; the byte count is the number that matters.
 - **Dependencies:** Python 3 standard library.
 - **Writes:** none.
 - **CI relationship:** the `lint` job runs `--check`.

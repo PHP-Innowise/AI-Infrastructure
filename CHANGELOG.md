@@ -1783,6 +1783,400 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **`PROTOCOL.md` and the `project-brain` skill admit the capsule and the MCP
+  server.** `project-brain/PROTOCOL.md` said no MCP server and no automatic
+  prompt injection are part of the runtime, and the `project-brain` skill told
+  agents never to claim automatic prompt injection because indexing and
+  retrieval run only through explicit CLI calls. Every edition's prompt hook
+  injects a Task Capsule into each request (Cursor through the rendered
+  `working-memory.mdc` rule), the Stop hook checkpoints the task, and every
+  edition registers the local memory MCP server
+  (`memory-bank/scripts/mcp_server.py`), whose four tools call `context.py`;
+  `AGENTS.md` already said so, so the skill contradicted the policy it sits
+  under. `PROTOCOL.md` in the four editions and the `memory-seed` asset
+  (`scripts/asset_parity.py --write`), rule 4 of the skill in the four
+  editions, and `docs/CONTEXT-AND-MEMORY.md` now describe both; no network
+  service or embedding store is still true and still said. Mirrors and policy
+  locks regenerated. `MemoryWiringClaimsTest` in
+  `tests/test_framework_semantics.py` fails when a shipped edition document,
+  the generator's memory assets or the root memory docs deny the MCP server or
+  the capsule the editions wire; changelogs and dated design records are left
+  out, since they quote history.
+
+- **The READMEs describe the memory the editions ship.** README_EN and
+  README_RU said a record reaches `verified` only through
+  `brain-update --authority verified`, when `brain-create --authority verified`
+  writes one already verified, with no ledger entry, and promotion reads only
+  the field. They said the memory has no MCP, when every edition ships the
+  local `harness-memory` server and the installer registers it. They named one
+  session-start hook that never injects context and left out
+  `context-continuity.sh`, which keeps every chat's visible prompts and answers
+  in `.context-handoff/` and delivers a prepared merge at session start. And
+  they promised about five percent of context-budget headroom where several
+  ceilings sit a few bytes above the measured value. Both READMEs now say what
+  the code does: ceilings were raised inconsistently, some refit to the
+  observed value plus five percent and others by exactly one change's growth,
+  so headroom runs from a few bytes to just under five percent.
+  `docs/SECURITY.md` and `docs/TOOL-INTEGRATIONS.md` no longer say the shipped
+  Codex configuration has no MCP server; `docs/CI.md`, the `--headroom` entry
+  in `scripts/README.md` and the `context_budget.py` docstrings no longer
+  promise the headroom; and `install/README.md` names the chunk and
+  Brain-runtime exclusions a seed chunk would fall under.
+
+- **This changelog's history matches the code.** The 2026-08-12 entry said the
+  installer was `main`'s version unchanged and that project chunks and Brain
+  runtime stayed installed; the merge that wrote it had added
+  `memory-bank/chunks/**` and four Brain-runtime patterns to
+  `EXCLUDED_PATH_PATTERNS`, and its counts predated them. It now records the
+  patterns and the committed inventory's counts. The 2026-08-10 entry, whose
+  `PROJECT_WORK_AREAS` rule never reached this line, is marked superseded. The
+  QA artifact integrity tooling entry, which a merge had placed by context
+  inside `## 2.0.0`, moves to Unreleased: 2.0.0 has no `scripts/qa`. The
+  context-handoff entry records the budget ceilings it raised.
+
+- **`install_accelerator.py --sync` no longer applies part of a release over
+  the runtime or hook wiring it keeps.** The sync, which the Harness runs by
+  itself on every installed project, writes no file the project's Git tracks
+  but did add the files a newer release brought. On a committed install of
+  the release before the context handoff it added the `context-save` and
+  `context-load` skills and commands, `context_handoff.py`,
+  `context_continuity.py` and the continuity hooks, and kept the older
+  `context.py`, `.claude/settings.json`, `.cursor/hooks.json` and
+  `.codex/hooks.json`: `/context-save` failed with "invalid choice:
+  'context-save'", no tool ran the new hooks, and the memory server it added
+  beside an older `brain_runtime.py` crashed on import. Now every write is
+  planned first and the release is applied only as far as what it runs
+  follows (`HOOK_WIRING`, `apply_release`): while a runtime file
+  (`memory-bank/scripts`, `project-brain/scripts`, `project-brain/schemas`)
+  stays at the project's version, nothing else of the release is written; a
+  tool's new hooks wait for its wiring, and the wiring for a new hook that
+  cannot be written; the runtime is written first, and a part of it that
+  fails holds back the rest. Each such file is listed under `kept` with a
+  reason starting `held back:`, and the report's new `partial` field says the
+  project is not at the release (null otherwise). A committed install takes
+  a release with the new `--sync --update-tracked`, which a person runs (the
+  Harness never does): it writes the files the project's Git tracks by the
+  same rules, so an edited file, the project's own `README.md` and
+  `.gitignore`, the text around `AGENTS.md`'s managed block, seeded state
+  and the tools it did not install stay, and leaves the diff to review and
+  commit; `partial` names it when tracking held the release back.
+  `scripts/README.md`, `docs/ADOPTION.md` and `harness/README.md` say so,
+  and that a reinstall with `--overwrite` is not an upgrade path (it
+  replaced those files and, without the original `--tool`, added every
+  tool). The Harness now tells the conversation when a sync held files back,
+  a sync that wrote nothing included, and `Accelerators.last_sync` carries
+  `partial`; when it puts Codex's approved wiring back because it cannot
+  approve the new one, `partial` says the release's Codex hooks run only
+  after the `/hooks` review. Tests: `tests/test_installation.py`
+  (`SyncOfAnOlderReleaseTest`: a clone publishes the release before the
+  handoff and then the current one; a committed install of the older one
+  takes nothing, as a dry run and with `--rewire-codex`, and is pointed to
+  `--update-tracked`; with it, a committed Claude-only install that has its
+  own README, ignore rules, team rule and an edited skill takes the release
+  and keeps all four, and its dry run writes nothing; an uncommitted one
+  takes everything; new hooks wait for tracked Claude wiring and for Codex
+  wiring awaiting approval; the wiring waits for a hook behind a link.
+  `InstallSyncTest`: a runtime whose backup cannot be written now holds back
+  the rest), `tests/test_harness_accelerators.py` (the held-back notice, and
+  `partial` after Codex's wiring is put back).
+
+- **The installation job has room to finish.** On PR #44 it ran 577 s of its
+  600 s limit on a hosted runner: the per-edition install checks doubled with
+  the context handoff, and its harness step varies by more than 100 s between
+  runs. `timeout-minutes` is now 20 in `.github/workflows/ci.yml` and
+  `scripts/check.py`, and `tests/test_check.py` (`test_timeouts_match_ci`)
+  fails when a group's limit differs from its job's.
+
+- **The merge archive's Windows file calls run in CI.** `harness.chat_merge`
+  creates, reads, removes and recovers a merged chat's archive through folder
+  handles, NT handles on Windows, but its tests ran only in the Linux job:
+  they build a whole in-process Harness store and assert POSIX modes and
+  links. `tests/test_harness_merge_archive.py` drives the same functions
+  against the record table alone, without POSIX-only assertions and with a
+  junction where POSIX uses a link, and runs in the `windows-harness` job and
+  in the Linux harness step.
+
+- **CLAUDE.md and the QA guides name the venv the `qa-tooling` check uses.**
+  CLAUDE.md still called the repository's tooling standard-library only and
+  gave no recipe for `scripts/qa/.venv`, and `docs/qa/` built the venv at
+  `/tmp/accelerator-qa-venv`, where `scripts/check.py` never looks, so the QA
+  checks were skipped before a push. CLAUDE.md now names both venv
+  exceptions and has a QA block beside the harness one, and the QA guides use
+  `scripts/qa/.venv`.
+
+- **The `compaction:` line reports what the rendered capsule cuts, and the
+  ceiling no longer removes it.** The line counted only what the JSON budget
+  and the governed contract dropped, while the rendered text - the only form
+  Claude Code, Codex and Cursor read - cut again: progress to its first 399
+  characters, five of the task's files, the goal and each next step past
+  their bounds, the last of five long paths in half, and every working source.
+  A 1,100-character progress therefore reached the model without the step it
+  ended on and with no compaction line, and a task with 20 files showed 5 and
+  reported 12 omitted. `rendered_working_state` now returns those cuts and
+  the line adds them to the JSON counters (20 files: 15 omitted); progress
+  keeps its opening and its end, as `truncate_progress` does for the JSON;
+  path lines stop at a whole path; and a `sources:` line shows the task's
+  cited sources, the ones the line asks the model to re-read. At the
+  3,600-character ceiling the line used to go whole before any entry, so a
+  capsule whose JSON had dropped results read as complete exactly when it was
+  tightest; it now gives up its counts for a fixed `compaction: lossy view`
+  marker, which is never dropped and goes in before the first entry the
+  ceiling drops. The marker costs about 100 characters in a capsule the
+  ceiling cuts; the drop order (excerpts, the line's counts, skills, related
+  knowledge, the weakest knowledge) and the 8,000/3,600 limits are unchanged,
+  and `shown_in_render` still records exactly what the text shows. Tests in
+  `memory-bank/tests/test_context.py` and the `WorkingStateCapsuleTest`,
+  `RelatedItemBudgetTest` and `DeliveryTest` cases in
+  `project-brain/tests/test_runtime.py`; the generator asset follows.
+
+- **The repetition guard and the edit counter no longer trust a counter
+  directory someone else made.** Both kept their counts in
+  `/tmp/<host>-loop-detection-<repo-key>/`, a predictable name they accepted
+  whoever had created it, and read and wrote the counters through symbolic
+  links: another user on a shared host could plant a counter of 11 that
+  blocked a first `php artisan test`, or link `cmd-<md5 of "git status">` to
+  `~/.bashrc` and have the next `git status` overwrite it with a number.
+  `loop-detection.sh` also fed a stored count to shell arithmetic, so a planted
+  `a[$(cmd)]` ran `cmd`, and in the guard a stored `08` aborted the arithmetic
+  and turned the guard off for that command. The counters now live in
+  `${TMPDIR:-/tmp}/<host>-loop-detection-<uid>-<repo-key>/`, created with mode
+  700; one that is a symbolic link or belongs to another user turns the count
+  off, a counter that is a symbolic link is never read or written, and a count
+  is accepted only as digits, read in base 10. The same in all four editions
+  and all three hosts.
+
+- **A command's repetition count is its session's, and polling is not a
+  loop.** The count was keyed by the command and the checkout alone: every
+  Claude Code, Codex or Harness session in one checkout added to it, and a new
+  session's start wiped the counts of every session still running there. Counters are now keyed by the payload's `session_id` (Cursor
+  `conversation_id`), and `local-context.sh` deletes only its own session's
+  counters and those untouched for a day; the edit counts of
+  `loop-detection.sh` are per session the same way. A read-only status query
+  standing alone - `gh pr checks/status/view`, `gh run list/view/watch`,
+  `git status`, `docker [compose] ps/logs`, `kubectl get/describe/logs`,
+  `tail`, optionally after `sleep N &&` and piped into filters - is no longer
+  counted: waiting for CI was refused on the twelfth poll. Chained with
+  anything else it counts as before.
+
+- **An edit by Codex, or by Claude Code's `Write`, restarts a command's
+  repetition count.** The count restarts when `loop-detection.sh` recorded an
+  edit since the command last ran, but Codex edits through `apply_patch`,
+  whose payload has no `file_path`, and Claude Code ran the hook for `Edit`
+  only. On Codex a fix-and-rerun loop was refused from its twelfth run, and
+  on Claude Code whenever the fix was a `Write`. `loop-detection.sh` now
+  counts every file an `apply_patch` call names on its `*** Add File:`,
+  `*** Update File:` and `*** Move to:` lines, and a `NotebookEdit`'s
+  `notebook_path`; `.claude/settings.json` wires it for
+  `Edit|Write|MultiEdit|NotebookEdit`.
+
+- **The repetition and edit-loop warnings reach the model on Claude Code and
+  Codex.** Both warned on stderr or stdout with exit 1, which Claude Code and
+  Codex treat as a non-blocking hook error shown to the user only, so the
+  agent first met either guard at its block. Their Claude and Codex copies
+  now exit 0 with `hookSpecificOutput.additionalContext`, which both hosts
+  add to the model's context next to the tool result, as their hook
+  documentation says. Cursor documents no such channel for `afterFileEdit` or
+  for a shell command it lets run (`agent_message` accompanies a denial), so
+  its copies still warn with exit 1 and the warning stays the user's; the
+  hook READMEs and `docs/TOOL-INTEGRATIONS.md` say so.
+
+- **Cursor no longer serves another task's working memory after a failed
+  render.** The stop and session-start hooks removed the rule
+  `.cursor/rules/working-memory.mdc` only when `hook-context` said the branch
+  had no context (status 3); a failure, a timeout, a broken render or an
+  enforce-mode skip kept the rule whichever task it named, and the prompt
+  hook never touched it without a capsule. After `git switch` to a branch
+  whose render kept failing - a name with `#` is enough, because the task ID
+  is refused - Cursor sent the previous branch's capsule with every prompt.
+  All three hooks now keep a rule they did not rewrite only when its header
+  names the current task, and remove it otherwise; an enforce-mode skip still
+  never empties the current task's rule.
+
+- **A lost subagent completion reaches the orchestrator and names its error.**
+  `subagent-dispatch.sh` reported a failed `msg-dispatch` on stdout and stderr
+  from `SubagentStop`, where Claude Code shows a hook's output to nobody but
+  the debug log, and the report quoted the first 160 characters of the error:
+  for an uncaught exception, `Traceback (most recent call last):` and the
+  install path. The report now quotes the error's last non-blank line, as
+  `working-memory-read.sh` does, and on Claude Code it is also left in the
+  ignored `memory-bank/local/unrecorded-completions`; the same script, wired
+  on `PostToolUse` for `Agent|Task` (the event Claude Code documents for
+  adding context to the parent after a subagent returns), hands it to the
+  orchestrator once as `additionalContext`. Cursor's report stays in its
+  hooks output.
+
+- **The hook READMEs describe the repetition guard as it runs.** The Cursor
+  READMEs listed only exit codes 0 and 2 for a validator that exits 1 on its
+  warning, and no README said that an edit restarts the count; they now give
+  each host's exit codes and warning channel, the edit reset, polling, the
+  session keying and the counter directory.
+
+- **Harness merge storage can be freed: a merged task's saved context can be
+  deleted.** Saved merge archives were capped at 128 and 64 MiB for the whole
+  state directory, and nothing ever removed one, so after the 128th merge
+  every new merge was refused for good. A finished merged task now offers
+  **Delete saved context** in the panel above the composer, which asks for
+  confirmation before it deletes (`POST
+  /api/sessions/<id>/delete-merge-context`). It empties the saved bundle and
+  removes the archive folder; the task, its conversation, its source list,
+  the titles of the chats it was about and the original chats stay. Only
+  saved copies count towards the quota, so the storage is free at once, the
+  refusal says how to free it, and a nested merge of such a task records
+  `inherited_context_deleted` and those titles instead of the copy. A deleted
+  copy cannot restart or start a first launch. Unknown files are never
+  removed: a folder that also holds files an agent wrote there is left in
+  place and named in the conversation, and a later start removes it only
+  once it holds nothing but the archive.
+
+- **Leaving a Harness merge draft keeps the project's new-session defaults.**
+  `selectSession()` ended the draft before saving the form, so the values
+  the draft forces (native workflow, project folder, Clash off) replaced the
+  project's saved defaults after every successful merge, or when a history
+  item was opened during a draft. It now saves first, while the draft guard
+  still skips them, as `newSession()` already did.
+
+- **The Merge picker no longer lists System Orchestration runs and AI
+  scans.** The picker filters the session list, which holds summaries, and
+  the summaries had no `system_run` or `system_discovery`; such runs were
+  offered and only refused on submit. `Sessions.SUMMARY_FIELDS` now carries
+  both.
+
+- **Restart merged task rewrites a missing or changed archive from its
+  record.** A first launch refuses an archive file that no longer matches the
+  database record, and Restart requeued the same failing launch indefinitely.
+  `restart_merge()` now rewrites the file from the record first (through
+  rooted descriptors; a link in the folder's place is refused, not followed)
+  and says so in the conversation.
+
+- **A merged task's project memory names the merged chats.** With automatic
+  memory, the first message became the Brain task goal and the first turn's
+  query, and for most merges that is the prefilled "Continue the work from
+  these chats..." with no subject. Memory now leaves the prefilled
+  instruction out. An instruction the person wrote still leads the goal and
+  the task ID, with the chats' titles after it, so long titles cannot push it
+  out of the 200-character goal; when only the prefilled instruction is
+  there, the goal starts with the titles and the task ID reads like
+  `harness/merged-design-the-payment-retry-...`. The query also carries each
+  chat's first request. A merged chat is named by the chats it merged, also
+  after its saved context was deleted. The first message itself stays as
+  written.
+
+- **A chat capture and a merge delivery stay inside the hook budget however
+  long the branch's chats are.** Every prompt and stop re-read all of the
+  branch's snapshots and ran the full secret scan over each (up to eight
+  times 4 MiB), and scanned the new text twice; delivering a merge re-scanned
+  every frozen source of an archive of up to 32 MiB. Eight chats of 3.5 MB
+  took about 9 s per capture and per delivery, so `timeout 5` killed the
+  capture after it wrote its snapshot but before it evicted one - the
+  8-per-branch cap stopped holding and each later turn cost more - and killed
+  the delivery before it claimed the pending merge, which then cost every new
+  session 5 s and delivered nothing. Each turn's new text is now scanned once;
+  snapshots and archives are read back by the sha256 recorded when their text
+  passed the scan; eviction runs first, from file modification times, without
+  opening a snapshot. `--event merge` (a command, no hook budget) scans its
+  sources again under the current patterns before freezing them, and the few
+  kilobytes a new task receives, and each `list` preview, are scanned once
+  more. Both paths now take about 0.1-0.2 s beside eight 3.5 MB chats; the
+  continuity tests time them against half the default budget.
+
+- **`.context-handoff/` keeps itself out of Git.** `install_accelerator.py
+  --sync`, which the Harness runs for every installed project, wires the
+  continuity hook into a project installed before it existed but keeps that
+  project's own `.gitignore`, so the visible chat text it then captured showed
+  up as untracked files a `git add -A` would commit. The store now writes its
+  own `.gitignore` containing `*` when it is created, or on the next capture
+  into a store that predates it, and never writes through a symlink there.
+
+- **Chat snapshots are bounded across branches, not only per branch.**
+  Eviction looked only at the current branch's valid snapshots, so those of
+  deleted branches, of a checkout that had moved (its `repository_id` no longer
+  matched) and of a pattern added since stayed on disk for good, as did a
+  temporary file of a write the hook budget killed. Each capture now keeps 64
+  snapshots per checkout and drops any idle for 30 days, besides eight per
+  branch; the hook READMEs and `docs/CONTEXT-HANDOFF.md` state the bounds.
+
+- **A Codex chat's snapshot starts with what the person typed.** Codex
+  records the project's AGENTS.md (`# AGENTS.md instructions for ...`),
+  `<environment_context>`, skills, hook prompts and notifications as
+  user-role messages, and the projection kept them as `User:` text: every
+  Codex chat of a project opened with the same AGENTS.md text, so the `list`
+  previews the `context-load merge` skill selects from were identical, and a
+  merged preview spent its first third of each source on policy. Such parts
+  (known context envelopes or either AGENTS.md header) are dropped now; a
+  `<pasted_content>` paste is the person's and stays.
+
+- **`list` and `merge` fail explicitly when chat continuity is disabled.**
+  With `CONTEXT_CONTINUITY_DISABLED` set, or a state root that does not exist,
+  both returned 0 with no output, so an agent following the skill reported a
+  merge as prepared that was never written. They now exit 1 with `Context merge
+  failed:` and the reason, as `docs/CONTEXT-HANDOFF.md` promised; the hook
+  events stay silent.
+
+- **A committed handoff loads in a CRLF checkout.** Git for Windows' default
+  `core.autocrlf=true` checks a committed `tasks/TASK-NNN/context-save-*.md`
+  out with CRLF, and `context-load` refused it as "missing JSON frontmatter".
+  A handoff that does not validate as read is now checked once more with CRLF
+  turned back into LF, and its digests decide. A new handoff containing a
+  CRLF transcript stores its exact text as a JSON string (version 2), so
+  commit-time normalization cannot change its bytes; version 1 remains readable.
+
+- **`context-save --topic` and `--task-id` refuse personal data.** Both went
+  into the tracked handoff after only the secret scan, while the curated
+  fields beside them also refuse personal data; an email address in the topic
+  was saved. They are screened like the curated fields, on save and on load.
+
+- **`context-save` works in a project outside Git.** Every cited file was
+  checked with `git check-ignore`, which exits 128 outside a repository, so a
+  handoff citing any file failed with "cannot verify source ignore rules" -
+  in a project without Git and when loading a handoff from a copy without
+  `.git`. Without Git metadata there are no ignore rules to honour and the
+  files are fingerprinted directly; where `.git` exists, a check that cannot
+  run still refuses.
+
+- **QA run evidence is complete on a detached checkout.** `run_tc_ai`
+  recorded `git branch --show-current` as the environment's `branch`, which is
+  empty where CI checks a pull request out as a detached merge commit, so the
+  evidence validator rejected `environment.json` as incomplete and the
+  `qa-tooling` job failed on its first pull request. A detached checkout is now
+  recorded as `detached at <commit>`, with a regression test.
+
+- **A project built inside an edition keeps its work under `Task/`.** The
+  client-application branches built an application inside `Laravel/` and
+  `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
+  and governed Brain records in the editions' own `specs/`, `codebase/`,
+  `memory-bank/chunks/` and `project-brain/`. There the editions' hooks and
+  index read them as the edition's memory (the Symfony session hook counted
+  six chunks and reported `brain-validation=invalid`), the installer listed
+  the specs as distribution files, the Laravel index masked three values in a
+  schema spec, and two of its PHP snippets failed the lint. The 52 files now
+  sit at the same relative paths under `<Edition>/Task/project-work/`, with
+  the project's `specs/MANIFEST.md` and `.memory-counter` beside them; the
+  editions' own copies are back to their seeds. `scripts/check_php_snippets.py`
+  no longer lints `Task/` material, which the installer already excludes.
+
+- **The QA tooling job runs locally, and its evidence names the interpreter
+  in a repository venv.** `qa-tooling` came in from the QA branch with a
+  `pip install` into the runner's own Python, which `scripts/check.py` cannot
+  mirror without installing third-party packages into the user's interpreter.
+  It now builds `scripts/qa/.venv` from the pinned `requirements-qa.txt`, as
+  `harness-fleet` builds `harness/.venv`; `check.py` has a `qa-tooling` group
+  that skips with the venv recipe when the venv is absent and fails under
+  `--strict`. `run_tc_ai.sanitized_argv` replaced the repository root before
+  the interpreter, so an interpreter inside the repository was recorded as
+  `{root}/...`; the longest path is now replaced first.
+
+- **A completion whose commit fails no longer leaves its event behind.**
+  `complete` writes the Git-tracked `event` before the SQLite commit, and the
+  rollback restored only files that existed beforehand: the task, its handoff
+  and the indexes. A commit that failed on disk or I/O therefore reopened the
+  task but kept a "Completed ..." event outside the restored index, so
+  `validate` reported the active index as stale, and a retried completion wrote
+  no event of its own (`event_id: null`) because the orphan already held its
+  external ID. The created event is now part of the same compensation. A
+  regression test fails the commit once the event exists and checks that no
+  event remains, the task, handoff and indexes are byte-identical, `validate`
+  is clean, and a retry writes exactly one event.
+
 - **Prompt distillation now preserves terms that exist only in local
   episodes.** The prompt hook previously ranked words against indexed files
   alone, so a natural prompt containing one repository word plus a distinctive

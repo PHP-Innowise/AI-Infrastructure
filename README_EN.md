@@ -680,12 +680,13 @@ python3 scripts/check.py --group lint --group mirrors  # only these jobs
 The context budget (each edition's `AGENTS.md`, skill descriptions, commands,
 agents, and skill bodies) is measured by `scripts/context_budget.py`; the
 ceilings live in `scripts/token_budget.json`. That file states a policy of
-about five percent headroom, but a ceiling is raised by exactly the growth of
-the change that justifies it, so several sit only a few bytes above the
-measured value, and one added sentence in an `AGENTS.md` can fail CI's lint
-job. Trim the text or raise the ceiling in the same change;
-`python3 scripts/context_budget.py --headroom` lists what each category has
-left.
+about five percent headroom, but ceilings have been raised inconsistently:
+some were refit to the observed value plus five percent, others raised by
+exactly the growth of one change. Headroom therefore runs from a few bytes to
+just under five percent of the ceiling, and where it is a few bytes one added
+sentence in an `AGENTS.md` can fail CI's lint job. Trim the text or raise the
+ceiling in the same change; `python3 scripts/context_budget.py --headroom`
+lists what each category has left.
 
 For stack-specific details, open the selected edition's README. For its
 durable memory, open the corresponding guide and then that edition's

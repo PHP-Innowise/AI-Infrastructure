@@ -250,6 +250,26 @@ class ContextContinuityTest(unittest.TestCase):
         self.assertIn("The pasted stack trace.", content)
         self.assertIn("Answer to rounding.", content)
 
+    def test_codex_global_policy_is_filtered_but_user_markup_stays(self) -> None:
+        self.assertTrue(runtime._codex_injected("# AGENTS.md instructions\n\n<INSTRUCTIONS>Global policy.</INSTRUCTIONS>"))
+        self.assertTrue(runtime._codex_injected("<task-notification>Finished.</task-notification>"))
+        for text in ('<div>Total</div>\nWhy is this empty?\n<div>{{ total }}</div>',
+                     '<div>Total</div>', '<pasted_content>Context.</pasted_content>'):
+            with self.subTest(text=text):
+                self.assertFalse(runtime._codex_injected(text))
+
+    def test_excerpt_cuts_do_not_manufacture_secret_tokens(self) -> None:
+        content = 'User:\n' + 'Visible progress on invoices. ' * 200
+        content += 'We closed the task-list-for-the-billing-module-refactor today.' + 'x' * 772
+        runtime._reject_secrets(content)
+        source = {'content': content, 'host': 'claude', 'kind': 'visible',
+                  'captured_at': '2026-10-10T00:00:00Z', 'commit': None, 'session': 'claude:a'}
+        rendered = runtime.render({'bundle': {'sources': [source, dict(source, session='claude:b')]},
+                                   'current': None, 'archive': 'saved.json', 'current_commit': None})
+        self.assertIn('Source 1', rendered)
+        self.assertIn('Source 2', rendered)
+        self.assertLessEqual(len(rendered.encode('utf-8')), runtime.MAX_RESTORE_BYTES)
+
     # -- explicit failures ----------------------------------------------------
 
     def test_list_and_merge_say_so_when_continuity_is_disabled(self) -> None:

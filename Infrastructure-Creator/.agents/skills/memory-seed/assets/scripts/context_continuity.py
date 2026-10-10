@@ -66,11 +66,14 @@ CAPTURE_EVENTS = {"UserPromptSubmit", "Stop", "beforeSubmitPrompt", "afterAgentR
 # AGENTS.md ("# AGENTS.md instructions for <cwd>"), `<environment_context>`,
 # skills, hook prompts and notifications. None of it is what the person typed,
 # and the AGENTS.md text would open every Codex snapshot of a project alike.
-# Each is one text part that is a single lowercase-tagged element; the person's
-# own paste arrives the same way as `<pasted_content>` and stays.
-CODEX_INSTRUCTIONS_PREFIX = "# AGENTS.md instructions for "
+# Only known injected envelopes are filtered. User markup and pasted content
+# stay even when they occupy one complete tagged text part.
+CODEX_INSTRUCTIONS_HEADER = "# AGENTS.md instructions"
 CODEX_ENVELOPE = re.compile(r"\s*<([a-z][a-z0-9_-]*)(?:\s[^<>]*)?>.*</\1(?:\s[^<>]*)?>\s*", re.DOTALL)
-CODEX_USER_ENVELOPES = {"pasted_content"}
+CODEX_INJECTED_ENVELOPES = {
+    "environment_context", "skill", "task-notification", "system-reminder",
+    "turn_aborted", "external_codex_apps_open_page",
+}
 KINDS = {
     kind + suffix
     for kind in ("event-history", "projected-jsonl", "projected-jsonl+event", "visible-export", "visible-export+event")
@@ -178,10 +181,11 @@ def _text_parts(value: Any) -> list[str]:
 
 def _codex_injected(part: str) -> bool:
     """Whether a Codex user-role text part is context Codex added itself."""
-    if part.lstrip().startswith(CODEX_INSTRUCTIONS_PREFIX):
+    header = part.lstrip().split("\n", 1)[0].rstrip("\r")
+    if header == CODEX_INSTRUCTIONS_HEADER or header.startswith(CODEX_INSTRUCTIONS_HEADER + " for "):
         return True
     envelope = CODEX_ENVELOPE.fullmatch(part)
-    return envelope is not None and envelope.group(1) not in CODEX_USER_ENVELOPES
+    return envelope is not None and envelope.group(1) in CODEX_INJECTED_ENVELOPES
 
 
 def _visible_message(record: dict[str, Any], host: str) -> tuple[str, str] | None:
@@ -716,7 +720,14 @@ def _excerpt(content: str, budget: int) -> str:
     remaining = max(0, budget - len(marker))
     first = remaining // 3
     last = remaining - first
-    return content[:first] + marker + (content[-last:] if last else "")
+    # Keep whole words at both cuts. Splitting a clean word like "task-list"
+    # at "sk-" can manufacture a token that the delivery scan then rejects.
+    while first > 0 and not content[first - 1].isspace():
+        first -= 1
+    start = len(content) - last
+    while start < len(content) and start > 0 and not content[start - 1].isspace():
+        start += 1
+    return content[:first] + marker + content[start:]
 
 
 def render(snapshot: dict[str, Any]) -> str:

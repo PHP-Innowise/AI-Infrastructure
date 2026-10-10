@@ -413,20 +413,40 @@ def memory_notice(brain):
 
 
 def accelerator_sync_notice(report):
-    """One line saying the project's accelerator was brought up to this clone."""
+    """One line saying how far the project's accelerator was brought up to this clone.
+
+    None when the sync failed or there is nothing to tell: nothing changed,
+    no hook was approved and nothing of the release was held back. A sync
+    that holds the whole release back (a project whose Git tracks the
+    runtime) changes nothing, and is told all the same.
+    """
+    if not report or report.get('error'):
+        return None
     changed = len(report.get('changed') or [])
+    trust = report.get('codex_trust') if isinstance(report.get('codex_trust'), dict) else {}
+    partial = report.get('partial')
+    if not (changed or trust.get('approved') or partial):
+        return None
+    kept = [item for item in report.get('kept') or [] if isinstance(item, dict)]
+    reasons = [str(item.get('reason') or '') for item in kept]
+    held = sum(1 for reason in reasons if reason.startswith('held back'))
     release = report.get('release')
-    text = f"This project's accelerator was brought up to {report.get('edition')}"
+    how = 'brought up' if not partial else 'partly brought up' if changed else 'not brought up'
+    text = f"This project's accelerator was {how} to {report.get('edition')}"
     text += f" {release}" if release else ''
     text += f": {changed} file(s) updated"
-    kept = len(report.get('kept') or [])
-    if kept:
-        text += (f"; {kept} left as they are (edited in the project, tracked by its Git, Codex hook wiring,"
-                 " or behind a symbolic link)")
-    trust = report.get('codex_trust') if isinstance(report.get('codex_trust'), dict) else {}
+    if held:
+        text += f"; {held} held back because the runtime or hook wiring they need stays at the project's version"
+    if len(kept) > held:
+        text += (f"; {len(kept) - held} left as they are (edited in the project, tracked by its Git,"
+                 " Codex hook wiring, or behind a symbolic link)")
     if trust.get('approved'):
         text += f"; {trust['approved']} accelerator hook(s) approved for Codex"
-    return text + '.'
+    text += '.'
+    if partial and any('--update-tracked' in reason for reason in reasons):
+        text += (' A project whose Git tracks its accelerator takes the release with'
+                 ' scripts/install_accelerator.py --sync --update-tracked, then a review and a commit.')
+    return text
 
 
 def capsule_meter(capsule, text=None):
@@ -1183,15 +1203,23 @@ class Sessions:
                 return session
             if session['status'] in (*ACTIVE, 'awaiting_context', 'awaiting_approval'):
                 raise SessionError('Wait for this task to finish, or cancel it, before deleting its saved context.')
-            summary = {**session['merge'], 'archive_deleted_at': now()}
+            row = self.db.execute('SELECT bundle FROM session_merges WHERE session_id=?', (sid,)).fetchone()
+            # The record keeps the titles of the chats the copy held, so a later merge of this task still names them.
+            kept = chat_merge.subjects(json.loads(row['bundle'])['sources']) if row and row['bundle'] else []
+            summary = {**session['merge'], 'archive_deleted_at': now(), 'subjects': kept}
             with self.db:
                 self.db.execute("UPDATE session_merges SET bundle='',context='',summary=? WHERE session_id=?",
                                 (json.dumps(summary), sid))
+            text = 'The saved copy of the merged chats was deleted; the original chats are unchanged.'
             try:
                 chat_merge.cleanup(self, sid)
             except OSError:
-                pass  # A folder that cannot be removed now is removed at the next start.
-            self._event(sid, {'kind': 'status', 'text': 'The saved copy of the merged chats was deleted; the original chats are unchanged.'})
+                pass
+            # Unknown files are never removed recursively: a folder an agent also wrote to stays, and so do they.
+            # A start removes it later only once it holds nothing or just the archive.
+            for folder in chat_merge.directories(self, sid):
+                text += ' Its folder could not be removed and was left in place: ' + folder
+            self._event(sid, {'kind': 'status', 'text': text})
             return self.get(sid)
 
     def restart_merge(self, sid):
@@ -1729,8 +1757,9 @@ class Sessions:
             synced = self.accelerators.keep_current(session['project_id'])
         except Exception:
             synced = None
-        if synced and not synced.get('error') and (synced.get('changed') or (synced.get('codex_trust') or {}).get('approved')):
-            self._event(sid, {'kind': 'memory', 'ok': True, 'text': accelerator_sync_notice(synced)})
+        notice = accelerator_sync_notice(synced)
+        if notice:
+            self._event(sid, {'kind': 'memory', 'ok': True, 'text': notice})
         try:
             if not session['brain'].get('query'):
                 prepared, problem = None, 'The automatic query has no safe technical content.'

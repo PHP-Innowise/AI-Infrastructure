@@ -2312,6 +2312,15 @@ class ContextEngineTest(unittest.TestCase):
         # The JSON still holds all of it: only the text cut it.
         self.assertEqual({"working_files": 12}, capsule["omitted"])
 
+    def test_an_oversized_first_path_is_omitted_instead_of_cut_in_half(self) -> None:
+        long_path = "very/" * 120 + "file.php"
+        capsule = {"working": {"files": [long_path], "sources": [long_path]}}
+        lines, cuts = CONTEXT.rendered_working_state(capsule)
+        self.assertEqual(1, cuts["working_files"])
+        self.assertEqual(1, cuts["working_sources"])
+        self.assertNotIn("very/", "\n".join(lines))
+        self.assertEqual(["small.php"], CONTEXT._whole_paths("sources: ", [long_path, "small.php"]))
+
     def test_path_lines_stop_at_a_whole_path(self) -> None:
         # Five long paths ran past the line bound, which cut the last one in
         # half and counted nothing.

@@ -310,7 +310,7 @@
         },
         {
           "exit": 1,
-          "meaning": "reports that the branch's snapshots could not be read, without changing them"
+          "meaning": "reports unreadable snapshots, disabled continuity, or an invalid state root without changing snapshots"
         }
       ],
       "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B": [
@@ -320,7 +320,7 @@
         },
         {
           "exit": 1,
-          "meaning": "reports an invalid, missing or duplicate source, a pending merge, or a full archive store without replacing or evicting anything"
+          "meaning": "reports invalid sources, disabled continuity, an invalid state root, a pending merge or a full archive store without replacing existing history"
         }
       ]
     },
@@ -408,7 +408,7 @@
     ],
     "limits": "32 MiB serialized per frozen archive; 128 archives and 256 MiB total per checkout; refuse new archives at quota without evicting existing task history",
     "disabled_restore_by": "CONTEXT_CONTINUITY_RESTORE_DISABLED=1, true, or yes; capture remains enabled",
-    "snapshots": "one visible-text snapshot per chat, the 8 most recent per branch kept",
+    "snapshots": "one visible-text snapshot per chat; at most 8 per branch and 64 per checkout; snapshots idle for 30 days and interrupted temporary writes are removed before capture",
     "skipped_when": "CONTEXT_MEMORY_RECOVERY=1 (a draft-only recovery is not part of the conversation)"
   }
 }

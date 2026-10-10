@@ -290,6 +290,16 @@ Treat an edition update as a new adoption:
    while retaining each tool's required frontmatter and event schema.
 6. Re-run structural, context, tool activation, and project verification.
 
+For a project installed with `scripts/install_accelerator.py` whose Git tracks
+the accelerator, `install_accelerator.py --sync --update-tracked --target DIR`
+(after the same command with `--dry-run`) does the mechanical part of steps 3
+and 4: it writes only files that still hold a released version, the runtime
+and the managed policy blocks, and lists every edited file it leaves for you
+under `kept`. Review that report and `git diff`, then commit. A reinstall with
+`--overwrite` is not an upgrade path: it replaces the project's own
+`AGENTS.md`, `README.md`, `.gitignore` and edited skills. See
+[`scripts/README.md`](../scripts/README.md).
+
 For heavily adapted or drifting installations, regenerate from current
 project evidence with Infrastructure-Creator rather than repeatedly layering
 generic files over the project.

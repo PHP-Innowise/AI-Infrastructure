@@ -52,10 +52,15 @@ command, which would reach the CLI without the merged context. The launch sets
 `context-load merge` for that client is not consumed by this Harness task; the
 project's hooks keep capturing its chat.
 
-Automatic project memory names the merged chats: the Brain task goal and the
-first turn's memory query start with the chats' titles (a merged chat by the
-chats it merged) and carry their first requests before the new instruction,
-which is often the prefilled one. The first message stays as written.
+Automatic project memory names the merged chats. An instruction you write
+leads the Brain task goal, its task ID and the first turn's memory query, as
+for any new session; the chats' titles follow it, and the query carries each
+chat's first request. The prefilled instruction names no subject, so memory
+leaves it out, and when it is all there is the goal starts with the titles
+instead. The goal is one line of at most 200 characters, so long titles after
+a long instruction are cut there; the query keeps them. A merged chat is named
+by the chats it merged, even after its saved context was deleted. The first
+message stays as written.
 
 Running chats and Creator, Fleet, Clash, System Orchestration or AI discovery
 runs are not listed and cannot be selected. A source is limited to 512 KiB of
@@ -67,6 +72,11 @@ storage, open a finished merged task you no longer need to restart and choose
 **Delete saved context**, then confirm. That removes its saved copy of the
 chats; the task, its conversation, its source list and the original chats stay,
 but the agent can no longer read the copy and the task cannot restart from it.
+The storage is freed at once, because the limits count the database copies.
+The archive folder goes too, unless something else was written into it (a
+Claude agent in Edit mode can write there): the Harness never removes unknown
+files, so it leaves that folder in place, names it in the conversation, and a
+later start removes it only once it holds nothing else.
 Archives live privately in the Harness state directory and SQLite,
 outside project Git. Retries with the same request identity create at most one
 task. A merged task that stopped before its provider created a native session
@@ -1110,7 +1120,11 @@ memory - it brings an installed copy's untouched files and memory runtime up to
 the clone (`scripts/install_accelerator.py --sync`), and, with Codex available,
 approves the accelerator's own Codex hooks in your Codex config, the record
 Codex's `/hooks` review writes; a team's own or edited hook is left for that
-review. The conversation says what changed. The memory server's own entry in
+review. The conversation says what changed, and what was held back: the sync
+writes no file the project's Git tracks, and none of a release whose runtime
+or hook wiring stays behind, so a project that commits its accelerator takes a
+release with `scripts/install_accelerator.py --sync --update-tracked` and a
+commit (see [scripts/README.md](../scripts/README.md)). The memory server's own entry in
 `.mcp.json`, `.cursor/mcp.json` and the managed block of `.codex/config.toml`
 follows the clone beside the project's own servers. Nothing is read or written
 through a symbolic link inside the project, backups and the sync's record

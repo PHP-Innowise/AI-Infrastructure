@@ -316,6 +316,124 @@ class ShippedContentIndexTest(unittest.TestCase):
                 self.assertEqual([], indexed["redacted"])
 
 
+class MemoryWiringClaimsTest(unittest.TestCase):
+    """Shipped memory documents do not deny what the editions wire.
+
+    Every edition registers the local memory MCP server (`harness-memory` in
+    `.mcp.json`, running `memory-bank/scripts/mcp_server.py`) and wires a
+    prompt hook that injects a Task Capsule. `project-brain/PROTOCOL.md` in
+    the editions and the generator asset still said no MCP server and no
+    automatic prompt injection were part of the runtime, the `project-brain`
+    skill told agents never to claim automatic prompt injection, and the root
+    READMEs, `docs/SECURITY.md`, `docs/TOOL-INTEGRATIONS.md` and
+    `docs/CONTEXT-AND-MEMORY.md` repeated it. A denial is checked only where
+    the wiring it contradicts exists, so removing the server or the hook frees
+    the documents to say so again. Changelogs and dated design records quote
+    history and are not checked.
+    """
+
+    DENIES_MCP = (
+        r"\bno\b[^.]*\bMCP servers?\b[^.]*\bis part of\b",
+        r"\bhas no\b[^.]*\bMCP server\b",
+        r"\brequires? no MCP servers?\b",
+        r"\bdoes not provide\b[^.]*\bMCP\b",
+        r"\bнет\b[^.]*\bMCP\b",
+    )
+    DENIES_INJECTION = (
+        r"\bautomatic prompt injection is part of\b",
+        r"\bhas no\b[^.]*\bautomatic prompt injection\b",
+        r"\bnever claim automatic prompt injection\b",
+        r"\bdoes not include automatic prompt injection\b",
+        r"\bretrieval happens? only through explicit CLI calls\b",
+    )
+    ROOT_DOCUMENTS = (
+        "README_EN.md",
+        "README_RU.md",
+        "docs/CONTEXT-AND-MEMORY.md",
+        "docs/SECURITY.md",
+        "docs/TOOL-INTEGRATIONS.md",
+    )
+    GENERATOR = Path("Infrastructure-Creator")
+    GENERATOR_ASSETS = GENERATOR / ".agents/skills/memory-seed/assets"
+
+    @staticmethod
+    def registers_memory_mcp(edition: Path) -> bool:
+        try:
+            servers = json.loads(
+                (ROOT / edition / ".mcp.json").read_text(encoding="utf-8")
+            )["mcpServers"]
+        except (OSError, ValueError, KeyError):
+            return False
+        server = servers.get("harness-memory") or {}
+        return "mcp_server.py" in json.dumps(server) and (
+            ROOT / edition / "memory-bank/scripts/mcp_server.py"
+        ).is_file()
+
+    @staticmethod
+    def injects_capsule(edition: Path) -> bool:
+        try:
+            hooks = json.loads(
+                (ROOT / edition / ".claude/settings.json").read_text(encoding="utf-8")
+            )["hooks"]["UserPromptSubmit"]
+        except (OSError, ValueError, KeyError):
+            return False
+        return "working-memory-read.sh" in json.dumps(hooks) and (
+            ROOT / edition / ".claude/hooks/working-memory-read.sh"
+        ).is_file()
+
+    @staticmethod
+    def tracked_documents(prefix: Path) -> list:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--", str(prefix)],
+            cwd=ROOT, capture_output=True, check=True,
+        ).stdout.decode("utf-8").split("\0")
+        return [
+            Path(name) for name in listed
+            if name.endswith(".md")
+            and Path(name).name != "CHANGELOG.md"
+            and "Task" not in Path(name).parts
+        ]
+
+    def denials(self, relative: Path, mcp: bool, injection: bool) -> list:
+        flat = " ".join(
+            (ROOT / relative).read_text(encoding="utf-8").split()
+        )
+        patterns = (self.DENIES_MCP if mcp else ()) + (
+            self.DENIES_INJECTION if injection else ()
+        )
+        return [
+            f"{relative.as_posix()}: {match.group(0)[:100]}"
+            for pattern in patterns
+            for match in re.finditer(pattern, flat, re.I)
+        ]
+
+    def test_no_shipped_document_denies_the_memory_server_or_the_capsule(self) -> None:
+        offenders = []
+        wired = []
+        for edition in FRAMEWORK_PATHS.values():
+            mcp, injection = self.registers_memory_mcp(edition), self.injects_capsule(edition)
+            wired.append((mcp, injection))
+            for relative in self.tracked_documents(edition):
+                offenders += self.denials(relative, mcp, injection)
+        # Sanity: the condition must hold today, or the test checks nothing.
+        self.assertIn((True, True), wired)
+
+        any_mcp = any(mcp for mcp, _ in wired)
+        any_injection = any(injection for _, injection in wired)
+        for name in self.ROOT_DOCUMENTS:
+            offenders += self.denials(Path(name), any_mcp, any_injection)
+
+        # The generator copies these assets into every project it builds, with
+        # the MCP server and a hook-forge prompt hook beside them.
+        asset_mcp = (ROOT / self.GENERATOR_ASSETS / "scripts/mcp_server.py").is_file()
+        asset_injection = "working-memory-read.sh" in (
+            ROOT / self.GENERATOR / ".agents/skills/hook-forge/SKILL.md"
+        ).read_text(encoding="utf-8")
+        for relative in self.tracked_documents(self.GENERATOR_ASSETS):
+            offenders += self.denials(relative, asset_mcp, asset_injection)
+        self.assertEqual([], offenders)
+
+
 class FrameworkApiCurrencyTest(unittest.TestCase):
     """Snippets that fatal or mislead on the framework versions an edition
     declares. Each pattern was shipped once and found by an audit."""

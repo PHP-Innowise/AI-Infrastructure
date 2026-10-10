@@ -1378,7 +1378,53 @@ class SyncOfAnOlderReleaseTest(unittest.TestCase):
                 self.assertTrue(
                     report["partial"].startswith(f"{len(self.new_files)} file(s) of release "), report["partial"]
                 )
+                self.assertIn("--sync --update-tracked", report["partial"])
                 self.assertEqual(before, self.accelerator_files(target))
+
+    def test_update_tracked_takes_the_release_and_keeps_what_the_project_owns(self) -> None:
+        # The project's own README, ignore rules and team rule, an edited
+        # accelerator skill, and one tool. Reinstalling with --overwrite, the
+        # documented way before, replaced the first three and the skill and
+        # added the tools the project had not chosen.
+        target = Path(self._tmp.name) / "committed with its own files"
+        target.mkdir()
+        (target / "README.md").write_text("# My project\n", encoding="utf-8")
+        (target / ".gitignore").write_text("vendor/\n.env\n", encoding="utf-8")
+        (target / "AGENTS.md").write_text("# Team rules\n\n- Deploy only on Tuesdays.\n", encoding="utf-8")
+        self.git(target, "init", "--quiet")
+        installed = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.older), "--edition", "Symfony",
+            "--tool", "claude", "--merge-existing", "--target", str(target),
+        )
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        skill = target / ".claude/skills/memory/SKILL.md"
+        edited = skill.read_text(encoding="utf-8") + "\nTeam note: run the memory check before a release.\n"
+        skill.write_text(edited, encoding="utf-8")
+        self.git(target, "add", "-A")
+        self.git(target, "commit", "--quiet", "-m", "Install the accelerator")
+        before = self.accelerator_files(target)
+        runtime = "memory-bank/scripts/context.py"
+
+        dry = self.sync(target, "--update-tracked", "--dry-run")
+        self.assertIn(runtime, {item["path"] for item in dry["changed"]})
+        self.assertEqual(before, self.accelerator_files(target))
+
+        report = self.sync(target, "--update-tracked")
+        self.assertIsNone(report["partial"], report["kept"])
+        expected = [path for path in self.new_files if not path.startswith((".codex/", ".agents/"))]
+        self.assertEqual(sorted(expected), sorted(set(self.accelerator_files(target)) - set(before)))
+        for path in (*expected, runtime, ".claude/settings.json"):
+            self.assertEqual(self.released(path), (target / path).read_bytes(), path)
+        self.assertEqual("# My project\n", (target / "README.md").read_text(encoding="utf-8"))
+        ignored = (target / ".gitignore").read_text(encoding="utf-8").splitlines()
+        self.assertIn("vendor/", ignored)
+        self.assertIn(".env", ignored)
+        self.assertIn("- Deploy only on Tuesdays.", (target / "AGENTS.md").read_text(encoding="utf-8"))
+        self.assertEqual(edited, skill.read_text(encoding="utf-8"))
+        self.assertEqual("edited in the project", self.kept(report).get(".claude/skills/memory/SKILL.md"))
+        # What changed waits in the working tree for review and a commit.
+        status = run("git", "-C", str(target), "status", "--porcelain")
+        self.assertIn(f" M {runtime}", status.stdout.splitlines())
 
     def test_an_install_nobody_committed_takes_the_whole_release(self) -> None:
         target = self.project("untracked")

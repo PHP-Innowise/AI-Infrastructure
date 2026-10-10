@@ -32,6 +32,7 @@ class HandoffError(Exception):
 
 
 SCHEMA_VERSION = 1
+ENCODED_SCHEMA_VERSION = 2
 DETAIL_LIMITS = {"summary": 8_000, "topic": 16_000, "full": 64_000}
 SOURCE_CLIENTS = {"codex", "claude", "cursor", "other"}
 CURATED_FIELDS = (
@@ -56,6 +57,7 @@ INPUT_MAX_BYTES = 1_024 * 1_024
 TRANSCRIPT_MAX_BYTES = 4 * 1_024 * 1_024
 HANDOFF_MAX_BYTES = 2 * INPUT_MAX_BYTES + TRANSCRIPT_MAX_BYTES
 TRANSCRIPT_MARKER = b"\n## Visible transcript\n\n<!-- context-handoff-transcript-v1 -->\n"
+TRANSCRIPT_JSON_MARKER = b"\n## Visible transcript (JSON string)\n\n<!-- context-handoff-transcript-v2 -->\n"
 INTERNAL_TRANSCRIPT_PATTERN = re.compile(
     r'"(?:type|role)"\s*:\s*"(?:system|developer|tool|reasoning|function_call|tool_call|response_item)"',
     re.IGNORECASE,
@@ -324,8 +326,9 @@ def _parse_handoff(text: bytes) -> tuple[dict[str, object], dict[str, object], b
     bytes. A checkout that converts line endings (Git for Windows' default
     core.autocrlf=true) hands back every LF as CRLF, so a file that does not
     validate as it is read is tried once more with CRLF turned back into LF;
-    the digests then decide. Git leaves a file alone that already held CRLF,
-    so a transcript's own CRLF survives in the first reading.
+    the digests then decide. Version 2 stores a transcript containing carriage
+    returns as a JSON string so Git cannot normalize its original bytes.
+    Version 1 handoffs remain readable.
     """
     readings = [text]
     if b"\r\n" in text:
@@ -351,7 +354,7 @@ def _validate_metadata(metadata: dict[str, object], body: bytes) -> tuple[dict[s
     }
     if set(metadata) != required:
         raise HandoffError("handoff frontmatter has an unsupported schema")
-    if type(metadata["schema_version"]) is not int or metadata["schema_version"] != SCHEMA_VERSION or metadata["type"] != "context-handoff":
+    if type(metadata["schema_version"]) is not int or metadata["schema_version"] not in (SCHEMA_VERSION, ENCODED_SCHEMA_VERSION) or metadata["type"] != "context-handoff":
         raise HandoffError("handoff schema version or type is unsupported")
     detail = metadata["detail"]
     if not isinstance(detail, str):
@@ -402,11 +405,24 @@ def _validate_metadata(metadata: dict[str, object], body: bytes) -> tuple[dict[s
         and type(transcript_metadata["bytes"]) is int
         and 0 < transcript_metadata["bytes"] <= TRANSCRIPT_MAX_BYTES
     ):
-        prefix = render_body(validated).encode("utf-8") + TRANSCRIPT_MARKER
+        encoded = metadata["schema_version"] == ENCODED_SCHEMA_VERSION
+        prefix = render_body(validated).encode("utf-8") + (TRANSCRIPT_JSON_MARKER if encoded else TRANSCRIPT_MARKER)
         if not body.startswith(prefix):
             raise HandoffError("handoff transcript marker is missing")
-        transcript = body[len(prefix):]
-        expected_body = prefix + transcript
+        stored = body[len(prefix):]
+        if encoded:
+            try:
+                visible = json.loads(stored.decode("utf-8"))
+                if not isinstance(visible, str):
+                    raise ValueError("transcript is not a string")
+                transcript = visible.encode("utf-8")
+            except (ValueError, UnicodeError, RecursionError) as error:
+                raise HandoffError("handoff transcript encoding is invalid") from error
+            _reject_secrets("transcript", [visible])
+            expected_body = prefix + json.dumps(visible, ensure_ascii=False).encode("utf-8")
+        else:
+            transcript = stored
+            expected_body = prefix + transcript
         if len(transcript) != transcript_metadata["bytes"] or hashlib.sha256(transcript).hexdigest() != transcript_metadata["sha256"]:
             raise HandoffError("handoff transcript digest does not match")
     else:
@@ -466,11 +482,15 @@ def save_handoff(
         else:
             raise HandoffError("handoff output must be a standalone task artifact, outside the accelerator state")
     transcript = _read_transcript(transcript_path) if transcript_path else None
+    encoded = transcript is not None and b"\r" in transcript
     body = render_body(context).encode("utf-8")
     if transcript is not None:
-        body += TRANSCRIPT_MARKER + transcript
+        body += (TRANSCRIPT_JSON_MARKER + json.dumps(transcript.decode("utf-8"), ensure_ascii=False).encode("utf-8")
+                 if encoded else TRANSCRIPT_MARKER + transcript)
+    if len(body) > HANDOFF_MAX_BYTES - INPUT_MAX_BYTES:
+        raise HandoffError("encoded handoff exceeds the size limit")
     metadata: dict[str, object] = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": ENCODED_SCHEMA_VERSION if encoded else SCHEMA_VERSION,
         "type": "context-handoff",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "detail": detail,

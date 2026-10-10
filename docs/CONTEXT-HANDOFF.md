@@ -122,9 +122,9 @@ native hook makes one available. A recognised JSONL input is projected to only
 visible `user` and `assistant` text; it discards system messages, hidden
 reasoning, tool calls, envelopes, and metadata. In a Codex rollout it also
 drops the context Codex records as user messages: the project's
-`# AGENTS.md instructions for ...` block, `<environment_context>`, and any other
-user-role text part that is one lowercase-tagged element (skills, hook prompts,
-notifications). A `<pasted_content>` part is the person's own paste and stays.
+`# AGENTS.md instructions` block (with or without a project path), and known
+context envelopes such as `<environment_context>`, `<skill>` and
+`<task-notification>`. User HTML/Blade examples and `<pasted_content>` stay.
 So a Codex chat's `list` preview opens with its first real prompt. A projected
 JSONL snapshot is explicitly partial, never a full transcript. The runtime never searches client
 account directories, private session stores, or internal history files.
@@ -209,8 +209,10 @@ indexing, even when renamed. `context-load` validates format and source drift
 without mutating Brain, Bank, or SQLite. A handoff checked out with CRLF line
 endings - Git for Windows' default `core.autocrlf=true` converts a committed LF
 file - still loads: a file that does not validate as read is checked again with
-CRLF turned back into LF, and its digests decide. A transcript that already
-held CRLF is left as it is by Git and keeps its bytes. In a project outside
+CRLF turned back into LF, and its digests decide. A new full handoff whose
+transcript contains carriage returns stores that transcript as a JSON string
+(version 2), preserving its exact bytes even when Git normalizes line endings
+on commit. `--include-transcript` decodes it; version 1 handoffs remain readable. In a project outside
 Git, or a copy of one without `.git`, cited files are fingerprinted without
 ignore rules; where Git metadata exists but the ignore check cannot run, the
 command still refuses. `context-load` returns the curated document by default;

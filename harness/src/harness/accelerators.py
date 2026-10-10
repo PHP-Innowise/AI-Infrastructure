@@ -277,6 +277,11 @@ class Accelerators:
                                              if item.get('path') != wiring]
                         report['kept'].append({'path': wiring,
                                                'reason': 'Codex could not approve the new wiring; the old one stays'})
+                        # The release's new Codex hooks are on disk but the
+                        # wiring that would run them is not: not at the release.
+                        note = ('Codex could not approve the new hook wiring, so the approved one stays; '
+                                "this release's Codex hooks run after the /hooks review")
+                        report['partial'] = f"{report['partial']}; {note}" if report.get('partial') else note
                 except (installer.InventoryError, OSError) as restore_error:
                     report['codex_trust']['not_restored'] = (
                         f'the approved wiring could not be put back: {restore_error}')
@@ -303,7 +308,7 @@ class Accelerators:
                 'edition': report.get('edition'), 'release': report.get('release'),
                 'changed': len(report.get('changed') or []), 'kept': report.get('kept') or [],
                 'backups': report.get('backups') or [], 'error': report.get('error'),
-                'codex_trust': report.get('codex_trust')}
+                'partial': report.get('partial'), 'codex_trust': report.get('codex_trust')}
 
     # -- a launch ------------------------------------------------------------
 

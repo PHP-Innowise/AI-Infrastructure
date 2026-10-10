@@ -2724,15 +2724,18 @@ def _bounded(text: object, limit: int) -> str:
 def _whole_paths(label: str, paths: list[str]) -> list[str]:
     """The leading ``paths`` that fit one rendered line after ``label``.
 
-    Whole paths only, and at least the first: a path cut in half names no
-    file, and the line's own bound used to cut the last one silently.
+    Whole paths only: a path cut in half names no file. Even the first is
+    omitted if it cannot fit; the caller counts it as omitted.
     """
     kept: list[str] = []
     width = len(label)
     for path in paths:
         width += len(path) + (2 if kept else 0)
-        if kept and width > RENDERED_LINE_LIMIT:
-            break
+        if width > RENDERED_LINE_LIMIT:
+            if kept:
+                break
+            width = len(label)
+            continue
         kept.append(path)
     return kept
 
