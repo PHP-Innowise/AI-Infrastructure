@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -87,8 +88,42 @@ def repo_key(repo: Path) -> str:
     )
 
 
-def track_dir(tool: str, repo: Path) -> Path:
-    return Path("/tmp/{}-loop-detection-{}".format(MIRRORS[tool][2], repo_key(repo)))
+def track_dir(tool: str, repo: Path, base: str | None = None) -> Path:
+    """The per-user counter directory loop-detection and the guard share.
+
+    Under TMPDIR (else /tmp), named for the host, the user and the repo key;
+    `base` stands for a TMPDIR the hook was given explicitly.
+    """
+    root = (base if base is not None else os.environ.get("TMPDIR") or "/tmp").rstrip("/")
+    return Path("{}/{}-loop-detection-{}-{}".format(
+        root, MIRRORS[tool][2], os.geteuid(), repo_key(repo)
+    ))
+
+
+def warning_context(result) -> str:
+    """The warning a Claude Code or Codex hook hands the model.
+
+    Both hosts add `hookSpecificOutput.additionalContext` to the model's
+    context next to the tool result; a non-blocking exit code with text on
+    stderr reaches only the user. Cursor has no such channel for these events
+    and keeps the user-visible form: text and exit 1.
+    """
+    output = json.loads(result.stdout)["hookSpecificOutput"]
+    return output["additionalContext"]
+
+
+def patch_payload(*paths: str, session: str | None = None) -> dict:
+    """A Codex apply_patch call: the files are named inside the patch text."""
+    body = "".join(
+        "*** Update File: {}\n@@\n-old\n+new\n".format(path) for path in paths
+    )
+    payload = {
+        "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Begin Patch\n" + body + "*** End Patch\n"},
+    }
+    if session:
+        payload["session_id"] = session
+    return payload
 
 
 def counter_files(directory: Path) -> list[Path]:
@@ -125,7 +160,10 @@ class FakeRepoMixin:
     def _cleanup_state(self) -> None:
         for tool in MIRRORS:
             for repo in (self.repo_a, self.repo_b):
-                shutil.rmtree(track_dir(tool, repo), ignore_errors=True)
+                directory = track_dir(tool, repo)
+                if directory.is_symlink():
+                    directory.unlink()
+                shutil.rmtree(directory, ignore_errors=True)
         self._tmp.cleanup()
 
 
@@ -186,12 +224,25 @@ class BashValidatorTest(FakeRepoMixin, unittest.TestCase):
         command = self.payload("vendor/bin/phpunit --filter Broken")
         for tool in MIRRORS:
             with self.subTest(tool=tool):
-                codes = [
-                    run_hook(tool, self.HOOK, command, cwd=self.repo_a).returncode
-                    for _ in range(12)
+                results = [
+                    run_hook(tool, self.HOOK, command, cwd=self.repo_a)
+                    for _ in range(11)
                 ]
-                self.assertEqual([0] * 5, codes[:5])
-                self.assertEqual([1] * 6, codes[5:11])
+                self.assertEqual(
+                    [(0, "", "")] * 5,
+                    [(r.returncode, r.stdout, r.stderr) for r in results[:5]],
+                )
+                for count, result in enumerate(results[5:], start=6):
+                    expected = "WARNING: this exact command has run {} times".format(count)
+                    if tool == "cursor":
+                        # No channel to the agent for an allowed shell
+                        # command: the warning is the user's.
+                        self.assertEqual((1, ""), (result.returncode, result.stdout))
+                        self.assertIn(expected, result.stderr)
+                    else:
+                        # Exit 0 with additionalContext: the model sees it.
+                        self.assertEqual((0, ""), (result.returncode, result.stderr))
+                        self.assertIn(expected, warning_context(result))
                 blocked = run_hook(tool, self.HOOK, command, cwd=self.repo_a)
                 self.assertEqual(2, blocked.returncode)
                 self.assertIn("BLOCKED", blocked.stderr)
@@ -211,20 +262,153 @@ class BashValidatorTest(FakeRepoMixin, unittest.TestCase):
     def test_a_file_edit_restarts_the_repetition_count(self) -> None:
         # Edit-and-rerun is progress: the guard counts reruns with nothing
         # changed, so an edit loop-detection.sh records starts the count over.
-        command = self.payload("vendor/bin/phpunit --filter Fixing")
         edit = edit_payload("/work/app/Fixing.php")
         for tool in MIRRORS:
             with self.subTest(tool=tool):
+                self.assert_edit_restarts_the_count(
+                    tool, edit, "vendor/bin/phpunit --filter Fixing"
+                )
+
+    def assert_edit_restarts_the_count(self, tool: str, edit: dict, command: str) -> None:
+        payload = self.payload(command)
+        codes = [
+            run_hook(tool, self.HOOK, payload, cwd=self.repo_a).returncode
+            for _ in range(11)
+        ]
+        self.assertEqual(1 if tool == "cursor" else 0, codes[-1])
+        time.sleep(0.05)  # file timestamps are coarser than a hook run
+        recorded = run_hook(tool, "loop-detection.sh", edit, cwd=self.repo_a)
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        rerun = run_hook(tool, self.HOOK, payload, cwd=self.repo_a)
+        self.assertEqual((0, "", ""), (rerun.returncode, rerun.stdout, rerun.stderr))
+
+    def test_a_codex_apply_patch_restarts_the_repetition_count(self) -> None:
+        # Codex edits through apply_patch: no file_path, the files are named
+        # inside the patch text. The hook used to record nothing, so a
+        # fix-and-rerun loop on Codex was refused from its twelfth run.
+        self.assert_edit_restarts_the_count(
+            "codex", patch_payload("app/Fixing.php"), "vendor/bin/phpunit --filter Patched"
+        )
+
+    def test_a_claude_write_or_notebook_edit_restarts_the_repetition_count(self) -> None:
+        # The Claude hook is wired for every edit tool (see HookWiringTest),
+        # and a notebook edit names its file notebook_path.
+        for name, edit in (
+            ("write", {"tool_name": "Write", "tool_input": {"file_path": "/work/app/W.php", "content": "x"}}),
+            ("notebook", {"tool_name": "NotebookEdit", "tool_input": {"notebook_path": "/work/n.ipynb", "new_source": "x"}}),
+        ):
+            with self.subTest(edit=name):
+                self.assert_edit_restarts_the_count(
+                    "claude", edit, "vendor/bin/phpunit --filter " + name
+                )
+
+    def test_polling_a_status_query_is_not_a_loop(self) -> None:
+        # A read-only status query changes its answer without any edit:
+        # asking again is waiting, not a rerun of a failing command.
+        for tool in MIRRORS:
+            for command in (
+                "gh pr checks 44",
+                "sleep 30 && gh run view 123 --log-failed | tail -n 50",
+                "git status",
+                "docker compose logs --tail 20 app",
+            ):
+                with self.subTest(tool=tool, command=command):
+                    results = [
+                        run_hook(tool, self.HOOK, self.payload(command), cwd=self.repo_a)
+                        for _ in range(13)
+                    ]
+                    self.assertEqual(
+                        [(0, "", "")] * 13,
+                        [(r.returncode, r.stdout, r.stderr) for r in results],
+                    )
+            with self.subTest(tool=tool, command="chained"):
+                # Chained with anything else, it counts like any command.
+                chained = self.payload("gh pr checks 44 && vendor/bin/phpunit")
                 codes = [
-                    run_hook(tool, self.HOOK, command, cwd=self.repo_a).returncode
-                    for _ in range(11)
+                    run_hook(tool, self.HOOK, chained, cwd=self.repo_a).returncode
+                    for _ in range(12)
                 ]
-                self.assertEqual(1, codes[-1])
-                time.sleep(0.05)  # file timestamps are coarser than a hook run
-                run_hook(tool, "loop-detection.sh", edit, cwd=self.repo_a)
-                rerun = run_hook(tool, self.HOOK, command, cwd=self.repo_a)
-                self.assertEqual(0, rerun.returncode, rerun.stderr)
-                self.assertEqual("", rerun.stderr)
+                self.assertEqual(2, codes[-1])
+
+    def test_sessions_keep_their_own_counts(self) -> None:
+        # Two sessions in one checkout: neither adds to the other's count, and
+        # a third session's start clears only its own counters. TMPDIR keeps
+        # the session start's validation cache out of the shared one.
+        base = Path(self._tmp.name) / "tmpdir"
+        base.mkdir()
+        env = {"TMPDIR": str(base)}
+
+        def run(tool: str, session: str):
+            payload = dict(self.payload("vendor/bin/phpunit --filter Shared"), session_id=session)
+            return run_hook(tool, self.HOOK, payload, cwd=self.repo_a, env=env)
+
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                for _ in range(5):
+                    self.assertEqual(0, run(tool, "session-a").returncode)
+                second = [run(tool, "session-b") for _ in range(5)]
+                self.assertEqual(
+                    [(0, "", "")] * 5,
+                    [(r.returncode, r.stdout, r.stderr) for r in second],
+                )
+                started = run_hook(
+                    tool, "local-context.sh", {"session_id": "session-c", "hook_event_name": "SessionStart"},
+                    cwd=self.repo_a, env=env,
+                )
+                self.assertEqual(0, started.returncode, started.stderr)
+                sixth = run(tool, "session-a")
+                self.assertEqual(1 if tool == "cursor" else 0, sixth.returncode)
+                self.assertIn("has run 6 times", sixth.stdout + sixth.stderr)
+
+    def test_counters_stay_private_and_are_never_followed_or_evaluated(self) -> None:
+        # The directory name is predictable: the hook makes it private, never
+        # follows a link in place of a counter, and reads a count in base 10.
+        victim = self.repo_b / "victim.txt"
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                victim.write_text("important\n", encoding="utf-8")
+                first = run_hook(tool, self.HOOK, self.payload("composer test"), cwd=self.repo_a)
+                self.assertEqual(0, first.returncode, first.stderr)
+                directory = track_dir(tool, self.repo_a)
+                self.assertEqual(0o700, directory.stat().st_mode & 0o777)
+                (counter,) = [p for p in counter_files(directory) if p.name.startswith("cmd-")]
+                counter.unlink()
+                counter.symlink_to(victim)
+                linked = run_hook(tool, self.HOOK, self.payload("composer test"), cwd=self.repo_a)
+                self.assertEqual((0, ""), (linked.returncode, linked.stderr))
+                self.assertEqual("important\n", victim.read_text(encoding="utf-8"))
+                self.assertTrue(counter.is_symlink())
+                counter.unlink()
+                # A leading zero is not octal, and a count is never shell code.
+                counter.write_text("08\n", encoding="utf-8")
+                ninth = run_hook(tool, self.HOOK, self.payload("composer test"), cwd=self.repo_a)
+                self.assertIn("has run 9 times", ninth.stdout + ninth.stderr)
+                marker = self.repo_b / "evaluated"
+                counter.write_text("a[$(touch {})]\n".format(marker), encoding="utf-8")
+                run_hook(tool, self.HOOK, self.payload("composer test"), cwd=self.repo_a)
+                self.assertFalse(marker.exists())
+                self.assertEqual("1\n", counter.read_text(encoding="utf-8"))
+
+    def test_a_linked_counter_directory_turns_the_guard_off(self) -> None:
+        # Another user's directory (or a link) under the predictable name
+        # could pre-seed a count that blocks a first run; the hook does not
+        # trust it.
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                planted = self.repo_b / "planted-{}".format(tool)
+                planted.mkdir()
+                directory = track_dir(tool, self.repo_a)
+                shutil.rmtree(directory, ignore_errors=True)
+                directory.symlink_to(planted)
+                try:
+                    for _ in range(12):
+                        result = run_hook(
+                            tool, self.HOOK, self.payload("composer test"), cwd=self.repo_a
+                        )
+                        self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
+                    self.assertEqual([], list(planted.iterdir()))
+                finally:
+                    directory.unlink()
 
     def test_nested_destructive_command_still_blocked(self) -> None:
         # The full nested command must survive extraction so the pattern
@@ -450,13 +634,59 @@ class LoopDetectionTest(FakeRepoMixin, unittest.TestCase):
                     self.assertEqual(result.stderr, "")
                 for count in range(7, 10):
                     result = self.edit(tool, self.repo_a)
-                    self.assertEqual(result.returncode, 1, "count={}".format(count))
-                    self.assertIn("WARNING", result.stdout)
+                    expected = "edited {} times this session".format(count)
                     self.assertEqual(result.stderr, "")
+                    if tool == "cursor":
+                        # afterFileEdit has no channel back to the agent.
+                        self.assertEqual(result.returncode, 1, "count={}".format(count))
+                        self.assertIn("WARNING", result.stdout)
+                        self.assertIn(expected, result.stdout)
+                    else:
+                        # Exit 0 with additionalContext: the model sees it.
+                        self.assertEqual(result.returncode, 0, "count={}".format(count))
+                        self.assertIn(expected, warning_context(result))
                 result = self.edit(tool, self.repo_a)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("BLOCKED", result.stderr)
                 self.assertEqual(result.stdout, "")
+
+    def test_every_file_of_a_codex_patch_is_counted(self) -> None:
+        # apply_patch names its files inside the patch text, one marker line
+        # each; every file the patch touches is an edit of that file.
+        payload = patch_payload("app/A.php", "app/B.php")
+        payload["tool_input"]["command"] += "*** Add File: app/C.php\n+new\n"
+        for _ in range(6):
+            result = run_hook("codex", self.HOOK, payload, cwd=self.repo_a)
+            self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
+        self.assertEqual(3, len(counter_files(track_dir("codex", self.repo_a))))
+        seventh = run_hook("codex", self.HOOK, payload, cwd=self.repo_a)
+        self.assertEqual(0, seventh.returncode, seventh.stderr)
+        context = warning_context(seventh)
+        for name in ("app/A.php", "app/B.php", "app/C.php"):
+            self.assertIn("File '{}' edited 7 times".format(name), context)
+
+    def test_counts_are_per_session(self) -> None:
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                for _ in range(9):
+                    run_hook(tool, self.HOOK, dict(edit_payload(self.EDITED), session_id="one"), cwd=self.repo_a)
+                other = run_hook(tool, self.HOOK, dict(edit_payload(self.EDITED), session_id="two"), cwd=self.repo_a)
+                self.assertEqual((0, "", ""), (other.returncode, other.stdout, other.stderr))
+                tenth = run_hook(tool, self.HOOK, dict(edit_payload(self.EDITED), session_id="one"), cwd=self.repo_a)
+                self.assertEqual(2, tenth.returncode)
+
+    def test_a_planted_count_is_never_evaluated(self) -> None:
+        marker = self.repo_b / "evaluated"
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                self.assertEqual(0, self.edit(tool, self.repo_a).returncode)
+                (counter,) = counter_files(track_dir(tool, self.repo_a))
+                counter.write_text("a[$(touch {})]\n".format(marker), encoding="utf-8")
+                self.assertEqual(0, self.edit(tool, self.repo_a).returncode)
+                self.assertFalse(marker.exists())
+                counter.write_text("08\n", encoding="utf-8")
+                ninth = self.edit(tool, self.repo_a)
+                self.assertIn("edited 9 times", ninth.stdout)
 
     def test_counters_namespaced_per_repository(self) -> None:
         for tool in MIRRORS:
@@ -573,28 +803,52 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
     def test_session_start_resets_only_own_repo_counters(self) -> None:
         for tool in MIRRORS:
             with self.subTest(tool=tool):
+                tmp_root = self.cache_root / tool
+                tmp_root.mkdir(exist_ok=True)
+                env = {"TMPDIR": str(tmp_root)}
                 for repo in (self.repo_a, self.repo_b):
                     primed = run_hook(
-                        tool, "loop-detection.sh", edit_payload("/work/App.php"), cwd=repo
+                        tool, "loop-detection.sh", edit_payload("/work/App.php"), cwd=repo, env=env
                     )
                     self.assertEqual(primed.returncode, 0, primed.stderr)
-                dir_a = track_dir(tool, self.repo_a)
-                dir_b = track_dir(tool, self.repo_b)
+                dir_a = track_dir(tool, self.repo_a, str(tmp_root))
+                dir_b = track_dir(tool, self.repo_b, str(tmp_root))
                 self.assertEqual(len(counter_files(dir_a)), 1)
                 self.assertEqual(len(counter_files(dir_b)), 1)
 
-                tmp_root = self.cache_root / tool
-                tmp_root.mkdir(exist_ok=True)
-                result = run_hook(
-                    tool,
-                    self.HOOK,
-                    "",
-                    cwd=self.repo_a,
-                    env={"TMPDIR": str(tmp_root)},
-                )
+                result = run_hook(tool, self.HOOK, "", cwd=self.repo_a, env=env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(counter_files(dir_a), [])
                 self.assertEqual(len(counter_files(dir_b)), 1)
+
+    def test_session_start_keeps_a_running_sessions_counters(self) -> None:
+        # A new session in the same checkout starts its own counts; it must
+        # not wipe those of a session that is still working there. Counters
+        # left untouched for a day are pruned whoever owns them.
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                tmp_root = self.cache_root / tool
+                tmp_root.mkdir(exist_ok=True)
+                env = {"TMPDIR": str(tmp_root)}
+                for session in ("running", "stale", "starting"):
+                    primed = run_hook(
+                        tool, "loop-detection.sh",
+                        dict(edit_payload("/work/App.php"), session_id=session),
+                        cwd=self.repo_a, env=env,
+                    )
+                    self.assertEqual(primed.returncode, 0, primed.stderr)
+                directory = track_dir(tool, self.repo_a, str(tmp_root))
+                (stale,) = [p for p in counter_files(directory) if p.name.startswith("edit-stale-")]
+                old = time.time() - 2 * 86400
+                os.utime(stale, (old, old))
+                result = run_hook(
+                    tool, self.HOOK, {"session_id": "starting", "hook_event_name": "SessionStart"},
+                    cwd=self.repo_a, env=env,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    ["running"], [p.name.split("-")[1] for p in counter_files(directory)]
+                )
 
 
 class WorkingMemoryRuleTest(unittest.TestCase):
@@ -1033,6 +1287,29 @@ class CursorPromptHookTest(unittest.TestCase):
                 self.assertEqual({"continue": True}, json.loads(result.stdout))
                 self.assertFalse(self.rule.exists())
 
+    def test_a_failed_refresh_keeps_only_this_tasks_rule(self) -> None:
+        # A prompt that renders nothing leaves the rule Cursor will send with
+        # it: another task's rule (a switched branch) is removed, this task's
+        # stays.
+        for name, setup in (
+            ("runtime fails", lambda: self.stub(status=1, capsule_text="")),
+            ("broken render", lambda: self.stub(capsule_text="not a capsule")),
+        ):
+            for owner, kept in (("TASK-OTHER", False), ("TASK-P", True)):
+                with self.subTest(case=name, rule_of=owner):
+                    self.rule.parent.mkdir(parents=True, exist_ok=True)
+                    held = (
+                        "Session context retrieved for a recent prompt (task: {}).\n"
+                        "```\nworking: {} - its goal\n```\n".format(owner, owner)
+                    )
+                    self.rule.write_text(held, encoding="utf-8")
+                    setup()
+                    result = self.run_prompt_hook(self.PAYLOAD)
+                    self.assertEqual({"continue": True}, json.loads(result.stdout))
+                    self.assertEqual(kept, self.rule.exists())
+                    if kept:
+                        self.assertEqual(held, self.rule.read_text(encoding="utf-8"))
+
     def test_the_prompts_rule_outlives_the_turn_but_not_the_task_or_the_session(self) -> None:
         # When Cursor reads its rules before this hook has run, the rule the
         # last prompt left is what the next request carries: the stop hook
@@ -1142,6 +1419,12 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         "import time\n"
         "time.sleep(1)\n"
     )
+    # Status 4: the retrieval gate withheld this turn (enforce mode).
+    STUB_GATE_SKIP = (
+        "import sys\n"
+        "if len(sys.argv) > 1 and sys.argv[1] == \"hook-context\":\n"
+        "    sys.exit(4)\n"
+    )
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="cursor-rule-")
@@ -1239,8 +1522,19 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         self.assertIn("working: TASK-STUB", rendered)
         self.assertNotIn("warming:", rendered)
 
+    @staticmethod
+    def labelled_rule(task: str, body: str = "previous capsule") -> str:
+        """A rule as the hooks write it: its header names the task."""
+        return (
+            "---\nalwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\n"
+            "Session context as of end of previous turn (task: {}).\n\n"
+            "```\n{}\n```\n".format(task, body)
+        )
+
     def test_failed_render_preserves_previous_rule(self) -> None:
-        self.rule_file().write_text("previous capsule\n", encoding="utf-8")
+        # The previous rule is this task's: a failed render keeps it.
+        previous = self.labelled_rule(self.TASK_ID)
+        self.rule_file().write_text(previous, encoding="utf-8")
         self.cli.write_text(self.STUB_FAILURE, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
@@ -1248,13 +1542,53 @@ class CursorCapsuleRenderTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
                     self.rule_file().read_text(encoding="utf-8"),
-                    "previous capsule\n",
+                    previous,
                 )
                 # No temp litter: an interrupted render must not accumulate.
                 self.assertEqual(
                     [path.name for path in self.rules_dir.iterdir()],
                     ["working-memory.mdc"],
                 )
+
+    def test_a_render_that_fails_removes_another_tasks_rule(self) -> None:
+        # A switched branch whose render fails, breaks or is withheld must not
+        # keep the previous branch's capsule as this task's working memory:
+        # Cursor sends the rule with every prompt.
+        foreign = self.labelled_rule("feature/a", "working: feature/a - rewrite billing")
+        for name, stub in (
+            ("failure", self.STUB_FAILURE),
+            ("malformed", self.STUB_MALFORMED),
+            ("gate skip", self.STUB_GATE_SKIP),
+        ):
+            for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
+                with self.subTest(case=name, hook=hook):
+                    self.rule_file().write_text(foreign, encoding="utf-8")
+                    self.cli.write_text(stub, encoding="utf-8")
+                    result = self.run_cursor_hook(hook, "fix/issue-42")
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertFalse(self.rule_file().exists())
+
+    def test_a_withheld_render_keeps_this_tasks_rule(self) -> None:
+        # An enforce-mode skip must never empty Cursor's only memory channel.
+        previous = self.labelled_rule(self.TASK_ID)
+        self.cli.write_text(self.STUB_GATE_SKIP, encoding="utf-8")
+        for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
+            with self.subTest(hook=hook):
+                self.rule_file().write_text(previous, encoding="utf-8")
+                result = self.run_cursor_hook(hook)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(previous, self.rule_file().read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(shutil.which("timeout"), "native timeout unavailable")
+    def test_a_timed_out_render_removes_another_tasks_rule(self) -> None:
+        foreign = self.labelled_rule("feature/a", "working: feature/a - rewrite billing")
+        self.cli.write_text(self.STUB_TIMEOUT, encoding="utf-8")
+        for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
+            with self.subTest(hook=hook):
+                self.rule_file().write_text(foreign, encoding="utf-8")
+                result = self.run_cursor_hook(hook, "fix/issue-42", budget="0.05")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertFalse(self.rule_file().exists())
 
     def test_valid_empty_branch_context_removes_foreign_rule(self) -> None:
         self.rule_file().write_text("foreign branch capsule\n", encoding="utf-8")
@@ -1271,27 +1605,29 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         self.assertFalse(self.rule_file().exists())
 
     def test_malformed_render_preserves_previous_rule(self) -> None:
-        self.rule_file().write_text("previous capsule\n", encoding="utf-8")
+        previous = self.labelled_rule(self.TASK_ID)
+        self.rule_file().write_text(previous, encoding="utf-8")
         self.cli.write_text(self.STUB_MALFORMED, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 result = self.run_cursor_hook(hook)
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual(
-                    "previous capsule\n",
+                    previous,
                     self.rule_file().read_text(encoding="utf-8"),
                 )
 
     @unittest.skipUnless(shutil.which("timeout"), "native timeout unavailable")
     def test_timed_out_render_preserves_previous_rule(self) -> None:
-        self.rule_file().write_text("previous capsule\n", encoding="utf-8")
+        previous = self.labelled_rule(self.TASK_ID)
+        self.rule_file().write_text(previous, encoding="utf-8")
         self.cli.write_text(self.STUB_TIMEOUT, encoding="utf-8")
         result = self.run_cursor_hook(
             "local-context.sh", budget="0.05"
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(
-            "previous capsule\n",
+            previous,
             self.rule_file().read_text(encoding="utf-8"),
         )
 
@@ -1889,6 +2225,52 @@ class SubagentDispatchTest(WriteLockMixin, unittest.TestCase):
         self.assertIn("database is locked", result.stdout)
         self.assertIn("NOT recorded", result.stderr)
 
+    def test_a_crash_is_reported_by_its_exception_not_its_traceback_header(self) -> None:
+        # An uncaught exception's first stderr line names nothing; its last
+        # line names the error.
+        self.failing_cli(
+            "Traceback (most recent call last):\n"
+            "  File \"/install/path/memory-bank/scripts/context.py\", line 1, in <module>\n"
+            "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 290\n"
+        )
+        result = self.run_dispatch({"agent_type": "coder"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff", result.stdout)
+        self.assertNotIn("Traceback", result.stdout)
+        self.assertNotIn("/install/path", result.stdout)
+
+    def test_a_lost_completion_reaches_the_orchestrator_after_the_agent_returns(self) -> None:
+        # Claude Code shows a SubagentStop hook's output to no conversation the
+        # orchestrator reads; a PostToolUse hook on the Agent tool is its way
+        # into the parent. The report waits for that hook, which hands it on
+        # once, records nothing and releases nothing.
+        self.failing_cli("context: database is locked")
+        stopped = self.run_dispatch(
+            {"hook_event_name": "SubagentStop", "agent_type": "coder", "session_id": "s-1"}
+        )
+        self.assertIn("NOT recorded", stopped.stdout)
+        lock = self.lock_dir / f"claude-write-agent-lock-{repo_key(self.repo)}"
+        lock.write_text("coder")
+        returned = {
+            "hook_event_name": "PostToolUse", "session_id": "s-1", "tool_name": "Agent",
+            "tool_input": {"subagent_type": "coder", "prompt": "do it"},
+        }
+        relayed = self.run_dispatch(returned)
+        self.assertEqual((0, ""), (relayed.returncode, relayed.stderr))
+        output = json.loads(relayed.stdout)["hookSpecificOutput"]
+        self.assertEqual("PostToolUse", output["hookEventName"])
+        self.assertIn('completion of "coder" was NOT recorded', output["additionalContext"])
+        self.assertIn("database is locked", output["additionalContext"])
+        self.assertTrue(lock.exists(), "the relay released a lock")
+        again = self.run_dispatch(returned)
+        self.assertEqual((0, "", ""), (again.returncode, again.stdout, again.stderr))
+
+    def test_cursor_reports_are_not_left_for_a_relay(self) -> None:
+        # Cursor names the event subagentStop and has no relay to read them.
+        self.failing_cli("context: database is locked")
+        self.run_dispatch({"hook_event_name": "subagentStop", "subagent_type": "coder"})
+        self.assertFalse((self.repo / "memory-bank" / "local" / "unrecorded-completions").exists())
+
     def test_no_channel_means_nothing_to_report(self) -> None:
         for message in (
             "context: Working task not found: feat/demo",
@@ -1914,15 +2296,50 @@ class MirrorConsistencyTest(unittest.TestCase):
             for tool in MIRRORS
         }
         for tool, text in contents.items():
-            self.assertIn(f"/tmp/{MIRRORS[tool][2]}-loop-detection-", text)
+            self.assertIn(f"/{MIRRORS[tool][2]}-loop-detection-", text)
+        # The third: Cursor keeps the repetition warning user-visible (text,
+        # exit 1), since it has no channel that shows the agent a message
+        # about a command it lets run.
+        warning = re.compile(
+            r'(elif \[ "\$COUNT" -ge 6 \]; then\n  BV_WARNING=[^\n]*\n).*?(\nfi\n)', re.S
+        )
         normalized = {
-            tool: text.replace(
-                f"/tmp/{MIRRORS[tool][2]}-loop-detection-", "/tmp/TOOL-loop-detection-"
-            ).replace("systematic-debugger", "/debugger")
+            tool: warning.sub(
+                r"\1  WARN\2",
+                text.replace(
+                    f"/{MIRRORS[tool][2]}-loop-detection-", "/TOOL-loop-detection-"
+                ).replace("systematic-debugger", "/debugger"),
+            )
             for tool, text in contents.items()
         }
         self.assertEqual(normalized["claude"], normalized["cursor"])
         self.assertEqual(normalized["claude"], normalized["codex"])
+        self.assertIn("additionalContext", contents["codex"])
+        self.assertIn("exit 1", warning.search(contents["cursor"]).group(0))
+
+
+class HookWiringTest(unittest.TestCase):
+    """What Claude Code runs the edit counter and the dispatch relay on."""
+
+    def post_tool_use(self) -> dict[str, list[str]]:
+        settings = json.loads((EDITION_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        wired: dict[str, list[str]] = {}
+        for group in settings["hooks"]["PostToolUse"]:
+            for hook in group["hooks"]:
+                wired.setdefault(hook["command"].rsplit("/", 1)[-1], []).extend(
+                    name.strip() for name in group.get("matcher", "").split("|")
+                )
+        return wired
+
+    def test_every_edit_tool_reaches_the_edit_counter(self) -> None:
+        # A Write that never reached loop-detection.sh never restarted a
+        # command's repetition count either.
+        matched = self.post_tool_use()["loop-detection.sh"]
+        for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit"):
+            self.assertIn(tool, matched)
+
+    def test_the_dispatch_relay_runs_when_an_agent_returns(self) -> None:
+        self.assertIn("Agent", self.post_tool_use()["subagent-dispatch.sh"])
 
 
 if __name__ == "__main__":

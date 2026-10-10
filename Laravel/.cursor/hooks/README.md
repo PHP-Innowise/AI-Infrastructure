@@ -22,9 +22,9 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### beforeShellExecution: Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive and secret-exposing shell commands: force push (including `--force-with-lease` and `+refspec`), hard reset, forced clean, `git branch -D`, hook bypass (`--no-verify`, `git commit -n`), recursive `rm` of root/home/working-tree paths, destructive SQL outside read-only searches, destructive `gh` calls, Composer auth tokens, printing `.env` files, and this edition's framework commands (listed in `BV_FRAMEWORK_RULES` at the end of `bash-validator.sh` in this directory). The command is parsed like a shell would split it, so chains, `$(...)`, `sh -c`, `eval`, wrappers such as `sudo`/`env`/`xargs` and console abbreviations do not hide a command. It is a guard against accidental destruction, not a sandbox: a script written to disk and run later is not inspected. The same command a sixth time in a session warns and a twelfth time blocks, since the edit counter cannot see a command loop.
+**Purpose:** Blocks destructive and secret-exposing shell commands: force push (including `--force-with-lease` and `+refspec`), hard reset, forced clean, `git branch -D`, hook bypass (`--no-verify`, `git commit -n`), recursive `rm` of root/home/working-tree paths, destructive SQL outside read-only searches, destructive `gh` calls, Composer auth tokens, printing `.env` files, and this edition's framework commands (listed in `BV_FRAMEWORK_RULES` at the end of `bash-validator.sh` in this directory). The command is parsed like a shell would split it, so chains, `$(...)`, `sh -c`, `eval`, wrappers such as `sudo`/`env`/`xargs` and console abbreviations do not hide a command. It is a guard against accidental destruction, not a sandbox: a script written to disk and run later is not inspected. The same command a sixth time in a session (the payload's `conversation_id`) warns and a twelfth time blocks, since the edit counter cannot see a command loop; a file edit `loop-detection.sh` recorded since the command last ran starts its count over, and a read-only status query standing alone - `gh pr checks/status/view`, `gh run list/view/watch`, `git status`, `docker [compose] ps/logs`, `kubectl get/describe/logs`, `tail`, optionally after `sleep N &&` and piped into filters - is polling, not a loop, and is not counted. Counts live in `${TMPDIR:-/tmp}/cursor-loop-detection-<uid>-<repo-key>/`. The counter directory is created private (mode 700); one that is a symbolic link or belongs to another user turns the count off, a counter that is a symbolic link is never read or written, and a count is read as base-10 digits only.
 **Input key:** `.command` (Cursor supplies the full command string).
-**Return:** `0` = safe, `2` = block.
+**Return:** `0` = safe, `1` = repetition warning (sixth to eleventh identical run), `2` = block. Cursor documents no channel that shows the agent a message about a command it lets run (`agent_message` accompanies a denial), so the warning reaches only the user, in the hooks output; the agent meets the guard first at the block. Claude Code and Codex hand the same warning to the model.
 
 ### subagentStart: Subagent Gate
 **Script:** `subagent-gate.sh`
@@ -36,7 +36,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### subagentStop: Subagent Dispatch Observer
 **Script:** `subagent-dispatch.sh`
-**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3 or the context runtime. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported in one line on stdout and stderr.
+**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3 or the context runtime. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported in one line - its exit status and the last line of its error - on stdout and stderr. That line reaches only the hooks output: Cursor's `subagentStop` has no channel to the orchestrating agent but `followup_message`, which would start another turn, so - unlike Claude Code, where a `PostToolUse` relay hands it on - the orchestrator is not told.
 **Return:** Always exit 0, no JSON output (observation only)
 
 ### afterFileEdit: File Naming Validator
@@ -47,9 +47,9 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### afterFileEdit: Loop Detection
 **Script:** `loop-detection.sh`
-**Purpose:** Tracks edit count per file to detect doom loops.
-**Return:** `0` = normal, `1` = warning at 7 edits, `2` = block at 10 edits.
-**Tracking:** `/tmp/cursor-loop-detection/` (resets on reboot).
+**Purpose:** Tracks edit count per file per session (the payload's `conversation_id`) to detect doom loops. Every edit it records also restarts the Bash Validator's repetition count for the commands run before it.
+**Return:** `0` = normal, `1` = warning at 7 edits (shown in the hooks output; `afterFileEdit` has no channel back to the agent), `2` = block at 10 edits.
+**Tracking:** `${TMPDIR:-/tmp}/cursor-loop-detection-<uid>-<repo-key>/`, created private; `sessionStart` clears that session's counters and any left untouched for a day. A linked or foreign directory turns the count off, and a linked counter is never followed.
 
 ## Claude Code -> Cursor Event Mapping
 
@@ -91,8 +91,11 @@ with every request:
   task; `local-context.sh` (`sessionStart`) always does, so a fresh session or
   a branch switch never serves the previous session's capsule.
 
-The rule is replaced atomically and only when a fresh render succeeds, and it
-is ignored local state (this edition's `.gitignore` lists it). Cursor also
+The rule is replaced atomically and only when a fresh render succeeds. A
+render that fails, times out, breaks or is withheld by the retrieval gate
+keeps the rule in place only when its header names the current task; a rule
+another task left behind (a switched branch) is removed rather than sent as
+this task's working memory. The rule is ignored local state (this edition's `.gitignore` lists it). Cursor also
 runs the Claude Code hooks it finds; the Claude copies of the two
 working-memory hooks recognize Cursor's payload and stand down while this
 folder's hooks serve. These Cursor copies differ from the canonical

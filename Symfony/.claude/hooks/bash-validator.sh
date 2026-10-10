@@ -2,7 +2,8 @@
 # Bash Validator Hook
 # Blocks destructive commands for Symfony projects.
 # Hook type: PreToolUse:Bash
-# Exit codes: 0 = pass, 1 = warn (continue), 2 = block
+# Exit codes: 0 = pass, 2 = block. The repetition guard at the end warns
+# before it blocks; how a warning reaches the agent is described there.
 
 # Consume the complete hook payload without relying on external utilities.
 # `read -d ''` returns nonzero at EOF, which is the expected delimiter here.
@@ -1368,44 +1369,87 @@ fi
 # approach starts its own count. A file edit that loop-detection.sh recorded
 # since the command last ran starts its count over too: edit-and-rerun is
 # progress, and only a rerun with nothing changed is the loop this guards.
-# The counter directory is the one the session start hook clears, which
-# makes the window a session. Only a command that passed the rules above is
-# counted: a refused one never ran.
+# Only a command that passed the rules above is counted: a refused one never
+# ran.
+#
+# Polling is not a loop. A read-only status query standing alone - CI checks
+# and runs (gh pr checks/status/view, gh run list/view/watch), git status, a
+# container's or a cluster's state and logs (docker [compose] ps/logs,
+# kubectl get/describe/logs), a log tail - changes its answer without any
+# edit, so asking again is waiting and is not counted. Optionally after a
+# `sleep N &&` and piped into filters; chained with anything else it counts
+# like any command.
+BV_POLL_QUERY='^(sleep [0-9.]+[smhd]? *(&&|;) *)?(git status|gh pr (checks|status|view)|gh run (list|view|watch)|docker (compose )?(ps|logs)|kubectl (get|describe|logs)|tail)( [^;&`$()<>]*)?$'
+if [[ "$COMMAND" =~ $BV_POLL_QUERY ]] && [[ "$COMMAND" != *'||'* ]] && [[ "$COMMAND" != *$'\n'* ]]; then
+  exit 0
+fi
+
+# The window is a session. Counts are keyed by the host's session id (Claude
+# Code and Codex send session_id, Cursor conversation_id), so two sessions or
+# a Harness run in one checkout never add to each other's counts, and the
+# session start hook clears only its own. A payload without one shares the
+# key "shared".
+SESSION_KEY=$(printf '%s' "$INPUT" \
+  | sed -n -E 's/.*"(session_id|conversation_id)"[[:space:]]*:[[:space:]]*"([^"]*)".*/\2/p' | head -1)
+SESSION_KEY=${SESSION_KEY//[^A-Za-z0-9]/}
+SESSION_KEY=${SESSION_KEY:0:64}
+[ -n "$SESSION_KEY" ] || SESSION_KEY=shared
+
+# The counter directory is the per-user one loop-detection.sh uses. Its name
+# is predictable, so a directory that is already there is used only when it
+# is a real directory this user owns - one another user planted could
+# otherwise pre-seed a count that blocks a first run, or hold a counter that
+# is a link to a file this hook would then overwrite - and a counter that is a
+# symbolic link is never read or written. Anything else turns the guard off
+# rather than trusting it.
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 REPO_KEY=$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)
-TRACK_DIR="/tmp/claude-loop-detection-$REPO_KEY"
+TRACK_BASE=${TMPDIR:-/tmp}
+TRACK_DIR="${TRACK_BASE%/}/claude-loop-detection-${EUID:-0}-$REPO_KEY"
+mkdir -m 700 "$TRACK_DIR" 2>/dev/null
+if [ -L "$TRACK_DIR" ] || [ ! -d "$TRACK_DIR" ] || [ ! -O "$TRACK_DIR" ]; then
+  exit 0
+fi
 
-if mkdir -p "$TRACK_DIR" 2>/dev/null; then
-  if command -v md5sum > /dev/null 2>&1; then
-    COMMAND_KEY=$(printf '%s' "$COMMAND" | md5sum | cut -d' ' -f1)
-  elif command -v md5 > /dev/null 2>&1; then
-    COMMAND_KEY=$(printf '%s' "$COMMAND" | md5 -q)
-  else
-    COMMAND_KEY=$(printf '%s' "$COMMAND" | cksum | tr -d ' ')
-  fi
-  TRACK_FILE="$TRACK_DIR/cmd-$COMMAND_KEY"
+if command -v md5sum > /dev/null 2>&1; then
+  COMMAND_KEY=$(printf '%s' "$COMMAND" | md5sum | cut -d' ' -f1)
+elif command -v md5 > /dev/null 2>&1; then
+  COMMAND_KEY=$(printf '%s' "$COMMAND" | md5 -q)
+else
+  COMMAND_KEY=$(printf '%s' "$COMMAND" | cksum | tr -d ' ')
+fi
+TRACK_FILE="$TRACK_DIR/cmd-$SESSION_KEY-$COMMAND_KEY"
+[ -L "$TRACK_FILE" ] && exit 0
 
+# Only digits are a count, read in base 10: "08" would otherwise abort the
+# arithmetic and switch the guard off for that command.
+COUNT=0
+[ -f "$TRACK_FILE" ] && COUNT=$(cat "$TRACK_FILE" 2>/dev/null)
+case "$COUNT" in *[!0-9]*|'') COUNT=0 ;; esac
+[ "${#COUNT}" -gt 9 ] && COUNT=0
+COUNT=$((10#$COUNT))
+if [ "$COUNT" -gt 0 ] && [ -n "$(find "$TRACK_DIR" -maxdepth 1 -type f -name 'edit-*' -newer "$TRACK_FILE" -print -quit 2>/dev/null)" ]; then
   COUNT=0
-  [ -f "$TRACK_FILE" ] && COUNT=$(cat "$TRACK_FILE" 2>/dev/null)
-  case "$COUNT" in *[!0-9]*|'') COUNT=0 ;; esac
-  if [ "$COUNT" -gt 0 ] && [ -n "$(find "$TRACK_DIR" -maxdepth 1 -type f ! -name 'cmd-*' -newer "$TRACK_FILE" -print -quit 2>/dev/null)" ]; then
-    COUNT=0
-  fi
-  COUNT=$((COUNT + 1))
-  echo "$COUNT" > "$TRACK_FILE" 2>/dev/null
+fi
+COUNT=$((COUNT + 1))
+echo "$COUNT" > "$TRACK_FILE" 2>/dev/null
 
-  if [ "$COUNT" -ge 12 ]; then
-    {
-      printf 'BLOCKED: this exact command has run %s times this session.\n' "$COUNT"
-      printf '   Repeating it again is not a new attempt. Either change the\n'
-      printf '   command (narrow it, add the failing case, read the output\n'
-      printf '   differently) or escalate to /debugger for a root cause.\n'
-    } >&2
-    exit 2
-  elif [ "$COUNT" -ge 6 ]; then
-    printf 'WARNING: this exact command has run %s times this session. If it keeps failing, /debugger instead of another rerun.\n' "$COUNT" >&2
-    exit 1
-  fi
+if [ "$COUNT" -ge 12 ]; then
+  {
+    printf 'BLOCKED: this exact command has run %s times this session.\n' "$COUNT"
+    printf '   Repeating it again is not a new attempt. Either change the\n'
+    printf '   command (narrow it, add the failing case, read the output\n'
+    printf '   differently) or escalate to /debugger for a root cause.\n'
+  } >&2
+  exit 2
+elif [ "$COUNT" -ge 6 ]; then
+  BV_WARNING="WARNING: this exact command has run $COUNT times this session. If it keeps failing, /debugger instead of another rerun."
+  # Claude Code and Codex add a PreToolUse hook's additionalContext to the
+  # model's context next to the tool result, without blocking the call or
+  # touching its permission decision. A warning on stderr with a non-blocking
+  # exit code reaches only the user's transcript: the agent would meet the
+  # guard first at the block.
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$BV_WARNING"
 fi
 
 exit 0

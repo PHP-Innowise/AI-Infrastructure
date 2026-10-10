@@ -191,6 +191,64 @@ _HOOK_PATH_EXTRACT_CODEX = (
     " | head -1)\nfi\n"
 )
 
+# loop-detection.sh header: the Claude copy is wired on PostToolUse with an
+# edit-tool matcher, the Codex copy runs on every PostToolUse and filters
+# itself, the Cursor copy runs on afterFileEdit - and only Cursor still warns
+# with exit 1 (see _LOOP_WARNING below).
+_LOOP_HEADER = (
+    "# Hook type: PostToolUse (Edit|Write|MultiEdit|NotebookEdit)\n"
+    "# Exit codes: 0 = pass (a warning travels as JSON additionalContext),\n"
+    "# 2 = block\n"
+)
+_LOOP_HEADER_CURSOR = (
+    "# Cursor hook event: afterFileEdit.\n"
+    "# Exit codes: 0 = pass, 1 = warn (continue), 2 = block\n"
+)
+_LOOP_HEADER_CODEX = (
+    "# Codex hook event: PostToolUse (self-filters to file-edit payloads).\n"
+    "# Exit codes: 0 = pass (a warning travels as JSON additionalContext),\n"
+    "# 2 = block\n"
+)
+
+# Warnings that reach the agent. Claude Code and Codex add a hook's
+# hookSpecificOutput.additionalContext to the model's context next to the tool
+# result, on PreToolUse and PostToolUse alike, so the canonical edit-loop
+# warning (loop-detection.sh) and repetition warning (bash-validator.sh) exit
+# 0 with that JSON on stdout. Cursor documents no such channel for an edit it
+# reports (afterFileEdit) or a shell command it lets run
+# (beforeShellExecution's agent_message accompanies a denial), so its mirrors
+# keep the user-visible form - text and exit 1, which Cursor shows in its
+# hooks output and otherwise ignores - and the agent there meets each guard
+# first at its block.
+_LOOP_WARNING = r'''if [ -n "$WARNING" ]; then
+  # Claude Code and Codex hand a PostToolUse hook's additionalContext to the
+  # model next to the tool result. Text with a non-blocking exit code reaches
+  # only the user's transcript, so the agent would never see its warning.
+  printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$WARNING"
+fi
+'''
+_LOOP_WARNING_CURSOR = r'''if [ -n "$WARNING" ]; then
+  # Cursor's afterFileEdit has no channel back to the agent: the warning
+  # reaches only the hooks output, where the user sees it.
+  printf '%s\n' "$WARNING"
+  exit 1
+fi
+'''
+_GUARD_WARNING = r'''  # Claude Code and Codex add a PreToolUse hook's additionalContext to the
+  # model's context next to the tool result, without blocking the call or
+  # touching its permission decision. A warning on stderr with a non-blocking
+  # exit code reaches only the user's transcript: the agent would meet the
+  # guard first at the block.
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$BV_WARNING"
+'''
+_GUARD_WARNING_CURSOR = r'''  # Cursor documents no channel that shows the agent a message about a shell
+  # command it lets run (beforeShellExecution's agent_message accompanies a
+  # denial), so here the warning reaches only the user, in the hooks output,
+  # and the agent meets the guard first at the block.
+  printf '%s\n' "$BV_WARNING" >&2
+  exit 1
+'''
+
 # Working-memory delivery: Claude and Codex receive the Task Capsule at
 # prompt time through working-memory-read.sh (UserPromptSubmit); Cursor has
 # no equivalent event, so its mirrors of the Stop and sessionStart hooks
@@ -199,8 +257,11 @@ _HOOK_PATH_EXTRACT_CODEX = (
 # turn stale by design, says so in its header, and lives in ignored local
 # state (the edition .gitignore lists it). The canonical hooks carry the
 # short marker comments below; the Cursor mirror swaps in the render steps.
-# The render is silent on stdout, degrades to a no-op on any failure, and
-# replaces the previous rule only when a fresh render succeeds.
+# The render is silent on stdout and replaces the previous rule only when a
+# fresh render succeeds. On any failure it renders nothing and keeps the
+# previous rule only when that rule's header names the current task: a rule
+# another task left behind (a switched branch) is removed instead of being
+# sent as this task's working memory.
 #
 # The rule is the one surface in this product that is re-sent on every prompt,
 # so its content must vary only when the context genuinely varies. Two former
@@ -254,10 +315,12 @@ fi
 # parse that protected the --json form.
 #
 # Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - including 4, "the retrieval gate withheld this turn" - falls through and
-# leaves the previous rule in place. That fallthrough is the correct
-# behaviour for a skip and is relied on: an enforce-mode skip must never
-# replace Cursor's only memory channel with an empty capsule.
+# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
+# this turn" - renders nothing. The rule in place then stays only when its
+# header names this task: an enforce-mode skip must never replace Cursor's
+# only memory channel with an empty capsule, and another task's capsule (a
+# switched branch whose render keeps failing) must never be sent with this
+# task's prompts as their working memory.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;
@@ -284,6 +347,9 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
     rm -f "$TMP_RULE" 2>/dev/null
   fi
 fi
+grep -qxF "Session context as of end of previous turn (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
+  || grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
+  || rm -f "$RULE_FILE" 2>/dev/null
 '''
 # Cursor runs the Claude Code hooks it finds as well as its own. The two
 # working-memory hooks of the Claude copy recognize Cursor's payload (it
@@ -344,11 +410,11 @@ _WM_DELIVERY_PROMPT_CURSOR = r'''# Capsule delivery: the rule is rendered from t
 # Attached, .cursor/rules is the shared clone's own folder; the launcher
 # delivers the capsule in the prompt instead.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
-[ -n "$REPORT" ] || exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 RULE_HEADER="Session context retrieved for a recent prompt (task: $TASK_ID)."
-CAPSULE=$(printf '%s' "$REPORT" | python3 -c '
+CAPSULE=""
+[ -n "$REPORT" ] && CAPSULE=$(printf '%s' "$REPORT" | python3 -c '
 import json
 import sys
 
@@ -375,8 +441,7 @@ if sys.argv[2] in held.splitlines() and items(text) <= items(held):
     sys.exit(0)
 sys.stdout.write(text)
 ' "$RULE_FILE" "$RULE_HEADER" 2>/dev/null)
-[ -n "$CAPSULE" ] || exit 0
-if mkdir -p "$RULES_DIR" 2>/dev/null; then
+if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
   TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
   if [ -n "$TMP_RULE" ]; then
     {
@@ -394,6 +459,15 @@ if mkdir -p "$RULES_DIR" 2>/dev/null; then
     rm -f "$TMP_RULE" 2>/dev/null
   fi
 fi
+# A prompt that rendered nothing - the refresh failed, timed out or carried no
+# capsule, or the rule already held everything it retrieved - keeps the rule in
+# place only when its header names this task. Another task's rule (a switched
+# branch whose refresh keeps failing) would otherwise go out with this prompt
+# as its working memory.
+[ -n "$TASK_ID" ] && {
+  grep -qxF "$RULE_HEADER" "$RULE_FILE" 2>/dev/null \
+    || grep -qxF "Session context as of end of previous turn (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null
+} || rm -f "$RULE_FILE" 2>/dev/null
 '''
 _WM_DELIVERY_SESSION = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
 # through working-memory-read.sh; session start reports metadata only.
@@ -429,10 +503,11 @@ fi
 # JSON parse.
 #
 # Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - including 4, "the retrieval gate withheld this turn" - falls through and
-# leaves the previous rule in place. That fallthrough is the correct
-# behaviour for a skip and is relied on: an enforce-mode skip must never
-# replace Cursor's only memory channel with an empty capsule.
+# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
+# this turn" - renders nothing. The rule in place then stays only when its
+# header names this task: an enforce-mode skip must never replace Cursor's
+# only memory channel with an empty capsule, and a fresh session on a switched
+# branch whose render fails must not start with the previous branch's capsule.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;
@@ -460,6 +535,10 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
     rm -f "$TMP_RULE" 2>/dev/null
   fi
 fi
+[ -n "$CAPSULE_TASK_ID" ] && {
+  grep -qxF "Session context as of end of previous turn (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null \
+    || grep -qxF "Session context retrieved for a recent prompt (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null
+} || rm -f "$RULE_FILE" 2>/dev/null
 '''
 
 MIRROR_RULES: dict[str, Any] = {
@@ -512,15 +591,16 @@ MIRROR_RULES: dict[str, Any] = {
                             "# Claude hook event: PreToolUse (Write|Edit).",
                             "# Cursor hook event: afterFileEdit.",
                         ],
-                        [
-                            "# Hook type: PostToolUse:Edit",
-                            "# Cursor hook event: afterFileEdit.",
-                        ],
+                        [_LOOP_HEADER, _LOOP_HEADER_CURSOR],
                         [_HOOK_PATH_EXTRACT, _HOOK_PATH_EXTRACT_CURSOR],
                         [
-                            "/tmp/claude-loop-detection-",
-                            "/tmp/cursor-loop-detection-",
+                            "/claude-loop-detection-",
+                            "/cursor-loop-detection-",
                         ],
+                        # The warnings stay user-visible on Cursor (see
+                        # _LOOP_WARNING above).
+                        [_LOOP_WARNING, _LOOP_WARNING_CURSOR],
+                        [_GUARD_WARNING, _GUARD_WARNING_CURSOR],
                         [
                             "SKILLS_DIR=\"$ROOT_DIR/.claude/skills\"",
                             "SKILLS_DIR=\"$ROOT_DIR/.cursor/skills\"",
@@ -554,15 +634,11 @@ MIRROR_RULES: dict[str, Any] = {
                             "# Codex hook event: PreToolUse "
                             "(self-filters to file-edit payloads).",
                         ],
-                        [
-                            "# Hook type: PostToolUse:Edit",
-                            "# Codex hook event: PostToolUse "
-                            "(self-filters to file-edit payloads).",
-                        ],
+                        [_LOOP_HEADER, _LOOP_HEADER_CODEX],
                         [_HOOK_PATH_EXTRACT, _HOOK_PATH_EXTRACT_CODEX],
                         [
-                            "/tmp/claude-loop-detection-",
-                            "/tmp/codex-loop-detection-",
+                            "/claude-loop-detection-",
+                            "/codex-loop-detection-",
                         ],
                         [
                             "SKILLS_DIR=\"$ROOT_DIR/.claude/skills\"",

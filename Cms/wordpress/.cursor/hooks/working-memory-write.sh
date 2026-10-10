@@ -86,10 +86,12 @@ fi
 # parse that protected the --json form.
 #
 # Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - including 4, "the retrieval gate withheld this turn" - falls through and
-# leaves the previous rule in place. That fallthrough is the correct
-# behaviour for a skip and is relied on: an enforce-mode skip must never
-# replace Cursor's only memory channel with an empty capsule.
+# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
+# this turn" - renders nothing. The rule in place then stays only when its
+# header names this task: an enforce-mode skip must never replace Cursor's
+# only memory channel with an empty capsule, and another task's capsule (a
+# switched branch whose render keeps failing) must never be sent with this
+# task's prompts as their working memory.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;
@@ -116,5 +118,8 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
     rm -f "$TMP_RULE" 2>/dev/null
   fi
 fi
+grep -qxF "Session context as of end of previous turn (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
+  || grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
+  || rm -f "$RULE_FILE" 2>/dev/null
 
 exit 0

@@ -206,7 +206,7 @@
     ".claude/commands/test-generator.md": "dcdb6542760fb1e52ac5d95ddcbee72eb5a52c5313cb49b235d5d89cd1a1375e",
     ".claude/commands/verify.md": "aac7ddc849c49eb75b8be17748add404ea552d6cb97b067a6c775d3b29066b53",
     ".claude/commands/writing-plans.md": "183238cd9fe57613f955cc23496e149b2a3624e8a13b9cd5dd4a2051e915ac53",
-    ".claude/settings.json": "6d793638331c2cef822937e2ffc2050329df0e3b9e98bcf653f35abb1af49f87",
+    ".claude/settings.json": "699814ac1a975d30dc644c3bab8c02cc13daabde1b4ae04581f58c9f313e06cb",
     ".claude/skills/SKILL FLOW.md": "886a5eeebd80ce356d32442f137795f0bd73b564ff4e4c1c28e054846e86abf5",
     ".claude/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     ".codex/config.toml": "42c947e361a7bb6606d6455bae697d90569ce8a7b0b90cf7c39c570083f29ced",
@@ -219,7 +219,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "92dba7b259cdb21d410e3854f229c1737d7b8bfd11874c915d49c030926c22ec"
   },
-  "policy_digest": "6f18667b52cdd8cd637f86319baa670b3e841814cadb7ab03acff8d6329eb8d4",
+  "policy_digest": "85c54af5099564b1693001a6062d2dfcd08096c176fd1ffb6564f2feaf0774af",
   "release": "2.0.0",
   "schema_version": 1
 }

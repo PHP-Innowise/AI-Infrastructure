@@ -40,11 +40,27 @@ if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
   echo "Accelerator state (Project Brain, Memory Bank, index): $STATE_DIR"
 fi
 
-# Loop detection is session-scoped; discard counters from earlier sessions.
-# Counters are namespaced by a stable hash of the repo root; only reset ours.
+# Edit and repetition counts are session-scoped (loop-detection.sh and the
+# guard at the end of bash-validator.sh). Their counters sit in this user's
+# directory for this repository, keyed by session: this session's start over,
+# any session's left untouched for a day are pruned, and another session still
+# running in this checkout keeps its own. A directory this user does not own,
+# or a symbolic link in its place, is left alone.
+LOOP_INPUT=
+[ -t 0 ] || IFS= read -r -d '' LOOP_INPUT || :
+SESSION_KEY=$(printf '%s' "$LOOP_INPUT" \
+  | sed -n -E 's/.*"(session_id|conversation_id)"[[:space:]]*:[[:space:]]*"([^"]*)".*/\2/p' | head -1)
+SESSION_KEY=${SESSION_KEY//[^A-Za-z0-9]/}
+SESSION_KEY=${SESSION_KEY:0:64}
+[ -n "$SESSION_KEY" ] || SESSION_KEY=shared
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 REPO_KEY=$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)
-find "/tmp/cursor-loop-detection-$REPO_KEY" -type f -delete 2>/dev/null || true
+TRACK_BASE=${TMPDIR:-/tmp}
+TRACK_DIR="${TRACK_BASE%/}/cursor-loop-detection-${EUID:-0}-$REPO_KEY"
+if [ -d "$TRACK_DIR" ] && [ ! -L "$TRACK_DIR" ] && [ -O "$TRACK_DIR" ]; then
+  find "$TRACK_DIR" -maxdepth 1 -type f \( -name "cmd-$SESSION_KEY-*" -o -name "edit-$SESSION_KEY-*" -o -mtime +0 \) \
+    -delete 2>/dev/null || true
+fi
 
 # Git info
 if git rev-parse --git-dir > /dev/null 2>&1; then
@@ -220,10 +236,11 @@ fi
 # JSON parse.
 #
 # Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - including 4, "the retrieval gate withheld this turn" - falls through and
-# leaves the previous rule in place. That fallthrough is the correct
-# behaviour for a skip and is relied on: an enforce-mode skip must never
-# replace Cursor's only memory channel with an empty capsule.
+# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
+# this turn" - renders nothing. The rule in place then stays only when its
+# header names this task: an enforce-mode skip must never replace Cursor's
+# only memory channel with an empty capsule, and a fresh session on a switched
+# branch whose render fails must not start with the previous branch's capsule.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;
@@ -251,5 +268,9 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
     rm -f "$TMP_RULE" 2>/dev/null
   fi
 fi
+[ -n "$CAPSULE_TASK_ID" ] && {
+  grep -qxF "Session context as of end of previous turn (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null \
+    || grep -qxF "Session context retrieved for a recent prompt (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null
+} || rm -f "$RULE_FILE" 2>/dev/null
 
 exit 0

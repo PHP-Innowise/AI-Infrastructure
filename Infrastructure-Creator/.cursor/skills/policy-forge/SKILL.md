@@ -62,7 +62,7 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    `SKIPPED - <check>: <reason>; impact: <unverified behavior>` rather than
    silently passing it.
 4. **Author `GOLDEN-PRINCIPLES.md`**: durable stack-specific non-negotiables, project-specific source authority, critical behavioral invariants, and secrets discipline.
-5. **Author `STABILIZATION.md`**: the error-to-rule loop the target uses to convert recurring mistakes into permanent rules.
+5. **Author `STABILIZATION.md`**: the error-to-rule loop the target uses to convert recurring mistakes into permanent rules. It MUST carry `## Localization` (the `COMPONENT - COMPONENT | blame: SIDE` label, its components - model, owner, grader, third party, context, memory, tool, local and external environment - mapped to the target, and the two attribution rules: label the earliest unrecovered failure; blame follows behavior, not opportunity) and `## Routing` (where each blamed side's repair belongs): the bug, finding and incident templates `memory-seed` installs point there.
 6. **Duplicate** `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into every selected edition folder (byte-identical copies). Do NOT write into unselected editions. When `.claude` is selected, also write `.claude/CLAUDE.md` with the `@../AGENTS.md` import (see the naming convention); bootstrap-verifier fails a Claude edition without it.
 7. **Analyze commands before publication.** Run
    `bootstrap-verifier/scripts/analyze_commands.py --target <real-target>` to
