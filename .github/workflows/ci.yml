@@ -174,7 +174,12 @@ jobs:
   installation:
     name: installation
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The job took 577 s of its former 600 on a hosted runner (PR #44): the
+    # per-edition install checks doubled with the context handoff, and the
+    # harness step alone varies between about 340 and 470 s. Twice the
+    # current run leaves room for that spread and the next tests; a run that
+    # needs more than this is a hang, not a slow runner.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

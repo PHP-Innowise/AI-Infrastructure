@@ -186,6 +186,11 @@ python3 -m unittest tests.test_registry tests.test_open_source_kit tests.test_ki
 python3 scripts/check.py --group installation   # adds the native browser harness regression tests
 ```
 
+The job's `timeout-minutes` is 20. It took 577 s of the former 600 on a hosted
+runner, and its harness step alone ranges from about 340 to 470 s between
+runs. `check.py` flags a group that ran longer than its job's limit, and
+`tests/test_check.py` keeps each group's limit equal to the workflow's.
+
 The synthetic matrix installs each PHP edition once for each selected AI tool
 into a path containing spaces. It verifies required Memory Bank and Project
 Brain files, exact copy transcripts, collision refusal, the canonical retired

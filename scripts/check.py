@@ -461,7 +461,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
             name="installation",
             title="installation",
             job="installation",
-            timeout_minutes=10,
+            timeout_minutes=20,
             weight=100,
             commands=(
                 step(

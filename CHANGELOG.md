@@ -1807,6 +1807,13 @@ edition's own files remain in that edition's changelog.
   waits for a hook behind a link. `InstallSyncTest`: a runtime whose backup
   cannot be written now holds back the rest).
 
+- **The installation job has room to finish.** On PR #44 it ran 577 s of its
+  600 s limit on a hosted runner: the per-edition install checks doubled with
+  the context handoff, and its harness step varies by more than 100 s between
+  runs. `timeout-minutes` is now 20 in `.github/workflows/ci.yml` and
+  `scripts/check.py`, and `tests/test_check.py` (`test_timeouts_match_ci`)
+  fails when a group's limit differs from its job's.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks

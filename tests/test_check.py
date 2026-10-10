@@ -559,6 +559,23 @@ class DriftTest(unittest.TestCase):
                 )
         self.assertEqual(problems, [], "setup-python versions and check.py `python=` pins differ")
 
+    def test_timeouts_match_ci(self) -> None:
+        # check.py reports a group that ran longer than its job may on a
+        # runner; a limit raised in one file and not the other made that
+        # report wrong, so the two are held together here.
+        problems = []
+        for workflow, document in load_workflows().items():
+            for job_id, job in (document.get("jobs") or {}).items():
+                group = self.by_job.get((workflow, job_id))
+                if group is None:
+                    continue  # reported by test_every_workflow_job_has_a_group
+                wanted = float(job["timeout-minutes"]) if job.get("timeout-minutes") is not None else 0
+                if group.timeout_minutes != wanted:
+                    problems.append(
+                        f"{workflow} > {job_id}: timeout-minutes {wanted:g}, check.py {group.timeout_minutes:g}"
+                    )
+        self.assertEqual(problems, [], "CI's timeout-minutes and check.py's timeout_minutes differ")
+
     def test_modules_ci_names_exist(self) -> None:
         # A guarded entry skips when its file is absent; CI would fail
         # instead. This keeps the guard from hiding a deleted test module.
