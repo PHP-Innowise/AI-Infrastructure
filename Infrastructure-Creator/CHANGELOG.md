@@ -31,6 +31,7 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Fixed
 
+- **`memory-seed` asset: the Memory MCP refuses over-nested messages itself.** A message nested past 64 levels is a parse error before the JSON parser runs, on every Python (see the root `CHANGELOG.md`). Policy lock regenerated.
 - **`memory-seed` asset: governed retrieval manifests validate again.** The runtime writes manifest schema version 4 (version 3 plus the source-link counters), so `context.py validate` in a generated project accepts the manifests its own retrievals write (see the root `CHANGELOG.md`). Policy lock regenerated.
 - **`memory-seed` asset: the second review's memory fixes.** A generated project's runtime refuses HTTP bearer and basic credentials, reports a revised learning consequence instead of claiming a replay, takes its source policy from the shared `automatic_query.py`, and survives a damaged session-repeat record. The `.claude`/`.cursor` mirrors and the policy lock are regenerated.
 - **`memory-seed` asset: attached first runs and a private attached state.** The runtime a generated project carries lays out an attached state under the mutation lock and writes each seed whole, so two first runs never read a half-written `runtime.json`, and keeps an attached state owner-only whatever the umask (see the root `CHANGELOG.md`). A generated project's installed layout is unchanged. Mirrors and policy lock regenerated.

@@ -26,6 +26,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **Memory MCP: a message nested past 64 levels is a parse error on every
+  Python.** The server relied on the JSON parser's recursion limit, which now
+  follows the C stack; a newer Python parsed 60,000 levels and answered
+  "invalid request" (installation CI). The depth is checked before parsing,
+  strings aside.
+
 - **A Windows sync can create files.** The installer's descriptor-relative
   `create_file` asked `NtCreateFile` for synchronous I/O without naming
   `SYNCHRONIZE` in the access mask; the call checks the requested mask before

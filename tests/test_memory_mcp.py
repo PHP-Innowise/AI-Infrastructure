@@ -339,6 +339,20 @@ class MemoryMcpTests(unittest.TestCase):
         self.assertEqual(7, replies[2]['id'])
         self.assertIn('tools', replies[2]['result'])
 
+    def test_nesting_past_the_limit_is_a_parse_error_whatever_the_stack(self):
+        # Shallow enough for any parser, deeper than any message of this
+        # server: the answer must not depend on the C stack of the host.
+        over = '[' * 65 + ']' * 65
+        within = json.dumps({'jsonrpc': '2.0', 'id': 8, 'method': 'ping',
+                             'params': {'_meta': {'nested': '[[[[ not structure ]]]]'}}})
+        result = subprocess.run([sys.executable, str(self.server), '--root', str(self.root)],
+            input=over + '\n' + within + '\n', capture_output=True, text=True, timeout=20)
+        self.assertEqual(0, result.returncode, result.stderr)
+        answers = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(-32700, answers[0]['error']['code'])
+        self.assertEqual(8, answers[1]['id'])
+        self.assertEqual({}, answers[1]['result'])
+
     def test_invalid_jsonrpc_shape_and_repeated_initialize(self):
         replies = self.exchange([[], {'jsonrpc': '1.0', 'method': 'ping', 'id': 1},
             {'jsonrpc': '2.0', 'method': 'ping', 'id': True},
