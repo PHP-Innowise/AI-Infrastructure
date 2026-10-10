@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,7 @@ from apply_disposition_decisions import apply_decisions  # noqa: E402
 from common import QaError, load_json, verify_sha256_manifest  # noqa: E402
 from reconstruct_workbook import reconstruct, sanitize_machine_paths  # noqa: E402
 from run_tc_ai import (  # noqa: E402
+    environment_record,
     expand_argv,
     run_case,
     sanitized_argv,
@@ -51,6 +53,21 @@ class QaToolingTests(unittest.TestCase):
             "catalog",
         )
         self.assertTrue(any("Additional properties" in error for error in errors))
+
+    def test_environment_names_a_detached_checkout(self) -> None:
+        # CI checks a pull request out as a detached merge commit; the
+        # evidence must still be complete there.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+            subprocess.run(git + ["init", "--quiet", "-b", "main"], cwd=root, check=True)
+            (root / "a.txt").write_text("a\n", encoding="utf-8")
+            subprocess.run(git + ["add", "a.txt"], cwd=root, check=True)
+            subprocess.run(git + ["commit", "--quiet", "-m", "a"], cwd=root, check=True)
+            self.assertEqual("main", environment_record(root)["branch"])
+            subprocess.run(git + ["checkout", "--quiet", "--detach"], cwd=root, check=True)
+            branch = environment_record(root)["branch"]
+        self.assertTrue(branch.startswith("detached at "), branch)
 
     def test_shell_commands_use_pinned_python_and_evidence_redacts_paths(self) -> None:
         argv = expand_argv(

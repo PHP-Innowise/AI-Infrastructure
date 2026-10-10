@@ -1775,6 +1775,13 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **QA run evidence is complete on a detached checkout.** `run_tc_ai`
+  recorded `git branch --show-current` as the environment's `branch`, which is
+  empty where CI checks a pull request out as a detached merge commit, so the
+  evidence validator rejected `environment.json` as incomplete and the
+  `qa-tooling` job failed on its first pull request. A detached checkout is now
+  recorded as `detached at <commit>`, with a regression test.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks

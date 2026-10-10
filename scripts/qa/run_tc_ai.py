@@ -148,8 +148,21 @@ def environment_record(root: Path) -> Dict[str, Any]:
         "executable": "{python}",
         "repository_root": "{root}",
         "repository_commit": repository_commit(root),
-        "branch": git_output(["branch", "--show-current"], root=root).strip(),
+        "branch": current_branch(root),
     }
+
+
+def current_branch(root: Path) -> str:
+    """The checked-out branch, or `detached at <commit>` without one.
+
+    CI checks a pull request out as a detached merge commit, where
+    `git branch --show-current` prints nothing; the evidence still has to
+    say what was run.
+    """
+    branch = git_output(["branch", "--show-current"], root=root).strip()
+    if branch:
+        return branch
+    return "detached at " + git_output(["rev-parse", "--short", "HEAD"], root=root).strip()
 
 
 def assertion_summary(items: List[Dict[str, str]]) -> Dict[str, Any]:
