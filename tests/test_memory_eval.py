@@ -899,6 +899,43 @@ class MechanismCounterTest(unittest.TestCase):
                     "capsule_secret_matches"):
             self.assertIsNone(mixed[key], key)
 
+    def test_knowledge_and_skill_routing_are_measured_apart(self) -> None:
+        skill, other_skill, doc, noise_doc = (".agents/skills/coder/SKILL.md", ".agents/skills/sdd/SKILL.md",
+                                              "docs/a.md", "docs/b.md")
+
+        def item(delivered, useful, noise, existed):
+            return {"status": "ok", "class": memory_eval.classify(delivered, useful, noise, False),
+                    "delivered": delivered, "useful_delivered": useful, "noise_delivered": noise,
+                    "unjudged": [path for path in delivered if path not in useful and path not in noise],
+                    "existed_useful": existed}
+        items = {
+            # useful only because of the skill: knowledge noise-only, skill hit
+            "a": item([skill, noise_doc], [skill], [noise_doc], [skill]),
+            # the wrong skill, a useful document
+            "b": item([other_skill, doc], [doc], [other_skill], [skill, doc]),
+            # a useful skill existed, none delivered; nothing else
+            "c": item([], [], [], [skill]),
+            # no useful skill; a noise skill is the only delivery
+            "d": item([other_skill], [], [other_skill], []),
+            # no useful skill, none delivered, a useful document
+            "e": item([doc], [doc], [], [doc]),
+        }
+        summary = memory_eval.summarize(items)
+        self.assertEqual(3, summary["useful"])
+        self.assertEqual((2, 1, 2), (summary["knowledge_useful"], summary["knowledge_noise_only"],
+                                     summary["knowledge_silent"]))
+        self.assertEqual(2, summary["knowledge_could_help"])
+        self.assertEqual((2, 2, 1), (summary["knowledge_useful_paths_delivered"],
+                                     summary["knowledge_useful_paths_existed"], summary["knowledge_noise_paths"]))
+        self.assertEqual((3, 1, 1, 1), (summary["skill_with_useful"], summary["skill_hit"],
+                                        summary["skill_wrong"], summary["skill_empty"]))
+        self.assertEqual((2, 1, 1, 0), (summary["skill_without_useful"], summary["skill_noise"],
+                                        summary["skill_silent"], summary["skill_unjudged"]))
+        report = memory_eval.format_report([("A", Path("a.json"), {"meta": {}, "items": items,
+                                                                  "summary": summary})])
+        self.assertIn("knowledge: useful turns", report)
+        self.assertIn("1/3", report)
+
     @unittest.skipIf(os.name == "nt", "POSIX modes")
     def test_results_are_written_owner_only(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

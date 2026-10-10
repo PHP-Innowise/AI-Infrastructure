@@ -1586,6 +1586,75 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         "latency_p50": percentile(seconds, 0.50),
         "latency_p95": percentile(seconds, 0.95),
         **mechanism_totals(evaluated),
+        **knowledge_and_skill_totals(evaluated),
+    }
+
+
+def knowledge_class(item: Dict[str, Any]) -> str:
+    """The turn's class with skills left out: what project knowledge did."""
+    def keep(key: str) -> List[str]:
+        return [path for path in item.get(key) or [] if not is_skill(normalise_path(path))]
+    return classify(keep("delivered"), keep("useful_delivered"), keep("noise_delivered"),
+                    bool(item.get("query_withheld")))
+
+
+def skill_outcome(item: Dict[str, Any]) -> str:
+    """How the procedural slot did on this turn.
+
+    With a labelled-useful skill: `hit` (a useful one delivered), `wrong`
+    (another skill delivered), `empty` (none). Without one: `silent`,
+    `noise` (a skill labelled noise delivered) or `unjudged`.
+    """
+    def skills(key: str) -> List[str]:
+        return [path for path in item.get(key) or [] if is_skill(normalise_path(path))]
+    delivered = skills("delivered")
+    if skills("existed_useful"):
+        if skills("useful_delivered"):
+            return "hit"
+        return "wrong" if delivered else "empty"
+    if not delivered:
+        return "silent"
+    return "noise" if skills("noise_delivered") else "unjudged"
+
+
+def knowledge_and_skill_totals(evaluated: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Project knowledge and skill routing, apart.
+
+    Agents in real sessions followed none of the 71 skills a capsule named
+    and called accelerator skills on 1.1% of Claude turns, while skills were
+    53 of 66 missed useful paths on the core set: a turn counted `useful`
+    for a skill is useful on the label, not in what the agent did. The
+    knowledge measures leave skills out; skill routing is reported on its
+    own. Computed from each item's paths, so older results have them too.
+    """
+    classes = Counter(knowledge_class(item) for item in evaluated)
+    outcomes = Counter(skill_outcome(item) for item in evaluated)
+
+    def knowledge(key: str) -> int:
+        return sum(
+            1 for item in evaluated for path in item.get(key) or []
+            if not is_skill(normalise_path(path))
+        )
+    return {
+        "knowledge_useful": classes.get("useful", 0),
+        "knowledge_noise_only": classes.get("noise-only", 0),
+        "knowledge_unjudged_only": classes.get("unjudged-only", 0),
+        "knowledge_silent": classes.get("silent", 0),
+        "knowledge_could_help": sum(
+            1 for item in evaluated
+            if any(not is_skill(normalise_path(path)) for path in item.get("existed_useful") or [])
+        ),
+        "knowledge_useful_paths_delivered": knowledge("useful_delivered"),
+        "knowledge_useful_paths_existed": knowledge("existed_useful"),
+        "knowledge_noise_paths": knowledge("noise_delivered"),
+        "skill_with_useful": sum(outcomes.get(name, 0) for name in ("hit", "wrong", "empty")),
+        "skill_hit": outcomes.get("hit", 0),
+        "skill_wrong": outcomes.get("wrong", 0),
+        "skill_empty": outcomes.get("empty", 0),
+        "skill_without_useful": sum(outcomes.get(name, 0) for name in ("silent", "noise", "unjudged")),
+        "skill_silent": outcomes.get("silent", 0),
+        "skill_noise": outcomes.get("noise", 0),
+        "skill_unjudged": outcomes.get("unjudged", 0),
     }
 
 
@@ -1978,6 +2047,18 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("mean unjudged per turn", "mean_unjudged"),
     ("latency p50 (s)", "latency_p50"),
     ("latency p95 (s)", "latency_p95"),
+    ("knowledge: useful turns", "knowledge_useful"),
+    ("knowledge: could help", "knowledge_could_help"),
+    ("knowledge: noise-only turns", "knowledge_noise_only"),
+    ("knowledge: unjudged-only turns", "knowledge_unjudged_only"),
+    ("knowledge: silent turns", "knowledge_silent"),
+    ("knowledge: useful paths delivered", "knowledge_useful_paths_delivered"),
+    ("knowledge: noise paths", "knowledge_noise_paths"),
+    ("skills: a useful one delivered", "skill_hit"),
+    ("skills: another one delivered", "skill_wrong"),
+    ("skills: none delivered", "skill_empty"),
+    ("skills: noise where none was useful", "skill_noise"),
+    ("skills: silent where none was useful", "skill_silent"),
     ("useful paths delivered", "useful_paths_delivered"),
     ("noise paths", "noise_paths"),
     ("unjudged paths", "unjudged_paths"),
@@ -1992,7 +2073,8 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("index latency p95 (s)", "index_latency_p95"),
 )
 SHARED_ROWS = {"useful", "answer_in_text", "noise_only", "unjudged_only", "silent", "could_help",
-               "answer_could_help", "contaminated"}
+               "answer_could_help", "contaminated", "knowledge_useful", "knowledge_could_help",
+               "knowledge_noise_only", "knowledge_unjudged_only", "knowledge_silent"}
 # Rows about a run's coverage; every other row measures its evaluated prompts.
 COVERAGE_ROWS = {"prompts", "evaluated", "skipped_total"}
 
@@ -2018,6 +2100,12 @@ def row_cell(summary: Dict[str, Any], key: str) -> str:
         return f"{value:.1%}"
     if key == "useful_paths_delivered":
         return f"{int(value)}/{int(summary.get('useful_paths_existed') or 0)}"
+    if key == "knowledge_useful_paths_delivered":
+        return f"{int(value)}/{int(summary.get('knowledge_useful_paths_existed') or 0)}"
+    if key in ("skill_hit", "skill_wrong", "skill_empty"):
+        return f"{int(value)}/{int(summary.get('skill_with_useful') or 0)}"
+    if key in ("skill_noise", "skill_silent"):
+        return f"{int(value)}/{int(summary.get('skill_without_useful') or 0)}"
     if key.startswith(("latency", "index_latency")):
         return f"{value:.3f}"
     if key.startswith("mean"):
@@ -2102,6 +2190,9 @@ def paired_diff(
         "useful": lambda item: item.get("class") == "useful",
         "noise-only": lambda item: item.get("class") == "noise-only",
         "answer": lambda item: bool(item.get("answer_in_text")),
+        "knowledge useful": lambda item: knowledge_class(item) == "useful",
+        "knowledge noise-only": lambda item: knowledge_class(item) == "noise-only",
+        "skill hit": lambda item: skill_outcome(item) == "hit",
     }
     changes = {}
     for name, test in tests.items():

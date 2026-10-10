@@ -255,6 +255,24 @@ there; links seeded by paths named in the prompt do, and count under
 
 ## What the numbers mean
 
+**Knowledge and skills are read apart.** In real sessions agents followed
+none of the 71 skills a capsule named (no Skill call, no `SKILL.md` read on
+those turns) and used accelerator skills on 1.1% of Claude turns; on Codex the
+user picked them (`$code-reviewer`). Skills were 53 of the 66 useful paths the
+core set missed. A turn counted `useful` for a skill is useful on its label,
+not in what the agent did, so the summary also reports:
+
+- `knowledge_*` - the turn classes, could-help, useful and noise paths with
+  every skill path left out: what project knowledge did;
+- `skill_*` - the procedural slot as a routing question. Where a
+  labelled-useful skill existed: `skill_hit` (a useful one delivered),
+  `skill_wrong` (another one), `skill_empty` (none), out of
+  `skill_with_useful`. Where none did: `skill_silent`, `skill_noise`,
+  `skill_unjudged`, out of `skill_without_useful`.
+
+Both are computed from each item's paths, so results written before them
+report them too.
+
 - **delivered** - item paths of the capsule's three layers, normalised. The
   layers of a `refresh` hold what its `capsule_text` shows: an item the
   rendered text had no room for is left out of them. `useful_delivered` have

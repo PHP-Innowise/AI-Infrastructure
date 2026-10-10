@@ -26,6 +26,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **The memory evaluation stand reads project knowledge and skill routing
+  apart.** Agents in real sessions followed none of the 71 skills a capsule
+  named and used accelerator skills on 1.1% of Claude turns, while skills were
+  53 of the 66 useful paths the core set missed. The summary adds
+  `knowledge_*` turn classes and paths with skills left out, and `skill_*`
+  routing outcomes (useful one, another one, none; noise or silence where
+  none was useful), computed from each item's paths so older results have
+  them too.
+
 - **Related knowledge gives its place back first.** When the capsule's JSON
   passes 8,000 characters or its text 3,600, an item a link brought in
   (`source-link`, `prompt-link`, `touch-link`) is dropped before history the
