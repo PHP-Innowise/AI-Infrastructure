@@ -6915,6 +6915,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ("implementing", "implementation"),
             ("execution", "implementation"),
             ("review", "verification"),
+            ("quality", "verification"),
         )
         for index, (supplied, canonical) in enumerate(cases):
             task_id = f"TASK-PHASE-{index}"

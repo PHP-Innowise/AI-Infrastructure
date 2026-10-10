@@ -67,6 +67,9 @@ TASK_PHASE_ALIASES = {
     "implementing": "implementation",
     "execution": "implementation",
     "review": "verification",
+    # SKILL FLOW.md's Phase Map names the reviewing/testing row "Quality", so
+    # an agent following it reaches for this word.
+    "quality": "verification",
 }
 TASK_PHASE_INPUTS = (*TASK_PHASES, *TASK_PHASE_ALIASES)
 # The agent message channel: an append-only JSONL journal per task under
