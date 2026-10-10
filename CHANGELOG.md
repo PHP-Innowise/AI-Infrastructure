@@ -26,6 +26,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A governed retrieval manifest that carries source-link counters
+  validates.** Manifests now declare schema version 4, which is version 3 plus
+  `source_links`. Version 3 had shipped with an exact key set, so every
+  governed manifest written since the counters were added failed
+  `context.py validate` ("retrieval manifest does not match strict schema").
+  Versions 1-3 keep validating; a version 3 manifest that carries the counters
+  is still rejected.
+
 - **Automatic excerpts keep the evidence they score, and related knowledge can
   share a current code source.** Adjacent FTS highlights retain each term's
   weight; exact section-score ties prefer body evidence; oversized sentences

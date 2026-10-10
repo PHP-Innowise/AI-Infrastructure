@@ -7,7 +7,7 @@
     "selected", "excluded", "token_estimates", "provider", "escalation_reason"
   ],
   "properties": {
-    "schema_version": {"enum": [1, 2, 3]},
+    "schema_version": {"enum": [1, 2, 3, 4]},
     "id": {"type": "string", "format": "uuid"},
     "created_at": {"type": "string", "format": "date-time"},
     "query": {"type": "string", "minLength": 1},

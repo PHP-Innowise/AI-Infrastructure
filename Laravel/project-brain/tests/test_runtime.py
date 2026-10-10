@@ -437,7 +437,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.assertEqual(0, payload.returncode, payload.stderr)
         manifest = self.latest_manifest(json.loads(payload.stdout))
 
-        self.assertEqual(3, manifest["schema_version"], manifest)
+        self.assertEqual(retrieval.MANIFEST_SCHEMA_VERSION, manifest["schema_version"], manifest)
         self.assertEqual("explicit", manifest["query_source"], manifest)
         phases = manifest["phase_seconds"]
         self.assertEqual({"stat", "index", "retrieval"}, set(phases), phases)
@@ -681,6 +681,31 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         self.assertEqual([], brain.validate_repository(self.repository))
 
+        # Version 4 adds the source-link counters; a version 3 manifest that
+        # carried them would fail every runtime that checks version 3 exactly.
+        version_4_id = "00000000-0000-4000-8000-000000000007"
+        version_4 = {
+            **version_3,
+            "schema_version": 4,
+            "id": version_4_id,
+            "source_links": {"anchors": 1, "candidates": 0, "delivered": 0},
+        }
+        (manifests / f"{version_4_id}.json").write_text(
+            json.dumps(version_4, indent=2), encoding="utf-8"
+        )
+        self.assertEqual([], brain.validate_repository(self.repository))
+        stray_id = "00000000-0000-4000-8000-000000000008"
+        (manifests / f"{stray_id}.json").write_text(
+            json.dumps({**version_4, "schema_version": 3, "id": stray_id}, indent=2),
+            encoding="utf-8",
+        )
+        errors = brain.validate_repository(self.repository)
+        self.assertTrue(
+            any(stray_id in error and "strict schema" in error for error in errors),
+            errors,
+        )
+        (manifests / f"{stray_id}.json").unlink()
+
         # A manifest that claims version 3 must carry host provenance.
         incomplete_id = "00000000-0000-4000-8000-000000000005"
         (manifests / f"{incomplete_id}.json").write_text(
@@ -715,6 +740,19 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             ),
             errors,
         )
+
+    def test_a_governed_manifest_written_now_validates(self) -> None:
+        # Every governed retrieval writes the manifest version it declares;
+        # `validate` must accept what the runtime itself just wrote.
+        self.start("TASK-WRITTEN")
+        self.run_cli("retrieve", "cobalt authority", "--task-id", "TASK-WRITTEN", "--json")
+        manifests = list(
+            (self.repository / "project-brain/control/retrieval-manifests").glob("*.json")
+        )
+        self.assertTrue(manifests)
+        self.assertEqual([], brain.validate_repository(self.repository))
+        result = self.run_cli("validate")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_hook_query_comes_from_the_task_not_the_branch_name(self) -> None:
         # A hook without a prompt (Cursor's stop and session-start renders)
@@ -3400,7 +3438,9 @@ class RetrievalReportTest(RuntimeHarness):
 
         report = self.report()
         self.assertEqual(2, report["turns"], report)
-        self.assertEqual({"1": 1, "3": 1}, report["schema_versions"], report)
+        self.assertEqual(
+            {"1": 1, str(retrieval.MANIFEST_SCHEMA_VERSION): 1}, report["schema_versions"], report
+        )
         # One of the two could answer the gate question; the report says so
         # rather than dividing by two.
         self.assertEqual(1, report["gate"]["decided"], report)

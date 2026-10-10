@@ -689,9 +689,10 @@ CROSS_EDITION_ALLOWED_DRIFT = {
 }
 
 MANIFEST_SCOPES = ("governed", "local")
-# Version 3 adds the host and retrieval entry point. Older manifests stay
-# valid: the validator keys its strict key set off the declared version.
-MANIFEST_SCHEMA_VERSION = 3
+# Version 3 adds the host and retrieval entry point, version 4 the counters
+# of automatic source-linked expansion. Older manifests stay valid: the
+# validator keys its strict key set off the declared version.
+MANIFEST_SCHEMA_VERSION = 4
 # Where the query that produced a retrieval came from. `prompt` is the user's
 # own request, `task` the goal and state of the active task, `task-id` a bare
 # identifier or branch name with no task text behind it, and `explicit` an

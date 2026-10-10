@@ -1883,6 +1883,10 @@ def validate_repository(
             "local_episode_count",
         },
     }
+    # Version 4 adds the counters of automatic source-linked expansion.
+    # Version 3 shipped, so a version 3 manifest that carried them would be
+    # rejected by every runtime that validates version 3 exactly.
+    manifest_keys_by_version[4] = manifest_keys_by_version[3] | {"source_links"}
     version_1_token_keys = {
         "policy", "handoff", "durable", "dynamic", "evidence", "total",
         "target", "hard",
@@ -1891,6 +1895,7 @@ def validate_repository(
         1: version_1_token_keys,
         2: version_1_token_keys,
         3: version_1_token_keys | {"local_episodes"},
+        4: version_1_token_keys | {"local_episodes"},
     }
     manifests = brain_root(repository) / "control" / "retrieval-manifests"
     if manifests.is_dir():
