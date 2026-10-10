@@ -424,11 +424,12 @@ require a current vendor-supported counting API, network access, and an API key,
 which is a separate decision under [Security](SECURITY.md).
 
 Not adopted: the `code2prompt-mcp` server and the `code2prompt-rs` Python SDK.
-The MCP server is recorded as a decision rather than a silence — the shipped
-Codex configuration deliberately requires no MCP server (see above and
-[Security](SECURITY.md)). The 2026-08-08 evaluation found the server surface
-poorer than this wrapper and the Python SDK unsuitable for the repository;
-re-check those upstream surfaces manually before relying on that comparison.
+The MCP server is recorded as a decision rather than a silence — the only
+MCP server the shipped Codex configuration registers is the accelerator's own
+local memory server (see above and [Security](SECURITY.md)). The 2026-08-08
+evaluation found the server surface poorer than this wrapper and the Python
+SDK unsuitable for the repository; re-check those upstream surfaces manually
+before relying on that comparison.
 The CLI is never a blocking CI gate: CI has no Rust toolchain, so
 `tests/test_collect_context.py` skips its live checks and runs its contract
 checks — including `test_containment`, which fails if `code2prompt` is ever

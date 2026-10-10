@@ -65,6 +65,17 @@ lowercase `tasks/` scaffolds. Source-only research, test suites, worked
 examples, and bundled uppercase `Task/` product/design material remain useful
 in this repository but are not copied into a consuming project.
 
+Memory written while working inside an edition is source-only too. Every
+Memory Bank chunk (`memory-bank/chunks/**`) and the governed Brain runtime
+files (`project-brain/control/handoffs/*.md`, `control/messages/*.jsonl`,
+`control/retrieval-manifests/*.json` and `project-brain/dynamic/*/*.md`) are
+excluded, so a consuming project starts from the empty memory index and Brain
+indexes and the `.gitkeep` placeholders that create the runtime's directories,
+never from another project's knowledge or tasks. A seed chunk or record added
+there is not installed: `--verify-inventories` reports it as `UNCLASSIFIED`
+until the inventories are regenerated, which lists it under
+`excluded_tracked_paths`.
+
 `Task/` and `tasks/` are intentionally different:
 
 - uppercase `Task/` is optional client-input space. A consuming project or
