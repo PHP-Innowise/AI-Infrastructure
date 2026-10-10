@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -480,8 +482,9 @@ class SecretPatternTableTest(unittest.TestCase):
     """What the shared secret patterns catch and what they must leave alone.
 
     The same patterns gate Brain writes, capsule queries and the index, where
-    a false positive drops a whole skill from retrieval: the Laravel
-    architect skill was excluded over a documented `--secret=...` flag.
+    a false positive masks a value in a shipped skill; it used to drop the
+    whole skill: the Laravel architect skill was excluded over a documented
+    `--secret=...` flag.
     """
 
     CREDENTIALS = (
@@ -557,6 +560,71 @@ class SecretPatternTableTest(unittest.TestCase):
             VALIDATOR.sensitive_label("Ask person@example.test"),
         )
         self.assertIsNone(VALIDATOR.sensitive_label("Apply the cobalt rule."))
+
+
+
+class MaskSecretsTest(unittest.TestCase):
+    """The index masks a detected value instead of dropping the document."""
+
+    VALUE_EXTENT = (
+        ("MAILER_PASSWORD=mailpit", "MAILER_PASSWORD=[redacted: assigned credential]"),
+        ("```yaml\nmailer:\n  password: quokka\n```",
+         "```yaml\nmailer:\n  password: [redacted: assigned credential]\n```"),
+        ("  password: correct horse battery", "  password: [redacted: assigned credential]"),
+        ("Set `MAIL_PASSWORD=mailpit` in .env, then run `php artisan migrate`.",
+         "Set `MAIL_PASSWORD=[redacted: assigned credential]` in .env, then run `php artisan migrate`."),
+        ("password='alpha beta gamma' trailing", "password=[redacted: assigned credential] trailing"),
+        ('curl -H "Authorization: Bearer abcdefghijklmnopqrstu1234" https://api.example.test/v1',
+         'curl -H "Authorization: [redacted: authorization header]" https://api.example.test/v1'),
+        ("mysql://app:hunter2@db:3306/app", "[redacted: credential in URL]db:3306/app"),
+        ("APP_KEY=base64:2fl+Ktvkfl+Fuz4Qp/A75G2RTiWVA/ZoKZvp6fiiM10=",
+         "APP_KEY=[redacted: Laravel application key]"),
+        ("-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----\nafter",
+         "[redacted: private key]\nafter"),
+        ("ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 and more", "[redacted: GitHub token] and more"),
+    )
+
+    def test_every_caught_credential_is_masked_and_no_pattern_survives(self) -> None:
+        for text in SecretPatternTableTest.CREDENTIALS:
+            with self.subTest(text=text):
+                masked, count = VALIDATOR.mask_secrets(text)
+                self.assertGreaterEqual(count, 1)
+                self.assertIn("[redacted: ", masked)
+                self.assertEqual([], SecretPatternTableTest.hits(masked))
+
+    def test_the_value_goes_and_the_key_stays(self) -> None:
+        for text, expected in self.VALUE_EXTENT:
+            with self.subTest(text=text):
+                self.assertEqual((expected, 1), VALIDATOR.mask_secrets(text))
+
+    def test_text_without_a_detection_is_unchanged(self) -> None:
+        # Quoted-credential shapes and personal data are not triggers here:
+        # a document indexed before masking existed is indexed as it was.
+        for text in (*SecretPatternTableTest.NOT_CREDENTIALS, "password: `CLAUDE.md`",
+                     'password: "${DB_PASSWORD}"', "DB_PASSWORD=changeme",
+                     "mail ops@example.com or +1 555 123 4567"):
+            with self.subTest(text=text):
+                self.assertEqual((text, 0), VALIDATOR.mask_secrets(text))
+
+    def test_masked_text_is_stable_and_passes_the_render_screen(self) -> None:
+        for _, masked in self.VALUE_EXTENT:
+            with self.subTest(masked=masked):
+                self.assertEqual((masked, 0), VALIDATOR.mask_secrets(masked))
+                VALIDATOR.sanitize_automatic_query(masked)
+                # The excerpt fallback strips brackets before the screen.
+                VALIDATOR.sanitize_automatic_query(masked.replace("[", "").replace("]", ""))
+
+    def test_masking_that_does_not_converge_raises_without_the_value(self) -> None:
+        with mock.patch.dict(VALIDATOR.SECRET_PATTERNS, {"echo": re.compile(r"ECHOSECRET|redacted: echo")}):
+            with self.assertRaises(VALIDATOR.ValidationError) as raised:
+                VALIDATOR.mask_secrets("x ECHOSECRET y")
+        self.assertNotIn("ECHOSECRET", str(raised.exception))
+
+    def test_the_policy_fingerprint_follows_the_patterns(self) -> None:
+        before = VALIDATOR.secret_policy_fingerprint()
+        self.assertEqual(before, VALIDATOR.secret_policy_fingerprint())
+        with mock.patch.dict(VALIDATOR.SECRET_PATTERNS, {"release code": re.compile(r"ZQX-[A-Z]+-\d{4}")}):
+            self.assertNotEqual(before, VALIDATOR.secret_policy_fingerprint())
 
 
 if __name__ == "__main__":

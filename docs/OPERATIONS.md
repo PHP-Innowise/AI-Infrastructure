@@ -310,9 +310,11 @@ python3 memory-bank/scripts/context.py index [--incremental] [--json]
 Rebuilds the disposable FTS5 document index from eligible policy, skills,
 documentation, specifications, active Memory Bank chunks, task documents,
 capability epics, changelog, active Brain records, and handoffs. It filters
-Git-ignored candidates before reading them, rejects likely secrets, deduplicates
-mirrored skills, and replaces the previous document/metadata index in one
-SQLite transaction.
+Git-ignored candidates before reading them, masks likely secret values in
+repository documents (and excludes Memory Bank chunks that carry one),
+deduplicates mirrored skills, and replaces the previous document/metadata index
+in one SQLite transaction. Its text output adds `Redacted: N value(s) in M
+document(s)` when masking happened; a masked document is cached like any other.
 
 `--incremental` reuses every row whose source modification time and size are
 unchanged **and whose calendar boundary has not passed**, so only new,

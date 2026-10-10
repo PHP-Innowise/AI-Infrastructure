@@ -122,6 +122,20 @@ class MemoryMcpTests(unittest.TestCase):
         recorded = {item['path']: item['estimated_tokens'] for item in manifest['selected']}
         self.assertEqual(chunk['estimated_tokens'], recorded[chunk['path']])
 
+    def test_a_masked_value_never_reaches_an_mcp_client(self):
+        (self.root / 'README.md').write_text(
+            '# Mail\n\nThe heron catcher receives development mail.\n\n'
+            '```env\nMAILER_PASSWORD=mailpit\n```\n', encoding='utf-8')
+        response = self.call('memory_retrieve', task_id='TASK-MASK', query='heron catcher development mail')
+        self.assertFalse(response['isError'], response)
+        result = response['structuredContent']
+        self.assertIn('README.md', [item['path'] for item in result['capsule']['semantic']])
+        self.assertNotIn('mailpit', json.dumps(response))
+        manifest = json.loads((self.root / result['capsule']['manifest']).read_text())
+        hashes = {item['path']: item['source_hash'] for item in manifest['selected']}
+        self.assertEqual(hashlib.sha256((self.root / 'README.md').read_bytes()).hexdigest(),
+                         hashes['README.md'])
+
     def test_first_retrieve_automatically_delivers_source_linked_answers(self):
         query, paths = source_link_fixture(self.root)
         response = self.call('memory_retrieve', task_id='TASK-AUTO-SOURCES', query=query)

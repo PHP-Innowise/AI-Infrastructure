@@ -26,6 +26,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A document with a detected credential is masked in the index, not
+  dropped.** One placeholder-shaped development credential in a code block
+  (`password: admin`) used to take a whole README out of retrieval; on the
+  121-prompt evaluation it was the only useful document of seven holdout
+  prompts. The indexer now replaces each value a secret pattern recognises
+  with `[redacted: <label>]`, keeping the key, and excludes the document only
+  when masking does not converge. The stored source hash stays the file's, so
+  governed retrieval does not call a masked document stale. `index --json`
+  reports `redacted` paths with a count of values. A change to the secret
+  patterns re-reads every document once. Memory Bank chunks with a likely
+  secret are still excluded whole.
+
 - **The memory evaluation stand restores archived records and counts each
   mechanism.** Archived Brain records that existed at the prompt are restored
   from the working tree under the as-of rule already used for active records,

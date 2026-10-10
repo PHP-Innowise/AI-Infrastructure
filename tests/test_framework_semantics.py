@@ -279,10 +279,11 @@ class FrameworkSemanticPreservationTest(unittest.TestCase):
 class ShippedContentIndexTest(unittest.TestCase):
     """Every edition's own shipped documents stay retrievable.
 
-    The index refuses a document that matches a secret pattern, and a
-    refused skill is never retrieved again. An over-eager pattern once
-    excluded the Laravel architect skill - all three tool copies - over a
-    documented `php artisan down --secret=...` example, in every install.
+    The index masks a value a secret pattern matches, and excludes a document
+    whose masking does not converge. An over-eager pattern once excluded the
+    Laravel architect skill - all three tool copies - over a documented
+    `php artisan down --secret=...` example, in every install; a pattern that
+    fired on shipped documents now would silently mask their text instead.
     """
 
     def test_no_shipped_document_is_excluded_as_a_secret(self) -> None:
@@ -306,11 +307,13 @@ class ShippedContentIndexTest(unittest.TestCase):
                     cwd=target, capture_output=True, text=True,
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
+                indexed = json.loads(result.stdout)
                 excluded = [
-                    item["path"] for item in json.loads(result.stdout)["excluded"]
+                    item["path"] for item in indexed["excluded"]
                     if item.get("reason") == "secret"
                 ]
                 self.assertEqual([], excluded)
+                self.assertEqual([], indexed["redacted"])
 
 
 class FrameworkApiCurrencyTest(unittest.TestCase):

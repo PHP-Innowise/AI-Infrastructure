@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -313,7 +314,7 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual("procedural", documents[0]["layer"])
         self.assertEqual(".agents/skills/review/SKILL.md", documents[0]["path"])
 
-    def test_index_skips_skill_with_secret_without_persisting_it(self) -> None:
+    def test_index_masks_a_token_in_a_skill_without_persisting_it(self) -> None:
         secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
         skill = self.repository / ".agents/skills/review/SKILL.md"
         skill.parent.mkdir(parents=True)
@@ -324,13 +325,93 @@ class ContextEngineTest(unittest.TestCase):
 
         indexed = self.run_context("index", "--json")
         self.assertEqual(0, indexed.returncode, indexed.stderr)
-        self.assertEqual(0, json.loads(indexed.stdout)["documents"])
-        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", indexed.stderr)
+        result = json.loads(indexed.stdout)
+        self.assertEqual(1, result["documents"])
+        self.assertEqual([], result["excluded"])
+        self.assertEqual([{"path": ".agents/skills/review/SKILL.md", "values": 1}], result["redacted"])
+        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", indexed.stdout + indexed.stderr)
 
         connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
-        documents = connection.execute("SELECT path, content FROM documents").fetchall()
+        rows = connection.execute("SELECT path, title, summary, content FROM documents").fetchall()
         connection.close()
-        self.assertEqual([], documents)
+        self.assertIn("[redacted: GitHub token]", rows[0][3])
+        self.assertTrue(all("ABCDEFGHIJKLMNOPQRSTUVWXYZ" not in "".join(row) for row in rows))
+
+    def test_index_masks_a_dev_credential_and_keeps_the_readme_searchable(self) -> None:
+        # The one line that used to take the whole README out of the index.
+        self.repository.joinpath("README.md").write_text(
+            "# Mailer\n\nOutgoing mail goes to the heron catcher.\n\n"
+            "```env\nMAILER_PASSWORD=mailpit\n```\n",
+            encoding="utf-8",
+        )
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        result = json.loads(indexed.stdout)
+        self.assertEqual([], result["excluded"])
+        self.assertEqual([{"path": "README.md", "values": 1}], result["redacted"])
+        text = self.run_context("index")
+        self.assertIn("Redacted: 1 value(s) in 1 document(s)", text.stdout)
+        outputs = [indexed.stdout, text.stdout]
+        for query in ("heron", "MAILER_PASSWORD"):
+            found = self.run_context("search", query, "--json")
+            self.assertEqual(0, found.returncode, found.stderr)
+            self.assertIn("README.md", found.stdout, query)
+            outputs.append(found.stdout)
+        self.assertTrue(all("mailpit" not in output for output in outputs))
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        rows = connection.execute("SELECT title, summary, content FROM documents").fetchall()
+        connection.close()
+        self.assertTrue(all("mailpit" not in "".join(row) for row in rows))
+
+    def test_incremental_index_reuses_a_masked_document_without_rescanning(self) -> None:
+        readme = self.repository / "README.md"
+        readme.write_text("# Mailer\n\n```\nMAILER_PASSWORD=mailpit\n```\n", encoding="utf-8")
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            CONTEXT.index_repository(connection, self.repository, incremental=True)
+            paths = {row[0] for row in connection.execute("SELECT path FROM documents")}
+            self.assertIn("README.md", paths)
+            with mock.patch.object(CONTEXT, "mask_secrets", wraps=CONTEXT.mask_secrets) as masking:
+                CONTEXT.index_repository(connection, self.repository, incremental=True)
+            self.assertEqual(0, masking.call_count)
+            stored = connection.execute(
+                "SELECT source_hash FROM document_metadata WHERE path = 'README.md'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        # The file's own digest: governed retrieval re-hashes the file, and a
+        # digest of the masked text would call it stale on every turn.
+        self.assertEqual(CONTEXT._content_hash(readme.read_text(encoding="utf-8")), stored)
+
+    def test_a_document_whose_masking_does_not_converge_is_excluded(self) -> None:
+        self.repository.joinpath("README.md").write_text("ECHOSECRET\n", encoding="utf-8")
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            with mock.patch.dict(CONTEXT.SECRET_PATTERNS, {"echo": re.compile(r"ECHOSECRET|redacted: echo")}):
+                result = CONTEXT.index_repository(connection, self.repository)
+            paths = {row[0] for row in connection.execute("SELECT path FROM documents")}
+        finally:
+            connection.close()
+        self.assertIn({"path": "README.md", "reason": "secret"}, result["excluded"])
+        self.assertNotIn("README.md", paths)
+        self.assertEqual([], result["redacted"])
+
+    def test_a_secret_pattern_change_remasks_cached_documents(self) -> None:
+        notes = self.repository / "docs/notes.md"
+        notes.parent.mkdir(parents=True, exist_ok=True)
+        notes.write_text("# Notes\n\nrelease code ZQX-ALPHA-7781\n", encoding="utf-8")
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            CONTEXT.index_repository(connection, self.repository, incremental=True)
+            with mock.patch.dict(CONTEXT.SECRET_PATTERNS, {"release code": re.compile(r"ZQX-[A-Z]+-\d{4}")}):
+                CONTEXT.index_repository(connection, self.repository, incremental=True)
+            content = connection.execute(
+                "SELECT content FROM documents WHERE path = 'docs/notes.md'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertIn("[redacted: release code]", content)
+        self.assertNotIn("ZQX-ALPHA-7781", content)
 
     def test_index_includes_common_project_documentation(self) -> None:
         self.repository.joinpath("CLAUDE.md").write_text(

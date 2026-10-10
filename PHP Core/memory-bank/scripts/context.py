@@ -69,6 +69,7 @@ from brain_runtime import (
 )
 from context_retrieval import (
     DocumentRow,
+    _content_hash,
     EVIDENCE_STOPWORDS,
     RetrievalError,
     STOPWORD_DOCUMENT_RATIO,
@@ -117,6 +118,7 @@ from validate import (
     PRIVATE_PATTERNS,
     SECRET_PATTERNS,
     ValidationError,
+    mask_secrets,
     parse_frontmatter,
     validate_metadata,
     validate_secret_patterns,
@@ -701,9 +703,13 @@ def discover_documents(
     repository: Path,
     reusable: Optional[SourceState] = None,
     candidates: Optional[list[SourceCandidate]] = None,
-) -> tuple[list[DocumentRow], SourceState, SourceState, list[dict[str, str]]]:
-    """Return changed documents, the retained cache subset, the new cache, and
-    every candidate dropped along the way with the reason it was dropped.
+) -> tuple[
+    list[DocumentRow], SourceState, SourceState, list[dict[str, str]], dict[str, tuple[str, int]]
+]:
+    """Return changed documents, the retained cache subset, the new cache,
+    every candidate dropped along the way with the reason it was dropped, and
+    the documents indexed with masked values: path -> (digest of the file as
+    read, values masked).
 
     ``reusable`` maps already-indexed paths to the (mtime_ns, size, boundary)
     recorded by the last successful index. A candidate whose stat still matches
@@ -728,6 +734,7 @@ def discover_documents(
     retained: SourceState = {}
     state: SourceState = {}
     excluded: list[dict[str, str]] = []
+    masked: dict[str, tuple[str, int]] = {}
     skill_keys: set[str] = set()
     claimed: set[str] = set()
     if candidates is None:
@@ -752,15 +759,15 @@ def discover_documents(
         claimed.add(relative_path)
         skill_key = skill_key_parts(relative_path)[1] if kind == "skill" else None
         if skill_key is not None and skill_key in skill_keys:
-            # A mirrored copy of an already-indexed skill. Only a copy that
-            # passes validation claims the key, so a later copy can never win
-            # it and never needs to be read or scanned.
+            # A mirrored copy of an already-indexed skill. Only an indexed copy
+            # claims the key, so a later copy can never win it and never needs
+            # to be read or scanned.
             continue
         cached = cache.get(relative_path)
         if cached is not None and _cache_entry_is_current(kind, cached, current):
             # Unchanged since the last successful index and still inside its
-            # calendar boundary, so it already passed secret and
-            # active-memory validation; keep the existing row.
+            # calendar boundary, so it was already masked, or validated if it
+            # is memory; keep the existing row.
             if skill_key is not None:
                 skill_keys.add(skill_key)
             retained[relative_path] = cached
@@ -769,19 +776,28 @@ def discover_documents(
         boundary: Optional[str] = None
         try:
             if kind == "memory":
+                # A chunk with a likely secret stays out whole: it is shared
+                # knowledge the team wrote, not a file the project ships.
                 metadata, reason, boundary = memory_eligibility(path, repository)
                 if metadata is None:
                     excluded.append(
                         {"path": relative_path, "reason": reason or "invalid"}
                     )
                     continue
+                content = path.read_text(encoding="utf-8")
             else:
+                # Masked, not dropped: one placeholder-shaped development
+                # credential in a code block used to take a whole README - the
+                # only useful document of seven graded prompts - out of the
+                # index. The value never reaches the index; the rest does.
                 try:
-                    validate_secret_patterns(path)
+                    raw = path.read_text(encoding="utf-8")
+                    content, values = mask_secrets(raw)
                 except (OSError, ValidationError):
                     excluded.append({"path": relative_path, "reason": "secret"})
                     continue
-            content = path.read_text(encoding="utf-8")
+                if values:
+                    masked[relative_path] = (_content_hash(raw), values)
         except UnicodeDecodeError as error:
             raise ContextError(
                 f"Source document is not valid UTF-8: {relative_path}"
@@ -815,7 +831,15 @@ def discover_documents(
             excluded.append(
                 {"path": pattern, "reason": "pattern-all-git-ignored"}
             )
-    return documents, retained, state, excluded
+    return documents, retained, state, excluded, masked
+
+
+def _report_masked(result: dict[str, object], masked: dict[str, tuple[str, int]]) -> None:
+    """Which documents read on this pass were indexed with masked values, and
+    how many: never a value, never its label."""
+    result["redacted"] = [
+        {"path": path, "values": values} for path, (_, values) in sorted(masked.items())
+    ]
 
 
 def _merge_excluded(result: dict[str, object], dropped: list[dict[str, str]]) -> None:
@@ -863,7 +887,7 @@ def index_repository(
         reusable, fingerprints = reusable_source_state(
             connection, repository, fingerprints
         )
-        documents, retained, state, dropped = discover_documents(
+        documents, retained, state, dropped, masked = discover_documents(
             repository, reusable, candidates=candidates
         )
         scan_seconds += time.monotonic() - phase_started
@@ -876,18 +900,20 @@ def index_repository(
                 retained=retained,
                 source_state=state,
                 fingerprints=fingerprints,
+                source_hashes={path: digest for path, (digest, _) in masked.items()},
             )
         except RetrievalError:
             # The cache disagreed with the index; fall through and rebuild.
             phase_started = time.monotonic()
         else:
             _merge_excluded(result, dropped)
+            _report_masked(result, masked)
             result["phase_seconds"] = {
                 "stat": round(scan_seconds, 6),
                 "index": round(time.monotonic() - index_started, 6),
             }
             return result
-    documents, _, state, dropped = discover_documents(
+    documents, _, state, dropped, masked = discover_documents(
         repository, candidates=candidates
     )
     scan_seconds += time.monotonic() - phase_started
@@ -895,8 +921,10 @@ def index_repository(
     result = index_documents(
         connection, repository, documents, source_state=state,
         fingerprints=fingerprints,
+        source_hashes={path: digest for path, (digest, _) in masked.items()},
     )
     _merge_excluded(result, dropped)
+    _report_masked(result, masked)
     result["phase_seconds"] = {
         "stat": round(scan_seconds, 6),
         "index": round(time.monotonic() - index_started, 6),
@@ -5396,6 +5424,12 @@ def main() -> int:
                         print(
                             f"Excluded: {len(dropped)} document(s) ({summary}); "
                             "--json lists the paths."
+                        )
+                    redacted = result.get("redacted") or []
+                    if isinstance(redacted, list) and redacted:
+                        print(
+                            f"Redacted: {sum(int(item.get('values') or 0) for item in redacted)} "
+                            f"value(s) in {len(redacted)} document(s); --json lists the paths."
                         )
                 return 0
 

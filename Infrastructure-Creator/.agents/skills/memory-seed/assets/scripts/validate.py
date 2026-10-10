@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -121,6 +122,8 @@ def _automatic_query():
 _automatic = _automatic_query()
 PRIVATE_PATTERNS = _automatic.PRIVATE_PATTERNS
 SECRET_PATTERNS = _automatic.SECRET_PATTERNS
+QUOTED_CREDENTIAL = _automatic.QUOTED_CREDENTIAL
+PRIVATE_KEY_BLOCK = _automatic.PRIVATE_KEY_BLOCK
 AutomaticQueryError = _automatic.AutomaticQueryError
 _sanitize_automatic_query = _automatic.sanitize_automatic_query
 
@@ -371,6 +374,96 @@ def validate_secret_patterns(path: Path) -> None:
     for label, pattern in SECRET_PATTERNS.items():
         if pattern.search(text):
             raise ValidationError(f"possible {label} detected; value intentionally not printed")
+
+
+# A match that opens with a key and a separator keeps the key - it is the
+# project's vocabulary (MAILER_PASSWORD, APP_KEY) - and loses only its value.
+_KEYED_SECRETS = frozenset(
+    {"assigned credential", "Laravel application key", "authorization header", "basic credentials"}
+)
+_KEY_SEPARATOR = re.compile(r"[:=][ \t]*")
+_VALUE_DELIMITERS = "'\"`"
+MASK_PASSES = 3
+# Bump when the masking rule itself changes; the patterns are fingerprinted
+# from their own source. Either change makes the index re-read every document.
+MASK_POLICY_VERSION = "1"
+
+
+def secret_policy_fingerprint() -> str:
+    """A digest of what decides an indexed document's masked text.
+
+    The stat cache keeps a document unread while its file is unchanged, so
+    without this a pattern added later would never reach a document indexed
+    before it - and after masking, the index is where secrets must not be.
+    """
+    parts = [MASK_POLICY_VERSION, PRIVATE_KEY_BLOCK.pattern, QUOTED_CREDENTIAL.pattern,
+             *sorted(_KEYED_SECRETS)]
+    for label, pattern in SECRET_PATTERNS.items():
+        parts += [label, pattern.pattern, str(pattern.flags)]
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def _masked_span(text: str, label: str, match: "re.Match[str]") -> tuple[int, int]:
+    """The stretch of `text` that carries the secret `match` found."""
+    if label == "private key":
+        # The header alone is detected; the body under it is the secret.
+        block = PRIVATE_KEY_BLOCK.match(text, match.start())
+        return match.start(), (block.end() if block else match.end())
+    separator = (
+        _KEY_SEPARATOR.search(text, match.start(), match.end())
+        if label in _KEYED_SECRETS else None
+    )
+    if separator is None:
+        # Self-identifying tokens, URL credentials, JWTs, bearer tokens.
+        return match.span()
+    if label == "assigned credential":
+        quoted = QUOTED_CREDENTIAL.match(text, match.start())
+        if quoted is not None:
+            # The whole quoted literal, to its closing quote or the line's end.
+            return quoted.start(1), quoted.end()
+    if match.end() < len(text) and text[match.end()] in _VALUE_DELIMITERS:
+        # A value closed by inline code or a quote: `MAIL_PASSWORD=x` in prose.
+        return separator.end(), match.end()
+    # Unquoted: the rest of the line, so no word of a multi-word value stays.
+    line_end = text.find("\n", match.end())
+    return separator.end(), (len(text) if line_end < 0 else line_end)
+
+
+def mask_secrets(text: str) -> tuple[str, int]:
+    """`text` with each value SECRET_PATTERNS recognises replaced by
+    `[redacted: <label>]`, and how many values were replaced.
+
+    Text with no detection comes back unchanged with 0, so a document indexed
+    before masking existed is indexed byte for byte as it was. Personal data
+    (PRIVATE_PATTERNS) is not masked here: the render screen removes it from
+    capsule text. Raises ValidationError, never naming the value, when a
+    pattern still matches after MASK_PASSES passes: the caller then leaves
+    the document out, as it used to leave out every document with a match.
+    """
+    masked = 0
+    for _ in range(MASK_PASSES):
+        spans = sorted(
+            (*_masked_span(text, label, found), label)
+            for label, pattern in SECRET_PATTERNS.items()
+            for found in pattern.finditer(text)
+        )
+        if not spans:
+            return text, masked
+        pieces: list[str] = []
+        end = 0
+        for start, stop, label in spans:
+            if start < end:
+                # Overlaps a value already masked: widen it, no second marker.
+                end = max(end, stop)
+                continue
+            pieces += [text[end:start], f"[redacted: {label}]"]
+            end = stop
+            masked += 1
+        pieces.append(text[end:])
+        text = "".join(pieces)
+    if any(pattern.search(text) for pattern in SECRET_PATTERNS.values()):
+        raise ValidationError("possible secret survives masking; value intentionally not printed")
+    return text, masked
 
 
 def summarize_bank(bank_root: Path) -> str:

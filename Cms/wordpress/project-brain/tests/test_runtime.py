@@ -5543,6 +5543,46 @@ class CapsuleNoiseTest(RuntimeHarness):
             self.assertEqual(placeholder, context_cli.sanitize_automatic_query(placeholder))
 
 
+class SecretMaskingDeliveryTest(RuntimeHarness):
+    """A document with a detected credential is delivered with the value
+    masked, fresh, and the value reaches no output."""
+
+    README = (
+        "# Shop\n\n## Local mail\n\nOutgoing mail in development goes to the heron catcher; "
+        "open the heron inbox on port 8025.\n\n```yaml\nmailer:\n  password: quokka\n```\n"
+    )
+
+    def test_a_masked_readme_is_delivered_fresh_and_its_value_never_leaves(self) -> None:
+        readme = self.repository / "README.md"
+        readme.write_text(self.README, encoding="utf-8")
+        outputs = []
+        for _ in range(2):  # the second refresh takes the retained-cache path
+            result = self.run_cli("refresh", "--query", "where does heron catcher mail go",
+                                  "--task-id", "TASK-MASK", "--host", "codex", "--ephemeral", "--json")
+            self.assertEqual(0, result.returncode, result.stderr)
+            outputs.append(result.stdout)
+            capsule = json.loads(result.stdout)["capsule"]
+            self.assertIn("README.md", [item["path"] for item in capsule["semantic"]])
+        self.start()
+        pulled = self.run_cli("retrieve", "heron catcher mailer", "--task-id", "TASK-1", "--json")
+        self.assertEqual(0, pulled.returncode, pulled.stderr)
+        outputs.append(pulled.stdout)
+        self.assertIn("README.md", pulled.stdout)
+        self.assertTrue(all("quokka" not in output for output in outputs))
+        for directory in ("memory-bank/local/retrieval-manifests", "project-brain/control/retrieval-manifests"):
+            for manifest in (self.repository / directory).glob("*.json"):
+                excluded = json.loads(manifest.read_text(encoding="utf-8"))["excluded"]
+                self.assertNotIn({"path": "README.md", "reason": "stale"}, excluded)
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            stored = connection.execute(
+                "SELECT source_hash FROM document_metadata WHERE path = 'README.md'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(hashlib.sha256(readme.read_text(encoding="utf-8").encode("utf-8")).hexdigest(), stored)
+
+
 class AutomaticWorkingMemoryTest(RuntimeHarness):
     """Cover the automated read and write paths the memory hooks depend on."""
 
@@ -5988,7 +6028,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ("semantic", "codebase", "docs/*.md"),
         )
         with mock.patch.object(context_cli, "SOURCE_PATTERNS", overlapping):
-            documents, _, state, _ = context_cli.discover_documents(self.repository)
+            documents, _, state, _, _ = context_cli.discover_documents(self.repository)
 
         paths = [row[0] for row in documents]
         self.assertEqual(len(paths), len(set(paths)))

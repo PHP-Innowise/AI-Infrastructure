@@ -117,7 +117,8 @@ Both modes also:
 - use SQLite FTS5/BM25 for local lexical search;
 - index eligible policies, skills, documentation, specifications, active
   Memory Bank chunks, and history;
-- reject likely secrets and invalid task values;
+- reject likely secrets in writes and invalid task values; mask them in
+  indexed documents;
 - exclude Git-ignored sources before reading them;
 - fail safely on invalid UTF-8 without replacing the previous index;
 - treat retrieved content as a discovery aid rather than canonical truth;

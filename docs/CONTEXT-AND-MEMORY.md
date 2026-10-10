@@ -353,9 +353,15 @@ The indexer discovers eligible files from fixed repository patterns, including:
 - eligible active Project Brain dynamic records and handoffs.
 
 Before reading a discovered repository document, the runtime excludes
-Git-ignored paths. It skips symlinks and non-files, rejects likely
-secret-bearing content, includes only validated active Memory Bank chunks, and
-requires UTF-8. Invalid UTF-8 aborts the refresh without replacing the prior
+Git-ignored paths. It skips symlinks and non-files, masks each value a secret
+pattern recognises in a repository document (`[redacted: <label>]`, the key
+such as `MAILER_PASSWORD` kept) and excludes a document whose masking does not
+converge, includes only validated active Memory Bank chunks (a chunk with a
+likely secret is still excluded whole), and requires UTF-8. The stored source
+hash of a masked document is the file's, so governed retrieval does not call it
+stale; `index --json` lists masked documents under `redacted` with a count of
+values, never the values. A change to the secret patterns re-reads every
+document once. Invalid UTF-8 aborts the refresh without replacing the prior
 index.
 
 For Brain records, eligibility is checked before insertion. Private,
@@ -704,7 +710,8 @@ in one skip rate.
 
 Whatever the reason a document leaves, `index` names it rather than dropping
 it silently — `retired`, `overdue-review`, a non-active status, `invalid`, or
-`secret` — so a red validator and a quietly shrinking index can no longer
+`secret` (a chunk with a likely secret, or a document whose masking did not
+converge) — so a red validator and a quietly shrinking index can no longer
 disagree about the same chunk.
 
 ## Search and Governed Retrieval

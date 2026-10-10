@@ -40,6 +40,7 @@ from brain_runtime import (
     validate_schema_file,
 )
 from automatic_query import source_path_problem
+from validate import secret_policy_fingerprint
 
 
 BUDGETS = {
@@ -806,6 +807,7 @@ LOCAL_MANIFEST_RETENTION = 200
 DELETE_CHUNK = 500
 INDEX_CONFIG_KEY = "config-fingerprint"
 INDEX_SKILL_KEY = "skill-tree-fingerprint"
+INDEX_SECRET_POLICY_KEY = "secret-policy-fingerprint"
 INDEX_PARITY_KEY = "skill-parity-drift"
 # A fresh value is stamped whenever index_documents rewrites the tables, so
 # anything derived from index content (the token-frequency cache below) can
@@ -1120,6 +1122,7 @@ def index_fingerprints(
     return {
         INDEX_CONFIG_KEY: config_fingerprint(repository),
         INDEX_SKILL_KEY: skill_tree_fingerprint(repository, skill_stats),
+        INDEX_SECRET_POLICY_KEY: secret_policy_fingerprint(),
     }
 
 
@@ -1136,6 +1139,10 @@ def reusable_source_state(
     if stored.get(INDEX_CONFIG_KEY) != fingerprints[INDEX_CONFIG_KEY]:
         # Runtime configuration decides eligibility for every indexed record,
         # so a configuration change invalidates the whole cache.
+        return {}, fingerprints
+    if stored.get(INDEX_SECRET_POLICY_KEY) != fingerprints[INDEX_SECRET_POLICY_KEY]:
+        # Indexed text is masked by the secret patterns, so a changed pattern
+        # set must reach documents whose files did not change.
         return {}, fingerprints
     indexed = {row[0] for row in connection.execute("SELECT path FROM documents")}
     return {
@@ -1587,7 +1594,9 @@ def _link_rows(path: str, sources: object) -> list[tuple[str, str, str]]:
     return sorted(set(rows))
 
 
-def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:
+def _legacy_metadata(
+    path: str, kind: str, content: str, source_hash: Optional[str] = None
+) -> tuple[object, ...]:
     # Repository documents carry no provenance timestamp or confidence of
     # their own: '' means "never decayed" and 1.0 keeps them rank-neutral.
     # A chunk promoted from a claim only its agent checked says so in its tags.
@@ -1599,7 +1608,7 @@ def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:
     )
     return (
         path, category_for(kind), "public", "*", "verified", "active",
-        _content_hash(content), None, "[]",
+        source_hash or _content_hash(content), None, "[]",
         _chunk_digests(content) if kind == "memory" else "[]",
         "", 1.0, attested,
     )
@@ -1732,12 +1741,18 @@ def index_documents(
     retained: Optional[SourceState] = None,
     source_state: Optional[SourceState] = None,
     fingerprints: Optional[dict[str, str]] = None,
+    source_hashes: Optional[dict[str, str]] = None,
 ) -> dict[str, object]:
     """Replace the index, reusing rows the caller proved unchanged.
 
     ``retained`` holds repository documents whose stat still matches the last
     successful index; their rows survive untouched and ``legacy_documents``
     then carries only the new or changed ones. ``None`` rebuilds everything.
+
+    ``source_hashes`` gives the file digest of a document whose indexed text
+    is not the file's text (masked secret values). Governed retrieval
+    re-hashes the file on disk, so the stored hash must be the file's, or the
+    document is excluded as stale on every turn.
 
     Project Brain records are always rebuilt: their eligibility depends on
     configuration, lifecycle, and cross-record conflict state rather than on
@@ -1764,7 +1779,7 @@ def index_documents(
     )
     documents = [*legacy_documents, *brain_documents]
     metadata = [
-        _legacy_metadata(path, kind, content)
+        _legacy_metadata(path, kind, content, (source_hashes or {}).get(path))
         for path, _, kind, _, _, content in legacy_documents
     ] + brain_metadata
     # Only durable chunks carry `sources` among repository documents; the rest
@@ -3079,6 +3094,8 @@ def _runtime_filter(
                 content = path.read_text(encoding="utf-8") if path.is_file() else None
             except OSError:
                 content = None
+            # `source_hash` is the file's digest even when the indexed text is
+            # masked, so this compares the file with the file it was indexed from.
             if content is None or _content_hash(content) != candidate["source_hash"]:
                 reason = "stale"
         if reason is None and candidate["kind"] == "codebase" and content is not None:
