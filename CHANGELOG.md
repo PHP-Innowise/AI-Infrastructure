@@ -26,6 +26,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **Recorded history has its own slot and its own search.** The capsule's
+  episodic layer carries the changelog and one Project Brain event or local
+  episode; they used to share one slot, which the changelog held on every
+  evaluated turn that had an event while 19 answers sat in events never
+  delivered. Events are found by `history_query`: every informative term of
+  the whole request, matched against the event's subject, admitted when it
+  covers two terms whose weight equals at least two terms unique in the index -
+  no tuned constant. Events leave the main query's window and floor. A local
+  episode follows the same rule and now renders its outcome. A delivered event
+  no longer costs the third semantic item. The governed contract is 1/3/2
+  (lightweight mode keeps one history item); `AGENTS.md`, the project-brain
+  skill, `PROTOCOL.md` and READMEs say so, and the Harness accepts two history
+  items.
+
 - **A skill's sub-files no longer take the capsule's procedural slot.**
   References, agents, rules files, an `AGENTS.md` inside a skill and
   `SKILL FLOW.md` were useful 1 time in 185 judgments against 71 in 627 for

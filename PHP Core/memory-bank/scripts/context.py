@@ -68,8 +68,12 @@ from brain_runtime import (
     validate_repository,
 )
 from context_retrieval import (
+    CAPSULE_EPISODIC_LIMIT,
+    CAPSULE_EVENT_LIMIT,
+    CAPSULE_PROMPT_TERM_LIMIT,
     DocumentRow,
     _content_hash,
+    episode_item,
     EVIDENCE_STOPWORDS,
     RetrievalError,
     STOPWORD_DOCUMENT_RATIO,
@@ -168,13 +172,10 @@ DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
 CAPSULE_LAYER_LIMITS = {
     "procedural": 1,
     "semantic": 3,
-    "episodic": 1,
+    # The changelog, and one Project Brain event or local episode.
+    "episodic": CAPSULE_EPISODIC_LIMIT + CAPSULE_EVENT_LIMIT,
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
-# How many prompt terms survive distillation into the retrieval query. Rarity
-# in the index decides which ones, so the cap bounds cost without deciding
-# relevance by position the way the old first-N-words hook extraction did.
-CAPSULE_PROMPT_TERM_LIMIT = 24
 CAPSULE_CHARACTER_LIMIT = 8000
 # What the rendered capsule - the text a model reads - may spend. Codex caps a
 # hook's additional context at 4,000 characters; this stays under it.
@@ -1040,19 +1041,7 @@ def search_episodes(
         """,
         (fts_query(query), limit),
     ).fetchall()
-    return [
-        {
-            "id": row["id"],
-            "layer": "episodic",
-            "summary": row["summary"],
-            "outcome": row["outcome"],
-            "files": json.loads(row["files"]),
-            "verification": json.loads(row["verification"]),
-            "sources": json.loads(row["sources"]),
-            "created_at": row["created_at"],
-        }
-        for row in rows
-    ]
+    return [episode_item(row) for row in rows]
 
 
 def build_capsule_query(
@@ -1363,7 +1352,7 @@ def build_context_packet(
     retrieval_query = build_capsule_query(request_query, working)
     procedural_limit = min(limit, CAPSULE_LAYER_LIMITS["procedural"])
     semantic_limit = min(limit, CAPSULE_LAYER_LIMITS["semantic"])
-    episodic_limit = min(limit, CAPSULE_LAYER_LIMITS["episodic"])
+    episodic_limit = min(limit, CAPSULE_EPISODIC_LIMIT)  # lightweight: no history search
     procedural = search_documents(
         connection, request_query, procedural_limit, "procedural",
         relevant_only=True, strong_only=True,
@@ -1511,7 +1500,7 @@ def synchronize_capsule_views(capsule: dict[str, object]) -> None:
 def enforce_governed_capsule_contract(
     capsule: dict[str, object],
 ) -> dict[str, object]:
-    """Apply the shared 1/3/1 and 8,000-character contract to governed output."""
+    """Apply the shared 1/3/2 and 8,000-character contract to governed output."""
     compacted = json.loads(serialize_capsule(capsule))
     compacted["procedural"] = compacted.get("procedural", [])[
         :CAPSULE_LAYER_LIMITS["procedural"]
@@ -2340,8 +2329,12 @@ def assemble_capsule(
     session_id: Optional[str] = None,
     transcript: Optional[str] = None,
     render: bool = False,
+    prompt: Optional[str] = None,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
+
+    ``prompt`` is the whole request ``query`` was distilled from; recorded
+    history is searched with all of it (see history_query).
 
     ``refresh_index`` exists so a caller that already refreshed does not index
     twice; retrieval reads the index rather than the sources, so the refresh
@@ -2392,6 +2385,9 @@ def assemble_capsule(
     # guards build_context_packet would have applied.
     reject_secrets("Task Capsule", [query])
     reject_capsule_privacy("Task Capsule request", [query])
+    if prompt is not None:
+        reject_secrets("Task Capsule", [prompt])
+        reject_capsule_privacy("Task Capsule request", [prompt])
     try:
         binding = governed_binding(connection, task_id)
     except ContextError as error:
@@ -2399,9 +2395,6 @@ def assemble_capsule(
             raise
         binding = None
     request_query = build_capsule_query(query, None)
-    local_episodes = search_episodes(
-        connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
-    )
 
     def pack(result: dict[str, object]) -> dict[str, object]:
         # Inside retrieve(), before it records anything: what the delivered
@@ -2435,7 +2428,7 @@ def assemble_capsule(
         paths=paths,
         host=host,
         entry_point=entry_point,
-        local_episodes=local_episodes,
+        history_text=prompt if prompt is not None else query,
         session_id=session_id,
         transcript=transcript,
         pack=pack,
@@ -2653,6 +2646,19 @@ def capsule_excerpts(
     rank = 0
     for layer in ("semantic", "episodic"):
         for item in capsule.get(layer) or []:
+            if (
+                layer == "episodic" and isinstance(item, dict)
+                and "path" not in item and item.get("id") is not None
+            ):
+                # A local episode has no document to quote: its outcome is
+                # what it learned. Without it only a 160-character summary
+                # reached the reader.
+                outcome = _bounded(str(item.get("outcome") or ""), EPISODIC_EXCERPT_CHARACTERS)
+                if outcome:
+                    excerpt = Excerpt(outcome)
+                    excerpt.heading = ""
+                    excerpts[f"episode {item['id']}"] = excerpt
+                continue
             if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                 continue
             if item.get("match") == "distinctive":
@@ -6275,6 +6281,7 @@ def main() -> int:
                             # Every refresh with a query renders: hosts put
                             # capsule_text in front of the model.
                             render=True,
+                            prompt=arguments.query,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh

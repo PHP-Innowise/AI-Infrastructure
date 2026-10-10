@@ -445,8 +445,9 @@ hard ceiling, with an escalation reason. Privacy, authority, lifecycle, owner,
 and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
 
-The delivered capsule has a separate final contract in both modes: at most 1
-procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
+The delivered capsule has a separate final contract: at most 1 procedural, 3
+semantic, and 2 episodic items (the changelog and one recorded event or
+episode; lightweight mode keeps one) and 8,000 serialized characters.
 Its working state carries the three newest next steps, the eight newest
 files, and four sources.
 

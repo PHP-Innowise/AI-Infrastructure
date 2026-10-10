@@ -11,6 +11,8 @@ it at the top of every session.
 
 ## Unreleased
 
+- The Task Capsule's episodic layer carries two items: the changelog and one recorded event or local episode, found by its own search. `AGENTS.md`, the `project-brain` skill, `PROTOCOL.md` and the READMEs say so. Details in the root [`CHANGELOG.md`](../CHANGELOG.md). Policy lock regenerated.
+
 ### Added
 
 - `.cursor-plugin/plugin.json` loads this edition in place for an attached Cursor Agent session (`--plugin-dir`), pointing at the edition's own `.cursor` rules, skills, agents, commands and `hooks.json`; it is excluded from installs. The SessionStart banner (`local-context.sh`) names the clone and the state directory when the edition is attached, and describes the project rather than the hook's working directory. See [docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md).

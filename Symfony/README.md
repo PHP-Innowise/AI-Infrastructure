@@ -292,7 +292,7 @@ derives a concise sanitized retrieval query and builds a Task Capsule from
 optional Working Memory and `context` retrieval. The raw request is not copied
 into the packet. The complete packet is capped at 8,000 Unicode characters (as
 the hooks print it, 3,600) and contains at most one Procedural, three Semantic,
-and one Episodic result.
+and two Episodic results (the changelog and one recorded event).
 Retrieved entries are short snippets with source paths; the next agent reads a
 full source only when its current step requires it.
 

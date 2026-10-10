@@ -239,7 +239,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         left, right = json.loads(first.stdout), json.loads(second.stdout)
         self.assertLessEqual(len(left["procedural"]), 2)
         self.assertLessEqual(len(left["semantic"]), 3)
-        self.assertLessEqual(len(left["episodic"]), 1)
+        self.assertLessEqual(len(left["episodic"]), 2)
         self.assertLessEqual(len(first.stdout.strip()), 8000)
         for layer in ("procedural", "semantic", "episodic"):
             self.assertEqual(left[layer], right[layer])
@@ -3292,6 +3292,171 @@ class EpisodicPillarTest(RuntimeHarness):
         self.assertEqual(0, retry.returncode, retry.stderr)
         self.assertIsNotNone(json.loads(retry.stdout)["event_id"], retry.stdout)
         self.assertEqual(1, len(list(events.glob("*.md"))))
+
+
+class HistorySlotTest(RuntimeHarness):
+    """Recorded history - a Project Brain event or a local episode - has its
+    own slot and its own search beside the changelog's."""
+
+    OUTCOME = EpisodicPillarTest.OUTCOME
+    CHECK = EpisodicPillarTest.CHECK
+    complete_task = EpisodicPillarTest.complete_task
+
+    def fillers(self, count: int) -> None:
+        for number in range(count):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(
+                f"# Filler {number}\n\nUnrelated filler paragraph number {number} about tooling.\n",
+                encoding="utf-8",
+            )
+
+    def retrieve(self, query: str, task: str = "TASK-READER") -> dict:
+        result = self.run_cli("retrieve", query, "--task-id", task, "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def manifest(self, capsule: dict) -> dict:
+        return json.loads((self.repository / capsule["manifest"]).read_text(encoding="utf-8"))
+
+    @staticmethod
+    def event_paths(items: list) -> list:
+        return [item["path"] for item in items if str(item.get("path", "")).startswith("project-brain/dynamic/events/")]
+
+    def test_the_changelog_and_an_event_share_the_history_layer(self) -> None:
+        self.fillers(12)
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changelog\n\n## Unreleased\n\nZirconium gateway retry tooling shipped.\n", encoding="utf-8")
+        self.complete_task("TASK-EPISODE-PAIR")
+        self.start("TASK-READER")
+        capsule = self.retrieve("zirconium gateway retry window")
+        paths = [item.get("path") for item in capsule["episodic"]]
+        self.assertEqual(2, len(paths), capsule["episodic"])
+        self.assertTrue(paths[0].startswith("project-brain/dynamic/events/"), paths)
+        self.assertEqual("CHANGELOG.md", paths[1])
+        selected = {item["path"]: item for item in self.manifest(capsule)["selected"]}
+        self.assertEqual("dynamic", selected[paths[0]]["category"])
+        self.assertEqual("covered", selected[paths[0]]["match"])
+        self.assertIn("CHANGELOG.md", selected)
+        text = self.run_cli("retrieve", "zirconium gateway retry window", "--task-id", "TASK-READER",
+                            "--ephemeral").stdout
+        self.assertLess(text.index("- history project-brain/dynamic/events/"), text.index("- history CHANGELOG.md"))
+        self.assertLessEqual(len(text), 3600)
+
+    def test_an_event_is_found_by_prompt_terms_the_distillation_dropped(self) -> None:
+        words = [f"quasar{chr(97 + n // 26)}{chr(97 + n % 26)}" for n in range(30)]
+        for number, word in enumerate(words):
+            self.repository.joinpath(f"specs/q-{number}.md").write_text(f"# Q {number}\n\nThe {word} note.\n",
+                                                                       encoding="utf-8")
+        self.complete_task("TASK-DROPPED")
+        self.start("TASK-READER")
+        result = self.run_cli("refresh", "--query", " ".join(words) + " zirconium gateway retry window",
+                              "--task-id", "TASK-READER", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        distilled = self.manifest(payload["capsule"])["query"].casefold().split()
+        for term in ("zirconium", "gateway", "retry", "window"):
+            self.assertNotIn(term, distilled)
+        self.assertEqual(1, len(self.event_paths(payload["capsule"]["episodic"])), payload["capsule"]["episodic"])
+        self.assertIn("Zirconium gateway retry window widened to five minutes", payload["capsule_text"])
+
+    def test_a_weak_event_match_leaves_the_event_slot_empty(self) -> None:
+        self.fillers(6)
+        for number in range(4):
+            self.repository.joinpath(f"specs/policy-{number}.md").write_text(
+                f"# Policy {number}\n\nThe gateway retry policy {number}.\n", encoding="utf-8")
+        self.complete_task("TASK-WEAK")
+        self.start("TASK-READER")
+        capsule = self.retrieve("gateway retry")
+        self.assertEqual([], self.event_paths(capsule["episodic"]))
+        self.assertEqual([], self.event_paths(self.manifest(capsule)["selected"]))
+        self.assertEqual([], [item for item in capsule["episodic"] if "path" not in item])
+
+    def test_a_recorded_episode_takes_the_event_slot_beside_the_changelog(self) -> None:
+        self.fillers(12)
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changelog\n\n## Unreleased\n\nAmber viaduct rollout tooling shipped.\n", encoding="utf-8")
+        recorded = self.run_cli("record", "--summary", "Amber viaduct rollout",
+                                "--outcome", "The canary held for an hour.", "--json")
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.start("TASK-READER")
+        capsule = self.retrieve("amber viaduct rollout canary")
+        self.assertEqual(2, len(capsule["episodic"]), capsule["episodic"])
+        self.assertEqual("Amber viaduct rollout", capsule["episodic"][0].get("summary"))
+        self.assertEqual("CHANGELOG.md", capsule["episodic"][1].get("path"))
+        manifest = self.manifest(capsule)
+        self.assertEqual(1, manifest["local_episode_count"])
+        self.assertGreater(manifest["token_estimates"]["local_episodes"], 0)
+
+    def test_a_local_episode_sharing_one_word_is_not_delivered(self) -> None:
+        self.fillers(6)
+        recorded = self.run_cli("record", "--summary", "Vermilion semaphore rollout", "--outcome", "Completed.")
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.start("TASK-READER")
+        capsule = self.retrieve("vermilion cobalt authority")
+        self.assertEqual([], capsule["episodic"])
+        self.assertEqual(0, self.manifest(capsule)["local_episode_count"])
+
+    def test_a_delivered_event_never_costs_a_semantic_slot(self) -> None:
+        self.fillers(12)
+        for number in range(3):
+            self.repository.joinpath(f"specs/zirc-{number}.md").write_text(
+                f"# Zirconium note {number}\n\nZirconium gateway retry window detail {number}.\n",
+                encoding="utf-8")
+        self.complete_task("TASK-EV")
+        self.start("TASK-READER")
+        capsule = self.retrieve("zirconium gateway retry window five minutes")
+        self.assertEqual({f"specs/zirc-{n}.md" for n in range(3)},
+                         {item["path"] for item in capsule["semantic"]})
+        self.assertEqual(1, len(self.event_paths(capsule["episodic"])))
+        self.assertNotIn("capsule-limit", [entry["reason"] for entry in self.manifest(capsule)["excluded"]])
+
+    def test_events_do_not_take_rows_of_the_main_candidate_window(self) -> None:
+        self.complete_task("TASK-ROW")
+        self.assertEqual(0, self.run_cli("index").returncode)
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            candidates, _ = retrieval._candidates(connection, "zirconium gateway retry window", 30)
+        finally:
+            connection.close()
+        self.assertNotIn("brain-event", [item["kind"] for item in candidates])
+
+    def test_a_repeated_event_is_not_refilled_by_its_twin_episode(self) -> None:
+        self.fillers(12)
+        self.complete_task("TASK-TWIN")
+        self.start("TASK-READER")
+        turns = []
+        for _ in range(2):
+            result = self.run_cli("refresh", "--query", "zirconium gateway retry window", "--task-id",
+                                  "TASK-READER", "--ephemeral", "--session-id", "s1", "--json")
+            self.assertEqual(0, result.returncode, result.stderr)
+            turns.append(json.loads(result.stdout)["capsule"])
+        self.assertEqual(1, len(self.event_paths(turns[0]["episodic"])))
+        self.assertEqual([], [item for item in turns[1]["episodic"] if "path" not in item])
+        self.assertEqual([], self.event_paths(turns[1]["episodic"]))
+        self.assertEqual(1, turns[1]["repeated"])
+        excluded = self.manifest(turns[1])["excluded"]
+        self.assertIn("delivered-this-session",
+                      [entry["reason"] for entry in excluded if entry["path"].startswith("project-brain/dynamic/events/")])
+
+    def test_governed_contract_keeps_two_history_items(self) -> None:
+        capsule = {
+            "working": None, "warnings": [], "procedural": [], "semantic": [], "selected": [],
+            "episodic": [{"path": f"e{n}.md", "layer": "episodic", "title": "t", "snippet": "s"} for n in range(3)],
+        }
+        result = context_cli.enforce_governed_capsule_contract(capsule)
+        self.assertEqual(["e0.md", "e1.md"], [item["path"] for item in result["episodic"]])
+        self.assertEqual(1, result["omitted"]["episodic"])
+
+    def test_a_recorded_episode_renders_its_outcome(self) -> None:
+        self.start("TASK-READER")
+        recorded = self.run_cli("record", "--summary", "Amber viaduct rollout", "--outcome",
+                                "The amber viaduct rollout finished after the canary held for an hour.")
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        result = self.run_cli("refresh", "--query", "amber viaduct rollout canary", "--task-id", "TASK-READER",
+                              "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        text = json.loads(result.stdout)["capsule_text"]
+        self.assertIn("- history episode 1", text)
+        self.assertIn("The amber viaduct rollout finished after the canary held for an hour.", text)
 
 
 class RetrievalReportTest(RuntimeHarness):

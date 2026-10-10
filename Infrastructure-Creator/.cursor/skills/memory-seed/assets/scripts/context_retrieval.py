@@ -64,7 +64,18 @@ SOURCE_CHANGED_WEIGHT = 0.5
 # One: see `procedural_ranked` in `retrieve`.
 CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
+# Repository history the main query ranks: the changelog.
 CAPSULE_EPISODIC_LIMIT = 1
+# Recorded history: one Project Brain event or local episode, found by its own
+# search (history_query). It used to share the changelog's single slot, which
+# the changelog held on every turn of the 121 evaluated prompts that had an
+# event - while 19 answers sat in events never delivered.
+CAPSULE_EVENT_LIMIT = 1
+HISTORY_KIND = "brain-event"
+# How many prompt terms survive into a retrieval query. Rarity in the index
+# decides which ones, so the cap bounds cost without deciding relevance by
+# position the way the old first-N-words hook extraction did.
+CAPSULE_PROMPT_TERM_LIMIT = 24
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
 # The one file of a skill a host lists and invokes. Everything else indexed from
 # a skills tree - references/, agents/, rules/, an AGENTS.md inside a skill, a
@@ -2143,6 +2154,201 @@ def required_coverage(tokens: list[str]) -> int:
     return MIN_TOKEN_COVERAGE if len(tokens) >= MIN_TOKEN_COVERAGE else 1
 
 
+def episode_item(row: Any) -> dict[str, Any]:
+    """A local episode as the capsule carries it."""
+    return {
+        "id": row["id"],
+        "layer": "episodic",
+        "summary": row["summary"],
+        "outcome": row["outcome"],
+        "files": json.loads(row["files"]),
+        "verification": json.loads(row["verification"]),
+        "sources": json.loads(row["sources"]),
+        "created_at": row["created_at"],
+    }
+
+
+def history_query(connection: sqlite3.Connection, text: str) -> Optional[dict[str, Any]]:
+    """The terms of a request that reach recorded history, and the bar for it.
+
+    Recorded history - Project Brain events and local episodes - is matched by
+    its subject only (an event's title and goal, an episode's summary and
+    outcome) against every informative term of the whole request, not the 24
+    the main query keeps: an event's words also occur in the changelog, the
+    README and the task documents, so they are never among the corpus-rarest,
+    and the distillation dropped every subject term of all 13 answer-holding
+    events on the evaluated prompts.
+
+    An item is admitted when it covers `required_coverage` distinct terms and
+    its matched terms weigh at least that many terms that each occur in a
+    single indexed document - evidence no likelier by chance than as many
+    unique words co-occurring. The weights are those excerpt_weights uses;
+    no constant is tuned. Of the terms that reach any history subject the
+    CAPSULE_PROMPT_TERM_LIMIT rarest count, so a long prompt cannot win by
+    length. Nothing here is persisted.
+    """
+    try:
+        tokens = evidence_tokens(query_tokens(text))
+    except RetrievalError:
+        return None
+    if not tokens:
+        return None
+    try:
+        documents = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        events_indexed = connection.execute(
+            "SELECT COUNT(*) FROM documents WHERE kind = ?", (HISTORY_KIND,)
+        ).fetchone()[0]
+    except sqlite3.Error:
+        return None
+    try:
+        episodes = connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+    except sqlite3.Error:
+        episodes = 0
+    total = documents + episodes
+    if not total or not (events_indexed or episodes):
+        return None
+    frequencies = token_document_frequencies(connection, tokens)
+    events: dict[str, set[str]] = {}
+    recorded: dict[str, set[int]] = {}
+    counts: dict[str, int] = {}
+    for token in tokens:
+        events[token] = set()
+        recorded[token] = set()
+        if events_indexed and frequencies.get(token):
+            try:
+                events[token] = {
+                    row[0] for row in connection.execute(
+                        "SELECT path FROM documents WHERE documents MATCH ? AND kind = ?",
+                        (f'summary : "{token}"', HISTORY_KIND),
+                    )
+                }
+            except sqlite3.Error:
+                pass
+        if episodes:
+            try:
+                recorded[token] = {
+                    row[0] for row in connection.execute(
+                        "SELECT rowid FROM episodes WHERE episodes MATCH ?",
+                        (f'{{summary outcome}} : "{token}"',),
+                    )
+                }
+            except sqlite3.Error:
+                pass
+        # `complete` writes an event and an equivalent episode: counting both
+        # would make the event's own words look common, so an episode adds to
+        # a term's frequency only where no document has the term.
+        counts[token] = frequencies.get(token) or len(recorded[token])
+    pool = [token for token in tokens if 0 < counts[token] <= total * STOPWORD_DOCUMENT_RATIO]
+    reach = [token for token in pool if events[token] or recorded[token]]
+    if not reach:
+        return None
+    position = {token: index for index, token in enumerate(tokens)}
+    terms = sorted(reach, key=lambda token: (counts[token], position[token]))[
+        :CAPSULE_PROMPT_TERM_LIMIT
+    ]
+    terms.sort(key=position.__getitem__)
+    minimum = required_coverage(pool)
+    return {
+        "terms": terms,
+        "weights": {
+            token: max(0.05, math.log((total + 1) / (counts[token] + 0.5))) for token in terms
+        },
+        "minimum": minimum,
+        "floor": minimum * max(0.05, math.log((total + 1) / 1.5)),
+        "events": {token: events[token] for token in terms},
+        "episodes": {token: recorded[token] for token in terms},
+    }
+
+
+def _history_candidates(
+    connection: sqlite3.Connection, history: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[tuple[float, float, dict[str, Any]]]]:
+    """Admitted events, ranked like candidates, and admitted episodes as
+    (ranked score, matched weight, episode)."""
+    def admitted(members: dict[str, set[Any]]) -> dict[Any, float]:
+        count: dict[Any, int] = {}
+        mass: dict[Any, float] = {}
+        for token, found in members.items():
+            for member in found:
+                count[member] = count.get(member, 0) + 1
+                mass[member] = mass.get(member, 0.0) + history["weights"][token]
+        # The tolerance keeps a match of exactly `minimum` unique terms on
+        # the right side of float rounding.
+        return {
+            member: mass[member]
+            for member in count
+            if count[member] >= history["minimum"] and mass[member] + 1e-9 >= history["floor"]
+        }
+
+    event_mass = admitted(history["events"])
+    events: list[dict[str, Any]] = []
+    if event_mass:
+        marks = ",".join("?" for _ in event_mass)
+        rows = connection.execute(
+            f"""
+            SELECT
+                d.rowid AS document_rowid, d.path, d.layer, d.kind, d.title,
+                m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+                m.source_hash, m.record_id, m.conflicts,
+                m.source_fingerprints, m.updated_at, m.confidence, m.attestation
+            FROM documents AS d
+            JOIN document_metadata AS m ON m.path = d.path
+            WHERE d.kind = ? AND d.path IN ({marks})
+            """,
+            (HISTORY_KIND, *sorted(event_mass)),
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            item["conflicts"] = json.loads(item["conflicts"])
+            item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+            item["match"] = "covered"
+            item["score"] = -event_mass[item["path"]]
+            item["adjusted_score"] = event_mass[item["path"]] * ranking_weight(
+                item["authority"], item["confidence"], item["updated_at"]
+            )
+            events.append(item)
+        events.sort(key=lambda item: (-item["adjusted_score"], item["path"]))
+        for rank, item in enumerate(events, start=1):
+            item["rank"] = rank
+        _quote_candidates(connection, events, " ".join(history["terms"]), history["terms"])
+    episode_mass = admitted(history["episodes"])
+    episodes: list[tuple[float, float, dict[str, Any]]] = []
+    if episode_mass:
+        marks = ",".join("?" for _ in episode_mass)
+        rows = connection.execute(
+            "SELECT rowid AS id, summary, outcome, files, verification, sources, created_at "
+            f"FROM episodes WHERE rowid IN ({marks})",
+            tuple(sorted(episode_mass)),
+        ).fetchall()
+        for row in rows:
+            episode = episode_item(row)
+            mass = episode_mass[row["id"]]
+            episodes.append((mass * ranking_weight("observed", 1.0, row["created_at"]), mass, episode))
+        episodes.sort(key=lambda entry: (-entry[0], -int(entry[2]["id"])))
+    return events, episodes
+
+
+def _best_history_event(
+    repository: Path, events: list[dict[str, Any]], config: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """The best admitted event that passes the runtime filters.
+
+    The filters only remove a candidate or lower its score, so once the next
+    candidate's unfiltered score cannot beat the best filtered one, no later
+    one can: usually one or two files are read, however many events exist.
+    """
+    best: Optional[dict[str, Any]] = None
+    excluded: list[dict[str, str]] = []
+    for item in events:
+        if best is not None and item["adjusted_score"] <= best["adjusted_score"]:
+            break
+        kept, dropped = _runtime_filter(repository, [item], config)
+        excluded.extend(dropped)
+        if kept and (best is None or kept[0]["adjusted_score"] > best["adjusted_score"]):
+            best = kept[0]
+    return ([best] if best is not None else []), excluded
+
+
 # The part of a document a capsule quotes. A capsule that names a document
 # helps only if the text it carries holds the answer: the section sharing the
 # most terms with the request was chosen by literal words and then cut to its
@@ -2616,6 +2822,10 @@ def _candidates(
     The diagnostics are computed here anyway and were discarded at the end of
     the call. A gate that has to decide whether this turn is worth retrieving
     for cannot recompute them without repeating the work.
+
+    Project Brain events are not candidates here: they reach the capsule only
+    through their own search (`history_query`), so they neither take rows of
+    this window nor set the episodic floor the changelog is held to.
     """
     ensure_metadata_tables(connection)
     tokens = informative_tokens(connection, query_tokens(query))
@@ -2635,11 +2845,11 @@ def _candidates(
             bm25(documents, ?, ?, ?, ?, ?, ?) AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
-        WHERE documents MATCH ?
+        WHERE documents MATCH ? AND d.kind != ?
         ORDER BY score, d.path
         LIMIT ?
         """,
-        (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), limit),
+        (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), HISTORY_KIND, limit),
     ).fetchall()
     result = []
     for row in rows:
@@ -3704,7 +3914,7 @@ def retrieve(
     paths: Optional[list[str]] = None,
     host: str = "cli",
     entry_point: str = "retrieve",
-    local_episodes: Optional[list[dict[str, Any]]] = None,
+    history_text: Optional[str] = None,
     session_id: Optional[str] = None,
     transcript: Optional[str] = None,
     pack: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
@@ -3724,6 +3934,9 @@ def retrieve(
     not depend on a task. Without a task there is no working state and no
     own record to exclude, and the manifest stays in ignored local state:
     governed history is kept per task.
+
+    ``history_text`` is the text recorded history is searched with - the whole
+    request, where ``query`` is its distilled form; ``query`` when omitted.
 
     ``pack`` turns the result into the capsule as the caller delivers it -
     the layer and character limits of its JSON, the ceiling of its rendered
@@ -3763,14 +3976,17 @@ def retrieve(
         task_path, task, _ = find_task(repository, task_identifier)
         validate_record(task)
     config = load_config(repository)
-    local_episodes = list(local_episodes or [])
     candidates, diagnostics = _candidates(connection, query, max(20, limit * 10))
+    # Recorded history has its own search over the whole request: events and
+    # local episodes share one slot beside the changelog's.
+    history = history_query(connection, query if history_text is None else history_text)
+    event_candidates, episode_candidates = (
+        _history_candidates(connection, history) if history else ([], [])
+    )
     # Taken before any filter runs, so "nothing matched" cannot be confused
-    # with "everything that matched was withheld". Only the layers a governed
-    # capsule fills from this call are answered for; the episodic layer is
-    # assembled by the caller and reports itself.
+    # with "everything that matched was withheld".
     matched_layers = {item["layer"] for item in candidates}
-    if local_episodes:
+    if event_candidates or episode_candidates:
         matched_layers.add("episodic")
     no_match = [
         layer
@@ -3782,6 +3998,16 @@ def retrieve(
     # again keeps fresh knowledge of equal fit ahead of it. Stable, so
     # nothing else moves.
     filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
+    chosen_event, history_excluded = _best_history_event(repository, event_candidates, config)
+    filter_excluded.extend(history_excluded)
+    history_episode: list[dict[str, Any]] = []
+    if episode_candidates and (
+        not chosen_event or episode_candidates[0][0] > chosen_event[0]["adjusted_score"]
+    ):
+        # Ties go to the event: it is the team's record, the episode a
+        # machine-local note of the same kind.
+        history_episode, chosen_event = [episode_candidates[0][2]], []
+    history_paths = {item["path"] for item in chosen_event}
     graph_anchors = [
         item for item in filtered
         if item["layer"] == "semantic" and item.get("match") == "covered"
@@ -3801,7 +4027,7 @@ def retrieve(
             repository,
             config,
             paths,
-            {item["path"] for item in filtered},
+            {item["path"] for item in filtered} | history_paths,
         )
         path_matched_count = len(linked) + len(link_excluded)
         filter_excluded.extend(link_excluded)
@@ -3810,11 +4036,14 @@ def retrieve(
         filtered = [*linked, *filtered]
     graph_candidates, graph_stats = _source_link_candidates(
         connection, repository, config, graph_anchors,
-        {item["path"] for item in filtered},
+        {item["path"] for item in filtered} | history_paths,
     )
     # Related knowledge fills remaining capacity after direct matches and
     # explicit paths; provenance alone never gives it priority over them.
     filtered.extend(graph_candidates)
+    # The history search's event goes through the same conflict expansion,
+    # exclusions and budget as everything else, ahead in the budget queue.
+    filtered = [*chosen_event, *filtered]
     # A promoted chunk and the record it was promoted from say the same thing,
     # and both used to take a slot. The chunk is the durable form, so the
     # record yields to it.
@@ -3919,7 +4148,7 @@ def retrieve(
     # the layer column, and the two taxonomies overlap: `category_for` has no
     # `changelog` branch, so CHANGELOG.md is category 'evidence' AND layer
     # 'episodic'. Without this filter it takes one of the three semantic slots
-    # and the single episodic slot at once, and the degradation ladder then
+    # and an episodic slot at once, and the degradation ladder then
     # drops real content to stay inside the budget. Filtering here rather than
     # after the split matters twice over: the freed slot goes to the next
     # ranked candidate instead of being lost, and the manifest written below
@@ -3937,14 +4166,24 @@ def retrieve(
     # governed records live there. Ranking it here puts it through the same
     # filters, the same budget and the same audit record as everything else,
     # and makes H1-03's `episodic-layer` exclusion reason literally true.
-    episodic_ranked = [item for item in selected if item["layer"] == "episodic"]
+    episodic_ranked = [
+        item for item in selected
+        if item["layer"] == "episodic" and item["kind"] != HISTORY_KIND
+    ]
+    # The history search's event first; an event a path or a conflict brought
+    # in only after it.
+    event_ranked = [
+        item for item in selected
+        if item["layer"] == "episodic" and item["kind"] == HISTORY_KIND
+    ]
     capsule_selected = [
         *procedural_ranked[:CAPSULE_PROCEDURAL_LIMIT],
         *semantic_ranked[:CAPSULE_SEMANTIC_LIMIT],
+        *event_ranked[:CAPSULE_EVENT_LIMIT],
         *episodic_ranked[:CAPSULE_EPISODIC_LIMIT],
     ]
-    local_episode_selected = local_episodes[
-        : max(0, CAPSULE_EPISODIC_LIMIT - len(episodic_ranked[:CAPSULE_EPISODIC_LIMIT]))
+    local_episode_selected = history_episode[
+        : max(0, CAPSULE_EVENT_LIMIT - len(event_ranked[:CAPSULE_EVENT_LIMIT]))
     ]
     local_episode_tokens = sum(
         _estimate_tokens(_serialized_episode(episode))
@@ -4061,7 +4300,9 @@ def retrieve(
         previous=previous if isinstance(previous, dict) else None,
         diagnostics=diagnostics,
         no_match=no_match,
-        matched_count=len(candidates) + len(local_episodes) + path_matched_count,
+        matched_count=(
+            len(candidates) + len(event_candidates) + len(episode_candidates) + path_matched_count
+        ),
         selected_count=len(selected) + len(local_episode_selected),
         # The selection above already left out what this conversation holds.
         conversation=session is not None,
@@ -4085,15 +4326,26 @@ def retrieve(
         public = _public_item(item)
         groups[item["category"]].append(public)
     procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
+    history_items = [
+        item for group in groups.values() for item in group if item["layer"] == "episodic"
+    ]
+    # Recorded history (an event, or a local episode) first, then the
+    # changelog: the text ceiling shrinks from the tail, and the changelog's
+    # long sections are what gives way.
+    recorded = [item for item in history_items if item["kind"] == HISTORY_KIND][:CAPSULE_EVENT_LIMIT]
+    recorded.extend(local_episode_selected[: CAPSULE_EVENT_LIMIT - len(recorded)])
     episodic = [
-        item
-        for group in groups.values()
-        for item in group
-        if item["layer"] == "episodic"
-    ][:CAPSULE_EPISODIC_LIMIT]
-    episodic.extend(local_episode_selected[: CAPSULE_EPISODIC_LIMIT - len(episodic)])
+        *recorded,
+        *[item for item in history_items if item["kind"] != HISTORY_KIND][:CAPSULE_EPISODIC_LIMIT],
+    ]
+    # Episodic items are history, not knowledge slots: a delivered event used
+    # to be counted here too (category `dynamic`), then removed as a
+    # duplicate, and the third semantic item was lost with it.
     semantic = [
-        *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
+        item
+        for category in ("handoff", "durable", "dynamic", "evidence")
+        for item in groups[category]
+        if item["layer"] != "episodic"
     ][:CAPSULE_SEMANTIC_LIMIT]
     # Category grouping must not move related knowledge ahead of direct
     # hits when the renderer spends its character allowance.

@@ -153,7 +153,7 @@ class MemoryIntegrationTest(unittest.TestCase):
             "3,600 characters",
             "one Procedural",
             "three Semantic",
-            "one Episodic",
+            "two Episodic",
             "MUST NOT pass the parent conversation",
             "start of a complex request",
             "research to planning",

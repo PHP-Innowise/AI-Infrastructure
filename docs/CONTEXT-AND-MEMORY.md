@@ -184,8 +184,7 @@ no record reports a completion that did not happen.
 `event` is the only record type mapped to the episodic layer. An `incident`
 stays semantic even though it is also a record of something that happened: an
 open incident is active, urgent, promotable content, and moving it to the
-single episodic slot would take it out of the runtime filters, the budget and
-the manifest.
+history slot would take it out of the semantic layer's three slots.
 
 The episodic slot of a governed capsule is ranked by `retrieve()` along with
 everything else. It used to be fetched separately by a query that never joined
@@ -195,11 +194,49 @@ That was harmless while the only episodic document was the changelog; it stops
 being harmless once governed records live there.
 
 Machine-local episodes also enter capsule assembly before the retrieval gate,
-not as an unaccounted append after it. They can fill only the unused part of the
-single episodic slot, contribute to the capsule and token ceilings, and their
-content hashes participate in repeat detection. A version 3 manifest records
-only `local_episode_count` and their aggregate
-`token_estimates.local_episodes`: it never stores a local episode ID or body.
+not as an unaccounted append after it. They share the recorded-history slot
+with events (below), contribute to the capsule and token ceilings, and their
+content hashes participate in repeat detection. A manifest records only
+`local_episode_count` and their aggregate `token_estimates.local_episodes`: it
+never stores a local episode ID or body.
+
+### Recorded history beside the changelog (2026-10-10)
+
+The episodic layer holds two items: the changelog, ranked by the main query as
+before, and one recorded history item - a Project Brain event or a local
+episode - found by a search of its own. They used to share one slot. On the 121
+evaluated prompts the changelog held it on every turn that had an event, while
+19 existing answers sat in 13 automatically written events that were never
+delivered; every subject term of those events had been dropped by the 24-term
+distillation, because an event's words also occur in the changelog, the README
+and the task documents and are never among the corpus-rarest.
+
+- **The search.** `history_query` matches every informative term of the whole
+  request (document frequency at most half the index) against the subject only
+  - an event's title and goal, an episode's summary and outcome - and keeps,
+  of the terms that reach any history subject, the 24 rarest, so a long prompt
+  cannot win by length. Events are no longer candidates of the main query: they
+  take none of its rows and do not set the episodic floor the changelog is held
+  to.
+- **The bar.** An item is admitted when it covers `required_coverage` distinct
+  terms and its matched terms weigh at least that many terms that each occur in
+  a single indexed document, `k * ln((N + 1) / 1.5)` with the weights
+  `excerpt_weights` uses: evidence no likelier by chance than as many unique
+  words co-occurring. Nothing is tuned to the evaluation prompts, and the bar
+  is absolute: it never admits the best item of a bad list.
+- **One slot.** The best admitted event that passes the runtime filters, or
+  the best local episode if it ranks higher (ties go to the event: `complete`
+  writes both). An episode adds to a term's frequency only where no document
+  has the term, so the twin does not make the event's own words look common.
+- **Render.** The history item renders before the changelog, so under the
+  3,600-character ceiling the changelog's long excerpt shrinks first; a local
+  episode now quotes its outcome, not only a summary.
+- **Cost.** At most two FTS lookups per informative term, only when events or
+  episodes exist: a few milliseconds per prompt.
+
+The governed JSON contract is 1/3/2; lightweight mode keeps one history item,
+because it has no such search. A delivered event no longer takes one of the
+three semantic slots on its way out, which had lost the third semantic item.
 
 ## Governed and Lightweight Ownership
 
@@ -990,10 +1027,11 @@ The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
 policy filtering, the delivered capsule is independently capped at 1
-procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
-Snippets are deterministically shortened as needed.
+procedural, 3 semantic, and 2 episodic items (the changelog and one recorded
+event or episode) and 8,000 serialized characters. Snippets are
+deterministically shortened as needed.
 
-A selected local episode uses only the remaining episodic slot. Its estimate is
+A selected local episode shares the recorded-history slot with events. Its estimate is
 included in `token_estimates.local_episodes` and in the total ceiling even
 though its identity and content are deliberately absent from the manifest.
 
