@@ -142,7 +142,7 @@ All output from this run lives under `tasks/TASK-{NNN}/` in Infrastructure-Creat
 
 ## What Will Be Generated (see profile sections 11-12 for full detail)
 - **Skills:** [dynamic evidence-gated count] - each has a distinct
-  necessity/scope/procedure/output/routing contract; the memory quartet remains
+  necessity/scope/procedure/output/routing contract; the six memory-continuity guides remain
   because its runtime is always installed
 - **Agents & commands:** [counts from section 11.2, for the selected edition(s)]
 - **Memory bank:** [count] cohesive confirmed concepts planned in section 12, each linked to canonical sources
@@ -164,7 +164,7 @@ generated. Correct anything wrong, then run `infra-generate`.
 
 ## Guardrails
 
-- MUST NOT write anything into the target project - Phase 1 is read-only there.
+- MUST NOT write anything into the target project - Phase 1 is read-only there. A baseline run of a verification command happens only in a throwaway copy of the target, and only for a command `analyze_commands.py --verification` reports safe (profile-synthesizer).
 - MUST confirm PHP evidence before scanning; a non-PHP target with no recognizable stack at all is reported out of scope.
 - MUST NOT invoke `stack-adapter` without first asking the user - detecting a foreign stack is never itself consent to generate a sibling tool.
 - MUST NOT run the seven PHP scanners against a target that already failed the PHP-evidence check.

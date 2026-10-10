@@ -1,0 +1,251 @@
+"""Pure policy shared byte for byte by the memory runtime and the Harness (stdlib only):
+what an automatic query may carry, and which paths a learning may cite."""
+from __future__ import annotations
+
+import re
+
+_NOT_A_LITERAL = (
+    r"(?!"
+    r"[$%{<\[(=]"
+    r"|(?:get)?env\(|config\(|secret\(|process\.env|os\.environ|vault:"
+    r"|\*{2,}|x{3,}|\.{2,}|\u2026"
+    r"|\d+(?![^\s'\"`,;])"
+    r"|[A-Za-z_\\][\w\\.]*(?:::|->|\()"
+    r"|[a-z_]\w*\.[a-z_][\w.]*(?![^\s'\"`,;])"
+    r"|(?:required|nullable|sometimes|confirmed|hashed|string|null|none|true|false"
+    r"|secret|password|passw(?:or)?d|pass|root|test|example|placeholder|redacted"
+    r"|!?change[-_]?me!?|your[-_ ][^\s]*)(?![A-Za-z0-9])"
+    r")"
+)
+# Key names a credential is assigned to: DB_PASSWORD=, AWS_SECRET_ACCESS_KEY=,
+# AccountKey= in a connection string.
+_CREDENTIAL_KEYS = (
+    r"(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key"
+    r"|access[_-]?(?:token|key)|auth[_-]?token|refresh[_-]?token|private[_-]?key"
+    r"|account[_-]?key|shared[_-]?access[_-]?key)"
+)
+SECRET_PATTERNS = {
+    "private key": re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"),
+    "GitHub token": re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{22,})\b"),
+    "GitLab token": re.compile(r"\bgl(?:pat|dt|rt|ptt|cbt|imt|oas|soat|ft|agent)-[A-Za-z0-9_-]{20,}"),
+    # Slack's bot, user, app, refresh and configuration tokens. A placeholder
+    # such as xoxb-your-token has no digit and does not count.
+    "Slack token": re.compile(r"\b(?:xox[abeoprs]|xapp)-(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{10,}"),
+    "Slack webhook": re.compile(
+        r"\bhooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9_/-]{16,}", re.IGNORECASE
+    ),
+    "Discord webhook": re.compile(
+        r"\bdiscord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{30,}", re.IGNORECASE
+    ),
+    "Telegram bot token": re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b"),
+    "AWS access key": re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+    "Google API key": re.compile(r"\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
+    "Google OAuth token": re.compile(r"\bya29\.[0-9A-Za-z_-]{20,}"),
+    "OpenAI-style token": re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
+    "Stripe secret key": re.compile(r"\b[rs]k_(?:live|test)_[A-Za-z0-9]{16,}\b"),
+    "npm token": re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"),
+    "PyPI token": re.compile(r"\bpypi-AgE[A-Za-z0-9_-]{50,}"),
+    "Hugging Face token": re.compile(r"\bhf_[A-Za-z0-9]{34,}\b"),
+    "SendGrid key": re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"),
+    "Shopify token": re.compile(r"\bshp(?:at|ss|ca|pa)_[a-fA-F0-9]{32}\b"),
+    "DigitalOcean token": re.compile(r"\bdo[opr]_v1_[a-f0-9]{64}\b"),
+    "JWT": re.compile(r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
+    "Laravel application key": re.compile(
+        r"\bAPP_KEY[ \t]*=[ \t]*['\"]?base64:[A-Za-z0-9+/]{20,}={0,2}"
+    ),
+    # user:password@ in a URL or DSN (mysql://, postgres://, redis://:pw@,
+    # https://user:token@), minus the placeholders documentation uses.
+    "credential in URL": re.compile(
+        r"\b[a-z][a-z0-9+.-]*://[^\s:/@]*:"
+        r"(?!(?:password|pass|secret|root|test|!?change[-_]?me!?|x{3,}|\*+|\.{2,})@"
+        r"|[<${%])"
+        r"[^\s@/]{3,}@",
+        re.IGNORECASE,
+    ),
+    # An HTTP credential pasted with a request: the header names the scheme,
+    # whatever shape the opaque token takes. A token has a digit somewhere and
+    # a placeholder (YOUR_TOKEN, <token>, $TOKEN, {token}) does not count.
+    "authorization header": re.compile(
+        r"\b(?:proxy-)?authorization[ \t]*[:=][ \t]*['\"`]?(?:bearer|basic|token|digest)[ \t]+"
+        + _NOT_A_LITERAL + r"(?=[A-Za-z0-9._~+/=-]*\d)[A-Za-z0-9._~+/=-]{8,}",
+        re.IGNORECASE,
+    ),
+    # Basic credentials are base64 and may carry no digit at all.
+    "basic credentials": re.compile(
+        r"\b(?:proxy-)?authorization[ \t]*[:=][ \t]*['\"`]?basic[ \t]+"
+        + _NOT_A_LITERAL + r"[A-Za-z0-9+/]{12,}={0,2}",
+        re.IGNORECASE,
+    ),
+    "bearer token": re.compile(
+        r"\bbearer[ \t]+" + _NOT_A_LITERAL + r"(?=[A-Za-z0-9._~+/-]*\d)[A-Za-z0-9._~+/-]{20,}=*",
+        re.IGNORECASE,
+    ),
+    # A credential key assigned a literal value. The key may carry a snake or
+    # UPPER_SNAKE prefix (DB_PASSWORD=, MAIL_PASSWORD=, AWS_SECRET_ACCESS_KEY=),
+    # which the old `\b` anchor missed; separators stay on one line.
+    "assigned credential": re.compile(
+        r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*" + _CREDENTIAL_KEYS
+        + r"[ \t]*[:=][ \t]*['\"`]?" + _NOT_A_LITERAL + r"[^\s'\"`]{4,}",
+        re.IGNORECASE,
+    ),
+}
+# Personal data that must not enter shared memory: Project Brain records are
+# Git-tracked, and the Task Capsule repeats them into every prompt. The
+# capsule gate used these first; the Brain write path applies them too.
+PRIVATE_PATTERNS = {
+    "email address": re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
+    "phone number": re.compile(
+        r"(?<!\w)(?:\+\d(?:[\d ().-]{6,}\d)|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4})(?!\w)"
+    ),
+    "customer identifier": re.compile(
+        r"\b(?:(?:customer|patient)\s+(?:name|address|id)|"
+        r"client\s+(?:name|address))\s*[:=]\s*\S+",
+        re.IGNORECASE,
+    ),
+    # A customer's or patient's number without the colon the form above
+    # needs: "customer ID 10492", "customer #10492", "patient no. 77",
+    # "ID клиента 10492", or a bare "customer 10492" of three digits or more.
+    # A query keeps the label and loses the number (`value`).
+    "customer number": re.compile(
+        r"(?<!\w)(?:"
+        r"(?:customer|patient|клиент\w*|пациент\w*)[\s_(\[-]*(?:identifier|id|number|no\.?|nr\.?|номер|№|#)"
+        r"|client[\s_(\[-]*(?:number|no\.?|nr\.?|#)"
+        r"|(?:id|номер|№)\s+(?:клиента|пациента)"
+        r"|(?:customer|patient|клиент\w*|пациент\w*)(?=\s*[#№]?\s*\d{3})"
+        r")[\s:=#№(\[]*(?P<value>[A-Za-z]{0,5}-?\d[\w-]*)",
+        re.IGNORECASE,
+    ),
+}
+
+
+# Transcript role prefixes ("user:", "stderr:") mark pasted conversation and
+# logs. The prefix goes; the words after it are often exactly the error text
+# the request is about.
+RAW_TEXT_PATTERN = re.compile(
+    r"^\s*(?:user|assistant|system|developer|tool|prompt|response|reasoning|"
+    r"stdout|stderr|log)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+# A credential assigned a quoted value: the whole literal goes, to its closing
+# quote or, when the quote never closes, to the end of the line. The detection
+# pattern above stops at the first space - enough to refuse a write, but it
+# left "beta gamma'" of `password='alpha beta gamma'` in an automatic query,
+# and from there in a task goal and a manifest.
+QUOTED_CREDENTIAL = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Za-z0-9]+_)*" + _CREDENTIAL_KEYS
+    + r"[ \t]*[:=][ \t]*(['\"`])[^\n]*?(?:\1|$)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# SECRET_PATTERNS recognises a private key by its header line alone; the body
+# under it is the secret, so the whole block goes, to its footer or the end.
+PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----.*?"
+    r"(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\Z)",
+    re.DOTALL,
+)
+# Words that only framed removed data: when nothing else is left, the request
+# was about a person, not about the project, and there is nothing to search.
+CONTACT_WORDS = frozenset("""
+    a an and at by for from in is of on or the to with please thanks
+    customer client patient user person email e mail address phone
+    number mobile telephone tel contact call reach send name id identifier
+    check fix review inspect look
+    клиент клиента пациент пациента пользователь пользователя имя
+    адрес почта телефон номер позвони позвонить связаться пожалуйста
+""".split())
+
+
+class AutomaticQueryError(ValueError):
+    pass
+
+
+def _cut(match: "re.Match[str]") -> str:
+    """What stays of a match: nothing, or the label in front of its value."""
+    if "value" not in match.re.groupindex:
+        return " "
+    return match.group(0)[: match.start("value") - match.start()] + " "
+
+
+def sanitize_automatic_query(text: str) -> str:
+    """The request as an automatic adapter may search with it.
+
+    Secrets, personal data and transcript role prefixes are cut out and the
+    words around them stay: prompts arrive as people write them, with pasted
+    logs and addresses, and refusing the whole prompt cost 35 of 60 first
+    prompts on one real project their memory. A labelled name or address has
+    no reliable end - it may hold spaces, newlines and ';' - so the text from
+    its label on goes. When what is left only framed the removed data, the
+    result is empty: there is nothing to search, and no fallback to a task
+    goal or branch name should stand in for it.
+
+    Only automatic adapters (hooks, Harness) use this. Direct queries and
+    shared writes still validate, and refuse, the original input.
+    """
+    original = text
+    text = PRIVATE_KEY_BLOCK.sub(" ", text)
+    text = QUOTED_CREDENTIAL.sub(" ", text)
+    labelled = PRIVATE_PATTERNS["customer identifier"].search(text)
+    if labelled:
+        text = text[:labelled.start()]
+    for _ in range(3):
+        before = text
+        for pattern in SECRET_PATTERNS.values():
+            text = pattern.sub(" ", text)
+        for label, pattern in PRIVATE_PATTERNS.items():
+            if label != "customer identifier":
+                text = pattern.sub(_cut, text)
+        text = RAW_TEXT_PATTERN.sub(" ", text)
+        if text == before:
+            break
+    if any(pattern.search(text) for pattern in SECRET_PATTERNS.values()):
+        # Redaction that does not converge is not trusted with the rest.
+        raise AutomaticQueryError("Automatic memory query still carries a secret after redaction")
+    if text != original:
+        residue = re.findall(r"\w+", text.casefold())
+        if not residue or all(word in CONTACT_WORDS for word in residue):
+            return ""
+    return text.strip(" \t\r\n,;")
+
+
+# A cited path that names a secret, a key or an environment file.
+SOURCE_PATH_DENYLIST = re.compile(
+    r"(^|/)(\.env(\..+)?|secrets?|id_[a-z0-9]+|[^/]+\.(pem|key|p12|pfx|jks|keystore))$",
+    re.IGNORECASE,
+)
+# Directory names a learning never cites: tooling, dependencies, credentials.
+BLOCKED_SOURCE_PARTS = frozenset({
+    ".git", ".ssh", ".aws", ".kube", "node_modules", "vendor", ".venv",
+    "__pycache__", "secrets", ".secrets", "credentials",
+})
+# Runtime state and derived memory: a learning cites what it was derived
+# from, never memory derived from something else.
+DERIVED_SOURCE_PREFIXES = (
+    "memory-bank/local/", "memory-bank/chunks/", "project-brain/local/",
+    "project-brain/dynamic/", "project-brain/archive/", "project-brain/control/",
+)
+PRIVATE_SOURCE_SUFFIXES = frozenset({".pem", ".key", ".p12", ".pfx", ".sqlite", ".db"})
+
+
+def source_path_problem(value: str) -> "str | None":
+    """Why a learning may not cite `value`, judged on the path alone, or None.
+
+    Every writer of a learning applies it - the runtime's record-result and
+    the Harness before it chooses a write path - so a source refused on one
+    path is refused on all. Existence and symlinks are each caller's to check
+    against its own root.
+    """
+    head = value.split("#", 1)[0]
+    if SOURCE_PATH_DENYLIST.search(head):
+        return "Sensitive source paths are refused"
+    if head.startswith(DERIVED_SOURCE_PREFIXES):
+        return "Cite canonical project sources, not private runtime state or derived memory"
+    parts = [part for part in head.split("/") if part]
+    name = parts[-1].casefold() if parts else ""
+    suffix = name[name.rfind("."):] if "." in name else ""
+    if (any(part.casefold() in BLOCKED_SOURCE_PARTS or part.casefold().startswith(".env") for part in parts)
+            or suffix in PRIVATE_SOURCE_SUFFIXES or name == "credentials.json"):
+        return "Private or dependency source paths are refused"
+    if head.startswith("/") or ".." in parts or "\\" in head or ":" in head:
+        return "Use project-relative source paths"
+    return None
+

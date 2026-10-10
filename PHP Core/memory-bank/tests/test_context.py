@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -313,7 +316,7 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual("procedural", documents[0]["layer"])
         self.assertEqual(".agents/skills/review/SKILL.md", documents[0]["path"])
 
-    def test_index_skips_skill_with_secret_without_persisting_it(self) -> None:
+    def test_index_masks_a_token_in_a_skill_without_persisting_it(self) -> None:
         secret = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
         skill = self.repository / ".agents/skills/review/SKILL.md"
         skill.parent.mkdir(parents=True)
@@ -324,13 +327,93 @@ class ContextEngineTest(unittest.TestCase):
 
         indexed = self.run_context("index", "--json")
         self.assertEqual(0, indexed.returncode, indexed.stderr)
-        self.assertEqual(0, json.loads(indexed.stdout)["documents"])
-        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", indexed.stderr)
+        result = json.loads(indexed.stdout)
+        self.assertEqual(1, result["documents"])
+        self.assertEqual([], result["excluded"])
+        self.assertEqual([{"path": ".agents/skills/review/SKILL.md", "values": 1}], result["redacted"])
+        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", indexed.stdout + indexed.stderr)
 
         connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
-        documents = connection.execute("SELECT path, content FROM documents").fetchall()
+        rows = connection.execute("SELECT path, title, summary, content FROM documents").fetchall()
         connection.close()
-        self.assertEqual([], documents)
+        self.assertIn("[redacted: GitHub token]", rows[0][3])
+        self.assertTrue(all("ABCDEFGHIJKLMNOPQRSTUVWXYZ" not in "".join(row) for row in rows))
+
+    def test_index_masks_a_dev_credential_and_keeps_the_readme_searchable(self) -> None:
+        # The one line that used to take the whole README out of the index.
+        self.repository.joinpath("README.md").write_text(
+            "# Mailer\n\nOutgoing mail goes to the heron catcher.\n\n"
+            "```env\nMAILER_PASSWORD=mailpit\n```\n",
+            encoding="utf-8",
+        )
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        result = json.loads(indexed.stdout)
+        self.assertEqual([], result["excluded"])
+        self.assertEqual([{"path": "README.md", "values": 1}], result["redacted"])
+        text = self.run_context("index")
+        self.assertIn("Redacted: 1 value(s) in 1 document(s)", text.stdout)
+        outputs = [indexed.stdout, text.stdout]
+        for query in ("heron", "MAILER_PASSWORD"):
+            found = self.run_context("search", query, "--json")
+            self.assertEqual(0, found.returncode, found.stderr)
+            self.assertIn("README.md", found.stdout, query)
+            outputs.append(found.stdout)
+        self.assertTrue(all("mailpit" not in output for output in outputs))
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        rows = connection.execute("SELECT title, summary, content FROM documents").fetchall()
+        connection.close()
+        self.assertTrue(all("mailpit" not in "".join(row) for row in rows))
+
+    def test_incremental_index_reuses_a_masked_document_without_rescanning(self) -> None:
+        readme = self.repository / "README.md"
+        readme.write_text("# Mailer\n\n```\nMAILER_PASSWORD=mailpit\n```\n", encoding="utf-8")
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            CONTEXT.index_repository(connection, self.repository, incremental=True)
+            paths = {row[0] for row in connection.execute("SELECT path FROM documents")}
+            self.assertIn("README.md", paths)
+            with mock.patch.object(CONTEXT, "mask_secrets", wraps=CONTEXT.mask_secrets) as masking:
+                CONTEXT.index_repository(connection, self.repository, incremental=True)
+            self.assertEqual(0, masking.call_count)
+            stored = connection.execute(
+                "SELECT source_hash FROM document_metadata WHERE path = 'README.md'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        # The file's own digest: governed retrieval re-hashes the file, and a
+        # digest of the masked text would call it stale on every turn.
+        self.assertEqual(CONTEXT._content_hash(readme.read_text(encoding="utf-8")), stored)
+
+    def test_a_document_whose_masking_does_not_converge_is_excluded(self) -> None:
+        self.repository.joinpath("README.md").write_text("ECHOSECRET\n", encoding="utf-8")
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            with mock.patch.dict(CONTEXT.SECRET_PATTERNS, {"echo": re.compile(r"ECHOSECRET|redacted: echo")}):
+                result = CONTEXT.index_repository(connection, self.repository)
+            paths = {row[0] for row in connection.execute("SELECT path FROM documents")}
+        finally:
+            connection.close()
+        self.assertIn({"path": "README.md", "reason": "secret"}, result["excluded"])
+        self.assertNotIn("README.md", paths)
+        self.assertEqual([], result["redacted"])
+
+    def test_a_secret_pattern_change_remasks_cached_documents(self) -> None:
+        notes = self.repository / "docs/notes.md"
+        notes.parent.mkdir(parents=True, exist_ok=True)
+        notes.write_text("# Notes\n\nrelease code ZQX-ALPHA-7781\n", encoding="utf-8")
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            CONTEXT.index_repository(connection, self.repository, incremental=True)
+            with mock.patch.dict(CONTEXT.SECRET_PATTERNS, {"release code": re.compile(r"ZQX-[A-Z]+-\d{4}")}):
+                CONTEXT.index_repository(connection, self.repository, incremental=True)
+            content = connection.execute(
+                "SELECT content FROM documents WHERE path = 'docs/notes.md'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertIn("[redacted: release code]", content)
+        self.assertNotIn("ZQX-ALPHA-7781", content)
 
     def test_index_includes_common_project_documentation(self) -> None:
         self.repository.joinpath("CLAUDE.md").write_text(
@@ -509,6 +592,80 @@ class ContextEngineTest(unittest.TestCase):
                 CONTEXT.git_ignored_paths(self.repository, ["docs/private.md"])
 
         self.assertNotIn("private probe detail", str(raised.exception))
+
+    def test_output_is_utf8_whatever_the_console_code_page(self) -> None:
+        self.repository.joinpath("specs/dash.md").write_text(
+            "# Dash — rule\n\nThe cerulean rule … holds.\n", encoding="utf-8"
+        )
+        self.assertEqual(0, self.run_context("index", "--json").returncode)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(self.repository),
+             "--mode", "lightweight", "search", "cerulean"],
+            capture_output=True,
+            env={**__import__("os").environ, "PYTHONIOENCODING": "cp1252",
+                 "PYTHONUTF8": "0"},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Dash — rule".encode("utf-8"), result.stdout)
+
+    def test_ignored_accelerator_sources_stay_indexed(self) -> None:
+        # Installs keep the accelerator out of the client's history with
+        # ignore rules; the project's own ignored documents stay out.
+        self.repository.joinpath(".gitignore").write_text(
+            ".agents/\nAGENTS.md\nspecs/\nmemory-bank/\ndocs/\n",
+            encoding="utf-8",
+        )
+        skill = self.repository / ".agents/skills/lilac/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# Lilac\n\nThe lilac procedure.\n", encoding="utf-8")
+        self.repository.joinpath("AGENTS.md").write_text(
+            "# Policy\n\nThe saffron policy.\n", encoding="utf-8"
+        )
+        self.repository.joinpath("specs/teal.md").write_text(
+            "# Teal\n\nThe teal contract.\n", encoding="utf-8"
+        )
+        self.repository.joinpath("docs").mkdir()
+        self.repository.joinpath("docs/private.md").write_text(
+            "# Private\n\nThe umber note.\n", encoding="utf-8"
+        )
+
+        indexed = self.run_context("index", "--json")
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        for term, path in (
+            ("lilac", ".agents/skills/lilac/SKILL.md"),
+            ("saffron", "AGENTS.md"),
+            ("teal", "specs/teal.md"),
+        ):
+            found = self.run_context("search", term, "--json")
+            self.assertEqual(
+                [path],
+                [item["path"] for item in json.loads(found.stdout)["documents"]],
+            )
+        private = self.run_context("search", "umber", "--json")
+        self.assertEqual([], json.loads(private.stdout)["documents"])
+
+    def test_folder_outside_a_repository_has_no_ignore_rules(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="context-no-git-") as folder:
+            root = Path(folder)
+            self.assertFalse(CONTEXT.inside_git_checkout(root))
+            self.assertEqual(set(), CONTEXT.git_ignored_paths(root, ["README.md"]))
+            with mock.patch.object(
+                CONTEXT.subprocess, "run", side_effect=OSError("no git")
+            ):
+                self.assertEqual(
+                    set(), CONTEXT.git_ignored_paths(root, ["README.md"])
+                )
+            root.joinpath("README.md").write_text(
+                "# Plain\n\nThe ochre folder.\n", encoding="utf-8"
+            )
+            indexed = subprocess.run(
+                [sys.executable, str(SCRIPT), "--root", folder, "--mode",
+                 "lightweight", "index", "--json"],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(0, indexed.returncode, indexed.stderr)
+            self.assertEqual(1, json.loads(indexed.stdout)["documents"])
 
     def test_index_reports_invalid_utf8_and_preserves_previous_index(self) -> None:
         self.repository.joinpath("README.md").write_text(
@@ -1558,7 +1715,9 @@ class ContextEngineTest(unittest.TestCase):
         self.assertTrue(
             all(item["layer"] == "episodic" for item in payload["episodic"])
         )
-        self.assertEqual(["AGENTS.md"], [item["path"] for item in payload["procedural"]])
+        # Hosts load their instruction files and list their skills: the
+        # packet carries no procedural item even when AGENTS.md matches.
+        self.assertEqual([], payload["procedural"])
         self.assertEqual(["README.md"], [item["path"] for item in payload["semantic"]])
         self.assertEqual("CHANGELOG.md", payload["episodic"][0]["path"])
 
@@ -1718,6 +1877,8 @@ class ContextEngineTest(unittest.TestCase):
                 "--progress",
                 "Earlier outcome.\nLatest outcome.",
                 "--next-step",
+                "Reproduce the report.",
+                "--next-step",
                 "Inspect the implementation.",
                 "--next-step",
                 "Run focused tests.",
@@ -1737,13 +1898,19 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(0, packet.returncode, packet.stderr)
         payload = json.loads(packet.stdout)
         self.assertEqual("Review branding safely now", payload["query"])
+        # The newest steps and files: the tail of each list is the work in
+        # hand, and the head is where the branch started.
         self.assertEqual(
             {
                 "task_id": "CAPSULE-PROJECTION",
                 "goal": "Review account workflow.",
                 "progress": "Earlier outcome. Latest outcome.",
-                "next_steps": ["Run final verification."],
-                "files": files[:8],
+                "next_steps": [
+                    "Inspect the implementation.",
+                    "Run focused tests.",
+                    "Run final verification.",
+                ],
+                "files": files[-8:],
                 "sources": sources[:4],
             },
             payload["working"],
@@ -1751,13 +1918,49 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(
             {
                 "working_files": 2,
-                "working_next_steps": 2,
+                "working_next_steps": 1,
                 "working_sources": 2,
                 "working_progress_characters": 0,
                 "last_turn_characters": 0,
+                "semantic": 0,
+                "episodic": 0,
             },
             payload["omitted"],
         )
+
+    def test_done_steps_can_leave_and_touched_files_move_last(self) -> None:
+        # Steps were append-only, so finished work stayed "next" forever; and
+        # a file kept the position of its first touch, so the one in hand fell
+        # out of the capsule's projection of the newest.
+        self.assertEqual(
+            0,
+            self.run_context(
+                "start", "--task-id", "LIGHT-STEPS", "--goal",
+                "Keep the steps current.",
+                "--file", "src/A.php", "--file", "src/B.php",
+            ).returncode,
+        )
+        self.assertEqual(
+            0,
+            self.run_context(
+                "update", "--task-id", "LIGHT-STEPS", "--next-step", "Write the test."
+            ).returncode,
+        )
+
+        updated = self.run_context(
+            "update", "--task-id", "LIGHT-STEPS", "--replace-next-steps",
+            "--next-step", "Ship it.", "--file", "src/A.php", "--json",
+        )
+
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        task = json.loads(updated.stdout)
+        self.assertEqual(["Ship it."], task["next_steps"])
+        self.assertEqual(["src/B.php", "src/A.php"], task["files"])
+        cleared = self.run_context(
+            "update", "--task-id", "LIGHT-STEPS", "--replace-next-steps", "--json"
+        )
+        self.assertEqual(0, cleared.returncode, cleared.stderr)
+        self.assertEqual([], json.loads(cleared.stdout)["next_steps"])
 
     def test_context_revalidates_legacy_working_privacy_data(self) -> None:
         self.assertEqual(
@@ -1957,14 +2160,18 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual("AGENTS.md", compacted["procedural"][0]["path"])
         self.assertLessEqual(CONTEXT.capsule_character_count(compacted), 1250)
 
-    def test_capsule_budget_preserves_latest_progress_suffix(self) -> None:
+    def test_capsule_budget_preserves_both_ends_of_progress(self) -> None:
         capsule = {
             "query": "capsule",
             "task_id": "CAPSULE-LATEST",
             "working": {
                 "task_id": "CAPSULE-LATEST",
                 "goal": "Preserve the latest outcome.",
-                "progress": ("old progress " * 200) + "LATEST_OUTCOME",
+                "progress": (
+                    "CONSTRAINT: the idempotency key stays. "
+                    + ("old progress " * 200)
+                    + "LATEST_OUTCOME"
+                ),
                 "next_steps": ["Run verification."],
                 "files": ["src/Required.php"],
                 "sources": ["specs/required.md"],
@@ -1984,10 +2191,247 @@ class ContextEngineTest(unittest.TestCase):
         with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", 500):
             compacted = CONTEXT.enforce_capsule_budget(capsule)
 
-        self.assertTrue(compacted["working"]["progress"].startswith("…"))
-        self.assertTrue(compacted["working"]["progress"].endswith("LATEST_OUTCOME"))
+        progress = compacted["working"]["progress"]
+        # Both ends survive: the head carries the constraint the work is bound
+        # by, the tail carries where it now stands. A tail-only cut keeps the
+        # action and drops the reason a later turn would need to keep it.
+        self.assertTrue(progress.startswith("CONSTRAINT"))
+        self.assertTrue(progress.endswith("LATEST_OUTCOME"))
+        self.assertIn("…", progress)
         self.assertGreater(compacted["omitted"]["working_progress_characters"], 0)
         self.assertLessEqual(CONTEXT.capsule_character_count(compacted), 500)
+
+    def test_capsule_budget_counts_dropped_retrieval_layers(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": None,
+            "working": None,
+            "procedural": [],
+            "semantic": [{
+                "path": f"specs/{index}.md", "layer": "semantic", "kind": "spec",
+                "title": str(index), "snippet": "s" * 250,
+            } for index in range(3)],
+            "episodic": [{
+                "id": 1, "layer": "episodic", "summary": "Prior work",
+                "outcome": "e" * 300, "files": [], "verification": ["Verified"],
+                "sources": [], "created_at": "2026-07-29T00:00:00+00:00",
+            }],
+            "warnings": [],
+            "omitted": {},
+        }
+
+        with mock.patch.object(CONTEXT, "CAPSULE_CHARACTER_LIMIT", 600):
+            compacted = CONTEXT.enforce_capsule_budget(capsule)
+
+        self.assertEqual([], compacted["episodic"])
+        self.assertEqual(1, compacted["omitted"]["episodic"])
+        self.assertGreater(compacted["omitted"]["semantic"], 0)
+        self.assertIn("semantic result(s)", CONTEXT.compaction_summary(compacted))
+
+    def test_print_capsule_reports_what_compaction_removed(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-REPORT",
+            "working": {
+                "task_id": "CAPSULE-REPORT",
+                "goal": "Report the lossy view.",
+                "progress": "…truncated",
+                "next_steps": ["Verify."],
+                "files": ["src/Kept.php"],
+                "sources": [],
+            },
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {
+                "semantic": 2,
+                "working_files": 3,
+                "working_progress_characters": 118,
+            },
+        }
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            CONTEXT.print_capsule(capsule)
+        rendered = stream.getvalue()
+
+        self.assertIn("compaction: omitted", rendered)
+        self.assertIn("2 semantic result(s)", rendered)
+        self.assertIn("3 working file(s)", rendered)
+        self.assertIn("118 characters of progress", rendered)
+        self.assertIn("re-read the cited source", rendered)
+
+    def test_print_capsule_reports_what_its_own_bounds_cut(self) -> None:
+        # The JSON holds every character of this working state; the rendered
+        # text - the only form a host hands the model - bounds the goal, the
+        # progress and each next step, shows five files and, until now, no
+        # source. None of those cuts reached the compaction line.
+        progress = (
+            "CONSTRAINT keep the v1 endpoint. " + "middle " * 140
+            + "NOW: step 4 of 6, writing the rollback test"
+        )
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-RENDER",
+            "working": {
+                "task_id": "CAPSULE-RENDER",
+                "goal": "g" * 250,
+                "progress": progress,
+                "next_steps": ["n" * 260, "Verify."],
+                "files": [f"src/File{index}.php" for index in range(8)],
+                "sources": ["specs/a.md", "specs/b.md"],
+            },
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {"working_files": 12},
+        }
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            CONTEXT.print_capsule(capsule)
+        lines = stream.getvalue().splitlines()
+
+        progress_line = next(line for line in lines if line.startswith("progress: "))
+        self.assertTrue(progress_line.startswith("progress: CONSTRAINT"), progress_line)
+        self.assertTrue(progress_line.endswith("writing the rollback test"), progress_line)
+        self.assertIn(
+            "recent files: src/File3.php, src/File4.php, src/File5.php, "
+            "src/File6.php, src/File7.php",
+            lines,
+        )
+        self.assertIn("sources: specs/a.md, specs/b.md", lines)
+        compaction = next(line for line in lines if line.startswith("compaction: "))
+        limit = CONTEXT.RENDERED_PROGRESS_LIMIT
+        self.assertIn("15 working file(s)", compaction)
+        self.assertIn("51 characters of the goal", compaction)
+        self.assertIn(f"{len(progress) - (limit - 1)} characters of progress", compaction)
+        self.assertIn(f"{260 - (limit // 2 - 1)} characters of next steps", compaction)
+        # The JSON still holds all of it: only the text cut it.
+        self.assertEqual({"working_files": 12}, capsule["omitted"])
+
+    def test_an_oversized_first_path_is_omitted_instead_of_cut_in_half(self) -> None:
+        long_path = "very/" * 120 + "file.php"
+        capsule = {"working": {"files": [long_path], "sources": [long_path]}}
+        lines, cuts = CONTEXT.rendered_working_state(capsule)
+        self.assertEqual(1, cuts["working_files"])
+        self.assertEqual(1, cuts["working_sources"])
+        self.assertNotIn("very/", "\n".join(lines))
+        self.assertEqual(["small.php"], CONTEXT._whole_paths("sources: ", [long_path, "small.php"]))
+
+    def test_path_lines_stop_at_a_whole_path(self) -> None:
+        # Five long paths ran past the line bound, which cut the last one in
+        # half and counted nothing.
+        files = [f"src/{'f' * 100}{index}.php" for index in range(5)]
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-PATHS",
+            "working": {
+                "task_id": "CAPSULE-PATHS", "goal": "Long paths.",
+                "progress": "", "next_steps": [], "files": files, "sources": [],
+            },
+            "procedural": [], "semantic": [], "episodic": [], "warnings": [],
+            "omitted": {},
+        }
+
+        lines = CONTEXT.render_capsule_lines(capsule)
+
+        shown = next(line for line in lines if line.startswith("recent files: "))
+        self.assertEqual(
+            "recent files: " + ", ".join(files[1:]), shown
+        )
+        self.assertIn("compaction: omitted 1 working file(s)", "\n".join(lines))
+
+    def test_the_compaction_line_survives_the_rendered_ceiling(self) -> None:
+        # Excerpts gone, the line used to yield whole before any entry, so a
+        # capsule whose head and entries sat just under the ceiling reached
+        # the model with no sign that its JSON had dropped anything.
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-CEILING",
+            "working": {
+                "task_id": "CAPSULE-CEILING", "goal": "Hold the ceiling.",
+                "progress": "Entries fill the capsule.", "next_steps": [],
+                "files": [], "sources": [],
+            },
+            "procedural": [],
+            "semantic": [
+                {
+                    "path": f"specs/item-{index}.md", "layer": "semantic",
+                    "kind": "spec", "title": f"Item {index} " + "t" * 150,
+                }
+                for index in range(3)
+            ],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {},
+        }
+        complete = CONTEXT.render_capsule_lines(capsule)
+        capsule["omitted"] = {"semantic": 2, "working_files": 4, "working_sources": 1}
+        ceiling = sum(len(line) + 1 for line in complete) + 110
+
+        with mock.patch.object(CONTEXT, "RENDERED_CAPSULE_LIMIT", ceiling):
+            lines = CONTEXT.render_capsule_lines(capsule)
+
+        self.assertLessEqual(sum(len(line) + 1 for line in lines), ceiling)
+        self.assertEqual(
+            3, sum(line.startswith("- memory specs/item-") for line in lines), lines
+        )
+        compaction = [line for line in lines if line.startswith("compaction:")]
+        self.assertEqual(1, len(compaction), lines)
+        self.assertIn("lossy view", compaction[0])
+        self.assertIn("re-read the cited source", compaction[0])
+
+    def test_print_capsule_stays_silent_when_nothing_was_omitted(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-COMPLETE",
+            "working": None,
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {"semantic": 0, "working_files": 0},
+        }
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            CONTEXT.print_capsule(capsule)
+
+        self.assertNotIn("compaction:", stream.getvalue())
+        self.assertIsNone(CONTEXT.compaction_summary(capsule))
+
+    def test_governed_contract_counts_hidden_working_state(self) -> None:
+        capsule = {
+            "query": "capsule",
+            "task_id": "GOVERNED-OMIT",
+            "working": {
+                "task_id": "GOVERNED-OMIT",
+                "goal": "Count what the projection hides.",
+                "progress": "Latest outcome.",
+                "next_steps": [f"Step {index}." for index in range(4)],
+                "files": [f"src/File{index}.php" for index in range(12)],
+                "sources": [f"specs/spec{index}.md" for index in range(6)],
+            },
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+        }
+
+        compacted = CONTEXT.enforce_governed_capsule_contract(capsule)
+
+        self.assertEqual(
+            4 - CONTEXT.CAPSULE_WORKING_NEXT_STEP_LIMIT,
+            compacted["omitted"]["working_next_steps"],
+        )
+        self.assertEqual(4, compacted["omitted"]["working_files"])
+        self.assertEqual(2, compacted["omitted"]["working_sources"])
+        self.assertIn(
+            "4 working file(s)", CONTEXT.compaction_summary(compacted)
+        )
 
     def test_capsule_budget_drops_nonpriority_working_sources(self) -> None:
         capsule = {

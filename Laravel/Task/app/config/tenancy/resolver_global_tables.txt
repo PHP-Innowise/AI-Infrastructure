@@ -1,0 +1,23 @@
+# Tables the tenant resolver reads BEFORE a tenant exists.
+#
+# These must never carry Row-Level Security. The resolver reads them to work out
+# which tenant applies, so a policy here would be evaluated with no tenant set,
+# match nothing, and make every login and every public code-resolved route
+# silently conclude the user belongs nowhere — a failure that raises nothing on
+# its own. The startup gate asserts their absence, the mirror image of what it
+# asserts for trainer_scoped_tables.txt.
+#
+# Keeping a table on this list is a deliberate, reviewable act: it is a table
+# tenancy does not protect. Both are minimal by design.
+#
+# See specs/architect-architecture.md and specs/council-sharelink-tenant-resolution.md.
+
+# Account -> trainer pairing with role-in-tenant and status. Read on every
+# authenticated request to validate the selected trainer context.
+account_trainer_links
+
+# Public code -> trainer mapping. Read on allow-listed code-resolved routes:
+# ShareLink acceptance and the Epic-08 public forms. Learning which trainer a
+# ShareLink belongs to requires reading a trainer-scoped row, so this
+# tenancy-exempt lookup is the precondition, not one option among several.
+public_tenant_codes

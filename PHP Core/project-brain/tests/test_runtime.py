@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import contextlib
 import io
@@ -28,6 +29,7 @@ try:
     import brain_runtime as brain
     import context as context_cli
     import context_retrieval as retrieval
+    import memory_results
     import telemetry as telemetry_runtime
 finally:
     sys.path.pop(0)
@@ -237,7 +239,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         left, right = json.loads(first.stdout), json.loads(second.stdout)
         self.assertLessEqual(len(left["procedural"]), 2)
         self.assertLessEqual(len(left["semantic"]), 3)
-        self.assertLessEqual(len(left["episodic"]), 1)
+        self.assertLessEqual(len(left["episodic"]), 2)
         self.assertLessEqual(len(first.stdout.strip()), 8000)
         for layer in ("procedural", "semantic", "episodic"):
             self.assertEqual(left[layer], right[layer])
@@ -292,7 +294,10 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "# Changelog\n\n## Unreleased\n\ncobalt authority rollout.\n",
             encoding="utf-8",
         )
-        self.repository.joinpath("specs/authority.md").write_text(
+        # A file of its own: editing the task's cited spec would now keep the
+        # task and its handoff indexed (changed, not evicted) and move the
+        # document frequencies this test relies on.
+        self.repository.joinpath("specs/cobalt.md").write_text(
             "# Authority\n\ncobalt authority specification detail.\n",
             encoding="utf-8",
         )
@@ -352,7 +357,10 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK", "--ephemeral",
         )
         self.assertEqual(0, rendered.returncode, rendered.stderr)
-        self.assertIn("weak-match: README.md", rendered.stdout)
+        # "plover" names the document it matched - it is its title - and so
+        # admits it alone; "zorkmid" is merely a rare word in the README.
+        self.assertRegex(rendered.stdout, r"specs/plover\.md — [^\n]*\(weak match\)")
+        self.assertNotIn("README.md", rendered.stdout)
 
         payload = self.run_cli(
             "retrieve", "zorkmid plover", "--task-id", "TASK-WEAK",
@@ -365,13 +373,14 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             for item in capsule[layer]
             if "path" in item
         }
-        self.assertEqual("distinctive", strengths.get("README.md"), capsule)
+        self.assertEqual("distinctive", strengths.get("specs/plover.md"), capsule)
+        self.assertNotIn("README.md", strengths)
         manifest = json.loads(
             (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
         )
         self.assertEqual(
             "distinctive",
-            {item["path"]: item["match"] for item in manifest["selected"]}["README.md"],
+            {item["path"]: item["match"] for item in manifest["selected"]}["specs/plover.md"],
             manifest,
         )
 
@@ -431,7 +440,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.assertEqual(0, payload.returncode, payload.stderr)
         manifest = self.latest_manifest(json.loads(payload.stdout))
 
-        self.assertEqual(3, manifest["schema_version"], manifest)
+        self.assertEqual(retrieval.MANIFEST_SCHEMA_VERSION, manifest["schema_version"], manifest)
         self.assertEqual("explicit", manifest["query_source"], manifest)
         phases = manifest["phase_seconds"]
         self.assertEqual({"stat", "index", "retrieval"}, set(phases), phases)
@@ -675,6 +684,31 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         self.assertEqual([], brain.validate_repository(self.repository))
 
+        # Version 4 adds the source-link counters; a version 3 manifest that
+        # carried them would fail every runtime that checks version 3 exactly.
+        version_4_id = "00000000-0000-4000-8000-000000000007"
+        version_4 = {
+            **version_3,
+            "schema_version": 4,
+            "id": version_4_id,
+            "source_links": {"anchors": 1, "candidates": 0, "delivered": 0},
+        }
+        (manifests / f"{version_4_id}.json").write_text(
+            json.dumps(version_4, indent=2), encoding="utf-8"
+        )
+        self.assertEqual([], brain.validate_repository(self.repository))
+        stray_id = "00000000-0000-4000-8000-000000000008"
+        (manifests / f"{stray_id}.json").write_text(
+            json.dumps({**version_4, "schema_version": 3, "id": stray_id}, indent=2),
+            encoding="utf-8",
+        )
+        errors = brain.validate_repository(self.repository)
+        self.assertTrue(
+            any(stray_id in error and "strict schema" in error for error in errors),
+            errors,
+        )
+        (manifests / f"{stray_id}.json").unlink()
+
         # A manifest that claims version 3 must carry host provenance.
         incomplete_id = "00000000-0000-4000-8000-000000000005"
         (manifests / f"{incomplete_id}.json").write_text(
@@ -710,8 +744,21 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             errors,
         )
 
+    def test_a_governed_manifest_written_now_validates(self) -> None:
+        # Every governed retrieval writes the manifest version it declares;
+        # `validate` must accept what the runtime itself just wrote.
+        self.start("TASK-WRITTEN")
+        self.run_cli("retrieve", "cobalt authority", "--task-id", "TASK-WRITTEN", "--json")
+        manifests = list(
+            (self.repository / "project-brain/control/retrieval-manifests").glob("*.json")
+        )
+        self.assertTrue(manifests)
+        self.assertEqual([], brain.validate_repository(self.repository))
+        result = self.run_cli("validate")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_hook_query_comes_from_the_task_not_the_branch_name(self) -> None:
-        # Cursor has no prompt-submit event, so its one automatic memory entry
+        # A hook without a prompt (Cursor's stop and session-start renders)
         # hands over a branch name. Retrieving on the slug asks memory about
         # the word "main"; the task behind it is what the turn is actually
         # about.
@@ -1767,6 +1814,62 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         self.assertEqual([], brain.validate_repository(self.repository))
 
+    def test_a_stale_citation_does_not_stop_compaction(self) -> None:
+        # Records cite living files, so every repository soon holds one whose
+        # source moved on. Compaction refused all of it from that moment.
+        active = brain.create_record(
+            self.repository, "decision", "DEC-LIVE", "Cobalt stays canonical",
+            [], ["specs/authority.md"], owner="alice",
+        )
+        resolved = brain.create_record(
+            self.repository, "finding", "FIND-DONE", "Cobalt guard fixed",
+            [], ["specs/authority.md"], owner="alice",
+        )
+        resolved = brain.update_record(
+            self.repository, resolved["id"], expected_revision=resolved["revision"],
+            progress="Guard added.", next_steps=[], files=[], sources=[],
+            actor="alice", transition_to="investigating", reason="Investigating",
+        )
+        brain.update_record(
+            self.repository, resolved["id"], expected_revision=resolved["revision"],
+            progress=None, next_steps=[], files=[], sources=[],
+            actor="alice", transition_to="resolved", reason="Resolved",
+        )
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rule now covers writes.\n",
+            encoding="utf-8",
+        )
+        stale = [
+            error for error in brain.validate_repository(self.repository)
+            if "source fingerprint is stale" in error
+        ]
+        self.assertEqual(2, len(stale), stale)
+
+        self.assertEqual({"moved": 1}, brain.compact(self.repository))
+
+        # The terminal record is history now; the live one stays where it was.
+        self.assertTrue(
+            self.repository.joinpath(
+                "project-brain/archive/finding", f"{resolved['id']}.md"
+            ).is_file()
+        )
+        self.assertTrue(
+            self.repository.joinpath(
+                "project-brain/dynamic/decisions", f"{active['id']}.md"
+            ).is_file()
+        )
+        # Staleness is still reported, and still keeps the record out of reach.
+        self.assertEqual(
+            2,
+            sum(
+                "source fingerprint is stale" in error
+                for error in brain.validate_repository(self.repository)
+            ),
+        )
+        self.assertEqual(
+            [], brain.validate_repository(self.repository, check_freshness=False)
+        )
+
     def test_compaction_rolls_back_all_moves_and_indexes_on_failure(self) -> None:
         first = brain.create_task(
             self.repository, "TASK-COMPACT-1", "Archive one.", [], [], owner="alice"
@@ -2354,8 +2457,10 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
             "project-brain/control/promotions", f"{proposal['id']}.json"
         )
         before = promotion_path.read_bytes()
+        # Clean before the write and failing after it: a write is refused for
+        # what it introduced, not for what the bank already carried.
         with mock.patch.object(
-            brain, "validate_bank", return_value=["injected validation failure"]
+            brain, "validate_bank", side_effect=[[], ["injected validation failure"]]
         ):
             with self.assertRaisesRegex(brain.BrainError, "failed validation"):
                 brain.apply_promotion(self.repository, proposal["id"])
@@ -2502,7 +2607,9 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         )
         self.assertIn("conflict pair", manifest["escalation_reason"])
 
-    def test_stale_source_is_filtered_before_reindex_and_retrieval(self) -> None:
+    def test_a_record_whose_cited_source_was_edited_stays_indexed(self) -> None:
+        # An edit to a cited file used to evict the record at the next index.
+        # It stays, and retrieval marks it (see ChangedSourceRecordTest).
         task = brain.create_task(
             self.repository,
             "TASK-STALE",
@@ -2515,23 +2622,9 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.repository.joinpath("specs/authority.md").write_text(
             "# Changed\n\nCobalt content drifted.\n", encoding="utf-8"
         )
-        database = self.repository / "memory-bank/local/context.db"
-        connection = context_cli.connect(database)
-        try:
-            packet = retrieval.retrieve(
-                connection, self.repository, "cobalt", task["id"], limit=3
-            )
-        finally:
-            connection.close()
-        self.assertFalse(
-            any(item.get("record_id") == task["id"] for item in packet["selected"])
-        )
         reindexed = json.loads(self.run_cli("index", "--json").stdout)
-        self.assertTrue(
-            any(
-                item["reason"] == "stale" and task["id"] in item["path"]
-                for item in reindexed["excluded"]
-            )
+        self.assertFalse(
+            any(task["id"] in item["path"] for item in reindexed["excluded"]), reindexed["excluded"]
         )
 
     def test_manifest_nested_schema_is_enforced_adversarially(self) -> None:
@@ -3134,6 +3227,228 @@ class EpisodicPillarTest(RuntimeHarness):
             [], list((self.repository / "project-brain/dynamic/events").glob("*.md"))
         )
 
+    def test_a_failed_commit_takes_the_completion_event_with_it(self) -> None:
+        # The event is written before the SQLite commit, and the rollback
+        # restored only files that existed beforehand: a commit that failed on
+        # disk or I/O reopened the task but left a "Completed" event outside
+        # the restored index, so `validate` failed, and the retry could not
+        # write the event of the completion that did happen.
+        task = self.start("TASK-COMMIT-FAILS")
+        events = self.repository / "project-brain/dynamic/events"
+        path, record, _ = brain.find_task(self.repository, "TASK-COMMIT-FAILS")
+        tracked = [
+            path,
+            brain.handoff_path(self.repository, record["id"]),
+            *brain.index_paths(self.repository),
+        ]
+        before = {item: item.read_bytes() for item in tracked}
+        real_connect = sqlite3.connect
+
+        class FailingCommit(sqlite3.Connection):
+            def commit(self) -> None:
+                # Only the completion commits with its event already on disk.
+                if any(events.glob("*.md")):
+                    raise sqlite3.OperationalError("disk I/O error")
+                super().commit()
+
+        with mock.patch.object(
+            sqlite3,
+            "connect",
+            lambda *arguments, **keywords: real_connect(
+                *arguments, factory=FailingCommit, **keywords
+            ),
+        ):
+            code, _, error = self.run_main(
+                "complete", "--task-id", "TASK-COMMIT-FAILS",
+                "--revision", str(task["revision"]),
+                "--outcome", self.OUTCOME, "--verification", self.CHECK,
+            )
+        self.assertEqual(1, code)
+        self.assertIn("disk I/O error", error)
+        self.assertEqual([], list(events.glob("*.md")))
+        self.assertEqual(before, {item: item.read_bytes() for item in tracked})
+        self.assertEqual(
+            "active", brain.get_task(self.repository, "TASK-COMMIT-FAILS")["status"]
+        )
+        validation = self.run_cli("validate", "--json")
+        self.assertEqual(0, validation.returncode, validation.stdout)
+        status = json.loads(self.run_cli("status", "--json").stdout)
+        self.assertEqual((1, 0), (status["working"], status["episodes"]))
+
+        retry = self.run_cli(
+            "complete", "--task-id", "TASK-COMMIT-FAILS",
+            "--revision", str(task["revision"]),
+            "--outcome", self.OUTCOME, "--verification", self.CHECK, "--json",
+        )
+        self.assertEqual(0, retry.returncode, retry.stderr)
+        self.assertIsNotNone(json.loads(retry.stdout)["event_id"], retry.stdout)
+        self.assertEqual(1, len(list(events.glob("*.md"))))
+
+
+class HistorySlotTest(RuntimeHarness):
+    """Recorded history - a Project Brain event or a local episode - has its
+    own slot and its own search beside the changelog's."""
+
+    OUTCOME = EpisodicPillarTest.OUTCOME
+    CHECK = EpisodicPillarTest.CHECK
+    complete_task = EpisodicPillarTest.complete_task
+
+    def fillers(self, count: int) -> None:
+        for number in range(count):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(
+                f"# Filler {number}\n\nUnrelated filler paragraph number {number} about tooling.\n",
+                encoding="utf-8",
+            )
+
+    def retrieve(self, query: str, task: str = "TASK-READER") -> dict:
+        result = self.run_cli("retrieve", query, "--task-id", task, "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def manifest(self, capsule: dict) -> dict:
+        return json.loads((self.repository / capsule["manifest"]).read_text(encoding="utf-8"))
+
+    @staticmethod
+    def event_paths(items: list) -> list:
+        return [item["path"] for item in items if str(item.get("path", "")).startswith("project-brain/dynamic/events/")]
+
+    def test_the_changelog_and_an_event_share_the_history_layer(self) -> None:
+        self.fillers(12)
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changelog\n\n## Unreleased\n\nZirconium gateway retry tooling shipped.\n", encoding="utf-8")
+        self.complete_task("TASK-EPISODE-PAIR")
+        self.start("TASK-READER")
+        capsule = self.retrieve("zirconium gateway retry window")
+        paths = [item.get("path") for item in capsule["episodic"]]
+        self.assertEqual(2, len(paths), capsule["episodic"])
+        self.assertTrue(paths[0].startswith("project-brain/dynamic/events/"), paths)
+        self.assertEqual("CHANGELOG.md", paths[1])
+        selected = {item["path"]: item for item in self.manifest(capsule)["selected"]}
+        self.assertEqual("dynamic", selected[paths[0]]["category"])
+        self.assertEqual("covered", selected[paths[0]]["match"])
+        self.assertIn("CHANGELOG.md", selected)
+        text = self.run_cli("retrieve", "zirconium gateway retry window", "--task-id", "TASK-READER",
+                            "--ephemeral").stdout
+        self.assertLess(text.index("- history project-brain/dynamic/events/"), text.index("- history CHANGELOG.md"))
+        self.assertLessEqual(len(text), 3600)
+
+    def test_an_event_is_found_by_prompt_terms_the_distillation_dropped(self) -> None:
+        words = [f"quasar{chr(97 + n // 26)}{chr(97 + n % 26)}" for n in range(30)]
+        for number, word in enumerate(words):
+            self.repository.joinpath(f"specs/q-{number}.md").write_text(f"# Q {number}\n\nThe {word} note.\n",
+                                                                       encoding="utf-8")
+        self.complete_task("TASK-DROPPED")
+        self.start("TASK-READER")
+        result = self.run_cli("refresh", "--query", " ".join(words) + " zirconium gateway retry window",
+                              "--task-id", "TASK-READER", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        distilled = self.manifest(payload["capsule"])["query"].casefold().split()
+        for term in ("zirconium", "gateway", "retry", "window"):
+            self.assertNotIn(term, distilled)
+        self.assertEqual(1, len(self.event_paths(payload["capsule"]["episodic"])), payload["capsule"]["episodic"])
+        self.assertIn("Zirconium gateway retry window widened to five minutes", payload["capsule_text"])
+
+    def test_a_weak_event_match_leaves_the_event_slot_empty(self) -> None:
+        self.fillers(6)
+        for number in range(4):
+            self.repository.joinpath(f"specs/policy-{number}.md").write_text(
+                f"# Policy {number}\n\nThe gateway retry policy {number}.\n", encoding="utf-8")
+        self.complete_task("TASK-WEAK")
+        self.start("TASK-READER")
+        capsule = self.retrieve("gateway retry")
+        self.assertEqual([], self.event_paths(capsule["episodic"]))
+        self.assertEqual([], self.event_paths(self.manifest(capsule)["selected"]))
+        self.assertEqual([], [item for item in capsule["episodic"] if "path" not in item])
+
+    def test_a_recorded_episode_takes_the_event_slot_beside_the_changelog(self) -> None:
+        self.fillers(12)
+        self.repository.joinpath("CHANGELOG.md").write_text(
+            "# Changelog\n\n## Unreleased\n\nAmber viaduct rollout tooling shipped.\n", encoding="utf-8")
+        recorded = self.run_cli("record", "--summary", "Amber viaduct rollout",
+                                "--outcome", "The canary held for an hour.", "--json")
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.start("TASK-READER")
+        capsule = self.retrieve("amber viaduct rollout canary")
+        self.assertEqual(2, len(capsule["episodic"]), capsule["episodic"])
+        self.assertEqual("Amber viaduct rollout", capsule["episodic"][0].get("summary"))
+        self.assertEqual("CHANGELOG.md", capsule["episodic"][1].get("path"))
+        manifest = self.manifest(capsule)
+        self.assertEqual(1, manifest["local_episode_count"])
+        self.assertGreater(manifest["token_estimates"]["local_episodes"], 0)
+
+    def test_a_local_episode_sharing_one_word_is_not_delivered(self) -> None:
+        self.fillers(6)
+        recorded = self.run_cli("record", "--summary", "Vermilion semaphore rollout", "--outcome", "Completed.")
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        self.start("TASK-READER")
+        capsule = self.retrieve("vermilion cobalt authority")
+        self.assertEqual([], capsule["episodic"])
+        self.assertEqual(0, self.manifest(capsule)["local_episode_count"])
+
+    def test_a_delivered_event_never_costs_a_semantic_slot(self) -> None:
+        self.fillers(12)
+        for number in range(3):
+            self.repository.joinpath(f"specs/zirc-{number}.md").write_text(
+                f"# Zirconium note {number}\n\nZirconium gateway retry window detail {number}.\n",
+                encoding="utf-8")
+        self.complete_task("TASK-EV")
+        self.start("TASK-READER")
+        capsule = self.retrieve("zirconium gateway retry window five minutes")
+        self.assertEqual({f"specs/zirc-{n}.md" for n in range(3)},
+                         {item["path"] for item in capsule["semantic"]})
+        self.assertEqual(1, len(self.event_paths(capsule["episodic"])))
+        self.assertNotIn("capsule-limit", [entry["reason"] for entry in self.manifest(capsule)["excluded"]])
+
+    def test_events_do_not_take_rows_of_the_main_candidate_window(self) -> None:
+        self.complete_task("TASK-ROW")
+        self.assertEqual(0, self.run_cli("index").returncode)
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            candidates, _ = retrieval._candidates(connection, "zirconium gateway retry window", 30)
+        finally:
+            connection.close()
+        self.assertNotIn("brain-event", [item["kind"] for item in candidates])
+
+    def test_a_repeated_event_is_not_refilled_by_its_twin_episode(self) -> None:
+        self.fillers(12)
+        self.complete_task("TASK-TWIN")
+        self.start("TASK-READER")
+        turns = []
+        for _ in range(2):
+            result = self.run_cli("refresh", "--query", "zirconium gateway retry window", "--task-id",
+                                  "TASK-READER", "--ephemeral", "--session-id", "s1", "--json")
+            self.assertEqual(0, result.returncode, result.stderr)
+            turns.append(json.loads(result.stdout)["capsule"])
+        self.assertEqual(1, len(self.event_paths(turns[0]["episodic"])))
+        self.assertEqual([], [item for item in turns[1]["episodic"] if "path" not in item])
+        self.assertEqual([], self.event_paths(turns[1]["episodic"]))
+        self.assertEqual(1, turns[1]["repeated"])
+        excluded = self.manifest(turns[1])["excluded"]
+        self.assertIn("delivered-this-session",
+                      [entry["reason"] for entry in excluded if entry["path"].startswith("project-brain/dynamic/events/")])
+
+    def test_governed_contract_keeps_two_history_items(self) -> None:
+        capsule = {
+            "working": None, "warnings": [], "procedural": [], "semantic": [], "selected": [],
+            "episodic": [{"path": f"e{n}.md", "layer": "episodic", "title": "t", "snippet": "s"} for n in range(3)],
+        }
+        result = context_cli.enforce_governed_capsule_contract(capsule)
+        self.assertEqual(["e0.md", "e1.md"], [item["path"] for item in result["episodic"]])
+        self.assertEqual(1, result["omitted"]["episodic"])
+
+    def test_a_recorded_episode_renders_its_outcome(self) -> None:
+        self.start("TASK-READER")
+        recorded = self.run_cli("record", "--summary", "Amber viaduct rollout", "--outcome",
+                                "The amber viaduct rollout finished after the canary held for an hour.")
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+        result = self.run_cli("refresh", "--query", "amber viaduct rollout canary", "--task-id", "TASK-READER",
+                              "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        text = json.loads(result.stdout)["capsule_text"]
+        self.assertIn("- history episode 1", text)
+        self.assertIn("The amber viaduct rollout finished after the canary held for an hour.", text)
+
 
 class RetrievalReportTest(RuntimeHarness):
     """Manifests were written and never read; this is the reader."""
@@ -3279,7 +3594,9 @@ class RetrievalReportTest(RuntimeHarness):
 
         report = self.report()
         self.assertEqual(2, report["turns"], report)
-        self.assertEqual({"1": 1, "3": 1}, report["schema_versions"], report)
+        self.assertEqual(
+            {"1": 1, str(retrieval.MANIFEST_SCHEMA_VERSION): 1}, report["schema_versions"], report
+        )
         # One of the two could answer the gate question; the report says so
         # rather than dividing by two.
         self.assertEqual(1, report["gate"]["decided"], report)
@@ -4007,6 +4324,624 @@ class DocumentLinkTest(BankFixture):
         self.assertEqual(self.chunk_paths(), self.link_paths(self.SOURCE))
 
 
+class SharedSourceExpansionTest(BankFixture):
+    SOURCE = "src/Settlement.php"
+    QUERY = "saffron ledger"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.repository.joinpath("src").mkdir(exist_ok=True)
+        self.source = self.repository / self.SOURCE
+        self.source.write_text("Canonical settlement rule.\n", encoding="utf-8")
+        digest = brain.fingerprint(self.repository, self.SOURCE)
+        self.first = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "saffron-ledger", "Saffron ledger keeps integer amounts.",
+            sources=[self.SOURCE], source_digests=[digest],
+        )
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[self.SOURCE + "#L1"], source_digests=[digest],
+        )
+        self.start("TASK-SHARED")
+        self.assertEqual(0, self.run_cli("index").returncode)
+
+    def capsule(self) -> dict:
+        result = self.run_cli("retrieve", self.QUERY, "--task-id", "TASK-SHARED", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def paths(self, capsule: dict) -> set:
+        return {item["path"] for item in capsule["semantic"]}
+
+    def test_common_unindexed_source_automatically_delivers_the_related_answer(self) -> None:
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            self.assertEqual(0, connection.execute("SELECT COUNT(*) FROM documents WHERE path = ?", (self.SOURCE,)).fetchone()[0])
+        finally:
+            connection.close()
+        capsule = self.capsule()
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(capsule))
+        self.assertEqual(self.first.relative_to(self.repository).as_posix(), capsule["semantic"][0]["path"])
+        related = next(item for item in capsule["semantic"] if item["path"] == self.second.relative_to(self.repository).as_posix())
+        self.assertEqual("source-link", related["selection"])
+        result = self.run_cli("refresh", "--query", self.QUERY, "--task-id", "TASK-SHARED", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Refunds require dual approval.", json.loads(result.stdout)["capsule_text"])
+
+    def test_a_changed_shared_source_does_not_bridge_its_former_revision(self) -> None:
+        self.source.write_text("A revised canonical rule.\n", encoding="utf-8")
+        capsule = self.capsule()
+        self.assertIn(self.first.relative_to(self.repository).as_posix(), self.paths(capsule))
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(capsule))
+
+    def test_duplicate_common_references_do_not_displace_another_neighbour(self) -> None:
+        sources = []
+        for index in range(32):
+            relative = f"src/Proof{index:02d}.php"
+            self.repository.joinpath(relative).write_text("Canonical proof.\n", encoding="utf-8")
+            sources.append(relative)
+        digests = [brain.fingerprint(self.repository, item) for item in sources]
+        self.first = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "saffron-ledger", "Saffron ledger keeps integer amounts.",
+            sources=sources, source_digests=digests,
+        )
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=sources, source_digests=digests,
+        )
+        other = self.write_chunk(
+            "MEM-20260101-dddddddd", "audit-consequence", "Audits require archival reconciliation.",
+            sources=[sources[0]], source_digests=[digests[0]],
+        )
+        capsule = self.capsule()
+        self.assertIn(other.relative_to(self.repository).as_posix(), self.paths(capsule))
+        self.assertLessEqual(len(capsule["semantic"]), retrieval.CAPSULE_SEMANTIC_LIMIT)
+
+    def test_line_ending_changes_preserve_the_same_source_revision(self) -> None:
+        self.source.write_bytes(b"Canonical settlement rule.\r\n")
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_wide_duplicate_fanout_does_not_materialize_the_citation_product(self) -> None:
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            anchor_path = self.first.relative_to(self.repository).as_posix()
+            references = [f"src/MissingProof{index:02d}.php" for index in range(32)]
+            anchor = dict(connection.execute("SELECT * FROM document_metadata WHERE path = ?", (anchor_path,)).fetchone())
+            anchor["source_fingerprints"] = [{"path": item, "sha256": "f" * 64} for item in references]
+            exemplar = dict(connection.execute("SELECT * FROM documents WHERE path = ?", (anchor_path,)).fetchone())
+            metadata = dict(connection.execute("SELECT * FROM document_metadata WHERE path = ?", (anchor_path,)).fetchone())
+            metadata["source_fingerprints"] = json.dumps(anchor["source_fingerprints"])
+            peer_paths = [f"memory-bank/chunks/fanout-{index:04d}.md" for index in range(3000)]
+            for table, template in (("documents", exemplar), ("document_metadata", metadata)):
+                columns = tuple(template)
+                connection.executemany(
+                    f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+                    [tuple(peer if column == "path" else template[column] for column in columns) for peer in peer_paths],
+                )
+            connection.executemany("INSERT INTO document_links VALUES (?, ?, 'source')",
+                [(item, reference) for item in [anchor_path, *peer_paths] for reference in references])
+            ticks = 0
+
+            def bounded_work() -> int:
+                nonlocal ticks
+                ticks += 1
+                # Deterministic VM work allowance, not a wall-clock assertion.
+                return int(ticks > 50)
+
+            connection.set_progress_handler(bounded_work, 10000)
+            try:
+                neighbours, examined = retrieval._shared_source_documents(
+                    connection, self.repository, brain.load_config(self.repository), anchor, 32, {},
+                )
+            finally:
+                connection.set_progress_handler(None, 0)
+            self.assertEqual([], neighbours)  # Missing canonical proofs cannot establish a bridge.
+            self.assertEqual(32, examined)
+        finally:
+            connection.close()
+
+    def test_a_later_current_common_reference_can_prove_the_relation(self) -> None:
+        other = "src/ZApproval.php"
+        self.repository.joinpath(other).write_text("A current approval rule.\n", encoding="utf-8")
+        digests = [brain.fingerprint(self.repository, item) for item in (self.SOURCE, other)]
+        self.first = self.write_chunk("MEM-20260101-bbbbbbbb", "saffron-ledger", "Saffron ledger keeps integer amounts.",
+            sources=[self.SOURCE, other], source_digests=digests)
+        self.second = self.write_chunk("MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[self.SOURCE, other], source_digests=[{"path": self.SOURCE, "sha256": "f" * 64}, digests[1]])
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_lightweight_retrieval_uses_the_same_shared_source_relation(self) -> None:
+        result = self.run_cli("--mode", "lightweight", "context", self.QUERY, "--task-id", "TASK-SHARED", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(json.loads(result.stdout)))
+
+    def test_attached_source_proof_uses_the_project_and_not_the_state_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="shared-source-project-") as temporary:
+            project = Path(temporary)
+            project.joinpath("src").mkdir()
+            project.joinpath(self.SOURCE).write_bytes(self.source.read_bytes())
+            self.source.write_text("A decoy source in the state root.\n", encoding="utf-8")
+            connection = context_cli.connect(context_cli.default_database(self.repository))
+            try:
+                with mock.patch.dict(os.environ, {"ACCELERATOR_HOME": str(EDITION),
+                        "ACCELERATOR_STATE_DIR": str(self.repository), "ACCELERATOR_PROJECT_DIR": str(project)}):
+                    candidates, _ = retrieval._candidates(connection, self.QUERY)
+                    anchors, _ = retrieval._runtime_filter(self.repository, candidates, brain.load_config(self.repository))
+                    neighbours, _ = retrieval._source_link_candidates(
+                        connection, self.repository, brain.load_config(self.repository), anchors,
+                        {item["path"] for item in anchors},
+                    )
+            finally:
+                connection.close()
+            self.assertIn(self.second.relative_to(self.repository).as_posix(), {item["path"] for item in neighbours})
+
+    def test_a_peer_without_owner_permission_stays_out_of_public_results(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        baseline = self.capsule()
+        before = json.loads((self.repository / baseline["manifest"]).read_text())["source_links"]
+        config.write_text(json.dumps({"allowed_privacy": ["public", "restricted"], "owners": ["*"]}))
+        private = brain.create_record(
+            self.repository, record_type="finding", external_id="FINDING-PRIVATE", title="Private approval rationale", goal="A separate approval constraint.",
+            owner="denied-owner", privacy="restricted", authority="observed", files=[], sources=[self.SOURCE],
+        )
+        self.assertEqual(0, self.run_cli("index").returncode)
+        config.write_text(json.dumps({"allowed_privacy": ["public", "restricted"], "owners": ["allowed-owner"]}))
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            capsule = context_cli.assemble_capsule(connection, self.repository, mode="governed", query=self.QUERY,
+                task_id="TASK-SHARED", limit=3, ephemeral=True, refresh_index=False)
+        finally:
+            connection.close()
+        denied = brain.dynamic_path(self.repository, private).relative_to(self.repository).as_posix()
+        report = json.loads((self.repository / capsule["manifest"]).read_text())
+        self.assertNotIn(denied, self.paths(capsule))
+        self.assertNotIn(denied, {item["path"] for item in report["excluded"]})
+        self.assertEqual(before, report["source_links"])
+
+    def test_an_incoming_conflict_blocks_a_shared_source_neighbour(self) -> None:
+        peer = brain.create_record(
+            self.repository, "finding", "FINDING-SHARED", "Refund approval rationale", [], [self.SOURCE],
+            owner="local", goal="Refund approval needs a separate check.",
+        )
+        peer_path = brain.dynamic_path(self.repository, peer).relative_to(self.repository).as_posix()
+        self.assertIn(peer_path, self.paths(self.capsule()))
+        brain.create_record(
+            self.repository, "finding", "FINDING-CONFLICT", "Alternative approval rationale", [], ["specs/authority.md"],
+            owner="local", goal="An alternative approval check.", conflicts=[peer["id"]],
+        )
+        self.assertNotIn(peer_path, self.paths(self.capsule()))
+
+    def test_an_in_project_source_symlink_does_not_establish_a_bridge(self) -> None:
+        target = self.repository / "src/Sentinel.php"
+        target.write_bytes(self.source.read_bytes())
+        self.source.unlink()
+        self.source.symlink_to(target)
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_windows_link_reparse_tags_cannot_establish_a_bridge(self) -> None:
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        original_lstat = Path.lstat
+        try:
+            candidates, _ = retrieval._candidates(connection, self.QUERY)
+            anchors, _ = retrieval._runtime_filter(self.repository, candidates, brain.load_config(self.repository))
+            anchor = next(item for item in anchors if item["path"] == self.first.relative_to(self.repository).as_posix())
+            for tag in retrieval.workspace_roots.LINK_REPARSE_TAGS:
+                def linked_status(candidate: Path):
+                    status = original_lstat(candidate)
+                    return mock.Mock(st_mode=status.st_mode, st_reparse_tag=tag) if candidate == self.source else status
+
+                with self.subTest(tag=tag), mock.patch.object(Path, "lstat", linked_status), \
+                        mock.patch.object(retrieval, "fingerprint", wraps=brain.fingerprint) as fingerprint:
+                    neighbours, _ = retrieval._shared_source_documents(
+                        connection, self.repository, brain.load_config(self.repository), anchor, 32, {},
+                    )
+                    self.assertEqual([], neighbours)
+                    fingerprint.assert_not_called()
+        finally:
+            connection.close()
+
+    def test_derived_memory_does_not_establish_a_shared_source_bridge(self) -> None:
+        reference = self.chunk.relative_to(self.repository).as_posix()
+        digest = brain.fingerprint(self.repository, reference)
+        self.first = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "saffron-ledger", "Saffron ledger keeps integer amounts.",
+            sources=[reference], source_digests=[digest],
+        )
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[reference], source_digests=[digest],
+        )
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_missing_fingerprints_do_not_create_a_shared_source_bridge(self) -> None:
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.", sources=[self.SOURCE],
+        )
+        capsule = self.capsule()
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(capsule))
+
+    def test_different_source_revisions_do_not_establish_a_shared_relation(self) -> None:
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[self.SOURCE], source_digests=[{"path": self.SOURCE, "sha256": "f" * 64}],
+        )
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), self.paths(self.capsule()))
+
+    def test_a_shared_source_neighbour_does_not_become_another_anchor(self) -> None:
+        other = self.repository / "src/Validation.php"
+        other.write_text("A separate validation rule.\n", encoding="utf-8")
+        self.second = self.write_chunk(
+            "MEM-20260101-cccccccc", "refund-consequence", "Refunds require dual approval.",
+            sources=[self.SOURCE, "src/Validation.php"],
+            source_digests=[brain.fingerprint(self.repository, item) for item in (self.SOURCE, "src/Validation.php")],
+        )
+        third = self.write_chunk(
+            "MEM-20260101-dddddddd", "transitive-consequence", "A transitive fact.",
+            sources=["src/Validation.php"], source_digests=[brain.fingerprint(self.repository, "src/Validation.php")],
+        )
+        capsule = self.capsule()
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.paths(capsule))
+        self.assertNotIn(third.relative_to(self.repository).as_posix(), self.paths(capsule))
+
+
+class GraphExpansionTest(DocumentLinkTest):
+    """Every normal retrieval follows allowed source links automatically."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.start("TASK-GRAPH")
+        self.assertEqual(0, self.run_cli("index").returncode)
+
+    def capsule(self, query: str = "", *extra: str) -> dict:
+        result = self.run_cli(
+            "retrieve", query or self.SOURCE_WORDS, "--task-id", "TASK-GRAPH",
+            "--ephemeral", "--json", *extra,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def baseline(self) -> dict:
+        # A test-only control; installed runtime has no graph switch.
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            with mock.patch.object(retrieval, "_source_link_candidates", return_value=(
+                [], {"anchors": 0},
+            )):
+                return context_cli.assemble_capsule(
+                    connection, self.repository, mode="governed", query=self.SOURCE_WORDS,
+                    task_id="TASK-GRAPH", limit=3, ephemeral=True,
+                )
+        finally:
+            connection.close()
+
+    def delivered(self, capsule: dict) -> set:
+        return {
+            item["path"] for layer in ("procedural", "semantic", "episodic")
+            for item in capsule.get(layer) or []
+        }
+
+    def manifest(self, capsule: dict) -> dict:
+        report = json.loads((self.repository / capsule["manifest"]).read_text())
+        brain.validate_schema_file(self.repository, "retrieval-manifest", report)
+        return report
+
+    def test_standard_retrieval_expands_without_a_user_setting(self) -> None:
+        baseline = self.baseline()
+        expanded = self.capsule()
+        self.assertEqual(set(), self.chunk_paths() & self.delivered(baseline))
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(expanded))
+        stats = self.manifest(expanded)["source_links"]
+        self.assertEqual({"anchors", "candidates", "delivered"}, set(stats))
+        self.assertEqual(2, stats["candidates"])
+        self.assertEqual(2, stats["delivered"])
+        self.assertEqual(baseline["no_match"], expanded["no_match"])
+        for command in ("context", "retrieve", "refresh"):
+            help_text = self.run_cli(command, "--help")
+            self.assertEqual(0, help_text.returncode)
+            self.assertNotIn("graph-expansion", help_text.stdout)
+
+    def test_automatic_delivery_quotes_bodies_without_a_lexical_rank(self) -> None:
+        baseline = self.baseline()
+        expanded = self.capsule()
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(expanded))
+        report = self.manifest(expanded)
+        self.assertEqual(2, report["source_links"]["delivered"])
+        for item in report["selected"]:
+            if item["path"] in self.chunk_paths():
+                self.assertEqual("source-link", item["selection"])
+                self.assertIsNone(item["rank"])
+                self.assertNotIn("match", item)
+        rendered = self.run_cli(
+            "refresh", "--query", self.SOURCE_WORDS, "--task-id", "TASK-GRAPH",
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        text = json.loads(rendered.stdout)["capsule_text"]
+        self.assertIn("floating point", text)
+        self.assertIn("refund can never exceed", text)
+        self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+        self.assertEqual(baseline["no_match"], expanded["no_match"])
+
+    def test_no_lexical_seed_never_creates_a_graph_answer(self) -> None:
+        capsule = self.capsule("vermilion semaphore")
+        self.assertEqual(set(), self.chunk_paths() & self.delivered(capsule))
+        self.assertEqual(0, self.manifest(capsule)["source_links"]["candidates"])
+
+    def test_stale_neighbours_are_withheld_without_reporting_their_paths(self) -> None:
+        self.first.write_text(self.first.read_text() + "\nChanged after indexing.\n")
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            binding = context_cli.governed_binding(connection, "TASK-GRAPH")
+            capsule = retrieval.retrieve(
+                connection, self.repository, self.SOURCE_WORDS, binding["task_uuid"],
+                limit=3, manifest_scope="local",
+            )
+        finally:
+            connection.close()
+        first = self.first.relative_to(self.repository).as_posix()
+        self.assertNotIn(first, self.delivered(capsule))
+        self.assertNotIn(first, {item["path"] for item in self.manifest(capsule)["excluded"]})
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.delivered(capsule))
+
+    def test_a_forbidden_citation_does_not_change_public_graph_diagnostics(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps({"allowed_privacy": ["public"]}), encoding="utf-8",
+        )
+        before = self.manifest(self.capsule())["source_links"]
+        # Index under the old team policy, then narrow it without rebuilding:
+        # cached edges must not publish a record the current policy withholds.
+        config.write_text(json.dumps({"allowed_privacy": ["public", "team"]}))
+        private = brain.create_record(
+            self.repository, record_type="finding", external_id="FINDING-PRIVATE",
+            title="Private rationale", goal="A private rationale with no query terms.",
+            owner="local", privacy="team", authority="observed",
+            files=[],
+            sources=[self.SOURCE],
+        )
+        self.assertEqual(0, self.run_cli("index").returncode)
+        private_path = brain.dynamic_path(self.repository, private).relative_to(self.repository).as_posix()
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            self.assertGreater(connection.execute(
+                "SELECT COUNT(*) FROM document_links WHERE path = ?", (private_path,),
+            ).fetchone()[0], 0, "the withheld edge must really be cached")
+        finally:
+            connection.close()
+        config.write_text(json.dumps({"allowed_privacy": ["public"]}))
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            after_capsule = context_cli.assemble_capsule(
+                connection, self.repository, mode="governed", query=self.SOURCE_WORDS,
+                task_id="TASK-GRAPH", limit=3, ephemeral=True, refresh_index=False,
+            )
+        finally:
+            connection.close()
+        after = self.manifest(after_capsule)
+        self.assertEqual(before, after["source_links"])
+        self.assertNotIn(private_path, self.delivered(after_capsule))
+        self.assertNotIn(private_path, {item["path"] for item in after["excluded"]})
+
+    def test_graph_items_obey_session_suppression_and_source_revision(self) -> None:
+        def refresh(session: str) -> dict:
+            result = self.run_cli(
+                "refresh", "--query", self.SOURCE_WORDS, "--task-id", "TASK-GRAPH",
+                "--session-id", session,
+                "--ephemeral", "--json",
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            return json.loads(result.stdout)["capsule"]
+
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(refresh("graph-a")))
+        self.assertEqual(set(), self.chunk_paths() & self.delivered(refresh("graph-a")))
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(refresh("graph-b")))
+        self.first.write_text(self.first.read_text() + "\nThe stored total also has an audit trail.\n")
+        changed = self.delivered(refresh("graph-a"))
+        self.assertIn(self.first.relative_to(self.repository).as_posix(), changed)
+        self.assertNotIn(self.second.relative_to(self.repository).as_posix(), changed)
+
+    def test_one_hop_does_not_expand_a_graph_neighbour_again(self) -> None:
+        third = self.write_chunk(
+            "MEM-20260101-dddddddd", "second-hop", "A consequence only of the other memory.",
+            sources=[self.first.relative_to(self.repository).as_posix()],
+        )
+        expanded = self.capsule()
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(expanded))
+        self.assertNotIn(third.relative_to(self.repository).as_posix(), self.delivered(expanded))
+
+    def test_direct_semantic_matches_keep_full_slots_and_render_priority(self) -> None:
+        first_expanded = self.capsule()
+        self.assertEqual("source-link", first_expanded["semantic"][-1]["selection"])
+        self.assertNotEqual("source-link", first_expanded["semantic"][0].get("selection"))
+        for name in ("second", "third"):
+            self.repository.joinpath(f"specs/{name}.md").write_text(
+                f"# {name}\n\nThe {self.SOURCE_WORDS} rule has an independent explanation.\n",
+            )
+        baseline = self.baseline()
+        expanded = self.capsule()
+        self.assertEqual(3, len(baseline["semantic"]))
+        self.assertEqual(self.delivered(baseline), self.delivered(expanded))
+        self.assertEqual(0, self.manifest(expanded)["source_links"]["delivered"])
+
+    def test_source_link_cannot_suppress_its_direct_source_record(self) -> None:
+        self.first.unlink()
+        self.second.unlink()
+        record = brain.create_record(
+            self.repository, "finding", "FINDING-DIRECT", self.SOURCE_WORDS,
+            [], [self.SOURCE], owner="local", goal=self.SOURCE_WORDS,
+        )
+        path = brain.dynamic_path(self.repository, record).relative_to(self.repository).as_posix()
+        derived = self.write_chunk(
+            "MEM-20260101-eeeeeeee", "derived", "A reusable consequence with unrelated vocabulary.",
+            sources=[path], source_digests=[brain.fingerprint(self.repository, path)],
+        )
+        baseline = self.baseline()
+        self.assertIn(path, self.delivered(baseline))
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            linked, _ = retrieval.linked_documents(
+                connection, self.repository, brain.load_config(self.repository), path,
+            )
+        finally:
+            connection.close()
+        derived_path = derived.relative_to(self.repository).as_posix()
+        candidate = next(item for item in linked if item["path"] == derived_path)
+        self.assertEqual([path], [source["path"] for source in candidate["source_fingerprints"]])
+        expanded = self.capsule()
+        self.assertIn(derived_path, self.delivered(expanded))
+        self.assertIn(path, self.delivered(expanded))
+        self.assertNotIn(path, {item["path"] for item in self.manifest(expanded)["excluded"]
+                                if item["reason"] == "promoted-to-chunk"})
+
+    def test_optional_conflict_component_is_not_admitted_one_side_only(self) -> None:
+        # Leave exactly one slot after the two direct sources. Before the
+        # guard, the graph record occupied it and its conflict partner lost.
+        self.first.unlink()
+        self.second.unlink()
+        self.repository.joinpath("specs/second.md").write_text(
+            f"# Companion\n\nThe {self.SOURCE_WORDS} rule has a second direct explanation.\n",
+        )
+        partner = brain.create_record(
+            self.repository, "finding", "FINDING-PARTNER", "Alternative rationale",
+            [], ["specs/authority.md"], owner="local", goal="A distinct alternative rationale.",
+        )
+        record = brain.create_record(
+            self.repository, "finding", "FINDING-CONFLICT", "Disputed rationale",
+            [], [self.SOURCE], owner="local", goal="A disputed rationale.", conflicts=[partner["id"]],
+        )
+        paths = {brain.dynamic_path(self.repository, item).relative_to(self.repository).as_posix()
+                 for item in (record, partner)}
+        baseline = self.baseline()
+        self.assertEqual({self.SOURCE, "specs/second.md"},
+                         {item["path"] for item in baseline["semantic"]})
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            linked, _ = retrieval.linked_documents(
+                connection, self.repository, brain.load_config(self.repository), self.SOURCE,
+            )
+        finally:
+            connection.close()
+        candidate = next(item for item in linked if item["record_id"] == record["id"])
+        self.assertEqual([partner["id"]], candidate["conflicts"])
+        expanded = self.capsule()
+        self.assertEqual(set(), paths & self.delivered(baseline))
+        self.assertEqual(set(), paths & self.delivered(expanded))
+        self.assertTrue(self.delivered(baseline) <= self.delivered(expanded))
+
+    def test_incoming_one_way_conflict_is_not_admitted_through_a_source(self) -> None:
+        self.first.unlink()
+        self.second.unlink()
+        candidate = brain.create_record(
+            self.repository, "finding", "FINDING-INCOMING", "Stored consequence",
+            [], [self.SOURCE], owner="local", goal="A stored consequence.",
+        )
+        partner = brain.create_record(
+            self.repository, "finding", "FINDING-DECLARATION", "Alternative explanation",
+            [], ["specs/authority.md"], owner="local", goal="An alternative explanation.",
+            conflicts=[candidate["id"]],
+        )
+        self.assertEqual([], candidate["conflicts"])
+        self.assertEqual([candidate["id"]], partner["conflicts"])
+        paths = {brain.dynamic_path(self.repository, item).relative_to(self.repository).as_posix()
+                 for item in (candidate, partner)}
+        expanded = self.capsule()
+        self.assertEqual(set(), paths & self.delivered(expanded))
+        self.assertEqual(0, self.manifest(expanded)["source_links"]["candidates"])
+        response = self.run_cli("--mode", "lightweight", "context", self.SOURCE_WORDS,
+                                "--task-id", "TASK-GRAPH", "--json")
+        self.assertEqual(0, response.returncode, response.stderr)
+        self.assertEqual(set(), paths & self.delivered(json.loads(response.stdout)))
+
+    def test_row_and_candidate_limits_bound_a_wide_source(self) -> None:
+        for number in range(40):
+            self.write_chunk(
+                f"MEM-20260101-{number:08x}", f"wide-{number}",
+                "A stored consequence without any query vocabulary.", sources=[self.SOURCE],
+            )
+        self.assertEqual(0, self.run_cli("index").returncode)
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            config = brain.load_config(self.repository)
+            candidates, _ = retrieval._candidates(connection, self.SOURCE_WORDS)
+            anchors, _ = retrieval._runtime_filter(self.repository, candidates, config)
+            linked, stats = retrieval._source_link_candidates(
+                connection, self.repository, config, anchors, set(),
+            )
+            again, repeated = retrieval._source_link_candidates(
+                connection, self.repository, config, anchors, set(),
+            )
+        finally:
+            connection.close()
+        self.assertLessEqual(stats["anchors"], retrieval.GRAPH_ANCHOR_LIMIT)
+        self.assertEqual(retrieval.GRAPH_ROW_LIMIT, stats["examined"])
+        self.assertEqual(retrieval.GRAPH_CANDIDATE_LIMIT, len(linked))
+        self.assertTrue(stats["truncated"])
+        self.assertEqual([item["path"] for item in linked], [item["path"] for item in again])
+        self.assertEqual(stats, repeated)
+
+
+    def test_refresh_all_hosts_and_first_turn_expand_automatically(self) -> None:
+        for host in ("claude", "codex", "cursor"):
+            for task in ("TASK-GRAPH", "TASK-FIRST-TURN"):
+                with self.subTest(host=host, task=task):
+                    response = self.run_cli(
+                        "refresh", "--query", self.SOURCE_WORDS, "--task-id", task,
+                        "--host", host, "--ephemeral", "--json",
+                    )
+                    self.assertEqual(0, response.returncode, response.stderr)
+                    result = json.loads(response.stdout)
+                    self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(result["capsule"]))
+                    self.assertIn("floating point", result["capsule_text"])
+
+    def test_bound_hook_context_expands_without_a_graph_setting(self) -> None:
+        task = "TASK-AUTO-HOOK"
+        response = self.run_cli("start", "--task-id", task, "--goal", self.SOURCE_WORDS)
+        self.assertEqual(0, response.returncode, response.stderr)
+        response = self.run_cli("hook-context", "--task-id", task, "--json")
+        self.assertEqual(0, response.returncode, response.stderr)
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(json.loads(response.stdout)))
+
+    def test_lightweight_context_and_bound_hook_expand_automatically(self) -> None:
+        task = "TASK-AUTO-LITE"
+        response = self.run_cli("--mode", "lightweight", "start", "--task-id", task, "--goal", self.SOURCE_WORDS)
+        self.assertEqual(0, response.returncode, response.stderr)
+        for arguments in (("context", self.SOURCE_WORDS), ("hook-context",)):
+            response = self.run_cli("--mode", "lightweight", *arguments, "--task-id", task, "--json")
+            self.assertEqual(0, response.returncode, response.stderr)
+            result = json.loads(response.stdout)
+            self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(result))
+            self.assertEqual(self.SOURCE, result["semantic"][0]["path"])
+            self.assertLessEqual(len(response.stdout), context_cli.CAPSULE_CHARACTER_LIMIT + 1)
+
+    def test_lightweight_expansion_rechecks_cached_neighbours(self) -> None:
+        self.first.write_text(self.first.read_text() + "\nChanged after indexing.\n")
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            result = context_cli.assemble_capsule(
+                connection, self.repository, mode="lightweight", query=self.SOURCE_WORDS,
+                task_id="TASK-GRAPH", limit=3, ephemeral=True, refresh_index=False,
+            )
+        finally:
+            connection.close()
+        self.assertNotIn(self.first.relative_to(self.repository).as_posix(), self.delivered(result))
+        self.assertIn(self.second.relative_to(self.repository).as_posix(), self.delivered(result))
+
+    def test_distinctive_but_weak_source_is_not_a_graph_seed(self) -> None:
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            candidates, _ = retrieval._candidates(connection, self.SOURCE_WORDS)
+            anchors = [item for item in candidates if item["path"] == self.SOURCE]
+            self.assertEqual(1, len(anchors))
+            anchors[0]["match"] = "distinctive"
+            self.assertEqual([], retrieval.source_link_candidates(
+                connection, self.repository, anchors, set(),
+            ))
+        finally:
+            connection.close()
+
+
 class PathLinkedRetrievalTest(DocumentLinkTest):
     """`retrieve --path`: the link index used during retrieval, not beside it.
 
@@ -4042,9 +4977,20 @@ class PathLinkedRetrievalTest(DocumentLinkTest):
             for item in capsule.get(layer) or []
         }
 
-    def test_without_the_flag_the_chunks_stay_unreachable(self) -> None:
-        # The baseline the flag is measured against.
-        self.assertEqual(set(), self.chunk_paths() & self.delivered(self.capsule()))
+    def test_rendered_path_link_contains_the_filtered_body(self) -> None:
+        payload = self.capsule("--path", self.SOURCE)
+        result = self.run_cli("retrieve", self.SOURCE_WORDS, "--task-id", "TASK-PATH",
+                              "--path", self.SOURCE)
+        self.assertEqual(0, result.returncode, result.stderr)
+        for item in payload["semantic"]:
+            if item["path"] in self.chunk_paths():
+                # The excerpt quotes the body; the heading names the item.
+                phrase = " ".join(item["snippet"].split())
+                phrase = phrase.removeprefix("# " + str(item["title"])).strip()
+                self.assertIn(phrase[:80], result.stdout)
+
+    def test_without_a_path_hint_automatic_source_links_reach_the_chunks(self) -> None:
+        self.assertEqual(self.chunk_paths(), self.chunk_paths() & self.delivered(self.capsule()))
 
     def test_the_flag_delivers_what_the_query_could_not_reach(self) -> None:
         self.assertEqual(
@@ -4166,48 +5112,80 @@ class ChunkSourceDigestTest(BankFixture):
         )
         self.assertEqual([], self.bank_errors())
 
-    def test_a_chunk_whose_source_changed_leaves_retrieval_with_that_reason(
+    def test_a_chunk_whose_source_changed_stays_flagged_for_checking(
         self,
     ) -> None:
+        # An edit to a cited file used to evict the chunk until someone ran
+        # bank-reverify by hand, and nobody did: 65 of 70 resolved findings on
+        # a real project were lost that way. The chunk now stays, ranked down
+        # and marked, and the reader checks the file it names.
         self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
         indexed = self.run_cli("index", "--json")
         self.assertEqual(0, indexed.returncode, indexed.stderr)
         self.start("TASK-DIGEST")
-        found = self.run_cli(
-            "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
-            "--ephemeral", "--json",
-        )
         chunk_path = "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md"
-        self.assertIn(
-            chunk_path,
-            [item["path"] for item in json.loads(found.stdout)["selected"]],
-            found.stdout,
+        found = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
+                "--ephemeral", "--json",
+            ).stdout
         )
+        fresh = {item["path"]: item for item in found["selected"]}
+        self.assertIn(chunk_path, fresh, found)
+        self.assertNotIn("source_changed", fresh[chunk_path])
 
         self.repository.joinpath("specs/authority.md").write_text(
             "# Authority\n\nThe cobalt authority rule was replaced.\n",
             encoding="utf-8",
         )
         self.assertEqual(0, self.run_cli("index", "--json").returncode)
-        after = self.run_cli(
-            "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
-            "--ephemeral", "--json",
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-DIGEST",
+                "--ephemeral", "--json",
+            ).stdout
         )
-        capsule = json.loads(after.stdout)
+        changed = {item["path"]: item for item in capsule["selected"]}
+        self.assertIn(chunk_path, changed, capsule)
+        self.assertEqual(
+            ["specs/authority.md"], changed[chunk_path]["source_changed"]
+        )
         manifest = json.loads(
             (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
         )
-        self.assertNotIn(
-            chunk_path, [item["path"] for item in manifest["selected"]], manifest
+        listed = {item["path"]: item for item in manifest["selected"]}
+        self.assertTrue(listed[chunk_path]["source_changed"])
+        self.assertLess(
+            listed[chunk_path]["score"],
+            {item["path"]: item for item in json.loads(
+                (self.repository / found["manifest"]).read_text(encoding="utf-8")
+            )["selected"]}[chunk_path]["score"],
         )
-        # Not `stale`: a Brain record is refreshed by a revisioned mutation, a
-        # chunk by re-reading the source. The reason names which remedy applies.
+
+    def test_a_chunk_whose_source_is_gone_leaves_retrieval(self) -> None:
+        self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        chunk_path = "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md"
+        self.repository.joinpath("specs/authority.md").unlink()
+        filtered, excluded = retrieval._runtime_filter(
+            self.repository,
+            [
+                {
+                    "path": chunk_path, "privacy": "team", "owner": "local",
+                    "authority": "verified", "kind": "memory",
+                    "lifecycle": "active",
+                    "source_hash": retrieval._content_hash(
+                        self.chunk.read_text(encoding="utf-8")
+                    ),
+                    "source_fingerprints": self.digests_of(self.chunk),
+                }
+            ],
+            {"allowed_privacy": ["team"], "allowed_authority": ["verified"],
+             "owners": ["*"]},
+        )
+        self.assertEqual([], filtered)
         self.assertEqual(
-            "source-changed",
-            {item["path"]: item["reason"] for item in manifest["excluded"]}.get(
-                chunk_path
-            ),
-            manifest["excluded"],
+            [{"path": chunk_path, "reason": "source-missing"}], excluded
         )
 
     def test_re_verifying_returns_the_chunk_to_retrieval(self) -> None:
@@ -4292,6 +5270,1113 @@ class ChunkSourceDigestTest(BankFixture):
             [item["path"] for item in capsule["selected"]],
             capsule,
         )
+
+
+class OverdueBankWriteTest(BankFixture):
+    """A chunk past its review date leaves retrieval; it must not lock the bank."""
+
+    def age(self, memory_id: str, slug: str, body: str) -> Path:
+        today = datetime.now(timezone.utc).date()
+        verified = (today - timedelta(days=400)).isoformat()
+        return self.write_chunk(
+            memory_id, slug, body,
+            created=verified, last_verified=verified,
+            review_after=(today - timedelta(days=35)).isoformat(),
+        )
+
+    def two_overdue(self) -> None:
+        self.age("MEM-20260101-aaaaaaaa", "old-rule", "The cerulean rollout is current.")
+        self.age("MEM-20260102-bbbbbbbb", "older-rule", "The vermilion rollout is current.")
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+        self.assertEqual(
+            2, sum("overdue for review" in error for error in self.bank_errors())
+        )
+
+    def test_two_overdue_chunks_can_each_be_reverified(self) -> None:
+        # Each re-attestation validated the whole bank and failed on the other
+        # chunk's review date, so neither could be repaired through the CLI.
+        self.two_overdue()
+        for memory_id in ("MEM-20260101-aaaaaaaa", "MEM-20260102-bbbbbbbb"):
+            result = self.run_cli("bank-reverify", "--id", memory_id)
+            self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], self.bank_errors())
+
+    def test_an_overdue_chunk_does_not_block_retiring_another(self) -> None:
+        self.two_overdue()
+        yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+        result = self.run_cli(
+            "bank-retire", "--id", "MEM-20260101-aaaaaaaa", "--valid-to", yesterday
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        # Still reported where it always was.
+        self.assertEqual(
+            1, sum("overdue for review" in error for error in self.bank_errors())
+        )
+        audit = json.loads(self.run_cli("bank-audit", "--json").stdout)
+        self.assertEqual(
+            ["MEM-20260102-bbbbbbbb"],
+            [item["id"] for item in audit["overdue_review"]],
+            audit,
+        )
+
+    def test_reverify_still_holds_the_attested_chunk_to_the_contract(self) -> None:
+        # A write no longer pays for other chunks' problems; the chunk it
+        # attests still answers for its own.
+        self.repository.joinpath("specs/authority.md").unlink()
+        result = self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("source path does not exist", result.stderr)
+
+    def test_bank_messages_do_not_carry_the_machine_path(self) -> None:
+        self.two_overdue()
+        for error in self.bank_errors():
+            self.assertTrue(error.startswith("memory-bank/chunks/"), error)
+            self.assertNotIn(str(self.repository), error)
+
+    def test_refresh_names_the_chunks_it_stopped_serving(self) -> None:
+        # Writes no longer fail on a review date, which was the only place the
+        # lapse was ever said out loud; the chunk still leaves retrieval.
+        self.two_overdue()
+        rendered = self.run_cli("refresh")
+        self.assertIn(
+            "memory review: 2 chunk(s) overdue, not served until re-verified",
+            rendered.stdout,
+        )
+        self.assertEqual(
+            2, json.loads(self.run_cli("refresh", "--json").stdout)["overdue_review"]
+        )
+        self.run_cli("bank-reverify", "--id", "MEM-20260101-aaaaaaaa")
+        self.run_cli("bank-reverify", "--id", "MEM-20260102-bbbbbbbb")
+        self.assertNotIn("memory review:", self.run_cli("refresh").stdout)
+
+
+class WorkingStateCapsuleTest(RuntimeHarness):
+    """What the rendered capsule says about the task, and what it stops repeating."""
+
+    def started(self) -> str:
+        task = self.start("TASK-STATE")
+        update = self.run_cli(
+            "update", "--task-id", "TASK-STATE", "--revision", "auto",
+            "--progress", "Cobalt guard wired into the request path.",
+            "--next-step", "Cover the read path.",
+            "--next-step", "Cover the write path.",
+            "--file", "src/Guard.php", "--file", "src/Request.php", "--json",
+        )
+        self.assertEqual(0, update.returncode, update.stderr)
+        return str(task["task_uuid"])
+
+    def test_the_rendered_capsule_says_where_the_work_stopped(self) -> None:
+        # The JSON capsule carried this all along; the rendered one - the only
+        # form Claude Code, Codex and Cursor read - printed the goal alone.
+        uuid = self.started()
+        rendered = self.run_cli(
+            "retrieve", "continue where we left off",
+            "--task-id", "TASK-STATE", "--ephemeral",
+        )
+        self.assertEqual(0, rendered.returncode, rendered.stderr)
+        lines = rendered.stdout.splitlines()
+        # The Cursor hooks accept a capsule only if it opens with "working:".
+        self.assertTrue(lines[0].startswith("working: TASK-STATE"), rendered.stdout)
+        self.assertIn("progress: Cobalt guard wired into the request path.", lines)
+        self.assertIn("next: Cover the read path.", lines)
+        self.assertIn("next: Cover the write path.", lines)
+        self.assertIn("recent files: src/Guard.php, src/Request.php", lines)
+        self.assertIn(f"task record: project-brain/dynamic/tasks/{uuid}.md", lines)
+
+    def test_the_rendered_progress_is_bounded(self) -> None:
+        # About a thousand characters: the constraint first, the current step
+        # last. The text kept the first 399 and no compaction line said so,
+        # so every later turn read the constraint without the step it was on.
+        self.start("TASK-LONG")
+        progress = (
+            "CONSTRAINT keep the v1 endpoint. " + "cobalt " * 140
+            + "NOW: step 4 of 6, writing the rollback test"
+        )
+        update = self.run_cli(
+            "update", "--task-id", "TASK-LONG", "--revision", "auto",
+            "--progress", progress, "--json",
+        )
+        self.assertEqual(0, update.returncode, update.stderr)
+        rendered = self.run_cli(
+            "retrieve", "cobalt", "--task-id", "TASK-LONG", "--ephemeral"
+        )
+        lines = rendered.stdout.splitlines()
+        line = next(line for line in lines if line.startswith("progress: "))
+        self.assertLessEqual(
+            len(line), len("progress: ") + context_cli.RENDERED_PROGRESS_LIMIT
+        )
+        self.assertGreater(len(line), context_cli.RENDERED_PROGRESS_LIMIT // 2)
+        self.assertTrue(line.startswith("progress: CONSTRAINT keep the v1 endpoint."), line)
+        self.assertTrue(line.endswith("NOW: step 4 of 6, writing the rollback test"), line)
+        self.assertIn("…", line)
+        compaction = next(
+            (line for line in lines if line.startswith("compaction: ")), ""
+        )
+        cut = len(progress.strip()) - (context_cli.RENDERED_PROGRESS_LIMIT - 1)
+        self.assertIn(f"omitted {cut} characters of progress", compaction, rendered.stdout)
+
+    def test_the_rendered_file_count_is_every_file_the_text_leaves_out(self) -> None:
+        # The capsule's JSON keeps eight of twenty files and the text five of
+        # those; the line counted the twelve the JSON lost, not the fifteen
+        # the model never saw.
+        self.start("TASK-FILES")
+        update = self.run_cli(
+            "update", "--task-id", "TASK-FILES", "--revision", "auto",
+            "--progress", "Twenty files touched.",
+            *[argument for index in range(20) for argument in ("--file", f"app/F{index}.php")],
+            "--json",
+        )
+        self.assertEqual(0, update.returncode, update.stderr)
+        rendered = self.run_cli(
+            "retrieve", "cobalt", "--task-id", "TASK-FILES", "--ephemeral"
+        )
+        lines = rendered.stdout.splitlines()
+        files = next(line for line in lines if line.startswith("recent files: "))
+        self.assertEqual(
+            context_cli.RENDERED_FILE_LIMIT,
+            len(files[len("recent files: "):].split(", ")),
+        )
+        compaction = next(
+            (line for line in lines if line.startswith("compaction: ")), ""
+        )
+        self.assertIn(
+            f"omitted {20 - context_cli.RENDERED_FILE_LIMIT} working file(s)",
+            compaction, rendered.stdout,
+        )
+        # The task's own citation is shown, not left to the task record.
+        self.assertIn("sources: specs/authority.md", lines)
+
+    def test_the_task_does_not_point_at_its_own_record(self) -> None:
+        # It matched every prompt that shared a word with its own goal and took
+        # a semantic slot to point at the state the capsule already leads with.
+        uuid = self.started()
+        own = f"project-brain/dynamic/tasks/{uuid}.md"
+        payload = json.loads(
+            self.run_cli(
+                "retrieve", "apply the cobalt authority rule",
+                "--task-id", "TASK-STATE", "--ephemeral", "--json",
+            ).stdout
+        )
+        self.assertNotIn(own, [item["path"] for item in payload["selected"]])
+        self.assertEqual(own, payload["task_record"])
+        manifest = json.loads(
+            (self.repository / payload["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertIn({"path": own, "reason": "working-task"}, manifest["excluded"])
+
+    def test_host_loaded_instructions_leave_the_capsule(self) -> None:
+        self.start("TASK-HOST")
+        self.repository.joinpath("CLAUDE.md").write_text(
+            "# Notes\n\nThe vermilion lattice convention. Policy: @AGENTS.md\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("AGENTS.md").write_text(
+            "# Policy\n\nThe vermilion lattice rule applies.\n", encoding="utf-8"
+        )
+
+        def procedural(host: str) -> tuple[set, list]:
+            payload = json.loads(
+                self.run_cli(
+                    "retrieve", "vermilion lattice", "--task-id", "TASK-HOST",
+                    "--ephemeral", "--gate", "off", "--host", host, "--json",
+                ).stdout
+            )
+            manifest = json.loads(
+                (self.repository / payload["manifest"]).read_text(encoding="utf-8")
+            )
+            return {item["path"] for item in payload["procedural"]}, manifest["excluded"]
+
+        paths, excluded = procedural("cli")
+        # No procedural item is carried; the pick - the better of the two,
+        # both being candidates - is recorded.
+        self.assertEqual(set(), paths)
+        picks = {entry["path"] for entry in excluded if entry["reason"] == "host-listed"}
+        self.assertEqual(1, len(picks))
+        self.assertLessEqual(picks, {"AGENTS.md", "CLAUDE.md"})
+        paths, excluded = procedural("claude")
+        self.assertEqual(set(), paths)
+        self.assertIn({"path": "CLAUDE.md", "reason": "host-loaded"}, excluded)
+        # Claude Code also loads what CLAUDE.md imports.
+        self.assertIn({"path": "AGENTS.md", "reason": "host-loaded"}, excluded)
+        paths, excluded = procedural("codex")
+        self.assertEqual(set(), paths)
+        self.assertIn({"path": "AGENTS.md", "reason": "host-loaded"}, excluded)
+        self.assertIn({"path": "CLAUDE.md", "reason": "host-listed"}, excluded)
+
+    def test_claude_imports_skip_code_and_paths_outside_the_repository(self) -> None:
+        docs = self.repository / "docs"
+        docs.mkdir()
+        docs.joinpath("a.md").write_text("# A\n", encoding="utf-8")
+        docs.joinpath("b.md").write_text("# B\n\nSee @c.md for details.\n", encoding="utf-8")
+        docs.joinpath("c.md").write_text("# C\n", encoding="utf-8")
+        self.repository.joinpath("AGENTS.md").write_text("# Policy\n", encoding="utf-8")
+        self.repository.joinpath("CLAUDE.md").write_text(
+            "# Notes\n\n"
+            "Inline `@AGENTS.md` is code, not an import.\n"
+            "```\n@docs/a.md\n```\n"
+            "Real import: @docs/b.md.\n"
+            "Outside: @../outside.md, and mail someone@example.com.\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            {"docs/b.md", "docs/c.md"}, retrieval._claude_imports(self.repository)
+        )
+
+    def test_claude_reads_agents_md_itself_only_without_a_claude_md(self) -> None:
+        self.repository.joinpath("AGENTS.md").write_text("# Policy\n", encoding="utf-8")
+        self.assertIn("AGENTS.md", retrieval.host_loaded_paths(self.repository, "claude"))
+        self.repository.joinpath("CLAUDE.local.md").write_text("# Mine\n", encoding="utf-8")
+        self.assertNotIn(
+            "AGENTS.md", retrieval.host_loaded_paths(self.repository, "claude")
+        )
+
+    def test_shipped_claude_dir_import_loads_agents_md(self) -> None:
+        self.repository.joinpath("AGENTS.md").write_text("# Policy\n", encoding="utf-8")
+        self.repository.joinpath("CLAUDE.md").write_text("# Team notes\n", encoding="utf-8")
+        claude_dir = self.repository / ".claude"
+        claude_dir.mkdir()
+        claude_dir.joinpath("CLAUDE.md").write_text(
+            "Policy lives in AGENTS.md.\n\n@../AGENTS.md\n", encoding="utf-8"
+        )
+        loaded = retrieval.host_loaded_paths(self.repository, "claude")
+        self.assertIn("AGENTS.md", loaded)
+        self.assertIn(".claude/CLAUDE.md", loaded)
+        self.assertEqual({"AGENTS.md"}, retrieval._claude_imports(self.repository))
+
+    def test_done_next_steps_can_leave_the_task(self) -> None:
+        uuid = self.started()
+        replaced = self.run_cli(
+            "update", "--task-id", "TASK-STATE", "--revision", "auto",
+            "--replace-next-steps", "--next-step", "Open the pull request.",
+            "--file", "src/Guard.php", "--json",
+        )
+        self.assertEqual(0, replaced.returncode, replaced.stderr)
+        task = json.loads(replaced.stdout)
+        self.assertEqual(["Open the pull request."], task["next_steps"])
+        # Touched again, so newest again.
+        self.assertEqual(["src/Request.php", "src/Guard.php"], task["files"])
+        cleared = self.run_cli(
+            "brain-update", "--record-id", uuid, "--revision", "auto",
+            "--replace-next-steps", "--json",
+        )
+        self.assertEqual(0, cleared.returncode, cleared.stderr)
+        self.assertEqual([], json.loads(cleared.stdout)["next_steps"])
+
+
+class ChangedSourceRecordTest(RuntimeHarness):
+    """A record whose cited file was edited is kept and marked; one whose cited
+    file is gone, or was never digested, is left out."""
+
+    def reader(self) -> None:
+        self.start("TASK-READER")
+
+    def retrieve(self, query: str) -> dict:
+        result = self.run_cli("retrieve", query, "--task-id", "TASK-READER", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def manifest(self, capsule: dict) -> dict:
+        return json.loads((self.repository / capsule["manifest"]).read_text(encoding="utf-8"))
+
+    def test_a_record_whose_cited_file_changed_stays_indexed_and_marked(self) -> None:
+        self.repository.joinpath("specs/quota.md").write_text("# Quota\n\nBurst limits.\n", encoding="utf-8")
+        decision = brain.create_record(
+            self.repository, "decision", "DEC-COBALT", "Cobalt quota guard is canonical", [],
+            ["specs/quota.md"], owner="alice", authority="verified",
+            goal="Cobalt quota guard rejects burst traffic",
+        )
+        path = brain.dynamic_path(self.repository, decision).relative_to(self.repository).as_posix()
+        self.reader()
+        before = {item["path"]: item for item in self.manifest(self.retrieve("cobalt quota guard"))["selected"]}
+        self.assertIn(path, before)
+        self.repository.joinpath("specs/quota.md").write_text("# Quota\n\nThe rule was rewritten.\n",
+                                                              encoding="utf-8")
+        reindex = json.loads(self.run_cli("index", "--json").stdout)
+        self.assertNotIn(path, [item["path"] for item in reindex["excluded"]])
+        capsule = self.retrieve("cobalt quota guard")
+        delivered = {item["path"]: item for item in capsule["semantic"]}
+        self.assertEqual(["specs/quota.md"], delivered[path]["source_changed"])
+        after = {item["path"]: item for item in self.manifest(capsule)["selected"]}
+        self.assertTrue(after[path]["source_changed"])
+        self.assertLess(after[path]["score"], before[path]["score"])
+
+    def test_a_record_whose_cited_file_is_gone_is_excluded_as_source_missing(self) -> None:
+        self.repository.joinpath("specs/retired.md").write_text("# Retired\n\nZirconium retry window.\n",
+                                                                encoding="utf-8")
+        finding = brain.create_record(
+            self.repository, "finding", "FIND-ZR", "Zirconium retry window", [], ["specs/retired.md"],
+            owner="alice", goal="Zirconium retry window",
+        )
+        path = brain.dynamic_path(self.repository, finding).relative_to(self.repository).as_posix()
+        self.repository.joinpath("specs/retired.md").unlink()
+        reindex = json.loads(self.run_cli("index", "--json").stdout)
+        self.assertIn({"path": path, "reason": "source-missing"}, reindex["excluded"])
+        self.reader()
+        selected = [item["path"] for item in self.manifest(self.retrieve("zirconium retry window"))["selected"]]
+        self.assertNotIn(path, selected)
+
+    def test_eligibility_tells_an_edited_citation_from_a_deleted_or_undigested_one(self) -> None:
+        record = brain.create_record(
+            self.repository, "finding", "FIND-ELIGIBLE", "Eligibility probe", [], ["specs/authority.md"],
+            owner="alice",
+        )
+        config = brain.load_config(self.repository)
+        self.repository.joinpath("specs/authority.md").write_text("# Authority\n\nEdited.\n", encoding="utf-8")
+        with mock.patch.object(brain, "fingerprint", side_effect=AssertionError("hashed")):
+            self.assertEqual((True, "eligible"), brain.record_is_eligible(self.repository, record, config))
+        self.repository.joinpath("specs/extra.md").write_text("# Extra\n", encoding="utf-8")
+        undigested = {**record, "sources": [*record["sources"], "specs/extra.md"]}
+        self.assertEqual((False, "source-undigested"),
+                         brain.record_is_eligible(self.repository, undigested, config))
+        self.repository.joinpath("specs/authority.md").unlink()
+        self.assertEqual((False, "source-missing"), brain.record_is_eligible(self.repository, record, config))
+
+    def test_an_event_whose_cited_file_changed_is_delivered_with_the_mark(self) -> None:
+        self.repository.joinpath("specs/rollout.md").write_text("# Rollout\n\nPlan.\n", encoding="utf-8")
+        event = brain.create_record(
+            self.repository, "event", "EVENT-COBALT", "Completed cobalt quota rollout", [],
+            ["specs/rollout.md"], owner="alice", goal="Cobalt quota guard rollout shipped to production",
+        )
+        path = brain.dynamic_path(self.repository, event).relative_to(self.repository).as_posix()
+        self.repository.joinpath("specs/rollout.md").write_text("# Rollout\n\nPlan changed.\n", encoding="utf-8")
+        result = self.run_cli("refresh", "--query", "cobalt quota rollout", "--task-id", "TASK-HISTORY",
+                              "--host", "codex", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        delivered = {item.get("path"): item for item in payload["capsule"]["episodic"]}
+        self.assertEqual(["specs/rollout.md"], delivered[path]["source_changed"])
+        self.assertIn(path, payload["capsule_text"])
+        self.assertIn("cited file changed: specs/rollout.md", payload["capsule_text"])
+
+    def test_validate_says_which_citations_retrieval_still_serves(self) -> None:
+        self.repository.joinpath("specs/retired.md").write_text("# Retired\n", encoding="utf-8")
+        edited = brain.create_record(self.repository, "finding", "FIND-EDITED", "Edited citation", [],
+                                     ["specs/authority.md"], owner="alice")
+        gone = brain.create_record(self.repository, "finding", "FIND-GONE", "Gone citation", [],
+                                   ["specs/retired.md"], owner="alice")
+        self.repository.joinpath("specs/authority.md").write_text("# Authority\n\nEdited.\n", encoding="utf-8")
+        self.repository.joinpath("specs/retired.md").unlink()
+        text = self.run_cli("validate")
+        self.assertEqual(0, text.returncode, text.stdout + text.stderr)
+        edited_path = str(brain.dynamic_path(self.repository, edited))
+        gone_path = str(brain.dynamic_path(self.repository, gone))
+        self.assertIn(f"{edited_path}: a cited source changed after the record was written; "
+                      "retrieval serves it marked for checking", text.stdout)
+        self.assertIn(f"{gone_path}: a cited source no longer exists; retrieval leaves the record out",
+                      text.stdout)
+        as_json = json.loads(self.run_cli("validate", "--json").stdout)
+        self.assertEqual(sorted([edited_path, gone_path]), sorted(as_json["stale"]))
+
+    def test_a_changed_citation_mark_names_one_file_and_counts_the_rest(self) -> None:
+        capsule = {"working": None, "warnings": [], "procedural": [], "episodic": [],
+                   "semantic": [{"path": "specs/cobalt.md", "title": "Cobalt", "snippet": "x",
+                                 "source_changed": ["src/A.php", "src/B.php", "src/C.php"]}]}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            context_cli.print_capsule(capsule)
+        self.assertIn("cited file changed: src/A.php +2 more", output.getvalue())
+        self.assertNotIn("src/B.php", output.getvalue())
+
+
+class FileEdgeFixture(RuntimeHarness):
+    """Active Brain tasks whose files[] become file edges."""
+
+    SHARED = "app/Billing/InvoiceTotal.php"
+
+    def fillers(self, count: int = 16) -> None:
+        # A corpus large enough that the query's words stay informative: in a
+        # handful of documents every shared word is a stop word.
+        for number in range(count):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(
+                f"# Filler {number}\n\nUnrelated filler paragraph number {number} about tooling.\n",
+                encoding="utf-8",
+            )
+
+    def track(self, *paths: str, content: str = "<?php\n") -> None:
+        for path in paths:
+            target = self.repository / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repository), "add", "--", *paths], check=True, capture_output=True)
+
+    def task(self, task_id: str, goal: str, *files: str, next_step: str = "") -> dict:
+        arguments = ["start", "--task-id", task_id, "--goal", goal, "--json"]
+        for file in files:
+            arguments += ["--file", file]
+        result = self.run_cli(*arguments)
+        self.assertEqual(0, result.returncode, result.stderr)
+        record = json.loads(result.stdout)
+        if next_step:
+            updated = self.run_cli("update", "--task-id", task_id, "--revision", str(record["revision"]),
+                                   "--next-step", next_step, "--json")
+            self.assertEqual(0, updated.returncode, updated.stderr)
+            record = json.loads(updated.stdout)
+        return record
+
+    def record_path(self, task_id: str) -> str:
+        path, _, _ = brain.find_task(self.repository, task_id)
+        return path.relative_to(self.repository).as_posix()
+
+    def link_rows(self, kind: str) -> set:
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            return set(connection.execute(
+                "SELECT path, ref_path FROM document_links WHERE ref_kind = ?", (kind,)
+            ).fetchall())
+        finally:
+            connection.close()
+
+    def refresh(self, query: str, task_id: str = "TASK-CUR", *extra: str) -> dict:
+        result = self.run_cli("refresh", "--query", query, "--task-id", task_id, "--sanitize",
+                              "--ephemeral", "--json", *extra)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def manifest(self, capsule: dict) -> dict:
+        return json.loads((self.repository / capsule["manifest"]).read_text(encoding="utf-8"))
+
+    @staticmethod
+    def by_path(capsule: dict) -> dict:
+        return {item.get("path"): item for layer in ("semantic", "episodic", "procedural")
+                for item in capsule[layer]}
+
+
+class FileEdgeIndexTest(FileEdgeFixture):
+    def test_only_tracked_project_files_of_an_active_task_become_file_rows(self) -> None:
+        self.track(self.SHARED, "var/cache/prod/Container.php", "composer.lock", "public/build/app.js")
+        self.repository.joinpath("app/Untracked.php").write_text("<?php\n", encoding="utf-8")
+        self.repository.joinpath("docs").mkdir(exist_ok=True)
+        self.task("TASK-A", "Edge fixture.", self.SHARED, "var/cache/prod/Container.php", "composer.lock",
+                  "public/build/app.js", "app/Untracked.php", "docs/", ".env", "../outside.php", "/abs/x.php",
+                  "project-brain/dynamic/tasks/x.md", "vendor/a/b.php", "PHP Core/app/X.php")
+        self.assertEqual(0, self.run_cli("index").returncode)
+        rows = {ref for path, ref in self.link_rows("file") if path == self.record_path("TASK-A")}
+        self.assertEqual({self.SHARED}, rows)
+
+    def test_links_reports_a_touch_separately_from_a_citation(self) -> None:
+        self.track(self.SHARED)
+        self.task("TASK-A", "Edge fixture.", self.SHARED)
+        brain.create_record(self.repository, "finding", "FIND-ROUND", "Totals are stored in minor units", [],
+                            [self.SHARED], owner="alice", goal="Totals are stored in minor units")
+        self.assertEqual(0, self.run_cli("index").returncode)
+        as_json = json.loads(self.run_cli("links", "--path", self.SHARED, "--json").stdout)
+        kinds = {item["path"]: item["ref_kind"] for item in as_json["documents"]}
+        self.assertEqual("file", kinds[self.record_path("TASK-A")])
+        self.assertIn("source", kinds.values())
+        text = self.run_cli("links", "--path", self.SHARED).stdout
+        self.assertIn(f"touched {self.SHARED}", text)
+        self.assertIn(f"cites {self.SHARED} (source)", text)
+
+    def test_tracked_probe_runs_once_per_task_revision(self) -> None:
+        self.track(self.SHARED)
+        record = self.task("TASK-A", "Edge fixture.", self.SHARED)
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            with mock.patch.object(retrieval.subprocess, "run", wraps=subprocess.run) as calls:
+                context_cli.index_repository(connection, self.repository, incremental=True)
+                context_cli.index_repository(connection, self.repository, incremental=True)
+                probes = [call for call in calls.call_args_list if "cat-file" in call.args[0]]
+                self.assertEqual(1, len(probes))
+                updated = self.run_cli("update", "--task-id", "TASK-A", "--revision", str(record["revision"]),
+                                       "--progress", "Moved on.")
+                self.assertEqual(0, updated.returncode, updated.stderr)
+                context_cli.index_repository(connection, self.repository, incremental=True)
+                probes = [call for call in calls.call_args_list if "cat-file" in call.args[0]]
+                self.assertEqual(2, len(probes))
+            state = retrieval.load_index_state(connection)
+        finally:
+            connection.close()
+        cached = json.loads(state[retrieval.FILE_LINK_TRACKED_KEY])
+        self.assertEqual([self.SHARED], cached["tracked"])
+
+    def test_outside_a_git_checkout_there_are_no_file_rows_and_refresh_works(self) -> None:
+        shutil.rmtree(self.repository / ".git")
+        self.repository.joinpath("app").mkdir()
+        self.repository.joinpath("app/A.php").write_text("<?php\n", encoding="utf-8")
+        self.task("TASK-A", "Edge fixture.", "app/A.php")
+        payload = self.refresh("edge fixture", "TASK-A")
+        self.assertIsNotNone(payload["capsule"])
+        self.assertEqual(set(), self.link_rows("file"))
+
+
+class AutomaticFileLinkTest(FileEdgeFixture):
+    QUERY = "cobalt authority rounding wrong"
+
+    def sibling(self, next_step: str = "Check the rounding of stored totals.") -> None:
+        self.fillers()
+        self.track(self.SHARED)
+        self.task("TASK-OTHER", "Vermilion ledger migration.", self.SHARED, next_step=next_step)
+        self.task("TASK-CUR", "Apply the cobalt authority rule.", self.SHARED)
+
+    def test_a_sibling_task_sharing_a_touched_file_and_a_term_is_delivered_after_strong_matches(self) -> None:
+        self.sibling()
+        payload = self.refresh(self.QUERY)
+        capsule = payload["capsule"]
+        paths = [item["path"] for item in capsule["semantic"]]
+        other = self.record_path("TASK-OTHER")
+        self.assertIn(other, paths)
+        self.assertIn("specs/authority.md", paths)
+        self.assertLess(paths.index("specs/authority.md"), paths.index(other))
+        item = self.by_path(capsule)[other]
+        self.assertEqual("touch-link", item["selection"])
+        self.assertEqual(self.SHARED, item["via"])
+        self.assertNotIn(self.record_path("TASK-CUR"), paths)
+        selected = {entry["path"]: entry for entry in self.manifest(capsule)["selected"]}
+        self.assertEqual("touch-link", selected[other]["selection"])
+        self.assertNotIn("match", selected[other])
+        self.assertIsNone(selected[other]["rank"])
+        self.assertNotIn("file-link-limit", [entry["reason"] for entry in self.manifest(capsule)["excluded"]])
+
+    def test_a_touch_without_any_shared_informative_term_delivers_nothing(self) -> None:
+        self.sibling(next_step="")
+        for query in ("the cobalt authority rule", "continue"):
+            capsule = self.refresh(query)["capsule"]
+            self.assertNotIn(self.record_path("TASK-OTHER"), self.by_path(capsule), query)
+
+    def test_a_hub_file_links_nothing(self) -> None:
+        self.fillers(30)
+        self.track("app/Shared.php", "app/Rare.php")
+        for number in range(1, 7):
+            self.task(f"TASK-H{number}", f"Hub task {number}.", "app/Shared.php", next_step="Fix rounding.")
+        self.task("TASK-R", "Rare task.", "app/Rare.php", next_step="Fix rounding.")
+        self.task("TASK-CUR", "Apply the cobalt authority rule.", "app/Shared.php", "app/Rare.php")
+        capsule = self.refresh(self.QUERY)["capsule"]
+        touch = [path for path, item in self.by_path(capsule).items() if item.get("selection") == "touch-link"]
+        self.assertEqual([self.record_path("TASK-R")], touch)
+
+    def test_touch_links_never_displace_covered_matches(self) -> None:
+        for number in range(3):
+            self.repository.joinpath(f"specs/round-{number}.md").write_text(
+                f"# Round {number}\n\nThe cobalt authority rounding note {number}.\n", encoding="utf-8")
+        self.sibling()
+        capsule = self.refresh("cobalt authority rounding")["capsule"]
+        allowed = {f"specs/round-{n}.md" for n in range(3)} | {"specs/authority.md"}
+        self.assertTrue({item["path"] for item in capsule["semantic"]} <= allowed, capsule["semantic"])
+        self.assertNotIn(self.record_path("TASK-OTHER"), [item["path"] for item in capsule["semantic"]])
+
+    def test_explicit_path_and_source_link_expansion_ignore_touch_rows(self) -> None:
+        self.track("README.md", self.SHARED, content="# Readme\n\ncobalt authority readme.\n")
+        self.task("TASK-OTHER", "Vermilion ledger migration.", "README.md", self.SHARED)
+        self.task("TASK-CUR", "Apply the cobalt authority rule.")
+        result = self.run_cli("retrieve", "zzz unrelated", "--task-id", "TASK-CUR", "--path", self.SHARED, "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        capsule = json.loads(result.stdout)
+        other = self.record_path("TASK-OTHER")
+        self.assertNotEqual("path-link", self.by_path(capsule).get(other, {}).get("selection"))
+        capsule = self.refresh("cobalt authority readme")["capsule"]
+        self.assertNotEqual("source-link", self.by_path(capsule).get(other, {}).get("selection"))
+        self.assertEqual(0, self.manifest(capsule)["source_links"]["candidates"])
+
+    def test_a_prompt_named_class_upgrades_a_weak_match_to_a_prompt_link(self) -> None:
+        self.fillers()
+        self.track(self.SHARED)
+        self.repository.joinpath("composer.json").write_text('{"autoload":{"psr-4":{"App\\\\":"app/"}}}',
+                                                               encoding="utf-8")
+        self.write_chunk_citing(self.SHARED)
+        self.task("TASK-CUR", "Apply the cobalt authority rule.")
+        payload = self.refresh("InvoiceTotal and the cobalt authority rule")
+        chunk = next(path for path in self.by_path(payload["capsule"]) if str(path).startswith("memory-bank/chunks/"))
+        item = self.by_path(payload["capsule"])[chunk]
+        self.assertEqual("prompt-link", item["selection"])
+        self.assertNotIn("match", item)
+        line = next(line for line in payload["capsule_text"].splitlines() if chunk in line)
+        self.assertNotIn("weak match", line)
+        self.assertIn(f"linked through {self.SHARED}, named in the request", line)
+
+    def write_chunk_citing(self, source: str) -> None:
+        today = datetime.now(timezone.utc).date()
+        memory_id = f"MEM-{today.strftime('%Y%m%d')}-0a1b2c3d"
+        metadata = {
+            "id": memory_id, "title": "InvoiceTotal persistence", "type": "convention", "status": "active",
+            "scope": ["application"], "tags": ["billing"], "created": today.isoformat(),
+            "last_verified": today.isoformat(), "review_after": (today + timedelta(days=90)).isoformat(),
+            "sources": [source], "supersedes": [], "superseded_by": None, "valid_from": today.isoformat(),
+            "valid_to": None, "source_digests": [],
+        }
+        path = self.repository / f"memory-bank/chunks/{memory_id}-invoice-total.md"
+        path.write_text("---\n" + json.dumps(metadata, indent=2) + "\n---\n\n# InvoiceTotal persistence\n\n"
+                        "## Durable Context\n\nTotals are persisted in minor units.\n", encoding="utf-8")
+
+    def test_rendered_touch_link_quotes_the_goal_and_the_shared_file(self) -> None:
+        self.sibling()
+        payload = self.refresh(self.QUERY)
+        text = payload["capsule_text"]
+        other = self.record_path("TASK-OTHER")
+        lines = text.splitlines()
+        index = next(position for position, line in enumerate(lines) if other in line)
+        self.assertIn("§ Files", lines[index])
+        self.assertIn(f"linked through {self.SHARED}, changed in this task", lines[index])
+        self.assertTrue(lines[index + 1].strip().startswith("Goal: Vermilion ledger migration"))
+        self.assertIn(self.SHARED, lines[index + 1])
+        self.assertLessEqual(len(text), 3600)
+
+    def test_touch_link_manifest_validates(self) -> None:
+        self.sibling()
+        ephemeral = self.refresh(self.QUERY)["capsule"]
+        brain.validate_schema_file(self.repository, "retrieval-manifest", self.manifest(ephemeral))
+        result = self.run_cli("refresh", "--query", self.QUERY,
+                              "--task-id", "TASK-CUR", "--sanitize", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        governed = json.loads(result.stdout)["capsule"]
+        manifest = self.manifest(governed)
+        brain.validate_schema_file(self.repository, "retrieval-manifest", manifest)
+        self.assertIn("touch-link", [entry.get("selection") for entry in manifest["selected"]])
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+    def test_pending_turn_files_seed_links_before_the_task_exists(self) -> None:
+        self.fillers()
+        self.track(self.SHARED)
+        subprocess.run(["git", "-C", str(self.repository), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-q", "-m", "base"], check=True, capture_output=True)
+        self.task("TASK-OTHER", "Vermilion ledger migration.", self.SHARED, next_step="Check the rounding.")
+        (self.repository / self.SHARED).write_text("<?php\n// edited\n", encoding="utf-8")
+        turned = self.run_cli("turn", "--task-id", "feature/new-branch")
+        self.assertEqual(0, turned.returncode, turned.stderr)
+        capsule = self.refresh(self.QUERY, "feature/new-branch")["capsule"]
+        self.assertEqual("warming", capsule["kind"])
+        item = self.by_path(capsule).get(self.record_path("TASK-OTHER"))
+        self.assertIsNotNone(item, capsule)
+        self.assertEqual("touch-link", item["selection"])
+
+
+class RelatedItemBudgetTest(RuntimeHarness):
+    """Under the capsule's limits, an item a relation brought in gives its
+    place back before history the query found."""
+
+    def capsule(self) -> dict:
+        return {
+            "working": None, "warnings": [], "procedural": [], "selected": [], "omitted": {},
+            "semantic": [
+                {"path": "specs/direct.md", "layer": "semantic", "title": "Direct", "snippet": "d" * 300},
+                {"path": "project-brain/dynamic/tasks/t.md", "layer": "semantic", "title": "Linked",
+                 "snippet": "l" * 300, "selection": "prompt-link", "via": "app/A.php"},
+            ],
+            "episodic": [{"path": "CHANGELOG.md", "layer": "episodic", "title": "Changelog", "snippet": "c" * 300}],
+        }
+
+    def test_the_json_contract_drops_a_linked_item_before_the_changelog(self) -> None:
+        capsule = self.capsule()
+        capsule["filler"] = "x" * 7000
+        result = context_cli.enforce_governed_capsule_contract(capsule)
+        self.assertEqual(["CHANGELOG.md"], [item["path"] for item in result["episodic"]])
+        self.assertEqual(["specs/direct.md"], [item["path"] for item in result["semantic"]])
+        self.assertEqual(1, result["omitted"]["semantic"])
+
+    def test_the_rendered_text_drops_a_linked_item_before_the_changelog(self) -> None:
+        capsule = self.capsule()
+        # Long enough that leaving frees room for the compaction marker the
+        # drop brings, as well as the 20 characters below.
+        capsule["semantic"][1]["title"] = "Linked " + "l" * 120
+        full, _ = context_cli._render_capsule(capsule, {})
+        size = sum(len(line) + 1 for line in full)
+        # Room for all but one entry: the linked one leaves, history stays.
+        with mock.patch.object(context_cli, "RENDERED_CAPSULE_LIMIT", size - 20):
+            lines, shown = context_cli._render_capsule(capsule, {})
+        self.assertEqual(["specs/direct.md", "CHANGELOG.md"], [item["path"] for item in shown])
+        self.assertIn(context_cli.COMPACTION_MARKER, lines)
+
+
+class FileLinkSeedTest(RuntimeHarness):
+    def link_table(self, *paths: str):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE document_links(path TEXT, ref_path TEXT, ref_kind TEXT)")
+        connection.executemany("INSERT INTO document_links VALUES ('doc.md', ?, 'file')", [(path,) for path in paths])
+        return connection
+
+    def test_prompt_paths_are_extracted_normalised_and_screened(self) -> None:
+        connection = self.link_table("app/Billing/InvoiceTotal.php", "src/Http/Kernel.php", "tests/Unit/FooTest.php")
+        root = self.repository.as_posix()
+        text = (f"see ./app/Billing/InvoiceTotal.php and {root}/src/Http/Kernel.php and tests\\Unit\\FooTest.php "
+                "and/or .env ../x.php node.js FooTest " + "x" * 16384 + " app/Late/Path.php")
+        self.assertEqual(
+            ["app/Billing/InvoiceTotal.php", "src/Http/Kernel.php", "tests/Unit/FooTest.php"],
+            retrieval.prompt_path_seeds(connection, self.repository, text),
+        )
+
+    def test_fqcn_maps_through_psr4_autoload_and_autoload_dev(self) -> None:
+        connection = self.link_table("app/Billing/InvoiceTotal.php", "extra/Money.php", "tests/Unit/FooTest.php")
+        self.repository.joinpath("composer.json").write_text(json.dumps({
+            "autoload": {"psr-4": {"App\\": "app/", "Acme\\Lib\\": ["lib/", "./extra/"]}},
+            "autoload-dev": {"psr-4": {"Tests\\": "tests/"}},
+        }), encoding="utf-8")
+        text = "\\App\\Billing\\InvoiceTotal::total() and Acme\\\\Lib\\\\Money and Tests\\Unit\\FooTest"
+        self.assertEqual(
+            ["app/Billing/InvoiceTotal.php", "extra/Money.php", "tests/Unit/FooTest.php"],
+            retrieval.prompt_path_seeds(connection, self.repository, text),
+        )
+        self.repository.joinpath("composer.json").unlink()
+        self.assertEqual(["app/Billing/InvoiceTotal.php"],
+                         retrieval.prompt_path_seeds(connection, self.repository, "App\\Billing\\InvoiceTotal"))
+
+    def test_insert_automatic_links_lands_after_the_last_covered_semantic_match(self) -> None:
+        def item(path, match="covered", category="evidence", layer="semantic", **extra):
+            return {"path": path, "match": match, "category": category, "layer": layer, **extra}
+        filtered = [item("skill", category="policy", layer="procedural"), item("A"), item("B", "distinctive"),
+                    item("C"), item("x", "distinctive"), item("E", layer="episodic")]
+        linked = [item("L", None), item("x", None)]
+        self.assertEqual(["skill", "A", "B", "C", "L", "x", "E"],
+                         [entry["path"] for entry in retrieval._insert_automatic_links(filtered, linked)])
+        self.assertEqual(["L", "B"], [entry["path"] for entry in retrieval._insert_automatic_links(
+            [item("B", "distinctive")], [item("L", None)])])
+        self.assertEqual(["P", "L", "B"], [entry["path"] for entry in retrieval._insert_automatic_links(
+            [item("P", None, selection="path-link"), item("B", "distinctive")], [item("L", None)])])
+
+    def test_file_link_problem_rejects_state_build_lock_and_sensitive_paths(self) -> None:
+        for path in ("app/A.php", "src/Kernel.php", ".claude/skills/x/SKILL.md"):
+            with self.subTest(path=path):
+                self.assertIsNone(retrieval._file_link_problem(path))
+        token = "ghp_" + "A" * 36
+        for path in ("var/log/a", "public/build/m.json", "composer.lock", "memory-bank/INDEX.md",
+                     "project-brain/config/runtime.json", "docs/", ".env.local", "a/../b", "/abs", "a\\b",
+                     "storage/logs/x.log", "node_modules/x.js", f"src/{token}.php"):
+            with self.subTest(path=path):
+                self.assertIsNotNone(retrieval._file_link_problem(path))
+
+
+class CapsuleNoiseTest(RuntimeHarness):
+    def capsule(self, query: str) -> dict:
+        result = self.run_cli("refresh", "--query", query, "--task-id", "TASK-NOISE",
+                              "--host", "codex", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)["capsule"]
+
+    def test_render_delivers_the_filtered_excerpt_and_preserves_source_warning(self) -> None:
+        capsule = {"working": None, "warnings": [], "procedural": [], "episodic": [],
+                   "semantic": [{"path": "specs/cobalt.md", "title": "Cobalt",
+                                 "snippet": "The cobalt allocation requires one owner.",
+                                 "source_changed": ["src/Guard.php"]}]}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            context_cli.print_capsule(capsule, {
+                "specs/cobalt.md": "The cobalt allocation requires one owner; ask person@example.test."})
+        self.assertTrue(output.getvalue().startswith("working:"))
+        self.assertIn("allocation requires one owner", output.getvalue())
+        # The excerpt is document text on its way into a prompt: screened too.
+        self.assertNotIn("person@example.test", output.getvalue())
+        self.assertIn("cited file changed", output.getvalue())
+
+    def test_excerpt_preserves_array_syntax_from_the_source(self) -> None:
+        self.repository.joinpath("specs/array.md").write_text(
+            "# Allocation\n\nCobalt values[owner] must exist before allocation.\n")
+        result = self.run_cli("refresh", "--query", "cobalt values", "--task-id", "TASK-NOISE", "--ephemeral")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("values[owner]", result.stdout)
+
+    def test_render_is_bounded_and_never_publishes_private_excerpt_text(self) -> None:
+        capsule = {"working": {"task_id": "TASK-NOISE", "goal": "Apply cobalt",
+                               "progress": "p" * 2000, "next_steps": ["s" * 2000] * 3,
+                               "files": ["src/" + "f" * 300] * 5}, "warnings": [],
+                   "procedural": [], "episodic": [],
+                   "semantic": [{"path": "specs/cobalt.md", "title": "Cobalt",
+                                 "snippet": "cobalt " * 300 + "person@example.test"}]}
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            context_cli.print_capsule(capsule, {"specs/cobalt.md": capsule["semantic"][0]["snippet"]})
+        self.assertLessEqual(len(output.getvalue()), 3600)
+        self.assertNotIn("person@example.test", output.getvalue())
+        self.assertTrue(output.getvalue().startswith("working: TASK-NOISE"))
+
+    def test_chat_does_not_retrieve_documents_or_history(self) -> None:
+        self.repository.joinpath("specs/chat.md").write_text("# Chat\n\nThanks, looks good.\n")
+        capsule = self.capsule("thanks looks good")
+        self.assertFalse(any(capsule[layer] for layer in context_cli.DOCUMENT_LAYERS), capsule)
+
+    def test_weak_skills_are_omitted_but_an_exact_identifier_survives(self) -> None:
+        skill = self.repository / ".agents/skills/xanthic/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: xanthic\ndescription: xanthic workflows\n---\n# Xanthic\n")
+        self.repository.joinpath("specs/other.md").write_text("# Rollover\n\nRollover is separate.\n")
+        self.repository.joinpath("specs/identifier.md").write_text("# Allocation\n\nCMS768 needs one owner.\n")
+        for number in range(15):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(
+                f"# Filler {number}\n\nOrdinary records.\n")
+        self.assertEqual([], self.capsule("xanthic rollover")["procedural"])
+        capsule = self.capsule("CMS768 rollover")
+        self.assertIn("specs/identifier.md", [item["path"] for item in capsule["semantic"]])
+
+    def test_weak_incidental_word_is_not_evidence_of_the_requested_topic(self) -> None:
+        self.repository.joinpath("specs/unrelated.md").write_text("# Allocation\n\nMentions xanthic.\n")
+        self.repository.joinpath("specs/other.md").write_text("# Rollover\n\nRollover is separate.\n")
+        for number in range(15):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(f"# Filler {number}\n\nOrdinary records.\n")
+        capsule = self.capsule("xanthic rollover")
+        self.assertNotIn("specs/unrelated.md", [item["path"] for item in capsule["semantic"]])
+
+    def test_lightweight_task_query_does_not_restore_a_weak_skill(self) -> None:
+        skill = self.repository / ".agents/skills/xanthic/SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("---\nname: xanthic\ndescription: xanthic workflows\n---\n# Xanthic\n")
+        self.repository.joinpath("specs/rollover.md").write_text("# Rollover\n\nRollover is separate.\n")
+        for number in range(15):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(f"# Filler {number}\n\nOrdinary records.\n")
+        started = self.run_cli("--mode", "lightweight", "start", "--task-id", "TASK-LITE",
+                               "--goal", "xanthic rollover")
+        self.assertEqual(0, started.returncode, started.stderr)
+        result = self.run_cli("--mode", "lightweight", "context", "cobalt",
+                              "--task-id", "TASK-LITE", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], json.loads(result.stdout)["procedural"])
+
+    def test_lightweight_acknowledgement_keeps_state_without_goal_fallback_retrieval(self) -> None:
+        started = self.run_cli("--mode", "lightweight", "start", "--task-id", "TASK-LITE",
+                               "--goal", "cobalt authority")
+        self.assertEqual(0, started.returncode, started.stderr)
+        result = self.run_cli("--mode", "lightweight", "context", "thanks looks good",
+                              "--task-id", "TASK-LITE", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        capsule = json.loads(result.stdout)
+        self.assertEqual("cobalt authority", capsule["working"]["goal"])
+        self.assertFalse(any(capsule[layer] for layer in context_cli.DOCUMENT_LAYERS), capsule)
+
+    def test_no_skill_is_delivered_and_one_is_recorded_as_the_pick(self) -> None:
+        # Hosts list skills themselves and agents took none a capsule named:
+        # the capsule carries none, and the manifest names the one pick.
+        for name in ("first", "second"):
+            skill = self.repository / f".agents/skills/{name}/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text(f"---\nname: {name}\ndescription: cobalt allocation\n---\n# {name}\n\ncobalt allocation\n")
+        capsule = self.capsule("cobalt allocation")
+        self.assertEqual([], capsule["procedural"])
+        manifest = json.loads((self.repository / capsule["manifest"]).read_text(encoding="utf-8"))
+        picks = [entry["path"] for entry in manifest["excluded"] if entry["reason"] == "host-listed"]
+        self.assertEqual(1, len(picks))
+        self.assertTrue(picks[0].startswith(".agents/skills/"))
+
+    def test_relative_floor_is_per_layer_and_keeps_the_best_memory(self) -> None:
+        rows = []
+        for path, layer, title, repetitions in (
+            (".agents/skills/strong/SKILL.md", "procedural", "Cobalt allocation", 1),
+            ("specs/best.md", "semantic", "Cobalt allocation", 1),
+            ("specs/tail.md", "semantic", "Unrelated", 400)):
+            content = "cobalt allocation " + "ordinary material " * repetitions
+            source = self.repository / path
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(content)
+            rows.append((path, layer, "skill" if layer == "procedural" else "spec", title, title, content))
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            retrieval.index_documents(connection, self.repository, rows)
+            candidates, _ = retrieval._candidates(connection, "cobalt allocation")
+        finally:
+            connection.close()
+        paths = {item["path"] for item in candidates}
+        self.assertIn("specs/best.md", paths)
+        self.assertNotIn("specs/tail.md", paths)
+
+    def test_next_question_receives_a_different_excerpt_from_the_same_file(self) -> None:
+        self.repository.joinpath("specs/allocation.md").write_text(
+            "# Allocation\n\nCobalt allocation requires one owner.\n\n"
+            + "Ordinary background. " * 200
+            + "\n\nRelease requires the dragonfly token.\n")
+        first = self.run_cli("refresh", "--query", "cobalt allocation", "--task-id", "TASK-NOISE",
+                             "--ephemeral")
+        second = self.run_cli("refresh", "--query", "dragonfly release", "--task-id", "TASK-NOISE",
+                              "--ephemeral")
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertIn("allocation requires one owner", first.stdout)
+        self.assertIn("Release requires the dragonfly token", second.stdout)
+
+    def test_automatic_query_sanitization_keeps_the_technical_subject(self) -> None:
+        safe = context_cli.sanitize_automatic_query(
+            "Fix CMS768 allocation for person@example.test, call +370 600 12345; Customer id: 10492")
+        self.assertIn("CMS768 allocation", safe)
+        for private in ("person@example.test", "12345", "10492"):
+            self.assertNotIn(private, safe)
+        for private_only in ("person@example.test", "Customer email: person@example.test",
+                             "Call +370 600 12345", "Patient name: Alice Smith",
+                             "Client address: Main Street 7, Vilnius",
+                             "Client address: Main Street 7\nVilnius",
+                             "Patient name: Alice; Smith; Fix CMS768",
+                             "Client address: Building A; Vilnius; Fix CMS768"):
+            self.assertEqual("", context_cli.sanitize_automatic_query(private_only))
+        self.assertIn("CMS768 allocation", context_cli.sanitize_automatic_query(
+            "Fix CMS768 allocation; Patient name: Alice; Smith"))
+        # A secret is cut out rather than costing the turn its memory; a prompt
+        # that was nothing else leaves nothing to search. A transcript role
+        # prefix goes and the words after it stay, and a private key goes
+        # with its body, not only its header line.
+        self.assertEqual("", context_cli.sanitize_automatic_query("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"))
+        self.assertEqual("copied request", context_cli.sanitize_automatic_query("User: copied request"))
+        self.assertEqual("why does deploy fail", context_cli.sanitize_automatic_query(
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\nwhy does deploy fail"))
+        self.assertEqual("", context_cli.sanitize_automatic_query(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjE truncated without its footer"))
+        # A quoted value goes whole, whatever the quote, and an unclosed one
+        # to the end of its line: the space inside it is not its end.
+        for quote in ("'", '"', "`"):
+            cleaned = context_cli.sanitize_automatic_query(
+                f"Fix deploy password={quote}alpha beta gamma{quote} after migration")
+            self.assertEqual("Fix deploy   after migration", cleaned)
+        self.assertEqual("next line stays", context_cli.sanitize_automatic_query(
+            "api_key: 'alpha beta\nnext line stays"))
+        # An HTTP credential goes whatever shape its token takes; a
+        # placeholder in documentation is not one.
+        token = "Zx81Kq0vLm2Np3Qr4St5Uv6Wx7"
+        self.assertEqual("curl fails with   on /orders", context_cli.sanitize_automatic_query(
+            f"curl fails with Authorization: Bearer {token} on /orders"))
+        self.assertEqual("use   for the deploy", context_cli.sanitize_automatic_query(f"use bearer {token} for the deploy"))
+        self.assertEqual("is rejected", context_cli.sanitize_automatic_query(
+            "Authorization: Basic dXNlcjpwYXNzMTIz is rejected"))
+        for placeholder in ("Authorization: Bearer YOUR_API_TOKEN", "Authorization: Bearer <token>",
+                            "Authorization: Bearer $TOKEN", "Bearer authentication for the API"):
+            self.assertEqual(placeholder, context_cli.sanitize_automatic_query(placeholder))
+
+
+class SkillSubfileSlotTest(RuntimeHarness):
+    """A skill's sub-file never holds the procedural slot, and does not hand
+    it to a weaker skill; `search` still finds it."""
+
+    QUERY = "reconcile the cobalt allocation ledger"
+    SKILL = ".agents/skills/alpha/SKILL.md"
+    SUBFILE = ".agents/skills/beta/references/cobalt-ledger.md"
+
+    def corpus(self, subfile: str = SUBFILE, strong_skill: bool = False) -> None:
+        skill = self.repository / self.SKILL
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        description = "cobalt allocation ledger" if strong_skill else "ledger reconciliation workflow"
+        skill.write_text(
+            f"---\nname: alpha\ndescription: {description}\n---\n\n"
+            f"# {'Cobalt allocation ledger' if strong_skill else 'Alpha'}\n\n"
+            "Reconcile entries; a cobalt allocation is checked once.\n",
+            encoding="utf-8",
+        )
+        target = self.repository / subfile
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            ("# Note\n\nA ledger note.\n" if strong_skill else
+             "# Cobalt allocation ledger\n\nThe cobalt allocation ledger lists every cobalt "
+             "allocation; reconcile the cobalt allocation ledger nightly.\n"),
+            encoding="utf-8",
+        )
+        for number in range(15):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(
+                f"# Filler {number}\n\nUnrelated filler paragraph number {number} about tooling.\n",
+                encoding="utf-8",
+            )
+
+    def refresh(self) -> tuple[dict, dict]:
+        result = self.run_cli("refresh", "--query", self.QUERY, "--task-id", "TASK-SUB",
+                              "--ephemeral", "--gate", "off", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        manifest = json.loads((self.repository / payload["capsule"]["manifest"]).read_text(encoding="utf-8"))
+        return payload, manifest
+
+    def test_a_skill_subfile_never_holds_the_procedural_slot_and_is_not_refilled(self) -> None:
+        self.corpus()
+        self.assertEqual(0, self.run_cli("index").returncode)
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            candidates, _ = retrieval._candidates(connection, self.QUERY, 30)
+        finally:
+            connection.close()
+        ranked = [item["path"] for item in candidates if item["category"] == "policy"]
+        self.assertEqual([self.SUBFILE, self.SKILL], ranked[:2])
+        payload, manifest = self.refresh()
+        capsule = payload["capsule"]
+        self.assertEqual([], capsule["procedural"])
+        for layer in ("semantic", "episodic"):
+            self.assertNotIn(self.SUBFILE, [item.get("path") for item in capsule[layer]])
+        self.assertIn({"path": self.SUBFILE, "reason": "skill-subfile"}, manifest["excluded"])
+        self.assertIn({"path": self.SKILL, "reason": "layer-limit"}, manifest["excluded"])
+        self.assertNotIn(self.SUBFILE, payload["capsule_text"])
+        found = self.run_cli("search", "cobalt allocation ledger", "--layer", "procedural", "--json")
+        self.assertEqual(0, found.returncode, found.stderr)
+        self.assertIn(self.SUBFILE, found.stdout)
+
+    def test_every_non_entry_file_of_a_skills_tree_is_a_subfile(self) -> None:
+        for subfile in (
+            ".agents/skills/beta/agents/cobalt-ledger.md",
+            ".agents/skills/beta/rules/cobalt-ledger.md",
+            ".agents/skills/beta/AGENTS.md",
+            ".agents/skills/SKILL FLOW.md",
+        ):
+            with self.subTest(subfile=subfile):
+                self.tearDown()
+                self.setUp()
+                self.corpus(subfile)
+                payload, manifest = self.refresh()
+                self.assertEqual([], payload["capsule"]["procedural"])
+                self.assertIn({"path": subfile, "reason": "skill-subfile"}, manifest["excluded"])
+
+    def test_a_skill_entry_file_is_still_the_recorded_pick(self) -> None:
+        self.corpus(strong_skill=True)
+        payload, manifest = self.refresh()
+        self.assertEqual([], payload["capsule"]["procedural"])
+        self.assertIn({"path": self.SKILL, "reason": "host-listed"}, manifest["excluded"])
+        self.assertNotIn("skill-subfile", [entry["reason"] for entry in manifest["excluded"]])
+
+    def test_lightweight_capsule_applies_the_same_rule(self) -> None:
+        self.corpus()
+        started = self.run_cli("--mode", "lightweight", "start", "--task-id", "TASK-LITE", "--goal", "ledger")
+        self.assertEqual(0, started.returncode, started.stderr)
+        result = self.run_cli("--mode", "lightweight", "context", self.QUERY, "--task-id", "TASK-LITE", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        capsule = json.loads(result.stdout)
+        capsule = capsule.get("capsule", capsule)
+        self.assertEqual([], capsule["procedural"])
+        for layer in ("semantic", "episodic"):
+            self.assertNotIn(self.SUBFILE, [item.get("path") for item in capsule[layer]])
+
+    def test_procedural_slot_eligibility(self) -> None:
+        for kind, path in (
+            ("policy", "AGENTS.md"), ("policy", "CLAUDE.md"),
+            ("skill", ".agents/skills/review/SKILL.md"),
+            ("skill", "/home/u/clone/PHP Core/.agents/skills/review/SKILL.md"),
+            ("skill", ".codex/skills/group/nested/SKILL.md"),
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(retrieval.procedural_slot_eligible(kind, path))
+        for path in (
+            ".agents/skills/review/references/guide.md", ".agents/skills/review/AGENTS.md",
+            ".agents/skills/SKILL FLOW.md", ".agents/skills/review/skill.md",
+            ".agents/skills/SKILL.md", "/home/u/clone/PHP Core/.claude/skills/SKILL.md",
+            ".agents/skills/review/references/SKILL.md.md",
+        ):
+            with self.subTest(path=path):
+                self.assertFalse(retrieval.procedural_slot_eligible("skill", path))
+
+
+class SecretMaskingDeliveryTest(RuntimeHarness):
+    """A document with a detected credential is delivered with the value
+    masked, fresh, and the value reaches no output."""
+
+    README = (
+        "# Shop\n\n## Local mail\n\nOutgoing mail in development goes to the heron catcher; "
+        "open the heron inbox on port 8025.\n\n```yaml\nmailer:\n  password: quokka\n```\n"
+    )
+
+    def test_a_masked_readme_is_delivered_fresh_and_its_value_never_leaves(self) -> None:
+        readme = self.repository / "README.md"
+        readme.write_text(self.README, encoding="utf-8")
+        outputs = []
+        for _ in range(2):  # the second refresh takes the retained-cache path
+            result = self.run_cli("refresh", "--query", "where does heron catcher mail go",
+                                  "--task-id", "TASK-MASK", "--host", "codex", "--ephemeral", "--json")
+            self.assertEqual(0, result.returncode, result.stderr)
+            outputs.append(result.stdout)
+            capsule = json.loads(result.stdout)["capsule"]
+            self.assertIn("README.md", [item["path"] for item in capsule["semantic"]])
+        self.start()
+        pulled = self.run_cli("retrieve", "heron catcher mailer", "--task-id", "TASK-1", "--json")
+        self.assertEqual(0, pulled.returncode, pulled.stderr)
+        outputs.append(pulled.stdout)
+        self.assertIn("README.md", pulled.stdout)
+        self.assertTrue(all("quokka" not in output for output in outputs))
+        for directory in ("memory-bank/local/retrieval-manifests", "project-brain/control/retrieval-manifests"):
+            for manifest in (self.repository / directory).glob("*.json"):
+                excluded = json.loads(manifest.read_text(encoding="utf-8"))["excluded"]
+                self.assertNotIn({"path": "README.md", "reason": "stale"}, excluded)
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            stored = connection.execute(
+                "SELECT source_hash FROM document_metadata WHERE path = 'README.md'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(hashlib.sha256(readme.read_text(encoding="utf-8").encode("utf-8")).hexdigest(), stored)
 
 
 class AutomaticWorkingMemoryTest(RuntimeHarness):
@@ -4508,17 +6593,56 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ),
         )
 
-    def test_refresh_still_updates_layers_when_the_capsule_is_unavailable(self) -> None:
+    def test_refresh_retrieves_before_the_branch_task_exists(self) -> None:
+        """A read-only session, and the first turns of every branch, have no
+        governed task yet. The capsule used to be a bare warning then; it now
+        carries the retrieval layers and no working state."""
         result = self.run_cli(
-            "refresh", "--query", "cobalt", "--task-id", "TASK-ABSENT", "--json"
+            "refresh", "--query", "cobalt authority", "--task-id", "TASK-ABSENT",
+            "--ephemeral", "--json",
         )
         self.assertEqual(0, result.returncode, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual("updated", report["semantic"])
-        self.assertIsNone(report["capsule"])
-        self.assertTrue(
+        capsule = report["capsule"]
+        self.assertIsNotNone(capsule, report["warnings"])
+        self.assertIsNone(capsule["working"])
+        self.assertEqual("warming", capsule["kind"])
+        self.assertIn(
+            "specs/authority.md",
+            [item["path"] for item in capsule["semantic"]],
+        )
+        self.assertFalse(
             any("Capsule unavailable" in item for item in report["warnings"]),
             report["warnings"],
+        )
+        # No governed history is written for a task that does not exist.
+        governed = self.repository / "project-brain" / "control" / "retrieval-manifests"
+        self.assertEqual([], sorted(governed.glob("*.json")) if governed.is_dir() else [])
+
+    def test_unprovisioned_capsule_renders_its_state(self) -> None:
+        result = self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "TASK-ABSENT",
+            "--ephemeral",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("working: not recorded yet", result.stdout)
+
+    def test_explicit_retrieve_still_requires_the_task(self) -> None:
+        result = self.run_cli("retrieve", "cobalt", "--task-id", "TASK-ABSENT")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Working task not found", result.stderr)
+
+    def test_subagent_completion_provisions_the_branch_task(self) -> None:
+        result = self.run_cli(
+            "msg-dispatch", "--task-id", "feature/new-branch",
+            "--agent", "coder-agent", "--event", "complete",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        listed = self.run_cli("msg-read", "--task-id", "feature/new-branch", "--json")
+        self.assertEqual(0, listed.returncode, listed.stderr)
+        self.assertEqual(
+            ["completion"], [message["type"] for message in json.loads(listed.stdout)]
         )
 
     def test_refresh_reports_failed_layers_instead_of_silently_serving_stale(
@@ -4700,7 +6824,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ("semantic", "codebase", "docs/*.md"),
         )
         with mock.patch.object(context_cli, "SOURCE_PATTERNS", overlapping):
-            documents, _, state, _ = context_cli.discover_documents(self.repository)
+            documents, _, state, _, _ = context_cli.discover_documents(self.repository)
 
         paths = [row[0] for row in documents]
         self.assertEqual(len(paths), len(set(paths)))
@@ -4838,6 +6962,7 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ("implementing", "implementation"),
             ("execution", "implementation"),
             ("review", "verification"),
+            ("quality", "verification"),
         )
         for index, (supplied, canonical) in enumerate(cases):
             task_id = f"TASK-PHASE-{index}"
@@ -5158,6 +7283,96 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.git("commit", "-qm", "init")
         self.git("branch", "-M", "main")
 
+    def commit(self, name: str, subject: str) -> None:
+        self.repository.joinpath(name).write_text(f"{subject}\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", subject)
+
+    def checkpoint_of(self, task_id: str) -> str:
+        return json.loads(
+            self.run_cli("get", "--task-id", task_id, "--json").stdout
+        )["auto_checkpoint"]
+
+    def test_a_checkpoint_names_the_branch_commits(self) -> None:
+        # Paths said where the work happened; nothing said what it was, though
+        # every commit already carried a person's one-line summary of it.
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/export")
+        self.commit("exporter.txt", "Add the invoice exporter")
+        self.commit("controller.txt", "Wire the export controller")
+        self.git("checkout", "-q", "main")
+        self.commit("main.txt", "Main moved on")
+        self.git("checkout", "-q", "feature/export")
+        self.git("merge", "-q", "--no-ff", "main", "-m", "Merge main into the branch")
+        self.repository.joinpath("pending.txt").write_text("x\n", encoding="utf-8")
+
+        result = self.run_cli("turn", "--task-id", "feature/export", "--flush", "--json")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        checkpoint = self.checkpoint_of("feature/export")
+        self.assertTrue(checkpoint.startswith("Auto-checkpoint: 1 turn(s)"), checkpoint)
+        self.assertIn(
+            "Branch commits, newest first: Wire the export controller; "
+            "Add the invoice exporter.",
+            checkpoint,
+        )
+        # The branch's own story: no merges, nothing the default branch did.
+        self.assertNotIn("Merge main", checkpoint)
+        self.assertNotIn("Main moved on", checkpoint)
+
+    def test_a_turn_that_ends_in_a_commit_still_counts(self) -> None:
+        # A clean tree used to read as a turn with nothing in it, so the most
+        # finished work - committed work - never reached the checkpoint.
+        self.repository.joinpath(".gitignore").write_text(
+            "memory-bank/local/\n", encoding="utf-8"
+        )
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/clean")
+        visit = json.loads(
+            self.run_cli("turn", "--task-id", "feature/clean", "--json").stdout
+        )
+        # Visiting a branch still mints nothing.
+        self.assertIsNone(visit["delta_id"])
+        self.commit("work.txt", "Finish the clean-tree change")
+
+        result = json.loads(
+            self.run_cli("turn", "--task-id", "feature/clean", "--flush", "--json").stdout
+        )
+
+        self.assertTrue(result["flushed"], result)
+        self.assertEqual(0, result["files"])
+        self.assertIn("Finish the clean-tree change", self.checkpoint_of("feature/clean"))
+        # An unchanged HEAD on a clean tree is still nothing.
+        again = json.loads(
+            self.run_cli("turn", "--task-id", "feature/clean", "--json").stdout
+        )
+        self.assertIsNone(again["delta_id"])
+
+    def test_a_checkpoint_leaves_out_subjects_a_privacy_gate_refuses(self) -> None:
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/gated")
+        self.commit("one.txt", "Add the ledger")
+        self.commit("two.txt", "Ping alice@example.com about totals")
+        self.commit("three.txt", "Set password=hunter2hunter2 for staging")
+        self.repository.joinpath("pending.txt").write_text("x\n", encoding="utf-8")
+
+        result = self.run_cli("turn", "--task-id", "feature/gated", "--flush", "--json")
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        checkpoint = self.checkpoint_of("feature/gated")
+        self.assertIn("Branch commits, newest first: Add the ledger (+2 more).", checkpoint)
+        self.assertNotIn("example.com", checkpoint)
+        self.assertNotIn("hunter2", checkpoint)
+
+    def test_work_on_the_default_branch_lists_no_branch_commits(self) -> None:
+        self.commit_main()
+        self.commit("main.txt", "Direct work on main")
+        self.repository.joinpath("pending.txt").write_text("x\n", encoding="utf-8")
+
+        self.run_cli("turn", "--task-id", "main", "--flush", "--json")
+
+        self.assertNotIn("Branch commits", self.checkpoint_of("main"))
+
     def test_turn_reports_merge_candidate_without_completing_task(self) -> None:
         self.enable_automation(automatic_completion=True)
         self.commit_main()
@@ -5449,9 +7664,31 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         return str(record["id"])
 
-    def test_turn_promotes_resolved_verified_knowledge_without_review(self) -> None:
-        self.enable_automatic_promotion()
+    def test_promote_auto_runs_automatic_promotion_without_a_turn(self) -> None:
+        # Knowledge recorded deliberately, as a reviewed Harness session does,
+        # should not wait for the turn counter to reach its boundary.
         record_id = self.accepted_decision()
+        off = self.run_cli("promote-auto", "--json")
+        self.assertEqual(0, off.returncode, off.stderr)
+        self.assertEqual((False, []), (json.loads(off.stdout)["enabled"], json.loads(off.stdout)["promoted"]))
+
+        self.enable_automatic_promotion()
+        result = json.loads(self.run_cli("promote-auto", "--json").stdout)
+
+        self.assertEqual([record_id], [item["record_id"] for item in result["promoted"]])
+        chunk = next((self.repository / "memory-bank/chunks").glob(
+            f"{result['promoted'][0]['memory_id']}-*.md"
+        ))
+        self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+        # Once is enough: the record is bound to its promotion now.
+        self.assertEqual([], json.loads(self.run_cli("promote-auto", "--json").stdout)["promoted"])
+
+    def test_turn_promotes_resolved_verified_knowledge_without_review(self) -> None:
+        # Resolved while promotion was off, so the turn boundary is what
+        # promotes it - the path every record written before promotion was
+        # switched on, or through the runtime API, still takes.
+        record_id = self.accepted_decision()
+        self.enable_automatic_promotion()
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
 
         result = self.run_cli("turn", "--task-id", "feature/auto", "--flush", "--json")
@@ -5467,6 +7704,131 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         # The bank itself must show which knowledge no human approved.
         self.assertIn("auto-promoted", chunk.read_text(encoding="utf-8"))
+
+    def test_turns_after_the_branch_task_closed_do_not_jam_the_boundary(self) -> None:
+        # Work on a branch went on after its task was completed. Every flush
+        # tried to reattach the closed task and failed, so the buffer grew and
+        # the promotion riding on the boundary never ran again.
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        first = json.loads(
+            self.run_cli("turn", "--task-id", "feature/closed", "--flush", "--json").stdout
+        )
+        self.assertTrue(first["provisioned"])
+        current = json.loads(
+            self.run_cli("get", "--task-id", "feature/closed", "--json").stdout
+        )
+        done = self.run_cli(
+            "complete", "--task-id", "feature/closed",
+            "--revision", str(current["revision"]), "--outcome", "Done.",
+            "--verification", "checked by hand", "--source", "specs/authority.md",
+            "--json",
+        )
+        self.assertEqual(0, done.returncode, done.stderr)
+
+        record_id = self.accepted_decision()
+        self.enable_automatic_promotion()
+        self.repository.joinpath("app.txt").write_text("more work\n", encoding="utf-8")
+        after = self.run_cli("turn", "--task-id", "feature/closed", "--flush", "--json")
+        self.assertEqual(0, after.returncode, after.stderr)
+        payload = json.loads(after.stdout)
+        self.assertEqual(current["task_uuid"], payload["closed_task"])
+        self.assertEqual(1, payload["discarded_turns"])
+        self.assertEqual(0, payload["pending"])
+        self.assertEqual([record_id], [item["record_id"] for item in payload["promoted"]])
+
+    def test_the_resolving_update_promotes_at_once(self) -> None:
+        # Waiting for the turn boundary let the fix that resolved a finding
+        # edit the files it cites first, and the record was never promoted.
+        self.enable_automatic_promotion()
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "decision", "--external-id", "TASK-NOW-D1",
+                "--title", "Cobalt rule is canonical",
+                "--source", "specs/authority.md", "--authority", "verified",
+                "--json",
+            ).stdout
+        )
+        accepted = self.run_cli(
+            "brain-update", "--record-id", record["id"], "--revision", "auto",
+            "--progress", "Cobalt applies to every request path, not only reads.",
+            "--transition", "accepted", "--reason", "Accepted", "--json",
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        payload = json.loads(accepted.stdout)
+        self.assertEqual("accepted", payload["status"])
+        promoted = payload["promotion"]["promoted"]
+        self.assertEqual([record["id"]], [item["record_id"] for item in promoted])
+        self.assertTrue(
+            list((self.repository / "memory-bank/chunks").glob(
+                f"{promoted[0]['memory_id']}-*.md"
+            ))
+        )
+        # Nothing is left for the boundary to do.
+        self.assertEqual(
+            [], json.loads(self.run_cli("promote-auto", "--json").stdout)["promoted"]
+        )
+
+    def test_an_update_that_does_not_resolve_promotes_nothing(self) -> None:
+        self.enable_automatic_promotion()
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "finding", "--external-id", "TASK-OPEN-F1",
+                "--title", "Open finding", "--source", "specs/authority.md",
+                "--authority", "verified", "--json",
+            ).stdout
+        )
+        updated = json.loads(
+            self.run_cli(
+                "brain-update", "--record-id", record["id"], "--revision", "auto",
+                "--progress", "Still investigating the cobalt guard.", "--json",
+            ).stdout
+        )
+        self.assertNotIn("promotion", updated)
+        self.assertEqual(
+            [], list((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        )
+
+    def test_knowledge_whose_cited_file_changed_is_promoted_and_marked(self) -> None:
+        # Resolved, then the cited file was edited before promotion ran: the
+        # record used to be blocked for good. It is promoted with the digest
+        # taken when it was verified, and retrieval marks it for checking.
+        record_id = self.accepted_decision()
+        verified_digest = brain.fingerprint(self.repository, "specs/authority.md")
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt rule was rewritten after the decision.\n",
+            encoding="utf-8",
+        )
+        self.enable_automatic_promotion()
+        result = json.loads(self.run_cli("promote-auto", "--json").stdout)
+        self.assertEqual([record_id], [item["record_id"] for item in result["promoted"]])
+        chunk = next((self.repository / "memory-bank/chunks").glob(
+            f"{result['promoted'][0]['memory_id']}-*.md"
+        ))
+        metadata, _ = brain.parse_markdown_record(chunk)
+        self.assertIn(verified_digest, metadata["source_digests"])
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        self.start("TASK-MARKED")
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cobalt request path", "--task-id", "TASK-MARKED",
+                "--ephemeral", "--json",
+            ).stdout
+        )
+        marked = {
+            item["path"]: item.get("source_changed") for item in capsule["selected"]
+        }
+        chunk_path = chunk.relative_to(self.repository).as_posix()
+        self.assertEqual(["specs/authority.md"], marked.get(chunk_path), capsule)
+
+    def test_knowledge_whose_cited_file_is_gone_stays_blocked(self) -> None:
+        self.accepted_decision()
+        self.repository.joinpath("specs/authority.md").unlink()
+        self.enable_automatic_promotion()
+        result = json.loads(self.run_cli("promote-auto", "--json").stdout)
+        self.assertEqual([], result["promoted"])
+        self.assertIn(
+            "cited source changed", " ".join(item["reason"] for item in result["blocked"])
+        )
 
     def test_verified_finding_completes_the_real_memory_journey(self) -> None:
         self.enable_automatic_promotion()
@@ -5511,14 +7873,16 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         self.assertEqual(0, resolved.returncode, resolved.stderr)
         self.assertEqual("resolved", json.loads(resolved.stdout)["status"])
+        # Promoted by the resolving update itself, not at the turn boundary.
+        promoted = json.loads(resolved.stdout)["promotion"]["promoted"]
+        self.assertEqual(1, len(promoted), promoted)
 
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
         flushed = self.run_cli(
             "turn", "--task-id", "TASK-MEMORY-E2E", "--flush", "--json"
         )
         self.assertEqual(0, flushed.returncode, flushed.stderr)
-        promoted = json.loads(flushed.stdout)["promoted"]
-        self.assertEqual(1, len(promoted), promoted)
+        self.assertEqual([], json.loads(flushed.stdout)["promoted"])
         self.assertEqual(finding["id"], promoted[0]["record_id"])
         memory_id = promoted[0]["memory_id"]
         chunk = next(
@@ -6001,12 +8365,14 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         # A resolved finding is both promotable and archivable. Promotion is
         # capped per run, so compaction can reach a record first; an archived
         # record must stay promotable or the knowledge is lost for good.
+        # Resolved before automation was on, so nothing was promoted at
+        # resolution and the capped boundary run has all seven to place.
+        for index in range(7):
+            self.resolved_finding(index)
         self.enable_automation(
             automatic_promotion=True, automatic_compaction=True,
             compaction_threshold=1,
         )
-        for index in range(7):
-            self.resolved_finding(index)
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
 
         first = json.loads(
@@ -6154,6 +8520,91 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         )
         self.assertEqual(2, len(task["files"]))
         self.assertIn("beyond the per-flush limit", task["auto_checkpoint"])
+
+    def test_a_stale_citation_does_not_stop_automatic_compaction(self) -> None:
+        # The hook path: from the first edit to a file any live record cited,
+        # every turn reported "compaction failed" and nothing was archived.
+        self.enable_automation(automatic_compaction=True, compaction_threshold=1)
+        live = self.run_cli(
+            "brain-create", "decision", "--external-id", "DEC-LIVE",
+            "--title", "Cobalt stays canonical", "--source", "specs/authority.md",
+            "--json",
+        )
+        self.assertEqual(0, live.returncode, live.stderr)
+        self.resolved_finding(0)
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rule now covers writes.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+
+        result = json.loads(
+            self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json").stdout
+        )
+
+        self.assertEqual((1, 0), (result["archived"], result["archivable_pending"]))
+        report = json.loads(
+            (self.repository / "memory-bank/local/last-turn-report.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual([], report["compaction_errors"])
+
+    def age_chunk(self, chunk: Path) -> None:
+        """Move a chunk's review date into the past, as a year of use would."""
+        _, frontmatter, body = chunk.read_text(encoding="utf-8").split("---\n", 2)
+        metadata = json.loads(frontmatter)
+        today = datetime.now(timezone.utc).date()
+        verified = (today - timedelta(days=400)).isoformat()
+        metadata.update(
+            created=verified, last_verified=verified,
+            review_after=(today - timedelta(days=35)).isoformat(),
+        )
+        chunk.write_text(
+            "---\n" + json.dumps(metadata, indent=2) + "\n---\n" + body,
+            encoding="utf-8",
+        )
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+
+    def test_an_overdue_chunk_does_not_stop_automatic_promotion(self) -> None:
+        # One chunk reaching its review date failed every later promotion in
+        # the repository - a year after automatic promotion wrote the first.
+        self.enable_automatic_promotion()
+        self.resolved_finding(0)
+        self.age_chunk(next((self.repository / "memory-bank/chunks").glob("MEM-*.md")))
+
+        # Promoted by its own resolving update, past the overdue chunk.
+        self.resolved_finding(1)
+        self.assertEqual(
+            2, len(list((self.repository / "memory-bank/chunks").glob("MEM-*.md")))
+        )
+        self.repository.joinpath("more.txt").write_text("more\n", encoding="utf-8")
+        result = json.loads(
+            self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json").stdout
+        )
+        self.assertEqual([], result["promotion_failed"])
+
+    def test_an_overdue_promoted_chunk_does_not_stop_compaction(self) -> None:
+        # Compaction repoints the citation of a chunk promoted from a record it
+        # archives. The rewrite is mechanical, and the chunk's review date is
+        # not its business.
+        self.enable_automatic_promotion()
+        self.resolved_finding(0)
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json")
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.age_chunk(chunk)
+
+        result = self.run_cli("compact")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("project-brain/archive/finding/", chunk.read_text(encoding="utf-8"))
+        self.assertEqual(
+            1,
+            sum(
+                "overdue for review" in error
+                for error in brain.validate_bank(self.repository / "memory-bank")
+            ),
+        )
 
 
 class LastTurnReportTest(RuntimeHarness):
@@ -6469,19 +8920,22 @@ class MultiMachineContinuityTest(RuntimeHarness):
         self.assertNotEqual(0, result.returncode)
         self.assertIn("completed", result.stderr)
 
-        # The automated flush hits the same wall — and because the Stop hook
-        # discards its output, the failure must reach the report instead.
+        # The automated flush does not reattach it either. It used to fail on
+        # every boundary and keep its buffer, so promotion and compaction never
+        # ran again; the turns after completion are now dropped, and the next
+        # capsule says so.
         self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
         turn = self.run_cli(
             "turn", "--task-id", "feature/finished", "--flush", "--json"
         )
-        self.assertNotEqual(0, turn.returncode)
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        payload = json.loads(turn.stdout)
+        self.assertEqual(task["task_uuid"], payload["closed_task"])
+        self.assertFalse(payload["flushed"])
+        self.assertEqual(0, payload["pending"])
         report = json.loads(self.report_path().read_text(encoding="utf-8"))
-        self.assertIn(task["task_uuid"], report["error"])
-        self.assertIn("completed", report["error"])
         self.assertFalse(report["flushed"])
-        # The raw branch argv stays out of the failure report by design.
-        self.assertNotIn("task_id", report)
+        self.assertEqual(1, report["discarded_turns"])
 
         other = self.start("TASK-WITNESS")
         self.assertTrue(other["task_uuid"])
@@ -6490,7 +8944,7 @@ class MultiMachineContinuityTest(RuntimeHarness):
             "--task-id", "TASK-WITNESS", "--ephemeral",
         )
         self.assertEqual(0, text.returncode, text.stderr)
-        self.assertIn("Last turn: turn failed:", text.stdout)
+        self.assertIn("Last turn: this branch's task is closed", text.stdout)
 
 
 class AutoCheckpointFieldTest(RuntimeHarness):
@@ -6776,6 +9230,181 @@ class ExportBundleTest(RuntimeHarness):
         self.assertIn("authorized owner", readme)
 
 
+class LineEndingFingerprintTest(RuntimeHarness):
+    """A CRLF checkout of the same commit keeps every record fresh."""
+
+    def test_crlf_checkout_of_a_cited_source_stays_fresh(self) -> None:
+        record = brain.create_record(
+            self.repository, "finding", "FIND-CRLF", "Cobalt rule finding",
+            [], ["specs/authority.md"], owner="alice",
+        )
+        source = self.repository / "specs" / "authority.md"
+        source.write_bytes(source.read_bytes().replace(b"\n", b"\r\n"))
+
+        self.assertTrue(brain.sources_are_fresh(self.repository, record))
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+        source.write_bytes(b"# Authority\r\n\r\nA different rule.\r\n")
+        self.assertFalse(brain.sources_are_fresh(self.repository, record))
+
+    def test_lf_digest_is_the_plain_file_digest(self) -> None:
+        source = self.repository / "specs" / "authority.md"
+        self.assertEqual(
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+            brain.fingerprint(self.repository, "specs/authority.md")["sha256"],
+        )
+
+    def test_binary_source_is_digested_as_is(self) -> None:
+        binary = self.repository / "specs" / "logo.bin"
+        binary.write_bytes(b"\x89PNG\0\r\n\x1a\n")
+        self.assertEqual(
+            hashlib.sha256(binary.read_bytes()).hexdigest(),
+            brain.fingerprint(self.repository, "specs/logo.bin")["sha256"],
+        )
+
+
+class SharedTextGuardTest(RuntimeHarness):
+    """Governed writes refuse the secrets and personal data they introduce.
+
+    Records, handoffs and agent messages are Git-tracked and travel into Task
+    Capsules, so the governed path holds the same line the lightweight path
+    already held. A refusal names the kind of data and never the value.
+    """
+
+    TOKEN = "ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    UNSAFE = (
+        ("email", "Fix login for person@example.test", "person@example.test"),
+        ("token", f"Use {TOKEN} for the deploy", "ABCDEFGHIJ"),
+        ("env credential", "Works locally with DB_PASSWORD=SuperS3cret!", "SuperS3cret"),
+        ("phone", "Call the owner at +370 600 12345", "600 12345"),
+    )
+
+    def task(self, external_id: str = "TASK-GUARD") -> dict:
+        return brain.create_task(
+            self.repository,
+            external_id,
+            "Apply the cobalt authority rule.",
+            [],
+            ["specs/authority.md"],
+            owner="alice",
+        )
+
+    def records_on_disk(self) -> list:
+        return sorted(self.repository.glob("project-brain/dynamic/**/*.md"))
+
+    def write_bypassing_guard(self, record: dict) -> None:
+        """A record as one written before the guard existed would look."""
+        brain._write_record(
+            self.repository, record, brain.dynamic_path(self.repository, record)
+        )
+
+    def test_create_refuses_unsafe_goal_and_stores_nothing(self) -> None:
+        for kind, goal, value in self.UNSAFE:
+            with self.subTest(kind=kind):
+                with self.assertRaises(brain.BrainError) as caught:
+                    brain.create_task(
+                        self.repository, "TASK-GUARD", goal, [],
+                        ["specs/authority.md"], owner="alice",
+                    )
+                message = str(caught.exception)
+                self.assertIn("nothing was stored", message)
+                self.assertNotIn(value, message)
+                self.assertEqual([], self.records_on_disk())
+
+    def test_update_refuses_unsafe_text_and_leaves_the_record_unchanged(self) -> None:
+        task = self.task()
+        for kind, text, value in self.UNSAFE:
+            for field in ("progress", "next_steps", "reason"):
+                with self.subTest(kind=kind, field=field):
+                    changes = {
+                        "progress": None, "next_steps": [], "reason": "Task updated",
+                    }
+                    changes[field] = [text] if field == "next_steps" else text
+                    with self.assertRaises(brain.BrainError) as caught:
+                        brain.update_record(
+                            self.repository, task["id"],
+                            expected_revision=task["revision"],
+                            files=[], sources=[], actor="alice", **changes,
+                        )
+                    self.assertNotIn(value, str(caught.exception))
+        stored = brain.get_record(self.repository, task["id"])
+        self.assertEqual(task["revision"], stored["revision"])
+        self.assertEqual("", stored["progress"])
+
+    def test_record_written_before_the_guard_stays_updatable(self) -> None:
+        task = self.task()
+        legacy = brain.get_record(self.repository, task["id"])
+        legacy["progress"] = "Reported by person@example.test"
+        self.write_bypassing_guard(legacy)
+
+        updated = brain.update_record(
+            self.repository, task["id"],
+            expected_revision=legacy["revision"],
+            progress=None, next_steps=["Confirm the cobalt rule."],
+            files=[], sources=[], actor="alice",
+        )
+
+        self.assertEqual(legacy["revision"] + 1, updated["revision"])
+
+    def test_agent_message_refuses_personal_data(self) -> None:
+        task = self.task()
+        with self.assertRaises(brain.BrainError) as caught:
+            brain.append_message(
+                self.repository, task["id"],
+                from_actor="coder", to_actor="orchestrator",
+                message_type="finding", body="Ask person@example.test for access",
+            )
+        self.assertNotIn("person@example.test", str(caught.exception))
+        self.assertFalse(brain.messages_path(self.repository, task["id"]).exists())
+
+    def test_promotion_refuses_a_legacy_record_carrying_personal_data(self) -> None:
+        finding = brain.create_record(
+            self.repository, "finding", "FIND-GUARD",
+            "Cobalt authority finding", [], ["specs/authority.md"], owner="alice",
+        )
+        resolved = self.resolve_verified_finding(finding)
+        config = brain.load_config(self.repository)
+        self.assertIsNone(
+            brain.promotion_eligibility_error(self.repository, resolved, config)
+        )
+        resolved["progress"] = "Verified with person@example.test"
+        self.write_bypassing_guard(resolved)
+
+        self.assertEqual(
+            "record content contains personal data (email address)",
+            brain.promotion_eligibility_error(self.repository, resolved, config),
+        )
+
+    def test_validation_reports_a_stored_secret_without_echoing_it(self) -> None:
+        task = self.task()
+        legacy = brain.get_record(self.repository, task["id"])
+        legacy["progress"] = f"Deploy token {self.TOKEN}"
+        self.write_bypassing_guard(legacy)
+
+        errors = brain.validate_repository(self.repository)
+
+        self.assertTrue(any("possible GitHub token" in error for error in errors), errors)
+        self.assertFalse(any("ABCDEFGHIJ" in error for error in errors))
+
+    def test_validation_does_not_fail_on_legacy_personal_data(self) -> None:
+        task = self.task()
+        legacy = brain.get_record(self.repository, task["id"])
+        legacy["progress"] = "Reported by person@example.test"
+        self.write_bypassing_guard(legacy)
+
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+    def test_governed_cli_start_refuses_personal_data(self) -> None:
+        result = self.run_cli(
+            "--mode", "governed", "start", "--task-id", "TASK-CLI-GUARD",
+            "--goal", "Fix login for person@example.test",
+            "--source", "specs/authority.md",
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("person@example.test", result.stdout + result.stderr)
+        self.assertEqual([], self.records_on_disk())
+
+
 class ShippedRuntimeConfigTest(unittest.TestCase):
     """Assert the config this edition actually ships, not a fixture's rewrite.
 
@@ -6922,6 +9551,1156 @@ class MetadataTelemetryTest(RuntimeHarness):
                         },
                     )
         self.assertEqual([], list(self.repository.glob("**/telemetry/*.json")))
+
+
+
+class ExcerptWindowTest(unittest.TestCase):
+    def test_adjacent_highlights_keep_each_terms_evidence_weight(self) -> None:
+        weights = {"cobalt": 3.0, "escrow": 4.0}
+        self.assertEqual((7.0, 2), retrieval._excerpt_score(["\x02cobalt escrow\x03"], weights))
+        self.assertEqual((7.0, 2), retrieval._excerpt_score(["\x02cobalt\x03 \x02escrow\x03"], weights))
+
+    def test_equal_section_scores_prefer_evidence_in_the_body(self) -> None:
+        text = "# Ledger escrow\n\nBackground notes only.\n\n## Settlement\n\nLedger escrow requires dual approval."
+        excerpt = context_cli.best_excerpt(text, {"ledger", "escrow"}, 120)
+        self.assertIn("requires dual approval", excerpt)
+        self.assertNotIn("Background notes", excerpt)
+
+    def test_a_precise_heading_keeps_priority_over_generic_body_evidence(self) -> None:
+        text = "# \x02SEC4711\x03\n\nUse dual approval.\n\n## Overview\n\n\x02ledger\x03 background notes."
+        section = retrieval.quoted_section(text, weights={"sec4711": 5.0, "ledger": 0.2})
+        self.assertEqual("SEC4711", section["heading"])
+
+    def test_a_long_sentence_quotes_the_strongest_matching_stretch(self) -> None:
+        text = "# Ledger\n\nledger " + "administrative background " * 80 + "cobalt escrow requires dual approval"
+        for limit in (120, 320, 800):
+            with self.subTest(limit=limit):
+                excerpt = context_cli.best_excerpt(text, {"ledger", "cobalt", "escrow"}, limit, "Ledger")
+                self.assertIn("cobalt escrow requires dual approval", excerpt)
+                self.assertLessEqual(len(excerpt), limit)
+
+    def test_window_score_counts_only_evidence_that_fits(self) -> None:
+        huge = "\x02ledger\x03 " + "background " * 25 + "\x02cobalt\x03 " + "background " * 25 + "\x02escrow\x03"
+        answer = "Clearing \x02cobalt\x03 \x02escrow\x03 requires dual approval."
+        excerpt = retrieval.excerpt_window([huge, answer], 120)
+        self.assertIn("requires dual approval", excerpt)
+        self.assertLessEqual(len(excerpt), 120)
+
+
+class DeliveryTest(RuntimeHarness):
+    """What a host actually puts in front of the model on each turn."""
+
+    def enable_automatic_promotion(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(
+            json.dumps({"mode": "governed", "automatic_promotion": True}),
+            encoding="utf-8",
+        )
+
+    def accept_money_decision(self) -> str:
+        self.repository.joinpath("src").mkdir(exist_ok=True)
+        self.repository.joinpath("src/Money.php").write_text(
+            "<?php\nfinal class Money {}\n", encoding="utf-8"
+        )
+        record = json.loads(
+            self.run_cli(
+                "brain-create", "decision", "--external-id", "DEC-MONEY",
+                "--title", "Store money as integer cents",
+                "--source", "src/Money.php", "--authority", "verified", "--json",
+            ).stdout
+        )
+        accepted = self.run_cli(
+            "brain-update", "--record-id", record["id"], "--revision", "auto",
+            "--progress",
+            "Totals and discounts are kept in integer cents; floats never hold "
+            "an amount, and rounding happens only when an amount is displayed.",
+            "--transition", "accepted", "--reason", "Agreed", "--json",
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stderr)
+        return str(record["id"])
+
+    def refresh(self, query: str, *extra: str) -> dict:
+        result = self.run_cli(
+            "refresh", "--query", query, "--task-id", "TASK-DELIVER",
+            "--ephemeral", "--json", *extra,
+        )
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        return json.loads(result.stdout)
+
+    def test_the_capsule_carries_the_answer_not_a_pointer(self) -> None:
+        self.enable_automatic_promotion()
+        record_id = self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        result = self.refresh("order totals rounding discount cents")
+        text = result["capsule_text"]
+        self.assertTrue(text.startswith("working: TASK-DELIVER"), text)
+        self.assertIn("rounding happens only when an amount is displayed", text)
+        # The promoted chunk and the record it came from said the same thing
+        # in two slots; the record yields to its chunk.
+        semantic = [item["path"] for item in result["capsule"]["semantic"]]
+        self.assertEqual(1, sum("store-money-as-integer-cents" in path for path in semantic), semantic)
+        self.assertNotIn(f"project-brain/dynamic/decisions/{record_id}.md", semantic)
+        manifest = json.loads(
+            (self.repository / result["capsule"]["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertIn(
+            {"path": f"project-brain/dynamic/decisions/{record_id}.md",
+             "reason": "promoted-to-chunk"},
+            manifest["excluded"],
+        )
+        self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+
+    def test_a_conversation_is_not_handed_the_same_item_twice(self) -> None:
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        query = "order totals rounding discount cents"
+        first = self.refresh(query, "--session-id", "conversation-1")
+        handed = {item["path"] for item in first["capsule"]["selected"]}
+        self.assertTrue(handed)
+        second = self.refresh(query, "--session-id", "conversation-1")
+        self.assertEqual([], second["capsule"]["selected"])
+        self.assertEqual(len(handed), second["capsule"]["repeated"])
+        self.assertIn("handed earlier in this conversation", second["capsule_text"])
+        # The slots are not refilled with weaker candidates.
+        self.assertNotIn("memory (retrieved", second["capsule_text"])
+        # Another conversation is handed everything.
+        other = self.refresh(query, "--session-id", "conversation-2")
+        self.assertEqual(handed, {item["path"] for item in other["capsule"]["selected"]})
+        # After the novelty window the item comes back: a conversation that
+        # was compacted meanwhile no longer holds it.
+        for _ in range(retrieval.SESSION_NOVELTY_TURNS - 2):
+            self.refresh(query, "--session-id", "conversation-1")
+        again = self.refresh(query, "--session-id", "conversation-1")
+        self.assertEqual(handed, {item["path"] for item in again["capsule"]["selected"]})
+
+    def test_enforce_hands_another_conversation_what_it_was_never_handed(self) -> None:
+        # The gate's repeat baseline is the task's, not the conversation's:
+        # a second conversation asking the same thing was a "repeat" of the
+        # first and enforce withheld its whole capsule, although nothing had
+        # been handed to it. What a conversation holds is its own record's
+        # call, and a repeat inside one conversation is still left out.
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        query = "order totals rounding discount cents"
+        first = self.refresh(query, "--session-id", "conversation-1", "--gate", "enforce")
+        handed = {item["path"] for item in first["capsule"]["selected"]}
+        self.assertTrue(handed, first["capsule"])
+        other = self.refresh(query, "--session-id", "conversation-2", "--gate", "enforce")
+        self.assertEqual("retrieve", other["capsule"]["gate"]["decision"], other["capsule"]["gate"])
+        self.assertEqual(handed, {item["path"] for item in other["capsule"]["selected"]})
+        self.assertIn("rounding happens only when an amount is displayed", other["capsule_text"])
+        again = self.refresh(query, "--session-id", "conversation-1", "--gate", "enforce")
+        self.assertEqual("skip", again["capsule"]["gate"]["decision"], again["capsule"]["gate"])
+        self.assertEqual([], again["capsule"]["selected"])
+        self.assertEqual(len(handed), again["capsule"]["repeated"])
+        # A caller with no conversation keeps the task's baseline.
+        self.refresh(query, "--gate", "enforce")
+        alone = self.refresh(query, "--gate", "enforce")
+        self.assertEqual("repeat-retrieval", alone["capsule"]["gate"]["reason"], alone["capsule"]["gate"])
+        self.assertEqual([], alone["capsule"]["selected"])
+
+    def test_enforce_hands_back_what_the_conversation_no_longer_holds(self) -> None:
+        # Past the novelty window, or after a compaction, the conversation's
+        # record hands an item again; the gate saw the selection of a turn
+        # that had delivered it and withheld it on that turn and every later
+        # one, since a withheld turn records nothing as handed.
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        query = "order totals rounding discount cents"
+        first = self.refresh(query, "--session-id", "c-novelty", "--gate", "enforce")
+        handed = {item["path"] for item in first["capsule"]["selected"]}
+        self.assertTrue(handed, first["capsule"])
+        for _ in range(retrieval.SESSION_NOVELTY_TURNS - 1):
+            held = self.refresh(query, "--session-id", "c-novelty", "--gate", "enforce")
+            self.assertEqual([], held["capsule"]["selected"])
+        again = self.refresh(query, "--session-id", "c-novelty", "--gate", "enforce")
+        self.assertEqual("retrieve", again["capsule"]["gate"]["decision"], again["capsule"]["gate"])
+        self.assertEqual(handed, {item["path"] for item in again["capsule"]["selected"]})
+
+        folder = tempfile.TemporaryDirectory(prefix="transcript-")
+        self.addCleanup(folder.cleanup)
+        transcript = Path(folder.name) / "transcript.jsonl"
+        transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+        conversation = ("--session-id", "c-compact", "--transcript", str(transcript), "--gate", "enforce")
+        self.assertTrue(self.refresh(query, *conversation)["capsule"]["selected"])
+        with transcript.open("a", encoding="utf-8") as handle:
+            handle.write('{"type":"system","subtype":"compact_boundary"}\n')
+        compacted = self.refresh(query, *conversation)
+        self.assertEqual("retrieve", compacted["capsule"]["gate"]["decision"], compacted["capsule"]["gate"])
+        self.assertEqual(handed, {item["path"] for item in compacted["capsule"]["selected"]})
+        self.assertIn("rounding happens only when an amount is displayed", compacted["capsule_text"])
+
+    def test_the_structured_capsule_quotes_what_the_text_quotes(self) -> None:
+        # The JSON capsule's snippet was FTS snippet() over the whole file, so
+        # a promoted chunk carried its frontmatter where the rendered capsule
+        # quoted the decision, and its token estimate counted the JSON keys.
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        result = self.refresh("order totals rounding discount cents")
+        chunk = next(
+            item for item in result["capsule"]["semantic"]
+            if "store-money-as-integer-cents" in item["path"]
+        )
+        self.assertEqual(
+            "Totals and discounts are kept in integer cents; floats never hold an "
+            "amount, and rounding happens only when an amount is displayed.",
+            chunk["snippet"],
+        )
+        self.assertIn(chunk["snippet"], result["capsule_text"])
+        self.assertEqual(
+            retrieval._estimate_tokens(chunk["title"] + chunk["snippet"]),
+            chunk["estimated_tokens"],
+        )
+
+    def test_a_match_only_in_frontmatter_quotes_the_opening_of_the_body(self) -> None:
+        # The query's words are in the description, not the prose: the
+        # snippet used to be that frontmatter, and the body's window, scored
+        # nothing everywhere, would have been its last sentence.
+        self.repository.joinpath("specs/ledger.md").write_text(
+            "---\ndescription: Cobalt allocation ledger\n---\n# Bookkeeping\n\n"
+            + " ".join(f"Entry rule {index} keeps the books balanced." for index in range(1, 40))
+            + "\n",
+            encoding="utf-8",
+        )
+        self.start("TASK-DELIVER")
+        result = self.refresh("cobalt allocation ledger")
+        ledger = next(
+            item for item in result["capsule"]["semantic"] if item["path"] == "specs/ledger.md"
+        )
+        self.assertTrue(
+            ledger["snippet"].startswith("Entry rule 1 keeps the books balanced."), ledger["snippet"]
+        )
+        self.assertNotIn("description", ledger["snippet"])
+        self.assertIn("Entry rule 1 keeps the books balanced.", result["capsule_text"])
+
+    def test_a_section_the_query_never_matched_gives_its_opening(self) -> None:
+        text = "# Guide\n\n" + " ".join(
+            f"Step {index} is described here." for index in range(1, 60)
+        ) + "\n"
+        section = retrieval.quoted_section(text, "Guide")
+        window = retrieval.excerpt_window(section["units"], 120)
+        self.assertTrue(window.startswith("Step 1 is described here."), window)
+        self.assertLessEqual(len(window), 120)
+        marked = text.replace("Step 30 is", "\x02Step\x03 30 is")
+        window = retrieval.excerpt_window(retrieval.quoted_section(marked, "Guide")["units"], 120)
+        self.assertTrue(window.startswith("… Step 30 is described here."), window)
+
+    def test_a_damaged_repeat_record_costs_a_repeat_not_the_turn(self) -> None:
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        query = "order totals rounding discount cents"
+        first = self.refresh(query, "--session-id", "conversation-1")
+        self.assertTrue(first["capsule"]["selected"])
+        for damaged in ({"conversation-1": {"turn": 1, "items": ["bad"]}},
+                        {"conversation-1": {"turn": "bad", "items": {}}},
+                        {"conversation-1": "bad", "conversation-2": {"turn": 2, "items": {"k": "bad"}}}):
+            with self.subTest(damaged=damaged):
+                connection = context_cli.connect(context_cli.default_database(self.repository))
+                try:
+                    with connection:
+                        retrieval.store_index_state(
+                            connection, {retrieval.SESSION_DELIVERIES_KEY: json.dumps(damaged)})
+                finally:
+                    connection.close()
+                again = self.refresh(query, "--session-id", "conversation-1")
+                self.assertTrue(again["capsule"]["selected"] or again["capsule"]["repeated"])
+
+    def test_small_talk_retrieves_nothing(self) -> None:
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        for prompt in ("thanks, looks good", "ok continue", "спасибо, отлично"):
+            with self.subTest(prompt=prompt):
+                result = self.refresh(prompt)
+                self.assertEqual([], result["capsule"]["selected"])
+                self.assertNotIn("memory (retrieved", result["capsule_text"])
+
+    def test_an_automatic_prompt_is_cleaned_instead_of_refused(self) -> None:
+        self.enable_automatic_promotion()
+        self.accept_money_decision()
+        self.start("TASK-DELIVER")
+        prompt = (
+            "Order totals are off by a cent after a discount, see the log:\n"
+            "stderr: rounding mismatch for jane.doe@example.test\n"
+            "Customer id: 10492 called about it"
+        )
+        refused = self.run_cli(
+            "refresh", "--query", prompt, "--task-id", "TASK-DELIVER",
+            "--ephemeral", "--json",
+        )
+        self.assertNotEqual(0, refused.returncode)
+        self.assertEqual("", refused.stdout)
+        cleaned = self.run_cli(
+            "refresh", "--query", prompt, "--task-id", "TASK-DELIVER",
+            "--ephemeral", "--sanitize", "--json",
+        )
+        self.assertIn(cleaned.returncode, (0, 1), cleaned.stderr)
+        result = json.loads(cleaned.stdout)
+        self.assertIn("rounding happens only when an amount is displayed", result["capsule_text"])
+        manifest = (self.repository / result["capsule"]["manifest"]).read_text(encoding="utf-8")
+        for private in ("jane.doe", "example.test", "10492", "stderr"):
+            self.assertNotIn(private, manifest)
+            self.assertNotIn(private, result["capsule_text"])
+
+    def test_the_excerpt_is_the_section_that_matches(self) -> None:
+        content = (
+            "---\n{\"id\": \"x\"}\n---\n# Payments\n\nGeneral notes about payments.\n\n"
+            "## Refunds\n\nRefunds are issued to the original card within five days.\n\n"
+            "## Webhooks\n\nWebhook signatures rotate monthly.\n"
+        )
+        excerpt = context_cli.best_excerpt(content, {"refunds", "card"}, 200, "Payments")
+        self.assertTrue(excerpt.startswith("Refunds: Refunds are issued"), excerpt)
+        self.assertNotIn("Webhook", excerpt)
+        self.assertLessEqual(len(context_cli.best_excerpt(content, set(), 30)), 30)
+
+    def test_render_quotes_a_late_match_in_one_oversized_sentence(self) -> None:
+        self.repository.joinpath("specs/escrow.md").write_text(
+            "# Ledger\n\nledger " + "administrative background " * 80
+            + "cobalt escrow requires dual approval\n", encoding="utf-8",
+        )
+        self.start("TASK-DELIVER")
+        result = self.refresh("ledger cobalt escrow")
+        self.assertIn("cobalt escrow requires dual approval", result["capsule_text"])
+        self.assertLessEqual(len(result["capsule_text"]), context_cli.RENDERED_CAPSULE_LIMIT)
+
+    def write_auth_guide(self) -> None:
+        filler = " ".join(
+            ["The session store keeps one record per login and expires it on a schedule."] * 12
+        )
+        self.repository.joinpath("specs").mkdir(exist_ok=True)
+        self.repository.joinpath("specs/auth.md").write_text(
+            "# Auth guide\n\n## Sessions\n\n"
+            f"{filler} To revoke every session of a user, call SessionStore::purge "
+            "after the password reset.\n\n"
+            "## Recovery codes\n\nRecovery codes are single-use: a used code is struck "
+            "from the list, and after the third the user prints a new set.\n",
+            encoding="utf-8",
+        )
+        self.repository.joinpath("specs/cleanup.md").write_text(
+            "# Cleanup\n\n## Login\n\nA session starts at login.\n\n"
+            "## Nightly job\n\nSessions are purged nightly by the cleanup job.\n",
+            encoding="utf-8",
+        )
+        for index in range(6):
+            self.repository.joinpath(f"specs/other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+
+    def test_the_excerpt_is_the_stretch_that_answers(self) -> None:
+        # The right section, but its answer sat past the first 600 characters.
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        text = self.refresh("how do I revoke sessions after a password reset")["capsule_text"]
+        self.assertIn("specs/auth.md § Sessions", text)
+        self.assertIn("SessionStore::purge after the password reset", text)
+
+    def test_the_excerpt_matches_words_as_the_index_does(self) -> None:
+        # The request says "session", the answering section "Sessions": the
+        # index matched them, the excerpt counted them as different words.
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        text = self.refresh("when does a session get purged")["capsule_text"]
+        self.assertIn("specs/cleanup.md § Nightly job", text)
+        self.assertIn("purged nightly by the cleanup job", text)
+
+    def test_another_section_of_a_handed_document_is_still_handed(self) -> None:
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        first = self.refresh("how do I revoke sessions after a password reset", "--session-id", "c-1")
+        self.assertIn("specs/auth.md § Sessions", first["capsule_text"])
+        again = self.refresh("revoke the sessions after a password reset", "--session-id", "c-1")
+        self.assertNotIn("specs/auth.md", again["capsule_text"])
+        other = self.refresh("what happens to used recovery codes", "--session-id", "c-1")
+        self.assertIn("specs/auth.md § Recovery codes", other["capsule_text"])
+        self.assertIn("struck from the list", other["capsule_text"])
+
+    def test_a_compacted_conversation_is_handed_its_memory_again(self) -> None:
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        # A folder of its own: parallel suites share the repository's parent.
+        folder = tempfile.TemporaryDirectory(prefix="transcript-")
+        self.addCleanup(folder.cleanup)
+        transcript = Path(folder.name) / "transcript.jsonl"
+        transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+        query = "how do I revoke sessions after a password reset"
+        conversation = ("--session-id", "c-1", "--transcript", str(transcript))
+        self.assertIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+
+        def append(record: str) -> None:
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(record + "\n")
+
+        append('{"type":"assistant"}')
+        self.assertNotIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+        # Claude Code's compaction record, then Codex's.
+        for record in (
+            '{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}',
+            '{"timestamp":"2026-10-08T10:00:00Z","type":"compacted","payload":{}}',
+        ):
+            with self.subTest(record=record):
+                append(record)
+                self.assertIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+                self.assertNotIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+
+    def test_one_rare_word_admits_a_document_only_when_it_names_something(self) -> None:
+        # In a small index most words are rare; one of them shared with the
+        # request is not evidence unless it is an identifier or the document's
+        # own subject.
+        specs = self.repository / "specs"
+        specs.mkdir(exist_ok=True)
+        specs.joinpath("weather.md").write_text(
+            "# Weather\n\nThe falcon flew over the harbour.\n", encoding="utf-8")
+        specs.joinpath("exporter.md").write_text(
+            "# Exports\n\nOrderExporter writes one line per order.\n", encoding="utf-8")
+        specs.joinpath("ticket.md").write_text(
+            "# Release notes\n\nShipped the fix for ticket 4711.\n", encoding="utf-8")
+        specs.joinpath("falcon.md").write_text(
+            "# Falcon dispatch\n\nRoutes are assigned nightly.\n", encoding="utf-8")
+        specs.joinpath("cobalt.md").write_text(
+            "# Cobalt\n\nCobalt budgets are reviewed monthly.\n", encoding="utf-8")
+        # Enough documents for a word in two of them to count as rare.
+        for index in range(24):
+            specs.joinpath(f"filler-{index}.md").write_text(
+                f"# Filler {index}\n\nunrelated text {index}.\n", encoding="utf-8")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            def admitted(query: str) -> set[str]:
+                candidates, _ = retrieval._candidates(connection, query)
+                return {item["path"] for item in candidates}
+
+            # Two informative terms, so one alone is a weak match.
+            self.assertNotIn("specs/weather.md", admitted("falcon cobalt"))
+            self.assertIn("specs/falcon.md", admitted("falcon cobalt"))
+            self.assertIn("specs/exporter.md", admitted("OrderExporter cobalt"))
+            self.assertIn("specs/ticket.md", admitted("4711 cobalt"))
+        finally:
+            connection.close()
+
+    def test_a_weak_tail_in_a_layer_is_left_out(self) -> None:
+        self.repository.joinpath("specs/quartz.md").write_text(
+            "# Quartz falcon\n\nThe quartz falcon dispatch rule. Quartz falcon "
+            "retries stop after three attempts.\n",
+            encoding="utf-8",
+        )
+        filler = " ".join(f"word{index}" for index in range(1500))
+        self.repository.joinpath("specs/long.md").write_text(
+            f"# Long\n\n{filler} quartz {filler} falcon {filler}\n",
+            encoding="utf-8",
+        )
+        for index in range(10):
+            self.repository.joinpath(f"specs/other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            candidates, _ = retrieval._candidates(connection, "quartz falcon")
+        finally:
+            connection.close()
+        paths = [item["path"] for item in candidates]
+        self.assertIn("specs/quartz.md", paths)
+        self.assertNotIn("specs/long.md", paths)
+
+    def test_a_plural_and_its_singular_weigh_the_same_in_the_excerpt(self) -> None:
+        # The index's Porter tokenizer matched "classes" to "class"; the
+        # excerpt read them as "class" and "clas", so the rare word that
+        # answered fell to the lowest weight and a section sharing two common
+        # words with the request was quoted instead.
+        pairs = {
+            "ledger-1": ("classes", "class"),
+            "ledger-2": ("policy", "policies"),
+            "ledger-3": ("businesses", "business"),
+            "ledger-4": ("stopped", "stop"),
+        }
+        specs = self.repository / "specs"
+        for stem, (_, written) in pairs.items():
+            specs.joinpath(f"{stem}.md").write_text(
+                f"# Ledger {stem[-1]}\n\n"
+                f"## Rare details\n\nThe InvoiceMapper {written} is what the "
+                "container resolves first.\n\n"
+                "## Common details\n\nThe billing module wiring lists every "
+                "listener of the billing module.\n",
+                encoding="utf-8",
+            )
+        for index in range(8):
+            specs.joinpath(f"common-{index}.md").write_text(
+                f"# Common {index}\n\nThe billing module note number {index}.\n",
+                encoding="utf-8",
+            )
+        for index in range(10):
+            specs.joinpath(f"other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+        self.start("TASK-DELIVER")
+        for stem, (asked, written) in pairs.items():
+            with self.subTest(asked=asked, written=written):
+                forms = retrieval.term_forms([asked, written])
+                self.assertEqual(forms[asked], forms[written], forms)
+                text = self.refresh(f"billing module {asked}")["capsule_text"]
+                self.assertIn(f"specs/{stem}.md § Rare details", text)
+                self.assertIn(f"The InvoiceMapper {written} is what", text)
+
+    def record_episode(self) -> None:
+        recorded = self.run_cli(
+            "record", "--summary", "Amber viaduct rollout",
+            "--outcome",
+            "The amber viaduct rollout finished after the canary held for an hour.",
+            "--json",
+        )
+        self.assertEqual(0, recorded.returncode, recorded.stderr)
+
+    def test_a_recorded_episode_is_handed_once_per_revision(self) -> None:
+        # A recorded episode took no part in the conversation's record: every
+        # turn handed the same one again and counted no repeat.
+        self.start("TASK-DELIVER")
+        self.record_episode()
+        query = "amber viaduct rollout canary"
+        first = self.refresh(query, "--session-id", "repeat-local")
+        self.assertEqual(
+            ["Amber viaduct rollout"],
+            [item.get("summary") for item in first["capsule"]["episodic"]],
+        )
+        self.assertEqual(0, first["capsule"]["repeated"])
+        second = self.refresh(query, "--session-id", "repeat-local")
+        self.assertEqual([], second["capsule"]["episodic"])
+        self.assertEqual(1, second["capsule"]["repeated"])
+        self.assertIn("1 item(s) handed earlier", second["capsule_text"])
+        manifest = json.loads(
+            (self.repository / second["capsule"]["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(0, manifest["local_episode_count"])
+        self.assertIn(
+            {"path": "episode:1", "reason": "delivered-this-session"},
+            manifest["excluded"],
+        )
+        # Another conversation is handed it.
+        other = self.refresh(query, "--session-id", "repeat-other")
+        self.assertEqual(1, len(other["capsule"]["episodic"]))
+        # An episode whose content changed is new to the conversation.
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            with connection:
+                connection.execute(
+                    "UPDATE episodes SET outcome = ? WHERE rowid = 1",
+                    ("The amber viaduct rollout was rolled back when the canary failed.",),
+                )
+        finally:
+            connection.close()
+        changed = self.refresh(query, "--session-id", "repeat-local")
+        self.assertEqual(
+            ["The amber viaduct rollout was rolled back when the canary failed."],
+            [item.get("outcome") for item in changed["capsule"]["episodic"]],
+        )
+        self.assertEqual(0, changed["capsule"]["repeated"])
+
+    def test_a_compacted_conversation_is_handed_its_episode_again(self) -> None:
+        self.start("TASK-DELIVER")
+        self.record_episode()
+        folder = tempfile.TemporaryDirectory(prefix="transcript-")
+        self.addCleanup(folder.cleanup)
+        transcript = Path(folder.name) / "transcript.jsonl"
+        transcript.write_text('{"type":"user"}\n', encoding="utf-8")
+        conversation = ("--session-id", "c-episode", "--transcript", str(transcript))
+        query = "amber viaduct rollout canary"
+
+        def append(record: str) -> None:
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(record + "\n")
+
+        self.assertEqual(1, len(self.refresh(query, *conversation)["capsule"]["episodic"]))
+        append('{"type":"assistant"}')
+        self.assertEqual([], self.refresh(query, *conversation)["capsule"]["episodic"])
+        append('{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}')
+        again = self.refresh(query, *conversation)
+        self.assertEqual(1, len(again["capsule"]["episodic"]))
+        self.assertEqual(0, again["capsule"]["repeated"])
+
+    DISPATCH_NOTES = ("alpha", "bravo", "charlie")
+
+    def write_dispatch_notes(self, depth: int, title_words: int) -> None:
+        specs = self.repository / "specs"
+        for name in self.DISPATCH_NOTES:
+            folder = specs / f"{name}-{'routing-' * depth}"
+            folder.mkdir(parents=True)
+            folder.joinpath("dispatch.md").write_text(
+                f"# {name.capitalize()} quartz falcon dispatch {'handbook ' * title_words}\n\n"
+                f"The {name} quartz falcon dispatch retries stop after three attempts.\n",
+                encoding="utf-8",
+            )
+        for index in range(12):
+            specs.joinpath(f"other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+
+    def shown_notes(self, result: dict) -> list[str]:
+        return [
+            name for name in self.DISPATCH_NOTES
+            if f"specs/{name}-" in result["capsule_text"]
+        ]
+
+    def assert_recorded_as_shown(self, result: dict) -> str:
+        """The capsule, its manifest and its estimates name what the text
+        shows; returns the note that was left out."""
+        shown = self.shown_notes(result)
+        self.assertEqual(2, len(shown), result["capsule_text"])
+        (left_out,) = set(self.DISPATCH_NOTES) - set(shown)
+        capsule = result["capsule"]
+        selected = sorted(item["path"] for item in capsule["selected"])
+        self.assertEqual(
+            shown, [path[len("specs/"):].split("-")[0] for path in selected]
+        )
+        manifest = json.loads(
+            (self.repository / capsule["manifest"]).read_text(encoding="utf-8")
+        )
+        self.assertEqual(selected, sorted(item["path"] for item in manifest["selected"]))
+        self.assertEqual(
+            ["capsule-limit"],
+            [
+                item["reason"]
+                for item in manifest["excluded"]
+                if item["path"].startswith(f"specs/{left_out}-")
+            ],
+        )
+        self.assertEqual(
+            sum(item["estimated_tokens"] for item in manifest["selected"]),
+            manifest["token_estimates"]["total"],
+        )
+        self.assertEqual(manifest["token_estimates"], capsule["token_estimates"])
+        return left_out
+
+    def test_an_item_the_capsule_leaves_out_is_handed_on_the_next_turn(self) -> None:
+        # Paths and titles long enough that the capsule's JSON holds two of
+        # the three notes. The third was recorded as handed all the same, and
+        # the next turns left it out as an item that "still applies". (Each
+        # snippet is the note's sentence, not its long heading, hence the
+        # title length; the path is near the file system's name limit.)
+        self.write_dispatch_notes(depth=28, title_words=34)
+        self.start("TASK-DELIVER")
+        query = "quartz falcon dispatch retries"
+        first = self.refresh(query, "--session-id", "c-limit")
+        left_out = self.assert_recorded_as_shown(first)
+        second = self.refresh(query, "--session-id", "c-limit")
+        self.assertEqual([left_out], self.shown_notes(second))
+        self.assertEqual(2, second["capsule"]["repeated"])
+
+    def test_an_item_the_rendered_text_leaves_out_is_handed_on_the_next_turn(self) -> None:
+        # The rendered text drops whole entries once the excerpts are gone,
+        # and an entry it dropped was recorded as handed. A ceiling that holds
+        # the working state, the compaction marker every drop brings and two
+        # of the three item lines, measured on a capsule that shows all three,
+        # makes the renderer the one to drop.
+        self.write_dispatch_notes(depth=8, title_words=1)
+        self.start("TASK-DELIVER")
+        arguments = (
+            "refresh", "--query", "quartz falcon dispatch retries",
+            "--task-id", "TASK-DELIVER", "--ephemeral", "--json",
+        )
+
+        def refresh_in_process(*extra: str) -> dict:
+            code, stdout, stderr = self.run_main(*arguments, *extra)
+            self.assertIn(code, (0, 1), stderr)
+            return json.loads(stdout)
+
+        lines = refresh_in_process()["capsule_text"].splitlines()
+        header = lines.index(context_cli.MEMORY_RENDER_HEADER)
+        items = [line for line in lines[header + 1:] if line.startswith("- ")]
+        self.assertEqual(3, len(items), lines)
+        self.assertFalse(any(line.startswith("compaction:") for line in lines), lines)
+        # Room for the marker, not for the line with its counts: at the
+        # ceiling the line yielded whole, and the dropped entry left no trace
+        # in the text the model reads.
+        marker = len("compaction: lossy view — re-read the cited source before "
+                     "revising a decision it no longer explains")
+        ceiling = sum(len(line) + 1 for line in [*lines[: header + 1], *items[:2]]) + marker + 11
+        with mock.patch.object(context_cli, "RENDERED_CAPSULE_LIMIT", ceiling):
+            first = refresh_in_process("--session-id", "c-render")
+        self.assertLessEqual(len(first["capsule_text"]), ceiling)
+        left_out = self.assert_recorded_as_shown(first)
+        self.assertEqual(1, first["capsule"]["omitted"]["semantic"])
+        self.assertTrue(
+            any(
+                line.startswith("compaction:")
+                for line in first["capsule_text"].splitlines()
+            ),
+            first["capsule_text"],
+        )
+        second = refresh_in_process("--session-id", "c-render")
+        self.assertEqual([left_out], self.shown_notes(second))
+        self.assertEqual(2, second["capsule"]["repeated"])
+
+    def test_the_capsule_keeps_only_the_items_its_text_shows(self) -> None:
+        # At the real ceiling: a full working state, two warnings and a
+        # last-turn line leave room for some of three long item lines. What
+        # stays in the capsule is exactly what its text shows, each with its
+        # attestation notice.
+        def item(index: int) -> dict:
+            return {
+                "path": f"specs/{'x' * 240}/item-{index}.md", "layer": "semantic",
+                "kind": "spec", "title": f"Item {index} " + "t" * 160, "snippet": "",
+                "category": "evidence", "estimated_tokens": 50, "record_id": None,
+                "conflicts": [], "attestation": "agent",
+            }
+
+        items = [item(index) for index in range(3)]
+        capsule = {
+            "query": "",
+            "working": {
+                "task_id": "TASK-" + "w" * 120, "goal": "g" * 200, "phase": None,
+                "progress": "p" * 400, "next_steps": ["n" * 200] * 3,
+                "files": [f"src/{'f' * 100}{index}.php" for index in range(5)],
+                "sources": [],
+            },
+            "task_record": "project-brain/dynamic/tasks/00000000-0000-4000-8000-000000000000.md",
+            "warnings": ["w" * 160] * 2, "last_turn": "l" * 600,
+            "procedural": [], "semantic": items, "episodic": [],
+            "selected": [dict(entry) for entry in items],
+            "categories": {"evidence": [dict(entry) for entry in items]},
+            "repeated": 0, "no_match": [],
+            "omitted": {"procedural": 0, "semantic": 0, "episodic": 0},
+        }
+        full = "\n".join(context_cli.render_capsule_lines(capsule, {}))
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            context_cli.shown_in_render(connection, capsule)
+        finally:
+            connection.close()
+        kept = [entry["path"] for entry in capsule["semantic"]]
+        self.assertTrue(0 < len(kept) < len(items), kept)
+        self.assertEqual(kept, [entry["path"] for entry in items if entry["path"] in full])
+        self.assertEqual(kept, [entry["path"] for entry in capsule["selected"]])
+        self.assertEqual(kept, [entry["path"] for entry in capsule["categories"]["evidence"]])
+        self.assertEqual(len(items) - len(kept), capsule["omitted"]["semantic"])
+        text = "\n".join(context_cli.render_capsule_lines(capsule, {}))
+        self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+        # Entries were dropped, so the text says it is a lossy view.
+        self.assertTrue(
+            any(line.startswith("compaction:") for line in text.splitlines()), text
+        )
+        for path in kept:
+            line = next(line for line in text.splitlines() if path in line)
+            self.assertIn("agent-attested, not reviewed by a person", line)
+
+
+
+class RecordResultTest(RuntimeHarness):
+    """One replayable write path for a run's result: MCP, the Harness and the CLI."""
+
+    LEARNING = {
+        "type": "finding",
+        "title": "Cobalt authority is canonical",
+        "consequence": "The cobalt authority rule decides allocation; nothing overrides it.",
+        "sources": ["specs/authority.md"],
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", "automatic_promotion": True}), encoding="utf-8")
+        started = self.run_cli("start", "--task-id", "TASK-RESULT", "--goal", "Check the cobalt authority", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+
+    def task(self) -> dict:
+        return brain.find_record(self.repository, "TASK-RESULT", record_type="task")[1]
+
+    def records(self, record_type: str = "finding") -> list[dict]:
+        return [record for _, record, _ in brain.iter_records(self.repository) if record["type"] == record_type]
+
+    def record(self, result_id: str, data: dict, revision: int | None = None, task: str = "TASK-RESULT") -> dict:
+        return memory_results.record_result(
+            self.repository, task, result_id,
+            self.task()["revision"] if revision is None else revision, data,
+            owner="local", reason="Saved by the test; agent-attested, not reviewed by a person",
+        )
+
+    def result(self, **changes) -> dict:
+        return {"progress": "Authority checked.", "next_steps": ["Cover release"],
+                "learnings": [self.LEARNING], "verified": True, **changes}
+
+    def test_a_result_closes_its_learnings_and_says_the_agent_attested_them(self) -> None:
+        saved = self.record("run-1", self.result())
+        self.assertEqual([("finding", "resolved", "created")],
+                         [(item["type"], item["status"], item["state"]) for item in saved["records"]])
+        self.assertFalse(saved["replayed"])
+        finding = self.records()[0]
+        self.assertEqual("verified", finding["authority"])
+        self.assertEqual("agent", brain.record_attestation(finding))
+        self.assertEqual(("Authority checked.", ["Cover release"]),
+                         (self.task()["progress"], self.task()["next_steps"]))
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.assertIn("agent-attested", chunk.read_text(encoding="utf-8"))
+
+    def test_a_replay_writes_nothing_and_other_content_under_the_same_id_is_refused(self) -> None:
+        self.record("run-1", self.result())
+        revision = self.task()["revision"]
+        replay = self.record("run-1", self.result())
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(revision, self.task()["revision"])
+        self.assertEqual(1, len(self.records()))
+        with self.assertRaisesRegex(brain.BrainError, "different content"):
+            self.record("run-1", self.result(progress="Something else."))
+        # A lost receipt: the task already says what the result would write.
+        shutil.rmtree(self.repository / "project-brain/local/results")
+        self.assertTrue(self.record("run-1", self.result())["replayed"])
+        self.assertEqual(revision, self.task()["revision"])
+
+    def test_a_save_that_stopped_after_writing_a_learning_is_finished_by_its_replay(self) -> None:
+        identifier = memory_results.learning_id(self.task()["id"], self.LEARNING)
+        brain.create_record(self.repository, "finding", identifier, self.LEARNING["title"], [],
+                            self.LEARNING["sources"], owner="local", authority="observed",
+                            goal=self.LEARNING["consequence"])
+        saved = self.record("run-1", self.result())
+        self.assertEqual(["completed"], [item["state"] for item in saved["records"]])
+        self.assertEqual([("resolved", "verified")], [(r["status"], r["authority"]) for r in self.records()])
+        self.assertEqual("Authority checked.", self.task()["progress"])
+
+    def test_a_learning_someone_took_further_is_left_as_it_is(self) -> None:
+        # Only a record still in its initial state is a result's to finish:
+        # one under investigation since is someone's later work.
+        identifier = memory_results.learning_id(self.task()["id"], self.LEARNING)
+        record = brain.create_record(self.repository, "finding", identifier, self.LEARNING["title"], [],
+                                     self.LEARNING["sources"], owner="local", authority="observed",
+                                     goal=self.LEARNING["consequence"])
+        brain.update_record(self.repository, record["id"], expected_revision=record["revision"],
+                            progress=None, next_steps=[], files=[], sources=[], actor="local",
+                            transition_to="investigating", reason="Under investigation")
+        saved = self.record("run-1", self.result())
+        self.assertEqual(["existing"], [item["state"] for item in saved["records"]])
+        self.assertEqual("investigating", self.records()[0]["status"])
+        self.assertEqual("Authority checked.", self.task()["progress"])
+
+    def test_a_stale_revision_writes_nothing(self) -> None:
+        revision = self.task()["revision"]
+        moved = self.run_cli("update", "--task-id", "TASK-RESULT", "--revision", "auto",
+                             "--progress", "Moved on.", "--json")
+        self.assertEqual(0, moved.returncode, moved.stderr)
+        with self.assertRaisesRegex(brain.BrainError, "Stale task revision.*Nothing was written"):
+            self.record("run-1", self.result(), revision=revision)
+        self.assertEqual([], self.records())
+        self.assertEqual("Moved on.", self.task()["progress"])
+
+    def test_the_same_learning_from_a_later_result_names_the_same_record(self) -> None:
+        self.record("run-1", self.result())
+        later = self.record("run-2", self.result(progress="Release covered."))
+        self.assertEqual(["existing"], [item["state"] for item in later["records"]])
+        self.assertEqual(1, len(self.records()))
+        self.assertEqual("Release covered.", self.task()["progress"])
+
+    def test_sources_outside_the_project_or_in_derived_memory_are_refused_before_writes(self) -> None:
+        for source in ("../outside.md", ".env", "memory-bank/chunks/x.md", "specs/missing.md"):
+            with self.subTest(source=source), self.assertRaises(brain.BrainError):
+                self.record("run-1", self.result(learnings=[{**self.LEARNING, "sources": [source]}]))
+        with self.assertRaisesRegex(brain.BrainError, "verified=true"):
+            self.record("run-1", self.result(verified=False))
+        self.assertEqual([], self.records())
+
+    def test_the_external_id_and_the_uuid_name_one_result(self) -> None:
+        self.record("run-1", self.result())
+        uuid = self.task()["id"]
+        revision = self.task()["revision"]
+        self.assertTrue(self.record("run-1", self.result(), task=uuid)["replayed"])
+        with self.assertRaisesRegex(brain.BrainError, "different content"):
+            self.record("run-1", self.result(progress="Something else."), task=uuid)
+        self.assertEqual(1, len(self.records()))
+        self.assertEqual(revision, self.task()["revision"])
+
+    def test_an_archived_learning_is_not_written_again(self) -> None:
+        self.record("run-1", self.result())
+        brain.compact(self.repository)
+        self.assertEqual([], self.records())
+        later = self.record("run-2", self.result(progress="Release covered."))
+        self.assertEqual(["archived"], [item["state"] for item in later["records"]])
+        self.assertEqual([], self.records())
+        archived = [record for _, record, _ in brain.iter_records(self.repository, include_archive=True)
+                    if record["type"] == "finding"]
+        self.assertEqual(1, len(archived))
+        self.assertEqual("Release covered.", self.task()["progress"])
+
+    def test_a_stale_revision_refuses_a_result_of_learnings_alone(self) -> None:
+        revision = self.task()["revision"]
+        moved = self.run_cli("update", "--task-id", "TASK-RESULT", "--revision", "auto",
+                             "--progress", "Moved on.", "--json")
+        self.assertEqual(0, moved.returncode, moved.stderr)
+        with self.assertRaisesRegex(brain.BrainError, "Stale task revision"):
+            self.record("run-1", {"learnings": [self.LEARNING], "verified": True}, revision=revision)
+        self.assertEqual([], self.records())
+
+    def test_a_replay_finishes_a_promotion_that_failed(self) -> None:
+        with mock.patch.object(memory_results, "auto_promote", side_effect=brain.BrainError("disk full")):
+            with self.assertRaisesRegex(brain.BrainError, "disk full"):
+                self.record("run-1", self.result())
+        self.assertEqual([], list((self.repository / "memory-bank/chunks").glob("MEM-*.md")))
+        replay = self.record("run-1", self.result())
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(1, len(replay["promotion"]["promoted"]))
+        self.assertEqual(1, len(list((self.repository / "memory-bank/chunks").glob("MEM-*.md"))))
+
+    def test_an_archived_agent_attested_record_keeps_its_mark_when_promoted(self) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.write_text(json.dumps({"mode": "governed", "automatic_promotion": False}), encoding="utf-8")
+        self.record("run-1", self.result())
+        finding = self.records()[0]
+        brain.compact(self.repository)
+        proposal = brain.create_promotion(self.repository, [finding["id"]], "Cobalt authority",
+                                          "The cobalt authority rule decides allocation.", proposer="local")
+        brain.review_promotion(self.repository, proposal["id"], reviewer="human-reviewer", approve=True)
+        brain.apply_promotion(self.repository, proposal["id"])
+        chunk = next((self.repository / "memory-bank/chunks").glob("MEM-*.md"))
+        self.assertIn("agent-attested", chunk.read_text(encoding="utf-8"))
+
+    def test_a_pasted_log_or_transcript_line_is_refused(self) -> None:
+        for data in (self.result(progress="stderr: synthetic migration failure"),
+                     self.result(next_steps=["user: please rerun it"]),
+                     self.result(learnings=[{**self.LEARNING, "consequence": "log: retries were exhausted"}])):
+            with self.subTest(data=data), self.assertRaisesRegex(brain.BrainError, "log or transcript"):
+                self.record("run-1", data)
+        self.assertEqual([], self.records())
+        self.assertEqual("", self.task()["progress"])
+
+    def test_a_bearer_token_is_refused_by_the_writer_and_a_direct_query(self) -> None:
+        token = "Zx81Kq0vLm2Np3Qr4St5Uv6Wx7"
+        with self.assertRaises(brain.BrainError):
+            self.record("run-1", self.result(progress=f"Called the API with Authorization: Bearer {token}."))
+        with self.assertRaises(brain.BrainError):
+            self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": f"Send bearer {token} first."}]))
+        self.assertEqual([], self.records())
+        refused = self.run_cli("retrieve", f"why does Authorization: Bearer {token} fail", "--task-id", "TASK-RESULT")
+        self.assertNotEqual(0, refused.returncode)
+        manifests = self.repository / "project-brain/control/retrieval-manifests"
+        for manifest in manifests.glob("*.json") if manifests.is_dir() else []:
+            self.assertNotIn(token, manifest.read_text(encoding="utf-8"))
+
+    def test_a_slack_token_or_a_customer_number_never_reaches_shared_memory(self) -> None:
+        # Built here, so no literal token sits in the repository.
+        token = "xox" + "b-" + "123456789012-1234567890123-" + "AbCdEfGhIjKlMnOpQrStUvWx"
+        for data in (self.result(progress=f"Notified the channel with {token}."),
+                     self.result(progress="Fixed the checkout timeout for customer ID 10492."),
+                     self.result(learnings=[{**self.LEARNING, "consequence": "Customer #10492 needs a retry."}])):
+            with self.subTest(data=data), self.assertRaises(brain.BrainError):
+                self.record("run-1", data)
+        self.assertEqual([], self.records())
+        for query in (f"why does {token} fail", "why does customer ID 10492 time out"):
+            refused = self.run_cli("retrieve", query, "--task-id", "TASK-RESULT")
+            self.assertNotEqual(0, refused.returncode, query)
+        prompt = f"Fix the cobalt authority timeout for customer ID 10492; notify with {token}"
+        cleaned = self.run_cli("refresh", "--query", prompt, "--task-id", "TASK-RESULT", "--sanitize", "--json")
+        self.assertIn(cleaned.returncode, (0, 1), cleaned.stderr)
+        stored = "".join(path.read_text(encoding="utf-8") for path in self.repository.rglob("*")
+                         if path.is_file() and path.suffix in (".md", ".json")
+                         and ".git" not in path.relative_to(self.repository).parts)
+        self.assertTrue(list((self.repository / "project-brain/control/retrieval-manifests").glob("*.json")))
+        for text in (stored, cleaned.stdout):
+            self.assertNotIn(token, text)
+            self.assertNotIn("10492", text)
+
+    def test_a_revised_consequence_updates_what_an_agent_attested(self) -> None:
+        self.record("run-1", self.result())
+        revised = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.assertEqual(["updated"], [item["state"] for item in revised["records"]])
+        self.assertFalse(revised["replayed"])
+        self.assertEqual(1, len(self.records()))
+        self.assertEqual("Retry once, then stop.", self.records()[0]["progress"])
+
+    def test_an_agent_does_not_overwrite_what_a_person_verified(self) -> None:
+        memory_results.record_result(self.repository, "TASK-RESULT", "run-1", self.task()["revision"],
+                                     self.result(), owner="local", reason="Reviewed by a person",
+                                     attestation="person")
+        revised = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.assertEqual(["differs"], [item["state"] for item in revised["records"]])
+        self.assertFalse(revised["replayed"])
+        self.assertEqual(self.LEARNING["consequence"], self.records()[0]["progress"])
+        brain.compact(self.repository)
+        archived = self.record("run-3", self.result(learnings=[{**self.LEARNING, "consequence": "Retry twice."}]))
+        self.assertEqual(["archived-differs"], [item["state"] for item in archived["records"]])
+        self.assertFalse(archived["replayed"])
+
+    def test_the_cli_records_a_result_from_a_file(self) -> None:
+        request = self.repository / "result.json"
+        request.write_text(json.dumps(self.result()), encoding="utf-8")
+        first = self.run_cli("record-result", "--task-id", "TASK-RESULT", "--result-id", "cli-1",
+                             "--revision", "auto", "--input", str(request), "--json")
+        self.assertEqual(0, first.returncode, first.stderr)
+        self.assertFalse(json.loads(first.stdout)["replayed"])
+        second = self.run_cli("record-result", "--task-id", "TASK-RESULT", "--result-id", "cli-1",
+                              "--revision", "auto", "--input", str(request))
+        self.assertEqual(0, second.returncode, second.stderr)
+        self.assertIn("Result already recorded", second.stdout)
+        self.assertEqual(1, len(self.records()))
+
+    def test_the_capsule_says_which_knowledge_only_an_agent_checked(self) -> None:
+        self.record("run-1", self.result())
+        refreshed = self.run_cli("refresh", "--query", "cobalt authority canonical allocation",
+                                 "--task-id", "TASK-RESULT", "--ephemeral")
+        self.assertEqual(0, refreshed.returncode, refreshed.stderr)
+        self.assertRegex(refreshed.stdout, r"Cobalt authority is canonical[^\n]*agent-attested, not reviewed by a person")
+
+    def chunks(self) -> dict:
+        found = {}
+        for path in sorted((self.repository / "memory-bank/chunks").glob("MEM-*.md")):
+            metadata, body = brain._parse_chunk(path)
+            found[metadata["id"]] = {**metadata, "body": body}
+        return found
+
+    def automatic(self, enabled: bool) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.write_text(json.dumps({"mode": "governed", "automatic_promotion": enabled}), encoding="utf-8")
+
+    def stalled(self, finding: dict) -> dict:
+        proposal = brain.create_promotion(self.repository, [finding["id"]], finding["title"],
+                                          brain.promotion_content(finding), proposer="local",
+                                          review_mode="automatic")
+        return brain.auto_review_promotion(self.repository, proposal["id"])
+
+    def test_a_delayed_replay_of_an_older_result_leaves_the_later_revision(self) -> None:
+        self.record("run-1", self.result())
+        self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        revised = self.records()[0]
+        replay = self.record("run-1", self.result())
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(["differs"], [item["state"] for item in replay["records"]])
+        self.assertEqual(("Retry once, then stop.", revised["revision"]),
+                         (self.records()[0]["progress"], self.records()[0]["revision"]))
+
+    def test_a_persons_correction_is_theirs_and_no_agent_overwrites_it(self) -> None:
+        self.record("run-1", self.result())
+        corrected = {**self.LEARNING, "consequence": "Retry once, then stop."}
+        person = memory_results.record_result(
+            self.repository, "TASK-RESULT", "run-2", self.task()["revision"],
+            self.result(learnings=[corrected]), owner="local", reason="Corrected by a person",
+            attestation="person")
+        self.assertEqual(["updated"], [item["state"] for item in person["records"]])
+        finding = self.records()[0]
+        self.assertEqual("person", brain.record_attestation(finding))
+        brain.validate_record(finding)
+        later = self.record("run-3", self.result(learnings=[{**self.LEARNING, "consequence": "Retry forever."}]))
+        self.assertEqual(["differs"], [item["state"] for item in later["records"]])
+        self.assertEqual("Retry once, then stop.", self.records()[0]["progress"])
+
+    def test_a_revised_learning_supersedes_the_chunk_promoted_before(self) -> None:
+        self.record("run-1", self.result())
+        [first] = self.chunks()
+        revised = {**self.LEARNING,
+                   "consequence": "Retry once, then stop; only after that does the cobalt rule decide allocation."}
+        saved = self.record("run-2", self.result(learnings=[revised]))
+        self.assertEqual(1, len(saved["promotion"]["promoted"]), saved["promotion"])
+        successor = saved["promotion"]["promoted"][0]["memory_id"]
+        chunks = self.chunks()
+        self.assertEqual({first, successor}, set(chunks))
+        self.assertEqual(("superseded", successor), (chunks[first]["status"], chunks[first]["superseded_by"]))
+        self.assertEqual(("active", [first]), (chunks[successor]["status"], chunks[successor]["supersedes"]))
+        self.assertIn("Retry once, then stop", chunks[successor]["body"])
+        self.assertIn("agent-attested", chunks[successor]["tags"])
+        self.assertEqual([], brain.validate_bank(self.repository / "memory-bank"))
+        replay = self.record("run-2", self.result(learnings=[revised]))
+        self.assertEqual(([], [], []), (replay["promotion"]["promoted"], replay["promotion"]["failed"],
+                                        replay["promotion"]["closed"]))
+        self.assertEqual({first, successor}, set(self.chunks()))
+
+    def test_a_revision_of_what_a_person_promoted_waits_for_a_person(self) -> None:
+        self.automatic(False)
+        self.record("run-1", self.result())
+        finding = self.records()[0]
+        proposal = brain.create_promotion(self.repository, [finding["id"]], finding["title"],
+                                          brain.promotion_content(finding), proposer="local")
+        brain.review_promotion(self.repository, proposal["id"], reviewer="human-reviewer", approve=True)
+        brain.apply_promotion(self.repository, proposal["id"])
+        self.automatic(True)
+        saved = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.assertEqual([], saved["promotion"]["promoted"])
+        self.assertTrue(any("person's review" in item["reason"] for item in saved["promotion"]["blocked"]),
+                        saved["promotion"]["blocked"])
+        self.assertEqual(["active"], [chunk["status"] for chunk in self.chunks().values()])
+
+    def test_two_promotion_runs_at_once_write_one_proposal_and_one_chunk(self) -> None:
+        self.automatic(False)
+        self.record("run-1", self.result())
+        self.automatic(True)
+        original = brain.create_promotion
+        other: dict = {}
+
+        def racing(*arguments, **keywords):
+            # The other run starts while this one is choosing; before the
+            # fix it finished in the gap and both wrote a proposal.
+            if "thread" not in other:
+                other["thread"] = threading.Thread(
+                    target=lambda: other.update(result=brain.auto_promote(self.repository, owner="local")))
+                other["thread"].start()
+                other["thread"].join(timeout=0.5)
+            return original(*arguments, **keywords)
+
+        with mock.patch.object(brain, "create_promotion", side_effect=racing):
+            first = brain.auto_promote(self.repository, owner="local")
+        other["thread"].join(timeout=30)
+        self.assertFalse(other["thread"].is_alive())
+        self.assertEqual(["applied"], [proposal["status"] for _, proposal in brain.iter_promotions(self.repository)])
+        self.assertEqual(1, len(self.chunks()))
+        self.assertEqual([], first["failed"] + other["result"]["failed"])
+        self.assertEqual(1, len(first["promoted"] + other["result"]["promoted"]))
+
+    def test_a_stalled_promotion_whose_record_moved_on_is_withdrawn(self) -> None:
+        self.automatic(False)
+        self.record("run-1", self.result())
+        proposal = self.stalled(self.records()[0])
+        self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.automatic(True)
+        first = brain.auto_promote(self.repository, owner="local")
+        self.assertEqual([], first["failed"])
+        self.assertEqual([proposal["id"]], [item["promotion_id"] for item in first["closed"]])
+        self.assertEqual(1, len(first["promoted"]))
+        second = brain.auto_promote(self.repository, owner="local")
+        self.assertEqual(([], [], []), (second["promoted"], second["failed"], second["closed"]))
+        self.assertEqual(["applied", "rejected"],
+                         sorted(proposal["status"] for _, proposal in brain.iter_promotions(self.repository)))
+        self.assertIn("Retry once, then stop", next(iter(self.chunks().values()))["body"])
+
+    def test_a_second_proposal_of_a_promoted_revision_is_withdrawn_not_retried(self) -> None:
+        self.automatic(False)
+        self.record("run-1", self.result())
+        finding = self.records()[0]
+        winner, loser = self.stalled(finding), self.stalled(finding)
+        brain.apply_promotion(self.repository, winner["id"])
+        self.automatic(True)
+        result = brain.auto_promote(self.repository, owner="local")
+        self.assertEqual(([], []), (result["failed"], result["promoted"]))
+        self.assertEqual([loser["id"]], [item["promotion_id"] for item in result["closed"]])
+        self.assertEqual(1, len(self.chunks()))
+        self.assertEqual([], brain.auto_promote(self.repository, owner="local")["failed"])
+
+    def test_an_older_unattended_save_still_reads_as_the_agents(self) -> None:
+        record = {"transitions": [
+            {"from": None, "to": "open", "reason": "Finding created"},
+            {"from": "observed", "to": "verified",
+             "reason": "Saved automatically when a Harness run completed; agent-attested, not reviewed by a person"},
+        ]}
+        self.assertEqual("agent", brain.record_attestation(record))
+        record["transitions"][-1]["reason"] = "Verified by Dana [attestation:person]"
+        self.assertEqual("person", brain.record_attestation(record))
+        record["transitions"].pop()
+        self.assertEqual("", brain.record_attestation(record))
+
+
+class SmallIndexRarityTest(RuntimeHarness):
+    def test_an_identifier_in_one_document_of_a_small_index_is_still_rare(self) -> None:
+        self.repository.joinpath("specs/allocation.md").write_text(
+            "# Allocation\n\nCMS768 needs one owner.\n", encoding="utf-8")
+        self.repository.joinpath("specs/other.md").write_text(
+            "# Other\n\nUnrelated notes about allocation.\n", encoding="utf-8")
+        self.assertEqual(0, self.run_cli("index", "--json").returncode)
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            self.assertLess(total, 10)
+            coverage, distinctive = retrieval.token_coverage(connection, ["cms768", "owner"])
+        finally:
+            connection.close()
+        self.assertIn("specs/allocation.md", distinctive)
 
 
 if __name__ == "__main__":

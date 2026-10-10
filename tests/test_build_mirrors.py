@@ -21,7 +21,10 @@ Run: python3 -m unittest tests.test_build_mirrors
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -191,6 +194,236 @@ class TestOnlyClassReversePass(unittest.TestCase):
         self.assertFalse(
             any("unrelated.md" in problem for problem in problems),
             f"unrelated mirror file flagged: {problems}",
+        )
+
+
+# Shaped like the hooks class every PHP edition declares: canonical scripts in
+# .claude/hooks, byte-identical copies in the Cursor and Codex trees.
+HOOK_RULES = {
+    "version": 1,
+    "classes": [
+        {
+            "name": "hooks",
+            "canonical": ".claude/hooks",
+            "mirrors": {
+                ".cursor/hooks": {"transform": "copy"},
+                ".codex/hooks": {"transform": "copy"},
+            },
+        },
+    ],
+}
+HOOK = "subagent-dispatch.sh"
+MIRRORS = (".cursor/hooks", ".codex/hooks")
+
+
+def executable_on_disk(path: Path) -> bool:
+    return bool(path.stat().st_mode & stat.S_IXUSR)
+
+
+def git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)}: {result.stderr}")
+    return result.stdout
+
+
+def index_modes(repo: Path) -> dict[str, str]:
+    return {
+        line.split("\t", 1)[1]: line.split(" ", 1)[0]
+        for line in git(repo, "ls-files", "--stage").splitlines()
+    }
+
+
+@unittest.skipIf(os.name == "nt", "the filesystem has no executable bit")
+class TestMirrorExecutableBit(unittest.TestCase):
+    """A mirror carries its canonical file's executable bit.
+
+    Regression: build_mirrors compared and wrote bytes only, and a mirror it
+    created was 0644, so the Cursor and Codex copies of subagent-dispatch.sh
+    shipped non-executable from all four editions while --check stayed green.
+    Cursor runs that hook as a direct command (subagentStop): exit 126, and
+    the write-agent lock was never released.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="build-mirrors-mode-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.edition = self.tmp / "Synthetic Edition"
+        hooks = self.edition / ".claude" / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / HOOK).write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        (hooks / HOOK).chmod(0o755)
+        (hooks / "README.md").write_text("# Hooks\n", encoding="utf-8")
+        (hooks / "README.md").chmod(0o644)
+
+    def process(self, write: bool):
+        return bm.process_edition(self.edition, HOOK_RULES, None, write=write)
+
+    def test_write_creates_executable_mirrors(self):
+        problems, _ = self.process(write=True)
+        self.assertEqual(problems, [])
+        for mirror in MIRRORS:
+            self.assertTrue(executable_on_disk(self.edition / mirror / HOOK), mirror)
+            self.assertFalse(executable_on_disk(self.edition / mirror / "README.md"))
+        self.assertEqual(self.process(write=False), ([], []))
+
+    def test_check_reports_mode_drift_when_bytes_match(self):
+        self.process(write=True)
+        lost = self.edition / ".cursor" / "hooks" / HOOK
+        lost.chmod(0o644)
+        problems, _ = self.process(write=False)
+        self.assertEqual(
+            problems,
+            [
+                "Synthetic Edition: [hooks] .cursor/hooks/subagent-dispatch.sh "
+                "mode differs from canon (.claude/hooks/subagent-dispatch.sh "
+                "is executable)"
+            ],
+        )
+
+    def test_write_repairs_the_mode_of_a_byte_identical_mirror(self):
+        self.process(write=True)
+        lost = self.edition / ".codex" / "hooks" / HOOK
+        lost.chmod(0o644)
+        problems, written = self.process(write=True)
+        self.assertEqual(problems, [])
+        self.assertEqual(
+            written, ["Synthetic Edition/.codex/hooks/subagent-dispatch.sh (mode +x)"]
+        )
+        self.assertTrue(executable_on_disk(lost))
+        self.assertEqual(self.process(write=False), ([], []))
+
+    def test_mirror_is_not_more_executable_than_canon(self):
+        self.process(write=True)
+        stray = self.edition / ".cursor" / "hooks" / "README.md"
+        stray.chmod(0o755)
+        problems, _ = self.process(write=False)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("README.md mode differs from canon", problems[0])
+        self.assertIn("is not executable", problems[0])
+        self.process(write=True)
+        self.assertFalse(executable_on_disk(stray))
+
+
+@unittest.skipIf(os.name == "nt", "the filesystem has no executable bit")
+class TestMirrorExecutableBitFromGitIndex(unittest.TestCase):
+    """The bit is read from, and repaired in, the Git index.
+
+    The edition sits one directory below the repository root - "PHP Core"
+    and "Cms/wordpress" do too - so index paths carry a prefix.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="build-mirrors-index-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = self.tmp / "repo"
+        self.edition = self.repo / "Synthetic Edition"
+        canonical = self.edition / ".claude" / "hooks" / HOOK
+        canonical.parent.mkdir(parents=True)
+        canonical.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        canonical.chmod(0o755)
+        bm.process_edition(self.edition, HOOK_RULES, None, write=True)
+        git(self.tmp, "-c", "init.defaultBranch=main", "init", "-q", str(self.repo))
+        git(self.repo, "add", "--", ".")
+        # The shipped defect: canon 100755, both mirrors recorded 100644.
+        for mirror in MIRRORS:
+            git(self.repo, "update-index", "--chmod=-x", "--", f"Synthetic Edition/{mirror}/{HOOK}")
+        self.canonical = canonical
+
+    def test_index_mode_is_reported_even_when_the_disk_is_right(self):
+        problems, _ = bm.process_edition(self.edition, HOOK_RULES, None, write=False)
+        self.assertEqual(
+            sorted(problems),
+            sorted(
+                f"Synthetic Edition: [hooks] {mirror}/{HOOK} mode differs from canon "
+                f"(.claude/hooks/{HOOK} is executable)"
+                for mirror in MIRRORS
+            ),
+        )
+
+    def test_canonical_bit_comes_from_the_index_on_a_checkout_without_it(self):
+        # A Windows-made checkout: canon is 100755 in the index, 0644 on disk.
+        self.canonical.chmod(0o644)
+        for mirror in MIRRORS:
+            (self.edition / mirror / HOOK).chmod(0o644)
+        problems, written = bm.process_edition(self.edition, HOOK_RULES, None, write=True)
+        self.assertEqual(problems, [])
+        self.assertEqual(len(written), 2)
+        modes = index_modes(self.repo)
+        for mirror in MIRRORS:
+            self.assertEqual(modes[f"Synthetic Edition/{mirror}/{HOOK}"], "100755")
+            self.assertTrue(executable_on_disk(self.edition / mirror / HOOK))
+        self.assertEqual(
+            bm.process_edition(self.edition, HOOK_RULES, None, write=False), ([], [])
+        )
+
+    def test_write_records_only_the_mode_and_leaves_content_unstaged(self):
+        mirror = self.edition / ".cursor" / "hooks" / HOOK
+        staged_blob = git(self.repo, "rev-parse", f":Synthetic Edition/.cursor/hooks/{HOOK}")
+        # A canonical edit not yet staged: --write regenerates the mirror's
+        # bytes and fixes its mode, but must not stage the new content.
+        self.canonical.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+        problems, _ = bm.process_edition(self.edition, HOOK_RULES, None, write=True)
+        self.assertEqual(problems, [])
+        self.assertEqual(mirror.read_text(encoding="utf-8"), "#!/usr/bin/env bash\nexit 1\n")
+        self.assertEqual(
+            git(self.repo, "rev-parse", f":Synthetic Edition/.cursor/hooks/{HOOK}"),
+            staged_blob,
+        )
+        self.assertEqual(
+            index_modes(self.repo)[f"Synthetic Edition/.cursor/hooks/{HOOK}"], "100755"
+        )
+
+    def test_write_leaves_intent_to_add_mirrors_unstaged(self):
+        # A new canonical hook, its fresh mirrors marked with `git add -N`
+        # while still 0644. --write repairs their bit on disk; it must not
+        # stage the empty blob an intent-to-add entry records, which a plain
+        # `git commit` would then ship as a 0-byte hook.
+        new_hook = "new-hook.sh"
+        canonical = self.edition / ".claude" / "hooks" / new_hook
+        canonical.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        canonical.chmod(0o755)
+        git(self.repo, "add", "--", f"Synthetic Edition/.claude/hooks/{new_hook}")
+        bm.process_edition(self.edition, HOOK_RULES, None, write=True)
+        mirrors = [f"Synthetic Edition/{mirror}/{new_hook}" for mirror in MIRRORS]
+        for mirror in MIRRORS:
+            (self.edition / mirror / new_hook).chmod(0o644)
+        git(self.repo, "add", "-N", "--", *mirrors)
+
+        problems, written = bm.process_edition(self.edition, HOOK_RULES, None, write=True)
+        self.assertEqual(problems, [])
+        for mirror, path in zip(MIRRORS, mirrors):
+            self.assertIn(f"Synthetic Edition/{mirror}/{new_hook} (mode +x)", written)
+            self.assertTrue(executable_on_disk(self.edition / mirror / new_hook))
+            self.assertEqual(
+                git(self.repo, "status", "--porcelain=v1", "-z", "--", path), f" A {path}\0"
+            )
+        # Staged for real, each mirror records its content and the bit.
+        git(self.repo, "add", "--", *mirrors)
+        modes = index_modes(self.repo)
+        for path in mirrors:
+            self.assertEqual(modes[path], "100755")
+            self.assertEqual(
+                git(self.repo, "cat-file", "-p", f":{path}"), "#!/usr/bin/env bash\nexit 0\n"
+            )
+        self.assertEqual(
+            bm.process_edition(self.edition, HOOK_RULES, None, write=False), ([], [])
+        )
+
+    def test_untrusted_filesystem_reads_the_index_only(self):
+        # core.fileMode=false: the disk bit says nothing, the index decides.
+        git(self.repo, "config", "core.fileMode", "false")
+        problems, _ = bm.process_edition(self.edition, HOOK_RULES, None, write=False)
+        self.assertEqual(len(problems), 2)
+        problems, _ = bm.process_edition(self.edition, HOOK_RULES, None, write=True)
+        self.assertEqual(problems, [])
+        modes = index_modes(self.repo)
+        for mirror in MIRRORS:
+            self.assertEqual(modes[f"Synthetic Edition/{mirror}/{HOOK}"], "100755")
+        self.assertEqual(
+            bm.process_edition(self.edition, HOOK_RULES, None, write=False), ([], [])
         )
 
 

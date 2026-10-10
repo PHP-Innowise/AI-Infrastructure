@@ -57,12 +57,13 @@ def find_project_root(start: Path | None = None) -> Path:
     )
 
 
-def _executable(config: PlatformConfig) -> str:
-    executable = os.environ.get(config.executable_env, config.executable)
+def _executable(config: PlatformConfig, env: dict | None = None) -> str:
+    environment = os.environ if env is None else env
+    executable = environment.get(config.executable_env, config.executable)
     if os.path.sep in executable:
         if not Path(executable).is_file():
             raise RuntimeError(f"Configured CLI does not exist: {executable}")
-    elif shutil.which(executable) is None:
+    elif shutil.which(executable, path=environment.get("PATH")) is None:
         raise RuntimeError(
             f"{config.display_name} CLI is unavailable. Install/authenticate it or set "
             f"{config.executable_env} to a compatible executable."
@@ -105,9 +106,11 @@ def evaluate_trigger(
     timeout: int,
     project_root: Path,
     model: str | None,
+    env: dict | None = None,
 ) -> bool:
     config = platform_config()
-    executable = _executable(config)
+    environment = dict(os.environ if env is None else env)
+    executable = _executable(config, environment)
     del project_root  # Compatibility with the public runner API.
 
     with tempfile.TemporaryDirectory(prefix="skill-trigger-probe-") as temporary:
@@ -136,7 +139,7 @@ def evaluate_trigger(
             capture_output=True,
             text=True,
             cwd=workspace,
-            env=os.environ.copy(),
+            env=environment,
             timeout=timeout,
         )
         if result.returncode != 0:

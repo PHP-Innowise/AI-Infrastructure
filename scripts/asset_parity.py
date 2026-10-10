@@ -11,7 +11,9 @@ green, and the next generated project gets the old engine.
 What this checker enforces:
 
 * Every mapped asset file is byte-identical to its counterpart in the
-  canonical edition (sha256).
+  canonical edition (sha256), and carries the same executable bit - read
+  from the Git index first, the filesystem only for an untracked path (see
+  file_modes.py), so a Windows checkout cannot seed a script that lost it.
 * Every canonical file the asset is supposed to seed exists in the asset - a
   new module under `memory-bank/scripts/` cannot be forgotten here.
 * Every asset file is either mapped or listed in ASSET_ONLY with a reason, so
@@ -35,6 +37,9 @@ import shutil
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from file_modes import FileModeError, FileModes  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ASSET_ROOT = (
     REPO_ROOT
@@ -55,6 +60,7 @@ CANONICAL_EDITIONS = ("Laravel", "Symfony", "PHP Core")
 # prefix wins, so "project-brain/" maps onto itself while "scripts/" and
 # "templates/" move under memory-bank/. Ordered longest-first at use time.
 ASSET_TO_EDITION_PREFIX = {
+    "MCP.md": "memory-bank/MCP.md",
     "scripts/": "memory-bank/scripts/",
     "templates/": "memory-bank/templates/",
     "project-brain/": "project-brain/",
@@ -64,6 +70,7 @@ ASSET_TO_EDITION_PREFIX = {
 # prefix map cannot check: a file that exists only in the edition would
 # otherwise never be looked for.
 REQUIRED_FROM_EDITION = (
+    "memory-bank/MCP.md",
     "memory-bank/scripts/*.py",
     "memory-bank/templates/*",
     "project-brain/PROTOCOL.md",
@@ -244,9 +251,14 @@ def check_runtime_contract(asset_root: Path) -> list[dict[str, str]]:
     return findings
 
 
+def mode_word(executable: bool) -> str:
+    return "executable" if executable else "not executable"
+
+
 def collect_findings(repo_root: Path, asset_root: Path) -> list[dict[str, str]]:
     edition = canonical_edition(repo_root)
     findings: list[dict[str, str]] = []
+    edition_modes, asset_modes = FileModes(edition), FileModes(asset_root)
 
     for asset_rel in asset_files(asset_root):
         if asset_rel in ASSET_ONLY:
@@ -279,6 +291,19 @@ def collect_findings(repo_root: Path, asset_root: Path) -> list[dict[str, str]]:
                     "reason": f"content differs from {edition.name}/{edition_rel}",
                 }
             )
+            continue
+        wanted = edition_modes.is_executable(counterpart)
+        seeded = asset_modes.is_executable(asset_root / asset_rel)
+        if wanted is not None and seeded is not None and wanted != seeded:
+            findings.append(
+                {
+                    "path": asset_rel,
+                    "reason": (
+                        f"mode differs from {edition.name}/{edition_rel} "
+                        f"({mode_word(wanted)} there)"
+                    ),
+                }
+            )
 
     for pattern in REQUIRED_FROM_EDITION:
         for path in sorted(edition.glob(pattern)):
@@ -305,13 +330,19 @@ def collect_findings(repo_root: Path, asset_root: Path) -> list[dict[str, str]]:
 
 
 def sync(repo_root: Path, asset_root: Path, findings: list[dict[str, str]]) -> int:
-    """Copy the canonical bytes over the asset for content/missing findings."""
+    """Bring the asset to canon for content, missing and mode findings."""
     edition = canonical_edition(repo_root)
+    edition_modes, asset_modes = FileModes(edition), FileModes(asset_root)
     copied = 0
     for finding in findings:
         asset_rel = finding["path"]
         reason = finding["reason"]
-        if not (reason.startswith("content differs") or "missing from the asset" in reason):
+        mode_only = reason.startswith("mode differs")
+        if not (
+            mode_only
+            or reason.startswith("content differs")
+            or "missing from the asset" in reason
+        ):
             print(f"  skip {asset_rel}: {reason} (needs a human decision)")
             continue
         edition_rel = edition_path_for(asset_rel)
@@ -323,10 +354,23 @@ def sync(repo_root: Path, asset_root: Path, findings: list[dict[str, str]]) -> i
             print(f"  skip {asset_rel}: {edition.name}/{edition_rel} does not exist")
             continue
         destination = asset_root / asset_rel
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
-        print(f"  wrote {asset_rel} from {edition.name}/{edition_rel}")
+        if not mode_only:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        # copy2 carried the working-tree bit, which a checkout without
+        # filesystem modes does not have; the canonical bit is the index's.
+        executable = edition_modes.is_executable(source)
+        if executable is not None:
+            asset_modes.set_executable(destination, executable)
+        if mode_only:
+            print(f"  set {asset_rel} {mode_word(bool(executable))} as {edition.name}/{edition_rel}")
+        else:
+            print(f"  wrote {asset_rel} from {edition.name}/{edition_rel}")
         copied += 1
+    try:
+        asset_modes.flush()
+    except FileModeError as error:
+        print(f"  {error}")
     return copied
 
 

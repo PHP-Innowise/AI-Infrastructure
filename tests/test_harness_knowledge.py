@@ -40,6 +40,28 @@ def install_knowledge_fixture(project):
     subprocess.run(["git", "init", "--quiet", str(project)], check=True, capture_output=True)
 
 
+def source_link_fixture(project):
+    """Answer-bearing knowledge reachable only through its declared source."""
+    query = "half-to-even banker tie breaking"
+    source = "specs/rounding.md"
+    (project / source).write_text("# Rounding\n\nAmounts use " + query + ".\n")
+    today = date.today()
+    paths = []
+    for identifier, slug, answer in (
+        ("bbbbbbbb", "minor-units", "Floating point never touches a stored invoice total."),
+        ("cccccccc", "refunds", "A refund can never exceed the stored invoice total."),
+    ):
+        fields = {"id": "MEM-20260801-" + identifier, "title": slug.replace("-", " "),
+                  "type": "convention", "status": "active", "scope": ["application"],
+                  "tags": ["billing"], "created": "2026-08-01", "last_verified": today.isoformat(),
+                  "review_after": (today + timedelta(days=365)).isoformat(),
+                  "sources": [source], "supersedes": [], "superseded_by": None}
+        relative = "memory-bank/chunks/" + fields["id"] + "-" + slug + ".md"
+        (project / relative).write_text("---\n" + json.dumps(fields) + "\n---\n\n" + answer + "\n")
+        paths.append(relative)
+    return query, set(paths)
+
+
 def metadata(path):
     return json.loads(path.read_text(encoding="utf-8")[4:].split("\n---\n", 1)[0])
 
@@ -230,6 +252,11 @@ class KnowledgeTests(unittest.TestCase):
 
     def test_durable_promotion_requires_eligible_sources_independent_review_and_pinned_revision(self):
         self.install()
+        # The reviewed path is the one a project takes with automatic promotion
+        # off; with it on, the accepting update promotes the record at once.
+        config = self.project / "project-brain/config/runtime.json"
+        settings = json.loads(config.read_text(encoding="utf-8"))
+        config.write_text(json.dumps({**settings, "automatic_promotion": False}), encoding="utf-8")
 
         def decision(identifier, authority="verified", privacy="team"):
             record = self.run_action("brain-create", record_type="decision", external_id=identifier,

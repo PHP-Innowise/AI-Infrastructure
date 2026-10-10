@@ -4,12 +4,37 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
 from datetime import date
 from pathlib import Path
 from typing import Optional
+
+
+
+def _workspace_roots():
+    """The attached-layout helper beside this file, or None.
+
+    The validator also runs copied on its own - a staged bank's check - and
+    then knows only the installed layout, which is all such a bank has.
+    """
+    try:
+        import workspace_roots
+    except ImportError:
+        directory = str(Path(__file__).resolve().parent)
+        sys.path.insert(0, directory)
+        try:
+            import workspace_roots
+        except ImportError:
+            return None
+        finally:
+            sys.path.remove(directory)
+    return workspace_roots
+
+
+workspace_roots = _workspace_roots()
 
 
 # Chunk identifiers come in two accepted formats:
@@ -64,22 +89,82 @@ OPTIONAL_KEYS = {
     # `valid_from`/`valid_to` are optional.
     "source_digests",
 }
-SECRET_PATTERNS = {
-    "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
-    "GitHub token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
-    "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    "OpenAI-style token": re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
-    "Stripe secret key": re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b"),
-    "JWT": re.compile(r"\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
-    "assigned credential": re.compile(
-        r"\b(?:password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*[^\s<{][^\s]*",
-        re.IGNORECASE,
-    ),
-}
+# What follows a credential key when the value is not a literal credential: a
+# variable or expression, an env/config lookup, a template, a placeholder, a
+# validation rule, a mask, or a bare number. Without it the pattern refused
+# ordinary PHP and Symfony text (`$password = $request->validated(...)`,
+# `secret: '%env(APP_SECRET)%'`) and dropped whole skills from the index over
+# a documented `--secret=...` example.
+def _automatic_query():
+    """The secret and personal-data patterns, from the module beside this file.
+
+    Loaded the way workspace_roots is, so a validator loaded by its path rather
+    than from its own directory still finds them. Without them nothing could
+    be checked, so a runtime missing the module says so instead of passing.
+    """
+    try:
+        import automatic_query
+    except ImportError:
+        directory = str(Path(__file__).resolve().parent)
+        sys.path.insert(0, directory)
+        try:
+            import automatic_query
+        except ImportError as error:
+            raise ImportError(
+                "memory-bank/scripts/automatic_query.py is missing beside validate.py; "
+                "reinstall or sync the memory runtime"
+            ) from error
+        finally:
+            sys.path.remove(directory)
+    return automatic_query
+
+
+_automatic = _automatic_query()
+PRIVATE_PATTERNS = _automatic.PRIVATE_PATTERNS
+SECRET_PATTERNS = _automatic.SECRET_PATTERNS
+QUOTED_CREDENTIAL = _automatic.QUOTED_CREDENTIAL
+PRIVATE_KEY_BLOCK = _automatic.PRIVATE_KEY_BLOCK
+AutomaticQueryError = _automatic.AutomaticQueryError
+_sanitize_automatic_query = _automatic.sanitize_automatic_query
+
+def sensitive_label(text: str) -> Optional[str]:
+    """What sensitive data `text` appears to carry, or None.
+
+    Names the kind only - never the matched value - so the message can be
+    shown, logged and put into a capsule without repeating what it refuses.
+    """
+    for label, pattern in SECRET_PATTERNS.items():
+        if pattern.search(text):
+            return f"a possible {label}"
+    for label, pattern in PRIVATE_PATTERNS.items():
+        if pattern.search(text):
+            return f"personal data ({label})"
+    return None
 
 
 class ValidationError(Exception):
     """A memory-bank contract violation."""
+
+
+def sanitize_automatic_query(text: str) -> str:
+    try:
+        return _sanitize_automatic_query(text)
+    except AutomaticQueryError as error:
+        raise ValidationError(str(error)) from error
+
+
+def display_path(path: Path, bank_root: Path) -> str:
+    """A bank path as a message reader should see it: from the bank's parent.
+
+    Validation messages travel further than the terminal that ran them - a
+    refused promotion's reason lands in the next Task Capsule - and an
+    absolute path carries the machine's home directory into a prompt while
+    saying nothing `memory-bank/chunks/...` does not.
+    """
+    try:
+        return path.relative_to(bank_root.parent).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def parse_frontmatter(path: Path) -> dict:
@@ -135,13 +220,15 @@ def validate_metadata(
     metadata: dict,
     repository_root: Path,
     warnings: Optional[list[str]] = None,
+    label: Optional[str] = None,
 ) -> None:
     """Raise on anything that makes a chunk unusable.
 
     ``warnings`` opts a caller into the non-fatal class: a terminal chunk
     whose cited source has since been deleted is reported there instead of
     raised. Without a sink the behaviour is unchanged, which is what keeps
-    the retrieval gate in `active_memory` strict.
+    the retrieval gate in `active_memory` strict. ``label`` names the chunk
+    in such a warning; it defaults to ``path``.
     """
     missing = REQUIRED_KEYS - metadata.keys()
     extra = metadata.keys() - REQUIRED_KEYS - OPTIONAL_KEYS
@@ -239,17 +326,20 @@ def validate_metadata(
         if source.startswith(("https://", "http://")):
             continue
         source_path = source.split("#", 1)[0]
-        resolved_source = (repository_root / source_path).resolve()
-        try:
-            resolved_source.relative_to(repository_root.resolve())
-        except ValueError as error:
-            raise ValidationError(f"source path escapes the repository: {source_path}") from error
+        if workspace_roots is not None:
+            resolved_source = workspace_roots.resolve(repository_root, source_path).resolve()
+            inside = workspace_roots.contains(repository_root, resolved_source)
+        else:
+            resolved_source = (repository_root / source_path).resolve()
+            inside = resolved_source.is_relative_to(repository_root.resolve())
+        if not inside:
+            raise ValidationError(f"source path escapes the repository: {source_path}")
         if not resolved_source.exists():
             # The containment check above stays fatal in every status: it is a
             # boundary guarantee, not a freshness one.
             if warnings is not None and terminal_chunk(metadata, valid_to):
                 warnings.append(
-                    f"{path}: cited source no longer exists: {source_path} "
+                    f"{label or path}: cited source no longer exists: {source_path} "
                     f"(chunk is {metadata['status']} and no longer retrievable)"
                 )
                 continue
@@ -284,6 +374,96 @@ def validate_secret_patterns(path: Path) -> None:
     for label, pattern in SECRET_PATTERNS.items():
         if pattern.search(text):
             raise ValidationError(f"possible {label} detected; value intentionally not printed")
+
+
+# A match that opens with a key and a separator keeps the key - it is the
+# project's vocabulary (MAILER_PASSWORD, APP_KEY) - and loses only its value.
+_KEYED_SECRETS = frozenset(
+    {"assigned credential", "Laravel application key", "authorization header", "basic credentials"}
+)
+_KEY_SEPARATOR = re.compile(r"[:=][ \t]*")
+_VALUE_DELIMITERS = "'\"`"
+MASK_PASSES = 3
+# Bump when the masking rule itself changes; the patterns are fingerprinted
+# from their own source. Either change makes the index re-read every document.
+MASK_POLICY_VERSION = "1"
+
+
+def secret_policy_fingerprint() -> str:
+    """A digest of what decides an indexed document's masked text.
+
+    The stat cache keeps a document unread while its file is unchanged, so
+    without this a pattern added later would never reach a document indexed
+    before it - and after masking, the index is where secrets must not be.
+    """
+    parts = [MASK_POLICY_VERSION, PRIVATE_KEY_BLOCK.pattern, QUOTED_CREDENTIAL.pattern,
+             *sorted(_KEYED_SECRETS)]
+    for label, pattern in SECRET_PATTERNS.items():
+        parts += [label, pattern.pattern, str(pattern.flags)]
+    return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def _masked_span(text: str, label: str, match: "re.Match[str]") -> tuple[int, int]:
+    """The stretch of `text` that carries the secret `match` found."""
+    if label == "private key":
+        # The header alone is detected; the body under it is the secret.
+        block = PRIVATE_KEY_BLOCK.match(text, match.start())
+        return match.start(), (block.end() if block else match.end())
+    separator = (
+        _KEY_SEPARATOR.search(text, match.start(), match.end())
+        if label in _KEYED_SECRETS else None
+    )
+    if separator is None:
+        # Self-identifying tokens, URL credentials, JWTs, bearer tokens.
+        return match.span()
+    if label == "assigned credential":
+        quoted = QUOTED_CREDENTIAL.match(text, match.start())
+        if quoted is not None:
+            # The whole quoted literal, to its closing quote or the line's end.
+            return quoted.start(1), quoted.end()
+    if match.end() < len(text) and text[match.end()] in _VALUE_DELIMITERS:
+        # A value closed by inline code or a quote: `MAIL_PASSWORD=x` in prose.
+        return separator.end(), match.end()
+    # Unquoted: the rest of the line, so no word of a multi-word value stays.
+    line_end = text.find("\n", match.end())
+    return separator.end(), (len(text) if line_end < 0 else line_end)
+
+
+def mask_secrets(text: str) -> tuple[str, int]:
+    """`text` with each value SECRET_PATTERNS recognises replaced by
+    `[redacted: <label>]`, and how many values were replaced.
+
+    Text with no detection comes back unchanged with 0, so a document indexed
+    before masking existed is indexed byte for byte as it was. Personal data
+    (PRIVATE_PATTERNS) is not masked here: the render screen removes it from
+    capsule text. Raises ValidationError, never naming the value, when a
+    pattern still matches after MASK_PASSES passes: the caller then leaves
+    the document out, as it used to leave out every document with a match.
+    """
+    masked = 0
+    for _ in range(MASK_PASSES):
+        spans = sorted(
+            (*_masked_span(text, label, found), label)
+            for label, pattern in SECRET_PATTERNS.items()
+            for found in pattern.finditer(text)
+        )
+        if not spans:
+            return text, masked
+        pieces: list[str] = []
+        end = 0
+        for start, stop, label in spans:
+            if start < end:
+                # Overlaps a value already masked: widen it, no second marker.
+                end = max(end, stop)
+                continue
+            pieces += [text[end:start], f"[redacted: {label}]"]
+            end = stop
+            masked += 1
+        pieces.append(text[end:])
+        text = "".join(pieces)
+    if any(pattern.search(text) for pattern in SECRET_PATTERNS.values()):
+        raise ValidationError("possible secret survives masking; value intentionally not printed")
+    return text, masked
 
 
 def summarize_bank(bank_root: Path) -> str:
@@ -339,19 +519,24 @@ def validate_bank_report(
     repository_root = (source_root or bank_root.parent).resolve()
     index_path = bank_root / "INDEX.md"
     chunks_dir = bank_root / "chunks"
+
+    def shown(path: Path) -> str:
+        return display_path(path, bank_root)
+
+    index_label = shown(index_path)
     # `.memory-counter` is intentionally absent from the required files and
     # from every check below: identifiers are date+UUID based now, so the
     # counter is a retired legacy artifact that may or may not exist on disk.
     for required in (bank_root / "README.md", index_path):
         if not required.is_file():
-            errors.append(f"{required}: required file is missing")
+            errors.append(f"{shown(required)}: required file is missing")
     if errors:
         return errors, warnings
 
     try:
         index = parse_index(index_path)
     except ValidationError as error:
-        errors.append(f"{index_path}: {error}")
+        errors.append(f"{index_label}: {error}")
         index = {}
 
     chunk_paths: list[Path] = []
@@ -359,7 +544,7 @@ def validate_bank_report(
         for entry in sorted(chunks_dir.iterdir()):
             if entry.is_symlink() or not entry.is_file() or FILENAME_PATTERN.fullmatch(entry.name) is None:
                 errors.append(
-                    f"{entry}: unexpected chunk entry; expected a direct MEM-0001-short-slug.md file"
+                    f"{shown(entry)}: unexpected chunk entry; expected a direct MEM-0001-short-slug.md file"
                 )
                 continue
             chunk_paths.append(entry)
@@ -376,7 +561,9 @@ def validate_bank_report(
             on_disk.add(filename_match.group(1))
         try:
             metadata = parse_frontmatter(path)
-            validate_metadata(path, metadata, repository_root, warnings)
+            validate_metadata(
+                path, metadata, repository_root, warnings, label=shown(path)
+            )
             validate_secret_patterns(path)
             memory_id = metadata["id"]
             on_disk.add(memory_id)
@@ -384,16 +571,16 @@ def validate_bank_report(
                 raise ValidationError(f"duplicate chunk ID: {memory_id}")
             chunks[memory_id] = (path, metadata)
         except (OSError, ValidationError) as error:
-            errors.append(f"{path}: {error}")
+            errors.append(f"{shown(path)}: {error}")
 
     for memory_id, (path, metadata) in chunks.items():
         row = index.get(memory_id)
         if row is None:
-            errors.append(f"{path}: chunk is missing from INDEX.md")
+            errors.append(f"{shown(path)}: chunk is missing from INDEX.md")
             continue
         expected_file = str(path.relative_to(bank_root))
         if row["file"] != expected_file:
-            errors.append(f"{index_path}: {memory_id} file must be {expected_file}")
+            errors.append(f"{index_label}: {memory_id} file must be {expected_file}")
         for index_key, metadata_key in (
             ("title", "title"),
             ("type", "type"),
@@ -401,11 +588,11 @@ def validate_bank_report(
             ("last_verified", "last_verified"),
         ):
             if row[index_key] != str(metadata[metadata_key]):
-                errors.append(f"{index_path}: {memory_id} {index_key} differs from chunk metadata")
+                errors.append(f"{index_label}: {memory_id} {index_key} differs from chunk metadata")
         for index_key, metadata_key in (("scope", "scope"), ("tags", "tags")):
             expected = ", ".join(metadata[metadata_key])
             if row[index_key] != expected:
-                errors.append(f"{index_path}: {memory_id} {index_key} differs from chunk metadata")
+                errors.append(f"{index_label}: {memory_id} {index_key} differs from chunk metadata")
 
     for memory_id, row in index.items():
         if memory_id in chunks:
@@ -415,12 +602,12 @@ def validate_bank_report(
             # Saying it is missing sends the reader looking for a deleted file
             # that is sitting right there.
             warnings.append(
-                f"{index_path}: {memory_id} index row retained for invalid chunk "
+                f"{index_label}: {memory_id} index row retained for invalid chunk "
                 f"({row['file']})"
             )
         else:
             errors.append(
-                f"{index_path}: {memory_id} points to a missing chunk ({row['file']})"
+                f"{index_label}: {memory_id} points to a missing chunk ({row['file']})"
             )
 
     for memory_id, (_, metadata) in chunks.items():

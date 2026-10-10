@@ -1,0 +1,33 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Trainers — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Trainers</h1>
+        <p><a class="button button--primary" href="{{ path('administration_trainer_create') }}">+ Create trainer</a></p>
+
+        <form method="get">
+            <input type="text" name="q" placeholder="Search business name" value="{{ app.request.query.get('q') }}">
+            <button type="submit" class="button">Search</button>
+        </form>
+
+        {% if trainers is empty %}
+            <p>No trainers found.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Business name</th><th>Owner</th><th>Subscription</th><th>Created</th></tr></thead>
+                <tbody>
+                    {% for trainer in trainers %}
+                        <tr>
+                            <td><a href="{{ path('administration_trainer_show', {trainer: trainer.id}) }}">{{ trainer.businessName }}</a></td>
+                            <td>{{ trainer.ownerAccount.email }}</td>
+                            <td>{{ subscriptionStatuses[trainer.id] }}</td>
+                            <td>{{ trainer.createdAt|date('Y-m-d') }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

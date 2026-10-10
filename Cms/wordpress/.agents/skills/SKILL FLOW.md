@@ -7,7 +7,7 @@ This flow keeps WordPress work structured while preserving user control. Agents 
 ```text
 /requirements-analyst
   -> /researcher        (when options/libraries/approaches are unclear)
-  -> /brainstorm
+  -> /brainstorming
   -> /council           (for high-stakes trade-offs)
   -> /architect
   -> /content-modeling  (when content/storage shape is unclear)
@@ -15,7 +15,7 @@ This flow keeps WordPress work structured while preserving user control. Agents 
   -> /api-designer
   -> /frontend-design
   -> /writing-plans
-  -> /git-worktrees
+  -> /using-git-worktrees
   -> /architecture-implementer   (scaffold the decided structure)
   -> /coder, /coder-frontend, or the narrowest WordPress specialty
   -> /code-reviewer
@@ -49,8 +49,8 @@ This flow keeps WordPress work structured while preserving user control. Agents 
 - Use `/security-reviewer` for auth, input-handling, SQL, upload, or secret-touching changes.
 - Use `/performance-optimization` when something is measurably slow.
 - Use `/dependency-manager` for Composer audits, updates, and vetting new packages.
-- Use `/debugger` when tests fail for unclear reasons or behavior is unexpected.
-- Use `/docs-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
+- Use `/systematic-debugger` when tests fail for unclear reasons or behavior is unexpected.
+- Use `/documentation-generator` when setup, deployment, worker/cron, API, or architecture documentation changed.
 - Use `project-brain` for governed task lifecycle, handoffs, unified retrieval, findings/bugs/incidents/decisions/events, compaction, and promotion proposals. Governed mode is the default; `--mode lightweight` is an explicit local-only fallback.
 - Use `memory-bank` only for durable retrieval/capture/audit/supersession and governed automatic or independently reviewed promotion application; active work stays in Project Brain.
 - Use `checkpoint`, `memory` for authority-aware progress capture and unified context refresh; governed mode never creates SQLite task authority.
@@ -59,11 +59,11 @@ This flow keeps WordPress work structured while preserving user control. Agents 
 
 | Phase | Commands |
 | --- | --- |
-| Understanding | `/requirements-analyst`, `/codebase-mapper`, `/researcher`, `/brainstorm` |
+| Understanding | `/requirements-analyst`, `/codebase-mapper`, `/researcher`, `/brainstorming` |
 | Planning | `council`, `architect`, `content-modeling`, `database-designer`, `api-designer`, `hooks-events`, `multisite`, `cron-background-processing`, `frontend-design`, `writing-plans` |
 | Implementation | `using-git-worktrees`, `architecture-implementer`, `coder`, `coder-frontend`, `plugin-development`, `theme-development`, `block-development`, `rest-api`, `wp-cli`, `woocommerce`, `refactorer` |
-| Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/debugger`, `/verify` |
-| Finalization | `/docs-generator`, `/release`, `/finishing-branch` |
+| Quality | `/code-reviewer`, `/security-reviewer`, `/test-generator`, `/performance-optimization`, `/systematic-debugger`, `/verify` |
+| Finalization | `/documentation-generator`, `/release`, `/finishing-branch` |
 | Utility | `project-brain`, `checkpoint`, `memory`, `memory-bank`, `/reflect`, `/skill-creator`, `/review-pr`, `/browser-verify`, `/dependency-manager` |
 
 ## Task Capsule Handoff

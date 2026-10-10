@@ -43,7 +43,8 @@ reviewed artifact - treat it as a change the user must ask for.
 **Per stage,** follow the delegation protocol: build one bounded capsule per
 agent (objective; output format per SKILL FLOW.md; tool and source guidance
 including the artifact paths and the task ID; task boundaries; decisions and
-assumptions so far), keep it inside the 8,000-character Task Capsule bound,
+assumptions so far, each with the constraint that binds it), keep it inside
+the 8,000-character Task Capsule bound,
 pass file paths rather than contents, then record the dispatch -
 `python3 memory-bank/scripts/context.py msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>` -
 before spawning with the Task tool. Spawn write-capable agents strictly one at

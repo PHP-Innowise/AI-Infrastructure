@@ -13,26 +13,37 @@ Checks:
     resolves to a skill/agent that actually exists in the same edition.
   - Every selected edition root exists and no unselected edition root exists.
   - Every hook script passes `bash -n` and carries the executable bit, and the
-    expected hook set is complete per edition (working-memory-read.sh is
-    deliberately absent from Cursor - it has no prompt-time hook event).
+    expected hook set is complete per edition (Cursor's working-memory-read.sh
+    runs on beforeSubmitPrompt and must answer {"continue": true}).
   - Every flow command's stages name agents that were generated, no parallel
     stage holds two write-capable agents (the gate runs those one at a time),
     and a multi-stage flow declares at least one checkpoint.
   - Every hook wiring file (.claude/settings.json, .cursor/hooks.json,
     .codex/hooks.json) references only hook scripts that exist and are
-    executable - every .sh token in a wired command is resolved, so an
-    interpreter-prefixed "bash .claude/hooks/x.sh" cannot hide a dead hook.
+    executable, and every command that names a hook is exactly hook-forge's
+    form for its edition ("${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh,
+    the verbatim Codex launcher, bare .cursor/hooks/<script>.sh). Anything
+    else is an error, not a skip: a bare Claude/Codex path exits 127 from a
+    subdirectory, and a wrapper, a trailing "|| true" or a quoted typo hides a
+    dead hook or swallows its blocking exit 2 - every one of them fails open.
+    Every hook hook-forge registers must also be wired in that exact form,
+    and context-continuity.sh - one unargumented script that dispatches on
+    the payload's hook_event_name - on each event it serves (session start,
+    prompt, end of turn) and calling context_continuity.py --event hook.
   - The seeded memory-bank passes its own scripts/validate.py.
-  - The context-brain runtime is present (context.py, brain_runtime.py,
-    context_retrieval.py, validate.py under memory-bank/scripts/) and the
-    project-brain/ skeleton is seeded with a substituted runtime.json whose
-    canonical_edition points at a skills tree that actually exists.
+  - The context-brain runtime is present (RUNTIME_SCRIPTS under
+    memory-bank/scripts/: context.py, context_handoff.py,
+    context_continuity.py, brain_runtime.py, context_retrieval.py,
+    validate.py and the modules they import) and the project-brain/ skeleton
+    is seeded with a substituted runtime.json whose canonical_edition points
+    at a skills tree that actually exists.
   - Smoke: `python3 memory-bank/scripts/context.py status --json` and
     `... validate` both exit 0 inside the generated tree; status exposes a
     structurally valid active/retrieval-only/degraded automatic-memory report.
-  - Every selected edition includes the memory quartet skills (memory-bank,
-    project-brain, checkpoint, memory) and their agent/command wrappers where
-    that edition carries those layers.
+  - Every selected edition includes the six memory-continuity skills
+    (memory-bank, project-brain, checkpoint, memory, context-save,
+    context-load) and their agent/command wrappers where that edition carries
+    those layers.
   - The upgrade contract: .infra-manifest.json exists, parses, carries a
     semver generator_version and a TASK reference, a valid mode (full/merge),
     a well-formed optional decisions map (standing kept/merged decisions),
@@ -48,6 +59,7 @@ Exit code 0 = pass, non-zero = failures (printed to stderr).
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -68,6 +80,7 @@ from infra_ownership import (  # noqa: E402
     resolve_target,
     sha256_file,
     validate_decisions,
+    normalize_relative_path,
 )
 from validate_skill_quality import (  # noqa: E402
     DEFAULT_REGISTRY,
@@ -97,22 +110,39 @@ APPROVED_VERBATIM_PLACEHOLDERS = {
 }
 
 # Always-generated skills that operate the shared memory layer; every selected
-# edition must carry all four (plus wrappers where the edition has those layers).
-MEMORY_QUARTET = ("memory-bank", "project-brain", "checkpoint", "memory")
+# edition must carry all six (plus wrappers where the edition has those layers).
+MEMORY_CONTINUITY_SKILLS = (
+    "memory-bank",
+    "project-brain",
+    "checkpoint",
+    "memory",
+    "context-save",
+    "context-load",
+)
 
 # The context-brain runtime memory-seed installs verbatim.
 RUNTIME_SCRIPTS = (
     "context.py",
+    "context_handoff.py",
+    "context_continuity.py",
     "brain_runtime.py",
     "context_retrieval.py",
     "validate.py",
+    "workspace_roots.py",
+    # validate.py imports it at load: without it no memory command starts.
+    "automatic_query.py",
+    # context.py imports it at load: the one write path for a run's result.
+    "memory_results.py",
+    "mcp_server.py",
+    "mcp_config.py",
 )
 
-# Hook contract per edition. Cursor deliberately lacks working-memory-read.sh:
-# it has no UserPromptSubmit-equivalent event to wire it to. Its read path is
-# the alwaysApply rule .cursor/rules/working-memory.mdc that the Cursor
-# copies of working-memory-write.sh and local-context.sh render instead
-# (hook-forge step 6). subagent-gate.sh is present in every edition but is
+# Hook contract per edition. Cursor's working-memory-read.sh runs on
+# beforeSubmitPrompt, which cannot add context to a prompt: it renders the
+# capsule for the prompt into the alwaysApply rule
+# .cursor/rules/working-memory.mdc, as the Cursor copies of
+# working-memory-write.sh and local-context.sh do at the end of a turn and at
+# session start (hook-forge step 6). subagent-gate.sh is present in every edition but is
 # tool-owned - each edition ships a variant matching its host's gate
 # contract, so byte-identity across editions is NOT expected for it.
 BASE_HOOKS = (
@@ -121,6 +151,7 @@ BASE_HOOKS = (
     "file-naming-validator.sh",
     "loop-detection.sh",
     "working-memory-write.sh",
+    "context-continuity.sh",
     "subagent-gate.sh",
     # Ships in every edition; wired on Claude/Cursor and deliberately
     # unregistered on Codex, where multi-agent is off and nothing stops.
@@ -128,7 +159,7 @@ BASE_HOOKS = (
 )
 REQUIRED_HOOKS = {
     "claude": BASE_HOOKS + ("working-memory-read.sh",),
-    "cursor": BASE_HOOKS,
+    "cursor": BASE_HOOKS + ("working-memory-read.sh",),
     "codex": BASE_HOOKS + ("working-memory-read.sh",),
 }
 
@@ -137,6 +168,81 @@ EDITION_HOOK_WIRING = {
     "claude": (".claude/hooks", ".claude/settings.json"),
     "cursor": (".cursor/hooks", ".cursor/hooks.json"),
     "codex": (".codex/hooks", ".codex/hooks.json"),
+}
+
+# Root-anchored wiring forms (hook-forge step 9). Claude Code and Codex run a
+# hook command in the session's current directory, so a bare relative
+# ".claude/hooks/x.sh" exits 127 as soon as that directory is not the project
+# root - and both hosts treat any exit other than 2 as non-blocking, so the
+# guardrail silently stops guarding. Cursor runs project hooks from the
+# project root and keeps the bare form.
+#
+# Claude Code exports the project root to every hook as CLAUDE_PROJECT_DIR;
+# its docs ask for the placeholder in double quotes in shell form. The
+# unbraced spelling is the same expansion in the bash/Git Bash shell these
+# hooks need, so both are accepted.
+CLAUDE_HOOK_ROOT_PREFIXES = ('"${CLAUDE_PROJECT_DIR}"/', '"$CLAUDE_PROJECT_DIR"/')
+# Codex exports no project-root variable and runs the command through the
+# user's login shell ($SHELL -lc), so the wiring hands one fixed POSIX walk to
+# `sh`: from the cwd towards /, stop at the nearest directory holding
+# .codex/hooks.json - the project that declared the hook - and exec that
+# project's .codex/hooks/<script>. The walk never looks past that project: a
+# script missing there exits 127 instead of running a same-named script from
+# an ancestor (~/.codex/hooks/ is Codex's own user-hook directory, /tmp is
+# world-writable). Only the trailing script name varies; anything else is not
+# this launcher.
+CODEX_HOOK_LAUNCHER = (
+    "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || "
+    "{ echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; "
+    "exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh "
+)
+HOOK_SCRIPT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\.sh")
+# Editions whose host does not run hooks from the project root.
+ROOT_ANCHORED_EDITIONS = ("claude", "codex")
+# The one command form hook-forge step 9 wires per edition; group 1 is the
+# script name. A wiring command that names a hook must match it in full.
+HOOK_FORGE_COMMANDS = {
+    "claude": re.compile(
+        r'"\$(?:\{CLAUDE_PROJECT_DIR\}|CLAUDE_PROJECT_DIR)"/\.claude/hooks/('
+        + HOOK_SCRIPT_NAME.pattern
+        + ")"
+    ),
+    "cursor": re.compile(r"\.cursor/hooks/(" + HOOK_SCRIPT_NAME.pattern + ")"),
+    "codex": re.compile(
+        re.escape(CODEX_HOOK_LAUNCHER) + "(" + HOOK_SCRIPT_NAME.pattern + ")"
+    ),
+}
+HOOK_FORGE_FORMS = {
+    "claude": '"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh',
+    "cursor": ".cursor/hooks/<script>.sh",
+    "codex": "hook-forge step 9's verbatim launcher ending in `sh <script>.sh`",
+}
+# A command that names a hook script or a hooks directory. Any other command
+# (the editions' Notification snippet) is not a hook-forge hook and is skipped.
+HOOK_REFERENCE = re.compile(r"\.sh\b|hooks/")
+# The hooks hook-forge step 9 registers per edition. subagent-dispatch.sh
+# ships on Codex but stays unregistered there (multi-agent is off).
+WIRED_HOOKS = {
+    "claude": REQUIRED_HOOKS["claude"],
+    "cursor": REQUIRED_HOOKS["cursor"],
+    "codex": tuple(
+        hook for hook in REQUIRED_HOOKS["codex"] if hook != "subagent-dispatch.sh"
+    ),
+}
+
+# context-continuity.sh is one script for every lifecycle event it serves: the
+# client names the event in its payload (`hook_event_name`) and the runtime
+# acts on it - a session start delivers a merge prepared with `context-load
+# merge`, a prompt or a final answer is captured. Wiring it once is not
+# enough: a missing capture event silently loses the user's request or the
+# answer from the chat's snapshot, and a missing start event never hands a new
+# task the merge prepared for it. Each event below must run the script in
+# hook-forge's exact form, with no argument - the payload selects the action.
+CONTINUITY_HOOK = "context-continuity.sh"
+CONTINUITY_EVENTS = {
+    "claude": ("SessionStart", "UserPromptSubmit", "Stop"),
+    "cursor": ("sessionStart", "beforeSubmitPrompt", "afterAgentResponse"),
+    "codex": ("SessionStart", "UserPromptSubmit", "Stop"),
 }
 
 # Edition -> (skills dir relative to target, has_agents, has_commands)
@@ -335,7 +441,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
     skill_names = collect_skill_names(skills_rel, files)
     if not skill_names:
         errors.append(f"[{edition}] no manifest-owned skills under {skills_rel}")
-    for required_skill in MEMORY_QUARTET:
+    for required_skill in MEMORY_CONTINUITY_SKILLS:
         if required_skill not in skill_names:
             errors.append(
                 f"[{edition}] memory-layer skill '{required_skill}' missing under {skills_rel}"
@@ -381,7 +487,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                     errors.append(
                         f"[{edition}] {af}: invokes '{invokes}' is not a generated skill"
                     )
-            for required_skill in MEMORY_QUARTET:
+            for required_skill in MEMORY_CONTINUITY_SKILLS:
                 required_rel = f"{agents_rel}/{required_skill}-agent.md"
                 if required_skill in skill_names and not is_owned(files, required_rel):
                     errors.append(
@@ -410,7 +516,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                     validate_flow(
                         edition, cf, text, roster or skill_names, write_agents, errors
                     )
-            for required_skill in MEMORY_QUARTET:
+            for required_skill in MEMORY_CONTINUITY_SKILLS:
                 required_rel = f"{commands_rel}/{required_skill}.md"
                 if required_skill in skill_names and not is_owned(files, required_rel):
                     errors.append(
@@ -450,16 +556,37 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
             expected_rel = f"{hooks_rel}/{expected}"
             if not is_owned(files, expected_rel):
                 errors.append(f"[{edition}] required hook is not manifest-owned: {expected_rel}")
-        read_hook_rel = f"{hooks_rel}/working-memory-read.sh"
-        if edition == "cursor" and is_owned(files, read_hook_rel):
-            errors.append(
-                "[cursor] working-memory-read.sh generated, but Cursor has no "
-                "prompt-time hook event to run it (documented divergence)"
+        continuity_rel = f"{hooks_rel}/{CONTINUITY_HOOK}"
+        if is_owned(files, continuity_rel):
+            # One unargumented script serves every event, so it must hand the
+            # payload to the runtime's event dispatch, and name its own host:
+            # a session start answers in that host's context envelope.
+            source = (target / continuity_rel).read_text(
+                encoding="utf-8", errors="replace"
             )
+            if (
+                "memory-bank/scripts/context_continuity.py" not in source
+                or not re.search(r"--event[ =]hook\b", source)
+                or not re.search(rf"--host[ =]{edition}\b", source)
+            ):
+                errors.append(
+                    f"[{edition}] {continuity_rel} does not call "
+                    "memory-bank/scripts/context_continuity.py with "
+                    f"--host {edition} --event hook (hook-forge step 6)"
+                )
         if edition == "cursor":
-            # Cursor's read path: the stop and sessionStart hooks must render
-            # the capsule into the alwaysApply working-memory rule.
-            for renderer in ("working-memory-write.sh", "local-context.sh"):
+            # Cursor's read path: the prompt, stop and sessionStart hooks must
+            # render the capsule into the alwaysApply working-memory rule, and
+            # the prompt hook must always let the prompt through.
+            read_hook = target / hooks_rel / "working-memory-read.sh"
+            if is_owned(files, f"{hooks_rel}/working-memory-read.sh") and '"continue": true' not in read_hook.read_text(
+                encoding="utf-8", errors="replace"
+            ).replace('\\"', '"'):
+                errors.append(
+                    f"[cursor] {hooks_rel}/working-memory-read.sh does not answer "
+                    '{"continue": true} to beforeSubmitPrompt'
+                )
+            for renderer in ("working-memory-read.sh", "working-memory-write.sh", "local-context.sh"):
                 renderer_rel = f"{hooks_rel}/{renderer}"
                 if not is_owned(files, renderer_rel):
                     continue  # already reported as a missing required hook
@@ -483,7 +610,7 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
             if result.returncode != 0:
                 errors.append(f"{sh}: bash -n failed: {result.stderr.strip()}")
             mode = sh.stat().st_mode
-            if not (mode & 0o111):
+            if os.name != 'nt' and not (mode & 0o111):
                 errors.append(f"{sh}: not executable (chmod +x needed)")
 
 
@@ -502,13 +629,89 @@ def collect_wired_commands(node) -> list:
     return commands
 
 
+def hook_forge_script(edition: str, command: str):
+    """The hook script `command` runs when it is exactly hook-forge's form.
+
+    Returns the script path relative to the target root, or None for any
+    other command - a wrapper, an interpreter prefix, trailing shell syntax, a
+    quoted path, a bare Claude/Codex path or an edited launcher.
+    """
+    match = HOOK_FORGE_COMMANDS[edition].fullmatch(command.strip())
+    if match is None:
+        return None
+    return f"{EDITION_HOOK_WIRING[edition][0]}/{match.group(1)}"
+
+
+def anchored_command(edition: str, token: str):
+    """hook-forge's command for a bare hooks path, or None when it names none."""
+    hooks_rel = EDITION_HOOK_WIRING[edition][0]
+    bare = token[2:] if token.startswith("./") else token
+    if not bare.startswith(f"{hooks_rel}/"):
+        return None
+    name = bare[len(hooks_rel) + 1:]
+    if not HOOK_SCRIPT_NAME.fullmatch(name):
+        return None
+    if edition == "claude":
+        return f'"${{CLAUDE_PROJECT_DIR}}"/{hooks_rel}/{name}'
+    if edition == "codex":
+        return CODEX_HOOK_LAUNCHER + name
+    return f"{hooks_rel}/{name}"
+
+
+def resolve_wired_scripts(edition: str, command: str) -> tuple:
+    """(script paths relative to the target root, unanchored tokens).
+
+    A command in hook-forge's exact form resolves to its one script. Any
+    other command is resolved token by token, best effort, so the gate can
+    also name the dead or unowned script it points at; validate_hook_wiring
+    rejects the command itself either way. The documented Claude anchor is
+    stripped before resolving, so the dead-hook check sees the same
+    `.claude/hooks/x.sh` path the anchor expands to. A token that carries no
+    anchor on an edition whose host runs hooks from the session cwd is
+    reported as unanchored; it is still resolved, so a bare path to a missing
+    script reports both problems.
+    """
+    script = hook_forge_script(edition, command)
+    if script is not None:
+        return [script], []
+    prefixes = CLAUDE_HOOK_ROOT_PREFIXES if edition == "claude" else ()
+    scripts: list = []
+    unanchored: list = []
+    for token in command.split():
+        if not token.endswith(".sh"):
+            continue
+        for prefix in prefixes:
+            if token.startswith(prefix):
+                scripts.append(token[len(prefix):])
+                break
+        else:
+            scripts.append(token)
+            if edition in ROOT_ANCHORED_EDITIONS:
+                unanchored.append(token)
+    return scripts, unanchored
+
+
+def event_commands(document, event: str) -> list:
+    """Every command string wired on one native hook event."""
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return []
+    return collect_wired_commands(hooks.get(event, []))
+
+
 def validate_hook_wiring(
     target: Path, editions: list, files: dict, errors: list
 ) -> None:
-    """Every wired hook must resolve to an existing executable script.
+    """Every wired hook must be in hook-forge's form and resolve to a script.
 
     A wiring entry that points at a missing or non-executable file is a dead
     hook: the host tool fails the call silently and the guardrail never runs.
+    A Claude or Codex entry that is not anchored to the project root is dead
+    the moment the session's cwd is a subdirectory, for the same reason. And
+    any command that names a hook but is not exactly hook-forge's form is
+    rejected outright rather than parsed: `|| true` or `; exit 0` swallows
+    the blocking exit 2, and a quoted typo or a script name without `.sh`
+    hides a dead hook from token-level resolution.
     """
     for edition in editions:
         _, wiring_rel = EDITION_HOOK_WIRING[edition]
@@ -525,12 +728,24 @@ def validate_hook_wiring(
         if not commands:
             errors.append(f"{wiring_path}: no hook commands wired")
         for command in commands:
-            # Check every token ending in .sh, not just the first: a wiring of
-            # the form "bash .claude/hooks/x.sh" (against hook-forge's bare-path
-            # rule) must not smuggle a dead hook past this check.
-            script_tokens = [tok for tok in command.split() if tok.endswith(".sh")]
-            if not script_tokens:
-                continue  # non-script command (e.g. a notifier); not ours to check
+            if not HOOK_REFERENCE.search(command):
+                continue  # names no hook (e.g. a notifier); not ours to check
+            script_tokens, unanchored = resolve_wired_scripts(edition, command)
+            for token in unanchored:
+                rewired = anchored_command(edition, token)
+                fix = f"; rewire it as: {rewired}" if rewired else ""
+                errors.append(
+                    f"{wiring_path}: wired hook is not anchored to the project "
+                    f"root, so it does not run from a subdirectory: {token}{fix}"
+                )
+            if not unanchored and hook_forge_script(edition, command) is None:
+                errors.append(
+                    f"{wiring_path}: wired hook is not in hook-forge's exact "
+                    f"{edition} form ({HOOK_FORGE_FORMS[edition]}); a wrapper, "
+                    "trailing shell syntax such as `|| true`, a quoted path or "
+                    "a name without .sh can hide a dead hook or swallow its "
+                    f"blocking exit 2: {command}"
+                )
             for script_token in script_tokens:
                 script_path = target / script_token
                 if not is_owned(files, script_token):
@@ -541,7 +756,7 @@ def validate_hook_wiring(
                     errors.append(
                         f"{wiring_path}: wired hook does not exist: {script_token}"
                     )
-                elif not (script_path.stat().st_mode & 0o111):
+                elif os.name != 'nt' and not (script_path.stat().st_mode & 0o111):
                     errors.append(
                         f"{wiring_path}: wired hook not executable: {script_token}"
                     )
@@ -559,6 +774,109 @@ def validate_hook_wiring(
             re.M,
         ):
             errors.append("[codex] .codex/config.toml does not enable hooks = true")
+
+
+def validate_required_wiring(
+    target: Path, editions: list, files: dict, errors: list
+) -> None:
+    """Every hook hook-forge registers must be wired in its exact form.
+
+    validate_hook_wiring judges the commands that are present; this catches
+    the one that is absent. A guard that is never wired never runs, and
+    nothing else would notice: the script still exists, is owned and passes
+    `bash -n`. An unowned or unreadable wiring file is already reported there.
+    """
+    for edition in editions:
+        hooks_rel, wiring_rel = EDITION_HOOK_WIRING[edition]
+        if not is_owned(files, wiring_rel):
+            continue
+        try:
+            document = json.loads((target / wiring_rel).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        wired = {
+            hook_forge_script(edition, command)
+            for command in collect_wired_commands(document)
+        }
+        for script in WIRED_HOOKS[edition]:
+            if f"{hooks_rel}/{script}" not in wired:
+                errors.append(
+                    f"[{edition}] {wiring_rel} does not wire {script} in "
+                    f"hook-forge's exact form ({HOOK_FORGE_FORMS[edition]}), "
+                    "so that guard never runs (hook-forge step 9)"
+                )
+
+
+def validate_continuity_wiring(
+    target: Path, editions: list, files: dict, errors: list
+) -> None:
+    """context-continuity.sh must run on every lifecycle event it serves.
+
+    validate_required_wiring proves the script is wired somewhere; this
+    proves it is wired where it acts. A start event that does not run it
+    never hands a new task the merge `context-load merge` prepared for it, and
+    a prompt or answer event that does not run it leaves that half of the
+    chat out of the snapshot - nothing else would notice either. The command
+    must be hook-forge's exact form, with no argument: the payload's
+    `hook_event_name` selects the action. An unowned or unreadable wiring file
+    is already reported by validate_hook_wiring.
+    """
+    for edition in editions:
+        hooks_rel, wiring_rel = EDITION_HOOK_WIRING[edition]
+        if not is_owned(files, wiring_rel):
+            continue
+        try:
+            document = json.loads((target / wiring_rel).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        script = f"{hooks_rel}/{CONTINUITY_HOOK}"
+        for event in CONTINUITY_EVENTS[edition]:
+            wired = {
+                hook_forge_script(edition, command)
+                for command in event_commands(document, event)
+            }
+            if script not in wired:
+                errors.append(
+                    f"[{edition}] {wiring_rel} does not run {CONTINUITY_HOOK} on "
+                    f"{event} in hook-forge's exact form "
+                    f"({HOOK_FORGE_FORMS[edition]}, no argument) (hook-forge step 9)"
+                )
+
+
+# The line policy-forge writes into `.claude/CLAUDE.md`. Claude Code reads
+# AGENTS.md by itself only while the project has no CLAUDE.md,
+# .claude/CLAUDE.md or CLAUDE.local.md (and only from v2.1.277), so in a
+# target that has one - Laravel Boost writes a CLAUDE.md - the shared policy
+# would never load without this import.
+CLAUDE_POLICY_IMPORT = "@../AGENTS.md"
+
+
+def validate_claude_policy_import(target: Path, editions: list, errors: list) -> None:
+    """A Claude edition must load AGENTS.md through `.claude/CLAUDE.md`."""
+    if "claude" not in editions:
+        return
+    path = target / ".claude" / "CLAUDE.md"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        errors.append(
+            "[claude] .claude/CLAUDE.md is missing; it must import "
+            f"{CLAUDE_POLICY_IMPORT}, or Claude Code skips AGENTS.md whenever "
+            "the project has a CLAUDE.md (policy-forge)"
+        )
+        return
+    fenced = False
+    for line in text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if not fenced and line.strip() == CLAUDE_POLICY_IMPORT:
+            return
+    errors.append(
+        f"[claude] .claude/CLAUDE.md does not import {CLAUDE_POLICY_IMPORT} on a "
+        "line of its own outside a code block, so Claude Code may never load "
+        "AGENTS.md (policy-forge)"
+    )
 
 
 def validate_memory_readiness(payload: object, errors: list) -> None:
@@ -638,6 +956,32 @@ def validate_memory_readiness(payload: object, errors: list) -> None:
             "context.py status automatic_memory.status is inconsistent with "
             f"task/Git readiness (expected {expected_status})"
         )
+
+
+def validate_memory_mcp(target: Path, editions: list, files: dict, errors: list) -> None:
+    """New generated runtimes must register the selected native clients."""
+    relative = 'memory-bank/scripts/mcp_config.py'
+    if not is_owned(files, relative):
+        return  # Legacy bundles keep their existing runtime contract.
+    try:
+        spec = importlib.util.spec_from_file_location('generated_memory_mcp_config', target / relative)
+        config = importlib.util.module_from_spec(spec); spec.loader.exec_module(config)
+        for host in editions:
+            name = config.PATHS[host]
+            if not is_owned(files, name):
+                errors.append(f'{name}: Memory MCP registration is not manifest-owned')
+                continue
+            value = (target / name).read_bytes()
+            config.merge(name, value, value)  # Reject foreign keys, duplicate tables and altered blocks.
+            if host == 'codex':
+                valid = any(config.codex_block(p).encode() in value
+                    for p in (('python3', []), ('python', []), ('py', ['-3'])))
+            else:
+                entry = config._json(value).get('mcpServers', {}).get('harness-memory')
+                valid = config._owned(entry, host)
+            if not valid: errors.append(f'{name}: portable Memory MCP registration is missing or changed')
+    except (OSError, ValueError, ImportError):
+        errors.append('Memory MCP registration could not be validated')
 
 
 def validate_memory_runtime(target: Path, files: dict, errors: list) -> None:
@@ -810,7 +1154,11 @@ def validate_manifest(target: Path, errors: list) -> dict:
         errors.append(f"{MANIFEST_NAME}: {error}")
 
     for rel, expected_sha in files.items():
-        if not isinstance(rel, str) or not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+        try:
+            if not isinstance(rel, str):
+                raise OwnershipError('File path must be a string.')
+            normalize_relative_path(rel)
+        except OwnershipError:
             errors.append(f"{MANIFEST_NAME}: invalid target-relative file path: {rel!r}")
             continue
         if rel == MANIFEST_NAME:
@@ -964,6 +1312,10 @@ def main() -> int:
         validate_edition(target, edition, files, errors)
     validate_hooks(target, editions, files, errors)
     validate_hook_wiring(target, editions, files, errors)
+    validate_required_wiring(target, editions, files, errors)
+    validate_continuity_wiring(target, editions, files, errors)
+    validate_claude_policy_import(target, editions, errors)
+    validate_memory_mcp(target, editions, files, errors)
     validate_memory_bank(
         target,
         files,

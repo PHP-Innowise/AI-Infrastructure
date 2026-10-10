@@ -65,6 +65,9 @@ SCHEMA_VERSION = 1
 SURFACE_PATHSPECS = (
     "AGENTS.md",
     "CLAUDE.md",
+    # Loads in every Claude Code session and decides, through its
+    # `@../AGENTS.md` import, whether the policy loads at all.
+    ".claude/CLAUDE.md",
     ".claude/DOD.md",
     ".claude/GOLDEN-PRINCIPLES.md",
     ".claude/STABILIZATION.md",

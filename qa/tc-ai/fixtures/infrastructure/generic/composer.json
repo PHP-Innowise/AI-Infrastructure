@@ -1,0 +1,7 @@
+{
+  "name": "qa/generic-php-fixture",
+  "description": "Synthetic framework-neutral PHP target",
+  "require": {
+    "php": ">=8.1"
+  }
+}

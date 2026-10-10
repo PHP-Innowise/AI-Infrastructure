@@ -1,5 +1,6 @@
 """Provider boundaries, tested offline with documented NDJSON shapes."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -8,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
-from harness import providers
+from harness import providers, windows_commands
 
 
 class BudgetTests(unittest.TestCase):
@@ -22,6 +23,23 @@ class BudgetTests(unittest.TestCase):
         self.assertEqual(providers.total_tokens({'input_tokens':10,'output_tokens':2,'cache_read_input_tokens':8,'cache_creation_input_tokens':3}),23)
         self.assertIsNone(providers.total_tokens({'input_tokens':10}))
         self.assertIsNone(providers.total_tokens({'input_tokens':True,'output_tokens':2}))
+
+    def test_resumed_claude_cost_is_the_growth_of_the_session_total(self):
+        init = lambda version=None: {'type': 'system', 'subtype': 'init', 'session_id': 'native-1',
+                                     **({'claude_code_version': version} if version else {})}
+        fresh = providers.RunCost('claude'); fresh.observe(init('2.1.278'))
+        self.assertEqual((fresh.own(.5), fresh.total(.5), fresh.session), (.5, .5, 'native-1'))
+        resumed = providers.RunCost('claude', 'native-1', .5); resumed.observe(init('2.1.278 (Claude Code)'))
+        self.assertEqual((resumed.own(.8), resumed.total(.8)), (.3, .8))
+        # A crash result can carry zeroed totals; the CLI then keeps the last saved total.
+        self.assertEqual((resumed.own(0), resumed.total(0)), (None, .5))
+        unknown = providers.RunCost('claude', 'native-1', None); unknown.observe(init('2.1.300'))
+        self.assertEqual((unknown.own(.8), unknown.total(.8)), (None, .8))
+        for version in ('2.1.276', None, 'unreleased'):
+            older = providers.RunCost('claude', 'native-1', .5); older.observe(init(version))
+            self.assertEqual((older.own(.3), older.total(.3)), (.3, None), version)
+        codex = providers.RunCost('codex', 'thread-1', .5); codex.observe(init('9.9.9'))
+        self.assertEqual((codex.own(.2), codex.total(.2)), (.2, .2))
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -75,6 +93,95 @@ class DiscoveryTests(unittest.TestCase):
             self.assertNotIn("PRIVATE", json.dumps(found))
 
 
+class SignInTests(unittest.TestCase):
+    """What `claude auth status --json` and `codex login status` print (Claude Code 2.1.278, Codex 0.160.0)."""
+
+    def status(self, provider, completed=None, failure=None, environment=None):
+        run = patch.object(providers.subprocess, "run", side_effect=failure, return_value=completed)
+        keys = {name: "" for names in providers.SIGN_IN_ENVIRONMENT.values() for name in names}
+        # The CLI is the one its name finds on PATH, so the sign-in command is that name.
+        with run as called, patch.dict(providers.os.environ, {**keys, **(environment or {})}), \
+                patch.object(providers.shutil, "which", return_value="/fake/" + provider):
+            answer = providers.sign_in_status(provider, "/fake/" + provider)
+        return answer, called
+
+    def test_claude_reports_its_own_sign_in(self):
+        signed_out = json.dumps({"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"})
+        answer, run = self.status("claude", subprocess.CompletedProcess([], 1, signed_out, ""))
+        self.assertEqual(("signed_out", "claude auth login"), (answer["state"], answer["login"]))
+        self.assertEqual(["/fake/claude", "auth", "status", "--json"], run.call_args.args[0])
+        self.assertEqual((subprocess.DEVNULL, providers.SIGN_IN_TIMEOUT), (run.call_args.kwargs["stdin"], run.call_args.kwargs["timeout"]))
+        signed_in = json.dumps({"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty", "email": "PRIVATE"})
+        answer, _ = self.status("claude", subprocess.CompletedProcess([], 0, signed_in, ""))
+        self.assertEqual("signed_in", answer["state"])
+        self.assertNotIn("PRIVATE", json.dumps(answer))
+
+    def test_another_backend_or_an_unreadable_answer_is_unknown(self):
+        for label, completed, environment in (
+                ("Bedrock", subprocess.CompletedProcess([], 1, json.dumps({"loggedIn": False, "apiProvider": "bedrock"}), ""), None),
+                ("key in the environment", subprocess.CompletedProcess([], 1, json.dumps({"loggedIn": False, "apiProvider": "firstParty"}), ""),
+                 {"ANTHROPIC_API_KEY": "set"}),
+                ("not JSON", subprocess.CompletedProcess([], 0, "Logged in", ""), None)):
+            with self.subTest(label):
+                self.assertEqual("unknown", self.status("claude", completed, environment=environment)[0]["state"])
+        for failure in (OSError("PRIVATE"), subprocess.TimeoutExpired("PRIVATE", 10)):
+            with self.subTest(failure=failure):
+                answer = self.status("claude", failure=failure)[0]
+                self.assertEqual("unknown", answer["state"])
+                self.assertNotIn("PRIVATE", json.dumps(answer))
+
+    def test_codex_reports_its_login_by_exit_status(self):
+        answer, run = self.status("codex", subprocess.CompletedProcess([], 0, "", "Logged in using ChatGPT\n"))
+        self.assertEqual(("signed_in", "codex login"), (answer["state"], answer["login"]))
+        self.assertEqual(["/fake/codex", "login", "status"], run.call_args.args[0])
+        self.assertEqual("signed_out", self.status("codex", subprocess.CompletedProcess([], 1, "", "Not logged in\n"))[0]["state"])
+        self.assertEqual("unknown", self.status("codex", subprocess.CompletedProcess([], 1, "", "Error checking login status: PRIVATE\n"))[0]["state"])
+        self.assertEqual("unknown", self.status("codex", subprocess.CompletedProcess([], 1, "", "Not logged in\n"),
+                                                environment={"CODEX_API_KEY": "set"})[0]["state"])
+
+    def test_cursor_reports_its_authentication(self):
+        unauthenticated = json.dumps({"status": "unauthenticated", "isAuthenticated": False, "message": "Not logged in"})
+        answer, run = self.status("cursor", subprocess.CompletedProcess([], 0, unauthenticated, ""))
+        self.assertEqual("signed_out", answer["state"])
+        # Every Harness call to Cursor disables its auto-update, which could replace another tool's launcher.
+        self.assertEqual(["/fake/cursor", "--disable-auto-update", "status", "--format", "json"], run.call_args.args[0])
+        authenticated = json.dumps({"status": "authenticated", "isAuthenticated": True, "email": "PRIVATE"})
+        answer, _ = self.status("cursor", subprocess.CompletedProcess([], 0, authenticated, ""))
+        self.assertEqual("signed_in", answer["state"])
+        self.assertNotIn("PRIVATE", json.dumps(answer))
+        self.assertEqual("unknown", self.status("cursor", subprocess.CompletedProcess([], 0, unauthenticated, ""),
+                                                 environment={"CURSOR_API_KEY": "set"})[0]["state"])
+
+    def test_the_sign_in_command_names_an_executable_that_is_not_on_path(self):
+        with patch.object(providers.shutil, "which", return_value="/usr/local/bin/claude"), \
+                patch.object(providers.os.path, "realpath", side_effect=lambda value: value):
+            self.assertEqual("claude auth login", providers.sign_in_command("claude", "/usr/local/bin/claude"))
+        with patch.object(providers.shutil, "which", return_value=None):
+            self.assertEqual("'/home/u/Cursor Agent/cursor-agent' login",
+                             providers.sign_in_command("cursor", "/home/u/Cursor Agent/cursor-agent"))
+            self.assertIn("`'/home/u/Cursor Agent/cursor-agent' login`",
+                          providers.sign_in_failure("cursor", "/home/u/Cursor Agent/cursor-agent"))
+
+    def test_a_missing_cli_is_not_asked(self):
+        with patch.object(providers.subprocess, "run") as run:
+            self.assertEqual("unknown", providers.sign_in_status("claude", None)["state"])
+        run.assert_not_called()
+
+    def test_refused_sign_ins_are_recognised_and_other_failures_are_not(self):
+        for text in ("Failed to authenticate: OAuth session expired and could not be refreshed", "authentication_failed",
+                     "Not logged in. Please run /login", "unexpected status 401 Unauthorized", "Invalid API key · Please run /login",
+                     "Authentication required. Please run 'cursor-agent login' first"):
+            with self.subTest(text=text):
+                self.assertTrue(providers.AUTH_FAILURE.search(text))
+        for text in ("Fixture failure", "Provider run failed", "Tool call failed: file not found", "Process exited with code 1",
+                     "Rate limit reached", "src/login/LoginController.php could not be parsed"):
+            with self.subTest(text=text):
+                self.assertIsNone(providers.AUTH_FAILURE.search(text))
+        with patch.object(providers.shutil, "which", return_value=None):
+            self.assertIn("`codex login`", providers.sign_in_failure("codex"))
+            self.assertIn("`claude auth login` (or run `claude` and type /login)", providers.sign_in_failure("claude"))
+
+
 class CommandTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -124,6 +231,26 @@ class CommandTests(unittest.TestCase):
             self.assertEqual("--mode" in command, mode == "plan")
             self.assertFalse({"--force", "--yolo", "--trust", "--approve-mcps", "--stream-partial-output"} & set(command))
             self.assertIsNone(providers.input_text("cursor", self.prompt))
+
+    def test_windows_npm_codex_shim_uses_node_and_metadata_not_cmd(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shim = root / "codex.cmd"
+            shim.write_text("untrusted batch text", encoding="utf-8")
+            package = root / "node_modules" / "@openai" / "codex"
+            script = package / "bin" / "codex.js"
+            script.parent.mkdir(parents=True)
+            script.write_text("console.log('fixture')", encoding="utf-8")
+            (package / "package.json").write_text(
+                '{"name":"@openai/codex","bin":{"codex":"bin/codex.js"}}', encoding="utf-8")
+            node = root / "node.exe"
+            node.write_bytes(b"fixture")
+            with patch.object(windows_commands, "WINDOWS", True), patch.object(
+                    windows_commands.shutil, "which", side_effect=lambda name: str(node) if name in ("node.exe", "node") else None):
+                command = providers.build_command("codex", str(shim), self.project, self.prompt)
+        self.assertEqual(command[:2], [str(node), str(script)])
+        self.assertEqual(command[-1], "-")
+        self.assertNotIn("cmd.exe", command)
 
     def test_enabled_claude_uses_concurrency_and_depth_limits_on_fresh_and_resumed_runs(self):
         for count in (1, 3, 40):
@@ -548,6 +675,352 @@ class EventTests(unittest.TestCase):
         result = providers.normalize_event("claude", {"type": "result", "subtype": "success", "is_error": False,
             "total_cost_usd": float("nan"), "usage": {"input_tokens": True, "output_tokens": -1}})
         self.assertEqual(result, [{"kind": "result", "ok": True, "text": ""}])
+
+
+
+class TargetTests(unittest.TestCase):
+    """Run-view targets ride on the same labels: same count and order with or without them."""
+
+    def aligned(self, provider, events):
+        enriched = []
+        for event in events:
+            plain, targeted = providers.normalize_event(provider, event), providers.normalize_event(provider, event, targets=True)
+            with self.subTest(provider=provider, event=event):
+                self.assertEqual(plain, [{key: value for key, value in item.items() if key != "targets"}
+                                         for item in targeted if item["kind"] != "plan"])
+            enriched.extend(targeted)
+        self.assertNotIn("PRIVATE", json.dumps(enriched))
+        return enriched
+
+    def test_claude_targets_pair_by_call_and_mark_helpers(self):
+        def assistant(parent, *blocks):
+            return {"type": "assistant", "parent_tool_use_id": parent, "session_id": "s",
+                    "message": {"id": "msg_1", "role": "assistant", "content": list(blocks)}}
+        def use(call, name, **arguments):
+            return {"type": "tool_use", "id": call, "name": name, "input": arguments}
+        events = self.aligned("claude", [
+            {"type": "system", "subtype": "init", "session_id": "s", "apiKeySource": "PRIVATE"},
+            assistant(None, {"type": "thinking", "thinking": "PRIVATE REASONING"}, {"type": "text", "text": "Reading."},
+                      use("toolu_1", "Read", file_path="/repo/app/Order.php"),
+                      use("toolu_2", "TodoWrite", todos=[]),
+                      use("toolu_3", "TodoWrite", todos=[{"content": "Inspect", "status": "completed", "activeForm": "Inspecting"},
+                                                         {"content": "Fix", "status": "in_progress", "activeForm": "Fixing the rules"},
+                                                         {"content": "Test", "status": "pending", "activeForm": "Testing"}]),
+                      use("toolu_4", "StructuredOutput", command="PRIVATE", summary="PRIVATE"),
+                      use("toolu_5", "Task", description="Find validation tests", prompt="PRIVATE", subagent_type="general")),
+            assistant("toolu_5", use("toolu_6", "Grep", pattern="rules(", path="/repo/app/Http"),
+                      use("toolu_7", "TodoWrite", todos=[{"content": "Helper step", "status": "pending"}])),
+            {"type": "user", "parent_tool_use_id": "toolu_5", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_6", "content": "PRIVATE", "is_error": False}]}},
+            {"type": "user", "parent_tool_use_id": None, "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "PRIVATE", "is_error": True},
+                {"type": "tool_result", "tool_use_id": "toolu_5", "content": [{"type": "text", "text": "PRIVATE"}]}]}}])
+        tools = [event for event in events if event["kind"] == "tool"]
+        self.assertEqual([("Read", "/repo/app/Order.php", None, None), ("TodoWrite", None, None, None),
+                          ("TodoWrite", None, None, None), ("StructuredOutput", None, "Final structured report", None),
+                          ("Task", None, "Find validation tests", None), ("Grep", "/repo/app/Http", '"rules("', "toolu_5"),
+                          ("TodoWrite", None, None, "toolu_5")],
+                         [(t["targets"]["tool"], t["targets"].get("path"), t["targets"].get("detail"), t["targets"].get("parent"))
+                          for t in tools if t["targets"]["state"] == "started"])
+        # Completions carry the call and the tool's own report, never a name or the result.
+        self.assertEqual([{"state": "completed", "ok": True, "call": "toolu_6"}, {"state": "completed", "ok": False, "call": "toolu_1"},
+                          {"state": "completed", "ok": True, "call": "toolu_5"}],
+                         [t["targets"] for t in tools if t["targets"]["state"] == "completed"])
+        # Only the main thread's non-empty todo list is the run's plan.
+        self.assertEqual([{"kind": "plan", "items": [{"text": "Inspect", "status": "done"}, {"text": "Fix", "status": "active"},
+                                                     {"text": "Test", "status": "pending"}], "total": 3, "active_form": "Fixing the rules"}],
+                         [event for event in events if event["kind"] == "plan"])
+        self.assertEqual("plan", events[events.index(tools[2]) + 1]["kind"])
+
+    def test_codex_targets_commands_changes_declines_and_helpers(self):
+        command = "/bin/bash -lc 'php artisan test --filter=OrderTest'"
+        events = self.aligned("codex", [
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "PRIVATE REASONING"}},
+            {"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": command,
+                                             "aggregated_output": "", "exit_code": None, "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": command,
+                                               "aggregated_output": "PRIVATE", "exit_code": 1, "status": "failed"}},
+            {"type": "item.completed", "item": {"id": "item_2", "type": "file_change", "status": "completed",
+                                               "changes": [{"path": "/repo/app/Order.php", "kind": "update"}]}},
+            {"type": "item.completed", "item": {"id": "item_3", "type": "file_change", "status": "completed", "changes": [
+                {"path": "/repo/app/Requests/StoreOrder.php", "kind": "add"}, {"path": "/repo/old.php", "kind": "delete"}]}},
+            {"type": "item.completed", "item": {"id": "item_4", "type": "command_execution", "command": "rm -rf bootstrap/cache",
+                                               "aggregated_output": "", "exit_code": None, "status": "declined"}},
+            {"type": "item.started", "item": {"id": "item_5", "type": "todo_list", "items": [
+                {"text": "Read", "completed": True}, {"text": "Fix", "completed": False}]}},
+            {"type": "item.started", "item": {"id": "item_6", "type": "collab_tool_call", "tool": "spawn_agent", "status": "in_progress",
+                                             "sender_thread_id": "PRIVATE", "receiver_thread_ids": [], "prompt": "PRIVATE"}},
+            {"type": "item.updated", "item": {"id": "item_6", "type": "collab_tool_call", "tool": "spawn_agent", "status": "in_progress",
+                                             "sender_thread_id": "PRIVATE", "receiver_thread_ids": ["PRIVATE"], "prompt": "PRIVATE"}},
+            {"type": "item.completed", "item": {"id": "item_6", "type": "collab_tool_call", "tool": "spawn_agent", "status": "completed",
+                                               "sender_thread_id": "PRIVATE", "receiver_thread_ids": ["PRIVATE"], "prompt": "PRIVATE"}},
+            {"type": "item.completed", "item": {"id": "item_7", "type": "sub_agent_activity", "kind": "started",
+                                               "agent_thread_id": "01a077b1-db6a-7460-b717-293ca1ecda3e", "agent_path": "/root/PRIVATE"}},
+            {"type": "item.completed", "item": {"id": "item_8", "type": "mcp_tool_call", "server": "docs", "tool": "search",
+                                               "arguments": {"q": "PRIVATE"}, "result": "PRIVATE", "status": "completed"}},
+            {"type": "item.completed", "item": {"id": "item_9", "type": "web_search", "query": "laravel form request"}},
+            {"type": "item.completed", "item": {"id": "item_10", "type": "agent_message", "text": "Done."}}])
+        self.assertEqual([("command_execution: started", {"state": "started", "ok": True, "tool": "Shell", "call": "item_1",
+                                                          "detail": "php artisan test --filter=OrderTest"}),
+                          ("command_execution: completed", {"state": "completed", "ok": False, "tool": "Shell", "call": "item_1",
+                                                            "detail": "php artisan test --filter=OrderTest", "exit_code": 1}),
+                          ("file_change: completed", {"state": "completed", "ok": True, "tool": "Edit", "call": "item_2",
+                                                      "changes": [{"path": "/repo/app/Order.php", "kind": "update"}]}),
+                          ("file_change: completed", {"state": "completed", "ok": True, "tool": "Edit", "call": "item_3", "changes": [
+                              {"path": "/repo/app/Requests/StoreOrder.php", "kind": "add"}, {"path": "/repo/old.php", "kind": "delete"}]}),
+                          # The label still says ok; the target says the approval policy declined it, which is not a failure.
+                          ("command_execution: completed", {"state": "completed", "ok": False, "tool": "Shell", "call": "item_4",
+                                                            "detail": "rm -rf bootstrap/cache", "outcome": "not_run"}),
+                          ("Agent spawn_agent: in_progress", {"state": "started", "ok": True, "tool": "Agent", "call": "item_6",
+                                                              "detail": "spawn_agent"}),
+                          ("Agent spawn_agent: in_progress", None),
+                          ("Agent spawn_agent: completed", {"state": "completed", "ok": True, "tool": "Agent", "call": "item_6",
+                                                           "detail": "spawn_agent"}),
+                          ("Agent activity: started", None),
+                          ("mcp_tool_call: completed", {"state": "completed", "ok": True, "tool": "MCP", "call": "item_8", "detail": "docs.search"}),
+                          ("web_search: completed", {"state": "completed", "ok": True, "tool": "WebSearch", "call": "item_9",
+                                                     "detail": "laravel form request"})],
+                         [(event["text"], event.get("targets")) for event in events if event["kind"] == "tool"])
+        self.assertEqual([True], [event["ok"] for event in events if event.get("targets", {}).get("outcome") == "not_run"])
+        self.assertIn({"kind": "plan", "items": [{"text": "Read", "status": "done"}, {"text": "Fix", "status": "pending"}], "total": 2}, events)
+        self.assertEqual([], providers.normalize_event("codex", {"type": "item.started", "item": {"id": "item_5", "type": "todo_list", "items": []}}, targets=True))
+
+    def test_cursor_targets_use_success_and_rejected_and_tolerate_missing_args(self):
+        events = self.aligned("cursor", [
+            {"type": "tool_call", "subtype": "started", "call_id": "call_1", "tool_call": {"readToolCall": {"args": {"path": "/repo/src/a.ts"}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "call_1", "tool_call": {"readToolCall": {
+                "result": {"success": {"content": "PRIVATE", "totalLines": 12}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "call_2", "tool_call": {"shellToolCall": {
+                "args": {"command": "npm test", "workingDirectory": "/repo"}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "call_2", "tool_call": {"shellToolCall": {
+                "args": {"command": "npm test"}, "result": {"rejected": {"command": "npm test", "reason": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "call_3", "tool_call": {"editToolCall": {
+                "args": {"path": "src/a.ts", "streamContent": "PRIVATE"}, "result": {"error": {"message": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "call_4", "tool_call": {"mcpToolCall": {
+                "args": {"providerIdentifier": "docs", "toolName": "lookup", "args": {"q": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "call_5", "tool_call": {"updateTodosToolCall": {"args": {"todos": [
+                {"id": "1", "content": "Read", "status": "TODO_STATUS_COMPLETED"}, {"id": "2", "content": "Fix", "status": "TODO_STATUS_IN_PROGRESS"},
+                {"id": "3", "content": "Skip", "status": "TODO_STATUS_CANCELLED"}]}}}}])
+        self.assertEqual([("readToolCall: started", True, {"state": "started", "ok": True, "tool": "Read", "call": "call_1", "path": "/repo/src/a.ts"}),
+                          ("readToolCall: completed", True, {"state": "completed", "ok": True, "tool": "Read", "call": "call_1"}),
+                          ("shellToolCall: started", True, {"state": "started", "ok": True, "tool": "Shell", "call": "call_2", "detail": "npm test"}),
+                          ("shellToolCall: completed", True, {"state": "completed", "ok": False, "tool": "Shell", "call": "call_2",
+                                                              "detail": "npm test", "outcome": "not_run"}),
+                          ("editToolCall: completed", False, {"state": "completed", "ok": False, "tool": "Edit", "call": "call_3", "path": "src/a.ts"}),
+                          ("mcpToolCall: started", True, {"state": "started", "ok": True, "tool": "MCP", "call": "call_4", "detail": "docs.lookup"}),
+                          ("updateTodosToolCall: started", True, {"state": "started", "ok": True, "tool": "UpdateTodos", "call": "call_5"})],
+                         [(event["text"], event["ok"], event["targets"]) for event in events if event["kind"] == "tool"])
+        self.assertEqual({"kind": "plan", "total": 3, "items": [{"text": "Read", "status": "done", "id": "1"},
+                          {"text": "Fix", "status": "active", "id": "2"}, {"text": "Skip", "status": "cancelled", "id": "3"}]}, events[-1])
+
+    def test_mcp_and_unknown_tools_never_forward_their_arguments(self):
+        # An MCP tool's arguments go to another service; a detail comes only from the argument that names a tool's target.
+        events = self.aligned("claude", [{"type": "assistant", "parent_tool_use_id": None, "session_id": "s", "message": {
+            "id": "msg_1", "role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "mcp__linear__create_issue", "input": {
+                    "title": "PRIVATE", "description": "Customer PRIVATE jane@example.com card 4242", "teamId": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_2", "name": "mcp__db__query", "input": {"query": "SELECT * FROM users WHERE email='PRIVATE'",
+                                                                                        "path": "/PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_3", "name": "Bash", "input": {"command": "php artisan test", "description": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_4", "name": "WebSearch", "input": {"query": "laravel form request"}},
+                {"type": "tool_use", "id": "toolu_5", "name": "Notify", "input": {"description": "PRIVATE", "command": "PRIVATE"}}]}}])
+        self.assertEqual([("mcp__linear__create_issue", "linear.create_issue"), ("mcp__db__query", "db.query"), ("Bash", "php artisan test"),
+                          ("WebSearch", '"laravel form request"'), ("Notify", None)],
+                         [(event["targets"]["tool"], event["targets"].get("detail")) for event in events if event["kind"] == "tool"])
+        self.assertFalse(any("path" in event["targets"] for event in events if event["kind"] == "tool"))
+        cursor = [item for item in providers.activity_events("cursor", {"type": "tool_call", "subtype": "started", "call_id": "c1", "tool_call": {
+            "function": {"name": "send_message", "arguments": json.dumps({"query": "PRIVATE", "description": "PRIVATE"})}}})]
+        self.assertEqual([None], [item.get("detail") for item in cursor])
+
+    def test_targets_off_by_default_keep_every_other_transcript_unchanged(self):
+        event = {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "TodoWrite", "input": {"todos": [{"content": "A", "status": "pending"}]}}]}}
+        self.assertEqual([{"kind": "tool", "text": "TodoWrite: started"}], providers.normalize_event("claude", event))
+        self.assertEqual([], providers.normalize_event("codex", {"type": "item.updated", "item": {"type": "todo_list", "items": [{"text": "A"}]}}))
+
+
+class ActivityEventTests(unittest.TestCase):
+    """Agents panel activity: tool targets and reasoning, never contents or output."""
+
+    def activity(self, provider, events):
+        items = [item for event in events for item in providers.activity_events(provider, event)]
+        self.assertNotIn("PRIVATE", json.dumps(items))
+        return items
+
+    def test_claude_targets_reasoning_plan_and_pairing(self):
+        items = self.activity("claude", [
+            {"type": "system", "subtype": "init", "session_id": "s", "model": "claude-test", "apiKeySource": "PRIVATE"},
+            {"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Check the consumer first."},
+                {"type": "text", "text": "Reading the contract."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "/repo/orders/spec.md"}},
+                {"type": "tool_use", "id": "toolu_2", "name": "Write", "input": {"file_path": "/repo/a.py", "content": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_3", "name": "Bash", "input": {"command": "pytest -q\n  --maxfail 1", "description": "Run"}},
+                {"type": "tool_use", "id": "toolu_4", "name": "WebFetch", "input": {"url": "https://user:PRIVATE@example.com/doc?token=PRIVATE#x", "prompt": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_5", "name": "TodoWrite", "input": {"todos": [
+                    {"content": "Read", "status": "completed"}, {"content": "Edit", "status": "in_progress"}, {"content": "Test", "status": "pending"}]}},
+                {"type": "tool_use", "id": "toolu_6", "name": "StructuredOutput", "input": {"summary": "PRIVATE"}},
+                {"type": "tool_use", "id": "toolu_7", "name": "Grep", "input": {"pattern": "order.cancelled", "path": "/repo/payments"}}]}},
+            {"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "PRIVATE", "is_error": False},
+                {"type": "tool_result", "tool_use_id": "toolu_3", "content": "PRIVATE", "is_error": True}]}},
+            {"type": "result", "subtype": "success", "is_error": False, "result": "PRIVATE",
+             "total_cost_usd": 0.5, "usage": {"input_tokens": 3, "output_tokens": 2}},
+            {"type": "result", "subtype": "error_max_turns", "is_error": True, "errors": ["Turn limit"]}])
+        self.assertEqual({"type": "status", "text": "Session started · model claude-test"}, items[0])
+        self.assertEqual({"type": "thinking", "text": "Check the consumer first."}, items[1])
+        self.assertEqual({"type": "text", "text": "Reading the contract."}, items[2])
+        tools = [item for item in items if item["type"] == "tool"]
+        self.assertEqual({"type": "tool", "tool": "Read", "state": "started", "ok": True, "call": "toolu_1",
+                          "path": "/repo/orders/spec.md"}, tools[0])
+        self.assertEqual(("/repo/a.py", None), (tools[1]["path"], tools[1].get("detail")))
+        # A command keeps its first line: a later line is another command, or a script's body.
+        self.assertEqual("pytest -q …", tools[2]["detail"])
+        self.assertEqual("https://example.com/doc", tools[3]["detail"])
+        self.assertEqual("Final structured report", tools[4]["detail"])
+        self.assertEqual(("/repo/payments", '"order.cancelled"'), (tools[5]["path"], tools[5]["detail"]))
+        self.assertEqual([("toolu_1", True), ("toolu_3", False)],
+                         [(t["call"], t["ok"]) for t in tools if t["state"] == "completed"])
+        self.assertIn({"type": "plan", "text": "✓ Read\n→ Edit\n○ Test", "items": [
+            {"text": "Read", "status": "done"}, {"text": "Edit", "status": "active"}, {"text": "Test", "status": "pending"}]}, items)
+        self.assertIn({"type": "usage", "kind": "usage", "input_tokens": 3, "output_tokens": 2, "cost_usd": 0.5}, items)
+        self.assertEqual({"type": "error", "text": "Turn limit"}, items[-1])
+
+    def test_codex_commands_changes_plans_and_failures(self):
+        command = "/bin/bash -lc 'rg -n cancel src'"
+        items = self.activity("codex", [
+            {"type": "thread.started", "thread_id": "t"},
+            {"type": "item.started", "item": {"id": "i1", "type": "command_execution", "command": command, "status": "in_progress"}},
+            {"type": "item.updated", "item": {"id": "i1", "type": "command_execution", "command": command, "status": "in_progress"}},
+            {"type": "item.completed", "item": {"id": "i1", "type": "command_execution", "command": command,
+             "aggregated_output": "PRIVATE", "exit_code": 2, "status": "failed"}},
+            {"type": "item.completed", "item": {"id": "i2", "type": "file_change", "status": "completed",
+             "changes": [{"path": "/repo/a.py", "kind": "update"}]}},
+            {"type": "item.completed", "item": {"id": "i3", "type": "reasoning", "text": "Consider idempotency."}},
+            {"type": "item.updated", "item": {"id": "i4", "type": "todo_list", "items": [
+                {"text": "Read", "completed": True}, {"text": "Fix", "completed": False}]}},
+            {"type": "item.completed", "item": {"id": "i5", "type": "mcp_tool_call", "server": "docs", "tool": "search",
+             "arguments": {"q": "PRIVATE"}, "result": "PRIVATE", "status": "completed"}},
+            {"type": "item.completed", "item": {"id": "i6", "type": "web_search", "query": "refund idempotency"}},
+            {"type": "item.completed", "item": {"id": "i7", "type": "command_execution", "command": "rm -rf build", "status": "declined"}},
+            {"type": "item.completed", "item": {"id": "i8", "type": "agent_message", "text": "Done."}},
+            {"type": "turn.completed", "usage": {"input_tokens": 10, "cached_input_tokens": 4, "output_tokens": 2}},
+            {"type": "turn.failed", "error": {"message": "Request failed"}}])
+        tools = [item for item in items if item["type"] == "tool"]
+        self.assertEqual([("Shell", "started", True, "rg -n cancel src"), ("Shell", "completed", False, "rg -n cancel src"),
+                          ("Edit", "completed", True, "update /repo/a.py"), ("MCP docs.search", "completed", True, None),
+                          ("Web search", "completed", True, "refund idempotency"), ("Shell", "completed", False, "rm -rf build")],
+                         [(t["tool"], t["state"], t["ok"], t.get("detail")) for t in tools])
+        self.assertEqual("/repo/a.py", tools[2]["path"])
+        self.assertIn({"type": "thinking", "text": "Consider idempotency."}, items)
+        self.assertIn({"type": "plan", "text": "✓ Read\n○ Fix", "items": [
+            {"text": "Read", "status": "done"}, {"text": "Fix", "status": "pending"}]}, items)
+        self.assertIn({"type": "text", "text": "Done."}, items)
+        self.assertEqual(10, next(item for item in items if item["type"] == "usage")["input_tokens"])
+        self.assertEqual({"type": "error", "text": "Request failed"}, items[-1])
+
+    def test_cursor_tool_calls_todos_thinking_and_partials(self):
+        items = self.activity("cursor", [
+            {"type": "tool_call", "subtype": "started", "call_id": "c1", "tool_call": {"readToolCall": {"args": {"path": "src/a.ts"}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "c1", "tool_call": {"readToolCall": {
+                "args": {"path": "src/a.ts"}, "result": {"success": {"content": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "c2", "tool_call": {"editToolCall": {
+                "args": {"path": "src/a.ts", "streamContent": "PRIVATE"}}}},
+            {"type": "tool_call", "subtype": "completed", "call_id": "c3", "tool_call": {"shellToolCall": {
+                "args": {"command": "npm test"}, "result": {"rejected": {"command": "npm test", "reason": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "c4", "tool_call": {"function": {
+                "name": "custom", "arguments": json.dumps({"path": "x.md", "body": "PRIVATE"})}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "c5", "tool_call": {"mcpToolCall": {
+                "args": {"providerIdentifier": "docs", "toolName": "lookup", "args": {"q": "PRIVATE"}}}}},
+            {"type": "tool_call", "subtype": "started", "call_id": "c6", "tool_call": {"updateTodosToolCall": {"args": {"todos": [
+                {"content": "A", "status": "TODO_STATUS_COMPLETED"}, {"content": "B", "status": "TODO_STATUS_IN_PROGRESS"}]}}}},
+            {"type": "thinking", "subtype": "delta", "text": "Partial "},
+            {"type": "thinking", "subtype": "completed"},
+            {"type": "assistant", "timestamp_ms": 1, "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]}}])
+        tools = [(t["tool"], t["state"], t["ok"], t.get("path"), t.get("detail")) for t in items if t["type"] == "tool"]
+        self.assertEqual([("Read", "started", True, "src/a.ts", None), ("Read", "completed", True, "src/a.ts", None),
+                          ("Edit", "started", True, "src/a.ts", None), ("Shell", "completed", False, None, "npm test"),
+                          ("Custom", "started", True, "x.md", None), ("MCP docs.lookup", "started", True, None, None)], tools)
+        self.assertIn({"type": "plan", "text": "✓ A\n→ B", "items": [{"text": "A", "status": "done"}, {"text": "B", "status": "active"}]}, items)
+        self.assertEqual([{"type": "thinking_delta", "text": "Partial "}, {"type": "thinking_end"}], items[-2:])
+
+    def test_malformed_events_and_unknown_providers(self):
+        for event in (None, [], {"type": 3}, {"type": "assistant", "message": "x"}, {"type": "tool_call", "tool_call": []}):
+            self.assertEqual([], providers.activity_events("claude", event))
+            self.assertEqual([], providers.activity_events("cursor", event))
+            self.assertEqual([], providers.activity_events("codex", event))
+        with self.assertRaises(ValueError):
+            providers.activity_events("command", {"type": "result"})
+
+class CodexInstructionBudgetTests(unittest.TestCase):
+    """Codex stops reading the AGENTS.md chain at 32 KiB, and the accelerator's policy comes last."""
+
+    def launch(self, files):
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            for name, size in files.items():
+                (project / name).write_text("x" * size, encoding="utf-8")
+            command = providers.build_command("codex", "/bin/codex", project, "hello")
+            return command, providers.codex_instruction_budget(command, project)
+
+    def test_a_policy_past_the_default_budget_is_read_whole(self):
+        command, raised = self.launch({"AGENTS.md": 40_000})
+        at = raised.index("exec")
+        self.assertEqual(["-c", "project_doc_max_bytes=131072"], raised[at - 2:at])
+        self.assertEqual(command, raised[:at - 2] + raised[at:])
+        _, larger = self.launch({"AGENTS.md": 200_000})
+        self.assertIn(f"project_doc_max_bytes={200_000 + 32768}", larger)
+
+    def test_the_override_file_is_the_one_codex_reads(self):
+        _, raised = self.launch({"AGENTS.override.md": 40_000, "AGENTS.md": 10})
+        self.assertIn("project_doc_max_bytes=131072", raised)
+        command, kept = self.launch({"AGENTS.override.md": 10, "AGENTS.md": 40_000})
+        self.assertEqual(command, kept)
+
+    def test_a_small_policy_or_another_command_is_left_alone(self):
+        command, kept = self.launch({"AGENTS.md": 1_000})
+        self.assertEqual(command, kept)
+        self.assertEqual(["codex", "resume"], providers.codex_instruction_budget(["codex", "resume"], Path("/nonexistent")))
+
+    def test_the_budget_stops_at_its_ceiling(self):
+        # A sparse 2 GiB AGENTS.md raised the budget to 2 GiB and 32 KiB, and Codex reads up to the budget.
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            with open(project / "AGENTS.md", "wb") as handle:
+                handle.truncate(2 * 1024 ** 3 if os.name == "posix" else 1024 * 1024)
+            command = providers.build_command("codex", "/bin/codex", project, "hello")
+            raised = providers.codex_instruction_budget(command, project)
+        at = raised.index("exec")
+        self.assertEqual(["-c", "project_doc_max_bytes=262144"], raised[at - 2:at])
+        self.assertEqual(262144, providers.CODEX_DOC_CEILING)
+        # Below it: every AGENTS.md the repository may ship (its context-budget ceiling, observed size plus
+        # headroom) with the 32 KiB the budget leaves for the rest of the chain, and the budget the editions set.
+        budgets = json.loads((Path(__file__).resolve().parents[1] / "scripts/token_budget.json").read_text(encoding="utf-8"))
+        largest = max(edition["agents_md_bytes"] for edition in budgets["editions"].values())
+        self.assertLessEqual(largest + providers.CODEX_DOC_DEFAULT, providers.CODEX_DOC_BUDGET)
+        self.assertLess(providers.CODEX_DOC_BUDGET, providers.CODEX_DOC_CEILING)
+
+    def test_only_a_regular_file_raises_the_budget(self):
+        # Its size was read through a link, whose target can be any file: a link to 512 MiB elsewhere asked Codex
+        # for 512 MiB. A linked AGENTS.md, or a linked override, leaves Codex's own budget.
+        with tempfile.TemporaryDirectory() as folder:
+            project = Path(folder)
+            target = project / "elsewhere.md"
+            target.write_text("x" * 40_000, encoding="utf-8")
+            command = providers.build_command("codex", "/bin/codex", project, "hello")
+            try:
+                (project / "AGENTS.md").symlink_to(target)
+            except (OSError, NotImplementedError) as error:  # Windows without the right to create links
+                self.skipTest(f"cannot create a symbolic link: {error}")
+            self.assertEqual(command, providers.codex_instruction_budget(command, project))
+            # The override is what Codex reads, so a linked one is not passed over for a long AGENTS.md.
+            (project / "AGENTS.md").unlink()
+            (project / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
+            (project / "AGENTS.override.md").symlink_to(target)
+            self.assertEqual(command, providers.codex_instruction_budget(command, project))
+            (project / "AGENTS.override.md").unlink()
+            self.assertIn("project_doc_max_bytes=131072", providers.codex_instruction_budget(command, project))
 
 
 if __name__ == "__main__":

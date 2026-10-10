@@ -1465,8 +1465,8 @@ def _attested_read_only_commands() -> frozenset:
 
     The seeded memory runtime is executed through an interpreter, which static
     analysis can never prove non-mutating: `python3 <script> status` is opaque
-    by construction. The generator nevertheless MUST emit the memory quartet on
-    every target, and those skills verify themselves with exactly those
+    by construction. The generator nevertheless MUST emit the six memory-continuity
+    guides on every target, and those skills verify themselves with exactly those
     commands - so without an attestation route the gate rejects the one
     inventory the generator is required to produce.
 
@@ -1594,7 +1594,7 @@ def _validate_role_coverage_wiring(
     types the entry so the match can be resolved rather than trusted.
 
     A runtime-fixed skill declares no target evidence by construction, so its
-    roles are wired to steps only; the memory quartet is judged by runtime
+    roles are wired to steps only; the runtime-fixed guides are judged by runtime
     contract accuracy, not by project specificity.
     """
     declared_evidence = {
@@ -2881,15 +2881,15 @@ def _creatable_parent_exists(target: Path, value: str) -> bool:
 
 # --- runtime-fixed accountability -------------------------------------------
 #
-# The `runtime-fixed` quartet (`memory-bank`, `project-brain`, `checkpoint`,
-# `memory`) is generated unconditionally because `memory-seed` installs the
-# runtime it drives in the same run. It therefore cannot be measured by
-# project specificity - it describes the generator's own runtime, not the
-# target's code - so the gate stops demanding target evidence from it and
-# demands a bar it CAN meet instead: every runtime path and every runtime
-# command it names must exist verbatim in the canonical
-# `memory-seed/assets/runtime-contract.json`, and it may not claim target
-# knowledge it declared no evidence for.
+# The `runtime-fixed` guides (`memory-bank`, `project-brain`, `checkpoint`,
+# `memory`, `context-save`, `context-load`) are generated unconditionally
+# because `memory-seed` installs the runtime they drive in the same run. They
+# therefore cannot be measured by project specificity - they describe the
+# generator's own runtime, not the target's code - so the gate stops demanding
+# target evidence from them and demands a bar they CAN meet instead: every
+# runtime path and every runtime command one names must exist verbatim in the
+# canonical `memory-seed/assets/runtime-contract.json`, and it may not claim
+# target knowledge it declared no evidence for.
 
 
 def _expand_braces(value: str) -> list[str]:
@@ -4224,7 +4224,7 @@ def _validate_schema_1_2_skill(
 ) -> None:
     # A runtime-fixed skill is allowed to declare no project evidence at all;
     # every contract member that cites evidence has to accept that emptiness,
-    # or the quartet could satisfy no consistent set of rules.
+    # or the runtime guides could satisfy no consistent set of rules.
     runtime_fixed = str(skill.get("kind", "")).lower() == RUNTIME_FIXED_KIND
     try:
         command_analyzer: CommandAnalyzer | None = CommandAnalyzer(target)
@@ -4392,7 +4392,12 @@ def _validate_schema_1_2_skill(
                 f"{name}.{step['id']} references unknown decisions: {unknown_decisions}",
             )
 
-    if schema_version not in LEGACY_PLAN_SCHEMAS:
+    # Keyed on the schemas that actually carry dispositions, not on whichever
+    # ones are still current. `claim_ids` and `evidence_dispositions` arrived
+    # with 1.5; demoting 1.5 to audit-only says nothing about whether a 1.5 plan
+    # has them, and reading the demotion as an answer silently switched this
+    # rule off for every 1.5 plan.
+    if schema_version in DISPOSED_PLAN_SCHEMAS:
         _validate_evidence_dispositions(
             name, skill, evidence_map, runtime_fixed, diagnostics
         )
@@ -6152,7 +6157,7 @@ def _validate_plan(
         required_skill_fields = REQUIRED_SKILL_FIELDS
         if schema_version in TYPED_PLAN_SCHEMAS:
             required_skill_fields = SCHEMA_1_2_SKILL_FIELDS
-        if schema_version not in LEGACY_PLAN_SCHEMAS:
+        if schema_version in DISPOSED_PLAN_SCHEMAS:
             required_skill_fields = SCHEMA_1_4_SKILL_FIELDS
         missing = [field for field in required_skill_fields if field not in skill]
         if missing:

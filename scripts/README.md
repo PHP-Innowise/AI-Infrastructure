@@ -11,6 +11,88 @@ states an external command requirement. Run examples from the repository root.
 
 ## Catalog
 
+### `ai_system.py` / `ai_system_lib.py` / `ai_system_execution.py` / `ai_system_providers.py`
+
+**Purpose and status.** Optional stack-neutral system coordination companion;
+source-only and not part of installed editions. It accepts explicit service
+passports and produces a declared impact map, globally bounded source context,
+and a reviewable plan. Explicit execution launches sequential development
+workers, native Brain tasks and receipt-backed recovery.
+
+```bash
+python3 scripts/ai_system.py validate --system docs/examples/ai-system/system.json
+python3 scripts/ai_system.py map --system docs/examples/ai-system/system.json
+python3 scripts/ai_system.py plan --system docs/examples/ai-system/system.json \
+  --task "Change cancellation behavior" --change-id chg-001 --service orders
+```
+
+- Commands: `init`, `validate`, `catalog`, `map`, `locate`, `plan`, `verify`,
+  `execute`, `resume`, `run-status`.
+- Dependencies: Python 3.9+ standard library on POSIX; optional Git provenance.
+  Execution uses the trusted checkout native runtime and a locally configured
+  Codex, Claude Code or Cursor Agent CLI, or an explicitly selected provider adapter.
+  Native adapters share stdlib Harness command/permission builders.
+- Writes: `init` creates a new system workspace; `plan --output` creates only a
+  new requested file. `execute`/`resume` write private journals and native tasks;
+  `--mode edit` enables scoped worker edits, and `execute --access all` lets every
+  worker read, and in edit mode change, all selected service folders (default
+  `service`: own service only). Declaration/query commands are read-only.
+- Access: external service roots require repeatable caller `--allow-root`;
+  passport metadata cannot authorize arbitrary filesystem access.
+- Tests: `python3 -m unittest tests.test_ai_system tests.test_ai_system_providers tests.test_ai_system_execution`, also in the dedicated CI job.
+- Full contract and sample: [System-level AI Coordination](../docs/AI-SYSTEM-ORCHESTRATION.md).
+
+### `check.py`
+
+**Purpose and status.** The local entry point for what CI runs; source-only
+and not installed. One group per job in `.github/workflows/*.yml`, each the
+job's `run:` steps in order.
+
+```bash
+python3 scripts/check.py                    # every group; exit 1 if anything failed
+python3 scripts/check.py --group lint --group links
+python3 scripts/check.py --list             # groups, commands, and what would skip here
+python3 scripts/check.py --fail-fast --jobs 4
+python3 scripts/check.py --strict           # a missing tool fails instead of skipping
+```
+
+- **Options:** repeatable `--group`; `--list`; `--fail-fast`; `--jobs N`
+  (jobs or matrix legs at once; default half the CPUs, at least 2);
+  `--strict`; `--base REF` for the changelog group.
+- **Execution:** jobs run in parallel, and so do the legs of a matrix job,
+  which CI also runs as separate jobs; the steps of one job or leg run in
+  order (`--jobs 1` runs everything one after another). A step that needs a
+  shell runs as GitHub runs it (`bash --noprofile --norc -eo pipefail -c`),
+  so a loop stops at its first failure. `python3`/`python` inside every
+  command — and inside the processes tests spawn — is the interpreter running
+  `check.py`; the job CI pins to 3.9 runs under `python3.9`. The `tests` job's
+  file loop becomes one command per file, so a failure names its file.
+- **Outputs:** one PASS/FAIL/SKIP line per command with its duration, the last
+  60 lines of each failing command's output with the path of its full log, and
+  a per-group summary table with wall times. A job or leg that took longer
+  than CI's `timeout-minutes` is flagged, not failed. Exit 0 when nothing
+  failed, 1 on a failure, 2 on a usage error, 130 when interrupted. Ctrl-C,
+  SIGTERM and SIGHUP (`kill`, `timeout`, a closed terminal) all stop the run
+  the same way: each running command's process group is terminated and the
+  temporary directory removed.
+- **Skips:** a tool the CI runner provides but this machine lacks (shellcheck,
+  php, pwsh, bwrap, `python3.9`, `harness/.venv`) skips with the reason;
+  `--strict` fails it. So does a changelog base with no merge base here (no
+  `origin/main` and no local `main`); a `--base` that does not resolve fails
+  either way. An entry whose files are not in the checkout skips as "not
+  present" when its workflow has no such step; when the workflow runs it, the
+  skip says CI fails there and `--strict` fails it. Windows-only jobs are
+  listed and skip elsewhere; the runner itself supports Linux and macOS.
+  Runner provisioning (apt-get, sysctl, venv creation, pip install) is not
+  repeated.
+- **Writes:** nothing in the repository. Logs and interpreter shims go to a
+  temporary directory that is removed unless something failed.
+- **CI relationship:** `tests/test_check.py` reads the workflows and fails when
+  a CI command has no entry here, an entry here is no longer in CI, a
+  guarded entry hides a step CI runs, or a job's setup-python versions (leg by
+  leg) differ from the interpreters pinned here. Gates CI does not run yet are
+  marked `local_only` with the reason.
+
 ### `build_mirrors.py`
 
 **Purpose and status.** Maintainer build tool; source-only and not installed.
@@ -32,12 +114,20 @@ python3 scripts/build_mirrors.py --write --edition Laravel \
   Laravel, Symfony, PHP Core, and WordPress load rules from
   `memory-bank/scripts/context_retrieval.py`; Infrastructure-Creator loads
   `mirror_rules.py`.
-- **Outputs:** `--check` prints drift, missing files, and unaccounted mirror
-  files and exits nonzero on findings. `--write` prints each changed path.
-- **Dependencies:** Python 3 standard library and a complete repository
-  checkout.
+- **Outputs:** `--check` prints drift, missing files, unaccounted mirror
+  files, and mirrors whose executable bit differs from canon
+  (`mode differs from canon`), and exits nonzero on findings. `--write` prints
+  each changed path; a mode-only repair is printed as `(mode +x)`/`(mode -x)`.
+- **Dependencies:** Python 3 standard library, Git, `file_modes.py`, and a
+  complete repository checkout.
 - **Writes:** `--check` never writes. `--write` creates/updates generated
-  mirror files and regenerates each selected edition's `.gitattributes`.
+  mirror files, gives each the executable bit of its canonical file (also
+  when the bytes already match), and regenerates each selected edition's
+  `.gitattributes`. For a tracked mirror the bit is also recorded in the Git
+  index - the mode only, never the content - because a checkout without
+  filesystem modes (Windows, `core.fileMode=false`) has nowhere else to keep
+  it. An intent-to-add entry (`git add -N`) counts as untracked and is left
+  as it is: its index entry holds the empty blob, not the file.
 - **CI relationship:** the `mirrors` job runs `--check`. Edition parity jobs
   also execute the same mirror contract through
   `memory-bank/scripts/context.py parity`.
@@ -52,6 +142,13 @@ python3 scripts/build_mirrors.py --write --edition Laravel \
 | Commands | `.claude/commands` | `.cursor/commands` | Cursor frontmatter and path adaptation |
 | Agents | `.claude/agents` | `.cursor/agents` | Drops Claude-only frontmatter; preserves body |
 | Governance docs | `.claude` | `.cursor`, `.codex` | Tool-tree self-reference rewrites |
+
+Every transformation also carries the canonical file's executable bit: a
+mirror is executable exactly when its canon is. The canonical bit is read from
+the Git index, and from the filesystem only for a path the index does not
+know, so a Windows checkout reads the same answer as Linux. Cursor and Codex
+run the hook mirrors as direct commands; a mirror that lost the bit exits 126
+in every installed project while its bytes still match.
 
 Documented exceptions live in the rules data with justifications; they are not
 an invitation to hand-edit generated files. Notable exceptions include
@@ -85,10 +182,15 @@ python3 scripts/install_accelerator.py \
   --dry-run
 ```
 
-- **Principal modes:** `--verify-inventories`, `--write-inventories`, or
-  `--edition {Laravel,Symfony,PHP Core,WordPress}` with `--target`.
+- **Principal modes:** `--verify-inventories`, `--write-inventories`,
+  `--edition {Laravel,Symfony,PHP Core,WordPress}` with `--target`, or
+  `--sync` with `--target` (see below).
 - **Selection options:** repeatable `--tool {claude,cursor,codex}`; omission
   selects all tools. `--source-root` points at an alternate source checkout.
+- **Sync options:** `--rewire-codex` also updates an untouched
+  `.codex/hooks.json` (approve it again in Codex `/hooks`);
+  `--update-tracked` also writes files the project's Git tracks, for a
+  person to review and commit. `--dry-run` reports without writing.
 - **Collision options:** `--dry-run`; conservative `--merge-existing`; and
   destructive `--overwrite`, which is for explicit maintainer-controlled use,
   not normal adoption.
@@ -98,8 +200,17 @@ python3 scripts/install_accelerator.py \
   production-specific selection are resolved there without requiring
   documentation to depend on a particular future schema field name.
 - **Outputs:** tab-separated `VERIFIED`, `COLLISION`, `WOULD_*`, `COPY`,
-  `MERGE`, `COPY_AS`, `UNCHANGED`, and `COMPLETE` records; meaningful nonzero
-  exit status on inventory errors or refused collisions.
+  `MERGE`, `COPY_AS`, `UNCHANGED`, `FIX_MODE`, and `COMPLETE` records;
+  meaningful nonzero exit status on inventory errors or refused collisions. A
+  `FIX_MODE\t<component>\t<path>\t<destination>` record (`WOULD_FIX_MODE`
+  with `--dry-run`) names a file already identical in the target that should
+  be executable and was not - typically a hook from an install made before
+  executable bits were enforced. Its content is left untouched and only the
+  bit is added, under every collision mode, since that destroys nothing. A
+  refused run changes nothing, modes included: an install from an earlier
+  release collides first on the files that release changed, and its modes
+  are repaired by the run that resolves those collisions (or by
+  `chmod +x <destination>`).
 - **Dependencies:** Python 3 standard library and Git. Inventory discovery for
   verification/writing is `git ls-files --cached`, so the payload is exactly
   what the index holds. Untracked working-tree content - a client application
@@ -118,8 +229,18 @@ python3 scripts/install_accelerator.py \
 - **CI relationship:** the `installation` job verifies inventories and runs
   installation and framework-semantics tests.
 
+Installed executables get mode `0755` regardless of the source working tree:
+every `*.sh` inside a `hooks/` directory, plus any file recorded `100755` in
+the source checkout's Git index (or, without a Git checkout, carrying the
+executable bit on disk). Every other file keeps normal copy semantics. The
+index is read, not the disk, because a source checkout made on Windows or with
+`core.fileMode=false` has no executable bit on disk and would otherwise
+install hooks that exit 126. The installer reads the index itself rather than
+through `file_modes.py`, because the Harness runs a standalone copy of it.
+
 Collision preflight is completed before normal copies begin. With
-`--merge-existing`, identical files remain `UNCHANGED`; `.gitignore` and
+`--merge-existing`, identical files remain `UNCHANGED` (or `FIX_MODE`, when
+only a required executable bit is missing); `.gitignore` and
 `.gitattributes` receive only missing directives in a marked block;
 `AGENTS.md` preserves project policy before one replaceable accelerator block;
 and an existing root `README.md` is preserved while accelerator documentation
@@ -127,10 +248,63 @@ is written to `ACCELERATOR.md`. Every other differing selected path remains a
 collision. A malformed managed block, symlink, non-file obstruction, or
 conflicting `ACCELERATOR.md` is also refused.
 
-The install transcript is an action log, not a backup and not an automatic
-rollback facility. Its `COMPLETE files=` value counts selected inventory
-entries, including `UNCHANGED` entries. Save the transcript with pipeline
-failure propagation and retain a pre-install VCS/backup recovery point.
+A file the install replaces - a merge into a project file, an `--overwrite`
+collision - and every MCP configuration it writes are written whole beside
+the file, flushed to disk and renamed over it, keeping the replaced file's
+mode: a full disk or an interrupted run leaves the old file as it was, never
+a truncated one a later merge cannot parse. An install that fails part way
+puts back, newest first, the files it had already replaced (`RESTORED` on
+stdout; `NOT_RESTORED` with the reason on stderr for a file someone changed
+after the install wrote it, which is left as it is) and exits nonzero. Files
+it created stay; they hold only the release, and the next run finds them
+identical.
+
+The install transcript is an action log, not a backup. Its
+`COMPLETE files=` value counts selected inventory entries, including
+`UNCHANGED` entries. Save the transcript with pipeline failure propagation
+and retain a pre-install VCS/backup recovery point.
+
+`--sync --target DIR` brings an installed project's untouched accelerator
+files and its runtime up to the clone and prints a JSON report; the Harness
+runs it when it opens a project. It never applies part of a release over
+what that release's files run: while a runtime file (`memory-bank/scripts`,
+`project-brain/scripts`, `project-brain/schemas`) stays at the project's
+version - the project's Git tracks it, or it cannot be written safely - the
+release's other files are held back too, because its skills, commands, hooks
+and memory server call that runtime; a tool's new hooks wait for its wiring
+(`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json`), and the
+wiring waits for a new hook that cannot be written. Each held-back file is
+listed under `kept` with a reason starting `held back:`, and `partial` says
+the project is not at the release (it is `null` otherwise).
+
+A project that commits its accelerator takes a release through a commit:
+`--sync --update-tracked --target DIR` (`--dry-run` first) writes the files
+the project's Git tracks too, by the same rules - a file still holding a
+released version, the runtime (a local edit backed up under
+`memory-bank/local`), the managed blocks of `AGENTS.md` and
+`.claude/CLAUDE.md` - and leaves every edited file, the project's own
+`README.md` and `.gitignore`, its seeded state and the tools it did not
+install as they are. Add `--rewire-codex` when the project uses Codex and
+approve the hooks again in Codex `/hooks`. Then review the report and
+`git diff` and commit. Do not reinstall with `--overwrite` for this: it
+replaces the project's own `AGENTS.md`, `README.md` and `.gitignore` and its
+edited skills, and without the original `--tool` selection it adds every
+tool. Nothing unattended (the Harness included) passes `--update-tracked`.
+
+The sync never reads or writes through a symbolic link inside the project.
+Where Python offers descriptor-relative calls
+(`os.supports_dir_fd`: Linux, macOS), every read, write, backup and the sync's
+record walk the path by folder descriptors with `O_NOFOLLOW`, so a folder
+another process swaps for a link while the sync runs is not followed either;
+a folder swapped during a write leaves the file alone, and the path is
+reported under `kept`. Native Windows has no such calls in Python; there the
+walk takes the same steps by NT handles (`NtCreateFile` relative to the
+folder before, no reparse point followed, the temporary file renamed within
+the last folder's handle), so a junction or link swapped in is not followed
+there either. Where neither descriptors nor handles are available nothing is
+written - each file that would have been is reported under `kept` - because
+a write by path after a check would follow a folder swapped in between. The
+same calls carry the files an install replaces or merges.
 
 ### `context_budget.py`
 
@@ -154,9 +328,11 @@ python3 scripts/context_budget.py --headroom
 - **`--headroom`:** prints the bytes remaining under each ceiling,
   tightest first, and always exits 0. It is what a rule author needs
   before adding a paragraph to a gated file. No percentage warning is
-  printed: `token_budget.json` sets every ceiling at the observed value
-  plus about five per cent, so headroom is ~4.8 % of the ceiling by
-  construction and a 5 % warning would fire on every category at once.
+  printed: `token_budget.json` states a policy of observed value plus about
+  five per cent, but ceilings were raised inconsistently (some refit to
+  observed + 5 %, others by exactly one change's growth), so headroom runs
+  from a few bytes to just under 5 % of the ceiling. A 5 % warning would fire
+  on every category at once; the byte count is the number that matters.
 - **Dependencies:** Python 3 standard library.
 - **Writes:** none.
 - **CI relationship:** the `lint` job runs `--check`.
@@ -197,6 +373,34 @@ The billing weights are constants in the script and must be reviewed if
 published pricing ratios change. Records that are unreadable or lack usable
 usage data are skipped; an absent transcript root or zero billed calls returns
 nonzero.
+
+### `memory_eval.py`
+
+**Purpose and status.** Optional maintainer measurement; source-only, never
+installed, and not run by CI (its tests are, in the `installation` job). It
+measures the prompt-time memory capsule on each project as it was when the
+prompt was written, so knowledge written after a prompt cannot be credited to
+it. See [Memory Evaluation Stand](../docs/MEMORY-EVAL.md).
+
+```bash
+python3 scripts/memory_eval.py run --set SET --judgments JUDGMENTS [--passages PASSAGES] \
+  --projects-root DIR --out RESULT [--edition auto|NAME] [--as-of prompt|now]
+python3 scripts/memory_eval.py report RESULT [--compare OTHER] [--show-unjudged]
+python3 scripts/memory_eval.py realized --project DIR [--since YYYY-MM-DD] [--json]
+```
+
+- **Inputs:** a prompt set, judgments and optional answer passages (client
+  data, kept outside the repository); the projects' Git history and working
+  trees, read-only; for `realized`, Claude Code transcripts and Codex rollouts.
+- **Outputs:** a result JSON of prompt ids, document paths and counts - never
+  prompt text, capsule text or document bodies; reports on stdout.
+- **Dependencies:** Python 3.9+ standard library and `git`; no network. It
+  imports `install_accelerator.py` (inventories, install rules) and
+  `accelerator_attach.py` (edition detection), and runs the edition's own
+  `memory-bank/scripts/context.py`.
+- **Writes:** only its cache (default under the system temporary directory;
+  refused inside the clone) and `--out`.
+- **CI relationship:** `tests/test_memory_eval.py` in the `installation` job.
 
 ### `collect_context.py`
 
@@ -280,23 +484,26 @@ python3 scripts/asset_parity.py --write
 ```
 
 - **Options:** `--check` (default) reports and exits non-zero on drift;
-  `--write` copies the canonical bytes over drifted or missing asset files and
-  re-checks; `--json` prints a machine-readable report. `--check` and `--write`
-  are mutually exclusive.
+  `--write` copies the canonical bytes over drifted or missing asset files,
+  gives them the canonical executable bit (on disk and, for a tracked file,
+  in the Git index), and re-checks; `--json` prints a machine-readable report.
+  `--check` and `--write` are mutually exclusive.
 - **Inputs:** the asset tree and the first present edition of `Laravel`,
   `Symfony`, `PHP Core`. Any of them will do, because
   `context.py parity --cross-edition` already holds the three to each other -
   that check is this one's prerequisite, not its duplicate.
 - **Outputs:** one line per finding and exit 1; a success message and exit 0
   otherwise. Exit 2 on a missing asset tree.
-- **Dependencies:** Python 3 standard library.
-- **Writes:** none under `--check`; only asset files under `--write`.
+- **Dependencies:** Python 3 standard library, Git, and `file_modes.py`.
+- **Writes:** none under `--check`; only asset files (and their index modes)
+  under `--write`.
 - **CI relationship:** the `parity` job runs `--check` and
   `tests/test_asset_parity.py` once, on the `Laravel` matrix leg.
 
 Five things are enforced: mapped asset files are byte-identical to their
 counterpart (`scripts/` against `memory-bank/scripts/`, `templates/` against
-`memory-bank/templates/`, `project-brain/` against itself); every canonical
+`memory-bank/templates/`, `project-brain/` against itself) and carry the same
+executable bit, read from the Git index first; every canonical
 file the asset is supposed to seed exists in it, so a new core module cannot be
 forgotten; every asset file is either mapped or listed in `ASSET_ONLY` with a
 reason, so a new asset file cannot become silently unchecked;
@@ -309,6 +516,27 @@ Deliberate one-sided files live in `ASSET_ONLY` (the runtime contract, the
 runtime template) and `EDITION_ONLY` (per-target prose, both Python test
 suites, installer bookkeeping, the materialized `runtime.json`). Record a new
 divergence there with its reason rather than widening a glob.
+
+### `file_modes.py`
+
+**Purpose and status.** Shared helper module, imported by `build_mirrors.py`
+and `asset_parity.py`; source-only, not installed, and not run directly.
+
+- **What it answers:** the executable bit Git commits for a path - the index
+  mode for a tracked path, the filesystem bit for an untracked one, and no
+  answer for an untracked path on a filesystem without a trustworthy bit
+  (Windows, `core.fileMode=false`), so callers skip the comparison rather than
+  invent drift.
+- **What it writes:** `set_executable` repairs the disk bit where the disk has
+  one and queues the index mode of a tracked path; `flush` records the queued
+  modes with `git update-index --index-info`, keeping the blob the index
+  already holds. `git update-index --chmod` is avoided on purpose: it also
+  stages the working-tree content.
+- **Dependencies:** Python 3 standard library and Git.
+- **Guard:** `tests/test_file_modes.py` (CI `mirrors` job) holds the
+  repository's own index to the rule: every tracked `hooks/*.sh`, every hook
+  script a tracked wiring file runs (whatever command form wraps it), and
+  every root launcher with a shebang is `100755`.
 
 ### `policy_lock.py`
 
@@ -357,6 +585,62 @@ it ships no haiku agent.
 
 `policy_digest` identifies the surface, not a release: a surface change does
 not require a `VERSION` bump, it requires the lock to be regenerated.
+
+### `check_routes.py`
+
+**Purpose and status.** Reference-integrity gate; source-only and not
+installed. Mirrors prove the copies agree with canon; this proves canon points
+at things that exist.
+
+```bash
+python3 scripts/check_routes.py
+python3 scripts/check_routes.py --edition Symfony --edition wordpress
+python3 scripts/check_routes.py --json
+```
+
+- **Options:** repeatable `--edition` (an edition path; `WordPress` and
+  `wordpress` are accepted for `Cms/wordpress`); `--json`; `--allowlist PATH`.
+- **Hook wiring:** every name under `(.claude|.cursor|.codex)/hooks/` in
+  `.claude/settings.json`, `.cursor/hooks.json` and `.codex/hooks.json`, and
+  the script name a Codex launcher passes as `$1` — matched on that tail, so
+  the command prefix (`"$CLAUDE_PROJECT_DIR"/...`, a
+  `git rev-parse --show-toplevel` form, bare relative) does not matter — must
+  be a `*.sh` script that exists, is tracked, and carries index mode `100755`;
+  a reference that drops `.sh` is an error, not a silent skip. A script under
+  a tool's `hooks/` that nothing wires is a warning.
+- **Routing:** Claude command `spawns`, `flow-next` and `flow-alternatives`;
+  `stages[].agents`, command-body `subagent_type` and prose spawns
+  ("spawn `x`", "Spawn the `x` agent", "Spawn `x` with", a line opening
+  "Spawn x agent"), which must equal an agent's frontmatter `name` exactly —
+  the host and `subagent-gate.sh` spawn by nothing else, so the file stem and
+  the `<name>-agent` alias that `spawns` accepts are errors there; command-body
+  "invoke the `x` skill" phrases, `` `/x` `` spans and `.<tool>/skills/<x>/`
+  paths (Claude and Cursor); agent `name` (present, unique, bare kebab-case),
+  Claude `invokes` and "invoke the `x` skill" phrases; every `SKILL FLOW.md`
+  (slash tokens, backticked names with or without arguments, Phase Map items,
+  and bare-name steps of fenced diagrams: a step at the line start, after a
+  leading `->`/`→` or a tree branch `├─`/`└─`, that ends the cell — end of
+  line, `(note)`, `<argument>`, or spaces before a box-drawing glyph — so
+  diagram prose is not read as a step); and `AGENTS.md` slash spans plus
+  "`x` skill/agent/command/hook" phrases. A `/x` resolves to a command or a
+  skill of the same tool (in Claude Code every skill is also `/<skill>`); in
+  the Codex flow (`.agents/skills/SKILL FLOW.md`) only a skill resolves,
+  because Codex has no command layer.
+- **Unreadable files:** a file that is not valid UTF-8 is an error finding
+  (exit 1, valid `--json`), still checked with the bad bytes replaced.
+- **Reachability:** every `.agents/skills/<x>` is named by some command,
+  agent or flow.
+- **Allowlist:** `scripts/check_routes_allowlist.json` — `unwired_hooks`,
+  `unreachable_skills`, `references`; every entry needs a `reason`, an unknown
+  edition is an error, a malformed entry is an error that silences nothing,
+  and an entry that matches nothing is a stale warning.
+- **Outputs:** findings grouped by edition with `file:line`; exit 1 on any
+  error, 0 otherwise (warnings allowed), 2 on a usage or Git failure or an
+  allowlist file that is not a UTF-8 JSON object (`--json` then prints
+  `{"error": ...}`).
+- **Dependencies:** Python 3.9+ standard library and Git (index modes).
+- **Writes:** none.
+- **CI relationship:** the `mirrors` job runs it and its regression tests.
 
 ### `check_stabilization.py`
 
@@ -462,6 +746,9 @@ python3 scripts/context_budget.py --check
 python3 scripts/install_accelerator.py --verify-inventories
 python3 scripts/check_links.py
 ```
+
+Before pushing, run everything CI runs in one go, `python3 scripts/check.py`,
+or the affected groups only (`--group mirrors --group parity`).
 
 Inventory regeneration is appropriate only when intentionally changing the
 production payload contract. Review source exclusions and production

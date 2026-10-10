@@ -13,10 +13,11 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+import uuid
+from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
-from harness import sessions
+from harness import commands, sessions
 
 
 FAKE_CLI = r'''
@@ -24,18 +25,31 @@ import json, os, pathlib, sys, time
 config = json.loads(sys.argv[1])
 pathlib.Path(config["pid_path"]).write_text(str(os.getpid()))
 pathlib.Path(config["pid_path"] + ".cwd").write_text(str(pathlib.Path.cwd()))
+pathlib.Path(config["pid_path"] + ".env").write_text(json.dumps({key: os.environ.get(key) for key in ("CONTEXT_TASK_ID", "CONTEXT_CAPSULE_DELIVERED")}))
 behavior = config["behavior"]
 if behavior == "no_stdin":
     time.sleep(30)
 sys.stdin.read()
+marker = 'Full captured source archive: '
+if marker in config.get('prompt', ''):
+    archive = json.loads(config['prompt'].split(marker, 1)[1].splitlines()[0])
+    pathlib.Path(config['pid_path'] + '.merge').write_text(json.dumps({
+        'archive': json.loads(pathlib.Path(archive).read_text()), 'argv': sys.argv,
+        'restore_disabled': os.environ.get('CONTEXT_CONTINUITY_RESTORE_DISABLED'),
+        'capture_disabled': os.environ.get('CONTEXT_CONTINUITY_DISABLED')}))
 for line in config.get('prompt', '').splitlines():
     if line.startswith('[{"name":') and '"path":' in line:
         import base64
         files = json.loads(line)
         pathlib.Path(config['pid_path'] + '.attachments').write_text(json.dumps([
             base64.b64encode(pathlib.Path(item['path']).read_bytes()).decode() for item in files]))
-if config["provider"] == "claude":
+if config["provider"] in ("claude", "cursor"):
     print(json.dumps({"type": "system", "subtype": "init", "session_id": "native-original"}), flush=True)
+    if behavior == "signed_out":
+        # What Claude Code 2.1.278 printed on 2026-10-06 when its OAuth sign-in had expired.
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "session_id": "native-original",
+                          "result": "Failed to authenticate: OAuth session expired and could not be refreshed"}), flush=True)
+        sys.exit(1)
     print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
         {"type": "text", "text": "Fixture answer"}]}}), flush=True)
     print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
@@ -156,7 +170,14 @@ class SessionTests(unittest.TestCase):
         self.fail("Timed out waiting for the fixture process/session")
 
     def settled(self, manager, sid):
-        self.wait_for(lambda: manager.get(sid)["status"] not in sessions.ACTIVE)
+        # The session's status turns final a moment before its launch row is
+        # finished; a snapshot taken in between differs from the state a
+        # restart reads back, so wait for both.
+        def done():
+            state = manager.get(sid)
+            launch = state.get("launch") or {}
+            return state["status"] not in sessions.ACTIVE and launch.get("status") != "running"
+        self.wait_for(done)
         return manager.get(sid)
 
     def assert_process_gone(self, call):
@@ -165,6 +186,46 @@ class SessionTests(unittest.TestCase):
         pid = int(pid_path.read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+    def test_merged_launches_read_frozen_sources_and_preserve_capture_for_all_providers(self):
+        from harness import chat_merge
+        manager=self.manager()
+        manager.providers['cursor'].update(available=True,executable=str(self.fake))
+        source_ids=[self.create(manager,prompt='Source API decision'),self.create(manager,prompt='Source UI progress')]
+        for sid in source_ids: self.settled(manager,sid)
+        for provider in ('codex','claude','cursor'):
+            with self.subTest(provider=provider):
+                row=manager.merge({'source_ids':source_ids,'request_id':str(uuid.uuid4()),'destination':{
+                    'project_id':next(iter(manager.projects)), 'provider':provider,'prompt':'Continue combined work'}})
+                final=self.settled(manager,row['id'])
+                self.assertEqual('completed',final['status'])
+                call=self.calls[-1]; evidence=json.loads(Path(call['pid_path']+'.merge').read_text())
+                self.assertEqual(source_ids,[source['id'] for source in evidence['archive']['sources']])
+                self.assertIsNone(call['session_id'])
+                self.assertEqual('1',evidence['restore_disabled']); self.assertIsNone(evidence['capture_disabled'])
+                if provider=='claude':
+                    self.assertIn('--add-dir',evidence['argv'])
+                    self.assertIn(str(chat_merge.archive_path(manager,row['id']).parent),evidence['argv'])
+                    self.assertNotIn(str(manager.state_dir/'merges'),evidence['argv'])
+
+    def test_a_changed_merge_archive_fails_the_first_launch_with_its_reason_and_starts_no_provider(self):
+        from harness import chat_merge
+        manager=self.manager()
+        source_ids=[self.create(manager,prompt='Source A'),self.create(manager,prompt='Source B')]
+        for sid in source_ids: self.settled(manager,sid)
+        with manager.lock:
+            row=manager.merge({'source_ids':source_ids,'request_id':str(uuid.uuid4()),'destination':{
+                'project_id':next(iter(manager.projects)),'provider':'codex','prompt':'Continue combined work'}})
+            chat_merge.archive_path(manager,row['id']).write_text('{}')
+        launched=len(self.calls)
+        final=self.settled(manager,row['id'])
+        self.assertEqual(('failed',None),(final['status'],final['native_session_id']))
+        self.assertEqual(launched,len(self.calls))
+        self.assertTrue(any(str(event.get('text')).startswith('The saved merge archive changed or is unavailable.') for event in manager.events(row['id'])))
+        # Restart rewrites the archive from its record, so the run it queues reaches the provider.
+        manager.restart_merge(row['id'])
+        self.settled(manager,row['id'])
+        self.assertEqual(launched+1,len(self.calls))
 
     def test_sdd_phases_validate_documents_resume_and_retain_launch_settings(self):
         from harness import sdd
@@ -338,6 +399,34 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(any('token limit' in event.get('text','') for event in manager.events(sid)))
         self.assert_process_gone(self.calls[0])
 
+    def test_resumed_claude_launch_counts_only_its_own_spend(self):
+        # From Claude Code 2.1.277 a resumed result reports the session's whole spend; "total <usd> <version>" drives the fixture.
+        self.fake.write_text(FAKE_CLI.replace(
+            '    print(json.dumps({"type": "system", "subtype": "init", "session_id": "native-original"}), flush=True)',
+            '    words = behavior.split()\n'
+            '    init = {"type": "system", "subtype": "init", "session_id": "native-original"}\n'
+            '    if len(words) == 3: init["claude_code_version"] = words[2]\n'
+            '    print(json.dumps(init), flush=True)').replace(
+            '"session_id": "native-original", "result": "Fixture answer"}',
+            '"session_id": "native-original", "result": "Fixture answer", **({"total_cost_usd": float(words[1])} if words[0] == "total" else {})}'))
+        manager = self.manager()
+        for version, totals, own in (('2.1.278', ('0.5', '0.8', '0', '0.95'), [.5, .3, None, .15]),
+                                     ('2.1.276', ('0.5', '0.3'), [.5, .3])):
+            sid = manager.create({'project_id': next(iter(manager.projects)), 'provider': 'claude', 'project_context': False,
+                                  'prompt': f'total {totals[0]} {version}', 'budgets': {'usd': .6, 'tokens': None, 'seconds': 5}})['id']
+            self.settled(manager, sid)
+            for total in totals[1:]:
+                manager.send(sid, f'total {total} {version}'); self.settled(manager, sid)
+            history = manager.results.history(sid)
+            self.assertEqual([launch['usage']['cost_usd'] for launch in history['launches']], own, version)
+            self.assertEqual(history['totals']['cost_usd']['reported'], sum(cost for cost in own if cost is not None), version)
+            self.assertEqual(history['totals']['cost_usd']['unknown_launches'], own.count(None), version)
+            # The USD cap applies to the launch's own spend, not to spend restored from earlier launches.
+            self.assertTrue(all(launch['usage']['limit_reached'] is None for launch in history['launches']), version)
+            self.assertTrue(all(isinstance(launch['usage']['cost_usd_reported'], float) for launch in history['launches']), version)
+        resumed = [call for call in self.calls if call.get('session_id') == 'native-original']
+        self.assertEqual(len(resumed), 4)
+
     def test_explicit_time_budget_terminates_process_and_can_be_increased(self):
         manager=self.manager(timeout=10); sid=self.create(manager,prompt='sleep',project_context=False,budgets={'seconds':1})
         result=self.settled(manager,sid)
@@ -419,8 +508,12 @@ class SessionTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
     def test_worktree_uses_committed_context_and_keeps_dirty_primary_unchanged_across_resume(self):
         self.initialize_git()
+        (self.project / "README.md").write_text("COMMITTED WORKTREE README\n", encoding="utf-8")
+        self.git_command("add", "README.md")
+        self.git_command("commit", "--quiet", "-m", "Add readme")
         head = self.git_command("rev-parse", "HEAD")
         (self.project / "AGENTS.md").write_text("DIRTY PRIMARY CONTEXT\n", encoding="utf-8")
+        (self.project / "README.md").write_text("DIRTY PRIMARY README\n", encoding="utf-8")
         (self.project / "untracked.txt").write_text("PRIVATE UNCOMMITTED FIXTURE\n", encoding="utf-8")
         primary_status = self.git_command("status", "--porcelain")
         manager = self.manager()
@@ -438,7 +531,10 @@ class SessionTests(unittest.TestCase):
         self.assertFalse((worktree / "untracked.txt").exists())
         self.assertEqual(self.calls[-1]["project"], str(worktree))
         self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(worktree))
-        self.assertIn("COMMITTED WORKTREE CONTEXT", self.calls[-1]["prompt"])
+        self.assertIn("Project reference: README.md\nCOMMITTED WORKTREE README", self.calls[-1]["prompt"])
+        self.assertNotIn("DIRTY PRIMARY README", self.calls[-1]["prompt"])
+        # Codex loads AGENTS.md by itself; the excerpts do not send it a second time.
+        self.assertNotIn("COMMITTED WORKTREE CONTEXT", self.calls[-1]["prompt"])
         self.assertNotIn("DIRTY PRIMARY CONTEXT", self.calls[-1]["prompt"])
         self.assertEqual(self.git_command("status", "--porcelain"), primary_status)
         self.assertEqual(self.git_command("branch", "--show-current"), "main")
@@ -558,10 +654,10 @@ class SessionTests(unittest.TestCase):
         self.initialize_git()
         nested = self.project / "packages/app"
         nested.mkdir(parents=True)
-        (nested / "AGENTS.md").write_text("NESTED COMMITTED CONTEXT\n", encoding="utf-8")
-        self.git_command("add", "packages/app/AGENTS.md")
+        (nested / "README.md").write_text("NESTED COMMITTED CONTEXT\n", encoding="utf-8")
+        self.git_command("add", "packages/app/README.md")
         self.git_command("commit", "--quiet", "-m", "Add nested project")
-        (nested / "AGENTS.md").write_text("NESTED DIRTY CONTEXT\n", encoding="utf-8")
+        (nested / "README.md").write_text("NESTED DIRTY CONTEXT\n", encoding="utf-8")
         manager = self.manager(projects=[nested])
         sid = self.create(manager, workspace="worktree", project_context=True)
         session = self.settled(manager, sid)
@@ -571,7 +667,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(expected))
         self.assertIn("NESTED COMMITTED CONTEXT", self.calls[-1]["prompt"])
         self.assertNotIn("NESTED DIRTY CONTEXT", self.calls[-1]["prompt"])
-        self.assertEqual((nested / "AGENTS.md").read_text(), "NESTED DIRTY CONTEXT\n")
+        self.assertEqual((nested / "README.md").read_text(), "NESTED DIRTY CONTEXT\n")
         manager.send(sid, "complete nested followup")
         self.assertEqual(self.settled(manager, sid)["project_path"], str(expected))
 
@@ -587,6 +683,289 @@ class SessionTests(unittest.TestCase):
         self.assertEqual((self.git_command("show-ref"), self.git_command("worktree", "list", "--porcelain")), before)
         self.assertFalse(any((absent_manager.state_dir / "worktrees").glob("*")))
 
+    def existing_worktree(self, name, *arguments):
+        """A checkout made outside the Harness, as a person's own script would make it."""
+        folder = self.root / name
+        self.git_command("worktree", "add", "--quiet", *arguments, str(folder))
+        return folder
+
+    @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
+    def test_existing_worktree_lists_other_checkouts_and_runs_the_session_there_as_it_is(self):
+        self.initialize_git()
+        task = self.existing_worktree("task-123", "-b", "task-123")
+        (task / "README.md").write_text("TASK WORKTREE README, NOT COMMITTED\n", encoding="utf-8")
+        (task / ".env.local").write_text("PREPARED BY THE PERSON'S OWN SCRIPT\n", encoding="utf-8")
+        detached = self.existing_worktree("detached", "--detach")
+        gone = self.existing_worktree("gone", "-b", "gone")
+        shutil.rmtree(gone)
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        # A Harness session worktree is the Harness's own; it is never offered as an existing one.
+        harness_sid = self.create(manager, workspace="worktree")
+        self.assertEqual(self.settled(manager, harness_sid)["status"], "completed")
+        listing = manager.worktrees(key)
+        self.assertEqual((listing["project_id"], listing["is_git"], listing["reason"], listing["skipped"]), (key, True, None, 1))
+        by_path = {entry["path"]: entry for entry in listing["worktrees"]}
+        self.assertEqual(set(by_path), {str(task), str(detached)})
+        self.assertEqual((by_path[str(task)]["branch"], by_path[str(task)]["detached"], by_path[str(task)]["folder"]),
+                         ("task-123", False, str(task)))
+        self.assertEqual((by_path[str(detached)]["branch"], by_path[str(detached)]["detached"]), (None, True))
+        self.assertEqual(by_path[str(detached)]["head"], self.git_command("rev-parse", "HEAD"))
+        self.assertTrue(all(len(entry["id"]) == 16 for entry in listing["worktrees"]))
+        self.assertEqual(manager.worktrees(key), listing)
+
+        sid = self.create(manager, workspace="existing-worktree", worktree_id=by_path[str(task)]["id"], project_context=True)
+        session = self.settled(manager, sid)
+        self.assertEqual((session["status"], session["workspace"], session["branch"], session["project_path"]),
+                         ("completed", "existing-worktree", "task-123", str(task)))
+        self.assertEqual(Path(session["git_common_dir"]), self.project / ".git")
+        self.assertEqual(self.calls[-1]["project"], str(task))
+        self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(task))
+        # The checkout is used as it is: its uncommitted files reach the agent and nothing is reset or copied.
+        self.assertIn("TASK WORKTREE README, NOT COMMITTED", self.calls[-1]["prompt"])
+        self.assertEqual((task / ".env.local").read_text(), "PREPARED BY THE PERSON'S OWN SCRIPT\n")
+        self.assertIn(f"Workspace: {task} (existing-worktree).", [event.get("text") for event in manager.events(sid)])
+        self.assertEqual(self.git_command("branch", "--show-current"), "main")
+        self.assertEqual(manager.delivery.get(sid)["available"], False)
+
+        # The person may switch the worktree's branch between turns; it is still their checkout of this repository.
+        self.git_command("checkout", "--quiet", "-b", "task-123-second-try", cwd=task)
+        manager.close()
+        self.managers.remove(manager)
+        restarted = self.manager()
+        self.assertEqual(restarted.get(sid)["project_path"], str(task))
+        restarted.send(sid, "complete in the same checkout")
+        resumed = self.settled(restarted, sid)
+        self.assertEqual((resumed["status"], resumed["project_path"], resumed["workspace"]), ("completed", str(task), "existing-worktree"))
+        self.assertEqual(self.calls[-1]["session_id"], "native-original")
+        self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(task))
+
+    @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
+    def test_existing_worktree_choice_is_strict_and_a_changed_checkout_stops_followups(self):
+        with patch.object(sessions.Sessions, "_worker", return_value=None):
+            plain = self.manager(state=self.root / "plain-state")
+            self.assertEqual(plain.worktrees(next(iter(plain.projects))),
+                             {"project_id": next(iter(plain.projects)), "is_git": False, "worktrees": [], "skipped": 0, "reason": None})
+            with self.assertRaises(sessions.SessionError):
+                self.create(plain, workspace="existing-worktree", worktree_id="0" * 16)
+        self.initialize_git()
+        task = self.existing_worktree("task-7", "-b", "task-7")
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        choice = manager.worktrees(key)["worktrees"][0]["id"]
+        invalid = [{"workspace": "existing-worktree"}]
+        invalid += [{"workspace": "existing-worktree", "worktree_id": value}
+                    for value in (None, 7, [], {}, "", "0" * 16, choice.upper(), choice + "0", str(task))]
+        invalid += [{"workspace": "existing-worktree", "worktree_id": choice, "worktree_branch": value} for value in ("other", None, 0)]
+        invalid += [{"workspace": value, "worktree_id": choice} for value in ("project", "worktree", None)]
+        invalid += [{"worktree_id": choice}]
+        for options in invalid:
+            with self.subTest(options=options), self.assertRaises(sessions.SessionError):
+                self.create(manager, **options)
+        self.assertEqual((manager.list(), manager.jobs.qsize(), self.calls), ([], 0, []))
+        # The Creator chooses only the project folder or a new worktree.
+        with self.assertRaises(sessions.SessionError):
+            manager._new_workspace(manager.project(key), {"workspace": "existing-worktree", "worktree_id": choice}, "creator-run")
+
+        sid = self.create(manager, workspace="existing-worktree", worktree_id=choice)
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.wait_for(lambda: manager.jobs.unfinished_tasks == 0)
+
+        def assert_rejected():
+            before = (manager.get(sid), manager.events(sid), manager.jobs.qsize(), dict(manager.generations), len(self.calls))
+            with self.assertRaises(sessions.SessionError):
+                manager.send(sid, "Do not resume a replaced checkout")
+            self.assertEqual((manager.get(sid), manager.events(sid), manager.jobs.qsize(),
+                              dict(manager.generations), len(self.calls)), before)
+
+        moved = self.root / "moved-task"
+        task.rename(moved)
+        task.symlink_to(moved, target_is_directory=True)
+        assert_rejected()
+        task.unlink()
+        moved.rename(task)
+        self.git_command("worktree", "remove", "--force", str(task))
+        self.assertEqual(manager.worktrees(key)["worktrees"], [])
+        assert_rejected()
+        self.initialize_git(cwd=task)
+        assert_rejected()
+
+    @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
+    def test_existing_worktree_of_a_nested_project_runs_in_the_same_subfolder(self):
+        self.initialize_git()
+        before = self.existing_worktree("before-app", "-b", "before-app")
+        nested = self.project / "packages/app"
+        nested.mkdir(parents=True)
+        (nested / "README.md").write_text("NESTED APP\n", encoding="utf-8")
+        self.git_command("add", "packages/app/README.md")
+        self.git_command("commit", "--quiet", "-m", "Add nested project")
+        task = self.existing_worktree("task-app", "-b", "task-app")
+        manager = self.manager(projects=[nested])
+        listing = manager.worktrees(next(iter(manager.projects)))
+        # A checkout made before the project folder existed has nowhere for the session to run.
+        self.assertEqual(([entry["path"] for entry in listing["worktrees"]], listing["skipped"]), ([str(task)], 1))
+        self.assertEqual(listing["worktrees"][0]["folder"], str(task / "packages/app"))
+        sid = self.create(manager, workspace="existing-worktree", worktree_id=listing["worktrees"][0]["id"])
+        session = self.settled(manager, sid)
+        self.assertEqual((session["status"], session["project_path"]), ("completed", str(task / "packages/app")))
+        self.assertEqual(Path(self.calls[-1]["pid_path"] + ".cwd").read_text(), str(task / "packages/app"))
+        self.assertTrue(before.is_dir())
+
+    def native_commands(self, *names):
+        """Claude Code's command list as its initialize answer gives it, without starting a CLI."""
+        listed = [{"name": name, "description": f"The {name} command.", "hint": "", "aliases": ["reset", "new"] if name == "clear" else [],
+                   "builtin": False} for name in names]
+        catalog = patch("harness.commands.claude_commands", return_value=listed)
+        catalog.start()
+        self.addCleanup(catalog.stop)
+
+    def test_a_claude_command_goes_to_the_cli_as_typed_and_other_text_keeps_the_harness_context(self):
+        self.native_commands("php-review", "compact", "clear")
+        (self.project / "README.md").write_text("FIXTURE README EXCERPT\n", encoding="utf-8")
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        listing = manager.command_listing(key, "claude")
+        self.assertEqual([(item["name"], item["kind"]) for item in listing["commands"][:3]],
+                         [("php-review", "native"), ("compact", "native"), ("clear", "page")])
+        # Then the Harness views for what only the terminal offers.
+        self.assertEqual({"page"}, {item["kind"] for item in listing["commands"][3:]})
+        for provider, worktree in (("unknown", None), ("claude", "0" * 16)):
+            with self.subTest(provider=provider, worktree=worktree), self.assertRaises(sessions.SessionError):
+                manager.command_listing(key, provider, worktree)
+
+        message = "/php-review src/Cart.php focus on rounding"
+        sid = manager.create(dict(project_id=key, provider="claude", prompt=message, project_context=True))["id"]
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        # Exactly what the person typed, as in Claude Code itself: no excerpts, memory or Harness instructions.
+        self.assertEqual(self.calls[-1]["prompt"], message)
+        self.assertIn("Claude Code runs /php-review itself: the message went to it as typed, without Harness memory or instructions.",
+                      [event.get("text") for event in manager.events(sid)])
+        ledger = manager.results.history(sid)["launches"][-1]["context"]["ledger"]
+        self.assertEqual((ledger["message"], ledger["total"], ledger["instructions"]), (len(message), len(message), 0))
+        self.assertEqual([item["name"] for item in manager.session_commands(sid)["commands"]][:3], ["php-review", "compact", "clear"])
+
+        # A follow-up with attachments still names them: the person attached them to this message.
+        manager.send(sid, "/compact keep the decisions", {"attachments": [{"name": "notes.txt", "data": "bm90ZXM="}]})
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        self.assertTrue(prompt.startswith("/compact keep the decisions\n\nUser-attached reference files"))
+        self.assertNotIn("Harness session delegation requirement", prompt)
+        # Starting over would replace the native conversation: the page does that with New session.
+        for restart in ("/clear", "/reset", "/new please"):
+            with self.subTest(restart=restart), self.assertRaisesRegex(sessions.SessionError, "New session"):
+                manager.send(sid, restart)
+        with self.assertRaisesRegex(sessions.SessionError, "New session"):
+            manager.create(dict(project_id=key, provider="claude", prompt="/clear"))
+
+        # A name Claude Code does not list, or a slash later in the text, is text with the usual Harness context.
+        unknown = manager.create(dict(project_id=key, provider="claude", prompt="/fix the bug", project_context=True))["id"]
+        self.assertEqual(self.settled(manager, unknown)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        self.assertTrue(prompt.startswith("Optional project reference excerpts"))
+        self.assertIn("/fix the bug\n\nHarness session delegation requirement", prompt)
+        self.assertIn("/fix is not a Claude Code command here, so it went as text.", [event.get("text") for event in manager.events(unknown)])
+        # A resumed turn sends no excerpts, so nothing would come before the slash: the text says it is the user's.
+        manager.send(unknown, "/fix it again")
+        self.assertEqual(self.settled(manager, unknown)["status"], "completed")
+        self.assertTrue(self.calls[-1]["prompt"].startswith(sessions.TEXT_MESSAGE_HEADER + "/fix it again\n\n"))
+        # The model and effort belong to the session's fields, set by the page's /model and /effort.
+        for page in ("/model sonnet", "/effort high", "/model picker is broken, fix it"):
+            with self.subTest(page=page), self.assertRaisesRegex(sessions.SessionError, "session settings"):
+                manager.send(unknown, page)
+        # Outside the Workspace workflow the Harness writes the prompt, so a command is text there too.
+        planned = manager.create(dict(project_id=key, provider="claude", prompt="/php-review src", workflow="plan"))["id"]
+        self.assertEqual(self.settled(manager, planned)["status"], "completed")
+        self.assertTrue(self.calls[-1]["prompt"].startswith("Inspect the project and produce an implementation plan"))
+        self.assertEqual(manager.session_commands(planned)["commands"], [])
+
+    def test_a_claude_command_leaves_memory_to_the_project_hooks_and_a_reviewed_session_refuses_it(self):
+        self.native_commands("php-review")
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        sid = manager.create(dict(project_id=key, provider="claude", prompt="complete"))["id"]
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        def link(brain):
+            with manager.lock:
+                manager.db.execute("UPDATE sessions SET brain=? WHERE id=?", (json.dumps(brain), sid))
+                manager.db.commit()
+        # Automatic memory: the command gets no Harness capsule, task or capsule claim, and leaves no draft to save.
+        link({"task_id": "T-auto", "bank": "memory-bank", "review": False, "capsule": {"task_id": "T-auto"}})
+        from harness import memory_recovery
+        with patch.object(sessions.Sessions, "_recall", side_effect=AssertionError("recall for a command")), \
+                patch.object(sessions.Sessions, "_remember", side_effect=AssertionError("remember for a command")), \
+                patch.object(memory_recovery, "recover", side_effect=AssertionError("recovery for a command")):
+            manager.send(sid, "/php-review src")
+            self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertEqual(self.calls[-1]["prompt"], "/php-review src")
+        self.assertEqual(json.loads(Path(self.calls[-1]["pid_path"] + ".env").read_text()),
+                         {"CONTEXT_TASK_ID": None, "CONTEXT_CAPSULE_DELIVERED": None})
+        # Reviewed memory: a person approves what each run receives, so a command that skips it does not run.
+        link({"task_id": "T-review", "bank": "memory-bank", "review": True})
+        before = len(self.calls)
+        manager.send(sid, "/php-review src")
+        session = self.settled(manager, sid)
+        self.assertEqual((session["status"], len(self.calls)), ("failed", before))
+        self.assertIn("reviews project memory before each run", manager.events(sid)[-1]["text"])
+
+    def test_codex_skills_mentioned_with_a_dollar_and_its_prompts_reach_codex_as_the_codex_app_sends_them(self):
+        skills = [{"name": "php-review", "description": "Review PHP.", "path": str(self.project / ".agents/skills/php-review/SKILL.md"), "scope": "repo"}]
+        listing = patch("harness.commands.codex_skills", return_value=skills)
+        listing.start()
+        self.addCleanup(listing.stop)
+        home = self.root / "codex-home"
+        (home / "prompts").mkdir(parents=True)
+        (home / "prompts" / "review.md").write_text("---\ndescription: Review\n---\nReview $FILES carefully.\n", encoding="utf-8")
+        environment = patch.dict(os.environ, {"CODEX_HOME": str(home)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        self.assertEqual([item["name"] for item in manager.command_listing(key, "codex")["skills"]], ["php-review"])
+
+        sid = self.create(manager, "Look at the diff with $php-review first")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        self.assertIn(f"Look at the diff with $php-review first\n\nHarness skill request: the user invoked these skills for this message. "
+                      f"Load each one before you act and follow it for this request:\n- php-review ({self.project}/.agents/skills/php-review/SKILL.md): "
+                      "read that file and follow it.", prompt)
+        self.assertIn("Codex skills requested: php-review.", [event.get("text") for event in manager.events(sid)])
+
+        manager.send(sid, "/prompts:review FILES=src/Cart.php")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertTrue(self.calls[-1]["prompt"].startswith("Review src/Cart.php carefully.\n\nHarness session delegation requirement"))
+        self.assertEqual(manager.events(sid)[-1]["kind"], "status")
+        self.assertIn("/prompts:review FILES=src/Cart.php", [event.get("text") for event in manager.events(sid) if event["kind"] == "user"])
+        for wrong in ("/prompts:review", "/prompts:missing x"):
+            with self.subTest(wrong=wrong), self.assertRaises(sessions.SessionError):
+                manager.send(sid, wrong)
+        manager.send(sid, "/init")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertTrue(self.calls[-1]["prompt"].startswith(commands.INIT_PROMPT))
+
+    @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
+    def test_existing_worktree_list_leaves_out_harness_state_and_names_a_checkout_by_what_it_holds(self):
+        self.initialize_git()
+        task = self.existing_worktree("task-9", "-b", "task-9")
+        manager = self.manager()
+        key = next(iter(manager.projects))
+        # A Delivery check builds a disposable worktree inside the runner state: never a place to start a session.
+        check = manager.state_dir / "delivery" / "check-fixture" / "worktree"
+        self.git_command("worktree", "add", "--quiet", "--detach", str(check))
+        listing = manager.worktrees(key)
+        self.assertEqual([entry["path"] for entry in listing["worktrees"]], [str(task)])
+        first = listing["worktrees"][0]["id"]
+        # A folder now holding another branch is a different entry, so a stale choice cannot start there.
+        self.git_command("checkout", "--quiet", "-b", "task-9-reused", cwd=task)
+        second = manager.worktrees(key)["worktrees"][0]["id"]
+        self.assertNotEqual(first, second)
+        with self.assertRaisesRegex(sessions.SessionError, "no longer lists"):
+            self.create(manager, workspace="existing-worktree", worktree_id=first)
+        self.assertEqual(manager.list(), [])
+        # That checkout holds no Cursor skill: only the Harness views are listed.
+        self.assertEqual([], [item for item in manager.command_listing(key, "cursor", second)["commands"] if item["kind"] != "page"])
+        with self.assertRaises(sessions.SessionError):
+            manager.command_listing(key, "cursor", first)
+
     def test_completion_requires_successful_terminal_and_zero_exit(self):
         manager = self.manager()
         for behavior, expected in (("complete", "completed"), ("no_newline", "completed"),
@@ -599,6 +978,45 @@ class SessionTests(unittest.TestCase):
                 self.assertTrue(any(event.get("text") == "Fixture answer" for event in events))
                 self.assertEqual(manager.events(sid, events[0]["id"]), events[1:])
                 self.assert_process_gone(self.calls[-1])
+                # Every event says when it was stored; the closing one names the outcome.
+                self.assertTrue(all(event["at"].endswith("+00:00") and len(event["at"]) == 29 for event in events))
+                self.assertEqual(("status", expected), (events[-1]["kind"], events[-1]["outcome"]))
+                launch = self.wait_for(lambda: (manager.get(sid)["launch"] or {}).get("status") != "running" and manager.get(sid)["launch"])
+                self.assertEqual(("native", expected), (launch["kind"], launch["status"]))
+                self.assertEqual(0, manager.results.history(sid)["launches"][-1]["receipt"]["steps"])
+
+    def test_a_refused_sign_in_names_the_command_that_signs_in(self):
+        manager = self.manager()
+        sid = manager.create(dict(project_id=next(iter(manager.projects)), provider="claude", prompt="signed_out"))["id"]
+        self.assertEqual(self.settled(manager, sid)["status"], "failed")
+        errors = [event for event in manager.events(sid) if event["kind"] == "error"]
+        self.assertEqual("claude", errors[-1]["sign_in"])
+        self.assertIn("Claude Code is not signed in", errors[-1]["text"])
+        # The fixture CLI is not on PATH, so the command names its path.
+        self.assertIn(f"`{self.fake} auth login`", errors[-1]["text"])
+        # Any other failure keeps the general message and does not point at the sign-in.
+        sid = self.create(manager, "failed")
+        self.assertEqual(self.settled(manager, sid)["status"], "failed")
+        errors = [event for event in manager.events(sid) if event["kind"] == "error"]
+        self.assertNotIn("sign_in", errors[-1])
+        self.assertIn("Provider did not complete successfully", errors[-1]["text"])
+
+    def test_sign_in_answers_are_cached_and_refreshed_on_request(self):
+        manager = self.manager()
+        asked = []
+
+        def status(provider, executable):
+            asked.append(provider)
+            return {"id": provider, "state": "signed_out" if provider == "claude" else "signed_in", "detail": "", "login": ""}
+        with patch.object(sessions.providers, "sign_in_status", side_effect=status):
+            first = manager.sign_in()
+            self.assertEqual({"claude": "signed_out", "codex": "signed_in"},
+                             {item["id"]: item["state"] for item in first["providers"]})
+            self.assertEqual(first, manager.sign_in())
+            self.assertEqual(2, len(asked))  # cursor is unavailable and never asked
+            manager.sign_in_cache = (time.monotonic() - manager.SIGN_IN_MIN_INTERVAL - 1, first)
+            manager.sign_in(refresh=True)
+            self.assertEqual(4, len(asked))
 
     def test_cancel_and_timeout_terminate_even_when_child_does_not_read_stdin(self):
         for behavior, cancel in (("sleep", True), ("no_stdin", False)):
@@ -615,6 +1033,9 @@ class SessionTests(unittest.TestCase):
                     manager.cancel(sid)
                 self.assertEqual(self.settled(manager, sid)["status"], "cancelled" if cancel else "failed")
                 self.assert_process_gone(call)
+                # The receipt is written however the launch ends.
+                self.wait_for(lambda: manager.get(sid)["launch"]["status"] != "running")
+                self.assertIsNotNone(manager.results.history(sid)["launches"][-1]["receipt"])
                 if not cancel:
                     self.assertTrue(any("time limit" in event.get("text", "")
                                         for event in manager.events(sid)))
@@ -693,6 +1114,30 @@ class SessionTests(unittest.TestCase):
                 self.assertTrue(any("restarted" in event.get("text", "") for event in events))
                 with self.assertRaises(sessions.SessionError):
                     restarted.send(sid, "No native session was created")
+
+    def test_held_runs_are_refused_on_every_way_in_until_released(self):
+        manager = self.manager()
+        sid = self.create(manager)
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        blocker = self.create(manager, "sleep")
+        self.wait_for(lambda: manager.get(blocker)["status"] == "running")
+        # A run in progress is counted and nothing is held: an update waits for it.
+        self.assertEqual(1, manager.hold_runs("Held for the update."))
+        self.assertIsNone(manager.held)
+        manager.cancel(blocker)
+        self.settled(manager, blocker)
+        self.assertEqual(0, manager.hold_runs("Held for the update."))
+        before = (len(manager.list()), len(manager.events(sid)), len(self.calls))
+        for attempt in (lambda: self.create(manager), lambda: manager.send(sid, "complete"),
+                        lambda: manager.results.start_check(sid, {"command": "true", "timeout": 2, "snapshot_id": "current"})):
+            with self.assertRaisesRegex(sessions.SessionError, "^Held for the update.$"):
+                attempt()
+        # Refused before anything was written or queued.
+        self.assertEqual(before, (len(manager.list()), len(manager.events(sid)), len(self.calls)))
+        self.assertEqual(("completed", 0), (manager.get(sid)["status"], manager.jobs.unfinished_tasks))
+        manager.release_runs()
+        manager.send(sid, "complete")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
 
     def test_model_and_effort_changes_reach_native_resume_and_survive_restart(self):
         manager = self.manager()
@@ -864,6 +1309,8 @@ class SessionTests(unittest.TestCase):
         sid = self.create(manager, "oversize")
         self.assertEqual(self.settled(manager, sid)["status"], "failed")
         self.assert_process_gone(self.calls[-1])
+        self.wait_for(lambda: manager.get(sid)["launch"]["status"] == "failed")
+        self.assertEqual(0, manager.results.history(sid)["launches"][-1]["receipt"]["steps"])
         next_sid = self.create(manager)
         self.assertEqual(self.settled(manager, next_sid)["status"], "completed")
 
@@ -1064,6 +1511,77 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(restored["git_common_dir"])
         self.assertEqual(manager.events(sid), [{"id": 7, "kind": "user", "text": "Original legacy request"}])
 
+    def test_capsule_meter_counts_every_copy_the_runtime_cap_counts(self):
+        policy = {"id": "policy:AGENTS.md", "category": "policy", "layer": "procedural", "text": "Rules — één owner."}
+        durable = {"id": "memory:MEM-1", "category": "durable", "layer": "semantic", "text": "Chunk.", "score": 4e-06}
+        handoff = {"id": "brain-handoff:H-1", "category": "handoff", "layer": "episodic", "text": "Last handoff."}
+        capsule = {"task_id": "TASK-1", "working": {"task_id": "TASK-1"},
+                   "procedural": [policy], "semantic": [durable], "episodic": [handoff], "selected": [policy, durable],
+                   "categories": {"policy": [policy], "durable": [durable], "handoff": [handoff], "dynamic": []},
+                   "omitted": {"procedural": 0, "semantic": 2, "episodic": 0}}
+
+        def size(value):
+            return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+        meter = sessions.capsule_meter(capsule)
+        # The runtime measures compact JSON in characters, so non-ASCII text is not counted as escapes.
+        self.assertEqual((size(capsule), 8000), (meter["characters"], meter["limit"]))
+        self.assertLess(meter["characters"], len(json.dumps(capsule, separators=(",", ":"))))
+        # Each item counts in its layer, among the selected items and under its category.
+        rules, bank = 3 * size(policy), 3 * size(durable)
+        self.assertEqual({"brain": size(capsule) - rules - bank, "rules": rules, "bank": bank}, meter["kinds"])
+        self.assertEqual({"brain": 1, "rules": 1, "bank": 1}, meter["items"])
+        self.assertEqual(2 * size(policy) + 2 * size(durable) + size(handoff), meter["repeats"])
+        self.assertEqual({"semantic": 2}, meter["dropped"])
+        inserted = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False) + "\n\n"
+        self.assertEqual(len(inserted), meter["prompt_characters"])
+
+    def test_project_context_sends_at_most_the_excerpt_the_chip_counts(self):
+        (self.project / "CLAUDE.md").write_text("A" * (sessions.CONTEXT_EXCERPT_BYTES + 500))
+        (self.project / "README.md").write_text("Short readme")
+        manager = self.manager()
+        files = {item["path"]: item for item in manager.context(next(iter(manager.projects)))["files"]}
+        # The context listing reports whole files; the page caps each one at the excerpt size.
+        self.assertEqual((sessions.CONTEXT_EXCERPT_BYTES + 500, 12, False),
+                         (files["CLAUDE.md"]["bytes"], files["README.md"]["bytes"], files["AGENTS.md"]["exists"]))
+        sid = self.create(manager, project_context=True)
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        prompt = self.calls[-1]["prompt"]
+        self.assertIn("Project reference: CLAUDE.md\n" + "A" * sessions.CONTEXT_EXCERPT_BYTES + "\n\n", prompt)
+        self.assertNotIn("A" * (sessions.CONTEXT_EXCERPT_BYTES + 1), prompt)
+        self.assertIn("Project reference: README.md\nShort readme", prompt)
+        self.assertIsNone(manager.get(sid)["capsule_meter"])
+
+    def test_project_context_comes_from_memory_and_fills_in_once_without_it(self):
+        (self.project / "AGENTS.md").write_text("AGENTS RULES")
+        (self.project / "CLAUDE.md").write_text("CLAUDE RULES")
+        (self.project / "README.md").write_text("README FACTS")
+        manager = self.manager()
+        sid = self.create(manager, project_context=True)
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        first = self.calls[-1]["prompt"]
+        # Codex loads AGENTS.md by itself; the project's other reference files stand in for memory.
+        self.assertIn("Project reference: README.md\nREADME FACTS", first)
+        self.assertIn("Project reference: CLAUDE.md\nCLAUDE RULES", first)
+        self.assertNotIn("AGENTS RULES", first)
+        # A resumed conversation already holds them.
+        manager.send(sid, "complete follow-up")
+        self.assertEqual(self.settled(manager, sid)["status"], "completed")
+        self.assertNotIn("Optional project reference excerpts", self.calls[-1]["prompt"])
+        launches = manager.results.history(sid)["launches"]
+        self.assertEqual([["CLAUDE.md", "README.md"], None],
+                         [[item["name"] for item in launch["context"]["ledger"]["excerpts"]]
+                          if launch["context"]["ledger"]["excerpts"] is not None else None for launch in launches])
+        # A turn that carries a memory capsule has what retrieval found; nothing is added beside it.
+        session = {**manager.get(sid), "native_session_id": None, "brain": {"capsule": {"query": "q", "working": {}}}}
+        ledger = {}
+        text = manager._prompt(session, "Do it", ledger)
+        self.assertNotIn("Optional project reference excerpts", text)
+        self.assertIsNone(ledger["excerpts"])
+        # Claude loads CLAUDE.md by itself, so its excerpts leave that one out instead.
+        text = manager._prompt({**session, "brain": None, "provider": "claude"}, "Do it", ledger := {})
+        self.assertEqual(["AGENTS.md", "README.md"], [item["name"] for item in ledger["excerpts"]])
+        self.assertNotIn("CLAUDE RULES", text)
+
     def test_context_and_state_symlinks_are_not_followed(self):
         outside = self.root / "outside.txt"
         outside.write_text("OUTSIDE SECRET")
@@ -1091,6 +1609,22 @@ class SessionTests(unittest.TestCase):
         with self.assertRaises(sessions.SessionError):
             self.manager(state=other_state)
         self.assertEqual(outside.read_text(), "OUTSIDE SECRET")
+
+
+
+class GitCleanupTests(unittest.TestCase):
+    def test_unconfirmed_worktree_process_cleanup_stops_new_admission(self):
+        process = Mock(returncode=0)
+        process.communicate.return_value = ('', '')
+        process.wait.side_effect = subprocess.TimeoutExpired('git fixture', 3)
+        owner = Mock(stopping=threading.Event())
+        with patch.object(sessions.process_runtime, 'launch_guarded', return_value=process), \
+                patch.object(sessions.process_runtime, 'signal_tree'):
+            with self.assertRaisesRegex(sessions.SessionError, 'cleanup could not be confirmed'):
+                sessions.run_git(Path.cwd(), 'worktree', 'add', 'fixture', guard_lock=99, guard_owner=owner)
+        self.assertTrue(owner.stopping.is_set())
+        process.stdout.close.assert_called_once()
+        process.stderr.close.assert_called_once()
 
 
 if __name__ == "__main__":

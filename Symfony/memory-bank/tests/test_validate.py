@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -19,7 +21,11 @@ SPEC = importlib.util.spec_from_file_location("memory_bank_validate", MODULE_PAT
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Cannot load memory-bank validator")
 VALIDATOR = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(VALIDATOR)
+sys.path.insert(0, str(MODULE_PATH.parent))
+try:
+    SPEC.loader.exec_module(VALIDATOR)
+finally:
+    sys.path.pop(0)
 
 
 class MemoryBankValidatorTest(unittest.TestCase):
@@ -393,6 +399,25 @@ class MemoryBankValidatorTest(unittest.TestCase):
 
         self.assertTrue(any("overdue for review" in error for error in errors))
 
+    def test_messages_name_paths_from_the_bank_parent(self) -> None:
+        # A refused write's reason travels into the next Task Capsule, and the
+        # machine's home directory has no business in a prompt.
+        self.add_chunk()
+        verified = date.today() - timedelta(days=2)
+        self.update_chunk_metadata(
+            created=verified.isoformat(),
+            last_verified=verified.isoformat(),
+            review_after=(date.today() - timedelta(days=1)).isoformat(),
+        )
+        self.bank.joinpath("chunks", "notes.txt").write_text("x\n", encoding="utf-8")
+
+        errors = VALIDATOR.validate_bank(self.bank)
+
+        self.assertGreaterEqual(len(errors), 2, errors)
+        for error in errors:
+            self.assertTrue(error.startswith("memory-bank/"), error)
+            self.assertNotIn(str(self.repository), error)
+
     def test_type_must_be_a_string(self) -> None:
         self.add_chunk()
         self.update_chunk_metadata(type=[])
@@ -451,6 +476,155 @@ class MemoryBankValidatorTest(unittest.TestCase):
         errors = VALIDATOR.validate_bank(self.bank)
 
         self.assertTrue(any("must include this ID in supersedes" in error for error in errors))
+
+
+class SecretPatternTableTest(unittest.TestCase):
+    """What the shared secret patterns catch and what they must leave alone.
+
+    The same patterns gate Brain writes, capsule queries and the index, where
+    a false positive masks a value in a shipped skill; it used to drop the
+    whole skill: the Laravel architect skill was excluded over a documented
+    `--secret=...` flag.
+    """
+
+    CREDENTIALS = (
+        "DB_PASSWORD=SuperS3cret!",
+        "MAIL_PASSWORD=abc123xyz",
+        "db_password=x7Gq9",
+        "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "CLIENT_SECRET=abcdef123456",
+        "password: hunter2",
+        'api_key="sk12345abc"',
+        "secret = s3cr3tvalue",
+        "access_token=abcd1234efgh",
+        "mysql -u root --password=hunter22 app",
+        "APP_KEY=base64:2fl+Ktvkfl+Fuz4Qp/A75G2RTiWVA/ZoKZvp6fiiM10=",
+        "mysql://app:hunter2@db:3306/app",
+        "postgres://admin:P%40ssw0rd@localhost/db",
+        "redis://:mypassword@cache:6379",
+        "https://user:ghs_token123@github.com/org/repo.git",
+    )
+    NOT_CREDENTIALS = (
+        "secret: '%env(APP_SECRET)%'",
+        "password: '%env(DATABASE_PASSWORD)%'",
+        '$password = $request->validated("password")',
+        "$this->password = Hash::make($value);",
+        "'password' => env('DB_PASSWORD')",
+        "'password' => 'hashed'",
+        'password = getenv("DB_PASSWORD")',
+        'api_key = config("services.x.key")',
+        "password: required|min:12|confirmed",
+        "php artisan down --secret=...",
+        "DB_PASSWORD=${DB_PASSWORD}",
+        "secret_key: ${{ secrets.KEY }}",
+        "DB_PASSWORD=",
+        "DB_PASSWORD=null",
+        "DB_PASSWORD=secret",
+        "DB_PASSWORD=password",
+        "secret=your-secret-here",
+        "api_key: <your-api-key>",
+        "password: ********",
+        "password_timeout=10800",
+        "APP_KEY=base64:...",
+        'DATABASE_URL="postgresql://app:!ChangeMe!@127.0.0.1:5432/app?serverVersion=16"',
+        "mysql://user:password@localhost/db",
+        "mysql://root:root@db/app",
+        "see http://localhost:8000/login",
+        "ssh://git@github.com:22/org/repo",
+    )
+
+    @staticmethod
+    def hits(text: str) -> list:
+        return [
+            label for label, pattern in VALIDATOR.SECRET_PATTERNS.items()
+            if pattern.search(text)
+        ]
+
+    def test_literal_credentials_are_caught(self) -> None:
+        for text in self.CREDENTIALS:
+            with self.subTest(text=text):
+                self.assertTrue(self.hits(text))
+
+    def test_code_config_and_placeholders_are_not_credentials(self) -> None:
+        for text in self.NOT_CREDENTIALS:
+            with self.subTest(text=text):
+                self.assertEqual([], self.hits(text))
+
+    def test_sensitive_label_names_the_kind_never_the_value(self) -> None:
+        self.assertEqual(
+            "a possible assigned credential",
+            VALIDATOR.sensitive_label("DB_PASSWORD=SuperS3cret!"),
+        )
+        self.assertEqual(
+            "personal data (email address)",
+            VALIDATOR.sensitive_label("Ask person@example.test"),
+        )
+        self.assertIsNone(VALIDATOR.sensitive_label("Apply the cobalt rule."))
+
+
+
+class MaskSecretsTest(unittest.TestCase):
+    """The index masks a detected value instead of dropping the document."""
+
+    VALUE_EXTENT = (
+        ("MAILER_PASSWORD=mailpit", "MAILER_PASSWORD=[redacted: assigned credential]"),
+        ("```yaml\nmailer:\n  password: quokka\n```",
+         "```yaml\nmailer:\n  password: [redacted: assigned credential]\n```"),
+        ("  password: correct horse battery", "  password: [redacted: assigned credential]"),
+        ("Set `MAIL_PASSWORD=mailpit` in .env, then run `php artisan migrate`.",
+         "Set `MAIL_PASSWORD=[redacted: assigned credential]` in .env, then run `php artisan migrate`."),
+        ("password='alpha beta gamma' trailing", "password=[redacted: assigned credential] trailing"),
+        ('curl -H "Authorization: Bearer abcdefghijklmnopqrstu1234" https://api.example.test/v1',
+         'curl -H "Authorization: [redacted: authorization header]" https://api.example.test/v1'),
+        ("mysql://app:hunter2@db:3306/app", "[redacted: credential in URL]db:3306/app"),
+        ("APP_KEY=base64:2fl+Ktvkfl+Fuz4Qp/A75G2RTiWVA/ZoKZvp6fiiM10=",
+         "APP_KEY=[redacted: Laravel application key]"),
+        ("-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----\nafter",
+         "[redacted: private key]\nafter"),
+        ("ghp_" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456 and more", "[redacted: GitHub token] and more"),
+    )
+
+    def test_every_caught_credential_is_masked_and_no_pattern_survives(self) -> None:
+        for text in SecretPatternTableTest.CREDENTIALS:
+            with self.subTest(text=text):
+                masked, count = VALIDATOR.mask_secrets(text)
+                self.assertGreaterEqual(count, 1)
+                self.assertIn("[redacted: ", masked)
+                self.assertEqual([], SecretPatternTableTest.hits(masked))
+
+    def test_the_value_goes_and_the_key_stays(self) -> None:
+        for text, expected in self.VALUE_EXTENT:
+            with self.subTest(text=text):
+                self.assertEqual((expected, 1), VALIDATOR.mask_secrets(text))
+
+    def test_text_without_a_detection_is_unchanged(self) -> None:
+        # Quoted-credential shapes and personal data are not triggers here:
+        # a document indexed before masking existed is indexed as it was.
+        for text in (*SecretPatternTableTest.NOT_CREDENTIALS, "password: `CLAUDE.md`",
+                     'password: "${DB_PASSWORD}"', "DB_PASSWORD=changeme",
+                     "mail ops@example.com or +1 555 123 4567"):
+            with self.subTest(text=text):
+                self.assertEqual((text, 0), VALIDATOR.mask_secrets(text))
+
+    def test_masked_text_is_stable_and_passes_the_render_screen(self) -> None:
+        for _, masked in self.VALUE_EXTENT:
+            with self.subTest(masked=masked):
+                self.assertEqual((masked, 0), VALIDATOR.mask_secrets(masked))
+                VALIDATOR.sanitize_automatic_query(masked)
+                # The excerpt fallback strips brackets before the screen.
+                VALIDATOR.sanitize_automatic_query(masked.replace("[", "").replace("]", ""))
+
+    def test_masking_that_does_not_converge_raises_without_the_value(self) -> None:
+        with mock.patch.dict(VALIDATOR.SECRET_PATTERNS, {"echo": re.compile(r"ECHOSECRET|redacted: echo")}):
+            with self.assertRaises(VALIDATOR.ValidationError) as raised:
+                VALIDATOR.mask_secrets("x ECHOSECRET y")
+        self.assertNotIn("ECHOSECRET", str(raised.exception))
+
+    def test_the_policy_fingerprint_follows_the_patterns(self) -> None:
+        before = VALIDATOR.secret_policy_fingerprint()
+        self.assertEqual(before, VALIDATOR.secret_policy_fingerprint())
+        with mock.patch.dict(VALIDATOR.SECRET_PATTERNS, {"release code": re.compile(r"ZQX-[A-Z]+-\d{4}")}):
+            self.assertNotEqual(before, VALIDATOR.secret_policy_fingerprint())
 
 
 if __name__ == "__main__":

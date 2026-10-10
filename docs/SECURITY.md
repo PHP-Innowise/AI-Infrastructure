@@ -111,8 +111,8 @@ Store sanitized facts and operational consequences instead: configuration key
 names without values, redacted examples, aggregate metadata, reproducible
 recovery steps, and links to authorized canonical sources.
 
-Secret-pattern checks are defense in depth. They reject known token-like
-values without echoing the suspected value, but they cannot recognize every
+Secret-pattern checks are defense in depth. Writes reject known token-like
+values and the index masks them, without echoing the suspected value, but they cannot recognize every
 secret or every form of personal/customer data. Human review remains required.
 
 ## Imported Content and Prompt Injection
@@ -184,7 +184,8 @@ access control.
 The indexer selects approved repository documentation and context sources. It:
 
 - asks Git which candidates are ignored before reading their contents;
-- excludes likely secrets and invalid active Memory Bank chunks;
+- masks likely secret values in repository documents before storage, and
+  excludes chunks carrying them and invalid active Memory Bank chunks;
 - excludes ineligible Project Brain records before FTS storage;
 - rejects invalid UTF-8 without replacing the prior valid index;
 - deduplicates mirrored skills by indexing canonical `.agents/skills/`;
@@ -338,8 +339,14 @@ the backup-first recovery in
 ## Network and MCP Posture
 
 The Project Brain runtime itself uses local SQLite FTS5 and has no network
-service, MCP server, embedding store, or automatic prompt injection. The
-current Codex project config requires no MCP servers.
+service or embedding store. Its one MCP server is the local memory server
+`memory-bank/scripts/mcp_server.py` (registered as `harness-memory` in
+`.mcp.json` and `.cursor/mcp.json`, and as `harness_memory` in the Codex
+project config), which the client starts over standard input and output and
+which works on the project's own Project Brain and Memory Bank; see
+`memory-bank/MCP.md` in an edition. The prompt hook delivers the bounded Task
+Capsule with each prompt (on Cursor through a local rule; see
+[Context and Memory](CONTEXT-AND-MEMORY.md)).
 
 Other workflows may use tool-native web access, GitHub tooling, package
 registries, or Infrastructure-Creator's stack research. Treat every network

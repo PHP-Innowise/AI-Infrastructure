@@ -83,7 +83,7 @@ Locate the app root by finding `composer.json` and confirming the Laravel versio
 - Start new files with `declare(strict_types=1);` and full type declarations (return types, property types, param types) even though Laravel doesn't require it — it still catches bugs.
 - Keep controllers thin: resolve the model via route-model binding, validate via a Form Request, call an Action/Service or model method, return an API Resource.
 - Validate input with Form Requests (`php artisan make:request`), not inline `$request->validate()` in controllers, once rules grow beyond a couple of trivial fields.
-- Authorize protected actions through Policies (`php artisan make:policy`) or Gates, called via `$this->authorize()`, `Gate::authorize()`, or the `can:` middleware — never by hiding UI only.
+- Authorize protected actions through Policies (`php artisan make:policy`) or Gates, called via `Gate::authorize()` or the `can:` middleware (`$this->authorize()` needs `use AuthorizesRequests;` on the base `Controller`, which the Laravel 11+ skeleton no longer has) — never by hiding UI only.
 - Access the database through Eloquent models or the query builder; avoid raw SQL string concatenation. Use `DB::raw()` only with bound parameters when the query builder can't express something.
 - Depend on interfaces at integration boundaries (e.g. `PaymentGateway`) bound in a Service Provider, so the concrete client is swappable and mockable.
 - Manage schema changes through versioned Artisan migrations; never edit a released migration.
@@ -148,6 +148,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers\Api;
 
 use App\Actions\CreateUser;
+use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreUserRequest;
 use App\Http\Resources\UserResource;
 use Illuminate\Http\JsonResponse;
@@ -193,7 +194,7 @@ final class UserPolicy
 }
 ```
 
-Register the policy in a Service Provider (or rely on Laravel's naming-convention auto-discovery) and enforce it with `$this->authorize('update', $user)`, `Gate::allows(...)`, or the `can:update,user` middleware on the route. For complex role/permission models beyond simple Gates, consider `spatie/laravel-permission`.
+Register the policy in a Service Provider (or rely on Laravel's naming-convention auto-discovery) and enforce it with `Gate::authorize('update', $user)`, `Gate::allows(...)`, or the `can:update,user` middleware on the route. For complex role/permission models beyond simple Gates, consider `spatie/laravel-permission`.
 
 ### API Resource
 
@@ -279,16 +280,21 @@ final class CreateUser
     /** @param array<string, mixed> $data */
     public function handle(array $data): User
     {
-        return DB::transaction(function () use ($data): User {
+        $user = DB::transaction(function () use ($data): User {
             $user = User::create($data);
 
             Log::info('User created', ['user_id' => $user->id]);
 
-            // Dispatch side effects (welcome email, event) after the transaction commits.
-            \App\Events\UserRegistered::dispatch($user);
-
             return $user;
         });
+
+        // After the transaction has committed. Dispatched inside the closure,
+        // a queued listener could run before the row exists for it, or after
+        // it was rolled back; an event implementing ShouldDispatchAfterCommit
+        // is the alternative when the dispatch must stay inside.
+        \App\Events\UserRegistered::dispatch($user);
+
+        return $user;
     }
 }
 ```

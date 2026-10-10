@@ -21,7 +21,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from harness import process_runtime
 from harness import providers
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'scripts'))
+import accelerator_attach  # noqa: E402
 from harness.blackboard import Blackboard, NullBlackboard
 from harness.config import HarnessConfig
 from harness.graphs.fleet_review import build_graph, dedupe, render_report, resume_command
@@ -88,23 +92,27 @@ class NativeReviewer:
                                           thinking_effort=config.thinking_effort)
         if provider == 'claude' and self.request.get('attachment_dirs'):
             command.extend(['--add-dir', *self.request['attachment_dirs']])
+        overlay = (self.request.get('accelerators') or {}).get(provider)
+        if overlay:
+            command = accelerator_attach.apply_overlay(provider, command, overlay)
         reservation, allowance = self.reserve_budget(config.lenses[0])
         if allowance is not None:
             if provider != 'claude':
                 raise ValueError('This provider cannot enforce a native USD limit.')
             command.extend(['--max-budget-usd', str(allowance)])
         environment = {**os.environ, **providers.agent_environment(provider, False, 1)}
+        if overlay:
+            environment.update(overlay['environment'])
         read_fd, write_fd = os.pipe()
         process = None
-        selector = selectors.DefaultSelector()
+        selector = process_runtime.PipeSelector()
         writer = None
         started = time.monotonic()
         try:
             try:
-                process = subprocess.Popen(
-                    [sys.executable, str(Path(__file__).with_name('process_guard.py')), str(read_fd), '--', *command],
+                process = process_runtime.launch_guarded(command, read_fd, lock_fd=self.lock_fd,
                     cwd=config.project, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, start_new_session=True, pass_fds=(read_fd, self.lock_fd))
+                    stderr=subprocess.DEVNULL)
             finally:
                 os.close(read_fd)
 
@@ -129,10 +137,10 @@ class NativeReviewer:
                     raise TimeoutError('Reviewer time limit reached.')
                 ready = selector.select(.1)
                 if not ready:
-                    if process.poll() is not None:
+                    if process.poll() is not None and not process_runtime.WINDOWS:
                         break
                     continue
-                chunk = os.read(process.stdout.fileno(), 65536)
+                chunk = selector.read(process.stdout, 65536)
                 eof = not chunk
                 if eof and not buffer:
                     break
@@ -185,15 +193,13 @@ class NativeReviewer:
                     process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     pass
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait()
+                reaped = process_runtime.reap_tree(process)
                 process.stdout.close()
                 if writer:
                     writer.join(timeout=1)
             selector.close()
+            if process is not None and not reaped:
+                raise RuntimeError("Reviewer cleanup could not be confirmed.")
 
 
 def execute(request, lock_fd):
@@ -267,9 +273,16 @@ def execute(request, lock_fd):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--runner-lock', type=int, required=True)
+    locks = parser.add_mutually_exclusive_group(required=True)
+    locks.add_argument('--runner-lock', type=int)
+    locks.add_argument('--runner-lock-handle', type=int)
     arguments = parser.parse_args()
     try:
+        if arguments.runner_lock_handle is not None:
+            if os.name != 'nt':
+                raise ValueError('Windows lock handle on another platform.')
+            import msvcrt
+            arguments.runner_lock = msvcrt.open_osfhandle(arguments.runner_lock_handle, os.O_WRONLY | os.O_BINARY)
         if not stat.S_ISREG(os.fstat(arguments.runner_lock).st_mode):
             raise ValueError('Missing runner lock.')
         raw = sys.stdin.buffer.read(262145)

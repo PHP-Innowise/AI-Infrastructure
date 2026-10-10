@@ -1,0 +1,8 @@
+{
+  "name": "qa/symfony-fixture",
+  "description": "Synthetic Symfony classification target",
+  "require": {
+    "php": ">=8.1",
+    "symfony/framework-bundle": "^7.0"
+  }
+}

@@ -1,0 +1,86 @@
+# Trainer-scoped tables — the tenancy manifest.
+#
+# One table name per line. Blank lines and lines starting with # are ignored.
+#
+# The container startup gate (docker/php/docker-entrypoint.sh) reads this file
+# and refuses to start if any table listed here exists without Row-Level
+# Security enabled and at least one policy attached. Tables that do not exist
+# yet are skipped, which is what makes pre-populating this list safe.
+#
+# This list is pre-populated from the settled schema
+# (specs/database-designer-schema.md, "Trainer-scoped tables"): all 40 tables
+# are named here before any of them is created. That is deliberate and stronger
+# than adding each one alongside its migration. "Remember to add the table to
+# the manifest" is a rule someone eventually forgets, and forgetting it means a
+# table carrying the tenant key with no policy — one trainer's rows readable by
+# another. Listing them up front inverts it: the migration that creates the
+# table must also give it RLS, or the container will not boot.
+#
+# If a migration adds a trainer-scoped table that is NOT in this list, add it
+# in the same commit. If the schema changes so a table here is no longer
+# trainer-scoped, remove it in the same commit as the migration that changes it.
+#
+# Global tables must NOT appear here — see config/tenancy/resolver_global_tables.txt
+# for the resolver's own tables, and specs/architect-architecture.md
+# "Entity population" for the full global list (accounts, the trainer registry,
+# branding, feature toggles, the audit log, Stripe links and receipts).
+
+# --- Identity / Platform (Epic-01) -----------------------------------------
+trainer_billing_settings
+coach_membership
+player_trainer_membership
+share_link
+share_link_open
+availability_window
+coach_availability_override
+child_approval_request
+
+# --- Scheduling (Epic-02) ---------------------------------------------------
+event
+rsvp
+attendance_record
+attendance_edit
+coach_assignment
+event_invitation
+event_duplication_record
+
+# --- CRM (Epic-03) ----------------------------------------------------------
+label
+player_label
+player_flag
+player_note
+
+# --- Content / LPPP (Epic-04) ----------------------------------------------
+# drill_detail is deliberately NOT listed here, despite this header comment
+# originally including it: it carries no trainer_id column of its own (RLS
+# is enforced through the join to content_item — see Drill's own docblock
+# and Version20260810190000's docblock for the full conflict this resolves,
+# per specs/database-designer-schema.md "Tenancy manifest": "drill_detail is
+# deliberately absent... the gate script... would simply never find a
+# matching tenant column on it").
+playlist
+playlist_item
+playlist_assignment
+playlist_access_grant
+content_item
+content_progress
+content_usage
+
+# --- Billing (Epic-05) ------------------------------------------------------
+token_entry
+token_balance
+token_package
+payment_record
+subscription_entitlement
+entitlement_coverage
+
+# --- Growth (Epic-06) -------------------------------------------------------
+referral_link
+referral
+referral_assist_count
+coupon
+coupon_redemption
+
+# --- Forms (Epic-08) --------------------------------------------------------
+form
+form_submission

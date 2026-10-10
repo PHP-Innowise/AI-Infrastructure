@@ -15,7 +15,22 @@
 
 set -u
 
+# An internal draft-only follow-up must not create another memory turn.
+[ "${CONTEXT_MEMORY_RECOVERY:-}" = "1" ] && exit 0
+
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# Installed, the accelerator, the project and its state are all ROOT_DIR.
+# Attached - a launcher lends this clone's edition to a project and names it
+# in ACCELERATOR_HOME - the project and the state directory are the
+# launcher's, so nothing is written into the clone or the project.
+PROJECT_DIR=$ROOT_DIR
+STATE_DIR=$ROOT_DIR
+accelerator_absolute() { case "$1" in /*|[A-Za-z]:[\\/]*) return 0 ;; esac; return 1; }
+if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${ACCELERATOR_PROJECT_DIR:-}" \
+  && [ "$(cd "${ACCELERATOR_HOME:-/nonexistent}" 2>/dev/null && pwd -P)" = "$(cd "$ROOT_DIR" && pwd -P)" ]; then
+  PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
+  STATE_DIR=$ACCELERATOR_STATE_DIR
+fi
 CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 FLUSH_AFTER="${CONTEXT_FLUSH_AFTER:-5}"
@@ -23,7 +38,9 @@ FLUSH_AFTER="${CONTEXT_FLUSH_AFTER:-5}"
 command -v python3 > /dev/null 2>&1 || exit 0
 [ -f "$CONTEXT_CLI" ] || exit 0
 
-TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
+HOOK_STDIN=$(cat 2>/dev/null)
+
+TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
 [ -n "$TASK_ID" ] || exit 0
 
 if command -v timeout > /dev/null 2>&1; then
@@ -34,14 +51,26 @@ else
     --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
 fi
 
-# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event, so
-# working-memory-read.sh is not shipped in .cursor/hooks. The read path is
-# served here instead: after the turn checkpoint, the freshest Task Capsule
-# is rendered into an alwaysApply Cursor rule, which Cursor attaches to
-# every prompt of the next turn. The file is ignored local state, one turn
-# stale by design, and replaced only when a fresh render succeeds.
+# Capsule delivery: Cursor's prompt-time event (beforeSubmitPrompt) cannot
+# add context to a prompt, so Cursor reads the Task Capsule from an
+# alwaysApply rule, which it sends with every request. working-memory-read.sh
+# renders the rule for each prompt; here, after the turn checkpoint, the
+# branch's capsule replaces any rule that hook did not render for this task
+# (an install without it, a prompt without a task, a switched branch). The
+# file is ignored local state, replaced only when a fresh render succeeds.
+# Attached, .cursor/rules is the shared clone's own rule folder, which every
+# project using the clone reads; the attaching launcher delivers the capsule
+# in the prompt instead. A host that put the capsule into the prompt itself
+# (the Harness) gets no second, branch-built one.
+[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
+# The prompt hook's rule for this task holds what was retrieved for the
+# conversation's latest prompt. Rebuilt here from the task alone it would lose
+# that, and when Cursor reads its rules before the prompt hook has run, it is
+# what the next request carries.
+grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null && exit 0
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
   CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
@@ -57,10 +86,12 @@ fi
 # parse that protected the --json form.
 #
 # Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - including 4, "the retrieval gate withheld this turn" - falls through and
-# leaves the previous rule in place. That fallthrough is the correct
-# behaviour for a skip and is relied on: an enforce-mode skip must never
-# replace Cursor's only memory channel with an empty capsule.
+# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
+# this turn" - renders nothing. The rule in place then stays only when its
+# header names this task: an enforce-mode skip must never replace Cursor's
+# only memory channel with an empty capsule, and another task's capsule (a
+# switched branch whose render keeps failing) must never be sent with this
+# task's prompts as their working memory.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;
@@ -87,5 +118,8 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
     rm -f "$TMP_RULE" 2>/dev/null
   fi
 fi
+grep -qxF "Session context as of end of previous turn (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
+  || grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
+  || rm -f "$RULE_FILE" 2>/dev/null
 
 exit 0

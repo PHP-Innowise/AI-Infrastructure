@@ -204,6 +204,9 @@ Prefer explicit, minimal structure over framework imitation:
 
 ## Project Brain And Memory Bank
 
+The bundled [local Memory MCP](memory-bank/MCP.md) lets Claude Code, Codex and Cursor retrieve and record through the existing project runtime. Connect it per project; keep memory hooks active. Finalize authorized work with sanitized progress and source-backed findings/decisions, and report failed or partial saves.
+
+
 Use `memory` in Codex or `/memory` in Claude/Cursor for an argument-free, authority-aware refresh: governed mode validates Project Brain and rebuilds the disposable source index without creating a second task record. Use `checkpoint` or `/checkpoint` for progress capture; it defers to revision-checked Project Brain updates in governed mode and writes local Working Memory only when lightweight mode is explicitly configured. Neither command completes a task or applies a promotion.
 
 Governed Project Brain mode is the default for non-trivial work. `project-brain/` is the shared authority for active tasks, handoffs, findings, bugs, incidents, decisions, events, retrieval manifests, conflicts, and promotion proposals. The ignored SQLite database is only a disposable index plus local binding/cache in this mode.
@@ -221,8 +224,10 @@ Canonical policy, specs, current code, configuration, migrations, and tests alwa
 At the start of a complex request and before a complex phase handoff, the agent
 derives a concise sanitized retrieval query and builds a Task Capsule from
 optional Working Memory and `context` retrieval. The raw request is not copied
-into the packet. The complete packet is capped at 8,000 Unicode characters and
-contains at most two Procedural, three Semantic, and one Episodic result.
+into the packet. The complete packet is capped at 8,000 Unicode characters (as
+the hooks print it, 3,600) and contains at most three Semantic and two Episodic
+results (the changelog and one recorded event) and no Procedural item: skills are
+left to the host's own list.
 Retrieved entries are short snippets with source paths; the next agent reads a
 full source only when its current step requires it.
 

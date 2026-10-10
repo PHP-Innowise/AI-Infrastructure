@@ -93,8 +93,12 @@ automated turn flush performs the same restoration. Lightweight tasks and local
 episodes remain machine-local and cannot be reconstructed after deletion.
 
 The active provider is local `sqlite-fts5`: network access and embeddings are
-disabled. An external provider entry exists only as a disabled contract. The
-runtime does not include automatic prompt injection.
+disabled. An external provider entry exists only as a disabled contract.
+Retrieval is not only on request: each edition's prompt hook injects a bounded
+Task Capsule into every request (Cursor reads it from the rendered
+`.cursor/rules/working-memory.mdc`), and the local memory MCP server
+(`memory-bank/scripts/mcp_server.py`, see `memory-bank/MCP.md`) offers the
+same runtime to the client as tools.
 
 ### Memory Bank
 
@@ -177,13 +181,14 @@ record type that reports that something happened rather than what to do about
 it, and it is excluded from promotion for exactly that reason — the record
 fixes a lifecycle transition that occurred and asserts nothing about how to
 act. It is best-effort: a task that completed is never reopened because its
-episode could not be written.
+episode could not be written. The reverse holds as well: a completion that
+fails, up to and including the database commit, takes its event with it, so
+no record reports a completion that did not happen.
 
 `event` is the only record type mapped to the episodic layer. An `incident`
 stays semantic even though it is also a record of something that happened: an
 open incident is active, urgent, promotable content, and moving it to the
-single episodic slot would take it out of the runtime filters, the budget and
-the manifest.
+history slot would take it out of the semantic layer's three slots.
 
 The episodic slot of a governed capsule is ranked by `retrieve()` along with
 everything else. It used to be fetched separately by a query that never joined
@@ -193,11 +198,49 @@ That was harmless while the only episodic document was the changelog; it stops
 being harmless once governed records live there.
 
 Machine-local episodes also enter capsule assembly before the retrieval gate,
-not as an unaccounted append after it. They can fill only the unused part of the
-single episodic slot, contribute to the capsule and token ceilings, and their
-content hashes participate in repeat detection. A version 3 manifest records
-only `local_episode_count` and their aggregate
-`token_estimates.local_episodes`: it never stores a local episode ID or body.
+not as an unaccounted append after it. They share the recorded-history slot
+with events (below), contribute to the capsule and token ceilings, and their
+content hashes participate in repeat detection. A manifest records only
+`local_episode_count` and their aggregate `token_estimates.local_episodes`: it
+never stores a local episode ID or body.
+
+### Recorded history beside the changelog (2026-10-10)
+
+The episodic layer holds two items: the changelog, ranked by the main query as
+before, and one recorded history item - a Project Brain event or a local
+episode - found by a search of its own. They used to share one slot. On the 121
+evaluated prompts the changelog held it on every turn that had an event, while
+19 existing answers sat in 13 automatically written events that were never
+delivered; every subject term of those events had been dropped by the 24-term
+distillation, because an event's words also occur in the changelog, the README
+and the task documents and are never among the corpus-rarest.
+
+- **The search.** `history_query` matches every informative term of the whole
+  request (document frequency at most half the index) against the subject only
+  - an event's title and goal, an episode's summary and outcome - and keeps,
+  of the terms that reach any history subject, the 24 rarest, so a long prompt
+  cannot win by length. Events are no longer candidates of the main query: they
+  take none of its rows and do not set the episodic floor the changelog is held
+  to.
+- **The bar.** An item is admitted when it covers `required_coverage` distinct
+  terms and its matched terms weigh at least that many terms that each occur in
+  a single indexed document, `k * ln((N + 1) / 1.5)` with the weights
+  `excerpt_weights` uses: evidence no likelier by chance than as many unique
+  words co-occurring. Nothing is tuned to the evaluation prompts, and the bar
+  is absolute: it never admits the best item of a bad list.
+- **One slot.** The best admitted event that passes the runtime filters, or
+  the best local episode if it ranks higher (ties go to the event: `complete`
+  writes both). An episode adds to a term's frequency only where no document
+  has the term, so the twin does not make the event's own words look common.
+- **Render.** The history item renders before the changelog, so under the
+  3,600-character ceiling the changelog's long excerpt shrinks first; a local
+  episode now quotes its outcome, not only a summary.
+- **Cost.** At most two FTS lookups per informative term, only when events or
+  episodes exist: a few milliseconds per prompt.
+
+The governed JSON contract is 1/3/2; lightweight mode keeps one history item,
+because it has no such search. A delivered event no longer takes one of the
+three semantic slots on its way out, which had lost the third semantic item.
 
 ## Governed and Lightweight Ownership
 
@@ -351,14 +394,23 @@ The indexer discovers eligible files from fixed repository patterns, including:
 - eligible active Project Brain dynamic records and handoffs.
 
 Before reading a discovered repository document, the runtime excludes
-Git-ignored paths. It skips symlinks and non-files, rejects likely
-secret-bearing content, includes only validated active Memory Bank chunks, and
-requires UTF-8. Invalid UTF-8 aborts the refresh without replacing the prior
+Git-ignored paths. It skips symlinks and non-files, masks each value a secret
+pattern recognises in a repository document (`[redacted: <label>]`, the key
+such as `MAILER_PASSWORD` kept) and excludes a document whose masking does not
+converge, includes only validated active Memory Bank chunks (a chunk with a
+likely secret is still excluded whole), and requires UTF-8. The stored source
+hash of a masked document is the file's, so governed retrieval does not call it
+stale; `index --json` lists masked documents under `redacted` with a count of
+values, never the values. A change to the secret patterns re-reads every
+document once. Invalid UTF-8 aborts the refresh without replacing the prior
 index.
 
 For Brain records, eligibility is checked before insertion. Private,
-disallowed-privacy, disallowed-authority, terminal, superseded, stale, or
-invalid records are excluded with safe reason metadata. Handoffs are indexed
+disallowed-privacy, disallowed-authority, terminal, superseded, or invalid
+records, and records whose cited source was deleted (`source-missing`) or never
+digested (`source-undigested`), are excluded with safe reason metadata. A record
+whose cited file was edited is indexed; retrieval marks it `source_changed` and
+ranks it at half its score, as it does a chunk. Handoffs are indexed
 only when their task is eligible and the handoff validates against it.
 
 Indexing replaces the FTS document and metadata tables transactionally. It does
@@ -373,7 +425,10 @@ whose own `.gitignore` carried a bare `docs` entry indexed 96 accelerator
 skills, one `README.md`, and none of its own design documents, without a word.
 
 The same pass builds `document_links`, the reverse index of which document
-declares which source, read by `links` and by `retrieve --path`. It is derived
+declares which source (`ref_kind` `source`), read by `links` and by `retrieve
+--path`, and which active Brain task touched which file (`ref_kind` `file`,
+from the task's newest 50 `files[]` entries Git tracks, screened; see "Files
+the work touched" below), rebuilt with the records on every refresh. It is derived
 and disposable: rows follow their document, and when the table is absent the
 runtime drops the stat cache so the first index after an upgrade re-reads
 every candidate. Populating it incrementally would leave it complete only for
@@ -424,7 +479,7 @@ That is not a ranking weakness to be tuned; it is a missing traversal.
 
 This is the number that justifies giving durable chunks a one-step link
 hydration, and it is why the semantic limit is not raised instead: widening
-2/3/1 would buy a larger lexical net, and the failure above is not a
+the layer limits would buy a larger lexical net, and the failure above is not a
 net-size problem.
 
 #### What was built, and what was not
@@ -444,6 +499,65 @@ justifiable only for a relationship that no shared source expresses, and no
 such case has been measured. It is recorded here beside the embeddings
 negative so the question is not reopened without new evidence.
 
+#### Automatic source-linked knowledge
+
+Every Task Capsule retrieval automatically follows the existing `sources[]`
+relations. Users do not select a graph mode, enable a flag or maintain edges.
+Native hooks for Claude Code, Codex and Cursor, Memory MCP and Harness use the
+same runtime. A first prompt can retrieve before its task is provisioned;
+lightweight capsules use the same policy-checked expansion. A hook without a
+prompt or substantive task state has no lexical seed to expand.
+
+From at most two strong, allowed lexical semantic matches, the runtime follows
+reverse citations or a shared canonical source revision to durable chunks or
+dynamic records. A common code file need not be indexed: both documents must
+declare it, have matching fingerprints and still match its current digest.
+Private/derived paths, symlinks, Windows junctions and sources over 8 MiB cannot establish a shared
+relation. The runtime examines at most 32 neighbour rows (duplicates in shared
+citations count as one document), considers at most 32 canonical source references
+per anchor and checks that bounded pool for each shared neighbour. A covering
+index reads each reference in path order with the remaining neighbour allowance;
+it does not materialize the product of citations. Current source digests are
+cached within the retrieval, and at most three neighbours are proposed. Weak/distinctive seeds
+are not expanded. Every anchor and neighbour passes privacy, owner, authority,
+lifecycle and source-hash checks. Records with outgoing or incoming conflicts
+are excluded from this expansion until whole-component admission can preserve both sides within the
+budget. There is no recursive traversal through a neighbour.
+
+Excerpt scoring counts each tokenizer term even when FTS5 groups adjacent
+matches into one highlight. Exact section-score ties favour matches in the
+body. Oversized sentences are scored on the bounded text actually quoted,
+with context before the match, so invisible words cannot win a window that
+then cuts the answer away. Document admission and the capsule ceiling stay
+under the same policy and budgets.
+
+Direct matches and explicit `--path` items keep priority. A source-linked
+promoted chunk cannot suppress its direct source record. Normal budgets,
+session novelty and the 3,600-character renderer apply. `no_match` still means
+that the lexical query found nothing in that layer. Delivered neighbours carry
+`selection: source-link`; manifests record only safe `source_links` counters
+(anchors/candidates/delivered), without a mode or withheld neighbour paths/counts.
+
+The relation establishes provenance; it does not prove relevance to every
+query. The synthetic comparison includes a relevant source with an irrelevant
+citing chunk, so this limitation remains measured rather than hidden.
+
+Maintainers can compare a committed runtime with the automatic working tree
+on identical synthetic prompt-time snapshots:
+
+```bash
+python3 scripts/memory_graph_pilot.py --out-dir /tmp/source-link-comparison
+```
+
+The directory must be new and outside the clone. Baseline defaults to `HEAD`;
+`--baseline-ref COMMIT` selects another local version for measurement. This
+option belongs to repository evaluation tooling and is not installed into a
+project. Baseline files are read as exact Git blobs, while both runs use the
+current scorer. Inputs, judgments, future controls and runtime digests are
+saved alongside `baseline.json` and `automatic.json`. The comparison measures
+source-link delivery, not Neo4j performance or autonomous use of a delivered
+fact by an agent.
+
 Two things the index deliberately does not carry:
 
 * **`source_fingerprints`.** `sources_are_fresh` requires the fingerprint path
@@ -457,9 +571,35 @@ Two things the index deliberately does not carry:
 
 The link is deliberately derived rather than durable. Carrying the same edge
 on the chunk would put it under `chunk_source_digests` and `validate_metadata`,
-where editing the referenced file evicts the chunk as `source-changed` and
-deleting it becomes a permanent bank-validation error reachable from
-`apply_promotion`, `compact` and `validate`.
+where every edit to the referenced file would mark the chunk as changed since
+verification and deleting it becomes a permanent bank-validation error
+reachable from `apply_promotion`, `compact` and `validate`.
+
+#### Written knowledge stays
+
+A resolved finding, a closed incident or an accepted decision leaves the
+index as a record: from then on its chunk is what retrieval serves. Two things
+used to make that hand-over fail for good, and on a real project only 2 of 70
+resolved findings ever reached the Memory Bank:
+
+* **Promotion waited for the turn boundary**, up to five turns after the
+  resolving update. The fix that resolved a finding usually edits the file the
+  finding cites, so by then the citation no longer matched what was verified
+  and promotion refused it. `brain-update` now promotes the record it resolves
+  at once (`promote_on_resolution`), while its citations still say what was
+  checked; a failure is reported and never undoes the update.
+* **Any edit to a cited file evicted the knowledge.** A chunk or record whose
+  cited file changed after verification now stays in retrieval, marked
+  `source_changed` - the capsule says "cited file changed since this was
+  verified" next to it - and ranked at half its score below fresh knowledge.
+  Only a deleted citation (`source-missing`) takes it out. Automatic promotion
+  of a record whose citation changed proceeds, and the chunk keeps the digests
+  taken at verification rather than laundering the edit into a fresh citation.
+
+`validate` lists such records as warnings instead of failing the project, and
+the turns a branch keeps working after its task was completed are dropped with
+a note instead of failing every flush, which had stopped promotion and
+compaction as well.
 
 #### Promotion carries the citation through
 
@@ -479,8 +619,8 @@ Two limits on what is carried:
 
 * **Only `sources`, never `files`.** A record's `files` is Git churn in the
   Git-toplevel frame; merging it would put code paths under
-  `chunk_source_digests`, where the next edit to any of them evicts the chunk
-  as `source-changed`.
+  `chunk_source_digests`, where the next edit to any of them marks the chunk
+  as changed since verification.
 * **Only citations whose file still exists.** A file deleted between review
   and apply would otherwise produce a chunk that fails `validate_metadata` at
   birth, failing a promotion that has nothing to do with that file.
@@ -517,6 +657,52 @@ Three properties worth knowing when reading a manifest:
   way. The two answer different questions: whether the caller's words found
   anything there, and whether the caller's path did.
 
+`--path`, MCP `paths` and the automatic source-linked expansion read citations
+only (`source` rows); `links` also lists active tasks that touched the path
+(`touched <path>`).
+
+#### Files the work touched (2026-10-10)
+
+The source links above had nothing to stand on: on the 121 evaluated prompts
+the link table was empty in every snapshot, because no indexed record carried a
+source. What records do carry is `files[]`: the checkpoint writes the files a
+task's turns changed, and 12 of the 14 answers that tasks held on the evaluated
+prompts were entries of that list. A task's `files[]` now become `file` rows:
+
+- **Which files.** Only paths Git's index holds as files (one `git cat-file
+  --batch-check` per change of the tasks' files, cached in the index state, so
+  never per prompt; outside a checkout no row is written), project-relative,
+  and not sensitive, runtime state, build output, a lockfile, a directory or
+  secret-shaped. Only active tasks: completed ones are not indexed.
+- **Who reads them.** An automatic channel, on `refresh` (hooks, Harness, MCP
+  `memory_retrieve`) and `hook-context`, seeded by paths the request names -
+  written out, as a PHP class through `composer.json`'s PSR-4 map, or as a bare
+  file or class name that some link names - and by the files this branch
+  touched on its last turns and its task's newest `files[]`. A seed reaches the
+  documents that cite it and the other active tasks that touched it. Explicit
+  retrieval stays deterministic and does not seed.
+- **Restraint.** One item per capsule (`FILE_LINK_LIMIT`), placed after the
+  strong lexical matches inside the three semantic slots; a weak match a link
+  confirms moves there. A file linked from more than five documents is a hub
+  and reaches nothing. A document reached only through touched files must also
+  share an informative query term: file sharing is dense on real projects (on
+  two installations every active task shared a file with another), and
+  "continue" must not hand over a sibling task. The current task's own record
+  and handoff are never candidates.
+- **What it shows.** The item is marked `prompt-link` or `touch-link` in the
+  manifest (no `match`, no rank) and `linked through <path>` in the capsule; a
+  linked task quotes its goal and its files, the shared one first. Under the
+  capsule's 8,000- and 3,600-character limits a linked item (like a
+  `source-link`) is the first to give its place back, before history.
+- **Not done.** Edges through commits (record and commit, files changed
+  together) wait until live link density is measured: they add a second hop
+  over edges that are still sparse.
+
+The evaluation stand runs no hook and has no working task, so touched-file
+seeds are not measured there; their go/no-go is prospective - live `file` rows
+per project, the share of turns with a `prompt-link` or `touch-link`, and
+labels of what they delivered.
+
 ### Skill pointers in the procedural layer: a measured negative
 
 A separate idea was tested here and rejected on measurement, and the result is
@@ -547,6 +733,43 @@ on real requests an acceptable skill reaches the top two only 10 times out of
 paths over real turns. A remedy should be built when those two say what it
 should be — not before.
 
+**2026-10-07: one procedural slot, strong matches only.** New evidence decided
+it. Agents opened 0 of 148 skill pointers they were handed on real
+installations (every host loads its own skill catalogue and picks from it),
+and on 61 real first prompts with graded relevance a skill admitted on one rare
+word was useful once in 37 deliveries. The capsule now carries at most one
+procedural item and never a `distinctive` one. On those 61 prompts turns with a
+useful item rose from 29 to 33 and noise-only turns fell from 16 to 7 (against
+the same runtime with two slots). The price is the bench's skill-routing view:
+an acceptable skill reaches the capsule on Symfony golden-en .59 instead of
+.71, because the second slot is gone; the ranking itself (hit@1, hit@2) is
+unchanged, and so is the routing floor, which measures ranking.
+
+**2026-10-10: a skill's sub-file never holds the procedural slot.** Files a
+`SKILL.md` sends the agent to - `references/`, `agents/`, `rules/`, an
+`AGENTS.md` inside a skill, a note at the tree's root such as `SKILL FLOW.md` -
+were useful 1 time in 185 judgments on 121 graded prompts, against 71 in 627
+for `SKILL.md`. When one heads the procedural ranking the slot stays empty and
+the manifest records `skill-subfile`; it is not refilled, because on the 19
+replayed turns where a sub-file held the slot the next skill down was useful on
+none (5 noise, 6 unjudged). The rule is structural - the file's place in its
+tree - not a score threshold. The sub-files stay indexed: `search` returns
+them. On a vacated turn `no-match` still reports that the procedural layer
+matched, as it does for a skill admitted on one rare term.
+
+**2026-10-10: the capsule carries no skill.** Measured in the real sessions of
+the five evaluated projects since January: on the 71 Claude Code turns where a
+capsule named an accelerator skill, the agent made no Skill call and read no
+`SKILL.md` at all; accelerator skills were used on 24 of 2,265 Claude turns
+(1.1%), and on Codex mostly because the user typed `$code-reviewer`. Of the 35
+graded core prompts with a useful skill, the agent used any accelerator skill
+on 4. Every host lists its skills and loads its instruction files itself, so
+the procedural line only took room from the excerpts that carry answers. The
+procedural ranking still runs: its pick is recorded in the manifest as
+`host-listed` (a sub-file pick as `skill-subfile`), `no_match` still reports
+the layer, and `search` returns skills. The evaluation stand reports skill
+routing apart from project knowledge (`skill_*`, `knowledge_*`).
+
 ### The retrieval gate
 
 Restraint above was all about the document: which files are relevant enough to
@@ -563,6 +786,11 @@ retrieval:
 - `empty-after-filter` skips when something matched but nothing remained
   deliverable;
 - `repeat-retrieval` skips an unchanged query, selection and task revision;
+- `not-held-by-conversation` retrieves what would be a repeat for a turn of a
+  conversation (a host-supplied session ID): its own delivery record has
+  already left out what it holds, so it does not hold what remains - another
+  conversation was handed it, or this one lost it to a compaction or the
+  novelty window;
 - `task-changed` retrieves when the query and selection match but the task
   revision moved;
 - `new-selection` retrieves every other non-empty result;
@@ -575,6 +803,10 @@ without changing its path, changing a local episode, or advancing the task
 therefore cannot be mistaken for a repeat from another client or lifecycle
 state. The bounded baseline lives in the disposable index, and a skip never
 overwrites it — otherwise the turn after a skip would compare against nothing.
+The baseline is shared by every conversation of a task, so it decides repeats
+only for a caller without a session ID; within a conversation the conversation's
+record of what it was handed is the one notion of "seen", and a turn whose
+every item it holds skips as `empty-after-filter`.
 
 The mode comes from `--gate`, then `CONTEXT_RETRIEVAL_GATE`, then
 `retrieval_gate` in `runtime.json`, and defaults to `shadow`. In `shadow` the
@@ -596,7 +828,8 @@ in one skip rate.
 
 Whatever the reason a document leaves, `index` names it rather than dropping
 it silently — `retired`, `overdue-review`, a non-active status, `invalid`, or
-`secret` — so a red validator and a quietly shrinking index can no longer
+`secret` (a chunk with a likely secret, or a document whose masking did not
+converge) — so a red validator and a quietly shrinking index can no longer
 disagree about the same chunk.
 
 ## Search and Governed Retrieval
@@ -606,14 +839,66 @@ than half the corpus are dropped as noise — measured against the index rather
 than a stopword list, so it adapts to the languages a repository documents
 itself in. A document then qualifies either by containing two distinct query
 terms, or by containing one term rare enough in this corpus to be evidence on
-its own.
+its own - provided that term names something: it is shaped like an identifier
+(a digit, `CamelCase`, `snake_case`: a ticket or version number, a class or
+constant name) or it is a word of the document's own path or title.
 
 That second route matters more than it looks. Counting terms equally punishes
 exactly the wrong document: a focused note containing only the rare term that
 matters scores one, while filler sharing two unremarkable words scores two and
 takes the slot. Admitting a distinctive single match lets some noise back in on
 queries no document covers, which is the cheaper error — a spurious result
-wastes a slot, a hidden one denies an answer the project already holds.
+wastes a slot, a hidden one denies an answer the project already holds. The
+anchor condition came from measurement: in an index of about a hundred
+documents a word in ten of them is "rare", and on 61 real first prompts the
+single-word matches without an anchor were noise in six of seven judged cases.
+Requiring the anchor removed 14 of 186 delivered items there without losing a
+useful one.
+
+Measurements like these are only honest on each project as it was when the
+prompt was written: an index of the project's current state lets knowledge
+written after the prompt, often about its own work, answer it. The
+[Memory Evaluation Stand](MEMORY-EVAL.md) (`scripts/memory_eval.py`) rebuilds
+that state, overlays the runtime under test and scores the capsule against
+judged prompts.
+
+### What a capsule quotes
+
+A delivered project-knowledge item carries text, not just a pointer, and the
+text is chosen to hold the answer:
+
+- The document's matches are marked by FTS5 `highlight()` with the index's own
+  tokenizer, so a request about a "session" finds the section that says
+  "Sessions" - the words that selected the document choose its excerpt.
+- Each matched term counts by its rarity in the index. A real prompt shares a
+  dozen common words with every long section; the entry naming the ticket or
+  the component is the one worth quoting. A marked word takes the weight of
+  the request word it matched: both are read as the tokenizer reads them
+  (`term_forms`), so "classes" and "class", or "policy" and "policies", are
+  one term.
+- The section with the most weight is chosen, and within it a window of whole
+  sentences that starts where the matches are - a changelog entry runs to a
+  kilobyte, and its answer is usually the sentence after the one that matched.
+  A list item keeps the line that introduces it. Elided text shows as `…`.
+- Windows are 800, 600 and 400 characters by rank, 600 for a history item; the
+  rendered capsule stays under 3,600.
+- The item line names the section: `- memory specs/auth.md § Sessions — Auth`.
+
+On the 61 graded prompts, with the passages that carry each useful document's
+value labelled, the delivered text held such a passage for 20 of 36 delivered
+useful documents instead of 12, in 14 turns instead of 11.
+
+A conversation is not handed the same thing twice within four turns
+(`refresh --session-id`), and "the same thing" is the section an excerpt came
+from at its revision: a later question answered by another section of a
+document already handed gets that section. A recorded episode is the same
+thing while its id and content are. A host that compacts a conversation
+records it in the transcript the hook is given (`--transcript`): Claude Code
+writes a `compact_boundary` record, Codex a `compacted` one. After one, nothing
+counts as handed any more, because the conversation holds a summary of it.
+Only what the capsule shows counts as handed: an item its rendered text had no
+room for is excluded from the manifest as `capsule-limit` and is handed on a
+later turn.
 
 Both admissions used to arrive looking identical, so the capsule names which
 one applied. A document that carried the required number of distinct query
@@ -718,8 +1003,9 @@ filtered out.
 Freshness has three checks:
 
 - the indexed document's current hash must match the hash stored when indexed;
-- for Brain records and handoffs, cited source paths must still match the
-  stored source fingerprints;
+- for Brain records, handoffs and chunks, a cited source that no longer exists
+  excludes the document; one whose digest moved on keeps it, marked
+  `source_changed` and ranked at `SOURCE_CHANGED_WEIGHT`;
 - for a codebase map under `codebase/`, the commits landed on its
   `mapped_scope` since its `mapped_commit` must stay within
   `codebase_map_max_drift`.
@@ -781,6 +1067,17 @@ index under one lock, validates the bank, and restores every touched file if
 anything fails. Doing it by hand leaves the bank invalid between the first
 edit and the last.
 
+Every bank write — promotion, compaction, `bank-reverify`, `bank-retire` — is
+refused for what it introduces, judged against the bank as it stood before
+the write, and for any problem in the chunk it produces or attests. It is not
+refused for a problem the bank already had. Validating the whole bank and
+rolling back on any error made time alone a write lock: one chunk passing its
+review date failed every promotion and compaction in the repository, and two
+overdue chunks each blocked the `bank-reverify` that would have repaired the
+other, leaving hand-editing as the only way out. A lapsed chunk is reported
+where lapses belong instead — `validate.py`, `bank-audit`, the `overdue-review`
+retrieval exclusion, and a `memory review:` line in every `refresh`.
+
 An active chunk may not sit past its `valid_to`, the same rule `review_after`
 already applies. Closing a period therefore removes the chunk from retrieval
 without deleting it: automatically written memory earns a boundary rather than
@@ -799,11 +1096,12 @@ measurement.
 The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
-policy filtering, the delivered capsule is independently capped at 2
-procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
-Snippets are deterministically shortened as needed.
+policy filtering, the delivered capsule is independently capped at 3 semantic
+and 2 episodic items (the changelog and one recorded event or episode) and
+8,000 serialized characters; it carries no procedural item. Snippets are
+deterministically shortened as needed.
 
-A selected local episode uses only the remaining episodic slot. Its estimate is
+A selected local episode shares the recorded-history slot with events. Its estimate is
 included in `token_estimates.local_episodes` and in the total ceiling even
 though its identity and content are deliberately absent from the manifest.
 
@@ -903,6 +1201,14 @@ unattended on the same boundary as the working-memory flush:
 propose -> apply
 ```
 
+`context.py promote-auto` runs the same pass on demand. The boundary waits for
+`--flush-after` turns, and knowledge recorded deliberately — what a Harness run
+drafted, saved when the run completes or after a person confirmed each
+learning — has no reason to wait for a counter. A learning the Harness saved
+unattended is written as observed and raised to verified with the reason
+"agent-attested, not reviewed by a person", so its own ledger says who
+attested it before promotion tags the chunk `auto-promoted`.
+
 There is no reviewer in the automatic mode, and the runtime refuses to pretend
 otherwise. `reviewer` stays null, `review_mode` is `automatic`, the outcome is
 recorded as `approved-without-review`, and the resulting chunk carries an
@@ -953,8 +1259,9 @@ reviewed promotion and `approved-without-review` for automatic promotion.
 
 Application mints a conflict-free Memory Bank ID (`MEM-YYYYMMDD-xxxxxxxx`,
 the promotion date plus eight hex characters of the source record's UUID),
-writes a chunk, regenerates the index from chunk frontmatter, validates the
-bank, and updates the proposal. These writes are snapshotted and rolled back
+writes a chunk, regenerates the index from chunk frontmatter, validates what
+the write changed — the new chunk in full, and the bank for anything newly
+broken — and updates the proposal. These writes are snapshotted and rolled back
 together on failure. No shared counter is involved: the legacy
 `.memory-counter` file is neither read nor written, so concurrent promotions
 on different machines or branches cannot collide, and `context.py
@@ -982,6 +1289,14 @@ Compaction validates the repository, then moves terminal or explicitly
 superseded dynamic records and associated handoffs into `project-brain/archive/`.
 It rebuilds deterministic indexes, validates the result, and restores all
 moves/indexes on failure.
+
+Both validations leave out source freshness. A record whose cited file changed
+after it was written is stale - retrieval serves it marked for checking and
+`validate` lists it as a warning - but moving terminal records can neither cause
+nor cure it. With freshness in, the first
+edit to any file a record cited — the living spec behind an accepted decision,
+the code a finding was about — refused every later compaction, manual or
+automatic.
 
 Compaction is archival, not deletion. Archived records remain subject to the
 same strict schema and relationship checks and can serve as promotion sources.
@@ -1115,7 +1430,11 @@ Session-start hooks can report metadata such as:
 - validation status;
 - Memory Bank availability.
 
-Session-start hooks print no record bodies and inject no context.
+Session-start hooks print no record bodies and inject no context. The one
+exception is `context-continuity.sh`, which delivers a chat merge prepared
+for a new task with `context-load merge` and otherwise prints nothing; it
+also keeps each chat's visible text in ignored `.context-handoff/` on prompt
+and end of turn. See [Context Handoff](CONTEXT-HANDOFF.md).
 
 Two further hooks automate working memory when the edition enables them:
 
@@ -1128,11 +1447,12 @@ The split is deliberate. At prompt time nothing has happened yet, so there is
 no delta to record; a request is the right moment to *read*. The delta exists
 at the end of a turn, which is the right moment to *write*.
 
-Cursor has no `UserPromptSubmit` equivalent, so its read half is delivered
-differently: the Cursor mirrors of the `stop` and `sessionStart` hooks render
-the most recently available capsule into the `alwaysApply` rule
-`.cursor/rules/working-memory.mdc` - ignored local state, one turn stale by
-design and labeled as such ("as of end of previous turn"). See
+Cursor cannot add context to a prompt from a hook, so its read half arrives
+through the `alwaysApply` rule `.cursor/rules/working-memory.mdc`: the Cursor
+mirror of `working-memory-read.sh` runs on `beforeSubmitPrompt`, renders the
+capsule for the prompt into the rule and lets the prompt through; the
+`sessionStart` mirror renders the branch's capsule, and the `stop` mirror does
+too unless the rule holds the prompt's capsule for the same task. See
 `docs/TOOL-INTEGRATIONS.md` for the mechanism and its MIRROR_RULES
 declaration.
 
@@ -1157,6 +1477,10 @@ than silently narrowing the result. When the hook also has a task — from
 `CONTEXT_TASK_ID` or the current branch — the same process assembles a bounded
 capsule with `--ephemeral`, avoiding the second index pass a separate
 `retrieve` would run. A capsule failure is a warning; the layer refresh stands.
+A host that has already put the turn's capsule into the prompt sets
+`CONTEXT_CAPSULE_DELIVERED=1`, and the hook then stays silent: the Harness
+retrieves for the message alone, and a second capsule distilled from the whole
+prompt it assembled would cost the turn twice.
 
 The hook passes the prompt as-is; `refresh` distills it into the retrieval
 query itself. The whole prompt is tokenized, terms neither indexed documents
@@ -1166,6 +1490,19 @@ request whose actual subject arrives at the end no longer retrieves on its
 preamble. The refresh report also carries per-phase wall-clock
 durations (`stat`, `index`, `retrieval`) so an operator can see which side of
 the work is approaching the hook budget.
+
+The rendered capsule leads with the task itself: after `working: <task> —
+<goal>` come bounded `phase:`, `progress:`, `next:`, `recent files:`,
+`sources:` and `task record:` lines, and a `compaction:` line whenever those
+bounds or the capsule budget left something out. Until they existed the plain
+capsule — the only form the hooks hand to a model — printed the goal alone, so
+a request to continue retrieved skill pointers and never the place the work
+stopped. The same turn
+spends no slot on what the model already has: the task's own record and
+handoff are excluded as `working-task`, and the instruction files the host
+loads by itself as `host-loaded` — `CLAUDE.md` and its `@path` imports for
+Claude Code, `AGENTS.md` for Codex. On two real installations `CLAUDE.md` had
+held a procedural slot on most Claude Code turns.
 
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.
@@ -1180,6 +1517,17 @@ directory path rather than thousands of files. Turns accumulate in ignored
 local state and flush together, so continuity costs one governed revision per
 `--flush-after` turns instead of one per turn. A flush contributes at most
 `--max-files` paths, and reports the remainder rather than dropping it silently.
+
+Paths say where work happened, not what it was, and agents almost never write
+progress themselves: on four real installations 23 of 24 tasks held nothing
+but the automatic checkpoint. So the checkpoint also carries the branch's
+newest commit subjects, counted from the merge base with the default branch.
+A subject is already shared history and already a person's one-line summary
+of a change, so it costs no model and exposes nothing Git did not. Merges and
+any subject a secret or privacy gate would refuse are left out. A turn that
+ends in a commit leaves a clean tree, so a moved HEAD counts as work too —
+otherwise committed work, the most finished there is, never reached the
+buffer at all.
 
 The first flush provisions the task if it does not exist. Automated continuity
 is worthless if it buffers into a task nobody created, and requiring an

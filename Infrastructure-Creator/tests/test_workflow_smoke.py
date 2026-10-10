@@ -97,9 +97,13 @@ class WorkflowSmokeTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         for name in (
             "context.py",
+            "context_handoff.py",
             "brain_runtime.py",
             "context_retrieval.py",
             "validate.py",
+            "workspace_roots.py",
+            "automatic_query.py",
+            "memory_results.py",
         ):
             shutil.copy2(RUNTIME_ASSETS / name, scripts / name)
 

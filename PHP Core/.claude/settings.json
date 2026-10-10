@@ -24,6 +24,7 @@
       "Bash(vendor/bin/rector:*)",
       "Bash(vendor/bin/phpbench:*)",
       "Bash(git:*)",
+      "Bash(python3 memory-bank/scripts/context.py:*)",
       "Bash(gh:*)",
       "Bash(ls:*)",
       "Bash(mkdir:*)",
@@ -70,8 +71,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/local-context.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/local-context.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
+            "timeout": 8
           }
         ]
       }
@@ -81,7 +87,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/working-memory-read.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/working-memory-read.sh",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
             "timeout": 8
           }
         ]
@@ -92,7 +103,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/working-memory-write.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/working-memory-write.sh",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
             "timeout": 8
           }
         ]
@@ -104,7 +120,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/subagent-gate.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/subagent-gate.sh",
             "timeout": 5
           }
         ]
@@ -114,7 +130,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/file-naming-validator.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/file-naming-validator.sh",
             "timeout": 5
           }
         ]
@@ -124,7 +140,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/bash-validator.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/bash-validator.sh",
             "timeout": 5
           }
         ]
@@ -132,11 +148,21 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit",
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/loop-detection.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/loop-detection.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/subagent-dispatch.sh",
             "timeout": 5
           }
         ]
@@ -147,7 +173,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/subagent-dispatch.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/subagent-dispatch.sh",
             "timeout": 8
           }
         ]

@@ -1,0 +1,16 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Join {{ shareLink.trainer.businessName }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ shareLink.trainer.businessName }}</p>
+        <h1>Register to join {{ shareLink.trainer.businessName }}</h1>
+
+        {{ form_start(form, {action: path('identity_sharelink_register', {code: shareLink.code})}) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+
+        <p>Already have an account? <a href="{{ path('identity_auth_login') }}">Sign in</a></p>
+    </div>
+{% endblock %}

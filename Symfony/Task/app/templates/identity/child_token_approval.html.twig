@@ -1,0 +1,14 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Token approval — {{ child.firstName }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Token approval for {{ child.firstName }}</h1>
+        <p>When off, {{ child.firstName }}'s token purchases need your approval, same as USD payments.</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

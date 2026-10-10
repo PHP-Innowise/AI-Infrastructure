@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "orders",
+  "description": "Owns order lifecycle and cancellation",
+  "owner": "checkout-team",
+  "relationships_complete": true,
+  "capabilities": [{"id": "cancel-order", "description": "Cancel an order", "keywords": ["cancel-order", "отмена-заказа"], "status": "planned", "sources": ["specs/cancellation.md"]}],
+  "provides": [{"id": "order.cancelled", "kind": "event", "version": "1", "sources": ["contracts/order-cancelled.json"]}],
+  "consumes": [],
+  "sources": [{"path": "specs/cancellation.md", "kind": "spec"}]
+}

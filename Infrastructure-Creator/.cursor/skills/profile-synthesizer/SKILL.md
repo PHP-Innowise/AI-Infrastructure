@@ -40,7 +40,7 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    against its real catalog anchor. Every registry ID must receive exactly one
    disposition: selected (families may produce multiple concrete skills) or
    rejected with reason/missing evidence. There are no category quotas. Only
-   the memory quartet is runtime-fixed.
+   the six memory-continuity guides are runtime-fixed.
    **The golden set is always selected.** Candidates the registry marks
    `golden` (`requirements-analyst`, `coding`, `refactorer`, `testing`,
    `debugging`, `performance`, `code-review`, `security-review` - the loop
@@ -91,8 +91,13 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    `load-evidence`/`execute`/`verify` trio - and wire each role to the evidence
    that grounds it and the procedure step that discharges it. Three or more
    obligations pointing at one step is a template and is rejected.
-   Run every executable verification command against the unmodified target once
-   and record what it did in that check's `baseline`; then state
+   Run every executable verification command once - only after
+   `bootstrap-verifier/scripts/analyze_commands.py --verification` reports it
+   `verification_safe`, and only in a throwaway copy of the target
+   (`cp -a <target> "$(mktemp -d)"`), never in the target itself: Phase 1 is
+   read-only there, and a test run can still write caches and reports. Compare
+   `git status --porcelain` in the copy before and after, report any change,
+   and record what the command did in that check's `baseline`; then state
    `expected_result` against that baseline rather than promising the command
    succeeds outright. Record what the target does **not** do as `absence`
    evidence when it matters - a configured analyser nobody invokes is a fact a
@@ -114,7 +119,7 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    evidence anchor proves it; otherwise encode it as a review question,
    external-standard requirement, or excluded unsupported claim.
    Load `memory-seed/assets/runtime-contract.json` for the runtime-fixed
-   quartet. Compile those four contracts from its exact paths, SQLite tables,
+   six guides. Compile those six contracts from its exact paths, SQLite tables,
    commands, ownership, required skeleton, and creatable artifacts; never
    synthesize runtime paths from catalog prose.
 9. **Derive section 11.2 ("Agents & Commands Preview")** from `skills.length`, with a dynamic category breakdown. Multiply by selected editions carrying agent/command layers; Codex has neither. Do not embed baseline numbers in the arithmetic.
@@ -173,7 +178,7 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 - MUST NOT propose any skill whose reference trigger and required evidence are unsatisfied. Familiarity, category symmetry, and a preferred baseline are not evidence.
 - MUST select every `golden` registry candidate in every run and build its contract from this target's own evidence - all of it: paths, commands, test topology, CI, conventions, invariants. Thin evidence narrows a golden skill's scope; it never removes the skill, and consolidation into a sibling is not a legal disposition for it.
 - MUST surface every draft rejection of an `escalates_on_rejection` candidate for the disposition interview round before finalizing, and MUST write the rejection report for every run - a silent rejection is indistinguishable from an oversight.
-- MUST generate only the memory quartet unconditionally, because its runtime is always installed.
+- MUST generate only the six memory-continuity guides unconditionally, because their runtime is always installed.
 - MUST provide a complete JSON contract for every selected skill; grouped or one-line descriptions are summaries only.
 - MUST cover every `roles` entry the selected candidate declares in the registry, each wired to cited evidence and to a procedure step that discharges it.
 - MUST record an observed `baseline` for every executable verification the gate cannot resolve, and phrase the expectation against it.
@@ -186,7 +191,7 @@ Read the profile and correct anything wrong, then run `infra-generate`.
 - MUST preserve source type and contradictions for behavioral findings; confidence alone is not enough.
 - MUST NOT elevate a catalog concern, inferred convention, package feature, or external standard into confirmed target behavior without a bounded target evidence anchor.
 - MUST map every high-priority confirmed invariant to a selected skill procedure and concrete verification assertion.
-- MUST compile the memory quartet from `memory-seed/assets/runtime-contract.json`, including `memory-bank/local/context.db`, SQLite `working_tasks`/`turn_deltas`, `project-brain/dynamic/**`, `project-brain/control/**`, required skeleton paths, creatable paths, and exact CLI commands.
+- MUST compile the six memory-continuity guides from `memory-seed/assets/runtime-contract.json`, including `memory-bank/local/context.db`, SQLite `working_tasks`/`turn_deltas`, `project-brain/dynamic/**`, `project-brain/control/**`, explicit portable handoff paths, required skeleton paths, creatable paths, and exact CLI commands.
 
 ## Final Output
 

@@ -15,7 +15,7 @@ Operate the shared, repository-backed control plane in `project-brain/` through 
 1. Canonical policy, specs, current code, configuration, migrations, and tests establish truth and always outrank retrieved context.
 2. `project-brain/` owns shared active tasks, handoffs, findings, bugs, incidents, decisions, events, retrieval manifests, conflicts, and promotion proposals.
 3. `memory-bank/` owns reviewed reusable consequences, not active progress. SQLite is a disposable index plus local binding/cache in governed mode.
-4. Never claim automatic prompt injection. Indexing and retrieval happen only through explicit CLI calls.
+4. The prompt hook injects a Task Capsule into every prompt (in Cursor through the `working-memory.mdc` rule it renders) and the Stop hook checkpoints changed files into the task; any other retrieval or write is an explicit CLI or memory MCP call. The capsule is a discovery aid: the sources it cites decide.
 5. Never write raw prompts, responses, chain-of-thought, command output, secrets, customer data, personal data, or unredacted incident payloads.
 
 ## Select One Operation
@@ -68,7 +68,7 @@ Use `--mode lightweight` only by explicit choice. In that mode, local SQLite tas
 - The public agent interface is only `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`; `context` may exist solely as a compatibility alias.
 - Retrieval applies privacy, owner, authority, lifecycle, supersession, and source-freshness filters before selection.
 - Treat SQLite/BM25 output and the context packet as discovery aids. Verify cited sources before implementation or decisions.
-- Keep bounded snippets and category budgets. Delivered capsules allow at most 2 procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters. Do not bypass the internal conflict ceiling or omit an escalation reason.
+- Keep bounded snippets and category budgets. Delivered capsules allow at most 3 semantic and 2 episodic items (the changelog and one recorded event), no procedural item (hosts list skills), and 8,000 serialized characters; the rendered text a host reads stays under 3,600. Do not bypass the internal conflict ceiling or omit an escalation reason.
 - Preserve relevant conflicting records together and report excluded/stale/private candidates only as safe metadata.
 - Require a committed retrieval manifest for governed retrieval. The manifest records selection/exclusion metadata, not hidden reasoning or source bodies.
 

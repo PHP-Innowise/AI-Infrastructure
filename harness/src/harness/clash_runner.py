@@ -20,7 +20,11 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from harness import process_runtime
 from harness import clash, providers
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'scripts'))
+import accelerator_attach  # noqa: E402
 from harness.sessions import SessionError, run_git
 
 TOOL_EVENT_LIMIT = 300
@@ -57,17 +61,30 @@ class Turn:
         self.text = ''
         self.native_id = None
         self.cost = None
+        self.total = None
+        self.reported = False
         self.seconds = 0.0
         self.error = None
         self.limit_reached = None
 
 
-def run_turn(command, cwd, stdin_text, provider, tags, environment):
-    """Stream one native run, forwarding public events tagged with the clash role."""
+def run_turn(command, cwd, stdin_text, provider, tags, environment, cost=None):
+    """Stream one native run, forwarding public events tagged with the clash role.
+
+    `cost` turns a resumed participant's reported session total into the turn's own spend.
+    """
     turn = Turn()
+    cost = cost or providers.RunCost(provider)
     started = time.monotonic()
-    process = subprocess.Popen(command, cwd=cwd, env=environment, stdin=subprocess.PIPE,
-                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    read_fd, write_fd = os.pipe()
+    try:
+        process = process_runtime.launch_guarded(command, read_fd, cwd=cwd, env=environment,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except Exception:
+        os.close(write_fd)
+        raise
+    finally:
+        os.close(read_fd)
 
     def feed():
         try:
@@ -85,15 +102,15 @@ def run_turn(command, cwd, stdin_text, provider, tags, environment):
     writer = threading.Thread(target=feed, daemon=True)
     writer.start()
     buffer, total, terminal, failed, tools = b'', 0, False, False, 0
-    selector = selectors.DefaultSelector()
+    selector = process_runtime.PipeSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
     try:
         while True:
             if not selector.select(.2):
-                if process.poll() is not None:
+                if process.poll() is not None and not process_runtime.WINDOWS:
                     break
                 continue
-            chunk = os.read(process.stdout.fileno(), 65536)
+            chunk = selector.read(process.stdout, 65536)
             buffer += chunk or b'\n'
             total += len(chunk)
             if len(buffer) > 2 * 1024 * 1024 or total > OUTPUT_LIMIT:
@@ -111,6 +128,7 @@ def run_turn(command, cwd, stdin_text, provider, tags, environment):
                     continue
                 if provider == 'claude' and event.get('subtype') == 'error_max_budget_usd':
                     turn.limit_reached = 'USD'
+                cost.observe(event)
                 for item in providers.normalize_event(provider, event):
                     if item.get('native_session_id'):
                         turn.native_id = item['native_session_id']
@@ -127,7 +145,13 @@ def run_turn(command, cwd, stdin_text, provider, tags, environment):
                         turn.text = item['text'][:TEXT_LIMIT]
                     elif kind == 'usage':
                         if 'cost_usd' in item:
-                            turn.cost = item['cost_usd']
+                            reported = item.pop('cost_usd')
+                            turn.cost, turn.total, turn.reported = cost.own(reported), cost.total(reported), True
+                            if turn.cost is not None:
+                                item['cost_usd'] = turn.cost
+                            if cost.session:
+                                # The session runner keeps this total for the participant's next resumed turn.
+                                item['cost_total'] = {'session': cost.session, 'total': turn.total}
                     elif kind == 'tool':
                         tools += 1
                         if tools > TOOL_EVENT_LIMIT:
@@ -148,13 +172,14 @@ def run_turn(command, cwd, stdin_text, provider, tags, environment):
         turn.ok = False
         turn.error = str(error) if isinstance(error, SessionError) else 'The native participant could not be read.'
     finally:
+        os.close(write_fd)
+        reaped = process_runtime.reap_tree(process)
         selector.close()
         process.stdout.close()
-        if process.poll() is None:
-            process.kill()
-            process.wait()
         writer.join(timeout=1)
         turn.seconds = round(time.monotonic() - started, 3)
+        if not reaped:
+            raise SessionError("Participant cleanup could not be confirmed. Clash stopped before another turn.")
     return turn
 
 
@@ -168,6 +193,7 @@ class Cycle:
         self.previous = session.get('clash_result') if request['action'] == 'continue' else None
         self.state = clash.new_state(session, request['stage'], self.previous)
         self.native = {'protagonist': session.get('native_session_id'), 'challenger': self.state['challenger_session_id']}
+        self.totals = dict(session.get('cost_totals') or {})
         self.spent = 0.0
         self.cap = (session.get('budgets') or {}).get('usd')
 
@@ -198,9 +224,18 @@ class Cycle:
         if provider == 'claude' and self.request.get('attachment_dirs'):
             command.extend(['--add-dir', *self.request['attachment_dirs']])
         environment = {**os.environ, **providers.agent_environment(provider, False, 1)}
+        # An accelerator attached to the project rides on both participants' turns.
+        overlay = (self.request.get('accelerators') or {}).get(provider)
+        if overlay:
+            command = accelerator_attach.apply_overlay(provider, command, overlay, first_turn=not self.native[slot])
+            environment.update(overlay['environment'])
         label = f"Cycle {self.state['cycle']}{f' · round {round_}' if round_ else ''} · {clash._name(provider)} ({role})"
         emit({'kind': 'clash_turn', 'status': 'running', 'text': label + ' is running.', **tags})
-        result = run_turn(command, self.project, providers.input_text(provider, prompt), provider, tags, environment)
+        resumed = self.native[slot]
+        cost = providers.RunCost(provider, resumed, self.totals.get(resumed) if resumed else None)
+        result = run_turn(command, self.project, providers.input_text(provider, prompt), provider, tags, environment, cost)
+        if result.reported and cost.session:
+            self.totals[cost.session] = result.total
         if result.native_id:
             if self.native[slot] and self.native[slot] != result.native_id:
                 result.ok = False

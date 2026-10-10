@@ -1,6 +1,6 @@
 ---
 name: writing-plans
-description: Create implementation plans for WordPress work. Use after requirements, brainstorming, architecture, or API design when execution needs clear steps.
+description: Create implementation plans before writing code for a WordPress feature. Use after requirements, brainstorming, architecture, or API design when execution needs clear steps.
 phase: planning
 flow-next: using-git-worktrees
 flow-alternatives: [coder, test-generator]

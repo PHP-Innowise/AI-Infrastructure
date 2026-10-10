@@ -3,6 +3,12 @@
 
 from __future__ import annotations
 
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -55,7 +61,7 @@ class FrameworkSemanticPreservationTest(unittest.TestCase):
         ):
             self.assertIn(phase, brain)
         self.assertIn("merge completion candidate is advisory", brain.lower())
-        self.assertIn("2 procedural, 3 semantic, and 1 episodic", brain)
+        self.assertIn("at most 3 semantic and 2 episodic items", brain)
         self.assertIn("8,000 serialized characters", brain)
         self.assertIn("automatic_promotion=false", brain)
         self.assertIn("brain-create", brain)
@@ -266,8 +272,216 @@ class FrameworkSemanticPreservationTest(unittest.TestCase):
         self.assertIn('"Bash(wp:*)"', settings)
         self.assertIn('"Read(wp-config.php)"', settings)
         hook = (root / ".claude/hooks/bash-validator.sh").read_text(encoding="utf-8")
-        self.assertIn("wp[[:space:]]+db", hook)
+        self.assertIn('"argv|wp|db reset|', hook)
         self.assertIn("wp-config", hook)
+
+
+class ShippedContentIndexTest(unittest.TestCase):
+    """Every edition's own shipped documents stay retrievable.
+
+    The index masks a value a secret pattern matches, and excludes a document
+    whose masking does not converge. An over-eager pattern once excluded the
+    Laravel architect skill - all three tool copies - over a documented
+    `php artisan down --secret=...` example, in every install; a pattern that
+    fired on shipped documents now would silently mask their text instead.
+    """
+
+    def test_no_shipped_document_is_excluded_as_a_secret(self) -> None:
+        for framework, edition in FRAMEWORK_PATHS.items():
+            with self.subTest(edition=framework), tempfile.TemporaryDirectory(
+                prefix="index-screen-"
+            ) as temporary:
+                target = Path(temporary) / "edition"
+                listed = subprocess.run(
+                    ["git", "ls-files", "-z", "--", str(edition)],
+                    cwd=ROOT, capture_output=True, check=True,
+                ).stdout.decode("utf-8").split("\0")
+                for name in filter(None, listed):
+                    destination = target / Path(name).relative_to(edition)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(ROOT / name, destination)
+                subprocess.run(["git", "init", "--quiet"], cwd=target, check=True)
+                subprocess.run(["git", "add", "--all"], cwd=target, check=True)
+                result = subprocess.run(
+                    [sys.executable, "memory-bank/scripts/context.py", "index", "--json"],
+                    cwd=target, capture_output=True, text=True,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                indexed = json.loads(result.stdout)
+                excluded = [
+                    item["path"] for item in indexed["excluded"]
+                    if item.get("reason") == "secret"
+                ]
+                self.assertEqual([], excluded)
+                self.assertEqual([], indexed["redacted"])
+
+
+class MemoryWiringClaimsTest(unittest.TestCase):
+    """Shipped memory documents do not deny what the editions wire.
+
+    Every edition registers the local memory MCP server (`harness-memory` in
+    `.mcp.json`, running `memory-bank/scripts/mcp_server.py`) and wires a
+    prompt hook that injects a Task Capsule. `project-brain/PROTOCOL.md` in
+    the editions and the generator asset still said no MCP server and no
+    automatic prompt injection were part of the runtime, the `project-brain`
+    skill told agents never to claim automatic prompt injection, and the root
+    READMEs, `docs/SECURITY.md`, `docs/TOOL-INTEGRATIONS.md` and
+    `docs/CONTEXT-AND-MEMORY.md` repeated it. A denial is checked only where
+    the wiring it contradicts exists, so removing the server or the hook frees
+    the documents to say so again. Changelogs and dated design records quote
+    history and are not checked.
+    """
+
+    DENIES_MCP = (
+        r"\bno\b[^.]*\bMCP servers?\b[^.]*\bis part of\b",
+        r"\bhas no\b[^.]*\bMCP server\b",
+        r"\brequires? no MCP servers?\b",
+        r"\bdoes not provide\b[^.]*\bMCP\b",
+        r"\bнет\b[^.]*\bMCP\b",
+    )
+    DENIES_INJECTION = (
+        r"\bautomatic prompt injection is part of\b",
+        r"\bhas no\b[^.]*\bautomatic prompt injection\b",
+        r"\bnever claim automatic prompt injection\b",
+        r"\bdoes not include automatic prompt injection\b",
+        r"\bretrieval happens? only through explicit CLI calls\b",
+    )
+    ROOT_DOCUMENTS = (
+        "README_EN.md",
+        "README_RU.md",
+        "docs/CONTEXT-AND-MEMORY.md",
+        "docs/SECURITY.md",
+        "docs/TOOL-INTEGRATIONS.md",
+    )
+    GENERATOR = Path("Infrastructure-Creator")
+    GENERATOR_ASSETS = GENERATOR / ".agents/skills/memory-seed/assets"
+
+    @staticmethod
+    def registers_memory_mcp(edition: Path) -> bool:
+        try:
+            servers = json.loads(
+                (ROOT / edition / ".mcp.json").read_text(encoding="utf-8")
+            )["mcpServers"]
+        except (OSError, ValueError, KeyError):
+            return False
+        server = servers.get("harness-memory") or {}
+        return "mcp_server.py" in json.dumps(server) and (
+            ROOT / edition / "memory-bank/scripts/mcp_server.py"
+        ).is_file()
+
+    @staticmethod
+    def injects_capsule(edition: Path) -> bool:
+        try:
+            hooks = json.loads(
+                (ROOT / edition / ".claude/settings.json").read_text(encoding="utf-8")
+            )["hooks"]["UserPromptSubmit"]
+        except (OSError, ValueError, KeyError):
+            return False
+        return "working-memory-read.sh" in json.dumps(hooks) and (
+            ROOT / edition / ".claude/hooks/working-memory-read.sh"
+        ).is_file()
+
+    @staticmethod
+    def tracked_documents(prefix: Path) -> list:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--", str(prefix)],
+            cwd=ROOT, capture_output=True, check=True,
+        ).stdout.decode("utf-8").split("\0")
+        return [
+            Path(name) for name in listed
+            if name.endswith(".md")
+            and Path(name).name != "CHANGELOG.md"
+            and "Task" not in Path(name).parts
+        ]
+
+    def denials(self, relative: Path, mcp: bool, injection: bool) -> list:
+        flat = " ".join(
+            (ROOT / relative).read_text(encoding="utf-8").split()
+        )
+        patterns = (self.DENIES_MCP if mcp else ()) + (
+            self.DENIES_INJECTION if injection else ()
+        )
+        return [
+            f"{relative.as_posix()}: {match.group(0)[:100]}"
+            for pattern in patterns
+            for match in re.finditer(pattern, flat, re.I)
+        ]
+
+    def test_no_shipped_document_denies_the_memory_server_or_the_capsule(self) -> None:
+        offenders = []
+        wired = []
+        for edition in FRAMEWORK_PATHS.values():
+            mcp, injection = self.registers_memory_mcp(edition), self.injects_capsule(edition)
+            wired.append((mcp, injection))
+            for relative in self.tracked_documents(edition):
+                offenders += self.denials(relative, mcp, injection)
+        # Sanity: the condition must hold today, or the test checks nothing.
+        self.assertIn((True, True), wired)
+
+        any_mcp = any(mcp for mcp, _ in wired)
+        any_injection = any(injection for _, injection in wired)
+        for name in self.ROOT_DOCUMENTS:
+            offenders += self.denials(Path(name), any_mcp, any_injection)
+
+        # The generator copies these assets into every project it builds, with
+        # the MCP server and a hook-forge prompt hook beside them.
+        asset_mcp = (ROOT / self.GENERATOR_ASSETS / "scripts/mcp_server.py").is_file()
+        asset_injection = "working-memory-read.sh" in (
+            ROOT / self.GENERATOR / ".agents/skills/hook-forge/SKILL.md"
+        ).read_text(encoding="utf-8")
+        for relative in self.tracked_documents(self.GENERATOR_ASSETS):
+            offenders += self.denials(relative, asset_mcp, asset_injection)
+        self.assertEqual([], offenders)
+
+
+class FrameworkApiCurrencyTest(unittest.TestCase):
+    """Snippets that fatal or mislead on the framework versions an edition
+    declares. Each pattern was shipped once and found by an audit."""
+
+    PHP_FENCE = re.compile(r"^```php[^\n]*\n(.*?)^```", re.S | re.M)
+
+    def canon(self, edition: str) -> list:
+        root = ROOT / edition
+        paths = [*sorted((root / ".agents" / "skills").rglob("*.md"))]
+        examples = root / "examples"
+        if examples.is_dir():
+            paths += sorted(examples.rglob("*.md"))
+        return [(path, path.read_text(encoding="utf-8")) for path in paths]
+
+    def php_blocks(self, text: str) -> list:
+        return self.PHP_FENCE.findall(text)
+
+    def test_laravel_snippets_match_the_11_plus_skeleton(self) -> None:
+        offenders = []
+        for path, text in self.canon("Laravel"):
+            relative = path.relative_to(ROOT).as_posix()
+            for block in self.php_blocks(text):
+                # Filament v4+: `string|BackedEnum|null`; `?string` is a fatal
+                # property-type mismatch.
+                if "?string $navigationIcon" in block:
+                    offenders.append(f"{relative}: ?string $navigationIcon")
+                # The 11+ base Controller has no AuthorizesRequests.
+                if "$this->authorize(" in block and "AuthorizesRequests" not in text:
+                    offenders.append(f"{relative}: $this->authorize() without AuthorizesRequests")
+                # The skeleton defines local, public and s3 - no `private` disk.
+                if re.search(r"(?:disk|fake)\('private'\)|, 'private'\)", block) and "'private' =>" not in text:
+                    offenders.append(f"{relative}: undefined 'private' disk")
+        self.assertEqual([], offenders)
+
+    def test_laravel_never_claims_dispatch_is_deferred_by_default(self) -> None:
+        for path, text in self.canon("Laravel"):
+            with self.subTest(path=path.relative_to(ROOT).as_posix()):
+                self.assertNotRegex(text, r"which Laravel defers automatically")
+                self.assertNotIn("EventServiceProvider.php", text)
+                self.assertNotIn("#[AsListener]", text)
+
+    def test_symfony_voters_take_the_8x_vote_parameter(self) -> None:
+        offenders = []
+        for path, text in self.canon("Symfony"):
+            for signature in re.findall(r"function voteOnAttribute\([^)]*\)", text):
+                if "?Vote $vote = null" not in signature:
+                    offenders.append(f"{path.relative_to(ROOT).as_posix()}: {signature}")
+        self.assertEqual([], offenders)
 
 
 if __name__ == "__main__":

@@ -246,7 +246,9 @@ return exit code `1`. Argument-parser errors use argparse's normal nonzero exit.
 Do not parse human-readable output in automation.
 
 Repeated `--file`, `--source`, `--next-step`, `--verification`, `--conflict`,
-and `--source-id` options append one value per occurrence:
+and `--source-id` options append one value per occurrence (`update` and
+`brain-update` also take `--replace-next-steps`, which makes the given
+`--next-step` values the whole list):
 
 ```bash
 python3 memory-bank/scripts/context.py --owner alice brain-create finding \
@@ -289,6 +291,12 @@ stale refresh from a working one. `--validate` additionally reports Project
 Brain validation, which reads every record and is not free as records
 accumulate.
 
+When active chunks have passed their review date, a `memory review: N
+chunk(s) overdue, not served until re-verified (bank-audit)` line follows the
+layer report, and `--json` carries the count as `overdue_review`. Such a chunk
+leaves retrieval but no longer stops any write, so this line is where the lapse
+stays visible.
+
 This is the command the request hook runs. Side effects: writes only the
 selected SQLite database, plus an ignored local manifest when `--ephemeral`
 accompanies a capsule.
@@ -302,9 +310,11 @@ python3 memory-bank/scripts/context.py index [--incremental] [--json]
 Rebuilds the disposable FTS5 document index from eligible policy, skills,
 documentation, specifications, active Memory Bank chunks, task documents,
 capability epics, changelog, active Brain records, and handoffs. It filters
-Git-ignored candidates before reading them, rejects likely secrets, deduplicates
-mirrored skills, and replaces the previous document/metadata index in one
-SQLite transaction.
+Git-ignored candidates before reading them, masks likely secret values in
+repository documents (and excludes Memory Bank chunks that carry one),
+deduplicates mirrored skills, and replaces the previous document/metadata index
+in one SQLite transaction. Its text output adds `Redacted: N value(s) in M
+document(s)` when masking happened; a masked document is cached like any other.
 
 `--incremental` reuses every row whose source modification time and size are
 unchanged **and whose calendar boundary has not passed**, so only new,
@@ -435,15 +445,61 @@ hard ceiling, with an escalation reason. Privacy, authority, lifecycle, owner,
 and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
 
-The delivered capsule has a separate final contract in both modes: at most 2
-procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
+The delivered capsule has a separate final contract: at most 3 semantic and 2
+episodic items (the changelog and one recorded event or episode; lightweight
+mode keeps one), no procedural item, and 8,000 serialized characters.
+Its working state carries the three newest next steps, the eight newest
+files, and four sources.
+
+The rendered capsule — the plain output, which is what the hooks hand to
+Claude Code, Codex, and Cursor — opens with `working: <task> — <goal>` and
+then the task's state, each line bounded and left out when empty: `phase:`,
+`progress:` (manual progress, then the automatic checkpoint, at most 400
+characters, keeping its opening and its end), one `next:` line per step,
+`recent files:` (the five newest, whole paths only), `sources:` (the task's
+cited sources), and in governed mode `task record:`, the path of the full
+record. Selected project knowledge/history also carries its already-filtered
+excerpt. The complete text is capped at 3,600 characters; excerpts shrink
+first, then optional entries. Source-change and weak-match caveats stay beside
+the source.
+
+Whenever the capsule shows less than its sources hold, a `compaction:` line
+after the warnings says so: it counts what the JSON budget dropped and what
+the rendered text cut on top (the goal, progress and next steps past their
+bounds, every file and source the text leaves out), and asks the model to
+re-read the cited source before revising a decision the capsule no longer
+explains. At the 3,600-character ceiling the line gives up its counts for the
+fixed `compaction: lossy view — …` marker before any entry is dropped; the
+marker itself is never dropped, so a capsule cut at the ceiling still reads as
+lossy.
+
+Acknowledgements alone do not retrieve. Procedural context admits one strong
+match; a weak semantic match needs a title/path term or an identifier-shaped
+term. Eligible candidate tails below 30% of the best score in their own layer
+leave as `score-floor`, after privacy/freshness/host filtering. Explicit source
+links and conflicting evidence stay eligible.
+
+Three kinds of candidate never take a slot, and all are recorded in the
+manifest's `excluded`. The task's own record and handoff leave as
+`working-task`: the state above already carries them. With `--host claude` or
+`--host codex` the instruction files that host loads by itself leave as
+`host-loaded` — `CLAUDE.md` and whatever it imports with `@path` for Claude
+Code, `AGENTS.md` for Codex. The default `--host cli` excludes neither. A file
+under a skills tree other than a skill's own `SKILL.md` (`references/`,
+`agents/`, `rules/`, an `AGENTS.md` inside a skill, `SKILL FLOW.md`) never takes
+the procedural pick: when one ranks first it leaves as `skill-subfile`, with
+no next-skill refill. The capsule carries no procedural item at all - hosts
+list their skills and load their instruction files - and the pick a skill or
+instruction file would have been is recorded as `host-listed`. `search` still
+finds skills.
 
 It also reports the quality of what it found. `no-match: <layers>` names the
 layers where no candidate passed the relevance test — measured before any
 filter or budget runs, so it never claims memory was empty when something was
-withheld. `weak-match: <path>` marks an item admitted on a single rare term
-rather than on covering the query. Both lines are printed after the opening
-`working:` line, which the Cursor hooks use as the render marker.
+withheld. `(weak match)` marks an anchored item admitted on a single rare
+term rather than on covering the query. Empty-layer diagnostics appear only
+when no optional knowledge is delivered. The opening `working:` line remains
+the Cursor render marker.
 
 Side effects in governed mode: creates
 `project-brain/control/retrieval-manifests/<uuid>.json`, a Git-trackable
@@ -484,13 +540,18 @@ python3 memory-bank/scripts/context.py [--owner OWNER] update \
   --revision N \
   [--progress TEXT] \
   [--next-step TEXT]... \
+  [--replace-next-steps] \
   [--file PATH]... \
   [--source PATH]... \
   [--json]
 ```
 
 At least one changed field is required. `progress` replaces the previous
-progress text; repeated list values are merged without duplicates.
+progress text; repeated list values are merged without duplicates. Next steps
+are appended unless `--replace-next-steps` makes this call's `--next-step`
+values the whole list, which is how a finished step leaves it; the flag with
+no `--next-step` clears the list. A file touched again moves to the end, so a
+task's files run oldest to newest and the capsule projects the newest.
 
 In governed mode, this verifies actor authorization, checks the expected
 revision when supplied, updates the task and handoff, rebuilds deterministic
@@ -529,6 +590,18 @@ never read, paths that look sensitive are excluded and reported, and the
 runtime's own record, handoff, and index churn is dropped rather than recorded
 as user work. A flush contributes at most `--max-files` paths (default `20`)
 and reports the count it omitted.
+
+A turn whose HEAD moved also counts, even with a clean tree: a turn that ends
+in a commit is the most finished work there is. The first turn a task sees only
+records its HEAD, so visiting a branch still counts as nothing.
+
+The checkpoint also says what the work was. After the turn and file counts it
+lists the branch's newest commit subjects, newest first — at most five, each
+cut to 80 characters, `(+N more)` for the rest — counted from the merge base
+with the default branch, so the list is the branch's own story. Merge commits
+are left out, and so is any subject the secret or privacy gates would refuse;
+a refused subject is never a reason for the flush to fail. On the default
+branch itself there is no branch story, and no list.
 
 With `automatic_promotion` enabled, a flush also runs automatic promotion; see
 [Promotion to Durable Memory](CONTEXT-AND-MEMORY.md#promotion-to-durable-memory)
@@ -727,6 +800,7 @@ python3 memory-bank/scripts/context.py [--owner OWNER] brain-update \
   --revision N \
   [--progress TEXT] \
   [--next-step TEXT]... \
+  [--replace-next-steps] \
   [--file PATH]... \
   [--source PATH]... \
   [--conflict UUID]... \
@@ -813,6 +887,12 @@ directories. Related handoffs move to `archive/handoffs/`. It rebuilds active
 and archive indexes, validates again, and restores the snapshot if a move or
 post-validation step fails.
 
+Both validations leave out source freshness. A record whose cited file changed
+after it was written is stale: `validate` reports it, and retrieval and
+promotion skip it, but moving terminal records can neither cause nor cure it.
+It therefore neither refuses compaction nor keeps a terminal record out of the
+archive.
+
 Compaction moves history; it does not delete it. Current terminal states are:
 
 - tasks: `completed`, `cancelled`;
@@ -885,6 +965,21 @@ chunk currently uses the runtime's fixed promoted-memory defaults; use the
 normal Memory Bank capture workflow when a proposal requires more nuanced
 categorization or an update/supersession decision.
 
+### `promote-auto`
+
+```bash
+python3 memory-bank/scripts/context.py [--owner OWNER] promote-auto [--json]
+```
+
+Runs automatic promotion now, under exactly the rules a turn boundary applies:
+eligible verified records are proposed and applied without review, at most
+five per run, each chunk tagged `auto-promoted`. It does nothing unless
+`automatic_promotion` is enabled in `project-brain/config/runtime.json`, and
+says so (`enabled: false`). The turn boundary waits for `--flush-after`
+turns; this is for knowledge recorded deliberately, such as what a Harness
+run saves when it completes, which should not wait for a counter. The result lists what
+was promoted, blocked with its reason, failed, and deferred.
+
 ### `retrieval-report`
 
 ```bash
@@ -912,8 +1007,9 @@ Manifests written before schema version 2 carry no gate, no phase timings, no
 query source and no per-item score. They are counted, and each metric reports
 how many manifests could answer it, rather than silently averaging over the
 subset that can. Path counts come from the manifest's selection, which is
-recorded before the capsule's character ladder may drop an item, so they are
-an upper bound on what the model was shown.
+recorded after the capsule's character limits: an item the rendered text (or,
+for `--json`, the JSON) could not hold is excluded as `capsule-limit` rather
+than counted as shown. Manifests written before that change count it.
 
 The report never contains the query text, in either output mode.
 
@@ -987,7 +1083,10 @@ Re-attests an active chunk against its sources as they are now: recomputes
 `source_digests` for every local path in `sources`, stamps `last_verified`
 with today, and sets the next `review_after` (default one year). Runs under
 the same transaction as `bank-retire` — lock, snapshot, regenerated index,
-whole-bank validation, restore on failure.
+validation, restore on failure. The re-verified chunk must meet the whole
+contract — a chunk whose cited source is gone is still refused — but another
+chunk's problem, such as its own lapsed review date, no longer refuses this
+one: each overdue chunk can be re-verified on its own.
 
 Running it is an assertion by whoever ran it that they re-read the sources and
 the chunk still holds; the command records that judgement, it does not make
@@ -1022,8 +1121,9 @@ Use this rather than editing frontmatter. Retiring by hand means editing both
 sides of a replacement link and then regenerating the index, and between any
 two of those edits the bank is invalid. Every write here happens under the
 mutation lock against a snapshot, `memory-bank/INDEX.md` is regenerated, and
-the whole bank is validated; any failure restores every touched file, so an
-interruption leaves the bank exactly as it was.
+the bank is validated for anything the retirement broke, with the retired
+chunk and its successor held to the whole contract; any failure restores every
+touched file, so an interruption leaves the bank exactly as it was.
 
 What does not change: the chunk body, its other frontmatter fields, the file
 on disk, and its `INDEX.md` row, which survives with the new status — a chunk
@@ -1191,7 +1291,8 @@ rejected, and deleting the database does not remove the shared task.
 ### Stale source fingerprint
 
 `validate`, indexing, or retrieval may report `stale` after a cited source
-changes.
+changes. Compaction does not wait for it: a stale record is skipped by
+retrieval and promotion, and a terminal one is still archived.
 
 1. Open the current canonical source.
 2. Decide whether the Brain claim remains valid, changed, or conflicted.

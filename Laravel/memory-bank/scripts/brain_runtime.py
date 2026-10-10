@@ -4,19 +4,49 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
+import errno
 import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import threading
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from validate import FILENAME_PATTERN as BANK_FILENAME_PATTERN, validate_bank
+import workspace_roots
+from validate import (
+    FILENAME_PATTERN as BANK_FILENAME_PATTERN,
+    ValidationError as BankValidationError,
+    display_path as bank_display_path,
+    parse_frontmatter as parse_bank_frontmatter,
+    SECRET_PATTERNS as BANK_SECRET_PATTERNS,
+    sensitive_label,
+    validate_bank,
+    validate_metadata as validate_bank_metadata,
+    validate_secret_patterns as validate_bank_secrets,
+)
+
+
+def _file_lock(handle, unlock=False):
+    if os.name != "nt":
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
+        return
+    import msvcrt
+    while True:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as error:
+            if unlock or error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise
+            time.sleep(.05)
 
 
 SCHEMA_VERSION = 1
@@ -37,6 +67,9 @@ TASK_PHASE_ALIASES = {
     "implementing": "implementation",
     "execution": "implementation",
     "review": "verification",
+    # SKILL FLOW.md's Phase Map names the reviewing/testing row "Quality", so
+    # an agent following it reaches for this word.
+    "quality": "verification",
 }
 TASK_PHASE_INPUTS = (*TASK_PHASES, *TASK_PHASE_ALIASES)
 # The agent message channel: an append-only JSONL journal per task under
@@ -166,6 +199,182 @@ def brain_root(repository: Path) -> Path:
     return repository / "project-brain"
 
 
+# What an installed accelerator's state looks like, for a state directory an
+# attached project starts without. Tooling - schemas, templates, scripts,
+# PROTOCOL.md - is never copied: it is read from the clone, so `git pull`
+# updates it everywhere at once.
+ATTACHED_STATE_DIRECTORIES = (
+    "project-brain/archive",
+    "project-brain/control/handoffs",
+    "project-brain/control/messages",
+    "project-brain/control/promotions",
+    "project-brain/control/retrieval-manifests",
+    "project-brain/dynamic/bugs",
+    "project-brain/dynamic/decisions",
+    "project-brain/dynamic/events",
+    "project-brain/dynamic/findings",
+    "project-brain/dynamic/incidents",
+    "project-brain/dynamic/tasks",
+    "project-brain/indexes",
+    "project-brain/local",
+    "memory-bank/chunks",
+    "memory-bank/local",
+)
+# The state file and where the accelerator keeps its starting content. The
+# configuration is copied because it is per-project policy (mode, owners,
+# retention) that a team may change; the rest is the installer's own seed.
+ATTACHED_STATE_SEEDS = (
+    ("project-brain/config/runtime.json", "project-brain/config/runtime.json"),
+    ("project-brain/config/telemetry.json", "project-brain/config/telemetry.json"),
+    ("project-brain/config/providers.json", "project-brain/config/providers.json"),
+    ("project-brain/indexes/active.json", "project-brain/.install/active.json"),
+    ("project-brain/indexes/archive.json", "project-brain/.install/archive.json"),
+    ("memory-bank/INDEX.md", "memory-bank/.install/INDEX.md"),
+)
+# Everything an attached state directory holds: the runtime's layout and the
+# launcher's record of the project (scripts/accelerator_attach.py).
+ATTACHED_STATE_ENTRIES = ("project-brain", "memory-bank", "launch", "accelerator-attach.json")
+# An attached state is a project's memory kept outside the project, so it is
+# its owner's alone: directories 0700 and files 0600, whatever the umask of
+# the shell or the tool that started the runtime. Installed state lives in the
+# project and keeps the project's permissions.
+PRIVATE_DIRECTORY_MODE = 0o700
+
+
+def make_private_directory(path: Path) -> bool:
+    """Create `path` and every parent it lacks owner-only, whatever the umask.
+
+    A directory that exists already is left as it is - above the state it is
+    not the accelerator's; inside, `secure_attached_state` decides. Returns
+    whether `path` itself was created here.
+    """
+    missing: list[Path] = []
+    current = path
+    while not os.path.lexists(current) and current.parent != current:
+        missing.append(current)
+        current = current.parent
+    created = False
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, PRIVATE_DIRECTORY_MODE)
+        except FileExistsError:
+            # A concurrent first run made it.
+            created = False
+            continue
+        created = True
+        if os.name != "nt":
+            # mkdir's mode passes through the umask; this does not.
+            os.chmod(directory, PRIVATE_DIRECTORY_MODE)
+    return created
+
+
+def _open_to_others(path: Path) -> bool:
+    """Whether a group or other user may use this entry, which the current
+    user owns; a link and another user's file are never the runtime's to
+    change, and Windows permissions are not mode bits."""
+    if os.name == "nt":
+        return False
+    try:
+        status = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        not stat.S_ISLNK(status.st_mode)
+        and status.st_uid == os.geteuid()
+        and bool(status.st_mode & 0o077)
+    )
+
+
+def _owner_only(path: Path) -> None:
+    """Take group and other access away from one entry; best effort."""
+    if not _open_to_others(path):
+        return
+    try:
+        os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) & 0o700)
+    except OSError:
+        return
+
+
+def secure_attached_state(repository: Path) -> None:
+    """Keep an attached state directory owner-only.
+
+    A missing state directory is created owner-only. One that exists - made
+    before this rule, or touched by a shell with a looser umask - is tightened
+    where it is the accelerator's: each accelerator entry that is open to
+    others, with everything under it, and the directory itself when it holds
+    nothing but accelerator state (a variable can name any directory). Links
+    are never followed, nothing above the state is changed, and another user's
+    file is left alone.
+    """
+    make_private_directory(repository)
+    if os.name == "nt":
+        return
+    try:
+        names = set(os.listdir(repository))
+    except OSError:
+        return
+    for name in ATTACHED_STATE_ENTRIES:
+        entry = repository / name
+        if name not in names or not _open_to_others(entry):
+            continue
+        if entry.is_dir():
+            # os.walk does not descend through a link to a directory.
+            for directory, folders, files in os.walk(entry):
+                for child in folders + files:
+                    _owner_only(Path(directory) / child)
+        # Last: a pass that was cut short is taken up again on the next run.
+        _owner_only(entry)
+    if names <= set(ATTACHED_STATE_ENTRIES):
+        _owner_only(repository)
+
+
+def _missing_attached_state(repository: Path, tooling: Path) -> bool:
+    return any(not (repository / directory).is_dir() for directory in ATTACHED_STATE_DIRECTORIES) or any(
+        not (repository / target).exists() and (tooling / source).is_file()
+        for target, source in ATTACHED_STATE_SEEDS
+    )
+
+
+def ensure_attached_state(repository: Path) -> list[str]:
+    """Give an attached project's state directory an installed layout.
+
+    Creates only what is missing and never overwrites, so it is safe on every
+    run; returns the state paths it created. Installed, it does nothing.
+
+    A session's first runs start together - Claude Code runs the hooks of one
+    event in parallel - and one must never take a seed another is still
+    writing for a finished one: a half-written runtime.json is an invalid
+    configuration. So a seed appears whole or not at all (written beside its
+    place, then renamed into it), and a layout that lacks anything is laid out
+    under the mutation lock, checked again once the lock is held. The lock's
+    own directory is made first, so the lock works in an empty state. All of
+    it is owner-only (`secure_attached_state`).
+    """
+    if not workspace_roots.is_attached(repository):
+        return []
+    tooling = workspace_roots.tooling_root(repository)
+    secure_attached_state(repository)
+    if not _missing_attached_state(repository, tooling):
+        return []
+    created: list[str] = []
+    if make_private_directory(brain_root(repository) / "local"):
+        created.append("project-brain/local/")
+    with mutation_lock(repository):
+        for directory in ATTACHED_STATE_DIRECTORIES:
+            if not (repository / directory).is_dir():
+                make_private_directory(repository / directory)
+                created.append(directory + "/")
+        for target, source in ATTACHED_STATE_SEEDS:
+            path = repository / target
+            origin = tooling / source
+            if path.exists() or not origin.is_file():
+                continue
+            make_private_directory(path.parent)
+            atomic_write_bytes(path, origin.read_bytes())
+            created.append(target)
+    return created
+
+
 def load_config(repository: Path) -> dict[str, Any]:
     path = brain_root(repository) / "config" / "runtime.json"
     defaults: dict[str, Any] = {
@@ -240,21 +449,24 @@ def mutation_lock(repository: Path) -> Iterator[None]:
                 depths[key] -= 1
             return
         with lock_path.open("a+", encoding="utf-8") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            _file_lock(handle)
             depths[key] = 1
             try:
                 yield
             finally:
                 depths.pop(key, None)
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                _file_lock(handle, unlock=True)
 
 
-def atomic_write(path: Path, content: str) -> None:
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Replace `path` whole: a reader sees the old content or the new, never
+    a part. The temporary file beside it is owner-only, as mkstemp makes it,
+    and the rename keeps that mode."""
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -262,6 +474,12 @@ def atomic_write(path: Path, content: str) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def atomic_write(path: Path, content: str) -> None:
+    # Encoded as written, newlines untranslated: Git-tracked records keep LF
+    # on Windows too.
+    atomic_write_bytes(path, content.encode("utf-8"))
 
 
 def atomic_json(path: Path, value: object) -> None:
@@ -438,6 +656,9 @@ def validate_schema_value(
 def validate_schema_file(repository: Path, name: str, value: Any) -> None:
     path = brain_root(repository) / "schemas" / name
     if not path.is_file():
+        # Attached, schemas ship with the accelerator rather than the state.
+        path = brain_root(workspace_roots.tooling_root(repository)) / "schemas" / name
+    if not path.is_file():
         return
     try:
         schema = json.loads(path.read_text(encoding="utf-8"))
@@ -446,28 +667,44 @@ def validate_schema_file(repository: Path, name: str, value: Any) -> None:
     validate_schema_value(value, schema)
 
 
-def fingerprint(repository: Path, source: str) -> dict[str, str]:
+def _cited_file(repository: Path, source: str) -> Path:
+    """The regular file inside the repository a citation names."""
     relative = source.split("#", 1)[0]
-    path = (repository / relative).resolve()
-    try:
-        path.relative_to(repository.resolve())
-    except ValueError as error:
-        raise BrainError(f"Source escapes repository: {relative}") from error
+    path = workspace_roots.resolve(repository, relative).resolve()
+    if not workspace_roots.contains(repository, path):
+        raise BrainError(f"Source escapes repository: {relative}")
     if not path.is_file() or path.is_symlink():
         raise BrainError(f"Source does not exist or is not a regular file: {relative}")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    return {"path": relative, "sha256": digest}
+    return path
+
+
+def fingerprint(repository: Path, source: str) -> dict[str, str]:
+    path = _cited_file(repository, source)
+    digest = hashlib.sha256(_line_ending_neutral(path.read_bytes())).hexdigest()
+    return {"path": source.split("#", 1)[0], "sha256": digest}
+
+
+def _line_ending_neutral(data: bytes) -> bytes:
+    """Text bytes with CRLF folded to LF; binary data unchanged.
+
+    A checkout with `core.autocrlf=true` holds the same commit as one without
+    it, yet a raw-byte digest differed, so every record citing a text file was
+    `stale` on a colleague's Windows clone while Git saw no change. Folding
+    leaves an LF file's digest exactly what it was, so stored fingerprints need
+    no migration. A NUL byte marks binary data, as Git's own heuristic does.
+    """
+    if b"\0" in data[:8192]:
+        return data
+    return data.replace(b"\r\n", b"\n")
 
 
 def source_fingerprints(repository: Path, sources: list[str]) -> list[dict[str, str]]:
     fingerprints = []
     for source in sorted(set(sources)):
         relative = source.split("#", 1)[0]
-        path = (repository / relative).resolve()
-        try:
-            path.relative_to(repository.resolve())
-        except ValueError as error:
-            raise BrainError(f"Source escapes repository: {relative}") from error
+        path = workspace_roots.resolve(repository, relative).resolve()
+        if not workspace_roots.contains(repository, path):
+            raise BrainError(f"Source escapes repository: {relative}")
         if not path.is_file() or path.is_symlink():
             raise BrainError(
                 f"Source does not exist or is not a regular file: {relative}"
@@ -530,6 +767,68 @@ def sources_are_fresh(repository: Path, record: dict[str, Any]) -> bool:
         except BrainError:
             return False
     return True
+
+
+def source_changes(
+    repository: Path, fingerprints: Any
+) -> tuple[list[str], list[str]]:
+    """Cited paths whose digest moved on, and cited paths that are gone.
+
+    `sources_are_fresh` answers yes or no; a reader deciding what to do with
+    knowledge needs to tell an edited citation (the knowledge may still hold;
+    check it) from a deleted one (nothing is left to check it against).
+    """
+    changed: list[str] = []
+    missing: list[str] = []
+    for item in fingerprints if isinstance(fingerprints, list) else []:
+        path = item.get("path") if isinstance(item, dict) else None
+        expected = item.get("sha256") if isinstance(item, dict) else None
+        if not isinstance(path, str) or not isinstance(expected, str):
+            missing.append(str(path))
+            continue
+        try:
+            current = fingerprint(repository, path)["sha256"]
+        except BrainError:
+            missing.append(path)
+            continue
+        if current != expected:
+            changed.append(path)
+    return changed, missing
+
+
+def citation_problem(repository: Path, record: dict[str, Any]) -> Optional[str]:
+    """Why a record's citations cannot be checked at all, or None.
+
+    `source-undigested`: a cited local path has no stored digest, or the
+    stored digests are malformed - there is nothing to compare an edit with.
+    `source-missing`: a digested path no longer resolves to a regular file in
+    the repository - there is nothing left to check the knowledge against.
+    An EDITED citation is not a problem here: retrieval serves the record
+    marked `source_changed` and ranked at SOURCE_CHANGED_WEIGHT. Existence
+    only, no file is read, so the per-turn rebuild of Brain rows does not
+    grow with the size of the files records cite.
+    """
+    fingerprints = record.get("source_fingerprints")
+    if not isinstance(fingerprints, list):
+        return "source-undigested"
+    digested: set[str] = set()
+    for item in fingerprints:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("sha256"), str)
+        ):
+            return "source-undigested"
+        digested.add(item["path"])
+    expected = {source.split("#", 1)[0] for source in digestible_sources(record.get("sources"))}
+    if not expected <= digested:
+        return "source-undigested"
+    for path in sorted(digested):
+        try:
+            _cited_file(repository, path)
+        except (BrainError, OSError, ValueError):
+            return "source-missing"
+    return None
 
 
 def _require_string(record: dict[str, Any], key: str) -> None:
@@ -829,6 +1128,44 @@ def _handoff_body(handoff: dict[str, Any]) -> str:
     )
 
 
+def guard_shared_text(label: str, values: Any) -> None:
+    """Refuse a Project Brain write that would store a secret or personal data.
+
+    Records, handoffs and agent messages are Git-tracked and repeated into
+    Task Capsules, so the governed path holds the line the lightweight path
+    and the capsule gate already hold. Only the text the call introduces is
+    checked: a record written before this guard existed stays updatable. The
+    message names the kind of data, never the value.
+    """
+    text = "\n".join(value for value in values if isinstance(value, str) and value)
+    found = sensitive_label(text)
+    if found:
+        raise BrainError(
+            f"{label} contains {found}; replace it with a sanitized summary "
+            "- nothing was stored"
+        )
+
+
+def stored_secret_label(record: dict[str, Any]) -> Optional[str]:
+    """The kind of credential a stored record's free text carries, or None.
+
+    Validation reports secrets only. A record written before the write guard
+    may hold personal data, which promotion and the capsule already refuse to
+    spread; failing every validation over it would leave the operator a
+    repository they cannot get green without rewriting history.
+    """
+    fields = [
+        record.get("title"), record.get("goal"), record.get("progress"),
+        record.get("auto_checkpoint"), *record.get("next_steps", []),
+        *(item.get("reason") for item in record.get("transitions", []) if isinstance(item, dict)),
+    ]
+    text = "\n".join(value for value in fields if isinstance(value, str) and value)
+    for label, pattern in BANK_SECRET_PATTERNS.items():
+        if pattern.search(text):
+            return f"a possible {label}"
+    return None
+
+
 def _write_record(repository: Path, record: dict[str, Any], path: Path) -> None:
     validate_record(record)
     affected = [path, *index_paths(repository)]
@@ -872,6 +1209,9 @@ def create_record(
 ) -> dict[str, Any]:
     if record_type not in RECORD_TYPES:
         raise BrainError(f"type must be one of: {', '.join(RECORD_TYPES)}")
+    guard_shared_text(
+        f"{record_type.capitalize()} record", [title, goal, *(conflicts or [])]
+    )
     try:
         find_record(repository, external_id)
     except BrainError as error:
@@ -946,6 +1286,28 @@ def create_task(
     )
 
 
+# Who checked a verified claim: the agent that wrote it, or a person.
+ATTESTATIONS = ("agent", "person")
+ATTESTATION_MARK = re.compile(r"\[attestation:(agent|person)\]")
+
+
+def record_attestation(record: dict[str, Any]) -> str:
+    """Who checked the claim the record's latest verification hardened.
+
+    'agent' or 'person' from the verification's ledger entry; '' when it
+    does not say. Unattended saves made before the mark existed said
+    "agent-attested" in their reason, and still count as the agent's.
+    """
+    for transition in reversed(record.get("transitions") or []):
+        if transition.get("to") != "verified" or transition.get("from") not in AUTHORITY_TRANSITIONS:
+            continue
+        reason = str(transition.get("reason") or "")
+        mark = ATTESTATION_MARK.search(reason)
+        if mark:
+            return mark.group(1)
+        return "agent" if "agent-attested" in reason else ""
+    return ""
+
 def update_record(
     repository: Path,
     identifier: str,
@@ -962,7 +1324,10 @@ def update_record(
     authority: Optional[str] = None,
     auto_checkpoint: Optional[str] = None,
     reason: str = "Task updated",
+    attestation: Optional[str] = None,
+    reverify: bool = False,
     allow_phase_regression: bool = False,
+    replace_next_steps: bool = False,
 ) -> dict[str, Any]:
     """Mutate a record under the caller's compare-and-swap revision.
 
@@ -979,7 +1344,31 @@ def update_record(
     is the point — each flush supersedes the previous checkpoint — while
     ``progress`` stays reserved for the operator's narrative, so an automated
     caller passes ``progress=None`` and its checkpoint here.
+
+    ``attestation`` says who checked the claim a verification hardens:
+    ``agent`` when the agent that wrote it attested it and no person read it,
+    ``person`` when someone did. It is written into the verification's own
+    ledger entry (`record_attestation` reads it back), not into a new record
+    field, so a runtime that predates it still accepts the record; promotion
+    carries an agent's attestation into the chunk's tags.
+
+    ``reverify`` says the update restates the claim of a record that is
+    already verified - a revised consequence - and ``attestation`` who
+    checked the new claim. The ledger gains another ``observed`` ->
+    ``verified`` entry: the revision is the observation, the attestation its
+    check, and it is the one authority edge every runtime's validator
+    accepts. Without it a person's correction kept the agent's mark from the
+    first verification, and the next agent was free to overwrite it.
+
+    ``next_steps`` are appended unless ``replace_next_steps`` makes them the
+    whole list: without it a step that was done could never leave, and the
+    handoff kept presenting finished work as what comes next. ``files`` keep
+    the newest touch last, which is the end the capsule projects from.
     """
+    guard_shared_text(
+        "Record update",
+        [progress, auto_checkpoint, reason, *next_steps, *(conflicts or [])],
+    )
     with mutation_lock(repository):
         path, record, _ = find_record(repository, identifier)
         validate_record(record)
@@ -992,11 +1381,13 @@ def update_record(
             raise BrainError(f"Owner is not authorized to mutate record: {actor}")
         if record["type"] == "event" and (
             progress is not None or next_steps or files or sources
-            or authority is not None
+            or authority is not None or replace_next_steps
         ):
             raise BrainError("Events are immutable; only lifecycle supersession is allowed")
         if auto_checkpoint is not None and record["type"] != "task":
             raise BrainError("only a task may record an auto checkpoint")
+        if attestation is not None and attestation not in ATTESTATIONS:
+            raise BrainError("attestation must be one of: " + ", ".join(ATTESTATIONS))
         if authority is not None:
             if authority not in AUTHORITY_TRANSITIONS.get(record["authority"], set()):
                 raise BrainError(
@@ -1006,10 +1397,24 @@ def update_record(
             record["transitions"].append(
                 {
                     "from": record["authority"], "to": authority, "at": utc_now(),
-                    "actor": actor, "reason": reason,
+                    "actor": actor,
+                    "reason": reason + (
+                        f" [attestation:{attestation}]" if attestation is not None else ""
+                    ),
                 }
             )
             record["authority"] = authority
+        if reverify:
+            if authority is not None or record["authority"] != "verified":
+                raise BrainError("Only a verified record's revised claim is verified again")
+            if attestation is None:
+                raise BrainError("Say who checked the revised claim: attestation agent or person")
+            record["transitions"].append(
+                {
+                    "from": "observed", "to": "verified", "at": utc_now(),
+                    "actor": actor, "reason": f"{reason} [attestation:{attestation}]",
+                }
+            )
         if transition_to is not None:
             allowed = LIFECYCLES[record["type"]]["transitions"].get(
                 record["status"], set()
@@ -1047,8 +1452,16 @@ def update_record(
             record["progress"] = progress
         if auto_checkpoint is not None:
             record["auto_checkpoint"] = auto_checkpoint
-        record["next_steps"] = list(dict.fromkeys([*record["next_steps"], *next_steps]))
-        record["files"] = list(dict.fromkeys([*record["files"], *files]))
+        record["next_steps"] = list(
+            dict.fromkeys(
+                next_steps if replace_next_steps else [*record["next_steps"], *next_steps]
+            )
+        )
+        touched = list(dict.fromkeys(files))
+        retouched = set(touched)
+        record["files"] = [
+            existing for existing in record["files"] if existing not in retouched
+        ] + touched
         record["sources"] = list(dict.fromkeys([*record["sources"], *sources]))
         if conflicts is not None:
             record["conflicts"] = list(
@@ -1227,6 +1640,7 @@ def append_message(
     terminal task refuses new messages - the channel exists for active
     coordination, not for post-mortem edits.
     """
+    guard_shared_text("Agent message", [body])
     with mutation_lock(repository):
         _, task, _ = find_task(repository, identifier)
         if task["status"] in LIFECYCLES["task"]["terminal"]:
@@ -1256,7 +1670,7 @@ def append_message(
         validate_message(record)
         validate_schema_file(repository, "message.schema.json", record)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -1309,6 +1723,12 @@ def read_messages(
 
 
 def record_is_eligible(repository: Path, record: dict[str, Any], config: dict[str, Any]) -> tuple[bool, str]:
+    """Whether retrieval may index a record, and the reason if not.
+
+    A record whose cited file was edited is eligible (retrieval marks it); one
+    whose cited file is gone (`source-missing`) or was never digested
+    (`source-undigested`) is not.
+    """
     if record.get("privacy") == "private":
         return False, "private"
     if record.get("privacy") not in config["allowed_privacy"]:
@@ -1326,8 +1746,14 @@ def record_is_eligible(repository: Path, record: dict[str, Any], config: dict[st
         return False, "lifecycle"
     if record.get("superseded_by") is not None:
         return False, "superseded"
-    if not sources_are_fresh(repository, record):
-        return False, "stale"
+    # An edited citation no longer evicts the record: retrieval marks it and
+    # ranks it down (context_retrieval._runtime_filter), as it does a chunk.
+    # Any edit used to evict it - accepted decisions, open findings and
+    # events alike - and its links went with it. Only a citation that cannot
+    # be checked at all keeps the record out.
+    problem = citation_problem(repository, record)
+    if problem is not None:
+        return False, problem
     return True, "eligible"
 
 
@@ -1356,7 +1782,45 @@ def rebuild_indexes(repository: Path) -> None:
     atomic_json(archive_path, archived)
 
 
-def validate_repository(repository: Path) -> list[str]:
+def stale_record_states(repository: Path) -> list[tuple[str, str]]:
+    """Records whose cited sources are no longer what they were when written,
+    each with its state: `changed` (retrieval serves it marked for checking),
+    `source-missing` or `source-undigested` (retrieval leaves it out).
+    Archived records are listed too, though they are never retrieved."""
+    stale: list[tuple[str, str]] = []
+    for path, record, _ in iter_records(repository, include_archive=True):
+        try:
+            fresh = sources_are_fresh(repository, record)
+        except (BrainError, OSError):
+            continue
+        if not fresh:
+            stale.append((str(path), citation_problem(repository, record) or "changed"))
+    return stale
+
+
+def stale_records(repository: Path) -> list[str]:
+    """Records whose cited source changed after they were written.
+
+    Reported beside validation, not as a failure of it: an edited citation
+    leaves the record intact and retrieval serves it marked for checking; a
+    deleted or undigested one keeps it out of retrieval.
+    """
+    return [path for path, _ in stale_record_states(repository)]
+
+
+def validate_repository(
+    repository: Path, *, check_freshness: bool = True
+) -> list[str]:
+    """Every problem with the governed records, journals, manifests and indexes.
+
+    ``check_freshness=False`` leaves out one rule: a record whose cited source
+    changed after it was written. That is the source moving on, not the record
+    breaking - retrieval serves such a record marked for checking, and only a
+    deleted citation keeps it out - and no write can cause or cure it.
+    Compaction passes it: with the rule in, the first edit to any file a record
+    cites, such as the living spec behind an accepted decision, refused every
+    compaction from then on.
+    """
     errors: list[str] = []
     seen: set[str] = set()
     records: dict[str, tuple[Path, dict[str, Any]]] = {}
@@ -1379,8 +1843,14 @@ def validate_repository(repository: Path) -> list[str]:
                 raise BrainError(
                     f"record path must be {expected_path.relative_to(repository)}"
                 )
-            if not sources_are_fresh(repository, record):
+            if check_freshness and not sources_are_fresh(repository, record):
                 raise BrainError("source fingerprint is stale")
+            secret = stored_secret_label(record)
+            if secret is not None:
+                raise BrainError(
+                    f"record contains {secret}; remove it from the record and "
+                    "rotate the credential, since Git history keeps it"
+                )
             records[record["id"]] = (path, record)
         except BrainError as error:
             errors.append(f"{path}: {error}")
@@ -1478,6 +1948,10 @@ def validate_repository(repository: Path) -> list[str]:
             "local_episode_count",
         },
     }
+    # Version 4 adds the counters of automatic source-linked expansion.
+    # Version 3 shipped, so a version 3 manifest that carried them would be
+    # rejected by every runtime that validates version 3 exactly.
+    manifest_keys_by_version[4] = manifest_keys_by_version[3] | {"source_links"}
     version_1_token_keys = {
         "policy", "handoff", "durable", "dynamic", "evidence", "total",
         "target", "hard",
@@ -1486,6 +1960,7 @@ def validate_repository(repository: Path) -> list[str]:
         1: version_1_token_keys,
         2: version_1_token_keys,
         3: version_1_token_keys | {"local_episodes"},
+        4: version_1_token_keys | {"local_episodes"},
     }
     manifests = brain_root(repository) / "control" / "retrieval-manifests"
     if manifests.is_dir():
@@ -1545,6 +2020,49 @@ def validate_repository(repository: Path) -> list[str]:
     return errors
 
 
+def bank_write_errors(
+    repository: Path,
+    before: list[str],
+    attested: tuple[Path, ...] = (),
+) -> list[str]:
+    """What a Memory Bank write broke, as opposed to what the bank already had.
+
+    Every write used to validate the whole bank afterwards and roll back on any
+    error at all. A chunk that merely reached its review date therefore failed
+    every promotion, compaction, re-attestation and retirement in the
+    repository, and two overdue chunks each blocked the one command that would
+    have repaired the other. Time alone made the bank unwritable.
+
+    A write is now refused for errors it introduced, compared against the
+    bank as it stood before the write (``before``), and for any error in a
+    chunk it produced or attested (``attested``): a new chunk, or one an
+    operator just re-verified, meets the full contract whatever the rest of
+    the bank looks like. A problem that predates the write stays where it
+    always surfaces - `validate.py`, `bank-audit`, and retrieval exclusion -
+    instead of being charged to the next unrelated write.
+    """
+    bank = repository / "memory-bank"
+    baseline = set(before)
+    errors = [error for error in validate_bank(bank) if error not in baseline]
+    for path in attested:
+        try:
+            validate_bank_metadata(
+                path,
+                parse_bank_frontmatter(path),
+                repository,
+                # A sink, so an attested chunk that is now terminal gets the
+                # same treatment of a deleted citation as the full report.
+                [],
+                label=bank_display_path(path, bank),
+            )
+            validate_bank_secrets(path)
+        except (OSError, BankValidationError) as error:
+            message = f"{bank_display_path(path, bank)}: {error}"
+            if message not in errors:
+                errors.append(message)
+    return errors
+
+
 def promoted_source_rewrites(
     repository: Path, renames: dict[str, str]
 ) -> list[tuple[Path, str]]:
@@ -1600,9 +2118,15 @@ def promoted_source_rewrites(
 
 def compact(repository: Path) -> dict[str, int]:
     with mutation_lock(repository):
-        errors = validate_repository(repository)
+        # Without freshness: moving terminal records can neither cause nor
+        # cure a stale citation, and the documented contract is that
+        # compaction skips stale records, not that one refuses all of it.
+        errors = validate_repository(repository, check_freshness=False)
         if errors:
-            raise BrainError("Compaction refused because active records are invalid")
+            raise BrainError(
+                "Compaction refused because active records are invalid "
+                f"({len(errors)} problem(s); see `context.py validate`)"
+            )
         moves: list[tuple[Path, Path]] = []
         for path, record, _ in list(iter_records(repository)):
             if (
@@ -1629,6 +2153,8 @@ def compact(repository: Path) -> dict[str, int]:
             for source, destination in moves
         }
         rewrites = promoted_source_rewrites(repository, renames)
+        bank = repository / "memory-bank"
+        bank_before = validate_bank(bank) if bank.is_dir() else []
         snapshot = snapshot_files(
             [path for move in moves for path in move]
             + list(index_paths(repository))
@@ -1641,15 +2167,16 @@ def compact(repository: Path) -> dict[str, int]:
             for path, content in rewrites:
                 atomic_write(path, content)
             rebuild_indexes(repository)
-            post_errors = validate_repository(repository)
+            post_errors = validate_repository(repository, check_freshness=False)
             if post_errors:
                 raise BrainError(
                     "Archive validation failed after compaction: "
                     + "; ".join(post_errors)
                 )
-            bank = repository / "memory-bank"
             if bank.is_dir():
-                bank_errors = validate_bank(bank)
+                # Repointing a citation is mechanical, not an attestation:
+                # only what the move broke may stop it.
+                bank_errors = bank_write_errors(repository, bank_before)
                 if bank_errors:
                     raise BrainError(
                         "Memory Bank validation failed after compaction: "
@@ -1894,6 +2421,104 @@ def stalled_automatic_promotions(repository: Path) -> list[tuple[str, dict[str, 
     ]
 
 
+def promotion_ledger(repository: Path) -> tuple[set[str], dict[str, dict[str, Any]]]:
+    """What the promotions say about each record: held, or last promoted alone.
+
+    Held: in a person's review, or promoted together with other records - a
+    synthesis is a person's to revise. Last promoted alone: the newest
+    applied promotion of the record by itself, by the record revision it
+    carried, which a revised record is compared with.
+    """
+    held: set[str] = set()
+    latest: dict[str, dict[str, Any]] = {}
+    for _, proposal in iter_promotions(repository):
+        if not isinstance(proposal, dict) or proposal.get("status") == "rejected":
+            continue
+        sources = [
+            source for source in proposal.get("source_records") or []
+            if isinstance(source, dict) and isinstance(source.get("id"), str)
+            and type(source.get("revision")) is int
+        ]
+        if proposal.get("status") != "applied":
+            if proposal.get("review_mode") != "automatic":
+                held.update(source["id"] for source in sources)
+            continue
+        if len(sources) != 1:
+            held.update(source["id"] for source in sources)
+            continue
+        previous = latest.get(sources[0]["id"])
+        if previous is None or sources[0]["revision"] > previous["source_records"][0]["revision"]:
+            latest[sources[0]["id"]] = proposal
+    return held, latest
+
+
+def _chunk_status(repository: Path, memory_id: object) -> Optional[str]:
+    if not isinstance(memory_id, str):
+        return None
+    try:
+        return str(_find_chunk(repository / "memory-bank", memory_id)[1].get("status"))
+    except BrainError:
+        return None
+
+
+def obsolete_promotion(
+    repository: Path, proposal: dict[str, Any], applied: dict[str, dict[str, Any]]
+) -> Optional[str]:
+    """Why an unapplied automatic promotion can never apply, or None.
+
+    Another promotion already brought its record's revision - or a later one
+    - into the bank, or the record moved on: a revision is never taken back
+    and a record compaction moved never moves back, so `apply_promotion`
+    would refuse it on every retry for good.
+    """
+    source = proposal["source_records"][0]
+    winner = applied.get(source["id"])
+    if (
+        winner is not None
+        and winner.get("id") != proposal.get("id")
+        and winner["source_records"][0]["revision"] >= source["revision"]
+    ):
+        return f"already promoted as {winner.get('destination_memory_id')}"
+    try:
+        path, record, _ = find_record(repository, source["id"], include_archive=True)
+    except BrainError as error:
+        if "not found" in str(error):
+            return "its record no longer exists"
+        return None
+    if record["revision"] != source["revision"]:
+        return f"its record moved on to revision {record['revision']}"
+    if path.relative_to(repository).as_posix() != source["path"]:
+        return "its record moved to " + path.relative_to(repository).as_posix()
+    return None
+
+
+def withdraw_promotion(repository: Path, promotion_id: str, reason: str) -> dict[str, Any]:
+    """Close an automatic promotion that can never apply.
+
+    Left open it was retried, and failed, on every run for good. The schema
+    has no withdrawn state, so it takes the closing state an unapplied
+    proposal has - `rejected`, by nobody, which every reader already takes as
+    "not promoted" - and `conflicts` keeps why, for the audit trail.
+    """
+    path = brain_root(repository) / "control" / "promotions" / f"{promotion_id}.json"
+    with mutation_lock(repository):
+        try:
+            proposal = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise BrainError(f"Promotion not found or invalid: {promotion_id}") from error
+        validate_promotion_record(repository, proposal, expected_id=promotion_id)
+        if proposal.get("review_mode") != "automatic" or proposal.get("status") not in {"proposed", "reviewed"}:
+            raise BrainError("Only an unapplied automatic promotion is withdrawn")
+        proposal["status"] = "rejected"
+        proposal["outcome"] = "rejected"
+        proposal["updated_at"] = utc_now()
+        proposal["revision"] += 1
+        proposal["conflicts"] = list(dict.fromkeys([*proposal["conflicts"], f"withdrawn: {reason}"]))
+        validate_promotion_record(repository, proposal, expected_id=promotion_id)
+        atomic_json(path, proposal)
+        return proposal
+
+
 def promotion_content(record: dict[str, Any]) -> Optional[str]:
     """Build durable content from a record, or None when it says nothing.
 
@@ -1921,7 +2546,11 @@ def promotion_content(record: dict[str, Any]) -> Optional[str]:
 
 
 def promotion_eligibility_error(
-    repository: Path, record: dict[str, Any], config: dict[str, Any]
+    repository: Path,
+    record: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    allow_changed_sources: bool = False,
 ) -> Optional[str]:
     promotable = PROMOTABLE_STATES.get(record["type"])
     if promotable is None:
@@ -1932,9 +2561,24 @@ def promotion_eligibility_error(
         return f"authority is {record['authority']}, not verified"
     if record["privacy"] not in config["allowed_privacy"]:
         return f"privacy {record['privacy']} is not allowed for retrieval"
-    if promotion_content(record) is None:
+    content = promotion_content(record)
+    if content is None:
         return "record carries no content beyond its own title"
+    found = sensitive_label(f"{record['title']}\n{content}")
+    if found:
+        # Durable memory is the widest audience a record can reach; a record
+        # that predates the write guard must not carry its data there.
+        return f"record content contains {found}"
     if sources_are_fresh(repository, record):
+        return None
+    if allow_changed_sources and citation_problem(repository, record) is None:
+        # The automatic path promotes knowledge whose cited files were edited
+        # after it was verified: the chunk keeps the digests taken at
+        # verification, so retrieval serves it marked "source changed"
+        # instead of the bank never learning it. On a real project 59 of 70
+        # resolved findings were blocked here for good, because promotion ran
+        # days after the fix that resolved them had edited the cited files.
+        # A deleted citation, or one the record never digested, still blocks.
         return None
     stale = [
         item["path"]
@@ -1950,7 +2594,11 @@ def promotion_eligibility_error(
 
 
 def promotable_records(
-    repository: Path, config: dict[str, Any]
+    repository: Path,
+    config: dict[str, Any],
+    *,
+    allow_changed_sources: bool = False,
+    only: Optional[set[str]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Return promotable records, and the ones a rule held back.
 
@@ -1965,6 +2613,7 @@ def promotable_records(
     to notice.
     """
     already = promoted_source_ids(repository)
+    held, applied = promotion_ledger(repository)
     candidates: list[dict[str, Any]] = []
     blocked: list[dict[str, str]] = []
     # Archived records stay promotable. A resolved finding is both promotable
@@ -1975,16 +2624,48 @@ def promotable_records(
             validate_record(record)
         except BrainError:
             continue
-        if record["id"] in already:
+        if only is not None and record["id"] not in only:
             continue
         if record["status"] not in PROMOTABLE_STATES.get(record["type"], set()):
             continue
         content = promotion_content(record)
-        reason = promotion_eligibility_error(repository, record, config)
+        supersedes = None
+        if record["id"] in already:
+            # Promoted once. A record revised since - a corrected consequence
+            # - is promoted again, and its chunk supersedes the one promoted
+            # before: excluding the record for good left the bank serving
+            # the old conclusion, marked only "source changed", while the
+            # corrected one never arrived.
+            previous = applied.get(record["id"])
+            if (
+                record["id"] in held
+                or previous is None
+                or content is None
+                or content == previous.get("content")
+                or record["revision"] <= previous["source_records"][0]["revision"]
+            ):
+                continue
+            memory_id = previous.get("destination_memory_id")
+            if previous.get("review_mode") != "automatic":
+                # What a person reviewed is not replaced without one.
+                blocked.append({"record_id": record["id"], "reason": (
+                    f"revised since {memory_id} was promoted after a person's review; "
+                    "propose the revision for review")})
+                continue
+            status = _chunk_status(repository, memory_id)
+            if status != "active":
+                blocked.append({"record_id": record["id"], "reason": (
+                    f"revised since it was promoted, and {memory_id} is {status or 'missing'}; "
+                    "promote the revision by hand if it still holds")})
+                continue
+            supersedes = memory_id
+        reason = promotion_eligibility_error(
+            repository, record, config, allow_changed_sources=allow_changed_sources
+        )
         if reason is not None:
             blocked.append({"record_id": record["id"], "reason": reason})
             continue
-        candidates.append({"record": record, "content": content})
+        candidates.append({"record": record, "content": content, "supersedes": supersedes})
     return candidates, blocked
 
 
@@ -2090,103 +2771,148 @@ def bank_duplicate_ratio(config: dict[str, Any]) -> float:
     return ratio if 0.0 < ratio <= 1.0 else BANK_DUPLICATE_RATIO
 
 
-def auto_promote(repository: Path, *, owner: str, limit: int = 5) -> dict[str, Any]:
+def auto_promote(
+    repository: Path,
+    *,
+    owner: str,
+    limit: int = 5,
+    only: Optional[set[str]] = None,
+) -> dict[str, Any]:
     """Promote resolved, verified knowledge into durable memory without review.
 
     Every applied chunk is tagged `auto-promoted` and its promotion names no
     reviewer, so the absence of human approval stays visible in both stores.
+    `only` restricts the run to the named records - the resolving update
+    promotes its own record at once instead of waiting for a turn boundary.
+    A record revised since its promotion is promoted again, and the new
+    chunk supersedes the old one. A stalled promotion that can never apply
+    is withdrawn (`closed`) rather than retried for good.
     """
     config = load_config(repository)
     if not config.get("automatic_promotion"):
         return {
             "enabled": False, "promoted": [], "failed": [],
-            "blocked": [], "skipped": 0,
+            "blocked": [], "closed": [], "skipped": 0,
         }
     promoted: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
-
-    # Retry a promotion that stalled after its record was created, in place.
-    # Creating a second one would leave the first orphaned forever.
-    for promotion_id, proposal in stalled_automatic_promotions(repository):
-        source = proposal["source_records"][0]
-        try:
-            if proposal["status"] == "proposed":
-                auto_review_promotion(repository, promotion_id)
-            applied = apply_promotion(repository, promotion_id)
-        except BrainError as error:
-            failed.append({"record_id": source["id"], "reason": str(error)})
-            continue
-        promoted.append(
-            {
-                "record_id": source["id"],
-                "type": source["type"],
-                "memory_id": applied["destination_memory_id"],
-            }
-        )
-
-    candidates, blocked = promotable_records(repository, config)
-    # Re-read on every iteration rather than once before the loop: a single
-    # flush promotes up to `limit` records, so the batch case - one review
-    # producing several findings that say the same thing - is exactly the one
-    # a pre-loop snapshot would miss.
-    threshold = bank_duplicate_ratio(config)
-    existing = active_chunk_texts(repository)
-    for candidate in candidates[:limit]:
-        record = candidate["record"]
-        duplicate = near_duplicate_chunk(
-            f"{record['title']}\n{candidate['content']}", existing, threshold
-        )
-        if duplicate is not None:
-            # The policy "update an existing chunk instead of creating a near
-            # duplicate" had no executor on the automatic path: promotion
-            # never read the bank it writes into. Naming the chunk turns the
-            # block into an instruction.
-            blocked.append(
+    closed: list[dict[str, str]] = []
+    # Choosing a record, proposing it and applying the proposal are one step.
+    # Two runs at once - a Stop hook and a Harness save - each chose the same
+    # record and each wrote a proposal; one chunk was written and the other
+    # proposal stayed `reviewed`, refused on every retry, or wrote a second
+    # chunk of the same record on a later day.
+    with mutation_lock(repository):
+        _, applied = promotion_ledger(repository)
+        # Retry a promotion that stalled after its record was created, in
+        # place: creating a second one would leave the first orphaned. One
+        # that can never apply is withdrawn instead.
+        for promotion_id, proposal in stalled_automatic_promotions(repository):
+            source = proposal["source_records"][0]
+            if only is not None and source["id"] not in only:
+                continue
+            try:
+                obsolete = obsolete_promotion(repository, proposal, applied)
+                if obsolete is not None:
+                    withdraw_promotion(repository, promotion_id, obsolete)
+                    closed.append({"record_id": source["id"], "promotion_id": promotion_id,
+                                   "reason": obsolete})
+                    continue
+                if proposal["status"] == "proposed":
+                    auto_review_promotion(repository, promotion_id)
+                applied_proposal = apply_promotion(repository, promotion_id)
+            except BrainError as error:
+                failed.append({"record_id": source["id"], "reason": str(error)})
+                continue
+            applied[source["id"]] = applied_proposal
+            promoted.append(
                 {
-                    "record_id": record["id"],
-                    "reason": (
-                        f"near-duplicate of {duplicate}; merge or supersede first"
-                    ),
+                    "record_id": source["id"],
+                    "type": source["type"],
+                    "memory_id": applied_proposal["destination_memory_id"],
                 }
             )
-            continue
-        try:
-            proposal = create_promotion(
-                repository,
-                [record["id"]],
-                record["title"],
-                candidate["content"],
-                proposer=owner,
-                review_mode="automatic",
-            )
-            auto_review_promotion(repository, proposal["id"])
-            applied = apply_promotion(repository, proposal["id"])
-        except BrainError as error:
-            # One unpromotable record must not stop the rest, but a systematic
-            # failure — an absent Memory Bank, say — has to stay visible rather
-            # than looking like "nothing was worth promoting".
-            failed.append({"record_id": record["id"], "reason": str(error)})
-            continue
-        promoted.append(
-            {
-                "record_id": record["id"],
-                "type": record["type"],
-                "memory_id": applied["destination_memory_id"],
-            }
+        # A record whose promotion is still open is retried in place on the
+        # next run, never proposed a second time.
+        pending = {
+            proposal["source_records"][0]["id"]
+            for _, proposal in stalled_automatic_promotions(repository)
+        }
+        candidates, blocked = promotable_records(
+            repository, config, allow_changed_sources=True, only=only
         )
-        # The chunk just written is a duplicate candidate for the rest of this
-        # same batch.
-        existing.append(
-            (
-                applied["destination_memory_id"],
-                f"{record['title']}\n{candidate['content']}",
+        candidates = [
+            candidate for candidate in candidates
+            if candidate["record"]["id"] not in pending
+        ]
+        # Re-read on every iteration rather than once before the loop: a
+        # single flush promotes up to `limit` records, so the batch case - one
+        # review producing several findings that say the same thing - is
+        # exactly the one a pre-loop snapshot would miss.
+        threshold = bank_duplicate_ratio(config)
+        existing = active_chunk_texts(repository)
+        for candidate in candidates[:limit]:
+            record = candidate["record"]
+            # A revision is measured against everything but the chunk it
+            # replaces, which it resembles by design.
+            replaces = candidate.get("supersedes")
+            others = [item for item in existing if item[0] != replaces]
+            duplicate = near_duplicate_chunk(
+                f"{record['title']}\n{candidate['content']}", others, threshold
             )
-        )
+            if duplicate is not None:
+                # The policy "update an existing chunk instead of creating a
+                # near duplicate" had no executor on the automatic path:
+                # promotion never read the bank it writes into. Naming the
+                # chunk turns the block into an instruction.
+                blocked.append(
+                    {
+                        "record_id": record["id"],
+                        "reason": (
+                            f"near-duplicate of {duplicate}; merge or supersede first"
+                        ),
+                    }
+                )
+                continue
+            try:
+                proposal = create_promotion(
+                    repository,
+                    [record["id"]],
+                    record["title"],
+                    candidate["content"],
+                    proposer=owner,
+                    review_mode="automatic",
+                )
+                auto_review_promotion(repository, proposal["id"])
+                applied_proposal = apply_promotion(repository, proposal["id"])
+            except BrainError as error:
+                # One unpromotable record must not stop the rest, but a
+                # systematic failure - an absent Memory Bank, say - has to
+                # stay visible rather than looking like "nothing was worth
+                # promoting".
+                failed.append({"record_id": record["id"], "reason": str(error)})
+                continue
+            promoted.append(
+                {
+                    "record_id": record["id"],
+                    "type": record["type"],
+                    "memory_id": applied_proposal["destination_memory_id"],
+                }
+            )
+            # The chunk just written is a duplicate candidate for the rest of
+            # this same batch; the one it superseded no longer is.
+            existing = others + [
+                (
+                    applied_proposal["destination_memory_id"],
+                    f"{record['title']}\n{candidate['content']}",
+                )
+            ]
     return {
         "enabled": True,
         "promoted": promoted,
         "failed": failed,
         "blocked": blocked,
+        "closed": closed,
         "skipped": max(0, len(candidates) - limit),
     }
 
@@ -2402,6 +3128,7 @@ def retire_chunk(
             successor_path, successor, successor_body = _find_chunk(
                 bank, superseded_by
             )
+        before = validate_bank(bank)
         snapshot = snapshot_files(
             [p for p in (path, successor_path, index_path) if p is not None]
         )
@@ -2422,7 +3149,11 @@ def retire_chunk(
                 )
             index_text, chunk_count = render_bank_index(bank)
             atomic_write(index_path, index_text)
-            errors = validate_bank(bank)
+            errors = bank_write_errors(
+                repository,
+                before,
+                tuple(p for p in (path, successor_path) if p is not None),
+            )
             if errors:
                 raise BrainError(
                     "Memory Bank retire failed validation: " + "; ".join(errors)
@@ -2567,6 +3298,7 @@ def reverify_chunk(
                 f"Only an active chunk can be re-verified: {memory_id} is "
                 f"{metadata.get('status')}"
             )
+        before = validate_bank(bank)
         snapshot = snapshot_files([path, index_path])
         try:
             metadata["last_verified"] = today.isoformat()
@@ -2577,7 +3309,9 @@ def reverify_chunk(
             atomic_write(path, _render_chunk(metadata, body))
             index_text, chunk_count = render_bank_index(bank)
             atomic_write(index_path, index_text)
-            errors = validate_bank(bank)
+            # Re-verifying is an attestation, so this chunk meets the full
+            # contract; another chunk's overdue review is not its problem.
+            errors = bank_write_errors(repository, before, (path,))
             if errors:
                 raise BrainError(
                     "Memory Bank re-verify failed validation: " + "; ".join(errors)
@@ -2651,6 +3385,11 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         # merging it here would put code paths under `chunk_source_digests`,
         # where the next edit evicts the chunk as `source-changed`.
         inherited: list[str] = []
+        # The digests each cited file had when the record was verified. A
+        # chunk digests what its knowledge was checked against, not what the
+        # files hold today, or promotion would launder an edit that happened
+        # after verification into a "fresh" citation.
+        verified_digests: dict[str, dict[str, str]] = {}
         for source in proposal["source_records"]:
             current_path, current, _ = find_record(
                 repository, source["id"], include_archive=True
@@ -2663,16 +3402,21 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 or current["revision"] != source["revision"]
             ):
                 raise BrainError(f"Promotion source revision changed: {source['id']}")
-            ineligible = promotion_eligibility_error(repository, current, config)
+            ineligible = promotion_eligibility_error(
+                repository, current, config, allow_changed_sources=automatic
+            )
             if ineligible is not None:
                 raise BrainError(f"Promotion source is not eligible: {ineligible}")
+            for item in current.get("source_fingerprints") or []:
+                if isinstance(item, dict) and isinstance(item.get("path"), str):
+                    verified_digests[item["path"]] = item
             for cited in current.get("sources") or []:
                 if not isinstance(cited, str):
                     continue
                 # A citation whose file is already gone is not carried: the
                 # chunk would fail `validate_metadata` at birth and block a
                 # promotion that has nothing to do with that file.
-                if (repository / cited.split("#", 1)[0]).is_file():
+                if workspace_roots.resolve(repository, cited).is_file():
                     inherited.append(cited)
         today = datetime.now(timezone.utc).date()
         # Conflict-free identifier: the promotion date plus eight hex
@@ -2682,16 +3426,53 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         # chunk files. The legacy counter file may remain on disk; it is
         # neither read nor written here.
         source_uuid = proposal["source_records"][0]["id"]
-        memory_id = (
-            f"MEM-{today.strftime('%Y%m%d')}-{source_uuid.replace('-', '')[:8]}"
-        )
+        suffix = source_uuid.replace("-", "")[:8]
+        # An automatic promotion of a record the bank already learned from,
+        # at an earlier revision, is that knowledge revised: its chunk
+        # supersedes the earlier one in this same write. Its identifier hashes
+        # the revision in, since the earlier chunk may carry today's date too.
+        predecessor: Optional[tuple[Path, dict[str, Any], str]] = None
+        if automatic and len(proposal["source_records"]) == 1:
+            _, applied = promotion_ledger(repository)
+            previous = applied.get(source_uuid)
+            if previous is not None and previous.get("id") != proposal["id"]:
+                revision = proposal["source_records"][0]["revision"]
+                if previous["source_records"][0]["revision"] >= revision:
+                    raise BrainError(
+                        "Promotion source was already promoted as "
+                        f"{previous.get('destination_memory_id')}"
+                    )
+                predecessor = _find_chunk(bank, str(previous.get("destination_memory_id")))
+                if predecessor[1].get("status") != "active":
+                    raise BrainError(
+                        f"The chunk this promotion revises is {predecessor[1].get('status')}: "
+                        f"{previous.get('destination_memory_id')}"
+                    )
+                suffix = hashlib.sha256(f"{source_uuid}#{revision}".encode("utf-8")).hexdigest()[:8]
+        memory_id = f"MEM-{today.strftime('%Y%m%d')}-{suffix}"
         slug = re.sub(r"[^a-z0-9]+", "-", proposal["title"].lower()).strip("-") or "promoted"
         destination = bank / "chunks" / f"{memory_id}-{slug}.md"
         if destination.exists():
-            raise BrainError(f"Promotion destination already exists: {destination}")
+            raise BrainError(
+                "Promotion destination already exists: "
+                + bank_display_path(destination, bank)
+            )
         # Tag the chunk so the bank itself shows which knowledge no human
         # approved; a reader must not have to open the promotion to find out.
         tags = ["project-brain", "promoted"] + (["auto-promoted"] if automatic else [])
+        # A claim only its own agent ever checked stays marked as such in
+        # the bank, so a later reader can weigh it.
+        attested = []
+        for item in proposal["source_records"]:
+            try:
+                # Archived sources too: promotion accepts an archived record,
+                # and its provenance must not drop out on the way.
+                attested.append(record_attestation(
+                    find_record(repository, item["id"], include_archive=True)[1]))
+            except BrainError:
+                attested.append("")
+        if "agent" in attested:
+            tags.append("agent-attested")
         metadata = {
             "id": memory_id, "title": proposal["title"],
             # Derived from what was promoted, not asserted. `decision` remains
@@ -2711,7 +3492,8 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                     [item["path"] for item in proposal["source_records"]] + inherited
                 )
             ),
-            "supersedes": [], "superseded_by": None,
+            "supersedes": [predecessor[1]["id"]] if predecessor else [],
+            "superseded_by": None,
             # Open-ended validity: the knowledge holds from today until a
             # successor closes it with a valid_to, rather than being deleted.
             "valid_from": today.isoformat(), "valid_to": None,
@@ -2721,23 +3503,37 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
         # year or more and carried no such check at all, so a promoted
         # conclusion outlived any means of noticing that the record it was
         # drawn from had moved on.
-        metadata["source_digests"] = chunk_source_digests(
-            repository, metadata["sources"]
-        )
+        metadata["source_digests"] = [
+            {"path": entry["path"], "sha256": verified_digests[entry["path"]]["sha256"]}
+            if entry["path"] in verified_digests
+            and isinstance(verified_digests[entry["path"]].get("sha256"), str)
+            else entry
+            for entry in chunk_source_digests(repository, metadata["sources"])
+        ]
         heading = f"# {proposal['title']}"
         content = proposal["content"].strip()
         chunk = render_markdown_record(
             metadata,
             content if content.startswith(heading) else f"{heading}\n\n{content}",
         )
-        snapshot = snapshot_files([destination, index_path, promotion_path])
+        before = validate_bank(bank)
+        snapshot = snapshot_files(
+            [destination, index_path, promotion_path] + ([predecessor[0]] if predecessor else [])
+        )
         try:
             atomic_write(destination, chunk)
+            if predecessor is not None:
+                # Closed the way `retire_chunk` closes one: superseded, linked
+                # to its successor, valid until today. The body is untouched.
+                predecessor[1]["status"] = "superseded"
+                predecessor[1]["superseded_by"] = memory_id
+                predecessor[1]["valid_to"] = today.isoformat()
+                atomic_write(predecessor[0], _render_chunk(predecessor[1], predecessor[2]))
             # The index is derived state: regenerate it from chunk
             # frontmatter instead of appending a row, so the same rendering
             # path serves promotions, manual capture, and post-merge repair.
             atomic_write(index_path, render_bank_index(bank)[0])
-            validation_errors = validate_bank(bank)
+            validation_errors = bank_write_errors(repository, before, (destination,))
             if validation_errors:
                 raise BrainError(
                     "Promoted Memory Bank chunk failed validation: "

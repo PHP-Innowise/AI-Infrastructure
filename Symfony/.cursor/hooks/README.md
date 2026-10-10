@@ -10,17 +10,22 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 **Return:** Always `0` (informational only).
 
 
+### beforeSubmitPrompt: Working-Memory Read
+**Script:** `working-memory-read.sh`
+**Purpose:** Retrieves for the prompt being submitted (`refresh --host cursor --query <prompt> --sanitize --json`) and renders the capsule into `.cursor/rules/working-memory.mdc` before the request leaves (see the capsule section below). Writes no task state. Stands down when the host already put the capsule into the prompt (`CONTEXT_CAPSULE_DELIVERED=1`, the Harness).
+**Return:** Always `0` with `{"continue": true}` on stdout - memory never blocks a prompt.
+
 ### stop: Working-Memory Write
 **Script:** `working-memory-write.sh`
-**Purpose:** Buffers this turn's change set and flushes it to the authoritative task on a boundary. Reads Git porcelain metadata only; sensitive-looking paths and the runtime's own churn are excluded. The first flush provisions the task if it does not exist, so no manual `start` is required; an existing task is never overwritten. After the checkpoint, this Cursor copy renders the freshest Task Capsule into `.cursor/rules/working-memory.mdc` (see the capsule section below).
+**Purpose:** Buffers this turn's change set and flushes it to the authoritative task on a boundary. Reads Git porcelain metadata only; sensitive-looking paths and the runtime's own churn are excluded. The first flush provisions the task if it does not exist, so no manual `start` is required; an existing task is never overwritten. After the checkpoint, this Cursor copy renders the branch's Task Capsule into `.cursor/rules/working-memory.mdc` unless the prompt hook rendered it for this task (see the capsule section below).
 **Return:** Always `0` (a failed checkpoint must never surface as a turn error).
 **Flush boundary:** `CONTEXT_FLUSH_AFTER` turns, default 5.
 
 ### beforeShellExecution: Bash Validator
 **Script:** `bash-validator.sh`
-**Purpose:** Blocks destructive shell commands: force-push, hard reset, database/schema drops, unsafe down migrations, purging fixture loads, failed-message bulk removal, destructive SQL, secret-writing Composer config, and verification bypass.
+**Purpose:** Blocks destructive and secret-exposing shell commands: force push (including `--force-with-lease` and `+refspec`), hard reset, forced clean, `git branch -D`, hook bypass (`--no-verify`, `git commit -n`), recursive `rm` of root/home/working-tree paths, destructive SQL outside read-only searches, destructive `gh` calls, Composer auth tokens, printing `.env` files, and this edition's framework commands (listed in `BV_FRAMEWORK_RULES` at the end of `bash-validator.sh` in this directory). The command is parsed like a shell would split it, so chains, `$(...)`, `sh -c`, `eval`, wrappers such as `sudo`/`env`/`xargs` and console abbreviations do not hide a command. It is a guard against accidental destruction, not a sandbox: a script written to disk and run later is not inspected. The same command a sixth time in a session (the payload's `conversation_id`) warns and a twelfth time blocks, since the edit counter cannot see a command loop; a file edit `loop-detection.sh` recorded since the command last ran starts its count over, and a read-only status query standing alone - `gh pr checks/status/view`, `gh run list/view/watch`, `git status`, `docker [compose] ps/logs`, `kubectl get/describe/logs`, `tail`, optionally after `sleep N &&` and piped into filters - is polling, not a loop, and is not counted. Counts live in `${TMPDIR:-/tmp}/cursor-loop-detection-<uid>-<repo-key>/`. The counter directory is created private (mode 700); one that is a symbolic link or belongs to another user turns the count off, a counter that is a symbolic link is never read or written, and a count is read as base-10 digits only.
 **Input key:** `.command` (Cursor supplies the full command string).
-**Return:** `0` = safe, `2` = block.
+**Return:** `0` = safe, `1` = repetition warning (sixth to eleventh identical run), `2` = block. Cursor documents no channel that shows the agent a message about a command it lets run (`agent_message` accompanies a denial), so the warning reaches only the user, in the hooks output; the agent meets the guard first at the block. Claude Code and Codex hand the same warning to the model.
 
 ### subagentStart: Subagent Gate
 **Script:** `subagent-gate.sh`
@@ -32,7 +37,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### subagentStop: Subagent Dispatch Observer
 **Script:** `subagent-dispatch.sh`
-**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3 or the context runtime.
+**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3 or the context runtime. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported in one line - its exit status and the last line of its error - on stdout and stderr. That line reaches only the hooks output: Cursor's `subagentStop` has no channel to the orchestrating agent but `followup_message`, which would start another turn, so - unlike Claude Code, where a `PostToolUse` relay hands it on - the orchestrator is not told.
 **Return:** Always exit 0, no JSON output (observation only)
 
 ### afterFileEdit: File Naming Validator
@@ -43,16 +48,16 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### afterFileEdit: Loop Detection
 **Script:** `loop-detection.sh`
-**Purpose:** Tracks edit count per file to detect doom loops.
-**Return:** `0` = normal, `1` = warning at 7 edits, `2` = block at 10 edits.
-**Tracking:** `/tmp/cursor-loop-detection/`, reset by `sessionStart`.
+**Purpose:** Tracks edit count per file per session (the payload's `conversation_id`) to detect doom loops. Every edit it records also restarts the Bash Validator's repetition count for the commands run before it.
+**Return:** `0` = normal, `1` = warning at 7 edits (shown in the hooks output; `afterFileEdit` has no channel back to the agent), `2` = block at 10 edits.
+**Tracking:** `${TMPDIR:-/tmp}/cursor-loop-detection-<uid>-<repo-key>/`, created private; `sessionStart` clears that session's counters and any left untouched for a day. A linked or foreign directory turns the count off, and a linked counter is never followed.
 
 ## Claude Code -> Cursor Event Mapping
 
 | Claude Code (`.claude/settings.json`) | Cursor (`.cursor/hooks.json`) |
 |---|---|
 | `SessionStart` | `sessionStart` |
-| `UserPromptSubmit` | **No equivalent** - the capsule is rendered into an `alwaysApply` rule instead; see below |
+| `UserPromptSubmit` | `beforeSubmitPrompt` - it cannot add context, so the capsule is rendered into an `alwaysApply` rule; see below |
 | `Stop` | `stop` |
 | `PreToolUse` matcher `Bash` | `beforeShellExecution` |
 | `PreToolUse` matcher `Write\|Edit` | `afterFileEdit` (post-edit; reports a blocking violation that must be corrected) |
@@ -72,25 +77,65 @@ Notes:
 
 ## How the Task Capsule reaches Cursor
 
-The read half of automatic memory cannot run at prompt time on this tool.
-Cursor's nearest event, `beforeSubmitPrompt`, returns
-`{"continue": true|false, "user_message": "..."}`: it can allow or block a
-submission, but it cannot add context to the prompt. Emitting a capsule from
-it would produce output the client discards, so `working-memory-read.sh` is
-absent from `.cursor/hooks/` rather than present and unwired.
+Cursor's prompt-time event, `beforeSubmitPrompt`, receives the prompt but
+returns only `{"continue": true|false, "user_message": "..."}`: it can allow or
+block a submission, not add context to it. The capsule therefore arrives
+through `.cursor/rules/working-memory.mdc`, an `alwaysApply` rule Cursor sends
+with every request:
 
-The capsule arrives through a rule file instead. The Cursor copies of
-`working-memory-write.sh` (after the turn checkpoint) and `local-context.sh`
-(at session start, so a fresh session or a branch switch never serves the
-previous session's capsule) render the freshest capsule into
-`.cursor/rules/working-memory.mdc`, an `alwaysApply` rule Cursor attaches to
-every prompt. The rendered file is one turn stale by design and says so in
-its header ("as of end of previous turn"); it is replaced atomically and only
-when a fresh render succeeds, and it is ignored local state (this edition's
-`.gitignore` lists it). This divergence from the canonical `.claude/hooks`
-scripts is a declared MIRROR_RULES transformation (the `_WM_DELIVERY_*`
-constants in `memory-bank/scripts/context_retrieval.py`), verified by
+- `working-memory-read.sh` (`beforeSubmitPrompt`) retrieves for the prompt and
+  renders that capsule into the rule before the request leaves - in the same
+  turn when Cursor reads its rules after the hook, on the next prompt
+  otherwise. Cursor puts rules at the start of the model's context, where a
+  change costs the conversation its cached prefix, so the rule is replaced
+  only when the prompt retrieved an item - a document section - it does not
+  hold yet. Its header
+  says "retrieved for a recent prompt".
+- `working-memory-write.sh` (`stop`) renders the branch's capsule after the
+  turn checkpoint, unless the rule holds the prompt hook's capsule for the same
+  task; `local-context.sh` (`sessionStart`) always does, so a fresh session or
+  a branch switch never serves the previous session's capsule.
+
+The rule is replaced atomically and only when a fresh render succeeds. A
+render that fails, times out, breaks or is withheld by the retrieval gate
+keeps the rule in place only when its header names the current task; a rule
+another task left behind (a switched branch) is removed rather than sent as
+this task's working memory. The rule is ignored local state (this edition's `.gitignore` lists it). Cursor also
+runs the Claude Code hooks it finds; the Claude copies of the two
+working-memory hooks recognize Cursor's payload and stand down while this
+folder's hooks serve. These Cursor copies differ from the canonical
+`.claude/hooks` scripts by declared MIRROR_RULES transformations (the
+`_WM_DELIVERY_*` and `_WM_PROMPT_*` constants in
+`memory-bank/scripts/context_retrieval.py`), verified by
 `scripts/build_mirrors.py --check` - not drift.
 
 Explicit retrieval still works on Cursor: run `context.py retrieve` (or the
 `memory` command) when a task needs sharper context than the rendered rule.
+
+## Chat snapshots and merges
+
+`context-continuity.sh` is wired on `sessionStart`, `beforeSubmitPrompt` and
+`afterAgentResponse`; the payload's `hook_event_name` selects the action. A
+prompt (`prompt`) or a response (`text`) is appended to a per-chat snapshot,
+keyed by `conversation_id`, under the ignored `.context-handoff/` - in an
+attached session, under the launcher's state directory instead. At
+`sessionStart` a merge prepared with `context-load merge` for Cursor is
+delivered to a new conversation as `additional_context`: at most 6,000 bytes,
+pointing at the full archive under `.context-handoff/merges/`. Session-start
+delivery depends on the installed desktop client; cloud agents do not expose
+this event. A merged conversation gets the same sources again when it resumes.
+Nothing else is restored: a new conversation starts with the Task Capsule the
+working-memory hooks render into `working-memory.mdc`.
+
+Snapshots never reach Project Brain, Memory Bank or the local index, and a
+recognised secret refuses the capture. Earlier conversation text is untrusted
+background and carries no approval. Both halves fail open under
+`CONTEXT_HOOK_BUDGET` (default 5 seconds). `CONTEXT_CONTINUITY_DISABLED=1`
+turns them off; `CONTEXT_CONTINUITY_RESTORE_DISABLED=1`, which the Harness sets
+for its own merged tasks, skips only the delivery. Storage is bounded: eight
+chats per branch and 64 per checkout, none kept 30 days past its last capture,
+4 MiB of visible text per chat, and 128 merge archives / 256 MiB per checkout
+with 32 MiB per archive; a full store refuses a new merge and never blocks a
+turn. The store writes its own `.gitignore`, so it stays out of Git even where
+the project's `.gitignore` does not name it. The repository's context-handoff guide lists the
+limits of each client.

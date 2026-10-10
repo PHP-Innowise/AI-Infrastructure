@@ -7,7 +7,7 @@ This is the Codex edition of the generator. Codex discovers skills and policy di
 | Skills (25 workflows) | `.agents/skills/<name>/SKILL.md` | Codex loads repo skills from `.agents/skills`, not `.codex/`. The complete tree is byte-identical to the Claude edition. |
 | Policy | root `AGENTS.md` | Read natively by Codex (walked root -> cwd, concatenated). Shared with Claude/Cursor. |
 | Config | `.codex/config.toml` | Enables lifecycle hooks; loads only when the project is trusted. |
-| Hooks | `.codex/hooks.json` + `.codex/hooks/*.sh` | Same event schema as Claude Code (no matcher/timeout). |
+| Hooks | `.codex/hooks.json` + `.codex/hooks/*.sh` | Same event schema as Claude Code (no matcher/timeout). Each command runs through a launcher that finds `.codex/hooks/` from any subdirectory (this edition sits below the monorepo root), and a changed hook stays skipped until it is trusted again in `/hooks`. |
 | Definition of Done / principles | `.codex/DOD.md`, `.codex/GOLDEN-PRINCIPLES.md`, `.codex/STABILIZATION.md` | This edition's copies. |
 
 - **No command layer.** Codex invokes skills directly by name (`infra-scan`, `infra-generate`, `infra-build`, `infra-update`, `stack-adapter`).

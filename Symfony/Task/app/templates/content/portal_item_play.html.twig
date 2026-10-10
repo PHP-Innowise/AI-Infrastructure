@@ -1,0 +1,35 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ item.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ item.title }}</h1>
+
+        {# AC-04-24: embedded YouTube player with standard controls
+           (play/pause/seek/volume — native to the embed, BR-04-2).
+           AC-04-25's auto-completion (POST content_portal_item_complete on
+           the YouTube IFrame API's onStateChange -> PLAYING) is Stimulus/JS
+           wiring — coder-frontend territory; the backend endpoint this
+           calls is fully implemented and tested independently of it. #}
+        <iframe
+            width="640" height="360"
+            src="{{ item.youtubeUrl|replace({'watch?v=': 'embed/'}) }}"
+            title="{{ item.title }}"
+            data-content-item-id="{{ item.id }}"
+            data-complete-url="{{ path('content_portal_item_complete', {item: item.id}) }}"
+            allowfullscreen
+        ></iframe>
+
+        {% if item.instructions %}
+            <details open>
+                <summary>Instructions</summary>
+                <p>{{ item.instructions|nl2br }}</p>
+            </details>
+        {% endif %}
+
+        {% if next %}
+            <p><a href="{{ path('content_portal_item_play', {item: next.id}) }}">Next</a></p>
+        {% endif %}
+    </div>
+{% endblock %}

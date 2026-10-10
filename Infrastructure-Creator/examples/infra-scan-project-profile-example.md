@@ -154,8 +154,8 @@
 
 **Frontend:** skipped - no UI surface detected.
 
-**Process & Workflow (18):**
-`requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`, `project-brain`, `checkpoint`, `memory`. The memory quartet (the last four) operates the shared seeded layer: `memory-bank` through retrieve/capture/supersede/audit modes, `project-brain` through the governed control plane, `checkpoint`/`memory` as manual companions to the automatic working-memory hooks.
+**Process & Workflow (20):**
+`requirements-analyst`, `researcher`, `brainstorming`, `council`, `writing-plans`, `using-git-worktrees`, `systematic-debugger`, `refactorer`, `dependency-manager`, `review-pr`, `finishing-branch`, `documentation-generator`, `skill-creator`, `reflect`, `memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load`. The six memory-continuity guides operate the shared seeded layer: `memory-bank` through retrieve/capture/supersede/audit modes, `project-brain` through the governed control plane, `checkpoint`/`memory` as manual companions to the automatic working-memory hooks, and `context-save`/`context-load` as explicit portable handoff controls. A visible transcript is included only for a user-requested full task artifact and never in automatic retrieval.
 
 **Universal PHP (7):**
 - `coding` - Laravel 11/PHP 8.2 implementation respecting Billing invariants and Pint
@@ -176,9 +176,9 @@
 - `billing-rules-review` - reviews changes against invoice transitions, refund amount/role/audit rules, Stripe idempotency, and the named regression scenarios, while surfacing the unresolved `voided` contradiction
 
 ### 11.2 Agents & Commands Preview
-- Skill count: 1 architecture + 3 design + 0 frontend + 18 process + 7 universal + 11 specialty + 7 integrations + 1 domain = **48 skills**.
-- Agents: 48 skills x 1 Claude edition = 48 agents.
-- Commands: 48 skills x 1 Claude edition = 48 commands.
+- Skill count: 1 architecture + 3 design + 0 frontend + 20 process + 7 universal + 11 specialty + 7 integrations + 1 domain = **50 skills**.
+- Agents: 50 skills x 1 Claude edition = 50 agents.
+- Commands: 50 skills x 1 Claude edition = 50 commands.
 
 ### 11.3 Non-PHP Neighbors
 - none

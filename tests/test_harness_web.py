@@ -2,23 +2,43 @@
 
 import contextlib
 import base64
+import hashlib
 import http.client
 import io
 import json
 import os
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from pathlib import Path, PurePosixPath
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
-from harness import providers, web
+from harness import providers, run_activity, sessions, web
+
+WEB = Path(__file__).resolve().parents[1] / "harness/web"
+
+
+def ui_script():
+    """The page's scripts in load order as one text; the Node checks slice functions out of it."""
+    page = (WEB / "index.html").read_text(encoding="utf-8")
+    return "\n".join((WEB / name).read_text(encoding="utf-8") for name in re.findall(r'<script src="/([\w.-]+\.js)"></script>', page))
+
+
+def stylesheet(page):
+    """A page's styles: inline, or the files its <link> elements name next to it."""
+    html = page.read_text(encoding="utf-8")
+    if "<style>" in html:
+        return html[html.index("<style>"):html.index("</style>")]
+    return "\n".join((page.parent / name).read_text(encoding="utf-8") for name in re.findall(r'<link rel="stylesheet" href="/([\w.-]+\.css)">', html))
 
 
 class HarnessWebTests(unittest.TestCase):
@@ -106,6 +126,51 @@ class HarnessWebTests(unittest.TestCase):
     def options(self, **changes):
         return {"project_id": self.project_id, "provider": "codex", "prompt": "Inspect the fixture",
                 "mode": "plan", "workflow": "native", "project_context": False, **changes}
+
+    def test_merge_creates_fresh_task_with_frozen_sources_and_requires_token(self):
+        import uuid
+        source_ids = []
+        for prompt in ('Decision A; progress A', 'Decision B; progress B'):
+            status, data, _ = self.post('/api/sessions', self.options(provider='claude', prompt=prompt))
+            self.assertEqual(201, status)
+            source_ids.append(data['session']['id'])
+            self.server.sessions._status(source_ids[-1], 'completed')
+        body = {'source_ids': source_ids, 'request_id': str(uuid.uuid4()),
+                'destination': self.options(provider='claude', prompt='Continue merged work')}
+        self.assertEqual(403, self.post('/api/sessions/merge', body, headers={'X-Harness-Token': None})[0])
+        status, data, _ = self.post('/api/sessions/merge', body)
+        self.assertEqual(201, status)
+        target = data['session']
+        self.assertIsNone(target['native_session_id'])
+        self.assertEqual(source_ids, [source['id'] for source in target['merge']['sources']])
+        self.assertEqual(target['id'], self.post('/api/sessions/merge', body)[1]['session']['id'])
+        status, archive, _ = self.request('/api/sessions/' + target['id'] + '/merge')
+        self.assertEqual(200, status)
+        self.assertIn('Decision A', json.dumps(archive))
+        self.assertEqual(400, self.request('/api/sessions/' + target['id'] + '/merge?unexpected=1')[0])
+        self.assertEqual(400, self.request('/api/sessions/' + source_ids[0] + '/merge')[0])
+        self.assertEqual(400, self.post('/api/sessions/merge?unexpected=1', body)[0])
+        self.assertEqual(400, self.post('/api/sessions/merge', {**body, 'source_ids': [source_ids[0]]})[0])
+        restart='/api/sessions/' + target['id'] + '/restart-merge'
+        self.assertEqual(400,self.post(restart,{})[0])
+        self.server.sessions._status(target['id'],'interrupted')
+        self.assertEqual(403,self.post(restart,{},headers={'X-Harness-Token':None})[0])
+        self.assertEqual(400,self.post(restart,{'unexpected':True})[0])
+        status,resumed,_=self.post(restart,{})
+        self.assertEqual(200,status); self.assertEqual('queued',resumed['session']['status'])
+        self.assertEqual(target['id'],resumed['session']['id'])
+        # Deleting the saved copy frees merge storage once no run can read it; it needs the token and no body.
+        delete='/api/sessions/' + target['id'] + '/delete-merge-context'
+        self.assertEqual(400,self.post(delete,{})[0])
+        self.server.sessions._status(target['id'],'failed')
+        self.assertEqual(403,self.post(delete,{},headers={'X-Harness-Token':None})[0])
+        self.assertEqual(400,self.post(delete,{'unexpected':True})[0])
+        self.assertEqual(400,self.post(delete+'?unexpected=1',{})[0])
+        status,deleted,_=self.post(delete,{})
+        self.assertEqual(200,status); self.assertTrue(deleted['session']['merge']['archive_deleted_at'])
+        self.assertEqual(source_ids,[source['id'] for source in deleted['session']['merge']['sources']])
+        self.assertEqual(400,self.request('/api/sessions/' + target['id'] + '/merge')[0])
+        self.assertEqual(400,self.post(restart,{})[0])
 
     def test_session_attachments_are_validated_bound_to_messages_and_downloaded_as_data(self):
         body = 'Требования <script>example</script>\n'.encode() * 2000
@@ -201,9 +266,56 @@ class HarnessWebTests(unittest.TestCase):
         self.assertEqual(data['session']['mode'], 'edit')
 
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
+    def test_session_list_carries_summaries_and_the_full_session_comes_on_its_own(self):
+        self.server.sessions.providers["codex"]["available"] = True
+        session = self.post("/api/sessions", self.options())[1]["session"]
+        with self.server.sessions.lock:
+            self.server.sessions.db.execute("UPDATE sessions SET brain=? WHERE id=?", (json.dumps({"capsule": {"working": {"goal": "x" * 6000}}}), session["id"]))
+            self.server.sessions.db.commit()
+        boot, listed = self.request("/api/bootstrap")[1]["sessions"], self.request("/api/sessions")[1]["sessions"]
+        self.assertEqual(boot, listed)
+        self.assertEqual(set(web.Sessions.SUMMARY_FIELDS) | {"summary"}, set(listed[0]))
+        self.assertEqual((session["id"], session["title"], session["status"], True), (listed[0]["id"], listed[0]["title"], listed[0]["status"], listed[0]["summary"]))
+        # The heavy parts stay with the session itself.
+        self.assertNotIn("x" * 6000, json.dumps(listed))
+        full = self.request(f"/api/sessions/{session['id']}")[1]["session"]
+        self.assertIn("x" * 6000, json.dumps(full))
+        self.assertNotIn("summary", full)
+
+    def test_memory_use_reads_without_the_knowledge_lock_and_its_check_conflicts_when_busy(self):
+        base = f"/api/projects/{self.project_id}/memory-use"
+        status, empty, _ = self.request(base)
+        self.assertEqual((200, None, None), (status, empty["bank_id"], empty["chunks"]))
+        self.assertEqual(400, self.request(base + "?path=chunks")[0])
+        (self.project / "memory-bank/chunks").mkdir(parents=True)
+        self.assertTrue(self.server.knowledge.lock.acquire(blocking=False))
+        try:
+            status, payload, _ = self.request(base)
+            self.assertEqual((200, "memory-bank", []), (status, payload["bank_id"], payload["chunks"]["items"]))
+            status, busy, _ = self.post(base + "/check", {})
+            self.assertEqual((409, "Another knowledge operation is running. Wait for it to finish."), (status, busy["error"]))
+        finally:
+            self.server.knowledge.lock.release()
+        self.assertEqual(400, self.post(base + "/check", {"bank": 3})[0])
+        self.assertEqual(400, self.post(base + "/check?bank=memory-bank", {})[0])
+
+    def test_accelerator_startup_bytes_match_the_ci_budget_measurement(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import context_budget
+        status, data, _ = self.request("/api/accelerators/startup")
+        self.assertEqual(200, status)
+        self.assertEqual(["Laravel", "Symfony", "PHP Core", "WordPress"], [row["edition"] for row in data["editions"]])
+        for row in data["editions"]:
+            measured = context_budget.measure_edition(row["edition"])
+            self.assertEqual({key: measured[key] for key in context_budget.STARTUP_CATEGORIES}, row["bytes"])
+            self.assertEqual((sum(row["bytes"].values()), context_budget.startup_tokens(measured)), (row["total"], row["tokens"]))
+            self.assertLessEqual(row["total"], row["ceiling_total"])
+        self.assertEqual("docs/TOKEN-ECONOMY-RESEARCH.md as of 9435dfc1^", data["calibration"])
+        self.assertEqual(400, self.request("/api/accelerators/startup?edition=Laravel")[0])
+
     def test_selecting_brain_record_focuses_editable_progress_without_erasing_draft(self):
-        page = (Path(__file__).resolve().parents[1] / 'harness/web/index.html').read_text()
-        source = page[page.index('    function fillKnowledgeSelection('):page.index('    function submitKnowledgeForm(')]
+        page = ui_script()
+        source = page[page.index('\nfunction fillKnowledgeSelection('):page.index('\nfunction submitKnowledgeForm(')]
         script = """const assert = require('node:assert/strict');
 const fields = {
   'brain-knowledge-action': {value:'brain-update'},
@@ -225,10 +337,100 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
 """
         subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
 
+    @unittest.skipUnless(shutil.which('node'), 'Memory draft check requires Node')
+    def test_each_run_saves_its_memory_draft_and_no_record_result_panel_remains(self):
+        # Record result & durable memory is gone from the conversation: no markup, no code that drives it.
+        page = (WEB / "index.html").read_text(encoding="utf-8")
+        script = ui_script()
+        for name in ("linked-result", "Record result", "memory-save", "linked-record", "linked-promotion", "linked-brain"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, page)
+                self.assertNotIn(name, script)
+        shown = script[script.index('\nconst MEMORY_DRAFT_BLOCK'):script.index('\n// Consecutive steps share one collapsed row.')]
+        check = """const assert = require('node:assert/strict');
+""" + shown + """
+// The reply says where its draft went instead of repeating the JSON, in a reviewed session too.
+assert.equal(withoutMemoryDraft('Done.\\n\\n```memory-draft\\n{"progress": "P"}\\n```\\n'),
+  'Done.\\n\\n[Memory draft: saved to project memory when the run completes.]');
+assert.equal(withoutMemoryDraft('No draft here.'),'No draft here.');
+"""
+        subprocess.run([shutil.which('node'), '-e', check], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Project memory composer check requires Node')
+    def test_project_memory_is_always_on_and_never_blocks_a_project_without_it(self):
+        page = ui_script()
+        source = page[page.index('\nfunction brainLinkConfig('):page.index('\nasync function loadBrainLinkTasks(')]
+        script = """const assert = require('node:assert/strict');
+const control = value => ({value, checked:false, disabled:false, hidden:false, textContent:''});
+const fields = {}; for (const id of ['brain-link-review','brain-link-kind','brain-link-bank','brain-link-task','brain-link-task-id',
+  'brain-link-goal','brain-link-query','brain-link-refresh','brain-link-config','brain-link-fields','brain-link-summary','brain-link-mode-note',
+  'brain-link-existing-field','brain-link-id-field','brain-link-goal-field','brain-link-query-field','brain-link-availability','project']) fields[id] = control('');
+const $ = id => fields[id]; const errors = []; const showError = (id, text) => { if (text) errors.push(text); };
+const state = {bootstrap:{}, authFailed:false, selectedId:null, pending:null}; let dryRun = false; const fleetDryRun = () => dryRun;
+const brainLinkDraft = {epoch:0, projectId:null, bankId:null, banks:[], tasks:[], meta:null, loading:false, error:'', controller:null};
+""" + source + """
+fields.project.value = 'p1'; resetBrainLink();
+assert.deepEqual(brainLinkConfig(),{bank:'',review:false,auto:true});
+// Until the project's memory is read, a new session waits rather than starting without it; nothing is flagged.
+Object.assign(brainLinkDraft,{projectId:'p1', loading:true});
+assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkPending(),true);
+// A project without a governed runtime starts its sessions without memory; nothing blocks them.
+Object.assign(brainLinkDraft,{loading:false, meta:{runtime_available:false}});
+assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false); assert.equal(brainLinkPending(),false);
+assert.equal(fields['brain-link-summary'].textContent,'Project files'); assert.match(fields['brain-link-availability'].textContent,/excerpts of its reference files/);
+brainLinkDraft.error = 'Read failed.'; assert.equal(updateBrainLinkControls(),true); assert.deepEqual(errors,[]); brainLinkDraft.error = '';
+// With a governed runtime the default needs nothing from a person: no task, no query, no review.
+Object.assign(brainLinkDraft,{meta:{runtime_available:true, mode:'governed'}, banks:[{id:'memory-bank'}]}); fields['brain-link-bank'].value = 'memory-bank';
+assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),true);
+assert.equal(fields['brain-link-summary'].textContent,'Automatic'); assert.equal(fields['brain-link-query-field'].hidden,true);
+assert.deepEqual(brainLinkConfig(),{bank:'memory-bank',review:false,auto:true});
+dryRun = true; assert.equal(updateBrainLinkControls(),true); assert.equal(brainLinkActive(),false); dryRun = false;
+// Review is the explicit choice: it asks for a query and holds the session to it.
+fields['brain-link-review'].checked = true; assert.equal(updateBrainLinkControls(),false); assert.equal(fields['brain-link-query-field'].hidden,false);
+fields['brain-link-query'].value = 'cobalt'; assert.equal(updateBrainLinkControls(),true);
+assert.deepEqual(brainLinkConfig(),{bank:'memory-bank',review:true,query:'cobalt',auto:true});
+fields['brain-link-kind'].value = 'create'; fields['brain-link-review'].checked = false; assert.equal(updateBrainLinkControls(),false);
+fields['brain-link-task-id'].value = 'TASK-9'; fields['brain-link-goal'].value = 'Ship it'; assert.equal(updateBrainLinkControls(),true);
+assert.deepEqual(brainLinkConfig(),{bank:'memory-bank',review:false,task_id:'TASK-9',create:true,goal:'Ship it'});
+// A named task is a choice that has to hold: a project without a runtime refuses it instead of dropping it.
+brainLinkDraft.meta = {runtime_available:false}; assert.equal(updateBrainLinkControls(),false); assert.equal(brainLinkActive(),true);
+assert.match(fields['brain-link-availability'].textContent,/Choose New task from the first message/);
+// Back to the default, the same project starts with its reference files: there is no off switch to reach for.
+fields['brain-link-kind'].value = 'auto'; assert.equal(updateBrainLinkControls(),true); assert.equal(fields['brain-link-summary'].textContent,'Project files');
+// Sessions linked before memory ran by itself were linked for review.
+assert.equal(brainReviewed({task_id:'T'}),true); assert.equal(brainReviewed({review:false}),false);
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Conversation check requires Node')
+    def test_the_conversation_shows_what_project_memory_did_for_each_turn(self):
+        page = ui_script()
+        shown = page[page.index('\nconst MEMORY_DRAFT_BLOCK'):page.index('\nfunction appendEvent(')]
+        append = page[page.index('\nfunction appendEvent('):]
+        append = append[:append.index('\n}\n') + 3]
+        script = """const assert = require('node:assert/strict');
+const nodes = []; const events = {append(node){ nodes.push(node); }, get lastElementChild(){ return nodes.at(-1); }};
+const $ = id => id === 'events' ? events : null;
+const el = (tag, className, text) => ({tag, className, textContent:text, dataset:{}, attributes:{}, children:[],
+  setAttribute(name, value){ this.attributes[name] = value; }, append(...items){ this.children.push(...items); }, classList:{contains(){ return false; }}});
+const state = {eventIds:new Set(), assistantTexts:new Set(), selected:{provider:'codex', brain:{review:false}}};
+const brainReviewed = brain => brain?.review !== false; const providerFor = () => ({name:'Codex'}); const humanLabel = value => value;
+const document = {createTextNode: text => ({textContent:text})};
+const runView = {observe() {}, statusNode: () => null};
+""" + shown + append + """
+appendEvent({id:1, kind:'memory', ok:true, text:'Project memory for this turn: task harness/x-1, 1 Memory Bank chunk (812 characters).'});
+appendEvent({id:2, kind:'memory', ok:false, text:'Project memory was not retrieved for this turn: Capsule unavailable.'});
+assert.deepEqual(nodes.map(node => [node.className, node.dataset.ok, node.attributes.role]), [['memory-event','true','status'],['memory-event','false','status']]);
+assert.match(nodes[0].textContent,/task harness\\/x-1/);
+appendEvent({id:3, kind:'text', text:'Done.\\n\\n```memory-draft\\n{"progress": "P"}\\n```\\n'});
+assert.equal(nodes.at(-1).children.at(-1).textContent,'Done.\\n\\n[Memory draft: saved to project memory when the run completes.]');
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
     @unittest.skipUnless(shutil.which('node'), 'Browser calculator check requires Node')
     def test_browser_budget_calculator_forms_shared_limits_with_parallel_deadlines(self):
-        page=(Path(__file__).resolve().parents[1]/'harness/web/index.html').read_text()
-        source=page[page.index('    function perAgentTotals('):page.index('    function agentBudgetControls(')]
+        page=ui_script()
+        source=page[page.index('\nfunction perAgentTotals('):page.index('\nfunction agentBudgetControls(')]
         scenarios=[
             ({'usd':2,'tokens':10000,'seconds':120},{'count':4,'waves':1,'fleet':False},{'usd':8,'tokens':40000,'seconds':120}),
             ({'usd':1,'tokens':1000,'seconds':100},{'count':5,'waves':3,'fleet':True},{'usd':5,'tokens':5000,'seconds':300}),
@@ -384,6 +586,272 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
         self.git_command("add", "README.md")
         self.git_command("commit", "--quiet", "-m", "Initialize HTTP fixture")
 
+    @unittest.skipUnless(shutil.which('node'), 'Composer command check requires Node')
+    def test_composer_commands_open_at_the_start_like_the_clis_and_rank_like_claude_code(self):
+        page = ui_script()
+        source = page[page.index('\nconst NAVIGATION'):page.index('\nconst composerCommands = ')]
+        script = """const assert = require('node:assert/strict');
+""" + source + r"""
+const at = (text, skills = false) => commandToken(text, text.length, skills);
+// `/` opens the commands only where the message starts, as in Claude Code and Codex.
+assert.deepEqual(at('/'),{start:0,end:1,trigger:'/',query:''});
+assert.deepEqual(at('/rev'),{start:0,end:4,trigger:'/',query:'rev'});
+assert.deepEqual(commandToken('/review src',4,false),{start:0,end:7,trigger:'/',query:'rev'});
+for (const text of ['Run /rev','/review now','line\n/rev',' /rev','src/rev']) assert.equal(at(text),null,text);
+// `$` names a Codex skill where a word starts, anywhere in the message, and only in a Codex session.
+assert.deepEqual(at('Check $php',true),{start:6,end:10,trigger:'$',query:'php'});
+assert.deepEqual(at('Use ($adv:rev',true),{start:5,end:13,trigger:'$',query:'adv:rev'});
+assert.equal(at('Check $php',false),null); assert.equal(at('costs US$5',true),null);
+const items = [{name:'review'},{name:'php-review',description:'Reviews PHP.'},{name:'security-review'},{name:'clear',aliases:['reset','new']},
+  {name:'unite-cms:init',description:'Plugin init'},{name:'deploy',description:'Ships after review.'}];
+assert.deepEqual(rankCommands(items,'').map(item => item.name),items.map(item => item.name));
+assert.deepEqual(rankCommands(items,'rev').map(item => item.name),['review','php-review','security-review','deploy']);
+assert.deepEqual(rankCommands(items,'init').map(item => item.name),['unite-cms:init']);
+assert.deepEqual(rankCommands(items,'new').map(item => item.name),['clear']);
+assert.deepEqual(rankCommands(items,'zzz'),[]);
+assert.deepEqual(insertCommand('/rev src',{start:0,end:4,trigger:'/'},'review'),{replacement:'/review',value:'/review src',caret:7});
+assert.deepEqual(insertCommand('/co',{start:0,end:3,trigger:'/'},'compact'),{replacement:'/compact ',value:'/compact ',caret:9});
+assert.deepEqual(insertCommand('Use $d',{start:4,end:6,trigger:'$'},'docs'),{replacement:'$docs ',value:'Use $docs ',caret:10});
+// Page commands: listed ones by their kind, and the providers' own before the list arrives.
+const listed = [{name:'clear',aliases:['reset','new'],kind:'page',action:'new'},{name:'model',kind:'page',action:'model'},{name:'compact',kind:'native'}];
+assert.deepEqual(pageCommand('/reset','claude',listed),{action:'new',name:'reset',argument:''});
+assert.deepEqual(pageCommand(' /model  claude-sonnet-5-5 ','claude',listed),{action:'model',name:'model',argument:'claude-sonnet-5-5'});
+// A sentence that starts with a page command is a message: nothing is taken from it.
+assert.equal(pageCommand('/model picker is broken, fix it','claude',listed),null); assert.equal(pageCommand('/new feature for the cart','claude',listed),null);
+assert.equal(pageCommand('/diff looks wrong','codex',null),null); assert.equal(pageCommand('/diff now','codex',null),null);
+assert.equal(pageCommand('/compact now','claude',listed),null); assert.equal(pageCommand('Use /model','claude',listed),null);
+assert.deepEqual(pageCommand('/effort high','claude',null),{action:'effort',name:'effort',argument:'high'});
+assert.deepEqual(pageCommand('/diff','codex',null),{action:'diff',name:'diff',argument:''});
+assert.equal(pageCommand('/init','codex',null),null);
+// Terminal-only commands open Harness views in every CLI; /memory waits for the list where a project may own it.
+assert.deepEqual(pageCommand('/diff','claude',null),{action:'diff',name:'diff',argument:''});
+assert.equal(pageCommand('/cost','claude',null),null); assert.deepEqual(pageCommand('/cost','codex',null),{action:'status',name:'cost',argument:''});
+assert.deepEqual(pageCommand('/resume','cursor',null),{action:'resume',name:'resume',argument:''});
+assert.equal(pageCommand('/memory','claude',null),null); assert.deepEqual(pageCommand('/memory','codex',null),{action:'memory',name:'memory',argument:''});
+assert.equal(pageCommand('/resume now','codex',null),null); assert.equal(pageCommand('/help me','claude',null),null);
+assert.equal(pageCommand('/memory','claude',[{name:'memory',kind:'native'}]),null);
+assert.deepEqual(pageCommand('/clear work','claude',listed),{action:'new',name:'clear',argument:'work'});
+// `@` opens the file search where a word starts, as the CLIs' composers do; an address is not a mention.
+assert.deepEqual(commandToken('Look at @src/Bil',16,false,true),{start:8,end:16,trigger:'@',query:'src/Bil'});
+assert.deepEqual(commandToken('Fix (@a) now',7,false,true),{start:5,end:7,trigger:'@',query:'a'});
+assert.deepEqual(commandToken('@READ more',3,false,true),{start:0,end:5,trigger:'@',query:'RE'});
+assert.equal(commandToken('mail me@host.com',16,false,true),null); assert.equal(commandToken('Look at @src',12,false,false),null);
+// A file gets a space after it; a folder does not, so what is inside it comes next.
+assert.deepEqual(insertCommand('Read @sr',{start:5,end:8,trigger:'@'},'src/',false),{replacement:'@src/',value:'Read @src/',caret:10});
+assert.deepEqual(insertCommand('Read @RE',{start:5,end:8,trigger:'@'},'README.md'),{replacement:'@README.md ',value:'Read @README.md ',caret:16});
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Composer command module check requires Node')
+    def test_command_list_inserts_runs_and_acts_on_the_page_like_the_clis(self):
+        page = ui_script()
+        source = page[page.index('\nconst NAVIGATION'):]
+        source = source[:source.index('\n})();') + 6]
+        script = r"""const assert = require('node:assert/strict');
+const handlers = {};
+const node = id => ({id, hidden:true, children:[], attributes:{}, dataset:{}, textContent:'', value:'', selectionStart:0, selectionEnd:0, disabled:false, options:[],
+  addEventListener(type, fn) { (handlers[id + ':' + type] ||= []).push(fn); }, setAttribute(name, value) { this.attributes[name] = String(value); },
+  removeAttribute(name) { delete this.attributes[name]; }, replaceChildren(...items) { this.children = items; }, append(...items) { this.children.push(...items); },
+  focus() { document.activeElement = this; }, setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+  dispatchEvent(event) { for (const fn of handlers[this.id + ':' + event.type] || []) fn(event); }, click() { this.clicked = (this.clicked || 0) + 1; }});
+const nodes = Object.fromEntries(['prompt','skill-hints-panel','skill-hints','skill-hints-note','skill-hints-status','session-form','project','provider','workflow',
+  'workspace','existing-worktree','send','session-settings','session-settings-toggle','model-choice','thinking-effort','composer-notice','history'].map(id => [id, node(id)]));
+nodes.history.querySelector = function () { return this.children[0] || null; };
+const viewGroups = {knowledge:['memory-use','brain','memory','context']}, lastViewInGroup = {}; let opened = null, menu = null;
+const openView = name => { opened = name; }, setMenu = open => { menu = open; };
+const $ = id => nodes[id]; const el = (tag, className, text) => ({...node(tag), className, textContent:text});
+const document = {activeElement:null, execCommand:() => false}; global.Event = class { constructor(type) { this.type = type; } };
+Object.assign(nodes.project,{value:'p1'}); Object.assign(nodes.provider,{value:'claude'}); Object.assign(nodes.workflow,{value:'native'}); Object.assign(nodes.workspace,{value:'project'});
+nodes['thinking-effort'].options = [{value:''},{value:'high'}];
+let submitted = 0, sessions = 0, model = null, view = null, failing = false, requests = 0;
+nodes['session-form'].requestSubmit = () => { submitted++; };
+const state = {selectedId:null, selected:null}; const fleetSelected = () => false, clashSelected = () => false, textError = error => error.message;
+const providerFor = id => ({name:{claude:'Claude Code',codex:'Codex'}[id]}); const newSession = () => { sessions++; };
+const refreshModelChoices = value => { model = value; }; const updateControls = () => {}; const setView = name => { view = name; }; const showError = () => {};
+const api = async url => { requests++; if (failing) throw Object.assign(new Error('down'), {status:0});
+  return url.includes('provider=codex') ? {commands:[{name:'new',kind:'page',action:'new',hint:''},{name:'init',kind:'prompt',hint:''}],
+    skills:[{name:'php-review',description:'Review PHP.',path:'/p/SKILL.md'}],error:null}
+  : {commands:[{name:'php-review',description:'Review PHP. (project)',hint:'<path>',kind:'native',aliases:[]},
+               {name:'compact',description:'Free up context',hint:'<optional custom summarization instructions>',kind:'native',aliases:[]},
+               {name:'clear',description:'Start over',hint:'[name]',kind:'page',action:'new',aliases:['reset','new']},
+               {name:'model',description:'Set the model',hint:'<model>',kind:'page',action:'model',aliases:[]}],skills:[],error:null}; };
+const fire = (type, extra = {}) => { const event = {type, key:'', preventDefault() { this.prevented = true; }, stopPropagation() {}, ...extra};
+  for (const fn of handlers['prompt:' + type] || []) fn(event); return event; };
+const prompt = nodes.prompt, panel = nodes['skill-hints-panel'], list = nodes['skill-hints'];
+const type = value => { prompt.value = value; prompt.selectionStart = prompt.selectionEnd = value.length; fire('input'); };
+const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+const names = () => list.children.map(item => item.children[0].textContent + item.children[0].children.map(part => part.textContent).join(''));
+""" + source + r"""
+(async () => {
+  prompt.focus(); type('/'); await settle();
+  assert.equal(panel.hidden, false); assert.deepEqual(names(), ['/php-review <path>','/compact <optional custom summarization instructions>','/clear [name]','/model <model>']);
+  assert.match(list.children[2].children[1].textContent, /Also \/reset, \/new · In the Harness/);
+  // No menu for a slash later in the message.
+  type('Run /php'); assert.equal(panel.hidden, true);
+  // Tab inserts; Enter on a command that needs an argument inserts and waits for it.
+  type('/ph'); fire('keydown', {key:'Tab'}); assert.equal(prompt.value, '/php-review '); assert.equal(submitted, 0);
+  type('/ph'); fire('keydown', {key:'Enter'}); assert.equal(prompt.value, '/php-review '); assert.equal(submitted, 0);
+  // Enter on a command whose argument is optional sends at once, as Claude Code runs it.
+  type('/comp'); fire('keydown', {key:'Enter'}); assert.equal(prompt.value, '/compact '); assert.equal(submitted, 1);
+  // Page commands act here. In a draft, /clear only empties the field (the draft is already new); /model picks a model.
+  type('/cl'); fire('keydown', {key:'Enter'}); assert.equal(sessions, 0); assert.equal(prompt.value, '');
+  assert.equal(composerCommands.intercept('/model claude-sonnet-5-5'), true); assert.equal(model, 'claude-sonnet-5-5');
+  assert.equal(composerCommands.intercept('/compact'), false); assert.equal(composerCommands.intercept('Use /clear'), false);
+  // A sentence is sent as it is, and the field keeps it.
+  prompt.value = '/model picker is broken, fix it'; assert.equal(composerCommands.intercept(prompt.value), false); assert.equal(prompt.value, '/model picker is broken, fix it');
+  assert.equal(document.activeElement, nodes['model-choice']);
+  // Escape closes the list for this token; leaving the token and typing / again opens it.
+  prompt.focus(); type('/'); await settle(); assert.equal(panel.hidden, false); fire('keydown', {key:'Escape'}); assert.equal(panel.hidden, true); type('/'); assert.equal(panel.hidden, true);
+  type(''); type('/'); assert.equal(panel.hidden, false);
+  // Codex: / lists what the Harness does for its commands, $ lists Codex's own skills anywhere in the message.
+  nodes.provider.value = 'codex'; type('/'); await settle(); assert.deepEqual(names(), ['/new','/init']);
+  type('Look at it with $ph'); await settle(); assert.deepEqual(names(), ['$php-review']);
+  fire('keydown', {key:'Enter'}); assert.equal(prompt.value, 'Look at it with $php-review '); assert.equal(submitted, 1);
+  assert.equal(composerCommands.intercept('/diff'), true); assert.equal(view, null);
+  state.selectedId = 's1'; state.selected = {id:'s1', provider:'codex', workflow:'native'};
+  assert.equal(composerCommands.intercept('/diff'), true); assert.equal(view, 'changes');
+  assert.equal(composerCommands.intercept('/new'), true); assert.equal(sessions, 1);
+  // No commands where the Harness writes the prompt.
+  state.selected = {...state.selected, workflow:'plan'}; type('/'); assert.equal(panel.hidden, true);
+  state.selectedId = null; state.selected = null;
+  // A failing list is not fetched again on every key press inside the same token.
+  nodes.provider.value = 'cursor'; failing = true; type(''); const before = requests; type('/x'); await settle(); type('/xy'); type('/xyz'); await settle();
+  assert.equal(requests - before, 1); assert.match(nodes['skill-hints-note'].textContent, /could not be loaded/);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Composer mention check requires Node')
+    def test_at_searches_the_workspace_and_terminal_only_commands_open_harness_views(self):
+        page = ui_script()
+        source = page[page.index('\nconst NAVIGATION'):]
+        source = source[:source.index('\n})();') + 6]
+        script = r"""const assert = require('node:assert/strict');
+const handlers = {};
+const node = id => ({id, hidden:true, children:[], attributes:{}, dataset:{}, textContent:'', value:'', selectionStart:0, selectionEnd:0, disabled:false, options:[],
+  addEventListener(type, fn) { (handlers[id + ':' + type] ||= []).push(fn); }, setAttribute(name, value) { this.attributes[name] = String(value); },
+  removeAttribute(name) { delete this.attributes[name]; }, replaceChildren(...items) { this.children = items; }, append(...items) { this.children.push(...items); },
+  focus() { document.activeElement = this; }, setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; },
+  dispatchEvent(event) { for (const fn of handlers[this.id + ':' + event.type] || []) fn(event); }, click() {}});
+const nodes = Object.fromEntries(['prompt','skill-hints-panel','skill-hints','skill-hints-note','skill-hints-status','session-form','project','provider','workflow',
+  'workspace','existing-worktree','send','session-settings','session-settings-toggle','model-choice','thinking-effort','composer-notice','history'].map(id => [id, node(id)]));
+const $ = id => nodes[id]; const el = (tag, className, text) => ({...node(tag), className, textContent:text});
+nodes.history.querySelector = function () { return this.children[0] || null; };
+const document = {activeElement:null, execCommand:() => false}; global.Event = class { constructor(type) { this.type = type; } };
+Object.assign(nodes.project,{value:'p1'}); Object.assign(nodes.provider,{value:'codex'}); Object.assign(nodes.workflow,{value:'fleet-review'}); Object.assign(nodes.workspace,{value:'project'});
+const state = {selectedId:null, selected:null}; const fleetSelected = () => nodes.workflow.value === 'fleet-review', clashSelected = () => false, textError = error => error.message;
+const providerFor = id => ({name:{claude:'Claude Code',codex:'Codex'}[id]}); const newSession = () => {}, refreshModelChoices = () => {}, updateControls = () => {}, showError = () => {};
+let view = null, opened = null, menu = null, submitted = 0; const setView = name => { view = name; }, openView = name => { opened = name; }, setMenu = open => { menu = open; };
+const viewGroups = {knowledge:['memory-use','brain','memory','context']}, lastViewInGroup = {};
+nodes['session-form'].requestSubmit = () => { submitted++; };
+const searched = [];
+const api = async url => {
+  if (url.includes('/files')) { const query = new URL('http://h' + url).searchParams.get('q'); searched.push([url.split('?')[0], query]);
+    return {items:query === 'src/' ? [{path:'src/Totals.php',kind:'file'}] : [{path:'src/',kind:'folder'},{path:'README.md',kind:'file'}], truncated:false}; }
+  return {commands:[{name:'new',kind:'page',action:'new',hint:''},{name:'resume',kind:'page',action:'resume',hint:''},{name:'login',kind:'page',action:'login',hint:''},
+    {name:'memory',kind:'page',action:'memory',hint:''},{name:'help',kind:'page',action:'help',hint:''}],skills:[],error:null}; };
+const fire = (type, extra = {}) => { const event = {type, key:'', preventDefault() {}, stopPropagation() {}, ...extra}; for (const fn of handlers['prompt:' + type] || []) fn(event); return event; };
+const prompt = nodes.prompt, panel = nodes['skill-hints-panel'], list = nodes['skill-hints'], notice = nodes['composer-notice'];
+const type = value => { prompt.value = value; prompt.selectionStart = prompt.selectionEnd = value.length; fire('input'); };
+const pause = () => new Promise(resolve => setTimeout(resolve, 160));
+const names = () => list.children.map(item => item.children[0].textContent);
+""" + source + r"""
+(async () => {
+  // A Fleet draft takes no commands, but a path is text to every CLI: @ searches the project.
+  prompt.focus(); type('Review @'); await pause();
+  assert.equal(panel.hidden, false); assert.deepEqual(names(), ['@src/','@README.md']);
+  assert.deepEqual(searched.at(-1), ['/api/projects/p1/files', '']);
+  assert.equal(list.children[0].children[1].textContent, 'Folder');
+  type('/'); assert.equal(panel.hidden, true);
+  // Enter inserts a file and sends nothing; a folder stays open on what is inside it.
+  type('Review @RE'); await pause(); fire('keydown', {key:'ArrowDown'}); fire('keydown', {key:'Enter'});
+  assert.equal(prompt.value, 'Review @README.md '); assert.equal(submitted, 0); assert.equal(panel.hidden, true);
+  type('Review @'); await pause(); fire('keydown', {key:'Tab'}); assert.equal(prompt.value, 'Review @src/'); await pause();
+  assert.equal(panel.hidden, false); assert.deepEqual(names(), ['@src/Totals.php']); assert.deepEqual(searched.at(-1), ['/api/projects/p1/files', 'src/']);
+  // An open session searches its own workspace.
+  state.selectedId = 's1'; state.selected = {id:'s1', provider:'codex', workflow:'native'}; nodes.workflow.value = 'native';
+  type('Also @'); await pause(); assert.deepEqual(searched.at(-1), ['/api/sessions/s1/files', '']);
+  // Terminal-only commands open Harness views: /resume the session list, /memory Knowledge, /login says how to sign in.
+  type('/'); await pause();
+  assert.equal(composerCommands.intercept('/resume'), true); assert.match(notice.children[0], /No earlier sessions/);
+  nodes.history.children = [{focus() { document.activeElement = this; }, className:'history-item'}]; nodes.history.querySelector = function () { return this.children[0]; };
+  assert.equal(composerCommands.intercept('/resume'), true); assert.equal(document.activeElement, nodes.history.children[0]); assert.equal(menu, true);
+  assert.equal(composerCommands.intercept('/memory'), true); assert.equal(opened, 'memory-use');
+  prompt.focus(); assert.equal(composerCommands.intercept('/login'), true); assert.equal(notice.hidden, false);
+  assert.match(notice.children.join(''), /does not sign Codex in/);
+  type('x'); assert.equal(notice.hidden, true);
+  // /help shows the command list, as the CLIs do.
+  assert.equal(composerCommands.intercept('/help'), true); assert.equal(prompt.value, '/'); assert.equal(panel.hidden, false);
+  assert.deepEqual(names(), ['/new','/resume','/login','/memory','/help']);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Update button check requires Node')
+    def test_the_update_button_appears_while_an_update_waits_and_says_what_it_brings(self):
+        page = ui_script()
+        source = page[page.index('\nconst appUpdate = '):page.index('\nasync function loadAppUpdate(')]
+        script = """const assert = require('node:assert/strict');
+const fields = {'app-update':{hidden:true, disabled:false, textContent:'', title:''}, 'app-update-note':{textContent:''},
+  'app-update-banner':{hidden:true, classList:{on:false, toggle(name, value) { this.on = value; }}}};
+const $ = id => fields[id];
+""" + source + """
+const button = fields['app-update'], note = fields['app-update-note'], banner = fields['app-update-banner'];
+renderAppUpdate(); assert.equal(button.hidden,true); assert.equal(banner.hidden,true);
+appUpdate.status = {state:'available', detail:'2 new changes on origin/main.', commits:[{hash:'a',subject:'Add the cart'},{hash:'b',subject:'Add billing'}]};
+renderAppUpdate();
+assert.equal(button.hidden,false); assert.equal(button.textContent,'Update'); assert.equal(banner.hidden,true);
+assert.equal(button.title,'2 new changes on origin/main.\\n• Add the cart\\n• Add billing');
+appUpdate.pending = true; renderAppUpdate(); assert.equal(button.disabled,true); assert.equal(button.textContent,'Updating…');
+Object.assign(appUpdate,{pending:false, restarting:true, note:'Updated to def5678. The Harness is restarting; this page reloads by itself.'}); appUpdate.status = {state:'updated'}; renderAppUpdate();
+assert.equal(button.hidden,false); assert.equal(button.textContent,'Restarting…'); assert.equal(banner.hidden,false); assert.match(note.textContent,/reloads by itself/);
+// A clone with commits of its own is told why, and offered no button.
+Object.assign(appUpdate,{restarting:false, note:''}); appUpdate.status = {state:'diverged', detail:'Update it with Git.', commits:[]}; renderAppUpdate();
+assert.equal(button.hidden,true); assert.equal(note.textContent,'Update it with Git.');
+Object.assign(appUpdate,{failed:true, note:'2 runs are in progress'}); renderAppUpdate(); assert.equal(banner.classList.on,true);
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
+    @unittest.skipUnless(shutil.which('node'), 'Worktree picker check requires Node')
+    def test_worktree_picker_names_checkouts_and_never_chooses_one_for_the_person(self):
+        page = ui_script()
+        source = page[page.index('\nfunction workspaceLabel('):page.index('\nasync function loadProjectWorktrees(')]
+        script = """const assert = require('node:assert/strict');
+const select = {dataset:{}, options:[], current:'', get firstChild() { return this.options[0]; },
+  replaceChildren(...items) { this.options = items; this.current = items[0]?.value ?? ''; },
+  get value() { return this.current; }, set value(id) { this.current = this.options.some(option => option.value === id) ? id : ''; }};
+const fields = {'existing-worktree': select, project: {value:'p1'}}; const $ = id => fields[id];
+const el = (tag, className, text) => ({tag, className, textContent:text, value:text});
+const projectWorktreeState = {projectId:'p1', data:null, pending:true, error:null, preferred:''};
+""" + source + """
+assert.equal(workspaceLabel('existing-worktree'),'Existing Git worktree'); assert.equal(workspaceLabel('project'),'Project folder');
+assert.equal(worktreeLabel({path:'/work/task-123', branch:'task-123', head:'a'.repeat(40)}),'task-123 · task-123');
+assert.equal(worktreeLabel({path:'C:\\\\work\\\\review', branch:null, head:'0123456789abcdef', locked:true}),'review · detached 01234567 · locked');
+assert.equal(worktreeLabel({path:'/work/fresh/', branch:null, head:null}),'fresh · no commits');
+// Until the list arrives the picker is empty and says it is loading.
+let listed = renderExistingWorktrees(); assert.equal(listed.loading,true); assert.equal(listed.choice,null);
+const one = {id:'1'.repeat(16), path:'/work/task-1', folder:'/work/task-1', branch:'task-1', head:'b'.repeat(40)};
+const two = {id:'2'.repeat(16), path:'/work/task-2', folder:'/work/task-2/app', branch:'task-2', head:'c'.repeat(40)};
+Object.assign(projectWorktreeState,{pending:false, data:{worktrees:[one,two], skipped:3}});
+listed = renderExistingWorktrees();
+assert.deepEqual(select.options.map(option => [option.value, option.textContent]), [['','Choose a worktree…'],[one.id,'task-1 · task-1'],[two.id,'task-2 · task-2']]);
+// Nothing is chosen for the person: a wrong checkout would run the agent somewhere else.
+assert.equal(listed.choice,null); assert.equal(listed.skipped,3); assert.equal(listed.loading,false);
+select.value = two.id; assert.equal(renderExistingWorktrees().choice.folder,'/work/task-2/app');
+// A refresh with the same checkouts keeps the choice; a new list keeps it while it is still listed.
+Object.assign(projectWorktreeState,{data:{worktrees:[two,one], skipped:0}}); assert.equal(renderExistingWorktrees().choice.id,two.id);
+Object.assign(projectWorktreeState,{data:{worktrees:[one], skipped:0}}); assert.equal(renderExistingWorktrees().choice,null);
+// A draft's choice comes back once its checkout is listed again; another project's list never inherits it.
+projectWorktreeState.preferred = two.id; Object.assign(projectWorktreeState,{data:{worktrees:[one,two], skipped:0}});
+assert.equal(renderExistingWorktrees().choice.id,two.id);
+select.value = ''; delete select.dataset.key; assert.equal(renderExistingWorktrees().choice.id,two.id);
+fields.project.value = 'p2'; listed = renderExistingWorktrees(); assert.deepEqual([listed.choices, listed.choice, listed.error], [[], null, '']);
+assert.equal(select.options[0].textContent,'No other worktrees');
+fields.project.value = 'p1'; Object.assign(projectWorktreeState,{data:{worktrees:[], skipped:0, reason:'Git could not list the worktrees of this repository.'}});
+assert.match(renderExistingWorktrees().error,/could not list/);
+"""
+        subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True)
+
     @unittest.skipUnless(shutil.which("git"), "Git workspace tests require git")
     def test_git_http_metadata_tracks_branch_and_dirty_state_and_project_is_default(self):
         path = f"/api/projects/{self.project_id}/git"
@@ -457,6 +925,75 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
             self.assertEqual(resumed["session"][field], original[field])
         self.assertEqual(resumed["session"]["native_session_id"], "fixture-worktree")
 
+    def test_command_routes_list_the_cli_commands_and_refuse_extra_input(self):
+        listed = [{"name": "php-review", "description": "Review PHP. (project)", "hint": "<path>", "aliases": [], "builtin": False},
+                  {"name": "clear", "description": "Start over", "hint": "[name]", "aliases": ["reset", "new"], "builtin": True}]
+        with patch("harness.commands.claude_commands", return_value=listed) as probe:
+            path = f"/api/projects/{self.project_id}/commands"
+            token = {"X-Harness-Token": self.token}
+            # Listing starts the native CLI, so a read needs the page's token too.
+            for headers in ({}, {"X-Harness-Token": "wrong"}):
+                with self.subTest(headers=headers):
+                    self.assertEqual(self.request(path + "?provider=claude", headers=headers)[0], 403)
+            self.assertEqual(probe.call_count, 0)
+            status, data, _ = self.request(path + "?provider=claude", headers=token)
+            self.assertEqual(status, 200)
+            self.assertEqual((data["project_id"], data["provider"], data["skills"], data["error"]), (self.project_id, "claude", [], None))
+            self.assertEqual([(item["name"], item["kind"], item["action"]) for item in data["commands"][:2]],
+                             [("php-review", "native", None), ("clear", "page", "new")])
+            self.assertEqual(probe.call_args.args[1], self.project)
+            for invalid in (path, path + "?provider=claude&provider=codex", path + "?provider=unknown", path + "?provider=claude&extra=1",
+                            path + "?provider=claude&worktree=" + "0" * 16, f"/api/projects/{'0' * 16}/commands?provider=claude"):
+                with self.subTest(path=invalid):
+                    self.assertEqual(self.request(invalid, headers=token)[0], 400)
+            status, created, _ = self.post("/api/sessions", self.options(provider="claude", prompt="/php-review src", workflow="native"))
+            self.assertEqual(status, 201)
+            sid = created["session"]["id"]
+            self.assertEqual(self.request(f"/api/sessions/{sid}/commands")[0], 403)
+            status, data, _ = self.request(f"/api/sessions/{sid}/commands", headers=token)
+            self.assertEqual((status, data["session_id"], [item["name"] for item in data["commands"][:2]]), (200, sid, ["php-review", "clear"]))
+            self.assertEqual(data["commands"][2]["kind"], "page")  # then the Harness views
+            self.assertEqual(self.request(f"/api/sessions/{sid}/commands?refresh=1", headers=token)[0], 400)
+            self.assertEqual(self.request(f"/api/sessions/{'0' * 36}/commands", headers=token)[0], 400)
+            # A restart inside a conversation is the page's New session; the API refuses it before anything runs.
+            self.assertEqual(self.post("/api/sessions", self.options(provider="claude", prompt="/clear", workflow="native"))[0], 400)
+            self.assertEqual(self.post("/api/sessions", self.options(provider="claude", prompt="/model sonnet", workflow="native"))[0], 400)
+            self.assertEqual(self.post("/api/sessions", self.options(provider="claude", prompt="Inspect", skills=["php-review"]))[0], 400)
+
+    @unittest.skipUnless(shutil.which("git"), "Worktree routes require Git")
+    def test_existing_worktree_http_listing_and_creation_keep_the_chosen_checkout(self):
+        path = f"/api/projects/{self.project_id}/worktrees"
+        self.assertEqual(self.request(path)[1], {"project_id": self.project_id, "is_git": False, "worktrees": [],
+                                                 "skipped": 0, "reason": None})
+        self.initialize_git()
+        task = self.root / "http-task"
+        self.git_command("worktree", "add", "--quiet", "-b", "http-task", str(task))
+        status, listing, _ = self.request(path)
+        self.assertEqual(status, 200)
+        self.assertEqual([(entry["path"], entry["branch"]) for entry in listing["worktrees"]], [(str(task), "http-task")])
+        for invalid in (path + "?refresh=1", f"/api/projects/{'0' * 16}/worktrees", path + "/extra"):
+            with self.subTest(path=invalid):
+                self.assertIn(self.request(invalid)[0], (400, 404))
+        choice = listing["worktrees"][0]["id"]
+        store = self.server.sessions
+        for changes in ({"workspace": "existing-worktree"}, {"workspace": "existing-worktree", "worktree_id": "f" * 16},
+                        {"workspace": "project", "worktree_id": choice},
+                        {"workspace": "existing-worktree", "worktree_id": choice, "worktree_branch": "new"}):
+            with self.subTest(changes=changes):
+                self.assertEqual(self.post("/api/sessions", self.options(provider="claude", **changes))[0], 400)
+        self.assertEqual(store.list(), [])
+        status, created, _ = self.post("/api/sessions", self.options(provider="claude", workspace="existing-worktree", worktree_id=choice))
+        self.assertEqual(status, 201)
+        session = created["session"]
+        self.assertEqual((session["workspace"], session["branch"], session["project_path"], session["git_common_dir"]),
+                         ("existing-worktree", "http-task", str(task), str(self.project / ".git")))
+        with store.lock:
+            store.db.execute("UPDATE sessions SET status='completed',native_session_id='fixture-existing' WHERE id=?", (session["id"],))
+            store.db.commit()
+        status, resumed, _ = self.post(f"/api/sessions/{session['id']}/messages", {"prompt": "Continue in my checkout"})
+        self.assertEqual(status, 200)
+        self.assertEqual(resumed["session"]["project_path"], str(task))
+
     def test_fleet_http_decisions_resume_and_report_enforce_state_auth_and_schema(self):
         store = self.server.sessions
         runtime = {"available": True, "executable": "/never-launched/fleet-python",
@@ -519,30 +1056,225 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
         self.assertEqual(self.request("/api/sessions/unregistered/report")[0], 400)
         self.assertEqual(list(self.project.iterdir()), [])
 
+    def test_sign_in_needs_the_page_token_and_asks_available_clis_only(self):
+        # Asking starts native CLIs, so a page without the token gets nothing.
+        self.assertEqual(self.request("/api/providers/sign-in")[0], 403)
+        token = {"X-Harness-Token": self.token}
+        answer = {"id": "claude", "state": "signed_out", "detail": "Claude Code reports that it is not signed in.",
+                  "login": "claude auth login"}
+        with patch.object(providers, "sign_in_status", return_value=answer) as ask:
+            self.assertEqual(self.request("/api/providers/sign-in", headers=token)[:2], (200, {"providers": [answer]}))
+            self.assertEqual(self.request("/api/providers/sign-in?refresh=yes", headers=token)[0], 400)
+        # The fixture Codex is unavailable: only Claude's CLI is asked.
+        self.assertEqual([("claude", "/never-launched/fixture-claude")], [call.args for call in ask.call_args_list])
+
+    def test_update_status_is_public_and_applying_needs_the_token_and_restarts_only_a_served_server(self):
+        status, boot, _ = self.request("/api/bootstrap")
+        self.assertIn(boot["update"]["state"], ("unknown", "current", "available", "diverged", "unavailable", "failed"))
+        with patch.object(self.server.updates, "poke", return_value={"state": "available", "behind": 2}) as poke:
+            self.assertEqual(self.request("/api/app/update?check=1")[:2], (200, {"state": "available", "behind": 2}))
+        poke.assert_called_once()
+        self.assertEqual(self.request("/api/app/update")[0], 200)
+        self.assertEqual(self.request("/api/app/update?check=yes")[0], 400)
+        self.assertEqual(self.request("/api/app/update", "POST", {})[0], 403)
+        applied = {"from": "abc1234", "to": "def5678", "changes": 2}
+        with patch.object(self.server.updates, "apply", return_value=dict(applied)), \
+                patch.object(web, "refresh_application", return_value=[]), patch.object(self.server, "restart") as restart:
+            status, data, _ = self.post("/api/app/update", {})
+            self.assertEqual((status, data), (202, {"ok": True, **applied, "application": [], "restarting": False}))
+            restart.assert_not_called()  # a server not started by serve cannot start itself again
+            self.server.relaunch_command = [sys.executable, str(Path(web.__file__).resolve()), "serve"]
+            self.assertEqual(self.post("/api/app/update", {})[1]["restarting"], True)
+            # The reply goes out first and the restart is handed over after it.
+            deadline = time.monotonic() + 5
+            while not restart.called and time.monotonic() < deadline:
+                time.sleep(.01)
+            restart.assert_called_once()
+        from harness.updates import UpToDate
+        with patch.object(self.server.updates, "apply", side_effect=UpToDate("This clone is already up to date.")):
+            self.assertEqual(self.post("/api/app/update", {})[:2], (200, {"ok": True, "current": True, "restarting": False,
+                                                                        "detail": "This clone is already up to date."}))
+        with patch.object(self.server.updates, "apply", side_effect=sessions.SessionError("2 runs are in progress")):
+            self.assertEqual(self.post("/api/app/update", {})[:2], (400, {"error": "2 runs are in progress"}))
+        self.assertEqual(self.post("/api/app/update", {"x": 1})[0], 404)
+
+    def gated_update(self, merge_code=0):
+        """The server's update with an available change and a merge that waits at a barrier: a request sent while it
+        waits arrives between the update's busy check and its merge."""
+        updates = self.server.updates
+        merging, finish = threading.Event(), threading.Event()
+
+        def git(*args, **kwargs):
+            if args[0] == "merge":
+                merging.set()
+                finish.wait(10)
+                return subprocess.CompletedProcess(args, merge_code, "", "error: Your local changes would be overwritten by merge")
+            return subprocess.CompletedProcess(args, 0, "def5678\n", "")
+        available = {"state": "available", "detail": "1 new change on origin/main.", "checked_at": None, "behind": 1,
+                     "ahead": 0, "commits": [], "branch": "main", "upstream": "origin/main", "version": "abc1234"}
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.object(updates, "_compute", return_value=available))
+        stack.enter_context(patch.object(updates, "_git", side_effect=git))
+        stack.enter_context(patch.object(web, "refresh_application", return_value=[]))
+        self.addCleanup(stack.close)
+        self.addCleanup(finish.set)
+        answer = {}
+        applying = threading.Thread(target=lambda: answer.update(reply=self.post("/api/app/update", {})[:2]), daemon=True)
+        applying.start()
+        self.assertTrue(merging.wait(5), "the update never reached its merge")
+
+        def done():
+            finish.set()
+            applying.join(5)
+            return answer["reply"]
+        return done
+
+    def test_an_update_holds_new_runs_back_from_its_busy_check_through_the_restart(self):
+        status, created, _ = self.post("/api/sessions", self.options(provider="claude"))
+        self.assertEqual(201, status)
+        sid, store = created["session"]["id"], self.server.sessions
+        with store.lock:
+            store.db.execute("UPDATE sessions SET status='completed',native_session_id='fixture-native' WHERE id=?", (sid,))
+            store.db.commit()
+        self.server.relaunch_command = [sys.executable, str(Path(web.__file__).resolve()), "serve"]
+        refused = (400, {"error": web.HOLD_REASON})
+        with patch.object(self.server, "restart", return_value=True) as restart:
+            finish = self.gated_update()
+            # Between the busy check and the merge, a new session and a follow-up are refused, not queued for the
+            # restart to interrupt.
+            self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+            self.assertEqual(refused, self.post(f"/api/sessions/{sid}/messages", {"prompt": "Continue"})[:2])
+            status, applied = finish()
+            self.assertEqual((202, True), (status, applied["restarting"]))
+            restart.assert_called_once()
+            # The hold outlives the reply until this server has stopped; a second update does not lift it.
+            self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+            status, again, _ = self.post("/api/app/update", {})
+            self.assertEqual(400, status)
+            self.assertIn("restarting", again["error"])
+            self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+        # Nothing was queued that the restart would turn into interrupted.
+        self.assertEqual([(sid, "completed")], [(item["id"], item["status"]) for item in store.summaries()])
+
+    def test_an_update_that_fails_or_does_not_restart_lets_new_runs_start_again(self):
+        def start_and_stop():
+            status, created, _ = self.post("/api/sessions", self.options(provider="claude"))
+            self.assertEqual(201, status)
+            self.assertEqual(200, self.post(f"/api/sessions/{created['session']['id']}/cancel", {})[0])
+        refused = (400, {"error": web.HOLD_REASON})
+        # The merge fails: refused while it runs, admitted once it has failed.
+        finish = self.gated_update(merge_code=1)
+        self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+        status, failed = finish()
+        self.assertEqual(400, status)
+        self.assertIn("clone is unchanged", failed["error"])
+        start_and_stop()
+        # Nothing to apply.
+        with patch.object(self.server.updates, "_compute", return_value={**self.server.updates.status(), "state": "current"}):
+            self.assertEqual(200, self.post("/api/app/update", {})[0])
+        start_and_stop()
+        # Applied by a server that cannot restart itself: it keeps the old code running, and runs.
+        self.server.relaunch_command = None
+        finish = self.gated_update()
+        self.assertEqual(refused, self.post("/api/sessions", self.options(provider="claude"))[:2])
+        status, applied = finish()
+        self.assertEqual((202, False), (status, applied["restarting"]))
+        status, created, _ = self.post("/api/sessions", self.options(provider="claude"))
+        self.assertEqual(201, status)
+        # A queued run holds the update back, and the refused update holds nothing back.
+        status, busy, _ = self.post("/api/app/update", {})
+        self.assertEqual((400, "1 run is in progress, and updating restarts the Harness. Let them finish or stop them, then update."),
+                         (status, busy["error"]))
+        self.assertEqual(201, self.post("/api/sessions", self.options(provider="claude"))[0])
+
+    def test_a_relaunch_starts_only_this_server_command(self):
+        state = self.root / "relaunch-state"
+        state.mkdir()
+        for command in ("not json", "[]", '["python3", "other.py", "serve"]', json.dumps([sys.executable, str(Path(web.__file__).resolve()), "stop"])):
+            with self.subTest(command=command), self.assertRaisesRegex(sessions.SessionError, "Invalid relaunch"):
+                web.relaunch(state, command)
+        command = json.dumps([sys.executable, str(Path(web.__file__).resolve()), "serve"])
+        with patch.object(web, "metadata", return_value={"port": 1}), patch.object(web, "spawn_server") as spawn:
+            with self.assertRaisesRegex(sessions.SessionError, "did not start again"):
+                web.relaunch(state, command, seconds=1)
+        spawn.assert_not_called()  # the old server never let go
+        with patch.object(web, "metadata", return_value=None), patch.object(web, "spawn_server", side_effect=[None, {"port": 1}]) as spawn:
+            self.assertTrue(web.relaunch(state, command, seconds=5))
+        self.assertEqual(2, spawn.call_count)  # the first attempt met the old server's lock
+
+    def test_file_search_needs_the_page_token_and_lists_the_workspace_by_name(self):
+        (self.project / "src").mkdir()
+        (self.project / "src" / "Totals.php").write_text("<?php\n", encoding="utf-8")
+        path = f"/api/projects/{self.project_id}/files"
+        self.assertEqual(self.request(path + "?q=tot")[0], 403)
+        token = {"X-Harness-Token": self.token}
+        status, data, _ = self.request(path + "?q=tot", headers=token)
+        self.assertEqual((status, data["project_id"], [item["path"] for item in data["items"]], data["truncated"]),
+                         (200, self.project_id, ["src/Totals.php"], False))
+        self.assertEqual([("src/", "folder")], [(item["path"], item["kind"]) for item in self.request(path + "?q=sr", headers=token)[1]["items"]][:1])
+        for invalid in (path + "?q=a&q=b", path + "?other=1", path + "?q=" + "x" * 301, path + "?worktree=" + "0" * 16,
+                        f"/api/projects/{'0' * 16}/files", f"/api/sessions/{'0' * 36}/files", f"/api/sessions/{'0' * 36}/files?worktree=x"):
+            with self.subTest(path=invalid):
+                self.assertEqual(self.request(invalid, headers=token)[0], 400)
+        self.assertEqual(self.request(f"/api/sessions/{'0' * 36}/files")[0], 403)
+
     def test_bootstrap_and_only_explicit_static_routes_are_served(self):
         status, boot, headers = self.request("/api/bootstrap")
         self.assertEqual(status, 200)
         self.assertEqual(boot["csrf"], self.token)
-        self.assertEqual(boot["projects"], [{"id": self.project_id, "name": "project", "path": str(self.project), "available": True}])
+        self.assertEqual(boot["projects"], [{"id": self.project_id, "name": "project", "path": str(self.project), "available": True,
+                                             "accelerator": {"mode": None, "edition": None}}])
         self.assertFalse(boot["providers"][0]["available"])
         self.assertNotIn("executable", boot["providers"][0])
         self.assertEqual({kit["id"] for kit in boot["accelerators"]}, {"kit1", "kit2", "kit3"})
         self.assertEqual((boot["runtime"]["max_agents"], boot["runtime"]["default_agent_count"]), (40, 3))
+        # Usage › Context labels project reference excerpts by the size the prompt sends.
+        self.assertEqual(boot["runtime"]["context_excerpt_bytes"], 3000)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertIn("frame-ancestors 'self'", headers["Content-Security-Policy"])
+        page_html = (WEB / "index.html").read_text(encoding="utf-8")
+        # Every file the page loads is a listed asset; /kit3/ is the catalog page, which has a route of its own.
+        references = [name for name in re.findall(r'(?:src|href)="/([^"]*)"', page_html) if name != "kit3/"]
+        self.assertEqual(set(references), set(web.ASSETS))
+        served = self.request("/")[1]
+        # Each reference is versioned, the hare's three (tab, sidebar, welcome) among them.
+        self.assertEqual(len(references), len(re.findall(rb'(?:src|href)="/[^"?]+\?v=[0-9a-f]{16}"', served)))
+        for name, content_type in web.ASSETS.items():
+            with self.subTest(asset=name):
+                status, body, asset_headers = self.request("/" + name)
+                self.assertEqual((status, body), (200, (WEB / name).read_bytes()))
+                self.assertEqual(asset_headers["Content-Type"], content_type)
+                self.assertEqual(asset_headers["X-Content-Type-Options"], "nosniff")
+                # Page files are kept by the browser and revalidated by their hash on every load.
+                self.assertEqual(asset_headers["Cache-Control"], "no-cache")
+                tag = asset_headers["ETag"]
+                self.assertEqual(tag, '"' + hashlib.sha256(body).hexdigest()[:32] + '"')
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": tag})[:2], (304, b""))
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": '"stale", ' + tag})[0], 304)
+                self.assertEqual(self.request("/" + name, headers={"If-None-Match": '"stale"'})[:2], (200, body))
+                # The served page names the asset by its hash; that address may be kept for good.
+                version = re.search(r'="/%s\?v=([0-9a-f]{16})"' % re.escape(name), served.decode()).group(1)
+                self.assertEqual(version, hashlib.sha256(body).hexdigest()[:16])
+                pinned = self.request(f"/{name}?v={version}")
+                self.assertEqual((pinned[0], pinned[1], pinned[2]["Cache-Control"]), (200, body, "private, max-age=31536000, immutable"))
+                self.assertEqual(self.request(f"/{name}?v=0000000000000000")[2]["Cache-Control"], "no-cache")
+                head_status, head, head_headers = self.request("/" + name, "HEAD")
+                self.assertEqual((head_status, head, int(head_headers["Content-Length"])), (200, b"", len(body)))
         for path, marker in (("/", b"AI Infrastructure Harness"),
                              ("/kit3/", b"Open Source Kit"),
                              ("/kit3/index.html", b"Open Source Kit")):
             with self.subTest(path=path):
-                status, page, _ = self.request(path)
+                status, page, page_headers = self.request(path)
                 self.assertEqual(status, 200)
                 self.assertIn(marker, page)
+                self.assertEqual(self.request(path, headers={"If-None-Match": page_headers["ETag"]})[:2], (304, b""))
                 head_status, head, head_headers = self.request(path, "HEAD")
                 self.assertEqual(head_status, 200)
                 self.assertEqual(head, b"")
                 self.assertEqual(int(head_headers["Content-Length"]), len(page))
-        for path in ("/index.html", "/kit3", "/api/bootstrap/", "/harness/web/index.html",
+        for path in ("/index.html", "/kit3", "/api/bootstrap/", "/harness/web/index.html", "/harness/web/app.css",
+                     "/app-unknown.js", "/app.css/", "/APP.CSS",
                      "/scripts/install_accelerator.py", "/../state/sessions.sqlite3", "/%2e%2e/secret"):
             with self.subTest(path=path):
                 self.assertEqual(self.request(path)[0], 404)
@@ -1370,7 +2102,7 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
         install_knowledge_fixture(self.project)
         data = {"project_id": self.project_id, "provider": "claude", "prompt": "Verify the cobalt rule",
                 "brain": {"bank": "memory-bank", "task_id": "TASK-SESSION-HTTP", "query": "cobalt allocation",
-                          "create": True, "goal": "Verify the cobalt allocation rule"}}
+                          "create": True, "goal": "Verify the cobalt allocation rule", "review": True}}
         for extra in ({"capsule": {}}, {"approved": True}, {"context_id": "injected"}):
             with self.subTest(extra=extra):
                 self.assertEqual(self.post("/api/sessions", {**data, "brain": {**data["brain"], **extra}})[0], 400)
@@ -1389,8 +2121,12 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
         queue_size = store.jobs.qsize()
         for action, body in (("run", {"context_id": prepared["context_id"]}),
                              ("context", {"query": "cobalt rule"}),
-                             ("brain", {"action": "rebind"})):
+                             ("brain", {"action": "rebind"}),
+                             ("memory", {"progress": "Unreviewed"})):
             self.assertEqual(self.request(base + "/" + action, "POST", body)[0], 403)
+        for body in ({"progress": "x", "unexpected": True}, {"learnings": [{"type": "task"}]}, {}):
+            with self.subTest(memory=body):
+                self.assertEqual(self.post(base + "/memory", body)[0], 400)
         for body in ({}, {"context_id": "different"}, {"context_id": prepared["context_id"], "capsule": {}},
                      {"context_id": prepared["context_id"], "approved": True}):
             with self.subTest(run=body):
@@ -1460,6 +2196,986 @@ assert.equal(fields['brain-op-progress'].scrolled,true);
             self.assertEqual(spawn.call_args.kwargs["cwd"], web.ROOT)
         finally:
             os.chdir(previous)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+# The harness serves the Kit 3 catalog in a same-origin frame, so both pages share one theme contract.
+THEMED_PAGES = (ROOT / "harness/web/index.html", ROOT / "install/open-source-kit/web/index.html")
+COLOR_LITERAL = re.compile(r"#[0-9a-fA-F]{3,8}\b|(?<![\w-])(?:white|black)(?![\w-])"
+                           r"|\b(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color-mix)\(")
+
+
+class HarnessThemeTests(unittest.TestCase):
+    def run_node(self, script):
+        result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True)
+        if result.returncode:
+            self.fail(result.stderr)
+
+    def test_stylesheets_take_every_color_from_matching_light_and_dark_tokens(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                html = page.read_text(encoding="utf-8")
+                css = stylesheet(page)
+                light = re.search(r"\n\s*:root \{([^}]*)\}", css).group(1)
+                dark = re.search(r'\n\s*:root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)
+                tokens = set(re.findall(r"(--[\w-]+)\s*:", light))
+                self.assertEqual(tokens, set(re.findall(r"(--[\w-]+)\s*:", dark)),
+                                 "every token needs a light and a dark value")
+                self.assertEqual(COLOR_LITERAL.findall(css.replace(light, "").replace(dark, "")), [],
+                                 "add a token to both :root sets instead of a literal color")
+                defined = set(re.findall(r"(--[\w-]+)\s*:", " ".join(re.findall(r":root[^{]*\{([^}]*)\}", css))))
+                runtime = set(re.findall(r"setProperty\('(--[\w-]+)'", html + ui_script()))
+                self.assertLessEqual(set(re.findall(r"var\((--[\w-]+)", css)) - runtime, defined)
+        switch = re.findall(r'<input type="radio" name="theme" value="(\w+)">', THEMED_PAGES[0].read_text(encoding="utf-8"))
+        self.assertEqual(switch, ["system", "light", "dark"])
+
+    def test_stylesheets_take_type_and_shape_from_the_scale_and_space_from_the_grid(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                rules = re.sub(r":root[^{]*\{[^}]*\}", "", stylesheet(page))
+                for prop in ("font-size", "line-height", "font-weight", "border-radius", "font"):
+                    literal = [value for value in re.findall(rf"(?<![\w-]){prop}:\s*([^;}}]+)", rules)
+                               if any(unit != "%" and float(number) for number, unit in
+                                      re.findall(r"(?<![\w-])(\d*\.?\d+)(px|em|rem|%)?(?!\w)", re.sub(r"var\([^)]*\)", "", value)))]
+                    self.assertEqual(literal, [], f"{prop} must come from a scale token")
+                spacing = re.findall(r"(?<![\w-])(?:padding|margin|gap|row-gap|column-gap)(?:-[a-z]+)?:\s*([^;}]+)", rules)
+                off_grid = sorted({px for value in spacing for px in re.findall(r"(\d+(?:\.\d+)?)px", value)
+                                   if float(px) not in (1, 2, 4, 8, 12, 16, 24, 32, 48, 64)})
+                self.assertEqual(off_grid, [], "spacing must sit on the 4px grid")
+
+    def test_motion_comes_from_tokens_and_reduced_motion_stops_it_everywhere(self):
+        for page in THEMED_PAGES:
+            with self.subTest(page=page.relative_to(ROOT).as_posix()):
+                css = stylesheet(page)
+                rules = re.sub(r":root[^{]*\{[^}]*\}", "", css)
+                motion = re.findall(r"(?<![\w-])(?:transition|animation)(?:-[a-z]+)?:\s*([^;}]+)", rules)
+                self.assertTrue(motion)
+                literal = [value for value in motion if "cubic-bezier(" in value
+                           or re.search(r"(?<![\w.-])\d*\.?\d+m?s\b", re.sub(r"var\([^)]*\)", "", value))]
+                self.assertEqual(literal, [], "durations and easings come from the motion tokens")
+                # Pseudo-elements animate too (the agents panel's live dot), so reduced motion must name them.
+                reduced = re.search(r"@media \(prefers-reduced-motion:reduce\) \{ ([^{]+)\{([^}]*)\}", css)
+                self.assertIsNotNone(reduced)
+                self.assertEqual({part.strip() for part in reduced.group(1).split(",")}, {"*", "*::before", "*::after"})
+                self.assertIn("animation:none !important", reduced.group(2))
+                self.assertIn("transition:none !important", reduced.group(2))
+
+    def test_memory_colors_read_as_marks_on_both_surfaces_in_both_themes(self):
+        def luminance(color):
+            channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            return sum(weight * (c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4)
+                       for weight, c in zip((.2126, .7152, .0722), channels))
+        def contrast(a, b):
+            high, low = sorted((luminance(a), luminance(b)), reverse=True)
+            return (high + .05) / (low + .05)
+        css = stylesheet(THEMED_PAGES[0])
+        for block in (re.search(r"\n\s*:root \{([^}]*)\}", css).group(1), re.search(r':root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)):
+            tokens = dict(re.findall(r"(--[\w-]+):(#[0-9a-f]{6})\b", block))
+            tokens.setdefault("--paper", "#ffffff")
+            marks = {name: value for name, value in tokens.items() if name.startswith(("--mem-", "--ctx-"))}
+            self.assertEqual(set(marks), {"--mem-rules", "--mem-bank", "--mem-brain", "--mem-auto", "--ctx-rest", "--ctx-added"})
+            for name, value in marks.items():
+                for surface in ("--paper", "--soft"):
+                    with self.subTest(token=name, surface=surface, paper=tokens["--paper"]):
+                        self.assertGreaterEqual(contrast(value, tokens[surface]), 3, "chart marks need 3:1 (WCAG 1.4.11)")
+
+    @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
+    def test_saved_theme_applies_before_first_paint_in_the_harness_and_its_catalog(self):
+        heads = []
+        for page in THEMED_PAGES:
+            head = page.read_text(encoding="utf-8").split("</head>", 1)[0]
+            heads.append(head[head.index("<script>") + len("<script>"):head.index("</script>")])
+        self.run_node("const assert = require('node:assert/strict');\nconst heads = " + json.dumps(heads) + """;
+for (const saved of [null,'light','dark','sepia','denied']) for (const systemDark of [false,true]) {
+  const themes = heads.map(source => {
+    const root = {dataset:{}};
+    const localStorage = {getItem(key) { assert.equal(key,'harness.theme.v1'); if (saved === 'denied') throw new Error('denied'); return saved; }};
+    const window = {matchMedia: () => ({matches:systemDark, addEventListener() {}}), addEventListener() {}};
+    new Function('window','document','localStorage',source)(window,{documentElement:root},localStorage);
+    return root.dataset.theme;
+  });
+  const expected = saved === 'light' || saved === 'dark' ? saved : systemDark ? 'dark' : 'light';
+  assert.deepEqual(themes,[expected,expected],`saved ${saved}, system ${systemDark ? 'dark' : 'light'}`);
+}""")
+
+    @unittest.skipUnless(shutil.which("node"), "Theme script check requires Node")
+    def test_theme_switch_saves_the_choice_and_follows_the_system_and_other_tabs(self):
+        page = ui_script()
+        start = page.index("\nconst themeKey = ") + 1
+        source = page[start:page.index("\napplyTheme();\n", start) + len("\napplyTheme();\n")]
+        self.run_node("const assert = require('node:assert/strict');\nconst source = " + json.dumps(source) + """;
+function boot({saved = null, dark = false, denied = false} = {}) {
+  const env = {stored:saved === null ? {} : {'harness.theme.v1':saved}, denied, listeners:{}, root:{dataset:{}}};
+  env.system = {matches:dark, addEventListener: (type,listener) => { env.listeners.system = listener; }};
+  env.radios = ['system','light','dark'].map(value => ({value, checked:false, addEventListener(type,listener) { this.change = listener; }}));
+  const localStorage = {
+    getItem: key => { if (env.denied) throw new Error('denied'); return key in env.stored ? env.stored[key] : null; },
+    setItem: (key,value) => { if (env.denied) throw new Error('denied'); env.stored[key] = String(value); },
+    removeItem: key => { if (env.denied) throw new Error('denied'); delete env.stored[key]; },
+  };
+  const window = {matchMedia: () => env.system, addEventListener: (type,listener) => { env.listeners[type] = listener; }};
+  new Function('window','document','localStorage',source)(window,{documentElement:env.root, querySelectorAll: () => env.radios},localStorage);
+  env.choose = value => { const radio = env.radios.find(r => r.value === value); radio.checked = true; radio.change(); };
+  env.checked = () => env.radios.filter(r => r.checked).map(r => r.value);
+  env.flip = matches => { env.system.matches = matches; env.listeners.system(); };
+  return env;
+}
+let env = boot();
+assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['system']);
+env.flip(true); assert.equal(env.root.dataset.theme,'dark');
+env.choose('light'); assert.equal(env.stored['harness.theme.v1'],'light'); assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['light']);
+env.flip(false); env.flip(true); assert.equal(env.root.dataset.theme,'light');
+env.stored['harness.theme.v1'] = 'dark'; env.listeners.storage({key:'harness.theme.v1'});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['dark']);
+env.choose('system'); assert.equal('harness.theme.v1' in env.stored,false); assert.equal(env.root.dataset.theme,'dark');
+env = boot({saved:'sepia', dark:true});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['system']);
+env = boot({saved:'light', dark:true, denied:true});
+assert.equal(env.root.dataset.theme,'dark'); assert.deepEqual(env.checked(),['system']);
+env.choose('light'); assert.equal(env.root.dataset.theme,'light'); assert.deepEqual(env.checked(),['light']);""")
+
+
+@unittest.skipUnless(shutil.which("node"), "Page helper checks require Node")
+class PageHelperTests(unittest.TestCase):
+    def run_node(self, source, checks):
+        result = subprocess.run([shutil.which("node"), "-e", "const assert = require('node:assert/strict');\n" + source + checks],
+                                capture_output=True, text=True)
+        if result.returncode:
+            self.fail(result.stderr)
+
+    def test_numbers_follow_one_grammar_and_unknown_is_never_zero(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")], r"""
+assert.deepEqual(fmt.exact(76450), {text: '76,450', label: '76,450'});
+assert.deepEqual(fmt.exact(Number.NaN), {text: '—', label: 'not reported'});
+assert.deepEqual(fmt.estimate(4123), {text: '≈ 4.1k', label: 'about 4,100'});
+assert.deepEqual([fmt.estimate(520.4).text, fmt.estimate(53210).text, fmt.estimate(1234567).text, fmt.estimate(1988).text, fmt.estimate(149e3).text],
+  ['≈ 520', '≈ 53k', '≈ 1.2M', '≈ 2.0k', '≈ 150k']);
+assert.deepEqual([fmt.atMost(4000).text, fmt.atLeast(12345).text], ['≤ 4k', '≥ 12k']);
+assert.deepEqual(fmt.atMost(4100), {text: '≤ 4.1k', label: 'at most 4,100'});
+assert.deepEqual([fmt.atLeast(13).text, fmt.capped(200).text, fmt.capped(200).label], ['≥ 13', '200+', 'more than 200']);
+assert.deepEqual(fmt.cost(.3), {text: '≈ $0.30', label: 'about 0.30 US dollars'});
+assert.deepEqual([fmt.cost(4.8312).text, fmt.cost(.0123).text, fmt.cost(.123).text], ['≈ $4.83', '≈ $0.0123', '≈ $0.123']);
+for (const unknown of [null, undefined, -1, Infinity]) assert.equal(fmt.cost(unknown).text, '—');
+assert.equal(fmt.unknown('not recorded').label, 'not recorded');
+""")
+
+    def test_capsule_meter_reads_exact_counts_and_marked_estimates(self):
+        page = ui_script()
+        parts = [page[page.index(start):page.index(end)] for start, end in (
+            ("\nconst el = (tag", "\n// Motion follows"), ("\nconst numberText", "\n// Keeps one node per key"),
+            ("\nconst capsuleKinds", "\nfunction renderLinkedSession("))]
+        self.run_node(r"""
+class Node { constructor() { this.children = []; this.dataset = {}; this.attributes = {}; this.style = {}; this.hidden = false; this.own = ''; }
+  get textContent() { return this.children.length ? this.children.map(child => typeof child === 'string' ? child : child.textContent).join('') : this.own; }
+  set textContent(value) { this.children = []; this.own = String(value); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  append(...nodes) { this.children.push(...nodes); }
+  replaceChildren(...nodes) { this.own = ''; this.children = nodes; }
+  querySelector(selector) { return this.children.find(child => selector === `[data-kind="${child.dataset.kind}"]`); } }
+const document = {createElement: () => new Node()}, nodes = {}, $ = id => nodes[id] ??= new Node();
+const state = {pending: null, bootstrap: {runtime: {context_excerpt_bytes: 3000}}};
+for (const kind of ['brain', 'bank', 'rules']) { const part = new Node(); part.dataset.kind = kind; $('capsule-bar').append(part); }
+""" + "".join(parts), r"""
+const part = kind => $('capsule-bar').querySelector(`[data-kind="${kind}"]`);
+renderCapsuleMeter({characters: 7650, limit: 8000, kinds: {brain: 2592, bank: 4296, rules: 762}, items: {brain: 2, bank: 3, rules: 1},
+  repeats: 1448, dropped: {semantic: 2, episodic: 1}, prompt_characters: 7946});
+assert.equal($('capsule-meter').hidden, false);
+assert.equal($('capsule-facts').textContent, '7,650 of 8,000 characters · 2 semantic items dropped to fit · 1 episodic item dropped to fit · 350 characters left');
+assert.equal($('capsule-repeats').textContent, 'Each item appears in 3 views: 1,448 characters repeat');
+assert.deepEqual($('capsule-legend').children.map(entry => entry.textContent), ['Project Brain 2,592', 'Memory bank 4,296', 'Rules & docs 762']);
+assert.deepEqual(['brain', 'bank', 'rules'].map(kind => part(kind).style.width), ['32.4%', '53.7%', '9.525%']);
+assert.equal(part('bank').title, 'Memory bank · 3 items · 4,296 characters');
+assert.equal($('capsule-bar').attributes['aria-label'], 'Capsule 7,650 of 8,000 characters: Project Brain 2,592, Memory bank 4,296, Rules and docs 762; 2 semantic items dropped to fit, 1 episodic item dropped to fit; 1,448 characters repeat.');
+const cost = $('linked-context-cost').children;
+assert.deepEqual([cost[0], cost[1].children[0].textContent, cost[1].children[0].attributes['aria-hidden'], cost[1].children[1].textContent, cost[2]],
+  ['Adds ', '≈ 2.2k tokens', 'true', 'about 2,200 tokens', ' to every turn.']);
+renderCapsuleMeter({characters: 900, limit: 8000, kinds: {brain: 900, bank: 0, rules: 0}, items: {brain: 0, bank: 0, rules: 0},
+  repeats: 0, dropped: {}, prompt_characters: 1000});
+assert.equal($('capsule-facts').textContent, '900 of 8,000 characters · No matching memory for this query.');
+assert.deepEqual([$('capsule-repeats-line').hidden, part('bank').hidden, part('rules').hidden, $('capsule-legend').children.length], [true, true, true, 1]);
+renderCapsuleMeter(null);
+assert.equal($('capsule-meter').hidden, true);
+""")
+
+    def test_memory_use_model_counts_the_window_and_what_changed_since_the_last_visit(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
+                      + "\nconst memoryKinds = [['brain','Project Brain'],['bank','Memory bank'],['rules','Rules & docs']];"
+                      + page[page.index("\nconst DAY_MS"):page.index("\nconst memoryAnchorKey")]
+                      + page[page.index("\nconst memoryFilters"):page.index("\nconst memoryMatches")], r"""
+const chunk = (id, fields) => ({id, title:id, type:'domain', status:'active', created:'2025-10-01', last_verified:'2025-10-01', review_after:'2026-12-01',
+  valid_to:null, promoted:false, auto:false, bytes:100, sources:1, sources_changed:false, path:`chunks/${id}.md`, ...fields});
+const data = {today:'2026-10-04',
+  chunks:{bytes:600, truncated:false, items:[chunk('A',{review_after:'2026-10-01'}), chunk('B',{auto:true, promoted:true, created:'2026-09-30', last_verified:'2026-09-30', review_after:'2027-09-30'}),
+    chunk('C',{auto:true, promoted:true, last_verified:'2026-09-02', review_after:'2027-09-02'}), chunk('D',{status:'needs-review'}),
+    chunk('E',{status:'superseded', valid_to:'2026-09-20'}), chunk('F',{review_after:'2026-10-20', sources_changed:true})]},
+  brain:{truncated:false, items:[{type:'task', status:'active', archived:false, open:true, resolved_at:null, promotable:false, promoted:false},
+    {type:'finding', status:'resolved', archived:false, open:false, resolved_at:'2026-09-25T08:00:00+00:00', promotable:true, promoted:false},
+    {type:'finding', status:'resolved', archived:true, open:false, resolved_at:'2026-09-29T08:00:00+00:00', promotable:true, promoted:true},
+    {private:true, archived:true, open:false, resolved_at:'2026-01-02T08:00:00+00:00', promotable:true, promoted:false}]},
+  promotions:{truncated:false, items:[{status:'applied', mode:'automatic', created_at:'2026-09-29T09:00:00+00:00', applied_at:'2026-09-30T09:00:00+00:00'},
+    {status:'applied', mode:'human', created_at:'2026-08-01T09:00:00+00:00', applied_at:'2026-09-15T09:00:00+00:00'},
+    {status:'proposed', mode:'human', created_at:'2026-10-01T09:00:00+00:00', applied_at:null}, {status:'reviewed', mode:'automatic', created_at:'2026-10-02T09:00:00+00:00', applied_at:null}]},
+  retrievals:{found:3, merged:1, limit:200, items:[{at:'2026-09-27T10:00:00+00:00', route:'Claude hook', task:0, brain:2, bank:2, rules:3, chunks:['A','B'], cuts:[]},
+    {at:'2026-10-02T10:00:00+00:00', route:'Harness', task:1, brain:1, bank:1, rules:2, chunks:['B'], cuts:[['C','layer-limit']]},
+    {at:'2026-10-03T10:00:00+00:00', route:'not recorded', task:1, brain:1, bank:0, rules:2, chunks:[], cuts:[]}]},
+  health:{truncated:false, items:[{at:'2026-09-20T10:00:00+00:00', dropped:true}, {at:'2026-09-27T10:00:00+00:00', dropped:true}, {at:'2026-10-02T10:00:00+00:00', dropped:false}, {at:'2026-10-03T10:00:00+00:00', dropped:null}]},
+  history:{horizon:120, days:[{day:'2026-07-01', retrievals:40, with_chunk:6, chunks:{F:2}}, {day:'2026-09-28', retrievals:12, with_chunk:2, chunks:{A:1, B:1}},
+    {day:'2026-10-02', retrievals:9, with_chunk:1, chunks:{B:1}}]}};
+const now = Date.parse('2026-10-04T12:00:00Z'), model = memoryUseModel(data, 30, now);
+// Trouble the tab counts: one chunk past review, one citing a changed file, one stalled automatic promotion.
+assert.equal(model.count, 3);
+assert.deepEqual([model.bank.active, model.bank.person, model.bank.auto, model.bank.reattested, model.bank.drafts, model.bank.superseded],[4, 2, 2, 1, 1, 1]);
+assert.deepEqual([model.bank.created, model.bank.retiredInWindow, model.bank.pastReview.map(c => c.id), model.bank.due.map(c => c.id)],[1, 1, ['A'], ['F']]);
+assert.deepEqual([model.brain.total, model.brain.open, model.brain.archived, model.brain.private, model.brain.resolved, model.brain.notPromoted],[4, 1, 2, 1, 2, 1]);
+assert.deepEqual([model.promotion.proposed, model.promotion.applied, model.promotion.auto, model.promotion.human, model.promotion.waiting.length, model.promotion.stalled.length],[3, 2, 1, 1, 1, 1]);
+const selected = model.selected;
+assert.deepEqual([selected.withChunk, selected.selections, selected.distinct, selected.reused, selected.cutTotal, selected.kinds],[2, 3, 2, 1, 1, {brain:4, bank:3, rules:7}]);
+// Dropped-to-fit counts only health lines inside the retrieval window, and an unmeasured line is not a zero.
+assert.deepEqual([selected.dropped, selected.measured, selected.merged],[1, 2, 1]);
+assert.deepEqual([model.review(data.chunks.items[0]), model.review(data.chunks.items[1])],[-3, 361]);
+const week = memoryUseModel(data, 7, now);
+assert.deepEqual([week.promotion.applied, week.brain.resolved, week.bank.created, week.bank.retiredInWindow],[1, 1, 1, 0]);
+assert.equal(memoryUseModel(data, 0, now).promotion.applied, 2);
+assert.deepEqual([bandWidth(0), bandWidth(1), bandWidth(3), bandWidth(10), bandWidth(11), bandWidth(41), bandWidth(51)],[1, 2, 4, 8, 12, 16, 24]);
+assert.deepEqual([reviewLabel(-3), reviewLabel(0), reviewLabel(344), reviewLabel(null)],['3 d overdue', 'today', 'in 344 d', '—']);
+const anchor = {at:'2026-09-28T16:40:00.000Z', today:'2026-09-28', newest:'2026-09-30T00:00:00+00:00',
+  chunks:{A:['active','2025-10-01','2026-10-01'], C:['active','2025-10-01','2026-09-29'], D:['needs-review','2025-10-01','2026-12-01'], E:['active','2025-10-01','2026-12-01'], F:['active','2025-10-01','2026-10-20']},
+  promotions:{'2026-09-29T09:00:00+00:00|automatic':'reviewed', '2026-08-01T09:00:00+00:00|human':'applied'}};
+const changes = memoryChanges(data, anchor), ids = list => list.map(item => item.id);
+assert.deepEqual([ids(changes.added), ids(changes.retired), ids(changes.reattested), ids(changes.moved), ids(changes.crossed)],[['B'], ['E'], ['C'], ['C'], ['A']]);
+assert.deepEqual([changes.applied.map(item => item.mode), changes.retrievals.length, changes.firstNew],[['automatic'], 2, 1]);
+assert.equal(memoryChanges(data, null), null);
+const snapshot = memorySnapshot(data);
+assert.deepEqual([snapshot.today, snapshot.newest, snapshot.chunks.A, Object.keys(snapshot.promotions).length],['2026-10-04', '2026-10-03T10:00:00+00:00', ['active','2025-10-01','2026-10-01'], 4]);
+assert.deepEqual(memoryChanges(data, snapshot), {since:snapshot.at, added:[], retired:[], reattested:[], moved:[], crossed:[], applied:[], retrievals:[], firstNew:3});
+// The kept history counts inside the flow window; per-chunk counts span everything kept.
+assert.deepEqual([model.history.retrievals, model.history.withChunk, model.history.days.length, model.history.since, model.history.chunks.get('F'), model.history.chunks.get('B')],
+  [21, 3, 2, '2026-07-01', 2, 2]);
+assert.deepEqual([memoryUseModel(data, 0, now).history.retrievals, memoryUseModel(data, 7, now).history.retrievals, memoryUseModel(data, 3, now).history.retrievals], [61, 21, 9]);
+const never = memoryFilters.find(([id]) => id === 'never')[2];
+// F was never in the last retrievals, but the kept history saw it selected.
+assert.deepEqual(['A', 'C', 'F'].map(id => never(data.chunks.items.find(item => item.id === id), model)), [false, true, false]);
+""")
+
+    def test_context_turns_split_exact_fill_from_estimated_memory_and_bound_earlier_copies(self):
+        page = ui_script()
+        source = page[page.index("// Sessions › Usage › Context"):page.index("\n$('context-meter').addEventListener")]
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
+                      + page[page.index("\nconst plural"):page.index("\nconst reasonLabel")]
+                      + "\nconst window = {matchMedia: () => ({matches: false, addEventListener() {}})};"
+                      + "\nconst el = (tag, className, text) => ({tag, className, textContent: text});\n" + source, r"""
+const ledger = {message: 388, instructions: 300, total: 18000, attachments: {characters: 214, count: 1},
+  capsule: {characters: 6895, inserted: 7157, kinds: {brain: 2409, bank: 1858, rules: 2890}, repeats: 3121, dropped: {semantic: 2}, items: {brain: 1, bank: 1, rules: 2}},
+  excerpts: [{name: 'AGENTS.md', sent: 3000, full: 13998, characters: 3000}, {name: 'README.md', sent: 3000, full: 18245, characters: 3000},
+             {name: 'project-brain/README.md', sent: 3000, full: 5919, characters: 3000}, {name: 'specs/MANIFEST.md', sent: 871, full: 871, characters: 871}]};
+const launch = (id, fill, extra = {}) => ({id, kind: 'native', status: 'completed', started_at: '2026-10-03T15:05:00+00:00', settings: {provider: 'claude'},
+  context: fill === undefined ? null : {version: 1, provider: 'claude', agents: 1, ledger, fill, hooks: {installed: true, measured: true, bytes: null}, cli_files: []}, ...extra});
+const turns = contextTurns([
+  launch('t1'),
+  launch('t2', {start: 31840, end: 61870, peak: 61870, calls: 18, window: 200000, compactions: [], cache_share: .88, hooks: null}),
+  launch('t3', {start: 66410, end: 52800, peak: 171900, calls: 31, window: 200000, compactions: [{pre: 171900, post: 29400, call: 24}], cache_share: .93, hooks: null}),
+  launch('t4', {start: 57190, end: 76450, peak: 76450, calls: 14, window: 200000, compactions: [], cache_share: .91, hooks: null}),
+  {id: 'fleet', kind: 'fleet', status: 'completed', started_at: '2026-10-03T15:10:00+00:00', settings: {provider: 'claude'}, context: {ledger, agents: 5, fill: null}},
+  launch('t5', {start: 80960, end: 106600, peak: 106600, calls: 11, window: 200000, compactions: [], cache_share: .94, hooks: null}, {status: 'running'})]);
+assert.deepEqual(turns.map(turn => turn.ordinal), [1, 2, 3, 4, 5]);
+const t4 = turns[3];
+// Memory is estimated from characters: capsule ÷ 3.6, excerpts ÷ 4.7, summed before rounding.
+assert.equal(Math.round(t4.memory), 4088);
+assert.deepEqual([fmt.estimate(t4.memory).text, fmt.estimate(t4.parts.brain).text, fmt.estimate(t4.parts.bank).text, fmt.estimate(t4.parts.rules).text],
+  ['≈ 4.1k', '≈ 670', '≈ 520', '≈ 2.9k']);
+assert.deepEqual([t4.added, t4.free, fmt.estimate(t4.rest).text, percentText(t4.end, t4.window), percentText(t4.memory, t4.end, true)],
+  [19260, 123550, '≈ 53k', '38%', '≈ 5%']);
+assert.deepEqual([t4.characters.rules, t4.calls, percentText(t4.cache, 1)], [2890 + 9871, 14, '91%']);
+const geometry = contextGeometry(t4);
+assert.equal(Math.round(geometry.brain + geometry.bank + geometry.rules + geometry.rest + geometry.added), 76450);
+// A compacted turn draws its final fill unsplit and has no growth.
+const t3 = turns[2];
+assert.deepEqual([t3.compacted, t3.added, contextGeometry(t3), t3.free, percentText(t3.end, t3.window), percentText(t3.peak, t3.window)],
+  [true, null, {added: 52800}, 147200, '26%', '86%']);
+// Earlier copies: bounded by the memory of turns since the last compaction; an unrecorded turn makes it unknown.
+assert.deepEqual(earlierMemory(turns, 4), {total: t4.memory, from: 4});
+assert.deepEqual(earlierMemory(turns, 3), {total: 0, from: 3});
+assert.deepEqual(earlierMemory(turns, 1), {unknown: 1});
+assert.deepEqual([turns[0].recorded, turns[0].end, contextGeometry(turns[0])], [false, null, null]);
+assert.equal(turns[4].running, true);
+const unknown = contextTurn(launch('cursor', {start: null, end: null, peak: null, calls: null, window: null, compactions: [], cache_share: null, hooks: null}), 6);
+assert.deepEqual([unknown.recorded, unknown.end, unknown.rest, unknown.free, contextGeometry(unknown)], [true, null, null, null, null]);
+// Memory that exceeds the reported start leaves the remainder unknown rather than negative.
+assert.equal(contextTurn(launch('small', {start: 3000, end: 3500, peak: 3500, calls: 1, window: 200000, compactions: [], cache_share: null, hooks: null}), 7).rest, null);
+assert.deepEqual([percentText(1, 1000), percentText(0, 10), percentText(5, 0)], ['<1%', '0%', null]);
+// Fleet and Clash send one prefix to every agent; their launch row names the memory once with the count.
+assert.equal(contextLaunchLine({kind: 'fleet', context: {ledger, agents: 5}}).textContent, 'Memory prefix ≈\u00a04.1k sent to 5 agents');
+assert.equal(contextLaunchLine({kind: 'clash', context: {ledger, agents: 2}}).textContent, 'Memory prefix ≈\u00a04.1k sent to 2 agents');
+assert.deepEqual([contextLaunchLine({kind: 'native', context: {ledger, agents: 1}}), contextLaunchLine({kind: 'fleet', context: null})], [null, null]);
+""")
+
+    def test_the_context_view_draws_again_when_anything_it_shows_changes(self):
+        page = ui_script()
+        source = page[page.index("// Sessions › Usage › Context"):page.index("\n$('context-meter').addEventListener")]
+        self.run_node(page[page.index("\nconst numberText"):page.index("\nfunction numberNode(")]
+                      + page[page.index("\nconst plural"):page.index("\nconst reasonLabel")]
+                      + "\nconst window = {matchMedia: () => ({matches: false, addEventListener() {}})};"
+                      + "\nconst el = (tag, className, text) => ({tag, className, textContent: text ?? '',"
+                      + " append(...parts) { this.textContent += parts.map(part => part.textContent ?? part).join(''); }});"
+                      + "\nconst numberNode = value => ({textContent: value.text});"
+                      + "\nconst nodes = {}, $ = id => nodes[id] ||= {hidden: false, textContent: '', firstChild: id === 'context-usage' ? {} : null};"
+                      + "\nconst state = {selectedId: 's1'}, memoryClock = {time: {format: () => '10:00'}};\n" + source, r"""
+// The real view down to what it draws; the legend records the details it would show under Everything else.
+const drawn = [];
+renderContextHeadline = renderContextBar = renderContextTurns = renderContextTable = () => {};
+renderContextLegend = (turn, turns, index) => drawn.push(contextDetails('rest', turn, turns, index).map(node => node.textContent).join(' | '));
+let status = 'running';
+const context = {provider: 'claude', agents: 1, hooks: {installed: true, measured: true, bytes: null}, cli_files: [],
+  ledger: {message: 20, instructions: 300, total: 2000, attachments: null, capsule: null, excerpts: []}};
+const fill = {start: 30000, end: 30000, peak: 30000, calls: 1, window: 200000, compactions: [], cache_share: null, hooks: {brain: 360, bank: 0, rules: 0}};
+const draw = () => {
+  const before = drawn.length;
+  renderContextUsage({launches: [{id: 'l1', kind: 'native', status, started_at: '2026-10-09T10:00:00+00:00', settings: {provider: 'claude'},
+                                  context: structuredClone({...context, fill})}]});
+  return drawn.length > before;
+};
+assert.deepEqual([draw(), draw()], [true, false]);
+// A second hook's output arrived before the next model call: only the hook memory changed.
+fill.hooks = {brain: 360, bank: 3600, rules: 720};
+assert.deepEqual([draw(), draw()], [true, false]);
+assert.match(drawn.at(-1), /Hook memory ≈.*Memory bank 3,600, Rules & docs 720 characters/);
+// A memory follow-up after the turn adds its prompt to the ledger; nothing else changes.
+context.ledger = {...context.ledger, instructions: 650, total: 2350};
+assert.equal(draw(), true);
+assert.notEqual(drawn.at(-1), drawn.at(-2));
+for (const change of [() => { fill.peak = 41000; }, () => { fill.start = 29000; }, () => { fill.compactions = [{pre: 150000, post: null, call: 1}]; },
+                      () => { fill.compactions = [{pre: 150000, post: 29000, call: 1}]; }, () => { status = 'completed'; }]) {
+  change();
+  assert.deepEqual([draw(), draw()], [true, false], String(change));
+}
+// A turn's column is built again when anything it draws changed, its numbers inside a compaction included.
+const column = changes => contextColumnKey(contextTurn({id: 'l1', kind: 'native', status, started_at: '2026-10-09T10:00:00+00:00', settings: {provider: 'claude'},
+                                                         context: {...context, fill: {...fill, ...changes}}}, 1));
+const keys = [column({}), column({peak: 160000}), column({start: 28000}), column({compactions: [{pre: 170000, post: 29000, call: 1}]}), column({end: 31000})];
+assert.equal(new Set(keys).size, keys.length);
+assert.equal(column({}), keys[0]);
+""")
+
+    def test_keyed_render_keeps_open_nodes_across_polls(self):
+        page = ui_script()
+        self.run_node(page[page.index("\nfunction keyedRender("):page.index("\nconst state = {")], r"""
+class Item { constructor(value) { this.value = value; this.dataset = {}; this.open = false; this.parent = null; }
+  replaceWith(node) { const list = this.parent.children; list[list.indexOf(this)] = node; node.parent = this.parent; this.parent = null; }
+  remove() { const list = this.parent.children; list.splice(list.indexOf(this), 1); this.parent = null; } }
+const container = {children: [], insertBefore(node, before) {
+  if (node.parent) node.parent.children.splice(node.parent.children.indexOf(node), 1);
+  const at = before ? this.children.indexOf(before) : this.children.length; this.children.splice(at, 0, node); node.parent = this; }};
+const placeholder = new Item('No launches'); container.insertBefore(placeholder, null);
+let built = 0; const render = items => keyedRender(container, items, item => item.id, item => { built++; return new Item(item.value); });
+render([{id: 1, value: 'a'}, {id: 2, value: 'b'}]);
+assert.deepEqual(container.children.map(node => node.value), ['a', 'b']);
+const first = container.children[0]; first.open = true;
+render([{id: 1, value: 'a'}, {id: 2, value: 'b'}]);
+assert.equal(built, 2); assert.equal(container.children[0], first); assert.equal(first.open, true);
+render([{id: 1, value: 'a, running 4s'}, {id: 2, value: 'b'}]);
+assert.notEqual(container.children[0], first); assert.equal(container.children[0].open, true);
+render([{id: 3, value: 'c'}, {id: 2, value: 'b'}]);
+assert.deepEqual(container.children.map(node => node.value), ['c', 'b']); assert.equal(built, 4);
+""")
+
+
+# Run view. Raw streams in the shapes the CLIs print (claude -p stream-json, codex exec --json, cursor-agent
+# stream-json) go through the backend's own normalize_event and Enricher, the way the session pump stores them,
+# so a change on either side of the event contract fails here rather than on a real project.
+def claude_raw(root="/repo"):
+    def use(i, name, **inputs):
+        return {"type": "tool_use", "id": f"toolu_{i:02d}", "name": name, "input": inputs}
+    def say(*blocks, parent=None):
+        return {"type": "assistant", "parent_tool_use_id": parent, "message": {"role": "assistant", "content": list(blocks)}}
+    def done(*ids, error=()):
+        return {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": f"toolu_{i:02d}", "content": "PRIVATE OUTPUT", "is_error": i in error} for i in ids]}}
+    steps = [("Inspect OrderController@store", "Inspecting the controller"), ("Add StoreOrderRequest", "Adding the request class"),
+             ("Use the request in the controller", "Wiring the request"), ("Write feature tests", "Writing feature tests"),
+             ("Run the order tests", "Running the order tests")]
+    todos = lambda *states: {"todos": [{"content": text, "status": state, "activeForm": form} for (text, form), state in zip(steps, states)]}
+    r = root + "/"
+    return [
+        {"type": "system", "subtype": "init", "session_id": "s-claude", "model": "claude-sonnet"},
+        say({"type": "text", "text": "I'll look at how orders are created."}, use(1, "Read", file_path=r + "app/Http/Controllers/OrderController.php")), done(1),
+        say(use(2, "Read", file_path=r + "app/Models/Order.php"), use(3, "Read", file_path=r + "routes/api.php"), use(4, "Read", file_path=r + "app/Models/OrderItem.php")), done(2, 3, 4),
+        say(use(5, "TodoWrite", **todos("in_progress", "pending", "pending", "pending", "pending"))), done(5),
+        say(use(6, "Grep", pattern="rules(", path=r + "app/Http"), use(7, "Glob", pattern="**/*Order*.php")), done(6, 7),
+        say(use(8, "Write", file_path=r + "app/Http/Requests/StoreOrderRequest.php", content="PRIVATE")), done(8),
+        say(use(9, "Edit", file_path=r + "app/Http/Controllers/OrderController.php", old_string="PRIVATE", new_string="PRIVATE")), done(9),
+        say(use(10, "TodoWrite", **todos("completed", "completed", "completed", "in_progress", "pending"))), done(10),
+        say(use(11, "Write", file_path=r + "tests/Feature/OrderValidationTest.php", content="PRIVATE")), done(11),
+        say(use(12, "Bash", command="php artisan test --filter=OrderTest", description="Run the order tests")), done(12, error=(12,)),
+        say(use(13, "Edit", file_path=r + "app/Http/Requests/StoreOrderRequest.php", old_string="x", new_string="y")), done(13),
+        say(use(14, "Bash", command="php artisan test --filter=OrderTest")), done(14, error=(14,)),
+        say(use(15, "Task", description="Find validation tests", prompt="PRIVATE", subagent_type="general-purpose")),
+        say(use(16, "Grep", pattern="foreignId", path=r + "database/migrations"), parent="toolu_15"), done(16),
+        say(use(17, "Read", file_path=r + "database/migrations/2024_01_01_create_orders_table.php"), parent="toolu_15"), done(17), done(15),
+        say(use(18, "Edit", file_path=r + "tests/Feature/OrderValidationTest.php", old_string="a", new_string="b")), done(18),
+        say(use(19, "Bash", command="php artisan test --filter=OrderTest")), done(19),
+        say(use(20, "Read", file_path="/home/dev/.config/composer/auth.json")), done(20, error=(20,)),
+        say(use(21, "Bash", command="vendor/bin/phpstan analyse app | tail -20")), done(21),
+        say(use(22, "TodoWrite", todos=todos("completed", "completed", "completed", "completed", "completed")["todos"][:4]
+                + [{"content": "Note the new rules in docs/api/orders.md", "status": "pending", "activeForm": "Noting the rules"}])), done(22),
+        say(use(23, "Bash", command="vendor/bin/pint app/Http")), done(23),
+        say({"type": "text", "text": "Added StoreOrderRequest and tests."}),
+        {"type": "result", "subtype": "success", "is_error": False, "result": "Added StoreOrderRequest and tests.", "total_cost_usd": 1.37,
+         "usage": {"input_tokens": 41200, "cache_read_input_tokens": 360000, "output_tokens": 11680}},
+    ]
+
+
+def codex_raw(root="/repo"):
+    def command(i, text, exit_code=0):
+        wrapped = f"/bin/bash -lc '{text}'"
+        return [{"type": "item.started", "item": {"id": f"item_{i}", "type": "command_execution", "command": wrapped, "status": "in_progress"}},
+                {"type": "item.completed", "item": {"id": f"item_{i}", "type": "command_execution", "command": wrapped, "aggregated_output": "PRIVATE",
+                                                    "exit_code": exit_code, "status": "completed" if exit_code == 0 else "failed"}}]
+    def change(i, *changes):
+        item = {"id": f"item_{i}", "type": "file_change", "changes": [{"path": f"{root}/{path}", "kind": kind} for path, kind in changes]}
+        return [{"type": "item.started", "item": {**item, "status": "in_progress"}}, {"type": "item.completed", "item": {**item, "status": "completed"}}]
+    todo = lambda *done: {"type": "item.updated", "item": {"id": "item_3", "type": "todo_list", "items": [
+        {"text": text, "completed": flag} for text, flag in zip(("Inspect the order model", "Add StoreOrderRequest", "Run the tests"), done)]}}
+    return [
+        {"type": "thread.started", "thread_id": "t-codex"}, {"type": "turn.started"},
+        *command(1, "sed -n 1,200p app/Models/Order.php"), *command(2, 'rg -n "rules(" app/Http'), todo(True, False, False),
+        *change(4, ("app/Http/Requests/StoreOrderRequest.php", "add")), *command(5, "php artisan test --filter=OrderTest", 1),
+        *change(6, ("app/Http/Controllers/OrderController.php", "update"), ("app/Http/Legacy/OrderValidator.php", "delete")),
+        *command(7, "php artisan test --filter=OrderTest"),
+        {"type": "item.completed", "item": {"id": "item_8", "type": "command_execution", "command": "rm -rf build", "status": "declined"}},
+        {"type": "item.started", "item": {"id": "item_9", "type": "collab_tool_call", "tool": "spawn_agent", "status": "in_progress", "receiver_thread_ids": ["PRIVATE"]}},
+        # Codex repeats the operation while it runs; only the start carries targets.
+        {"type": "item.updated", "item": {"id": "item_9", "type": "collab_tool_call", "tool": "spawn_agent", "status": "in_progress", "receiver_thread_ids": ["PRIVATE"]}},
+        {"type": "item.completed", "item": {"id": "item_9", "type": "collab_tool_call", "tool": "spawn_agent", "status": "completed", "receiver_thread_ids": ["PRIVATE"]}},
+        todo(True, True, True),
+        {"type": "item.completed", "item": {"id": "item_10", "type": "agent_message", "text": "Done. The order tests pass."}},
+        {"type": "turn.completed", "usage": {"input_tokens": 12000, "cached_input_tokens": 8000, "output_tokens": 3000}},
+    ]
+
+
+def cursor_raw(root="/repo"):
+    call = lambda phase, i, key, **body: {"type": "tool_call", "subtype": phase, "call_id": f"c{i}", "tool_call": {key: body}}
+    return [
+        {"type": "system", "subtype": "init", "session_id": "c-cursor", "model": "auto"},
+        call("started", 1, "readToolCall", args={"path": f"{root}/src/Order.php"}),
+        call("completed", 1, "readToolCall", args={"path": f"{root}/src/Order.php"}, result={"success": {"content": "PRIVATE"}}),
+        call("started", 2, "grepToolCall", args={"pattern": "function store", "path": f"{root}/src"}), call("completed", 2, "grepToolCall", result={"success": {}}),
+        call("started", 3, "editToolCall", args={"path": f"{root}/src/Order.php", "streamContent": "PRIVATE"}), call("completed", 3, "editToolCall", result={"success": {}}),
+        call("started", 4, "shellToolCall", args={"command": "vendor/bin/phpunit --filter OrderTest"}),
+        call("completed", 4, "shellToolCall", args={"command": "vendor/bin/phpunit --filter OrderTest"}, result={"success": {"exitCode": 0}}),
+        call("completed", 5, "shellToolCall", args={"command": "rm -rf vendor"}, result={"rejected": {"command": "rm -rf vendor", "reason": "PRIVATE"}}),
+        call("started", 6, "updateTodosToolCall", args={"todos": [{"content": "Read Order", "status": "TODO_STATUS_COMPLETED"}, {"content": "Fix store()", "status": "TODO_STATUS_IN_PROGRESS"}]}),
+        call("completed", 6, "updateTodosToolCall", result={"success": {}}),
+        {"type": "assistant", "model_call_id": "m1", "message": {"role": "assistant", "content": [{"type": "text", "text": "Fixed store()."}]}},
+        {"type": "result", "subtype": "success", "is_error": False, "result": "Fixed store().", "usage": {"inputTokens": 100, "outputTokens": 20}},
+    ]
+
+
+def pumped(provider, raw, targets=True, launch="L1", compaction_after=None, outcome="completed", start=datetime(2026, 10, 4, 14, 0, tzinfo=timezone.utc), first_id=1):
+    """What the session pump stores for one native launch: plans and limited notices outside its count, targets after it."""
+    enricher = run_activity.Enricher(provider, PurePosixPath("/repo"), None) if targets else None
+    stored = [{"kind": "user", "text": "Add validation to POST /orders and cover it with tests."},
+              {"kind": "status", "text": f"Running {provider} in edit mode.", "launch_id": launch}]
+    count = output_bytes = 0
+    for index, event in enumerate(raw):
+        for clean in providers.normalize_event(provider, event, targets=targets):
+            if clean.get("kind") == "plan":
+                plan = enricher.plan(clean) if enricher else None
+                if plan:
+                    stored.append({**plan, "launch_id": launch})
+                continue
+            display = enricher.take(clean, count, output_bytes) if enricher and clean.get("kind") == "tool" else None
+            output_bytes += len(json.dumps(clean))
+            count += 1
+            if display:
+                clean.update(display)
+            elif enricher and clean.get("kind") == "tool" and (limited := enricher.notice()):
+                stored.append({**limited, "launch_id": launch})
+            stored.append({**clean, "launch_id": launch})
+        if enricher and index == compaction_after:
+            stored.extend({**notice, "launch_id": launch} for notice in enricher.compaction([{"pre": 166040, "post": 38900}]))
+    stored.append({"kind": "status", "outcome": outcome, "launch_id": launch,
+                   "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
+    return [{**event, "id": first_id + offset, "at": (start + timedelta(seconds=10 * offset)).isoformat(timespec="milliseconds")}
+            for offset, event in enumerate(stored)]
+
+
+@unittest.skipUnless(shutil.which("node"), "Run view checks require Node")
+class RunViewTests(unittest.TestCase):
+    """RunModel (harness/web/run-model.js) has no DOM: these checks load the file in Node as the page does."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.streams = {"claude": pumped("claude", claude_raw(), compaction_after=20), "codex": pumped("codex", codex_raw()),
+                       "cursor": pumped("cursor", cursor_raw()), "claude_labels": pumped("claude", claude_raw(), targets=False),
+                       "codex_labels": pumped("codex", codex_raw(), targets=False)}
+        with patch.object(run_activity, "ENRICH_EVENTS", 12):
+            cls.streams["claude_limited"] = pumped("claude", claude_raw())
+
+    def run_node(self, checks, prelude=""):
+        source = "const assert = require('node:assert/strict');\n" + (WEB / "run-model.js").read_text(encoding="utf-8") \
+            + "\nconst streams = " + json.dumps(self.streams) + ";\n" + prelude + "\n" + checks
+        result = subprocess.run([shutil.which("node"), "-e", source], capture_output=True, text=True)
+        if result.returncode:
+            self.fail(result.stderr)
+
+    def test_claude_targets_fold_into_files_searches_checks_plan_and_moments(self):
+        self.run_node(r"""
+const model = RunModel.create(); RunModel.observe(model, streams.claude); const run = RunModel.current(model);
+assert.deepEqual([run.mode, run.finished, run.outcome, run.ordinal], ['targets', true, 'completed', 1]);
+assert.deepEqual(run.counters, {steps:23, opened:6, edited:3, edits:5, searched:3, commands:5, failed:3, notRun:0, messages:2, commandFailed:2});
+// Files in first-touch order; Write to a path not seen in the session created it, an Edit did not.
+const paths = [...run.paths.values()];
+assert.deepEqual(paths.map(p => p.key), ['app/Http/Controllers/OrderController.php', 'app/Models/Order.php', 'routes/api.php', 'app/Models/OrderItem.php',
+  'app/Http/Requests/StoreOrderRequest.php', 'tests/Feature/OrderValidationTest.php', 'database/migrations/2024_01_01_create_orders_table.php', 'outside:auth.json']);
+const file = key => run.paths.get(key);
+assert.deepEqual([file('app/Http/Requests/StoreOrderRequest.php').created, file('app/Http/Requests/StoreOrderRequest.php').edits, file('app/Http/Controllers/OrderController.php').created], [true, 2, false]);
+assert.deepEqual([file('outside:auth.json').path, file('outside:auth.json').outside, file('outside:auth.json').failed], ['auth.json', true, true]);
+const helper = file('database/migrations/2024_01_01_create_orders_table.php'); assert.deepEqual([helper.helper, helper.main], [true, false]);
+assert.deepEqual(run.searches.map(item => [item.pattern, item.scope, item.helper]), [['"rules("', 'app/Http', false], ['"**/*Order*.php"', '', false], ['"foreignId"', 'database/migrations', true]]);
+assert.deepEqual(RunModel.searchedIn(run, file('app/Http/Controllers/OrderController.php')), ['"rules("', '"**/*Order*.php"']);
+// A Claude completion names only its call; it pairs with the start that named the tool.
+assert.deepEqual([run.calls.get('toolu_12').tool, run.calls.get('toolu_12').ok, run.calls.get('toolu_19').ok], ['Bash', false, true]);
+assert.deepEqual(RunModel.checks(run).map(row => [row.family, row.target, row.runs.map(item => item.glyph), row.green || null, row.masked]),
+  [['Artisan test', '--filter=OrderTest', ['fail', 'fail', 'ok'], {runs:3, edits:2}, null], ['PHPStan', 'app', ['unknown'], null, "piped to tail: exit status is tail's"]]);
+assert.deepEqual(run.commands.filter(cmd => cmd.cls.fixer).map(cmd => cmd.command), ['vendor/bin/pint app/Http']);
+// The plan compares snapshots by exact text only.
+assert.deepEqual([run.plan.items.filter(item => item.status === 'done').length, run.plan.total, [...run.plan.added]], [4, 5, ['Note the new rules in docs/api/orders.md']]);
+assert.deepEqual([run.planChange.added, run.planChange.dropped, run.dropped], [['Note the new rules in docs/api/orders.md'], ['Run the order tests'], ['Run the order tests']]);
+assert.deepEqual(run.moments.map(item => item.kind), ['first-edit', 'first-failed-command', 'compaction', 'check-green', 'plan-changed']);
+assert.deepEqual(run.compactions.map(item => [item.pre, item.post]), [[166040, 38900]]);
+assert.equal(RunModel.now(model, run), null);
+// The receipt and the step groups read the same facts.
+assert.equal(RunModel.groupSummary({steps:7, tools:new Map([['Read', 4], ['Grep', 2], ['Edit', 1]]), patterns:['"rules("', '"**/*Order*.php"'], opened:new Set(['a', 'b', 'c', 'd']), edited:new Set(['a'])}),
+  '7 steps · Read ×4, Grep ×2, Edit · Looked for "rules(", "**/*Order*.php" · opened 4 files · edited 1');
+assert.doesNotMatch(JSON.stringify(run, (key, value) => value instanceof Map || value instanceof Set ? [...value] : value), /PRIVATE|\/repo\//);
+""")
+
+    def test_live_pages_pair_calls_and_say_what_runs_now(self):
+        self.run_node(r"""
+const model = RunModel.create(), events = streams.claude, at = id => Date.parse(events.find(event => event.id === id).at);
+let run = null;
+const feed = upTo => { for (const event of events.filter(event => event.id <= upTo && !feed.seen.has(event.id))) { feed.seen.add(event.id); RunModel.observe(model, [event], {arrival:Date.parse(event.at) + 400, live:true}); } run = RunModel.current(model); };
+feed.seen = new Set();
+const id = (call, state) => events.find(event => event.call === call && event.state === state).id;
+feed(2); assert.deepEqual(RunModel.now(model, run, at(2) + 1000), {kind:'preparing'});
+// The browser's clock runs 400 ms behind the stored `at`; clocks subtract the offset.
+feed(id('toolu_01', 'started')); assert.equal(model.offset, 400);
+let now = RunModel.now(model, run, at(id('toolu_01', 'started')) + 400 + 3000);
+assert.deepEqual([now.kind, now.verb, now.target, now.path, now.clock], ['call', 'Reading', 'app/Http/Controllers/OrderController.php', true, 3]);
+feed(id('toolu_04', 'started')); now = RunModel.now(model, run);
+assert.deepEqual([now.kind, now.verb, now.target, now.more, now.count], ['parallel', 'Reading 3 files', 'app/Models/Order.php', '+2', 3]);
+feed(id('toolu_02', 'completed')); assert.equal(RunModel.now(model, run).verb, 'Reading 2 files');
+feed(id('toolu_16', 'started')); now = RunModel.now(model, run);
+assert.deepEqual([now.kind, now.verb, now.target], ['helper', 'Helper · Searching', '"foreignId" in database/migrations']);
+feed(id('toolu_15', 'completed')); now = RunModel.now(model, run, at(id('toolu_15', 'completed')) + 400 + 45000);
+assert.deepEqual([now.kind, now.verb, now.clock], ['model', "Model's turn", 45]);
+feed(id('toolu_21', 'started')); now = RunModel.now(model, run); assert.deepEqual([now.verb, now.target, now.path], ['Running', 'vendor/bin/phpstan analyse app | tail -20', false]);
+// One live page of changes: what the strip announces and animates.
+const ch = RunModel.observe(model, events.filter(event => event.id > id('toolu_21', 'started')), {arrival:Date.now(), live:true});
+assert.deepEqual([ch.finished, ch.plan, ch.milestones], [run.id, true, ['Run finished']]);
+const first = RunModel.observe(RunModel.create(), events.filter(event => event.id <= id('toolu_12', 'completed')));
+assert.deepEqual(first.milestones, ['First edit: app/Http/Requests/StoreOrderRequest.php', 'Command failed: php artisan test --filter=OrderTest']);
+// History pages and catch-up pages of 250 are drawn final; only a short page of a watched run is live.
+assert.equal(RunModel.live({loaded:false, count:12, running:true, hidden:false}), false);
+assert.equal(RunModel.live({loaded:true, count:250, running:true, hidden:false}), false);
+assert.equal(RunModel.live({loaded:true, count:12, running:true, hidden:true}), false);
+assert.equal(RunModel.live({loaded:true, count:12, running:false, hidden:false}), false);
+assert.equal(RunModel.live({loaded:true, count:12, running:true, hidden:false}), true);
+// Without `at`, history has no clock (never 0:00) and a live event uses its arrival, marked approximate.
+const old = RunModel.create(), plain = streams.claude_labels.filter(event => event.id <= 6).map(({at, ...event}) => event);
+RunModel.observe(old, plain); const oldRun = RunModel.current(old);
+assert.deepEqual([oldRun.startAt, oldRun.approx, RunModel.now(old, oldRun).clock], [null, true, null]);
+RunModel.observe(old, [{id:900, kind:'tool', text:'Bash: started', launch_id:'L1'}], {arrival:5000, live:true});
+assert.deepEqual([RunModel.now(old, oldRun, 9000).verb, RunModel.now(old, oldRun, 9000).clock], ['Running a command', 4]);
+RunModel.observe(old, [{id:901, kind:'tool', text:'Read: started', launch_id:'L1'}], {arrival:6000, live:true});
+assert.deepEqual([RunModel.now(old, oldRun, 9000).verb, RunModel.now(old, oldRun, 9000).clock], ['2 steps running', null]);
+""")
+
+    def test_codex_and_cursor_targets_read_changes_exit_codes_and_not_run(self):
+        self.run_node(r"""
+let model = RunModel.create(); RunModel.observe(model, streams.codex); let run = RunModel.current(model);
+assert.equal(run.mode, 'targets');
+assert.deepEqual(run.counters, {steps:8, opened:0, edited:3, edits:3, searched:0, commands:5, failed:1, notRun:1, messages:1, commandFailed:1});
+assert.deepEqual([...run.paths.values()].map(p => [p.path, p.created, p.deleted]), [['app/Http/Requests/StoreOrderRequest.php', true, false],
+  ['app/Http/Controllers/OrderController.php', false, false], ['app/Http/Legacy/OrderValidator.php', false, true]]);
+assert.deepEqual(run.commands.map(cmd => [cmd.command, cmd.exitCode, cmd.outcome]), [['sed -n 1,200p app/Models/Order.php', 0, null], ['rg -n "rules(" app/Http', 0, null],
+  ['php artisan test --filter=OrderTest', 1, null], ['php artisan test --filter=OrderTest', 0, null], ['rm -rf build', null, 'not_run']]);
+assert.deepEqual(RunModel.checks(run).map(row => row.runs.map(item => item.glyph)), [['fail', 'ok']]);
+assert.deepEqual([run.plan.activeForm, run.plan.items.map(item => item.status)], [null, ['done', 'done', 'done']]);
+const spawn = run.calls.get('item_9'); assert.deepEqual([spawn.tool, RunModel.verbOf(spawn)], ['Agent', 'Starting a helper']);
+// The label-only repeat of the open spawn is not a second step, so nothing is left running after it completes.
+const live = RunModel.create(), upTo = streams.codex.findIndex(event => event.call === 'item_9' && event.state === 'completed');
+RunModel.observe(live, streams.codex.slice(0, upTo + 1)); const liveRun = RunModel.current(live);
+assert.deepEqual([liveRun.anon.length, liveRun.open.size, RunModel.now(live, liveRun).kind], [0, 0, 'model']);
+model = RunModel.create(); RunModel.observe(model, streams.cursor); run = RunModel.current(model);
+assert.deepEqual(run.counters, {steps:6, opened:1, edited:1, edits:1, searched:1, commands:2, failed:0, notRun:1, messages:1, commandFailed:0});
+assert.deepEqual([...run.tools.keys()], ['Read', 'Grep', 'Edit', 'Shell', 'UpdateTodos']);
+assert.deepEqual(RunModel.checks(run).map(row => [row.family, row.target, row.runs.map(item => item.glyph)]), [['PHPUnit', '--filter=OrderTest', ['ok']]]);
+assert.deepEqual(run.plan.items.map(item => item.status), ['done', 'active']);
+""")
+
+    def test_label_only_runs_count_steps_by_starts_and_keep_failures_unattributed(self):
+        self.run_node(r"""
+// Recorded before targets existed: Claude starts carry no ok, completions are unnamed 'Tool: completed'.
+let model = RunModel.create(); RunModel.observe(model, streams.claude_labels); let run = RunModel.current(model);
+assert.equal(run.mode, 'labels'); assert.equal(run.paths.size, 0);
+assert.deepEqual([run.counters.steps, run.counters.failed, run.counters.commands, run.counters.commandFailed], [23, 3, 5, 0]);
+assert.equal(RunModel.tally(run.tools), 'Read ×6, TodoWrite ×3, Grep ×2, Glob, Write ×2, Edit ×3, Bash ×5, Task');
+assert.equal(RunModel.toolName({text:'Tool: completed'}), 'Tool');
+// The Now line names the kind of step; with more than one open it counts them and shows no step clock.
+model = RunModel.create(); const events = streams.claude_labels, upTo = n => events.filter(event => event.id <= n);
+const read = events.find(event => event.text === 'Read: started').id;
+RunModel.observe(model, upTo(read)); run = RunModel.current(model);
+let now = RunModel.now(model, run, Date.parse(events.find(event => event.id === read).at) + 5000);
+assert.deepEqual([now.kind, now.verb, now.clock], ['labels', 'Reading a file', 5]);
+const parallel = events.filter(event => event.text === 'Read: started')[3].id;
+RunModel.observe(model, events.filter(event => event.id > read && event.id <= parallel)); now = RunModel.now(model, run);
+assert.deepEqual([now.verb, now.clock], ['3 steps running', null]);
+// Codex labels name the item type; a failed command is a failed command, a helper journal is a helper.
+model = RunModel.create(); RunModel.observe(model, streams.codex_labels); run = RunModel.current(model);
+assert.deepEqual([run.mode, run.counters.steps, run.counters.commands, run.counters.commandFailed, [...run.tools.keys()]], ['labels', 7, 4, 1, ['Shell', 'Edit', 'Agent']]);
+assert.deepEqual(['command_execution: started', 'file_change: completed', 'mcp_tool_call: started', 'web_search: completed', 'Agent activity: started (native session journal)',
+  'Agent wait: in_progress', 'readToolCall: started', 'Read: started'].map(text => [RunModel.toolName({text}), RunModel.isStart({text})]),
+  [['Shell', true], ['Edit', false], ['MCP', true], ['Web search', false], ['Agent', true], ['Agent', true], ['Read', true], ['Read', true]]);
+""")
+
+    def test_failed_steps_name_the_first_one_to_show_and_plans_keep_their_full_count(self):
+        self.run_node(r"""
+// With targets the first failed call is the step to show; label-only failures name no call, so their own row is.
+let model = RunModel.create(); RunModel.observe(model, streams.claude); let run = RunModel.current(model);
+const first = streams.claude.find(event => event.call && event.state === 'started' && run.calls.get(event.call)?.ok === false && run.calls.get(event.call).outcome !== 'not_run');
+assert.equal(run.firstFailedEventId, first.id);
+model = RunModel.create(); RunModel.observe(model, streams.claude_labels); run = RunModel.current(model);
+assert.equal(run.calls.size, 0);
+assert.equal(run.firstFailedEventId, streams.claude_labels.find(event => event.kind === 'tool' && event.ok === false).id);
+model = RunModel.create(); RunModel.observe(model, streams.claude.filter(event => event.ok !== false)); assert.equal(RunModel.current(model).firstFailedEventId, null);
+// The backend keeps 30 items and sends the full count: the away line and the plan chip say the same denominator.
+model = RunModel.create();
+RunModel.observe(model, [{id:1, kind:'plan', launch_id:'L1', items:Array.from({length:30}, (_, n) => ({text:`Item ${n}`, status:n < 12 ? 'done' : 'pending'})), total:42}]);
+run = RunModel.current(model);
+assert.match(RunModel.awaySummary(run, RunModel.snapshot(run), 3), /plan 12 of 42$/);
+""")
+
+    def test_enrichment_limit_turns_counts_into_lower_bounds(self):
+        self.run_node(r"""
+const model = RunModel.create(), ch = RunModel.observe(model, streams.claude_limited, {arrival:Date.now(), live:true}), run = RunModel.current(model);
+const notices = streams.claude_limited.filter(event => event.targets === 'limited');
+assert.equal(notices.length, 1);
+// Twelve enriched events are seven calls: starts and completions both carry targets.
+assert.deepEqual([run.mode, run.limited.step, run.counters.steps], ['targets', 7, 23]);
+assert.ok(ch.milestones.includes('Step details are no longer recorded'));
+assert.ok(run.counters.opened < 6, 'after the notice, paths are no longer known');
+assert.ok(run.moments.some(item => item.kind === 'limit'));
+// Grep and Glob were open at the notice; their completions arrive as plain labels without a call. They close them in
+// order, so the Now line does not stay on two searches, and their own results stay unknown.
+const open = RunModel.create(); RunModel.observe(open, streams.claude_limited.filter(event => !/^Run completed/.test(event.text || '')));
+const openRun = RunModel.current(open);
+assert.deepEqual([openRun.open.size, openRun.anon.length, RunModel.now(open, openRun).kind], [0, 0, 'model']);
+assert.deepEqual(['toolu_06', 'toolu_07'].map(call => openRun.calls.get(call).state), ['unfinished', 'unfinished']);
+""")
+
+    def test_cursor_delete_tool_marks_the_file_deleted(self):
+        # cursor-agent's delete tool names the file it removes; the receipt's ledger counts it as edited and deleted.
+        raw = [{"type": "tool_call", "subtype": "started", "call_id": "c1", "tool_call": {"deleteToolCall": {"args": {"path": "/repo/src/Old.php"}}}},
+               {"type": "tool_call", "subtype": "completed", "call_id": "c1", "tool_call": {"deleteToolCall": {"args": {"path": "/repo/src/Old.php"}, "result": {"success": {}}}}}]
+        events = pumped("cursor", raw)
+        ledger = run_activity.Enricher("cursor", PurePosixPath("/repo"), None)
+        for event in raw:
+            for clean in providers.normalize_event("cursor", event, targets=True):
+                ledger.take(clean, 0, 0)
+        self.assertEqual((1, 1, ["src/Old.php"]), (ledger.ledger.receipt()["edited"], ledger.ledger.receipt()["deleted"], ledger.ledger.receipt()["edited_paths"]))
+        self.run_node(r"""
+const model = RunModel.create(); RunModel.observe(model, events); const run = RunModel.current(model), file = run.paths.get('src/Old.php');
+assert.deepEqual([run.calls.get('c1').tool, file.deleted, file.edited, run.counters.edited], ['Delete', true, true, 1]);
+assert.deepEqual([RunModel.describe(events.find(event => event.state === 'started')).edit, RunModel.verbOf(run.calls.get('c1'))], [true, 'Deleting']);
+""", prelude="const events = " + json.dumps(events) + ";")
+
+    def real_launch(self, provider, raw):
+        """One native launch through the real session pump with a scripted CLI: (session, stored events, receipt, project)."""
+        fake_cli = ("import json, pathlib, sys\nconfig = json.loads(sys.argv[1])\nsys.stdin.read()\n"
+                    "for line in pathlib.Path(config['events']).read_text(encoding='utf-8').splitlines():\n    print(line, flush=True)\n")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); project = root / "project"; project.mkdir()
+            fake, script = root / "fake_provider.py", root / "events.jsonl"
+            fake.write_text(fake_cli)
+            script.write_text("\n".join(json.dumps(event, ensure_ascii=False) for event in raw(str(project))), encoding="utf-8")
+            with patch.object(providers, "discover_providers", return_value=[{"id": provider, "available": True, "executable": str(fake)}]), \
+                    patch.object(providers, "model_options", return_value={"models": [], "efforts": [], "detail": "Offline fixture"}), \
+                    patch.object(providers, "build_command", side_effect=lambda *args, **options: [sys.executable, "-u", str(fake), json.dumps({"events": str(script)})]):
+                store = sessions.Sessions(root / "state", [project], timeout=120)
+                try:
+                    sid = store.create({"project_id": next(iter(store.projects)), "provider": provider, "prompt": "Add validation to POST /orders",
+                                        "project_context": False})["id"]
+                    deadline = time.monotonic() + 60
+                    while (store.get(sid)["status"] in sessions.ACTIVE or store.jobs.unfinished_tasks) and time.monotonic() < deadline:
+                        time.sleep(.02)
+                    return store.get(sid), store.events(sid), store.results.history(sid)["launches"][-1]["receipt"], str(project)
+                finally:
+                    store.close()
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "Session workers require POSIX process groups")
+    def test_the_real_pump_stores_what_run_model_reads_and_the_receipt_agrees(self):
+        # pumped() above mirrors the pump; this runs the real one, so the two sides of the contract meet as they do in use.
+        for provider, raw in (("claude", claude_raw), ("codex", codex_raw), ("cursor", cursor_raw)):
+            with self.subTest(provider=provider):
+                session, events, receipt, project = self.real_launch(provider, raw)
+                self.assertEqual(("completed", "completed"), (session["status"], session["launch"]["status"]))
+                tools = [event for event in events if event["kind"] in ("tool", "plan")]
+                self.assertNotIn(project, json.dumps(tools, ensure_ascii=False))
+                self.run_node(r"""
+const model = RunModel.create(); RunModel.observe(model, events); const run = RunModel.current(model), paths = [...run.paths.values()];
+assert.deepEqual([run.id, run.mode, run.outcome, run.approx], [launch.id, 'targets', 'completed', false]);
+// The server counts every tool event whatever the display caps; the browser folds the stored ones. Unlimited, they agree.
+const listed = paths.filter(p => !p.outside);
+assert.deepEqual([run.counters.steps, run.counters.opened, run.counters.edited, run.counters.searched, run.counters.commands, run.counters.commandFailed, run.counters.notRun, run.counters.failed],
+  [receipt.steps, receipt.opened, receipt.edited, receipt.searched, receipt.commands, receipt.failed, receipt.not_run, receipt.failed_steps]);
+assert.deepEqual([paths.filter(p => p.created).length, paths.filter(p => p.deleted).length], [receipt.created, receipt.deleted]);
+assert.deepEqual(listed.filter(p => p.opened).map(p => p.path), receipt.opened_paths);
+assert.deepEqual(listed.filter(p => p.edited).map(p => p.path).sort(), [...receipt.edited_paths].sort());
+assert.deepEqual(run.commands.map(cmd => [cmd.command, cmd.ok, cmd.outcome, cmd.exitCode]), receipt.last_commands.map(cmd => [cmd.command, cmd.ok, cmd.outcome, cmd.exit_code]));
+assert.deepEqual(run.searches.map(item => item.pattern), receipt.patterns);
+assert.deepEqual({done:run.plan.items.filter(item => item.status === 'done').length, total:run.plan.total}, receipt.plan);
+""", prelude=f"const events = {json.dumps(events)}, launch = {json.dumps(session['launch'])}, receipt = {json.dumps(receipt)};")
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "Session workers require POSIX process groups")
+    def test_a_launch_that_raises_ends_on_the_worker_error_with_its_receipt(self):
+        # A launch that raises (here the CLI changes its session identity) has no closing status: the worker's error line ends it,
+        # and the receipt the server saved on that path is drawn after it.
+        def raw(root):
+            return [{"type": "system", "subtype": "init", "session_id": "s-one"},
+                    {"type": "assistant", "parent_tool_use_id": None, "message": {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "toolu_01", "name": "Read", "input": {"file_path": root + "/app/Order.php"}}]}},
+                    {"type": "system", "subtype": "init", "session_id": "s-two"}]
+        session, events, receipt, _ = self.real_launch("claude", raw)
+        self.assertEqual(("failed", "failed"), (session["status"], session["launch"]["status"]))
+        self.assertEqual((1, ["app/Order.php"], False), (receipt["steps"], receipt["opened_paths"], receipt["limited"]))
+        self.assertFalse(any("outcome" in event for event in events))
+        self.run_node(r"""
+const model = RunModel.create(), ch = RunModel.observe(model, events), run = RunModel.current(model), last = events[events.length - 1];
+assert.deepEqual([RunModel.aborted(last), last.launch_id], [true, run.id]);
+assert.deepEqual([run.finished, run.outcome, run.aborted, run.closingEventId, ch.finished], [true, 'failed', true, last.id, run.id]);
+assert.deepEqual([run.calls.get('toolu_01').state, RunModel.now(model, run)], ['unfinished', null]);
+assert.equal(RunModel.aborted({kind:'error', text:'Provider did not complete successfully. Check CLI authentication.'}), false);
+""", prelude=f"const events = {json.dumps(events)};")
+
+    def test_plan_changes_compare_exact_text_and_return_dropped_items(self):
+        self.run_node(r"""
+const model = RunModel.create(); let id = 0;
+const plan = (...items) => RunModel.observe(model, [{id:++id, kind:'plan', launch_id:'L1', items:items.map(([text, status]) => ({text, status})), total:items.length}]);
+plan(['A', 'active'], ['B', 'pending']); const run = RunModel.current(model);
+assert.equal(run.planChange, null);
+plan(['B', 'pending'], ['A', 'done']); assert.equal(run.planChange, null, 'order and status are not changes');
+plan(['A', 'done'], ['B, reworded', 'pending'], ['C', 'pending']);
+assert.deepEqual([run.planChange.added, run.planChange.dropped, run.dropped, [...run.plan.added]], [['B, reworded', 'C'], ['B'], ['B'], ['B, reworded', 'C']]);
+plan(['A', 'done'], ['B', 'pending'], ['C', 'pending']); assert.deepEqual(run.dropped, ['B, reworded'], 'a returning item leaves Dropped');
+plan(['A', 'done'], ['\u202eevil', 'bogus']); assert.deepEqual(run.plan.items[1], {text:'evil', status:'pending'});
+assert.deepEqual(run.moments.filter(item => item.kind === 'plan-changed').length, 1);
+""")
+
+    def test_away_summary_counts_what_changed_while_the_tab_was_hidden(self):
+        self.run_node(r"""
+const model = RunModel.create(), events = streams.claude, cut = events.find(event => event.call === 'toolu_12' && event.state === 'started').id;
+RunModel.observe(model, events.filter(event => event.id <= cut)); const run = RunModel.current(model), before = RunModel.snapshot(run);
+RunModel.observe(model, events.filter(event => event.id > cut && event.call !== 'toolu_21' && !/Run completed/.test(event.text || '')));
+assert.equal(RunModel.awaySummary(run, before, 4), 'While you were away (4 min): 10 steps · 2 edits in 2 files · Artisan test ✗ ✗ ✓ · plan 4 of 5');
+RunModel.observe(model, events.filter(event => /Run completed/.test(event.text || '')));
+assert.match(RunModel.awaySummary(run, before, 6), /^While you were away \(6 min\): run finished · /);
+""")
+
+    def test_classify_command_reads_php_checks_wrappers_masks_and_windows_forms(self):
+        cases = [
+            # command, family, target, check, fixer, masked (substring or None), bare
+            ("php artisan test --filter=OrderTest", "Artisan test", "--filter=OrderTest", True, False, None, "php artisan test --filter=OrderTest"),
+            ("php artisan test", "Artisan test", "all tests", True, False, None, "php artisan test"),
+            ("php artisan test --parallel --testsuite=Feature", "Artisan test", "--testsuite=Feature", True, False, None, None),
+            ("vendor/bin/phpunit", "PHPUnit", "all tests", True, False, None, None),
+            ("./vendor/bin/phpunit --filter OrderTest", "PHPUnit", "--filter=OrderTest", True, False, None, None),
+            ("vendor/bin/phpunit tests/Feature/OrderTest.php", "PHPUnit", "tests/Feature/OrderTest.php", True, False, None, None),
+            ("bin/phpunit --group slow", "PHPUnit", "--group=slow", True, False, None, None),
+            ('vendor/bin/pest --filter="creates order"', "Pest", "--filter=creates order", True, False, None, 'vendor/bin/pest --filter="creates order"'),
+            ("vendor/bin/paratest -p4", "ParaTest", "all tests", True, False, None, None),
+            ("vendor/bin/phpstan analyse app --level=8 --memory-limit=1G", "PHPStan", "app --level=8", True, False, None, None),
+            ("vendor/bin/phpstan analyse -c phpstan.neon", "PHPStan", "project", True, False, None, None),
+            ("php -d memory_limit=-1 vendor/bin/phpstan analyse", "PHPStan", "project", True, False, None, "php -d memory_limit=-1 vendor/bin/phpstan analyse"),
+            ("vendor/bin/psalm --no-cache", "Psalm", "project", True, False, None, None),
+            ("vendor/bin/phpcs --standard=PSR12 src", "PHPCS", "src", True, False, None, None),
+            ("php -l app/Models/Order.php", "PHP lint", "app/Models/Order.php", True, False, None, None),
+            ("vendor/bin/pint", "Pint", "project", False, True, None, None),
+            ("vendor/bin/pint --test", "Pint", "project", True, False, None, None),
+            ("vendor/bin/php-cs-fixer fix --dry-run --diff", "PHP-CS-Fixer", "project", True, False, None, None),
+            ("vendor/bin/php-cs-fixer fix src", "PHP-CS-Fixer", "src", False, True, None, None),
+            ("vendor/bin/phpcbf src", "PHPCBF", "src", False, True, None, None),
+            ("vendor/bin/rector process --dry-run", "Rector", "project", True, False, None, None),
+            ("vendor/bin/rector", "Rector", "project", False, True, None, None),
+            ("bin/console lint:yaml config", "Symfony lint", "lint:yaml config", True, False, None, None),
+            ("php bin/console doctrine:schema:validate", "Doctrine schema", "validate", True, False, None, None),
+            ("wp core verify-checksums", "WP checksums", "core", True, False, None, None),
+            ("composer validate --strict", "Composer", "validate", True, False, None, None),
+            ("composer audit", "Composer", "audit", True, False, None, None),
+            ("composer test", "Composer", "test", True, False, None, None),
+            ("composer exec -- phpunit", "PHPUnit", "all tests", True, False, None, None),
+            ("vendor/bin/codecept run unit", "Codeception", "unit", True, False, None, None),
+            ("cd /repo && vendor/bin/phpunit", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("XDEBUG_MODE=off vendor/bin/phpunit --testsuite=Unit", "PHPUnit", "--testsuite=Unit", True, False, None, "vendor/bin/phpunit --testsuite=Unit"),
+            ("timeout 600 php artisan test", "Artisan test", "all tests", True, False, None, "php artisan test"),
+            ("docker compose exec -T app php artisan test --filter=Order", "Artisan test", "--filter=Order", True, False, None, "php artisan test --filter=Order"),
+            ("docker-compose exec app vendor/bin/phpunit", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("ddev exec vendor/bin/phpstan analyse", "PHPStan", "project", True, False, None, "vendor/bin/phpstan analyse"),
+            ("lando php vendor/bin/phpcs", "PHPCS", "project", True, False, None, "php vendor/bin/phpcs"),
+            ("./vendor/bin/sail artisan test", "Artisan test", "all tests", True, False, None, "php artisan test"),
+            ("sail test --filter=Order", "Artisan test", "--filter=Order", True, False, None, "php artisan test --filter=Order"),
+            ("vendor/bin/phpstan analyse app | tail -20", "PHPStan", "app", True, False, "piped to tail", "vendor/bin/phpstan analyse app"),
+            ("php artisan test 2>&1 | tail -50", "Artisan test", "all tests", True, False, "piped to tail", "php artisan test"),
+            ("vendor/bin/phpunit || true", "PHPUnit", "all tests", True, False, "a failure is ignored", "vendor/bin/phpunit"),
+            ('vendor/bin/phpunit; echo "exit: $?"', "PHPUnit", "all tests", True, False, "the last command sets the exit status", None),
+            ("vendor/bin/phpunit && echo OK", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("vendor/bin/phpunit > /tmp/out.txt 2>&1", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("vendor/bin/phpunit &", "PHPUnit", "all tests", True, False, "background", None),
+            ("set -o pipefail && vendor/bin/phpunit | tee out.log", "PHPUnit", "all tests", True, False, None, "vendor/bin/phpunit"),
+            ("/bin/bash -lc 'vendor/bin/phpunit --filter Order'", "PHPUnit", "--filter=Order", True, False, None, "vendor/bin/phpunit --filter Order"),
+            (r"vendor\bin\phpunit.bat --filter OrderTest", "PHPUnit", "--filter=OrderTest", True, False, None, r"vendor\bin\phpunit.bat --filter OrderTest"),
+            (r"php.exe vendor\bin\phpstan analyse src", "PHPStan", "src", True, False, None, None),
+            (r".\vendor\bin\pest.bat", "Pest", "all tests", True, False, None, None),
+            (r'& "C:\php\php.exe" artisan test', "Artisan test", "all tests", True, False, None, r'"C:\php\php.exe" artisan test'),
+            (r'pwsh -NoProfile -Command "vendor\bin\phpunit | Select-Object -Last 20"', "PHPUnit", "all tests", True, False, "piped to Select-Object", r"vendor\bin\phpunit"),
+            (r'powershell -Command "vendor\bin\phpstan.bat analyse src; exit $LASTEXITCODE"', "PHPStan", "src", True, False, None, r"vendor\bin\phpstan.bat analyse src"),
+            (r"cmd /c vendor\bin\phpcs.bat --standard=PSR12 src", "PHPCS", "src", True, False, None, None),
+            (r'$env:XDEBUG_MODE="off"; vendor\bin\phpunit.bat', "PHPUnit", "all tests", True, False, None, r"vendor\bin\phpunit.bat"),
+        ]
+        others = ["npm test", "git status", "sed -n '1,200p' app/Models/Order.php", 'rg -n "rules(" app/Http', "composer install",
+                  "vendor/bin/phpstan --version", "php artisan migrate", "ls -la", "cat composer.json | head"]
+        self.assertGreaterEqual(len(cases) + len(others), 40)
+        self.run_node("const cases = " + json.dumps(cases) + ", others = " + json.dumps(others) + ";\n" + r"""
+for (const [command, family, target, check, fixer, masked, bare] of cases) {
+  const result = RunModel.classifyCommand(command), label = `classify ${command}`;
+  assert.deepEqual([result.family, result.target, result.check, result.fixer], [family, target, check, fixer], label);
+  if (masked) assert.match(result.masked || '', new RegExp(masked.replace(/[|]/g, '\\|')), label); else assert.equal(result.masked, null, label);
+  if (bare) assert.equal(result.bare, bare, label);
+  assert.equal(result.key, `${family}|${target}`, label);
+  assert.equal(result.runnable, true, `${label} leaves one command Harness can run`);
+}
+for (const command of others) assert.deepEqual([RunModel.classifyCommand(command).family, RunModel.classifyCommand(command).check], [null, false], command);
+// What was peeled off is named, so Run in Harness can say it.
+assert.deepEqual(RunModel.classifyCommand('cd app && XDEBUG_MODE=off vendor/bin/phpunit 2>&1 | tail -5').removed, ['cd', 'environment', 'redirect', '| tail']);
+assert.deepEqual(RunModel.classifyCommand('docker compose exec -T app vendor/bin/phpunit').removed, ['container']);
+// Results.check_command refuses shell operators, control characters and more than 4000 bytes.
+assert.deepEqual(['vendor/bin/phpunit', 'vendor/bin/phpunit | tail', 'a && b', 'x\ny', 'x'.repeat(4001), 'say "open', ''].map(RunModel.runnable), [true, false, false, false, false, false, false]);
+assert.equal(RunModel.classifyCommand('vendor/bin/phpunit --filter \u202eOrder').target, '--filter=Order');
+""")
+
+    def test_step_rows_name_their_tool_and_target_and_groups_count_as_steps_arrive(self):
+        page = ui_script()
+        helpers = page[page.index("\nfunction stepGroup("):page.index("\nfunction appendEvent(")]
+        append = page[page.index("\nfunction appendEvent("):]
+        append = append[:append.index("\n}\n") + 3]
+        self.run_node(r"""
+class Node { constructor(tag, className = '', text) { Object.assign(this, {tag, className, own:text ?? '', children:[], dataset:{}, attributes:{}}); }
+  get textContent() { return this.children.length ? this.children.map(child => child.textContent).join('') : this.own; }
+  set textContent(value) { this.children = []; this.own = String(value); }
+  get classList() { return {contains: name => this.className.split(' ').includes(name)}; }
+  get firstElementChild() { return this.children[0]; } get lastElementChild() { return this.children[this.children.length - 1]; } get lastChild() { return this.lastElementChild; }
+  setAttribute(name, value) { this.attributes[name] = String(value); } append(...nodes) { this.children.push(...nodes); } }
+const events = new Node('div'), $ = id => id === 'events' ? events : null, el = (tag, className, text) => new Node(tag, className, text);
+const document = {createTextNode: text => new Node('#text', '', text)};
+const state = {eventIds:new Set(), assistantTexts:new Set(), stepCalls:new Map(), selected:{provider:'claude'}};
+const runView = {observe() {}, statusNode: () => null}, providerFor = () => ({name:'Claude Code'}), humanLabel = value => value, brainReviewed = () => true;
+const withoutMemoryDraft = text => text, bytesLabel = () => '';
+""" + helpers + append + r"""
+const render = stream => { events.children = []; state.eventIds.clear(); state.stepCalls.clear(); for (const event of streams[stream]) appendEvent(event);
+  const groups = events.children.filter(node => node.className === 'activity-group');
+  return {summaries:groups.map(group => group.firstElementChild.textContent), rows:groups.flatMap(group => group.lastElementChild.children.filter(node => node.className === 'step-row'))}; };
+let {summaries, rows} = render('claude');
+assert.deepEqual(summaries, ['1 step · Session',
+  '13 steps · Read ×4, TodoWrite ×2, Grep, Glob, Write ×2, Edit ×2, Bash · Looked for "rules(", "**/*Order*.php" · opened 4 files · edited 3',
+  '10 steps · Bash ×4, Task, Grep, Read ×2, Edit, TodoWrite · Looked for "foreignId" · opened 2 files · edited 1', '1 step · Usage']);
+// Completions update their start row: one row per call, with the target in a left-to-right <bdi>.
+assert.equal(rows.length, 23);
+const row = call => rows.find(item => item.dataset.call === call), text = node => node.children.map(child => child.textContent).join(' · ');
+assert.equal(text(row('toolu_01')), 'Read · app/Http/Controllers/OrderController.php · done');
+assert.equal(text(row('toolu_12')), 'Bash · php artisan test --filter=OrderTest · failed');
+assert.equal(text(row('toolu_16')), 'Helper · Grep · "foreignId" in database/migrations · done');
+assert.deepEqual([row('toolu_01').children[1].tag, row('toolu_01').children[1].dir, row('toolu_12').dataset.state], ['bdi', 'ltr', 'failed']);
+assert.ok(rows.every(item => Number.isInteger(item.dataset.eventId)));
+assert.doesNotMatch(summaries.join(' '), /found|matches|results/);
+// A label-only run: each completion stays its own row and is not a step; names come from the label.
+({summaries, rows} = render('claude_labels'));
+assert.equal(summaries[1], '23 steps · Read ×6, TodoWrite ×3, Grep ×2, Glob, Write ×2, Edit ×3, Bash ×5, Task');
+assert.deepEqual(rows.slice(0, 2).map(text), ['Read · started', 'Tool · done']);
+({summaries, rows} = render('codex'));
+assert.deepEqual(rows.map(text).slice(0, 3), ['Shell · sed -n 1,200p app/Models/Order.php · exit 0', 'Shell · rg -n "rules(" app/Http · exit 0', 'Edit · app/Http/Requests/StoreOrderRequest.php · done']);
+assert.ok(rows.map(text).includes('Shell · rm -rf build · not run'));
+assert.deepEqual(rows.map(text).filter(line => line.startsWith('Agent')), ['Agent · spawn_agent · done']);
+// A launch that raised ends on the worker's error line: a call it never answered says so instead of "running".
+events.children = []; state.stepCalls.clear();
+appendEvent({id:9001, kind:'tool', text:'Read: started', tool:'Read', call:'toolu_x', state:'started', ok:true, path:'app/Order.php', launch_id:'LX'});
+appendEvent({id:9002, kind:'error', text:'Run failed (SessionError). Check the native CLI and server setup.', launch_id:'LX'});
+assert.deepEqual([state.stepCalls.get('LX|toolu_x').row.dataset.state, text(state.stepCalls.get('LX|toolu_x').row)], ['unfinished', 'Read · app/Order.php · no result']);
+// Codex numbers its items again in every resumed turn: item_1 of turn 2 is not turn 1's call.
+events.children = []; state.stepCalls.clear();
+appendEvent({id:9101, kind:'tool', text:'command_execution: started', tool:'Shell', call:'item_1', state:'started', ok:true, detail:'php artisan test', launch_id:'T1'});
+appendEvent({id:9102, kind:'tool', text:'command_execution: completed', tool:'Shell', call:'item_1', state:'completed', ok:true, exit_code:0, detail:'php artisan test', launch_id:'T1'});
+appendEvent({id:9103, kind:'tool', text:'file_change: completed', tool:'Edit', call:'item_1', state:'completed', ok:true, changes:[{path:'app/Order.php', kind:'update'}], launch_id:'T2'});
+const turns = events.children.filter(node => node.className === 'activity-group').flatMap(group => group.lastElementChild.children);
+assert.deepEqual(turns.map(text), ['Shell · php artisan test · exit 0', 'Edit · app/Order.php · done']);
+assert.match(events.children[events.children.length - 1].firstElementChild.textContent, /^2 steps .* edited 1$/);
+""")
+
+    def test_run_view_scripts_render_text_only_and_guard_every_animation(self):
+        for name in ("run-model.js", "run-view.js"):
+            source = (WEB / name).read_text(encoding="utf-8")
+            with self.subTest(script=name):
+                self.assertIsNone(re.search(r"innerHTML|outerHTML|insertAdjacentHTML|document\.write", source))
+                # The scripts strip bidi controls from agent text and must not carry any themselves (written as \u escapes).
+                self.assertIsNone(re.search("[\u202a-\u202e\u2066-\u2069\u200e\u200f]", source))
+                # Smooth scrolling follows the system setting through scrollMotion().
+                self.assertEqual(re.findall(r"behavior:\s*(?!scrollMotion\(\))[^,}]+", source), [])
+        view = (WEB / "run-view.js").read_text(encoding="utf-8")
+        helper = view[view.index("  function motion("):view.index("\n  }\n", view.index("  function motion(")) + 4]
+        self.assertIn("reducedMotion.matches", helper)
+        self.assertEqual(view.count(".animate("), helper.count(".animate("), "every element.animate goes through motion()")
+        # requestAnimationFrame only schedules a render or a guarded motion() call.
+        for call in re.findall(r"requestAnimationFrame\(([^\n]{0,120})", view):
+            self.assertTrue(call.startswith("() => { ui.raf = 0") or "motion(" in call, call)
+        self.assertNotIn("innerHTML", (WEB / "app-core.js").read_text(encoding="utf-8")[(WEB / "app-core.js").read_text(encoding="utf-8").index("\nfunction stepGroup("):])
+
+    def test_file_chips_read_as_text_on_their_fills_in_both_themes(self):
+        def luminance(color):
+            channels = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            return sum(weight * (c / 12.92 if c <= .04045 else ((c + .055) / 1.055) ** 2.4) for weight, c in zip((.2126, .7152, .0722), channels))
+        def contrast(a, b):
+            high, low = sorted((luminance(a), luminance(b)), reverse=True)
+            return (high + .05) / (low + .05)
+        css = stylesheet(THEMED_PAGES[0])
+        self.assertIn('.run-file[data-edited="true"] { background:var(--purple-soft); border-color:var(--purple); color:var(--purple); }', css)
+        for block in (re.search(r"\n\s*:root \{([^}]*)\}", css).group(1), re.search(r':root\[data-theme="dark"\] \{([^}]*)\}', css).group(1)):
+            tokens = dict(re.findall(r"(--[\w-]+):(#[0-9a-f]{6})\b", block)); tokens.setdefault("--paper", "#ffffff")
+            for text, surface in (("--purple", "--purple-soft"), ("--ink-2", "--paper"), ("--error", "--paper"), ("--muted", "--soft"), ("--warning", "--warning-surface")):
+                with self.subTest(text=text, surface=surface, paper=tokens["--paper"]):
+                    self.assertGreaterEqual(contrast(tokens[text], tokens[surface]), 4.5, "chip and strip text needs 4.5:1")
+
+    def test_a_glob_without_a_path_searches_from_its_leading_folders(self):
+        self.run_node(r"""
+const model = RunModel.create(); let id = 0;
+const tool = fields => ({id:++id, kind:'tool', launch_id:'L1', at:'2026-10-04T21:00:00.000+00:00', state:'started', ok:true, ...fields});
+RunModel.observe(model, [tool({text:'Glob: started', tool:'Glob', call:'g1', detail:'"app/**/*Order*.php"'}), tool({text:'Glob: started', tool:'Glob', call:'g2', detail:'"**/*.php"'}),
+  tool({text:'Glob: started', tool:'Glob', call:'g3', detail:'"*.php"', path:'tests'}),
+  tool({text:'Read: started', tool:'Read', call:'r1', path:'routes/api.php'}), tool({text:'Read: started', tool:'Read', call:'r2', path:'app/Models/Order.php'})]);
+const run = RunModel.current(model);
+assert.deepEqual(run.searches.map(item => item.scope), ['app', '', 'tests']);
+// A pattern that starts in app/ was not run over routes/: the file card and the Searched filter say so.
+assert.deepEqual(RunModel.searchedIn(run, run.paths.get('routes/api.php')), ['"**/*.php"']);
+assert.deepEqual(RunModel.searchedIn(run, run.paths.get('app/Models/Order.php')), ['"app/**/*Order*.php"', '"**/*.php"']);
+""")
+
+    def test_hidden_text_in_receipts_and_panes_stays_inside_its_scroller(self):
+        # .sr-only is absolutely positioned: inside a static receipt or pane it escaped the conversation's scroller and
+        # made the page itself scrollable, so scrollIntoView or a focus could shift the whole app up.
+        css = stylesheet(THEMED_PAGES[0])
+        for selector in (".run-pane", ".run-receipt"):
+            with self.subTest(selector=selector):
+                self.assertRegex(css, re.escape(selector) + r" \{ position:relative;")
 
 
 if __name__ == "__main__":

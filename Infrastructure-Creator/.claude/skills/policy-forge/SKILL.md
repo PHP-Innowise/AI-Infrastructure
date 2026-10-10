@@ -24,6 +24,7 @@ Into the required **generation root** (task staging during
 `infra-generate`/`infra-update`; never the evidence target directly), write:
 - `AGENTS.md` at the target ROOT - a SINGLE shared file (never per edition).
 - For each selected edition folder in `{.claude, .cursor, .codex}`: `<edition>/DOD.md`, `<edition>/GOLDEN-PRINCIPLES.md`, `<edition>/STABILIZATION.md` (identical copies duplicated into each selected edition).
+- When `.claude` is selected: `.claude/CLAUDE.md` with the line `@../AGENTS.md` (one explanatory sentence before it at most). Claude Code reads `AGENTS.md` by itself only while the project has no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`, so without the import a target with its own `CLAUDE.md` never loads the policy. If the target already has a `.claude/CLAUDE.md`, keep its content and append the import line; never replace the file.
 
 Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every file written and the profile lines each rule is grounded in.
 
@@ -38,6 +39,15 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    **Orchestration** section requires contract-based specialist selection,
    read-only parallelism, serialized writers, bounded capsules, checkpoints,
    and stop-on-failure behavior.
+   The working-memory rules require task-aware retrieval at complex starts,
+   after compaction/scope changes and before uncovered material decisions;
+   source verification; progress/next-step checkpoints at meaningful boundaries;
+   and source-backed reusable findings/decisions at finalization when writes are
+   authorized. Support Harness `memory-draft` and an available Harness Memory MCP
+   without requiring either for an otherwise self-contained target; the fallback
+   is the installed context CLI's `record-result`, whose replay of the same
+   result ID finishes a save that stopped half way. Report failed saves and
+   distinguish delivered context from agent-reported use.
 3. **Author `DOD.md`** as the Definition of Done: exact non-mutating
    test/lint-check/format-check/static-analysis commands plus affected confirmed
    critical scenarios, denied paths, transitions, and audit checks when a
@@ -52,8 +62,8 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    `SKIPPED - <check>: <reason>; impact: <unverified behavior>` rather than
    silently passing it.
 4. **Author `GOLDEN-PRINCIPLES.md`**: durable stack-specific non-negotiables, project-specific source authority, critical behavioral invariants, and secrets discipline.
-5. **Author `STABILIZATION.md`**: the error-to-rule loop the target uses to convert recurring mistakes into permanent rules.
-6. **Duplicate** `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into every selected edition folder (byte-identical copies). Do NOT write into unselected editions.
+5. **Author `STABILIZATION.md`**: the error-to-rule loop the target uses to convert recurring mistakes into permanent rules. It MUST carry `## Localization` (the `COMPONENT - COMPONENT | blame: SIDE` label, its components - model, owner, grader, third party, context, memory, tool, local and external environment - mapped to the target, and the two attribution rules: label the earliest unrecovered failure; blame follows behavior, not opportunity) and `## Routing` (where each blamed side's repair belongs): the bug, finding and incident templates `memory-seed` installs point there.
+6. **Duplicate** `DOD.md`, `GOLDEN-PRINCIPLES.md`, `STABILIZATION.md` into every selected edition folder (byte-identical copies). Do NOT write into unselected editions. When `.claude` is selected, also write `.claude/CLAUDE.md` with the `@../AGENTS.md` import (see the naming convention); bootstrap-verifier fails a Claude edition without it.
 7. **Analyze commands before publication.** Run
    `bootstrap-verifier/scripts/analyze_commands.py --target <real-target>` to
    inventory target aliases without execution. Then analyze every command

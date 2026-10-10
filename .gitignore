@@ -9,3 +9,5 @@ memory-bank/local/
 /.c2p/
 /.c2pconfig
 infrastructure-creator/tasks/
+/docs/Accelerator-TestEvidence-Submission/
+/docs/qa/evidence*/

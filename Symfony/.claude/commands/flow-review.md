@@ -31,12 +31,15 @@ You - the MAIN conversation - are the orchestrator and the synthesizer.
    - **Tool and source guidance** - the changed-file list and the task ID.
    - **Task boundaries** - report only; do NOT modify files, run fixes, or
      apply optimizations in this flow.
-   - **Decisions and assumptions so far** - the review scope and anything
-     the user said about intent.
+   - **Decisions and assumptions so far** - the review scope, anything the
+     user said about intent, and the constraint behind each decision the
+     reviewer must not undo.
    Before each spawn, save the capsule to a scratch file and record it -
    `python3 memory-bank/scripts/context.py msg-dispatch --task-id <ID> --agent <name> --event spawn --capsule-file <file>`
-   (it refuses an under-specified capsule); completions are recorded in the
-   channel by the SubagentStop hook automatically.
+   (it refuses an under-specified capsule). The SubagentStop hook normally
+   records completions in the channel; when it reports a failed write, or an
+   agent returned without a completion entry, record it yourself instead of
+   reading the gap as an unfinished agent.
 3. When all three return, synthesize in the main conversation: deduplicate
    overlapping findings, rank by severity, drop claims without evidence,
    and present one report grouped by file.

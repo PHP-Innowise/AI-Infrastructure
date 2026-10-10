@@ -2558,7 +2558,7 @@ class VerificationAttestationTest(unittest.TestCase):
 
     The seeded memory runtime is executed through an interpreter, so
     `python3 <script> status` cannot be proven non-mutating by inspection.
-    The memory quartet is unconditional and verifies itself with exactly those
+    The six memory-continuity guides are unconditional and verify themselves with exactly those
     commands, so before this route existed the generator could not pass its
     own gate on any target: a real end-to-end run ended in FAIL after 19
     forge iterations.
@@ -4496,7 +4496,7 @@ class RuntimeCommandDescriptionTest(unittest.TestCase):
 
 
 class RuntimeFixedAccountabilityTest(unittest.TestCase):
-    """The runtime-fixed quartet is measured by runtime accuracy, not by
+    """The runtime-fixed memory-continuity guides are measured by runtime accuracy, not by
     project specificity it cannot have.
 
     `memory-bank`, `project-brain`, `checkpoint`, and `memory` describe the
@@ -5808,7 +5808,7 @@ class ContractRenderingTest(SkillQualityFixture):
 class RuntimeExpectationTest(SkillQualityFixture):
     """A runtime command has no unmodified target to be observed on.
 
-    The runtime the memory quartet verifies itself with is installed by the
+    The runtime the memory-continuity guides verify themselves with is installed by the
     generation, so on a first run there is nothing to record a baseline
     against - ADR-002's model has no subject. The runtime is fixed and shipped
     by this generator, though, so its behaviour belongs to the contract, and
@@ -5832,7 +5832,7 @@ class RuntimeExpectationTest(SkillQualityFixture):
         return [item.code for item in self.plan_diagnostics()]
 
     def test_promising_zero_against_a_declared_nonzero_exit_is_rejected(self) -> None:
-        """The defect this closes, measured on a real run: a quartet skill
+        """The defect this closes, measured on a real run: a runtime guide skill
         promised `context.py validate` exits zero, and the contract declares
         exit 1 whenever an index is stale."""
         codes = self.runtime_check(

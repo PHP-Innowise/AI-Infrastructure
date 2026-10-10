@@ -1,0 +1,14 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ approving ? 'Approve' : 'Deny' }} request — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ approving ? 'Approve' : 'Deny' }} {{ approval.childPlayer.firstName }}'s request</h1>
+        <p>{{ approval.actionType }}</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

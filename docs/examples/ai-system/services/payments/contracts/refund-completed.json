@@ -1,0 +1,6 @@
+{
+  "name": "refund.completed",
+  "version": "1",
+  "fields": {"event_id": "string", "order_reference": "string", "refund_reference": "string"},
+  "status": "illustrative-proposal"
+}

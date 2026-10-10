@@ -24,6 +24,8 @@
 .claude/skills/coder-frontend/SKILL.md -diff linguist-generated=true
 .claude/skills/coder/SKILL.md -diff linguist-generated=true
 .claude/skills/content-modeling/SKILL.md -diff linguist-generated=true
+.claude/skills/context-load/SKILL.md -diff linguist-generated=true
+.claude/skills/context-save/SKILL.md -diff linguist-generated=true
 .claude/skills/council/SKILL.md -diff linguist-generated=true
 .claude/skills/cron-background-processing/SKILL.md -diff linguist-generated=true
 .claude/skills/database-designer/SKILL.md -diff linguist-generated=true
@@ -103,6 +105,7 @@
 .codex/GOLDEN-PRINCIPLES.md -diff linguist-generated=true
 .codex/STABILIZATION.md -diff linguist-generated=true
 .codex/hooks/bash-validator.sh -diff linguist-generated=true
+.codex/hooks/context-continuity.sh -diff linguist-generated=true
 .codex/hooks/file-naming-validator.sh -diff linguist-generated=true
 .codex/hooks/local-context.sh -diff linguist-generated=true
 .codex/hooks/loop-detection.sh -diff linguist-generated=true
@@ -163,6 +166,8 @@
 .cursor/commands/coder-frontend.md -diff linguist-generated=true
 .cursor/commands/coder.md -diff linguist-generated=true
 .cursor/commands/content-modeling.md -diff linguist-generated=true
+.cursor/commands/context-load.md -diff linguist-generated=true
+.cursor/commands/context-save.md -diff linguist-generated=true
 .cursor/commands/council.md -diff linguist-generated=true
 .cursor/commands/cron-background-processing.md -diff linguist-generated=true
 .cursor/commands/database-designer.md -diff linguist-generated=true
@@ -198,10 +203,12 @@
 .cursor/commands/wp-cli.md -diff linguist-generated=true
 .cursor/commands/writing-plans.md -diff linguist-generated=true
 .cursor/hooks/bash-validator.sh -diff linguist-generated=true
+.cursor/hooks/context-continuity.sh -diff linguist-generated=true
 .cursor/hooks/file-naming-validator.sh -diff linguist-generated=true
 .cursor/hooks/local-context.sh -diff linguist-generated=true
 .cursor/hooks/loop-detection.sh -diff linguist-generated=true
 .cursor/hooks/subagent-dispatch.sh -diff linguist-generated=true
+.cursor/hooks/working-memory-read.sh -diff linguist-generated=true
 .cursor/hooks/working-memory-write.sh -diff linguist-generated=true
 .cursor/skills/SKILL?FLOW.md -diff linguist-generated=true
 .cursor/skills/api-designer/SKILL.md -diff linguist-generated=true
@@ -216,6 +223,8 @@
 .cursor/skills/coder-frontend/SKILL.md -diff linguist-generated=true
 .cursor/skills/coder/SKILL.md -diff linguist-generated=true
 .cursor/skills/content-modeling/SKILL.md -diff linguist-generated=true
+.cursor/skills/context-load/SKILL.md -diff linguist-generated=true
+.cursor/skills/context-save/SKILL.md -diff linguist-generated=true
 .cursor/skills/council/SKILL.md -diff linguist-generated=true
 .cursor/skills/cron-background-processing/SKILL.md -diff linguist-generated=true
 .cursor/skills/database-designer/SKILL.md -diff linguist-generated=true

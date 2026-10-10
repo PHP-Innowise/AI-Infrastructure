@@ -10,21 +10,27 @@ import copy
 from contextlib import closing
 from datetime import datetime
 from functools import lru_cache
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
 import subprocess
 from typing import Optional
+from urllib.parse import urlsplit
+
+from .filesystem import fs
+from .windows_commands import command_argv
 
 PROVIDERS = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor Agent"}
 PROBE_TIMEOUT = 3
 AGENT_CONTROL_DETAILS = {
-    "claude": "Requires the selected helper count per turn. Native concurrency limits apply; Ultracode uses its own workflow limits.",
+    "claude": "Native concurrency limits apply; Ultracode uses its own workflow limits.",
     "codex": "Uses Codex's native limit for concurrent helpers; the main agent runs separately.",
     "cursor": "Instruction only: Cursor has no verified CLI control to disable helpers or cap concurrency.",
 }
@@ -46,7 +52,10 @@ def _value(value: str, label: str) -> str:
 def _probe(executable: str, provider: str) -> bool:
     output = []
     for flag in ("--version", "--help"):
-        command = [executable]
+        try:
+            command = command_argv([executable], provider)
+        except ValueError:
+            return False
         if provider == "cursor":
             # Even help/version can update Cursor's shared `agent` launcher.
             command.append("--disable-auto-update")
@@ -105,7 +114,7 @@ def discover_providers(overrides: Optional[dict[str, str]] = None) -> list[dict]
             if _probe(path, provider):
                 executable = os.path.abspath(path)
                 break
-        detail = ("CLI identity verified; login is checked when a run starts."
+        detail = ("CLI identity verified; Sessions asks the CLI whether it is signed in."
                   if executable else "CLI not found or identity/required flags could not be verified.")
         if provider == "cursor" and not executable:
             detail += " Set --cursor-bin to a Cursor Agent executable; another tool named agent is not Cursor."
@@ -114,6 +123,84 @@ def discover_providers(overrides: Optional[dict[str, str]] = None) -> list[dict]
                       "agent_control_detail": AGENT_CONTROL_DETAILS[provider],
                       "model_options": model_options(provider)})
     return found
+
+
+# provider: (the program's name, the subcommand that signs in, the arguments that report the sign-in)
+SIGN_IN = {"claude": ("claude", "auth login", ["auth", "status", "--json"]),
+           "codex": ("codex", "login", ["login", "status"]),
+           "cursor": ("cursor-agent", "login", ["--disable-auto-update", "status", "--format", "json"])}
+# Credentials a CLI can take from the environment instead of its own sign-in.
+SIGN_IN_ENVIRONMENT = {"claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"),
+                       "codex": ("OPENAI_API_KEY", "CODEX_API_KEY"), "cursor": ("CURSOR_API_KEY",)}
+SIGN_IN_TIMEOUT = 10
+# What a CLI reports when its account is signed out, expired or revoked. Matched against the provider's own
+# error and failed-result events only, never against the model's text.
+AUTH_FAILURE = re.compile(
+    r"authentication_failed|failed to authenticate|authentication required|not (?:logged|signed) in"
+    r"|log ?in again|\B/login\b|oauth (?:session|token)|refresh token|invalid (?:api|x-api)[ -]key"
+    r"|unauthori[sz]ed|\b401\b", re.IGNORECASE)
+
+
+def sign_in_command(provider: str, executable: Optional[str] = None) -> str:
+    """The command that signs a CLI in, as typed in a terminal: the program's name when that name finds this
+    executable, else its path (the Harness may run a Cursor Agent that is not on PATH)."""
+    name, subcommand, _ = SIGN_IN[provider]
+    found = shutil.which(name)
+    if executable and not (found and os.path.realpath(found) == os.path.realpath(executable)):
+        name = shlex.quote(executable)
+    return f"{name} {subcommand}"
+
+
+def sign_in_status(provider: str, executable: Optional[str]) -> dict:
+    """Ask a CLI whether its own account is signed in: no model call, well under a second.
+
+    Advisory. `signed_out` means the CLI said so about its own sign-in; a CLI set up for another backend
+    (Bedrock, Vertex, a key in the environment, a custom Codex provider) or one that cannot be asked is
+    `unknown`, and no run is refused on it.
+    """
+    status = {"id": provider, "state": "unknown", "detail": "",
+              "login": sign_in_command(provider, executable) if provider in SIGN_IN else ""}
+    if not executable or provider not in SIGN_IN:
+        return status
+    try:
+        completed = subprocess.run(command_argv([executable], provider) + SIGN_IN[provider][2], stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, errors="replace", timeout=SIGN_IN_TIMEOUT,
+                                   check=False)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return status
+    keyed = any(os.environ.get(name) for name in SIGN_IN_ENVIRONMENT[provider])
+    name = PROVIDERS[provider]
+    if provider == "codex":
+        # `codex login status` exits 0 with "Logged in using ...", or 1 with "Not logged in".
+        output = completed.stdout + completed.stderr
+        if completed.returncode == 0 and re.search(r"\blogged in\b", output, re.IGNORECASE):
+            status.update(state="signed_in", detail=f"{name} is signed in.")
+        elif completed.returncode != 0 and re.search(r"\bnot logged in\b", output, re.IGNORECASE) and not keyed:
+            status.update(state="signed_out", detail=f"{name} reports that it is not signed in.")
+        return status
+    # `claude auth status --json` reports loggedIn and apiProvider; `cursor-agent status --format json`, isAuthenticated.
+    try:
+        reported = json.loads(completed.stdout)
+    except ValueError:
+        return status
+    if not isinstance(reported, dict):
+        return status
+    signed = reported.get("loggedIn" if provider == "claude" else "isAuthenticated")
+    own = provider == "cursor" or reported.get("apiProvider") in (None, "firstParty")
+    if signed is True:
+        status.update(state="signed_in", detail=f"{name} is signed in.")
+    elif signed is False and own and not keyed:
+        status.update(state="signed_out", detail=f"{name} reports that it is not signed in.")
+    return status
+
+
+def sign_in_failure(provider: str, executable: Optional[str] = None) -> str:
+    """The run error for a provider that refused the account: what to run instead of a generic failure."""
+    name = PROVIDERS.get(provider, "The provider")
+    how = (f"Sign in from a terminal with `{sign_in_command(provider, executable)}`"
+           + (" (or run `claude` and type /login)" if provider == "claude" else "")) if provider in SIGN_IN else "Sign in with its CLI"
+    return (f"{name} is not signed in, or its sign-in expired. {how}, "
+            "then send the message again; or start a new session with a provider that is signed in.")
 
 
 def _catalog_rows(data) -> list[dict]:
@@ -154,8 +241,8 @@ def _catalog_rows(data) -> list[dict]:
 def _read_model_cache(path: Path) -> list[dict]:
     descriptor = None
     try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        metadata = os.fstat(descriptor)
+        descriptor = fs.open(path, os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK)
+        metadata = fs.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MODEL_CATALOG_LIMIT:
             return []
         payload = os.read(descriptor, MODEL_CATALOG_LIMIT + 1)
@@ -164,7 +251,7 @@ def _read_model_cache(path: Path) -> list[dict]:
         return []
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            fs.close(descriptor)
 
 
 @lru_cache(maxsize=3)
@@ -201,7 +288,7 @@ def _model_options(provider: str) -> dict:
             try:
                 # This documented offline branch returns bundled data before
                 # Codex constructs configuration or an authentication manager.
-                completed = subprocess.run([executable, "debug", "models", "--bundled"],
+                completed = subprocess.run(command_argv([executable, "debug", "models", "--bundled"], "codex"),
                                            stdin=subprocess.DEVNULL, capture_output=True,
                                            timeout=PROBE_TIMEOUT, check=False)
                 if completed.returncode == 0 and len(completed.stdout) <= MODEL_CATALOG_LIMIT:
@@ -310,10 +397,14 @@ def _codex_helper_activity(event):
     return None
 
 
-def codex_journal_activity(native_id, project, since, until):
-    """Read only bounded lifecycle metadata when exec JSON omits V2 activity."""
+def codex_rollout(native_id, project):
+    """An exec thread's rollout in this project, opened without following links, past its session_meta line.
+
+    Returns (stream, path) or None. Nothing outside Codex's own session folders is
+    opened, and a rollout of another thread, folder or non-exec source is refused.
+    """
     if not isinstance(native_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}', native_id):
-        return []
+        return None
     home = Path(os.environ.get('CODEX_HOME') or str(Path.home() / '.codex')).expanduser()
     try:
         databases = sorted((p for p in home.glob('state_*.sqlite')
@@ -331,26 +422,59 @@ def codex_journal_activity(native_id, project, since, until):
             if row:
                 break
         else:
-            return []
+            return None
         path = Path(row[0])
         if str(project) != row[1] or path.suffix != '.jsonl' or path.resolve() != path:
-            return []
+            return None
         if not any(root in path.parents for root in (home / 'sessions', home / 'archived_sessions')):
-            return []
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        with os.fdopen(descriptor, 'rb') as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                return []
+            return None
+        stream = os.fdopen(fs.open(path, os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK), 'rb')
+        try:
+            if not stat.S_ISREG(fs.fstat(stream.fileno()).st_mode):
+                raise ValueError('not a regular file')
             first = json.loads(stream.readline(65536))
             meta = first.get('payload', {})
             if (first.get('type') != 'session_meta' or not isinstance(meta, dict)
                     or meta.get('id') != native_id or meta.get('cwd') != str(project) or meta.get('source') != 'exec'):
-                return []
+                raise ValueError('another thread')
+        except Exception:
+            stream.close()
+            raise
+        return stream, path
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        return None
+
+
+def codex_rollout_end(native_id, project):
+    """The last 4 MiB of an exec thread's rollout in this project from the start of a line, with the file it was
+    read from and where in it that line starts: (path, position, bytes), or None."""
+    opened = codex_rollout(native_id, project)
+    if not opened:
+        return None
+    stream, path = opened
+    try:
+        with stream:
             # ponytail: inspect only the last 4 MiB; absent/older metadata stays unconfirmed.
-            offset = max(stream.tell(), os.fstat(stream.fileno()).st_size - 4 * 1024 * 1024)
+            offset = max(stream.tell(), fs.fstat(stream.fileno()).st_size - 4 * 1024 * 1024)
             if offset > stream.tell():
                 stream.seek(offset); stream.readline(4 * 1024 * 1024)
-            tail = stream.read(4 * 1024 * 1024)
+            return path, stream.tell(), stream.read(4 * 1024 * 1024)
+    except (OSError, ValueError):
+        return None
+
+
+def codex_rollout_tail(native_id, project):
+    """The last 4 MiB of an exec thread's rollout in this project, or None."""
+    end = codex_rollout_end(native_id, project)
+    return end[2] if end else None
+
+
+def codex_journal_activity(native_id, project, since, until):
+    """Read only bounded lifecycle metadata when exec JSON omits V2 activity."""
+    tail = codex_rollout_tail(native_id, project)
+    if not tail:
+        return []
+    try:
         turns, activities = set(), []
         for line in tail.splitlines():
             try:
@@ -474,8 +598,13 @@ class DelegationTracker:
 def build_command(provider: str, executable: str, project: Path, prompt: str,
                   mode: str = "plan", model: Optional[str] = None,
                   session_id: Optional[str] = None, agents_enabled: bool = False,
-                  agent_count: int = 3, thinking_effort: Optional[str] = None, budget_usd: Optional[float] = None) -> list[str]:
-    """Construct argv only. The caller must launch with cwd=project and no shell."""
+                  agent_count: int = 3, thinking_effort: Optional[str] = None, budget_usd: Optional[float] = None,
+                  hook_events: bool = False) -> list[str]:
+    """Construct argv only. The caller must launch with cwd=project and no shell.
+
+    `hook_events` asks Claude to stream hook lifecycle events, so a session launch can
+    count the memory its hooks inject; other providers ignore it.
+    """
     if provider not in PROVIDERS or mode not in ("plan", "edit"):
         raise ValueError("unknown provider or mode")
     _agent_options(provider, agents_enabled, agent_count)
@@ -494,8 +623,9 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
             raise ValueError("invalid native session ID")
     if budget_usd is not None and (provider != 'claude' or type(budget_usd) not in (int,float) or not .01 <= budget_usd <= 1000 or not math.isfinite(budget_usd)):
         raise ValueError('A USD cap of $0.01–$1000 is supported only for Claude.')
+    launch = command_argv([executable], provider)
     if provider == "claude":
-        command = [executable, "--print", "--output-format", "stream-json", "--verbose",
+        command = [*launch, "--print", "--output-format", "stream-json", "--verbose",
                    "--permission-mode", "plan" if mode == "plan" else "acceptEdits"]
         ultracode = thinking_effort == "ultracode"
         if ultracode:
@@ -518,9 +648,11 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
             command.extend(["--allowedTools", "Agent", "Task"])
         if session_id:
             command.extend(["--resume", session_id])
+        if hook_events:
+            command.append("--include-hook-events")
     elif provider == "codex":
         # Resume does not accept --sandbox/--cd: global flags precede `exec`.
-        command = [executable, "--ask-for-approval", "never", "--sandbox",
+        command = [*launch, "--ask-for-approval", "never", "--sandbox",
                    "read-only" if mode == "plan" else "workspace-write", "--cd", str(project)]
         if agents_enabled:
             # Codex 0.153.2: V1 counts helpers; V2 counts the main thread too.
@@ -541,7 +673,7 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
             command.append("resume")
         command.append("--json")
     else:
-        command = [executable, "--disable-auto-update", "--print", "--output-format", "stream-json",
+        command = [*launch, "--disable-auto-update", "--print", "--output-format", "stream-json",
                    "--workspace", str(project), "--sandbox", "enabled"]
         if mode == "plan":
             command.extend(["--mode", "plan"])
@@ -558,6 +690,47 @@ def build_command(provider: str, executable: str, project: Path, prompt: str,
     elif provider == "cursor":
         command.extend(["--", prompt])
     return command
+
+
+# Codex reads the AGENTS.md chain only up to project_doc_max_bytes, 32 KiB by
+# default. A project's own AGENTS.md with the accelerator's policy block after
+# it passes that, and the policy, coming last, was what got cut. The budget is
+# the file plus that default again for the rest of the chain, at least the
+# 128 KiB the editions' .codex/config.toml set.
+CODEX_DOC_DEFAULT = 32768
+CODEX_DOC_BUDGET = 131072
+# Codex reads the chain up to the budget into every call, so a file's size
+# must not raise it without bound: a sparse 2 GiB AGENTS.md asked for 2 GiB and
+# 32 KiB. The ceiling, 256 KiB, holds every real case with room to spare. The
+# AGENTS.md files this repository ships measure 11.3-16.9 KiB (the largest,
+# Infrastructure-Creator's, 17,251 B), and scripts/token_budget.json lets none
+# pass 17,971 B (observed size plus ~5% headroom): with the 32 KiB for the rest
+# of the chain that is under 50 KiB, which leaves a project's own AGENTS.md
+# about 200 KiB in front of the policy block. At the ceiling the instructions
+# alone are some 55,000 tokens of every call (4.76 bytes a token, as
+# scripts/context_budget.py measured AGENTS.md).
+CODEX_DOC_CEILING = 262144
+
+
+def codex_instruction_budget(command: list[str], project: Path) -> list[str]:
+    """Raise Codex's AGENTS.md budget for this launch when the project needs it, never past CODEX_DOC_CEILING.
+
+    Only a regular file's own size counts: a link's size is its target's, which can be any file. The first of the two
+    names that exists decides, as the override is what Codex reads when there is one, so a linked override is not
+    passed over for AGENTS.md."""
+    size = 0
+    for name in ("AGENTS.override.md", "AGENTS.md"):
+        try:
+            info = (project / name).lstat()
+        except OSError:
+            continue
+        size = info.st_size if stat.S_ISREG(info.st_mode) else 0
+        break
+    if size <= CODEX_DOC_DEFAULT or "exec" not in command:
+        return command
+    at = command.index("exec")
+    budget = min(CODEX_DOC_CEILING, max(CODEX_DOC_BUDGET, size + CODEX_DOC_DEFAULT))
+    return [*command[:at], "-c", f"project_doc_max_bytes={budget}", *command[at:]]
 
 
 def _text(value) -> str:
@@ -589,6 +762,60 @@ def total_tokens(usage):
                if type(usage.get(k,0)) is int and usage.get(k,0) >= 0)
 
 
+# From Claude Code 2.1.277 a resumed session's result restores the session's
+# earlier spend into total_cost_usd, so adding results double-counts it
+# (https://code.claude.com/docs/en/agent-sdk/cost-tracking). Older CLIs, and
+# results without a version, report the run alone.
+CUMULATIVE_COST_SINCE = (2, 1, 277)
+
+
+class RunCost:
+    """One run's own spend from what the provider reports.
+
+    `resumed` is the native session the run continues and `previous` the last
+    total reported for it. A resumed Claude run on a CLI that restores earlier
+    spend reports the session total; its own spend is the growth over
+    `previous`. When that cannot be told the spend is unknown (None), never 0.
+    """
+
+    def __init__(self, provider, resumed=None, previous=None):
+        self.provider, self.resumed, self.previous = provider, resumed, previous
+        self.restores = False
+        self.session = resumed
+
+    def observe(self, event):
+        """Read the CLI version and session from a raw Claude init event."""
+        if self.provider != 'claude' or not isinstance(event, dict) or event.get('type') != 'system' or event.get('subtype') != 'init':
+            return
+        version = event.get('claude_code_version')
+        match = re.match(r'(\d+)\.(\d+)\.(\d+)', version) if isinstance(version, str) else None
+        self.restores = bool(match) and tuple(int(part) for part in match.groups()) >= CUMULATIVE_COST_SINCE
+        if isinstance(event.get('session_id'), str) and event['session_id']:
+            self.session = event['session_id']
+
+    def own(self, reported):
+        """This run's spend for a reported total, or None when it is unknown."""
+        if not (self.provider == 'claude' and self.resumed and self.restores):
+            return reported
+        if self.previous is None or reported < self.previous:
+            return None
+        return round(reported - self.previous, 9)
+
+    def total(self, reported):
+        """The session total to remember for the next resumed run, or None when unknown.
+
+        A lower total than the last one (a crash result with zeroed fields) keeps
+        the last one: the CLI saves its totals only when it exits normally.
+        """
+        if self.provider != 'claude' or not self.resumed:
+            return reported
+        if not self.restores:
+            return None
+        if self.previous is not None and reported < self.previous:
+            return self.previous
+        return reported
+
+
 def _error(event: dict, fallback: str) -> str:
     error = event.get("error")
     if isinstance(error, dict):
@@ -599,12 +826,18 @@ def _error(event: dict, fallback: str) -> str:
     return _text(error) or _text(errors) or _text(event.get("message")) or _text(event.get("result")) or fallback
 
 
-def normalize_event(provider: str, event: dict) -> list[dict]:
+def normalize_event(provider: str, event: dict, targets: bool = False) -> list[dict]:
     """Allowlisted public events only; result is terminal, text alone is not.
 
     A successful result's text is the complete answer, not another text delta.
     Callers should use it as a fallback when no assistant text was received.
     Partial-message flags are intentionally disabled; partial events are ignored.
+
+    With targets=True a tool label also carries `targets`, read from the same block:
+    the canonical tool, call ID, state, path, detail, ok by the tool's own report,
+    outcome, Codex exit code and file changes, and Claude's helper parent. Main-thread
+    todo lists add `plan` events. The labels themselves are the same either way; the
+    caller maps paths, redacts and bounds the targets before it stores them.
     """
     if provider not in PROVIDERS:
         raise ValueError("unknown provider")
@@ -644,6 +877,8 @@ def normalize_event(provider: str, event: dict) -> list[dict]:
         if kind == "item.completed" and item_type == "agent_message":
             text = _text(item.get("text"))
             return [{"kind": "text", "text": text}] if text else []
+        if item_type == "todo_list" and targets:
+            return _plan_event(item.get("items"), "text", lambda entry: "done" if entry.get("completed") is True else "pending")
         if kind in ("item.started", "item.updated", "item.completed") and item_type == "collab_tool_call":
             tool, status = item.get("tool"), item.get("status")
             if tool not in ("spawn_agent", "send_input", "wait", "close_agent") or status not in (
@@ -651,12 +886,18 @@ def normalize_event(provider: str, event: dict) -> list[dict]:
             ):
                 return []
             # Prompts, agent messages and child thread IDs stay inside the CLI.
-            return [{"kind": "tool", "text": f"Agent {tool}: {status}", "ok": status != "failed"}]
+            label = {"kind": "tool", "text": f"Agent {tool}: {status}", "ok": status != "failed"}
+            if targets and kind != "item.updated":
+                label["targets"] = _targets("Agent", item.get("id"), kind.split(".")[1], status != "failed", detail=tool)
+            return [label]
         if kind in ("item.started", "item.completed") and item_type in (
             "command_execution", "file_change", "mcp_tool_call", "web_search",
         ):
             ok = item.get("status") != "failed" and item.get("exit_code") in (None, 0)
-            return [{"kind": "tool", "text": f"{item_type}: {kind.split('.')[1]}", "ok": ok}]
+            label = {"kind": "tool", "text": f"{item_type}: {kind.split('.')[1]}", "ok": ok}
+            if targets:
+                label["targets"] = _codex_targets(item, kind.split(".")[1])
+            return [label]
         return []
     if kind == "assistant":
         if event.get("error"):
@@ -671,13 +912,24 @@ def normalize_event(provider: str, event: dict) -> list[dict]:
         if not isinstance(content, list):
             return []
         result = []
+        # A helper's own calls name the Task call that started it; its todo list is not the run's plan.
+        parent = event.get("parent_tool_use_id")
         for block in content:
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 result.append({"kind": "text", "text": block["text"]})
             elif block.get("type") == "tool_use":
-                result.append({"kind": "tool", "text": (_text(block.get("name")) or "Tool") + ": started"})
+                name = _text(block.get("name"))
+                label = {"kind": "tool", "text": (name or "Tool") + ": started"}
+                result.append(label)
+                if not targets:
+                    continue
+                inputs = block.get("input") if isinstance(block.get("input"), dict) else {}
+                label["targets"] = _targets(name or "Tool", block.get("id"), "started", True, parent=_call_token(parent),
+                                            **({"detail": "Final structured report"} if name == "StructuredOutput" else {"arguments": inputs}))
+                if name == "TodoWrite" and parent is None:
+                    result.extend(_plan_event(inputs.get("todos"), "content", _todo_status, "activeForm"))
         return result
     if kind == "tool_call" and provider == "cursor":
         calls = event.get("tool_call")
@@ -692,11 +944,401 @@ def normalize_event(provider: str, event: dict) -> list[dict]:
             ok = not (isinstance(outcome, dict) and "error" in outcome)
             phase = "completed" if event.get("subtype") == "completed" else "started"
             result.append({"kind": "tool", "text": f"{label or 'Tool'}: {phase}", "ok": ok})
+            if targets:
+                tool, arguments = _cursor_call(name, call)
+                result[-1]["targets"] = _cursor_targets(tool, arguments, event.get("call_id"), phase, outcome)
+                if tool in ("updateTodos", "todo"):
+                    # The tool's own result, when it lists the whole plan, outranks the request; a request with
+                    # merge: true lists only the items it changes.
+                    success = outcome.get("success") if isinstance(outcome, dict) else None
+                    plan = _plan_event(success.get("todos"), "content", _todo_status) if isinstance(success, dict) else []
+                    if not plan and isinstance(arguments, dict):
+                        plan = _plan_event(arguments.get("todos"), "content", _todo_status,
+                                           merge=arguments.get("merge") is True)
+                    result.extend(plan)
         return result
     if kind == "user" and provider == "claude":
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if isinstance(content, list):
-            return [{"kind": "tool", "text": "Tool: completed", "ok": block.get("is_error") is not True}
+            # A completion names only its call; the start it pairs with names the tool.
+            return [{"kind": "tool", "text": "Tool: completed", "ok": block.get("is_error") is not True,
+                     **({"targets": _targets(None, block.get("tool_use_id"), "completed", block.get("is_error") is not True)}
+                        if targets else {})}
                     for block in content if isinstance(block, dict) and block.get("type") == "tool_result"]
+    return []
+
+
+ACTIVITY_TEXT_LIMIT = 2000
+ACTIVITY_THINKING_LIMIT = 1200
+ACTIVITY_DETAIL_LIMIT = 300
+_ACTIVITY_CALL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+_ACTIVITY_PATH_KEYS = ("file_path", "notebook_path", "path", "filePath", "targetFile", "target_file",
+                       "targetDirectory", "directory")
+# The detail a tool may show comes from the argument that names its target, chosen by the tool: a command, a search
+# pattern, a URL, a helper's description or a skill. Any other argument (an MCP payload, a message, a body) stays out.
+_COMMAND_KEYS = ("command", "cmd")
+_SEARCH_KEYS = ("pattern", "globPattern", "glob_pattern", "glob", "query")
+_ACTIVITY_DETAIL_KEYS = {
+    **dict.fromkeys(("bash", "shell", "powershell", "run_terminal_cmd", "run_command", "terminal"), _COMMAND_KEYS),
+    **dict.fromkeys(("grep", "glob", "ls", "search", "grep_search", "file_search", "glob_file_search",
+                     "codebase_search", "semsearch", "semantic_search"), _SEARCH_KEYS),
+    **dict.fromkeys(("websearch", "web_search", "web search"), ("query", "searchTerm", "search_term")),
+    **dict.fromkeys(("webfetch", "web_fetch", "fetch"), ("url",)),
+    **dict.fromkeys(("task", "agent"), ("description",)),
+    "skill": ("skill",),
+}
+_ACTIVITY_QUOTED = {"pattern", "globPattern", "glob_pattern", "glob", "query", "searchTerm", "search_term"}
+_SHELL_WRAPPER = re.compile(r"""^(?:\S*/)?(?:ba|z)?sh -lc (['"])(.*)\1$""", re.DOTALL)
+# A heredoc's body is file content: a command keeps its operator and delimiter, never the lines after it. `1<<2` and
+# PHP's `<<<EOT` are not heredocs; the first-line cut below covers PHP's body.
+_HEREDOC = re.compile(r"""(?<![<\w])<<(?!<)-?[ \t]*(['"]?)[A-Za-z_][\w.-]*\1""")
+
+
+def _bounded(value, limit, single_line=False):
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value.split()) if single_line else value.strip()
+    if not value:
+        return None
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def _activity_url(value):
+    """Keep the location only: query strings and fragments often carry tokens."""
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    return parts.scheme + "://" + parts.hostname + parts.path
+
+
+def command_head(value):
+    """A command as the run view may show it: its first line, cut after a heredoc's delimiter; never a script's body.
+
+    `cat > a.php <<'EOF'` (and the file content after it) reads `cat > a.php <<'EOF' …`; a multi-line
+    `python -c` or `php -r` script keeps its first line. A backslash line continuation joins first.
+    """
+    if not isinstance(value, str):
+        return None
+    text, cut = re.sub(r"\\\r?\n", " ", value.strip()), False
+    heredoc = _HEREDOC.search(text)
+    if heredoc:
+        text, cut = text[:heredoc.end()], True
+    lines = text.splitlines()
+    if len(lines) > 1:
+        text, cut = lines[0], True
+    text = text.rstrip()
+    return (text + " …" if cut else text) if text else None
+
+
+def _mcp_name(tool):
+    """`server.tool` of Claude's `mcp__server__tool`; None for any other tool."""
+    if not isinstance(tool, str) or not tool.lower().startswith("mcp__"):
+        return None
+    return ".".join(part for part in tool.split("__")[1:] if part) or None
+
+
+def _activity_target(arguments, tool=None):
+    """(path, detail) of a tool call; never file contents, diffs, command output or an MCP tool's arguments."""
+    if not isinstance(arguments, dict):
+        return None, None
+    mcp = _mcp_name(tool)
+    if mcp:
+        # An MCP tool's arguments are the payload it sends to another service; its name is the target.
+        return None, _bounded(mcp, ACTIVITY_DETAIL_LIMIT, True)
+    path = next((arguments[key] for key in _ACTIVITY_PATH_KEYS
+                 if isinstance(arguments.get(key), str) and arguments[key].strip()), None)
+    detail = None
+    for key in _ACTIVITY_DETAIL_KEYS.get(str(tool or "").lower(), ()):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            # Quote search terms so they read apart from the path they search.
+            detail = (_activity_url(value) if key == "url" else command_head(value) if key in _COMMAND_KEYS
+                      else '"' + value + '"' if key in _ACTIVITY_QUOTED else value)
+            break
+    return _bounded(path, 1024, True), _bounded(detail, ACTIVITY_DETAIL_LIMIT, True)
+
+
+def _activity_call(value):
+    return value if isinstance(value, str) and _ACTIVITY_CALL.fullmatch(value) else None
+
+
+def _call_token(value):
+    """A call ID as starts and completions pair by it: the provider's own when it is safe to show, else a stable token.
+
+    Cursor gives OpenAI-model calls IDs such as `call_1\\nfc_2`; dropping them would leave every such start and
+    completion unpaired, so an edit or a failed command would never be counted.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    if _ACTIVITY_CALL.fullmatch(value):
+        return value
+    return "h" + hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:24]
+
+
+def _todo_status(entry):
+    """Claude and Cursor todo status (Cursor spells it TODO_STATUS_COMPLETED) as done, active, pending or cancelled."""
+    status = str(entry.get("status", "")).lower().replace("todo_status_", "")
+    return {"completed": "done", "in_progress": "active", "cancelled": "cancelled"}.get(status, "pending")
+
+
+def _plan_items(entries, text_key, status, form_key=None, merge=False):
+    """(the first 30 todo items as {text, status[, id]}, how many there are, the active item's present-tense form).
+
+    A merge update (Cursor's `merge: true`) lists only the items it changes, matched by id, and may leave out an
+    item's text or status: such an item keeps its id and only the fields it carries.
+    """
+    def has_text(entry):
+        return isinstance(entry.get(text_key), str) and bool(entry[text_key].strip())
+    valid = [entry for entry in entries if isinstance(entry, dict) and (
+        has_text(entry) or merge and _activity_call(entry.get("id")))] if isinstance(entries, list) else []
+    items, form = [], None
+    for entry in valid[:30]:
+        item = {"text": " ".join(entry[text_key].split())[:200]} if has_text(entry) else {}
+        if not merge or "status" in entry:
+            item["status"] = status(entry)
+        if _activity_call(entry.get("id")):
+            item["id"] = entry["id"]
+        if form_key and form is None and item.get("status") == "active":
+            form = _bounded(entry.get(form_key), 200, True)
+        items.append(item)
+    return items, len(valid), form
+
+
+def _plan_event(entries, text_key, status, form_key=None, merge=False):
+    """A `plan` event; with merge the caller folds its items into the previous plan by id (run_activity.Enricher)."""
+    items, total, form = _plan_items(entries, text_key, status, form_key, merge)
+    if not items:
+        return []
+    return [{"kind": "plan", "items": items, "total": total, **({"active_form": form} if form else {}),
+             **({"merge": True} if merge else {})}]
+
+
+def _activity_plan(entries, text_key, status):
+    items = _plan_items(entries, text_key, status)[0]
+    lines = [{"done": "✓", "active": "→"}.get(item["status"], "○") + " " + item["text"] for item in items]
+    return [{"type": "plan", "text": "\n".join(lines), "items": items}] if items else []
+
+
+def _activity_tool(name, call, state, ok=True, arguments=None, path=None, detail=None):
+    if arguments is not None:
+        path, detail = _activity_target(arguments, name)
+    item = {"type": "tool", "tool": _bounded(name, 120, True) or "Tool", "state": state, "ok": ok}
+    for key, value in (("call", _call_token(call)), ("path", path), ("detail", detail)):
+        if value:
+            item[key] = value
+    return item
+
+
+def _targets(tool, call, state, ok, arguments=None, path=None, detail=None, **extra):
+    """One tool label's run-view targets (see normalize_event); None values are left out."""
+    if arguments is not None:
+        path, detail = _activity_target(arguments, tool)
+    targets = {"state": state, "ok": ok}
+    for key, value in (("tool", _bounded(tool, 120, True)), ("call", _call_token(call)), ("path", path),
+                       ("detail", detail), *extra.items()):
+        if value is not None:
+            targets[key] = value
+    return targets
+
+
+def _codex_command(item):
+    """The command a Codex item ran, without its `bash -lc` wrapper and without a heredoc's or script's body."""
+    command = item.get("command")
+    if isinstance(command, list):
+        parts = [part for part in command if isinstance(part, str)]
+        # ["bash", "-lc", "<script>"]: the script is the command.
+        wrapped = (len(parts) == 3 and parts[1] in ("-lc", "-c")
+                   and re.fullmatch(r"(?:\S*/)?(?:ba|z)?sh", parts[0]) is not None)
+        command = parts[2] if wrapped else " ".join(parts)
+    if isinstance(command, str):
+        unwrapped = _SHELL_WRAPPER.match(command.strip())
+        command = unwrapped.group(2) if unwrapped else command
+    return _bounded(command_head(command), ACTIVITY_DETAIL_LIMIT, True)
+
+
+def _codex_changes(item):
+    changes = item.get("changes")
+    return [change for change in changes if isinstance(change, dict)
+            and isinstance(change.get("path"), str)][:20] if isinstance(changes, list) else []
+
+
+def _codex_targets(item, state):
+    """A Codex command, file change, MCP call or web search; a declined item did not run."""
+    status, call = item.get("status"), item.get("id")
+    ok, outcome = status not in ("failed", "declined"), "not_run" if status == "declined" else None
+    if item["type"] == "command_execution":
+        exit_code = item.get("exit_code")
+        return _targets("Shell", call, state, ok and exit_code in (None, 0), detail=_codex_command(item), outcome=outcome,
+                        exit_code=exit_code if type(exit_code) is int else None)
+    if item["type"] == "file_change":
+        changes = [{"path": change["path"], "kind": change.get("kind")} for change in _codex_changes(item)]
+        return _targets("Edit", call, state, ok, outcome=outcome, changes=changes)
+    if item["type"] == "mcp_tool_call":
+        name = ".".join(part for part in (item.get("server"), item.get("tool")) if isinstance(part, str))
+        return _targets("MCP", call, state, ok, detail=name or None, outcome=outcome)
+    return _targets("WebSearch", call, state, ok, detail=_bounded(item.get("query"), ACTIVITY_DETAIL_LIMIT, True), outcome=outcome)
+
+
+def _cursor_call(name, call):
+    """(tool name without the ToolCall suffix, arguments) of one Cursor tool call."""
+    arguments = call.get("args")
+    if name == "function":
+        name, arguments = _text(call.get("name")) or "function", call.get("arguments")
+        try:
+            arguments = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except (ValueError, RecursionError):
+            arguments = None
+    elif name.endswith("ToolCall"):
+        name = name[:-8]
+    return name, arguments
+
+
+def _cursor_targets(name, arguments, call, state, outcome):
+    """Cursor reports success, error or rejected; a rejected call did not run. Completions may omit args."""
+    ok = not isinstance(outcome, dict) or not outcome or "success" in outcome
+    not_run = "not_run" if isinstance(outcome, dict) and "rejected" in outcome else None
+    if name == "mcp" and isinstance(arguments, dict):
+        label = ".".join(part for part in (arguments.get("providerIdentifier"), arguments.get("toolName"))
+                         if isinstance(part, str))
+        return _targets("MCP", call, state, ok, detail=label or None, outcome=not_run)
+    return _targets(name[:1].upper() + name[1:], call, state, ok, outcome=not_run,
+                    arguments=arguments if isinstance(arguments, dict) else {})
+
+
+def _codex_activity(kind, event):
+    if kind == "error":
+        return [{"type": "error", "text": _error(event, "Provider error")}]
+    if kind == "turn.failed":
+        return [{"type": "error", "text": _error(event, "Provider run failed")}]
+    if kind == "turn.completed":
+        return [{**item, "type": "usage"} for item in _usage(event)]
+    item = event.get("item")
+    if kind not in ("item.started", "item.updated", "item.completed") or not isinstance(item, dict):
+        return []
+    item_type, call, state = item.get("type"), item.get("id"), kind.split(".")[1]
+    finished = kind == "item.completed"
+    if finished and item_type == "agent_message":
+        text = _bounded(item.get("text"), ACTIVITY_TEXT_LIMIT)
+        return [{"type": "text", "text": text}] if text else []
+    if finished and item_type == "reasoning":
+        text = _bounded(item.get("text"), ACTIVITY_THINKING_LIMIT)
+        return [{"type": "thinking", "text": text}] if text else []
+    if finished and item_type == "error":
+        text = _bounded(item.get("message"), ACTIVITY_TEXT_LIMIT)
+        return [{"type": "error", "text": text}] if text else []
+    if item_type == "todo_list":
+        return _activity_plan(item.get("items"), "text", lambda entry: "done" if entry.get("completed") is True else "pending")
+    if state == "updated":
+        return []
+    ok = item.get("status") not in ("failed", "declined")
+    if item_type == "command_execution":
+        return [_activity_tool("Shell", call, state, ok and item.get("exit_code") in (None, 0), detail=_codex_command(item))]
+    if item_type == "file_change":
+        changes = _codex_changes(item)
+        detail = ", ".join(str(change.get("kind") or "change") + " " + change["path"] for change in changes)
+        item = _activity_tool("Edit", call, state, ok, path=changes[0]["path"] if len(changes) == 1 else None,
+                              detail=_bounded(detail, ACTIVITY_DETAIL_LIMIT, True))
+        # The paths as given, so a caller that maps them (agent_activity) can rebuild the detail from mapped paths.
+        item["changes"] = [{"path": change["path"], "kind": str(change.get("kind") or "change")} for change in changes]
+        return [item]
+    if item_type == "mcp_tool_call":
+        name = ".".join(part for part in (item.get("server"), item.get("tool")) if isinstance(part, str))
+        return [_activity_tool("MCP " + (name or "tool"), call, state, ok)]
+    if item_type == "web_search":
+        return [_activity_tool("Web search", call, state, ok,
+                               detail=_bounded(item.get("query"), ACTIVITY_DETAIL_LIMIT, True))]
+    if item_type in ("collab_tool_call", "sub_agent_activity"):
+        return [_activity_tool("Agent " + str(item.get("tool") or item.get("kind") or "activity"), call, state, ok)]
+    return []
+
+
+def activity_events(provider: str, event: dict) -> list[dict]:
+    """Display-only agent activity: messages, reasoning summaries and tool targets.
+
+    Unlike normalize_event, tool targets (paths, commands, search patterns and URL
+    locations) are returned so an operator can follow what an agent inspects. File
+    contents, diffs, tool results and command output are never returned. Callers
+    must still redact secrets, bound volume and keep the result private.
+    """
+    if provider not in PROVIDERS:
+        raise ValueError("unknown provider")
+    if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+        return []
+    kind = event["type"]
+    if provider == "codex":
+        return _codex_activity(kind, event)
+    if kind == "system" and event.get("subtype") == "init":
+        model = _bounded(event.get("model"), 120, True)
+        return [{"type": "status", "text": "Session started" + (" · model " + model if model else "")}]
+    if kind == "error":
+        return [{"type": "error", "text": _error(event, "Provider error")}]
+    if kind == "result":
+        failed = [] if event.get("subtype") == "success" and event.get("is_error") is False else [
+            {"type": "error", "text": _error(event, "Provider run failed")}]
+        return [{**item, "type": "usage"} for item in _usage(event)] + failed
+    if kind == "assistant":
+        if event.get("error"):
+            return [{"type": "error", "text": _error(event, "Assistant request failed")}]
+        if provider == "cursor" and "timestamp_ms" in event and "model_call_id" not in event:
+            return []
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        result = []
+        for block in content if isinstance(content, list) else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = _bounded(block.get("text"), ACTIVITY_TEXT_LIMIT)
+                if text:
+                    result.append({"type": "text", "text": text})
+            elif block.get("type") == "thinking":
+                text = _bounded(block.get("thinking"), ACTIVITY_THINKING_LIMIT)
+                if text:
+                    result.append({"type": "thinking", "text": text})
+            elif block.get("type") == "tool_use":
+                name, inputs = _text(block.get("name")), block.get("input")
+                if name == "TodoWrite" and isinstance(inputs, dict):
+                    result.extend(_activity_plan(inputs.get("todos"), "content", _todo_status))
+                elif name == "StructuredOutput":
+                    result.append(_activity_tool(name, block.get("id"), "started", detail="Final structured report"))
+                else:
+                    result.append(_activity_tool(name, block.get("id"), "started", arguments=inputs if isinstance(inputs, dict) else {}))
+        return result
+    if kind == "user" and provider == "claude":
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        return [_activity_tool("Tool", block.get("tool_use_id"), "completed", block.get("is_error") is not True)
+                for block in content if isinstance(block, dict) and block.get("type") == "tool_result"] if isinstance(content, list) else []
+    if kind == "tool_call" and provider == "cursor":
+        calls = event.get("tool_call")
+        state = "completed" if event.get("subtype") == "completed" else "started"
+        result = []
+        for name, call in calls.items() if isinstance(calls, dict) else []:
+            if not isinstance(call, dict):
+                continue
+            name, arguments = _cursor_call(name, call)
+            if name in ("updateTodos", "todo") and isinstance(arguments, dict):
+                result.extend(_activity_plan(arguments.get("todos"), "content", _todo_status))
+                continue
+            # Completed events may omit args; callers pair them with the start by call ID.
+            outcome = call.get("result")
+            ok = not isinstance(outcome, dict) or not outcome or "success" in outcome
+            if name == "mcp" and isinstance(arguments, dict):
+                label = ".".join(part for part in (arguments.get("providerIdentifier"), arguments.get("toolName"))
+                                 if isinstance(part, str))
+                result.append(_activity_tool("MCP " + (label or "tool"), event.get("call_id"), state, ok))
+                continue
+            result.append(_activity_tool(name[:1].upper() + name[1:], event.get("call_id"), state, ok,
+                                         arguments=arguments if isinstance(arguments, dict) else {}))
+        return result
+    if kind == "thinking" and provider == "cursor":
+        # Deltas are joined by the caller and flushed on completion.
+        if event.get("subtype") == "delta" and isinstance(event.get("text"), str) and event["text"]:
+            return [{"type": "thinking_delta", "text": event["text"][:ACTIVITY_THINKING_LIMIT]}]
+        if event.get("subtype") == "completed":
+            return [{"type": "thinking_end"}]
     return []

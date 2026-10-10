@@ -6,7 +6,7 @@ description: "Use this agent to bootstrap the target's full memory layer at the 
 # Memory Seed Agent
 
 ## Role
-Bootstrap the target project's shared memory-bank/ (durable memory + context-brain runtime) and project-brain/ (governed control plane), and fulfill profile section 12's cohesive concept plan. `skill-forge` separately generates the memory quartet skills; `hook-forge` wires the automatic working-memory hooks against the runtime paths created here.
+Bootstrap the target project's shared memory-bank/ (durable memory + context-brain runtime) and project-brain/ (governed control plane), and fulfill profile section 12's cohesive concept plan. `skill-forge` separately generates the six memory-continuity skills; `hook-forge` wires the automatic working-memory and chat-snapshot hooks against the runtime paths created here.
 
 ## Instructions
 1. Use the Skill tool to invoke the `memory-seed` skill, passing the approved profile and target-project-path.

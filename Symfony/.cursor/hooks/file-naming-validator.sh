@@ -68,6 +68,18 @@ FILE_PATHS=$(printf '%s' "$INPUT" | extract_paths 2>/dev/null) || exit 0
 [ -z "$FILE_PATHS" ] && exit 0
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+# Installed, the accelerator, the project and its state are all ROOT_DIR.
+# Attached - a launcher lends this clone's edition to a project and names it
+# in ACCELERATOR_HOME - the project and the state directory are the
+# launcher's, so nothing is written into the clone or the project.
+PROJECT_DIR=$ROOT_DIR
+STATE_DIR=$ROOT_DIR
+accelerator_absolute() { case "$1" in /*|[A-Za-z]:[\\/]*) return 0 ;; esac; return 1; }
+if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${ACCELERATOR_PROJECT_DIR:-}" \
+  && [ "$(cd "${ACCELERATOR_HOME:-/nonexistent}" 2>/dev/null && pwd -P)" = "$(cd "$ROOT_DIR" && pwd -P)" ]; then
+  PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
+  STATE_DIR=$ACCELERATOR_STATE_DIR
+fi
 SKILLS_DIR="$ROOT_DIR/.cursor/skills"
 
 block() {
@@ -81,8 +93,8 @@ validate_path() {
   local normalized filename relative task_dir skill_dir prefix
 
   [[ "$file_path" == *.md ]] || return 0
-  if [[ "$file_path" == "$ROOT_DIR/"* ]]; then
-    normalized=${file_path#"$ROOT_DIR/"}
+  if [[ "$file_path" == "$PROJECT_DIR/"* ]]; then
+    normalized=${file_path#"$PROJECT_DIR/"}
   else
     normalized=${file_path#./}
   fi

@@ -1,0 +1,977 @@
+#!/usr/bin/env python3
+"""Lend an accelerator edition to a project for a session; copy nothing into it.
+
+The accelerator stays in this clone. A session started through this module
+gets the edition's policy, skills, agents, commands and hooks from the clone,
+and keeps the accelerator's per-project state (Project Brain, Memory Bank,
+local index) in a private directory outside the project. `git pull` in the
+clone updates every attached project at once.
+
+Run from anywhere; the project defaults to the current directory:
+
+    python3 scripts/accelerator_attach.py detect [--project DIR]
+    python3 scripts/accelerator_attach.py run claude [--edition NAME] [--project DIR] [-- CLAUDE ARGS]
+    python3 scripts/accelerator_attach.py run codex  [...] [-- CODEX ARGS]
+    python3 scripts/accelerator_attach.py run cursor [...] [-- CURSOR AGENT ARGS]
+    python3 scripts/accelerator_attach.py env [--project DIR]        # shell exports for other launchers
+    python3 scripts/accelerator_attach.py trust-codex-hooks [--project DIR]
+
+How each tool receives the edition (all verified against the installed CLIs,
+see docs/ATTACHED-MODE.md):
+
+- Claude Code: `--add-dir <edition>` loads its skills, commands and subagents
+  under their own names; `--append-system-prompt-file` carries AGENTS.md;
+  `--settings` carries the edition's permissions, environment and hooks with
+  absolute paths into the clone.
+- Codex: `-c developer_instructions=...` carries AGENTS.md and the skill
+  catalogue (Codex has no setting for an extra skills folder); `-c hooks.*`
+  carries the hooks, which Codex runs only after `trust-codex-hooks` records
+  their hashes once; `--add-dir <state>` lets the sandbox write the state.
+- Cursor Agent: `--plugin-dir <edition>` loads `.cursor-plugin/plugin.json`,
+  which points at the edition's own `.cursor` rules, skills, agents, commands
+  and hooks; the policy file is named in the prompt preamble.
+
+The Harness imports this module; the functions below are its contract.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import json
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+# Beside this file; its callers - the command line, the Harness, the tests -
+# all have this directory on sys.path.
+import portable_fs as fs
+
+
+REPOSITORY = Path(__file__).resolve().parents[1]
+EDITIONS = {
+    "Laravel": "Laravel",
+    "Symfony": "Symfony",
+    "PHP Core": "PHP Core",
+    "WordPress": "Cms/wordpress",
+}
+TOOLS = ("claude", "codex", "cursor")
+STATE_MARKER = "accelerator-attach.json"
+LAUNCH_DIRECTORY = "launch"
+CLAUDE_SYSTEM_PROMPT = "claude-system-prompt.md"
+# The state is a project's memory kept outside the project, so it is its
+# owner's alone whatever the umask: directories 0700, files 0600 (POSIX). The
+# runtime keeps what it writes there the same way (secure_attached_state in
+# the edition's memory-bank/scripts/brain_runtime.py).
+PRIVATE_DIRECTORY = 0o700
+# Below its base the state is reached one directory at a time, each opened
+# inside the one before it and never through a link (portable_fs: openat with
+# O_NOFOLLOW on POSIX, NtCreateFile relative to a handle on Windows).
+_DIRECTORY_FLAGS = os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW
+_READ_FLAGS = os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK | getattr(os, "O_BINARY", 0)
+_NEW_FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW | getattr(os, "O_BINARY", 0)
+# Windows reports symbolic links and junctions as reparse points with these
+# tags (IO_REPARSE_TAG_SYMLINK, IO_REPARSE_TAG_MOUNT_POINT).
+_LINK_REPARSE_TAGS = (0xA000000C, 0xA0000003)
+# Codex hook events the edition wires, in .codex/hooks.json spelling.
+CODEX_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop")
+SKILL_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)
+WORDPRESS_PACKAGES = {"johnpbloch/wordpress", "johnpbloch/wordpress-core", "roots/wordpress", "roots/wordpress-no-content"}
+WORDPRESS_TYPES = {"wordpress-plugin", "wordpress-theme", "wordpress-muplugin", "wordpress-core"}
+
+
+class AttachError(Exception):
+    """A user-facing reason the edition cannot be attached."""
+
+
+@dataclass
+class Overlay:
+    """What one launch of one tool adds: arguments, settings, environment."""
+
+    arguments: list[str] = field(default_factory=list)
+    # Claude only: merged into the single --settings JSON of the launch.
+    settings: dict[str, Any] = field(default_factory=dict)
+    environment: dict[str, str] = field(default_factory=dict)
+    # Cursor only: prepended to the first prompt, which is its only channel.
+    prompt_prefix: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Where things are
+
+def edition_directory(edition: str, repository: Path = REPOSITORY) -> Path:
+    if edition not in EDITIONS:
+        raise AttachError(f"Unknown edition {edition!r}; choose one of: {', '.join(EDITIONS)}")
+    directory = repository / EDITIONS[edition]
+    if not (directory / "AGENTS.md").is_file():
+        raise AttachError(f"The {edition} edition is missing from {repository}")
+    return directory
+
+
+def canonical_project(project: Path | str) -> Path:
+    """The one spelling of a project directory that its identity comes from.
+
+    Absolute, `~` expanded, symbolic links and `..` resolved as the system
+    resolves them, without repeated or trailing separators - and without the
+    leading `//` that POSIX also accepts for the root. `/srv/shop`,
+    `//srv/shop`, `/srv/shop/` and a link to it are one project.
+    """
+    return Path(project).expanduser().resolve()
+
+
+def project_key(project: Path | str) -> str:
+    """The project's identity, shared with the Harness's project registry: the
+    same for every spelling of one directory, so the browser and this launcher
+    keep one state directory for it."""
+    return hashlib.sha256(os.path.normcase(str(canonical_project(project))).encode()).hexdigest()[:16]
+
+
+def default_state_base() -> Path:
+    """The Harness's own state directory, so the CLI and the browser share memory."""
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    return base / "ai-infrastructure-harness"
+
+
+def state_directory(project: Path, base: Optional[Path] = None) -> Path:
+    """The project's state directory, always as an absolute path.
+
+    A relative base is taken from the current directory now, before a launch
+    moves into the project: from there the same words would name another
+    directory, and the runtime refuses a relative ACCELERATOR_STATE_DIR.
+    """
+    base = Path(os.path.abspath(Path(base or default_state_base()).expanduser()))
+    return base / "attached" / project_key(project)
+
+
+def resolve_project(value: Optional[str]) -> Path:
+    project = canonical_project(value or os.getcwd())
+    if not project.is_dir():
+        raise AttachError(f"The project is not a directory: {project}")
+    if project == REPOSITORY or REPOSITORY in project.parents or project in REPOSITORY.parents:
+        raise AttachError("Attach the accelerator to a project outside this clone, and not to a folder that contains it.")
+    return project
+
+
+# ---------------------------------------------------------------------------
+# Which edition fits the project
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _composer_packages(project: Path) -> tuple[set[str], str]:
+    composer = _read_json(project / "composer.json")
+    names: set[str] = set()
+    for section in ("require", "require-dev"):
+        value = composer.get(section)
+        if isinstance(value, dict):
+            names.update(name.lower() for name in value if isinstance(name, str))
+    lock = _read_json(project / "composer.lock")
+    for section in ("packages", "packages-dev"):
+        for package in lock.get(section) or []:
+            if isinstance(package, dict) and isinstance(package.get("name"), str):
+                names.add(package["name"].lower())
+    kind = composer.get("type") if isinstance(composer.get("type"), str) else ""
+    return names, kind.lower()
+
+
+def _has_header(paths: list[Path], header: str) -> bool:
+    for path in paths[:40]:
+        try:
+            with path.open("rb") as handle:
+                head = handle.read(8192).decode("utf-8", "ignore")
+        except OSError:
+            continue
+        if header in head:
+            return True
+    return False
+
+
+def detect_edition(project: Path) -> tuple[Optional[str], str]:
+    """The edition the project's own files point to, and the evidence."""
+    names, kind = _composer_packages(project)
+    if "laravel/framework" in names:
+        return "Laravel", "composer requires laravel/framework"
+    if (project / "artisan").is_file():
+        return "Laravel", "an artisan file at the project root"
+    if "symfony/framework-bundle" in names:
+        return "Symfony", "composer requires symfony/framework-bundle"
+    if (project / "bin/console").is_file() and (project / "config/bundles.php").is_file():
+        return "Symfony", "bin/console and config/bundles.php"
+    if names & WORDPRESS_PACKAGES or kind in WORDPRESS_TYPES:
+        return "WordPress", "composer declares WordPress"
+    if (project / "wp-config.php").is_file() or (project / "wp-content").is_dir():
+        return "WordPress", "a WordPress installation"
+    root_php = sorted(project.glob("*.php"))
+    if _has_header([project / "style.css"], "Theme Name:") or _has_header(root_php, "Plugin Name:"):
+        return "WordPress", "a WordPress theme or plugin header"
+    if (project / "composer.json").is_file() or root_php:
+        return "PHP Core", "a PHP project without a dedicated edition"
+    return None, "no composer.json and no PHP files at the project root"
+
+
+# ---------------------------------------------------------------------------
+# What every tool gets
+
+def environment(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> dict[str, str]:
+    """The variables the edition's runtime and hooks read to find the three roots."""
+    return {
+        "ACCELERATOR_HOME": str(edition_directory(edition, repository)),
+        "ACCELERATOR_STATE_DIR": str(state),
+        "ACCELERATOR_PROJECT_DIR": str(project),
+        "ACCELERATOR_EDITION": edition,
+    }
+
+
+def _private_directory(path: Path) -> None:
+    """Create `path` and every parent it lacks owner-only, whatever the umask.
+    A directory that exists already is not changed here."""
+    missing = []
+    current = path
+    while not os.path.lexists(current) and current.parent != current:
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            os.mkdir(directory, PRIVATE_DIRECTORY)
+        except FileExistsError:
+            continue  # a concurrent launch made it
+        if os.name != "nt":
+            # mkdir's mode passes through the umask; this does not.
+            os.chmod(directory, PRIVATE_DIRECTORY)
+
+
+def _is_link(status: os.stat_result) -> bool:
+    return stat.S_ISLNK(status.st_mode) or getattr(status, "st_reparse_tag", 0) in _LINK_REPARSE_TAGS
+
+
+def _refusal(folder: int, name: str, shown: Path, error: Exception, kind: str) -> AttachError:
+    """Why `name` inside `folder` did not open as the state's `kind`, "directory" or "file"."""
+    try:
+        status = fs.stat(name, dir_fd=folder, follow_symlinks=False)
+    except (OSError, ValueError):
+        try:
+            # Only to say what stands there: Windows' rooted stat refuses a
+            # reparse point outright. Nothing is opened through it.
+            status = os.lstat(shown)
+        except OSError:
+            status = None
+    if status is not None and _is_link(status):
+        return AttachError(f"{shown} is a symbolic link; the accelerator keeps no state through one")
+    wanted = stat.S_ISDIR if kind == "directory" else stat.S_ISREG
+    if status is not None and not wanted(status.st_mode):
+        return AttachError(f"{shown} is not a {kind}")
+    return AttachError(f"{shown} cannot be opened: {getattr(error, 'strerror', None) or error}")
+
+
+def _open_directory(folder: int, name: str, shown: Path, *, create: bool) -> Optional[int]:
+    """A descriptor of the directory `name` inside `folder`, never through a link.
+
+    With `create` a missing one is made owner-only first; mkdir never follows
+    a link standing at the name it makes. None when it is missing and
+    `create` is false. Raises AttachError for a link or anything but a
+    directory.
+    """
+    try:
+        return fs.open(name, _DIRECTORY_FLAGS, dir_fd=folder)
+    except FileNotFoundError:
+        if not create:
+            return None
+    except (OSError, ValueError) as error:
+        raise _refusal(folder, name, shown, error, "directory") from None
+    made = True
+    try:
+        fs.mkdir(name, PRIVATE_DIRECTORY, dir_fd=folder)
+    except FileExistsError:
+        made = False  # a concurrent launch made it
+    except (OSError, ValueError) as error:
+        raise AttachError(f"{shown} cannot be created: {getattr(error, 'strerror', None) or error}") from None
+    try:
+        directory = fs.open(name, _DIRECTORY_FLAGS, dir_fd=folder)
+    except (OSError, ValueError) as error:
+        raise _refusal(folder, name, shown, error, "directory") from None
+    if made and os.name != "nt":
+        try:
+            # mkdir's mode passes through the umask; this does not.
+            os.fchmod(directory, PRIVATE_DIRECTORY)
+        except BaseException:
+            fs.close(directory)
+            raise
+    return directory
+
+
+def _open_base(base: Path) -> Optional[int]:
+    """The state base as named, or None when it is missing."""
+    try:
+        if os.name == "nt":
+            # Windows walks even the base from the drive root and refuses a
+            # reparse point anywhere on it, as the Harness does for its own
+            # state directory (portable_fs, windows_security).
+            return fs.open_target_directory(base)
+        # The person's own setting, so a link in it is theirs to make.
+        return os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        raise AttachError(
+            f"The state base {base} cannot be opened: {getattr(error, 'strerror', None) or error}"
+        ) from None
+
+
+def _open_state(state: Path, *, create: bool) -> Optional[int]:
+    """A descriptor of the state directory, reached without following a link below its base.
+
+    The base - the Harness's state directory or --state-base - is the
+    person's own setting and is taken as named. The two directories below it
+    are the accelerator's (`attached` and the project's own, see
+    state_directory): each is opened inside the one before it, never through
+    a link, and with `create` made owner-only where missing. A link there -
+    `attached/<project>` pointing into the project took the launcher's
+    record and Claude's system prompt into it - is refused (AttachError).
+    None when something is missing and `create` is false.
+    """
+    base = state.parent.parent
+    if create:
+        _private_directory(base)
+    folder = _open_base(base)
+    if folder is None:
+        if create:
+            raise AttachError(f"The state base {base} could not be created")
+        return None
+    for shown in (state.parent, state):
+        try:
+            child = _open_directory(folder, shown.name, shown, create=create)
+        finally:
+            fs.close(folder)
+        if child is None:
+            return None
+        folder = child
+    return folder
+
+
+def _owner_only_descriptor(descriptor: int) -> None:
+    """Take group and other access away from an open directory of this user; best effort."""
+    if os.name == "nt":
+        return
+    try:
+        status = os.fstat(descriptor)
+        if status.st_uid == os.geteuid() and status.st_mode & 0o077:
+            os.fchmod(descriptor, stat.S_IMODE(status.st_mode) & 0o700)
+    except OSError:
+        pass
+
+
+def _owner_only_entry(folder: int, name: str) -> None:
+    """The same for the entry `name` inside `folder`: never a link, never
+    another user's file. `folder` is the state's and owner-only by now, so
+    nobody else can put a link in the entry's place meanwhile."""
+    if os.name == "nt":
+        return
+    try:
+        status = os.stat(name, dir_fd=folder, follow_symlinks=False)
+        if not stat.S_ISLNK(status.st_mode) and status.st_uid == os.geteuid() and status.st_mode & 0o077:
+            os.chmod(name, stat.S_IMODE(status.st_mode) & 0o700, dir_fd=folder)
+    except OSError:
+        pass
+
+
+def _owner_only_tree(directory: int) -> None:
+    """The same for an open directory and everything under it, top down, so a
+    directory is closed to others before its own entries are looked at."""
+    if os.name == "nt":
+        return
+    _owner_only_descriptor(directory)
+    try:
+        # fwalk opens each directory inside the one before it and does not
+        # descend through a link.
+        for _, folders, files, inside in os.fwalk(".", dir_fd=directory):
+            for name in folders + files:
+                _owner_only_entry(inside, name)
+    except OSError:
+        pass
+
+
+def _read_at(folder: int, name: str, shown: Path) -> Optional[bytes]:
+    """The bytes of the file `name` inside `folder`, never through a link; None when missing."""
+    try:
+        descriptor = fs.open(name, _READ_FLAGS, dir_fd=folder)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as error:
+        raise _refusal(folder, name, shown, error, "file") from None
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(fs.fstat(handle.fileno()).st_mode):
+            raise AttachError(f"{shown} is not a file")
+        return handle.read()
+
+
+def _write_private_at(folder: int, name: str, data: bytes) -> None:
+    """Replace `name` inside `folder` whole with an owner-only (0600) file:
+    written beside it and renamed into place through the folder's
+    descriptor, so no reader sees a part and neither name is followed."""
+    temporary = f".{name}.{os.urandom(6).hex()}"
+    descriptor = fs.open(temporary, _NEW_FILE_FLAGS, 0o600, dir_fd=folder)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+        fs.replace(temporary, name, src_dir_fd=folder, dst_dir_fd=folder)
+    except BaseException:
+        with contextlib.suppress(OSError, ValueError):
+            fs.unlink(temporary, dir_fd=folder)
+        raise
+
+
+def _prepare(folder: int, edition: str, project: Path, state: Path) -> None:
+    """prepare_state's work inside the state directory `folder` holds."""
+    _owner_only_descriptor(folder)
+    launch = _open_directory(folder, LAUNCH_DIRECTORY, state / LAUNCH_DIRECTORY, create=False)
+    if launch is not None:
+        try:
+            _owner_only_tree(launch)
+        finally:
+            fs.close(launch)
+    record = {"project": str(project), "edition": edition}
+    current: Any = {}
+    found = _read_at(folder, STATE_MARKER, state / STATE_MARKER)
+    if found is not None:
+        try:
+            current = json.loads(found.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            current = {}
+    if not isinstance(current, dict) or {key: current.get(key) for key in record} != record:
+        since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _write_private_at(folder, STATE_MARKER, (json.dumps({**record, "since": since}, indent=2) + "\n").encode("utf-8"))
+    else:
+        _owner_only_entry(folder, STATE_MARKER)
+
+
+def prepare_state(edition: str, project: Path, state: Path) -> None:
+    """Create the private state directory and say whose it is.
+
+    The state directory, and any parent it lacks, is created owner-only and
+    what the launcher writes there is 0600, whatever the umask. A state from
+    before that rule is tightened here - the directory and the launcher's own
+    files, never through a link; the runtime tightens its layout itself - and
+    nothing above the state directory is changed.
+
+    Nothing here goes through a link: below its base the state is reached
+    one directory at a time without following one, and the record is read
+    and written through the state directory's descriptor (_open_state). A
+    link in the state's place, at `launch` or at the record is refused with
+    AttachError, and nothing is written.
+
+    The runtime fills in the Project Brain and Memory Bank layout itself on
+    first use; this only records the project, for a person looking at it.
+    """
+    folder = _open_state(state, create=True)
+    try:
+        _prepare(folder, edition, project, state)
+    finally:
+        fs.close(folder)
+
+
+def preamble(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> str:
+    home = edition_directory(edition, repository)
+    return f"""# {edition} accelerator: attached, not installed
+
+The {edition} accelerator is attached to this project from its own clone at
+`{home}` (ACCELERATOR_HOME). Nothing of it is installed in the project at
+`{project}`, and nothing of it may be copied there.
+
+- Paths that the policy, skills, agents and commands give for the accelerator's
+  own files - `AGENTS.md`, `.claude/`, `.agents/`, `.cursor/`, `.codex/`,
+  `project-brain/PROTOCOL.md`, `project-brain/templates/`, `memory-bank/README.md`,
+  `memory-bank/scripts/` - are relative to ACCELERATOR_HOME. Never edit them.
+- The accelerator's state for this project - Project Brain records, Memory Bank
+  chunks, the local index - is in `{state}` (ACCELERATOR_STATE_DIR). Change it
+  only through the context runtime: `python3 "$ACCELERATOR_HOME/memory-bank/scripts/context.py" ...`,
+  run from the project; it finds the state and the project by itself.
+- Work products a workflow asks for - `specs/`, `tasks/TASK-NNN/`, `codebase/` -
+  belong to the project and are written into it as usual.
+"""
+
+
+def policy(edition: str, repository: Path = REPOSITORY) -> str:
+    return (edition_directory(edition, repository) / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def _frontmatter_value(text: str, key: str) -> str:
+    match = SKILL_FRONTMATTER.match(text.replace("\r\n", "\n"))
+    if not match:
+        return ""
+    lines = match.group(1).split("\n")
+    for index, line in enumerate(lines):
+        if line.startswith(f"{key}:"):
+            value = line[len(key) + 1:].strip()
+            if value in ("|", ">", "|-", ">-"):
+                continuation = []
+                for following in lines[index + 1:]:
+                    if following and not following[0].isspace():
+                        break
+                    continuation.append(following.strip())
+                value = " ".join(part for part in continuation if part)
+            return value.strip().strip("\"'")
+    return ""
+
+
+def skill_catalogue(edition: str, tree: str = ".agents/skills", repository: Path = REPOSITORY) -> list[dict[str, str]]:
+    """Name, description and path of every skill the edition ships for a tool."""
+    root = edition_directory(edition, repository) / tree
+    skills = []
+    for path in sorted(root.glob("*/SKILL.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        name = _frontmatter_value(text, "name") or path.parent.name
+        skills.append({"name": name, "description": _frontmatter_value(text, "description"), "path": str(path)})
+    return skills
+
+
+# ---------------------------------------------------------------------------
+# Claude Code
+
+def _claude_settings(edition: str, state: Path, repository: Path) -> dict[str, Any]:
+    home = edition_directory(edition, repository)
+    source = _read_json(home / ".claude" / "settings.json")
+    settings: dict[str, Any] = {}
+    if isinstance(source.get("env"), dict):
+        settings["env"] = {str(key): str(value) for key, value in source["env"].items()}
+    permissions = source.get("permissions") if isinstance(source.get("permissions"), dict) else {}
+    home_rule = "//" + home.as_posix().lstrip("/")
+    state_rule = "//" + state.as_posix().lstrip("/")
+    settings["permissions"] = {
+        "allow": [*permissions.get("allow", []), f"Read({home_rule}/**)", f"Read({state_rule}/**)"],
+        # The clone is shared by every attached project: never edited from one.
+        "deny": [*permissions.get("deny", []), f"Edit({home_rule}/**)", f"Write({home_rule}/**)"],
+    }
+    quoted_home = shlex.quote(home.as_posix())
+    hooks: dict[str, Any] = {}
+    for event, groups in (source.get("hooks") or {}).items():
+        rewritten = []
+        for group in groups if isinstance(groups, list) else []:
+            group = json.loads(json.dumps(group))
+            for hook in group.get("hooks", []):
+                if isinstance(hook.get("command"), str):
+                    hook["command"] = hook["command"].replace('"${CLAUDE_PROJECT_DIR}"', quoted_home)
+            rewritten.append(group)
+        hooks[event] = rewritten
+    if hooks:
+        settings["hooks"] = hooks
+    return settings
+
+
+def claude_overlay(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> Overlay:
+    home = edition_directory(edition, repository)
+    system_prompt = state / LAUNCH_DIRECTORY / CLAUDE_SYSTEM_PROMPT
+    content = (preamble(edition, project, state, repository) + "\n" + policy(edition, repository)).encode("utf-8")
+    folder = _open_state(state, create=True)
+    try:
+        _prepare(folder, edition, project, state)
+        launch = _open_directory(folder, LAUNCH_DIRECTORY, state / LAUNCH_DIRECTORY, create=True)
+        try:
+            if _read_at(launch, CLAUDE_SYSTEM_PROMPT, system_prompt) != content:
+                _write_private_at(launch, CLAUDE_SYSTEM_PROMPT, content)
+        finally:
+            fs.close(launch)
+    finally:
+        fs.close(folder)
+    return Overlay(
+        arguments=["--add-dir", str(home), "--append-system-prompt-file", str(system_prompt)],
+        settings=_claude_settings(edition, state, repository),
+        environment=environment(edition, project, state, repository),
+    )
+
+
+def merge_claude_settings(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """One --settings value from the launcher's own and the edition's.
+
+    Environment entries the launcher sets win: they carry per-launch choices
+    (agent counts, effort) the edition's defaults must not undo.
+    """
+    merged = {**overlay, **{key: value for key, value in base.items() if key not in ("env", "permissions", "hooks")}}
+    merged["env"] = {**overlay.get("env", {}), **base.get("env", {})}
+    permissions: dict[str, list[str]] = {}
+    for source in (overlay.get("permissions", {}), base.get("permissions", {})):
+        for key, rules in source.items():
+            permissions[key] = list(dict.fromkeys([*permissions.get(key, []), *rules]))
+    if permissions:
+        merged["permissions"] = permissions
+    hooks = {event: list(groups) for event, groups in overlay.get("hooks", {}).items()}
+    for event, groups in base.get("hooks", {}).items():
+        hooks.setdefault(event, []).extend(groups)
+    if hooks:
+        merged["hooks"] = hooks
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Codex
+
+def _toml(value: Any) -> str:
+    """Inline TOML for a `-c key=value` override."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return json.dumps(value)
+    if isinstance(value, str):
+        # A JSON string is a valid TOML basic string.
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ",".join(_toml(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ",".join(f"{json.dumps(str(key)) if not re.fullmatch(r'[A-Za-z0-9_-]+', str(key)) else key}={_toml(item)}" for key, item in value.items()) + "}"
+    raise TypeError(f"cannot express {type(value).__name__} in TOML")
+
+
+def codex_hooks(edition: str, repository: Path = REPOSITORY) -> dict[str, list[dict[str, Any]]]:
+    """The edition's .codex/hooks.json with each command pointing into the clone."""
+    home = edition_directory(edition, repository)
+    source = _read_json(home / ".codex" / "hooks.json").get("hooks") or {}
+    hooks: dict[str, list[dict[str, Any]]] = {}
+    for event in CODEX_EVENTS:
+        groups = []
+        for group in source.get(event) or []:
+            handlers = []
+            for handler in group.get("hooks", []):
+                match = re.search(r"([A-Za-z0-9_.-]+\.sh)\s*$", str(handler.get("command", "")))
+                if not match:
+                    continue
+                script = home / ".codex" / "hooks" / match.group(1)
+                # bash runs the script on every platform Codex supports, and
+                # needs no executable bit (NTFS has none).
+                handlers.append({**handler, "command": "bash " + shlex.quote(script.as_posix())})
+            if handlers:
+                groups.append({**{key: value for key, value in group.items() if key != "hooks"}, "hooks": handlers})
+        if groups:
+            hooks[event] = groups
+    return hooks
+
+
+def codex_hook_arguments(edition: str, repository: Path = REPOSITORY) -> list[str]:
+    arguments: list[str] = []
+    for event, groups in codex_hooks(edition, repository).items():
+        arguments += ["-c", f"hooks.{event}={_toml(groups)}"]
+    return arguments
+
+
+def codex_instructions(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> str:
+    skills = skill_catalogue(edition, ".agents/skills", repository)
+    lines = [
+        preamble(edition, project, state, repository),
+        "## Accelerator skills",
+        "",
+        "Each skill below is a SKILL.md file in the accelerator. When the task matches",
+        "a skill's description, read that whole file and follow it; per the policy,",
+        "run only the one selected skill.",
+        "",
+    ]
+    lines += [f"- {skill['name']}: {skill['description']} (file: {skill['path']})" for skill in skills]
+    lines += ["", "## Accelerator policy (AGENTS.md)", "", policy(edition, repository)]
+    return "\n".join(lines)
+
+
+def codex_overlay(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> Overlay:
+    prepare_state(edition, project, state)
+    arguments = ["-c", "developer_instructions=" + _toml(codex_instructions(edition, project, state, repository))]
+    arguments += codex_hook_arguments(edition, repository)
+    # Writable for the context runtime the model runs in the sandbox.
+    arguments += ["--add-dir", str(state)]
+    return Overlay(arguments=arguments, environment=environment(edition, project, state, repository))
+
+
+def _app_server(executable: str, arguments: list[str], cwd: Path, requests: list[dict[str, Any]], timeout: float = 60) -> list[dict[str, Any]]:
+    """Send numbered requests to `codex app-server` and return their responses."""
+    process = subprocess.Popen([executable, *arguments, "app-server"], cwd=cwd, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    responses: dict[int, dict[str, Any]] = {}
+    try:
+        def send(message: dict[str, Any]) -> None:
+            process.stdin.write(json.dumps(message) + "\n")
+            process.stdin.flush()
+
+        def wait(identifier: int) -> dict[str, Any]:
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if message.get("id") == identifier:
+                    return message
+            raise AttachError("Codex did not answer; check that `codex` runs and is signed in.")
+
+        send({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"clientInfo": {"name": "accelerator-attach", "version": "1"}}})
+        if "error" in wait(0):
+            raise AttachError("Codex refused the app-server handshake.")
+        send({"jsonrpc": "2.0", "method": "initialized"})
+        for number, request in enumerate(requests, start=1):
+            send({"jsonrpc": "2.0", "id": number, **request})
+            responses[number] = wait(number)
+    finally:
+        try:
+            process.stdin.close()
+            process.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+    return [responses[number] for number in sorted(responses)]
+
+
+def codex_hook_trust(executable: str, edition: str, project: Path, repository: Path = REPOSITORY) -> list[dict[str, str]]:
+    """The edition's session hooks as Codex sees them: key, hash, trust status."""
+    [listing] = _app_server(executable, codex_hook_arguments(edition, repository), project,
+                            [{"method": "hooks/list", "params": {"cwds": [str(project)]}}])
+    if "error" in listing:
+        raise AttachError("Codex could not list hooks.")
+    entries = []
+    for scope in (listing.get("result") or {}).get("data") or []:
+        for hook in scope.get("hooks") or []:
+            if hook.get("source") == "sessionFlags":
+                entries.append({"key": hook["key"], "hash": hook["currentHash"], "status": hook["trustStatus"],
+                                "command": hook.get("command", "")})
+    return entries
+
+
+def trust_codex_hooks(executable: str, edition: str, project: Path, repository: Path = REPOSITORY) -> list[dict[str, str]]:
+    """Record the edition's hook hashes as trusted in the user's Codex config.
+
+    Codex runs a hook only after its definition was approved once; the
+    approval is a hash in ~/.codex/config.toml (hooks.state), the same record
+    Codex's own /hooks review writes. Moving the clone changes the commands
+    and so needs a new approval; a `git pull` that edits only scripts does not.
+    """
+    entries = codex_hook_trust(executable, edition, project, repository)
+    pending = {entry["key"]: {"trusted_hash": entry["hash"]} for entry in entries if entry["status"] != "trusted"}
+    if pending:
+        [written] = _app_server(executable, [], project, [{"method": "config/batchWrite", "params": {
+            "edits": [{"keyPath": "hooks.state", "mergeStrategy": "upsert", "value": pending}]}}])
+        if "error" in written:
+            raise AttachError(f"Codex did not record the hook approvals: {written['error'].get('message', 'unknown error')}")
+    return codex_hook_trust(executable, edition, project, repository)
+
+
+def codex_hook_script(command: str) -> Optional[str]:
+    """The hook script a Codex hook command runs: its last `*.sh` word."""
+    match = re.search(r"([A-Za-z0-9._-]+\.sh)\W*$", command.strip())
+    return match.group(1) if match else None
+
+
+def trust_installed_codex_hooks(executable: str, edition: str, project: Path,
+                                repository: Path = REPOSITORY) -> dict[str, Any]:
+    """Approve the accelerator's own hooks in an installed project, in the user's Codex config.
+
+    Codex runs a project hook only after its definition was approved, by hash,
+    and an installed accelerator's memory hooks never ran in projects nobody
+    approved them in (0 of 39 sessions on one real project). This approves a
+    definition only when it is one this clone's edition ships - the same event
+    and command - and the script it runs is byte-identical to the clone's:
+    the accelerator's own code, which the person installed. A team's own hook,
+    an edited definition or an edited script is left for review in /hooks.
+    """
+    home = edition_directory(edition, repository)
+    canonical = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
+    shipped = {
+        (str(event).lower(), handler.get("command"))
+        for event, groups in (canonical.get("hooks") or {}).items()
+        for group in groups or []
+        for handler in (group.get("hooks") or [])
+        if isinstance(handler, dict)
+    }
+    hooks_file = (project / ".codex" / "hooks.json").resolve()
+    [listing] = _app_server(executable, [], project,
+                            [{"method": "hooks/list", "params": {"cwds": [str(project)]}}])
+    if "error" in listing:
+        raise AttachError("Codex could not list hooks.")
+    pending: dict[str, dict[str, str]] = {}
+    already = 0
+    left: list[str] = []
+    for scope in (listing.get("result") or {}).get("data") or []:
+        for hook in scope.get("hooks") or []:
+            if hook.get("source") != "project":
+                continue
+            try:
+                if Path(str(hook.get("sourcePath") or "")).resolve() != hooks_file:
+                    continue
+            except OSError:
+                continue
+            command = str(hook.get("command") or "")
+            script = codex_hook_script(command)
+            mine = script is not None and (str(hook.get("eventName") or "").lower(), command) in shipped
+            if mine:
+                local = project / ".codex" / "hooks" / script
+                source = home / ".codex" / "hooks" / script
+                try:
+                    mine = (local.is_file() and not local.is_symlink()
+                            and local.read_bytes() == source.read_bytes())
+                except OSError:
+                    mine = False
+            if not mine:
+                left.append(str(hook.get("key")))
+            elif hook.get("trustStatus") == "trusted":
+                already += 1
+            elif isinstance(hook.get("key"), str) and isinstance(hook.get("currentHash"), str):
+                pending[hook["key"]] = {"trusted_hash": hook["currentHash"]}
+    if pending:
+        [written] = _app_server(executable, [], project, [{"method": "config/batchWrite", "params": {
+            "edits": [{"keyPath": "hooks.state", "mergeStrategy": "upsert", "value": pending}]}}])
+        if "error" in written:
+            raise AttachError("Codex did not record the hook approvals: "
+                              f"{written['error'].get('message', 'unknown error')}")
+    return {"approved": len(pending), "already": already, "left": left}
+
+
+# ---------------------------------------------------------------------------
+# Cursor Agent
+
+def cursor_overlay(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> Overlay:
+    home = edition_directory(edition, repository)
+    if not (home / ".cursor-plugin" / "plugin.json").is_file():
+        raise AttachError(f"The {edition} edition has no .cursor-plugin/plugin.json to load.")
+    prepare_state(edition, project, state)
+    prefix = (preamble(edition, project, state, repository)
+              + f"\nRead and follow the accelerator policy in `{home / 'AGENTS.md'}` before acting.\n\n")
+    return Overlay(arguments=["--plugin-dir", str(home)], environment=environment(edition, project, state, repository),
+                   prompt_prefix=prefix)
+
+
+def apply_overlay(tool: str, command: list[str], overlay: Any, first_turn: bool = True) -> list[str]:
+    """Merge an overlay - an Overlay or its dataclasses.asdict form - into argv
+    built the Harness way: Claude with one `--settings`, Codex global flags
+    before `exec`, Cursor's prompt after `--`."""
+    if isinstance(overlay, Overlay):
+        overlay = {"arguments": overlay.arguments, "settings": overlay.settings, "prompt_prefix": overlay.prompt_prefix}
+    command = list(command)
+    arguments = list(overlay.get("arguments") or [])
+    if tool == "claude":
+        index = command.index("--settings")
+        settings = merge_claude_settings(json.loads(command[index + 1]), overlay.get("settings") or {})
+        command[index + 1] = json.dumps(settings, separators=(",", ":"))
+        command[index + 2:index + 2] = arguments
+    elif tool == "codex":
+        index = command.index("exec")
+        command[index:index] = arguments
+    elif tool == "cursor":
+        index = command.index("--")
+        command[index:index] = arguments
+        if first_turn and overlay.get("prompt_prefix"):
+            command[-1] = overlay["prompt_prefix"] + command[-1]
+    else:
+        raise AttachError(f"Unknown tool {tool!r}; choose one of: {', '.join(TOOLS)}")
+    return command
+
+
+def overlay(tool: str, edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> Overlay:
+    if tool == "claude":
+        return claude_overlay(edition, project, state, repository)
+    if tool == "codex":
+        return codex_overlay(edition, project, state, repository)
+    if tool == "cursor":
+        return cursor_overlay(edition, project, state, repository)
+    raise AttachError(f"Unknown tool {tool!r}; choose one of: {', '.join(TOOLS)}")
+
+
+# ---------------------------------------------------------------------------
+# Command line
+
+def _choose_edition(project: Path, requested: Optional[str]) -> str:
+    if requested:
+        edition_directory(requested)
+        return requested
+    edition, evidence = detect_edition(project)
+    if edition is None:
+        raise AttachError(f"No edition fits {project}: {evidence}. Pass --edition.")
+    return edition
+
+
+def _executable(tool: str) -> str:
+    return {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}[tool]
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Everything after `--` belongs to the launched CLI, untouched.
+    passthrough: list[str] = []
+    if "--" in argv:
+        index = argv.index("--")
+        argv, passthrough = argv[:index], argv[index + 1:]
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest="command", required=True)
+    state_base = ("where per-project state directories are kept (default: the Harness's state "
+                  "directory); a relative path is taken from the current directory")
+    for name in ("detect", "env", "trust-codex-hooks"):
+        command = commands.add_parser(name)
+        command.add_argument("--project")
+        command.add_argument("--edition", choices=list(EDITIONS))
+        command.add_argument("--state-base", type=Path, help=state_base)
+    run = commands.add_parser("run")
+    run.add_argument("tool", choices=TOOLS)
+    run.add_argument("--project")
+    run.add_argument("--edition", choices=list(EDITIONS))
+    run.add_argument("--state-base", type=Path, help=state_base)
+    run.add_argument("--executable")
+    for command in (commands.choices["trust-codex-hooks"],):
+        command.add_argument("--executable", default="codex")
+    options = parser.parse_args(argv)
+    if passthrough and options.command != "run":
+        parser.error("arguments after -- are passed only to `run`")
+    try:
+        project = resolve_project(options.project)
+        if options.command == "detect":
+            edition, evidence = detect_edition(project)
+            print(json.dumps({"project": str(project), "edition": edition, "evidence": evidence}))
+            return 0 if edition else 1
+        edition = _choose_edition(project, options.edition)
+        state = state_directory(project, options.state_base)
+        if options.command == "env":
+            # Handed to another launcher, a state reached through a link is
+            # refused here as `run` refuses it; nothing is created.
+            folder = _open_state(state, create=False)
+            if folder is not None:
+                fs.close(folder)
+            for key, value in environment(edition, project, state).items():
+                print(f"export {key}={shlex.quote(value)}")
+            return 0
+        if options.command == "trust-codex-hooks":
+            for entry in trust_codex_hooks(options.executable, edition, project):
+                print(f"{entry['status']:9} {entry['key']}")
+            return 0
+        attached = overlay(options.tool, edition, project, state)
+        extra = passthrough
+        command = [options.executable or _executable(options.tool)]
+        if options.tool == "claude":
+            command += [*attached.arguments, "--settings", json.dumps(attached.settings), *extra]
+        elif options.tool == "codex":
+            command += [*attached.arguments, *extra]
+        else:
+            command += [*attached.arguments, *extra]
+            if attached.prompt_prefix and not extra:
+                command.append(attached.prompt_prefix + "Say which accelerator is attached and wait for my task.")
+        print(f"Attaching {edition} from {edition_directory(edition)} to {project} (state: {state}).", file=sys.stderr)
+        os.chdir(project)
+        os.execvpe(command[0], command, {**os.environ, **attached.environment})
+    except AttachError as error:
+        print(f"accelerator_attach: {error}", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

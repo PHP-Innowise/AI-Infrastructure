@@ -202,6 +202,52 @@ class FullMirrorParityTest(ParityFixture):
         drift = self.drift_by_path(payload)
         self.assertEqual("governance-docs", drift[".codex/DOD.md"]["class"])
 
+    def single_tool_install(self, tool: str) -> Path:
+        """What `install_accelerator.py --tool <tool>` leaves: one tool's trees
+        plus the other tools' README files and nothing else of them."""
+        repository = self.base / f"{tool}-only"
+        self.write_config(repository)
+        self.write(repository, f"{tool}/skills/review/SKILL.md", "# review\n\nshared\n")
+        self.write(repository, f"{tool}/skills/review/helper.py", "print('shared')\n")
+        if tool == ".claude":
+            self.write(repository, ".claude/hooks/guard.sh", HOOK_CANON)
+            self.write(repository, ".claude/DOD.md", DOD_CANON)
+        for other in (".agents", ".claude", ".cursor", ".codex"):
+            if other != tool:
+                self.write(repository, f"{other}/README.md", f"# {other}\n")
+        return repository
+
+    def test_single_tool_install_compares_the_tree_it_has(self) -> None:
+        for tool in (".claude", ".cursor"):
+            with self.subTest(tool=tool):
+                code, payload = self.parity(self.single_tool_install(tool))
+                self.assertEqual(0, code, payload)
+                self.assertEqual(tool, payload["canonical_edition"])
+                self.assertEqual(".agents", payload["configured_canonical_edition"])
+                self.assertEqual([], payload["drift"])
+                self.assertEqual([], payload["mirror_drift"])
+
+    def test_single_tool_install_names_the_stand_in_canonical(self) -> None:
+        result = run_cli(self.single_tool_install(".claude"), "parity")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(".claude canonical; configured .agents is not installed here", result.stdout)
+
+    def test_mirror_missing_part_of_a_class_is_still_drift(self) -> None:
+        repository = self.build_edition()
+        self.write(repository, ".claude/STABILIZATION.md", "# Stabilization\n")
+        code, payload = self.parity(repository)
+        self.assertEqual(1, code)
+        drift = self.drift_by_path(payload)
+        self.assertEqual("missing from mirror", drift[".cursor/STABILIZATION.md"]["reason"])
+        self.assertEqual("missing from mirror", drift[".codex/STABILIZATION.md"]["reason"])
+
+    def test_skill_missing_from_one_present_tree_is_still_drift(self) -> None:
+        repository = self.single_tool_install(".claude")
+        self.write(repository, ".cursor/skills/other/SKILL.md", "# other\n")
+        code, payload = self.parity(repository)
+        self.assertEqual(1, code)
+        self.assertIn("review/SKILL.md", [item["logical_path"] for item in payload["drift"]])
+
     def test_non_markdown_skill_file_drift_is_caught(self) -> None:
         repository = self.build_edition()
         self.write(
@@ -228,12 +274,22 @@ class FullMirrorParityTest(ParityFixture):
         # hooks README: each tool documents its own registration model.
         self.write(repository, ".claude/hooks/README.md", "settings.json\n")
         self.write(repository, ".cursor/hooks/README.md", "hooks.json\n")
-        # working-memory-read.sh: Cursor has no prompt-submit hook event.
-        self.write(repository, ".claude/hooks/working-memory-read.sh", HOOK_CANON)
         code, payload = self.parity(repository)
         self.assertEqual(0, code, payload)
         self.assertEqual([], payload["mirror_drift"])
         self.assertEqual([], payload["drift"])
+
+    def test_the_cursor_read_hook_is_mirrored_like_any_other(self) -> None:
+        # Cursor runs it on beforeSubmitPrompt; a mirror without it renders no
+        # memory for the prompt being answered.
+        repository = self.build_edition()
+        self.write(repository, ".claude/hooks/working-memory-read.sh", HOOK_CANON)
+        code, payload = self.parity(repository)
+        self.assertEqual(1, code)
+        self.assertEqual(
+            "missing from mirror",
+            self.drift_by_path(payload)[".cursor/hooks/working-memory-read.sh"]["reason"],
+        )
 
     def test_framework_keyed_exemption_applies_only_to_that_framework(self) -> None:
         rewritten = "---\nname: skill-creator\ndescription: rewritten\n---\nCursor.\n"

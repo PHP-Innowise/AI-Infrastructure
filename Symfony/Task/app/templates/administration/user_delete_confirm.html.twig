@@ -1,0 +1,22 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Delete {{ account.email }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Delete this account?</h1>
+        <p role="alert" class="form-error">
+            Personal information will be permanently removed. Historical records will show "Deleted User".
+            <strong>This action cannot be undone.</strong>
+        </p>
+
+        <form method="post">
+            <input type="hidden" name="_token" value="{{ csrf_token('delete' ~ account.id) }}">
+            <div class="form-row">
+                <label for="reason">Reason (optional, for the compliance record)</label>
+                <textarea id="reason" name="reason"></textarea>
+            </div>
+            <button type="submit" class="button button--primary">Confirm permanent deletion</button>
+        </form>
+    </div>
+{% endblock %}

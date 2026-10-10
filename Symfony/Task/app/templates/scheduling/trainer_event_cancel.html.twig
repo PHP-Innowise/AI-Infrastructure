@@ -1,0 +1,15 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Cancel {{ event.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Cancel event</h1>
+        <p role="alert">This will notify all registered players and process refunds. Continue?</p>
+        <p><strong>{{ event.title }}</strong> — {{ event.startsAt|date('Y-m-d H:i', event.trainer.timezone) }}</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

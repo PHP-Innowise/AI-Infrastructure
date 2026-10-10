@@ -1,0 +1,73 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ playlist.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">
+            {{ playlist.pillar|capitalize }}
+            {% if playlist.public %}<span class="badge badge--public">Public</span>{% endif %}
+            {% if playlist.coachesOnly %}<span class="badge">Coaches Only</span>{% endif %}
+        </p>
+        <h1>{{ playlist.title }}</h1>
+        {% if playlist.description %}<p>{{ playlist.description }}</p>{% endif %}
+
+        {# AC-04-15: assignment status counts. #}
+        <p>Assigned to {{ assignments.assigned }} player{{ assignments.assigned == 1 ? '' : 's' }}, {{ assignments.completed }} completed, {{ assignments.inProgress }} in progress</p>
+
+        <h2>Items</h2>
+        {% if items is empty %}
+            <p>No items yet.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>#</th><th>Title</th><th>Duration</th><th>Notes</th><th></th></tr></thead>
+                <tbody>
+                    {% for item in items %}
+                        <tr>
+                            <td>{{ item.sequenceOrder }}</td>
+                            <td>
+                                {% if item.contentItem.deleted %}
+                                    <span role="status">Unavailable</span>
+                                {% else %}
+                                    {{ item.contentItem.title }}
+                                {% endif %}
+                            </td>
+                            <td>{{ item.contentItem.durationSeconds }}</td>
+                            <td>{{ item.trainerNotes }}</td>
+                            <td>
+                                {% if is_granted('PLAYLIST_EDIT', playlist) %}
+                                    <form method="post" action="{{ path('content_trainer_playlist_item_remove', {playlist: playlist.id, item: item.id}) }}">
+                                        <input type="hidden" name="_token" value="{{ csrf_token('playlist-item-remove' ~ item.id) }}">
+                                        <button type="submit">Remove</button>
+                                    </form>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+
+        {# Mutating actions are trainer-only (PlaylistVoter denies a coach on
+           every OWNER_ONLY attribute) — guarded here too so a coach viewing
+           this same template (CoachContentController) sees no dead-end
+           links, not just a 403 if clicked. #}
+        {% if is_granted('PLAYLIST_EDIT', playlist) %}
+            {% if playlist.pillar == 'practice' %}
+                <p><a href="{{ path('content_trainer_playlist_drill_add', {playlist: playlist.id}) }}">+ Add drill</a></p>
+            {% else %}
+                <p><a href="{{ path('content_trainer_playlist_video_add', {playlist: playlist.id}) }}">+ Add video</a></p>
+            {% endif %}
+
+            <nav>
+                <a href="{{ path('content_trainer_playlist_edit', {playlist: playlist.id}) }}">Edit</a>
+                ·
+                <a href="{{ path('content_trainer_playlist_visibility', {playlist: playlist.id}) }}">Visibility</a>
+                ·
+                <a href="{{ path('content_trainer_playlist_assign', {playlist: playlist.id}) }}">Assign to Players</a>
+                ·
+                <a href="{{ path('content_trainer_playlist_delete', {playlist: playlist.id}) }}">Delete</a>
+            </nav>
+        {% endif %}
+    </div>
+{% endblock %}

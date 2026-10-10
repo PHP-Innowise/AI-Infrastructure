@@ -46,8 +46,8 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 - [ ] The collision guard passed: an explicit overwrite/merge/abort decision was obtained before writing, if the target already had an accelerator.
 - [ ] Only the selected edition(s) were written - no unselected edition folders were created, and no selected edition was skipped.
 - [ ] Every generated skill has a validated necessity rationale and distinct
-  operational value. The memory quartet is present because its runtime is
-  generated; every other design, process, universal, frontend, specialty,
+  operational value. The six memory-continuity guides are present because
+  their runtime is generated; every other design, process, universal, frontend, specialty,
   integration, or domain skill is evidence-gated.
 - [ ] Every skill cites resolvable target-relative canonical sources and
   implements its contract-specific procedure, decisions, failure handling,
@@ -74,8 +74,8 @@ Pick the tier that matches the work performed. Higher tiers include all lower-ti
 - [ ] Every material adjacent owner and routing case survived into wrappers.
   `SKILL FLOW.md`, `flow-feature`, and `flow-review` match the canonical flow
   contract exactly, including required code-review/checkpoint stages.
-- [ ] Every generated hook script passes `bash -n` and carries the executable bit; the per-edition hook set is complete (four enforcement + working-memory pair; Cursor deliberately lacks `working-memory-read.sh`), and every wiring file references only existing executable scripts.
-- [ ] The seeded `memory-bank/` passes its validator and matches section 12 (same count, concepts, and sources); the context-brain runtime (`context.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`) and the `project-brain/` skeleton were copied verbatim with `runtime.json` substituted (`context.py status`/`validate` exit 0 in the target); the memory quartet skills were also generated and wrapped; any drift was reported.
+- [ ] Every generated hook script passes `bash -n` and carries the executable bit; the per-edition hook set is complete (four enforcement + working-memory pair + `context-continuity.sh`; Cursor's `working-memory-read.sh` runs on `beforeSubmitPrompt` and renders the working-memory rule), `context-continuity.sh` is wired without an argument on its session-start, prompt and end-of-turn events, and every wiring file references only existing executable scripts.
+- [ ] The seeded `memory-bank/` passes its validator and matches section 12 (same count, concepts, and sources); the context-brain runtime (`context.py`, `context_handoff.py`, `context_continuity.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py`) and the `project-brain/` skeleton were copied verbatim with `runtime.json` substituted (`context.py status`/`validate` exit 0 in the target); the six memory-continuity skills were also generated and wrapped; any drift was reported.
 - [ ] `context.py status --json` reports task-identity and Git readiness
   truthfully as active, retrieval-only, or degraded. Explicit task identity
   outside Git is never reported as checkpoint-capable; all degraded hooks remain

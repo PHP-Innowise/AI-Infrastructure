@@ -1,0 +1,80 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ player.firstName }} — CRM Master — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ player.firstName }} <span class="skeleton-caption">— {{ membership.trainer.businessName }}</span></h1>
+
+        {# AC-03-56: cross-trainer history, if the player is associated with more than one. #}
+        {% if otherTrainers is not empty %}
+            <section>
+                <h2>Also associated with</h2>
+                <ul>
+                    {% for trainer in otherTrainers %}
+                        <li>{{ trainer.businessName }}</li>
+                    {% endfor %}
+                </ul>
+            </section>
+        {% endif %}
+
+        <section>
+            <h2>Labels <span class="skeleton-caption">(view only — trainer-owned)</span></h2>
+            {% for playerLabel in labels %}
+                <span class="badge" style="background:{{ playerLabel.label.colorHex }}">{{ playerLabel.label.name }}</span>
+            {% else %}
+                <p>No labels.</p>
+            {% endfor %}
+        </section>
+
+        <section>
+            <h2>Flags</h2>
+            {% for flag in activeFlags %}
+                <div class="badge">
+                    <strong>{{ flagDefinitions[flag.flagType] }}</strong>
+                    {% if flag.note %}<p>{{ flag.note }}</p>{% endif %}
+                    <form method="post" action="{{ path('crm_super_admin_player_flag_resolve', {membership: membership.id, flag: flag.id}) }}" onsubmit="return confirm('Mark as resolved?');">
+                        <input type="hidden" name="_token" value="{{ csrf_token('sa-player-flag-resolve' ~ flag.id) }}">
+                        <button type="submit">Remove Flag</button>
+                    </form>
+                </div>
+            {% else %}
+                <p>No active flags.</p>
+            {% endfor %}
+
+            {# AC-03-56/58: Super Admin applies flags across trainers. #}
+            {{ form_start(flagForm, {action: path('crm_super_admin_player_flag_add', {membership: membership.id})}) }}
+                {{ form_widget(flagForm) }}
+            {{ form_end(flagForm) }}
+        </section>
+
+        <section>
+            <h2>Notes</h2>
+            {% for note in generalNotes %}
+                <p>{{ note.noteText }} <span class="skeleton-caption">— {{ note.createdAt|date('Y-m-d') }}</span></p>
+            {% else %}
+                <p>No notes yet.</p>
+            {% endfor %}
+        </section>
+
+        <section>
+            <h2>Event History</h2>
+            {% if attendanceRecords is empty %}
+                <p>No events recorded yet.</p>
+            {% else %}
+                <table>
+                    <thead><tr><th>Date</th><th>Event</th><th>Status</th></tr></thead>
+                    <tbody>
+                        {% for record in attendanceRecords %}
+                            <tr>
+                                <td>{{ record.event.startsAt|date('Y-m-d') }}</td>
+                                <td>{{ record.event.title }}</td>
+                                <td>{{ record.status|capitalize }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% endif %}
+        </section>
+    </div>
+{% endblock %}

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "_comment": "Deliberate exceptions to scripts/check_routes.py. Every entry needs a reason; an entry that stops matching anything is reported as a stale warning. 'edition' is an edition path (Laravel, Symfony, PHP Core, Cms/wordpress, Infrastructure-Creator) or '*' for every edition. Sections: unwired_hooks {path} silences an unwired-script warning; unreachable_skills {skill} silences a reachability error; references {file, target} silences one unresolved routing reference (file is edition-relative).",
+  "unwired_hooks": [
+    {
+      "edition": "*",
+      "path": ".codex/hooks/subagent-dispatch.sh",
+      "reason": "Kept as the byte-identical mirror of the canonical .claude hook but deliberately unregistered: multi-agent is disabled in .codex/config.toml ([agents] enabled = false), so Codex has no subagent stop to observe. Documented in each edition's .codex/hooks/README.md."
+    }
+  ],
+  "unreachable_skills": [
+    {
+      "edition": "*",
+      "skill": "wcag-accessibility",
+      "reason": "Description-triggered reference skill: the host selects it from its own SKILL.md description on accessibility/WCAG/a11y requests. No edition ships an agent wrapper, command or flow for it; it is consulted alongside coder-frontend and frontend-design work rather than routed to."
+    },
+    {
+      "edition": "*",
+      "skill": "web-design-guidelines",
+      "reason": "Description-triggered reference skill: the host selects it from its own SKILL.md description on UI/UX guideline review requests ('review my UI', 'audit design'). No edition ships an agent wrapper, command or flow for it by design."
+    }
+  ],
+  "references": []
+}

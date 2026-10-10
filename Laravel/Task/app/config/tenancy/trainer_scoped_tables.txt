@@ -1,0 +1,75 @@
+# Trainer-scoped tables — the tenancy manifest.
+#
+# One table name per line. Blank lines and lines starting with # are ignored.
+#
+# The container startup gate (docker/php/docker-entrypoint.sh) reads this file
+# and refuses to start if any table listed here exists without Row-Level
+# Security enabled and at least one policy attached. Tables that do not exist
+# yet are skipped, which is what makes pre-populating this list safe.
+#
+# Pre-populated from the settled schema (specs/database-designer-eloquent-schema.md)
+# before any of these tables is created. That is deliberate and stronger than
+# adding each one alongside its migration: "remember to add the table to the
+# manifest" is a rule someone eventually forgets, and forgetting it means a
+# table carrying the tenant key with no policy — one trainer's rows readable by
+# another. Listing them up front inverts the failure: the migration that creates
+# the table must also give it RLS, or the container will not boot.
+#
+# drill_details is deliberately absent: it carries no trainer_id of its own and
+# inherits isolation through its join to content_items.
+#
+# Global tables must NOT appear here — see config/tenancy/resolver_global_tables.txt
+# and the schema's own tenancy section.
+
+# --- Identity / Platform (Epic-01) -----------------------------------------
+trainer_billing_settings
+coach_memberships
+player_trainer_memberships
+share_links
+share_link_opens
+availability_windows
+coach_availability_overrides
+child_approval_requests
+
+# --- Scheduling (Epic-02) ---------------------------------------------------
+events
+rsvps
+attendance_records
+attendance_edits
+coach_assignments
+event_invitations
+event_duplication_records
+
+# --- CRM (Epic-03) ----------------------------------------------------------
+labels
+player_labels
+player_flags
+player_notes
+
+# --- Content / LPPP (Epic-04) ----------------------------------------------
+playlists
+playlist_items
+playlist_assignments
+playlist_access_grants
+content_items
+content_progress
+content_usage
+
+# --- Billing (Epic-05) ------------------------------------------------------
+token_entries
+token_balances
+token_packages
+payment_records
+subscription_entitlements
+entitlement_coverages
+
+# --- Growth (Epic-06) -------------------------------------------------------
+referral_links
+referrals
+referral_assist_counts
+coupons
+coupon_redemptions
+
+# --- Forms (Epic-08) --------------------------------------------------------
+forms
+form_submissions

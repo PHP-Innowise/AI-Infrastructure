@@ -13,7 +13,9 @@ Engine is a disposable lexical index and local binding/cache.
   append-only transition history.
 - Only an authorized owner may mutate a record. Stale expected revisions fail.
 - Privacy, owner, authority, lifecycle, supersession, archive, and source
-  freshness checks happen before indexing and again before retrieval.
+  freshness checks happen before indexing and again before retrieval. A
+  deleted citation keeps a record out of the index; an edited one keeps it
+  in, marked and ranked down.
 - Canonical project sources outrank Project Brain, Memory Bank, and local
   indexes. Conflicts are retained explicitly.
 - Terminal records are moved, never deleted. Active and archived records are
@@ -21,7 +23,8 @@ Engine is a disposable lexical index and local binding/cache.
 - Task phases are stored only as `understanding`, `planning`,
   `implementation`, `verification`, or `finalization`. Input compatibility
   aliases normalize at the mutation boundary: `implementing` and `execution`
-  become `implementation`; `review` becomes `verification`.
+  become `implementation`; `review` and `quality` (the Phase Map's Quality
+  row) become `verification`.
 - Completion is always explicit and requires the caller's current numeric
   revision. Turn maintenance may report sanitized branch-merge evidence as a
   completion candidate, but it never closes the task or creates an episode.
@@ -98,11 +101,14 @@ unreachable from each other lexically — measured at 0 of 2, and 2 of 2 through
 the link index. Path-linked items lead their layer, are recorded in the
 manifest with `selection: "path-link"` and no `match`, and do not change
 `no_match`, which stays a statement about the query. `links` reports the same
-citations without retrieving; both apply the full runtime filter.
+citations without retrieving, and also the active tasks that touched the path;
+both apply the full runtime filter. Automatic retrieval (`refresh`,
+`hook-context`) may add one document linked to a path the request names or the
+task touched, after the strong matches, marked `prompt-link` or `touch-link`.
 Category budgets are policy 1,200; handoff 1,500; durable 3,500; dynamic 1,500;
 evidence 2,000 estimated tokens. Internal candidate selection may escalate to
 its 12,000-token conflict ceiling, but the delivered capsule is always capped
-after ranking/filtering at 2 procedural, 3 semantic, 1 episodic item and 8,000
+after ranking/filtering at 3 semantic and 2 episodic items (no procedural item: hosts list skills) and 8,000
 serialized characters. Every governed retrieval writes a manifest under
 `control/retrieval-manifests/`; automated `--ephemeral` retrieval writes the
 same metadata contract to ignored local state.
@@ -112,8 +118,13 @@ UUID even when they do not match the query. Conflict pairs may exceed normal
 category/target budgets up to the hard ceiling, with an explicit escalation
 reason; privacy, owner, authority, lifecycle, and freshness filters still win.
 
-No network service, MCP server, embedding store, or automatic prompt injection
-is part of this runtime.
+No network service or embedding store is part of this runtime. Retrieval also
+runs without a command: the prompt hook injects the capsule above into every
+request (Cursor reads it from the `working-memory.mdc` rule the hook renders),
+unless the host delivered it and set `CONTEXT_CAPSULE_DELIVERED=1`. The local
+memory MCP server, `memory-bank/scripts/mcp_server.py`, is a stdio subprocess
+of the client whose four tools call `memory-bank/scripts/context.py` in
+governed mode; see `memory-bank/MCP.md`.
 
 ## Messages
 

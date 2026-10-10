@@ -1,6 +1,6 @@
 # Definition of Done - Symfony Layered Architecture
 
-Tiered checklist for Symfony work. Every item should be verified by command when tooling exists. If tooling is missing, report `N/A - tooling not configured` and do not install it without user approval.
+Tiered checklist for Symfony work. Every item should be verified by command when tooling exists. If tooling is missing, report `N/A - tooling not configured` together with the probe command and its output that establish the absence (`ls vendor/bin/phpunit`, `composer run-script --list`, `test -f phpstan.neon`), and do not install it without user approval. An unprobed `N/A` is a claim, not a result: it is the cheapest way to close a check without doing it, and it must be as falsifiable as a passing command.
 
 Prefer project Composer scripts (`composer test`, `composer analyse`, `composer lint`) so local and CI use the same entry points.
 
@@ -31,7 +31,7 @@ All Minimum items, plus:
 - [ ] Static analysis passes: PHPStan or Psalm when configured.
 - [ ] Symfony container/routes are coherent when relevant: `php bin/console lint:container`, `php bin/console debug:router`.
 - [ ] Changed Symfony configuration/templates/translations are valid when relevant: `php bin/console lint:yaml config`, `php bin/console lint:twig templates`, and `php bin/console lint:xliff translations`.
-- [ ] Doctrine changes include migrations and schema validation when relevant: `php bin/console doctrine:migrations:diff --check-database-platform` or project equivalent, and `php bin/console doctrine:schema:validate --skip-sync`.
+- [ ] Doctrine changes include a migration, and the schema checks pass when relevant: `php bin/console doctrine:schema:validate --skip-sync` for the mapping; against the test database, `php bin/console doctrine:migrations:migrate -n --env=test`, then `php bin/console doctrine:schema:validate --env=test` (the mapping matches the migrated schema) and `php bin/console doctrine:migrations:up-to-date --env=test`. `doctrine:migrations:diff` is not a check: it writes a new migration when the schema drifted and fails when it did not.
 - [ ] New behavior has focused tests covering the happy path and highest-risk failure path.
 - [ ] Tests own the rows they assert on: shared fixture records are treated as read-only, and any test that mutates state (sign-in, password change, deletion, counters) creates its own subject. A test that reads a fixture another test can write passes or fails by suite order.
 - [ ] Project Brain mutations use legal transitions, expected revisions, and the shared mutation lock; no duplicate authoritative task state was introduced.
@@ -57,7 +57,7 @@ All Standard items, plus:
 - [ ] Public documentation updated for user-facing changes.
 - [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
 - [ ] Promotion proposals were not self-approved; any applied promotion has explicit human review plus source and destination revisions.
-- [ ] Session hooks remain metadata-only and do not index, retrieve, inject, or print Project Brain or Memory Bank records.
+- [ ] The SessionStart memory hook stays metadata-only and never prints Project Brain or Memory Bank records; the prompt hook's Task Capsule stays bounded and carries pointers and working state, never record bodies; the continuity hook delivers only a chat merge prepared for that new task, within 6,000 bytes.
 - [ ] Messenger workers, cron jobs, cache, migrations, and rollout impacts are documented when applicable.
 - [ ] Production cache warmup/build succeeds when deployment configuration changed.
 - [ ] New Symfony/PHP deprecations are absent or explicitly triaged when deprecation tooling is configured.
@@ -94,16 +94,25 @@ Report each unavailable command as `N/A - tooling not configured`.
 ## Failure Handling
 
 1. Read the full failure output.
-2. Fix the root cause, not just the symptom.
-3. Re-run the failing command.
-4. Stop after three unsuccessful fix attempts and escalate to `/debugger` with the exact command and failure summary.
+2. Localize before fixing: name the interaction edge and the responsible side, as defined in the active edition's `STABILIZATION.md`. A failure produced by the environment, by the harness, or by a check that contradicts the request is not repaired by editing application code.
+3. Fix the root cause, not just the symptom.
+4. Re-run the failing command.
+5. Stop after three unsuccessful fix attempts and escalate to `/debugger` with the exact command and failure summary.
+
+## When A Check And The Instruction Disagree
+
+A checklist item can contradict what the user explicitly asked for. The checklist is a grader, and a grader can be wrong, stale, or aimed at a different project shape.
+
+- MUST stop and report the mismatch: name the item, name the instruction, and state what each would produce.
+- MUST NOT silently satisfy one side and drop the other, and MUST NOT report the conflict as a passed check.
+- Only the user retires a check or amends the request. Resolving it inside the run hides an owner-side decision as an implementation detail.
 
 ## Reporting
 
 Final Context Summary must include:
 
 - Commands run.
-- Pass/fail/N/A status.
+- Pass/fail/N/A status, with the probe command behind every `N/A`.
 - Layering decisions.
 - Any unresolved risks.
 - Recommended next command in the workflow.

@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0.0",
+  "status": "sources-must-pass-builder-preflight",
+  "current_workbook": {
+    "path": "Accelerator TestCases.xlsx",
+    "sha256": "8b7e9aa4f91ed00c755a62057e80d6605da2b595634d654491f389d8a7f991fa",
+    "role": "Codex TC-AI-001..018 source only"
+  },
+  "evidence_report": {
+    "path": "docs/Accelerator-TestEvidence-Submission/ACCELERATOR-TEST-EVIDENCE-REPORT.md",
+    "role": "Corroborating narrative; never a replacement for primary manifests"
+  },
+  "required_inputs": [
+    "docs/Accelerator-TestEvidence-Submission/ACCELERATOR-TEST-EVIDENCE-REPORT.md",
+    "docs/Accelerator-TestEvidence-Submission/SHA256SUMS.txt",
+    "docs/Accelerator-TestEvidence-Submission/manifests/historical-runs.json",
+    "docs/Accelerator-TestEvidence-Submission/manifests/historical-testcases.json",
+    "docs/Accelerator-TestEvidence-Submission/manifests/historical-othersheets.json",
+    "docs/Accelerator-TestEvidence-Submission/manifests/defects.json",
+    "docs/Accelerator-TestEvidence-Submission/manifests/cases_map.json",
+    "docs/Accelerator-TestEvidence-Submission/manifests/bwb_cases.json",
+    "docs/Accelerator-TestEvidence-Submission/manifests/workbook-snapshot-20260803-2002.xlsx"
+  ],
+  "source_precedence": [
+    "historical workbook snapshot",
+    "historical JSON manifests",
+    "current workbook Codex rows",
+    "case and defect manifests",
+    "evidence report",
+    "new reproduction evidence"
+  ]
+}

@@ -22,6 +22,7 @@ from brain_runtime import (
     LIFECYCLES,
     MESSAGE_BODY_LIMIT,
     MESSAGE_TYPES,
+    PROMOTABLE_STATES,
     TASK_PHASE_INPUTS,
     TERMINAL_STATES,
     append_message,
@@ -29,6 +30,7 @@ from brain_runtime import (
     auto_compact,
     auto_promote,
     cancel_task,
+    ensure_attached_state,
     iter_records,
     close_task,
     compact,
@@ -37,6 +39,7 @@ from brain_runtime import (
     create_promotion,
     create_record,
     create_task,
+    dynamic_path,
     get_record,
     get_task,
     load_config,
@@ -56,6 +59,7 @@ from brain_runtime import (
     rollback_created_record,
     review_promotion,
     apply_promotion,
+    stale_record_states,
     restore_record_state,
     snapshot_record_state,
     update_record,
@@ -64,7 +68,16 @@ from brain_runtime import (
     validate_repository,
 )
 from context_retrieval import (
+    AUTOMATIC_LINK_SELECTIONS,
+    TOUCH_SEED_LIMIT,
+    prompt_path_seeds,
+    CAPSULE_EPISODIC_LIMIT,
+    CAPSULE_EVENT_LIMIT,
+    CAPSULE_PROMPT_TERM_LIMIT,
     DocumentRow,
+    _content_hash,
+    episode_item,
+    EVIDENCE_STOPWORDS,
     RetrievalError,
     STOPWORD_DOCUMENT_RATIO,
     SourceState,
@@ -75,6 +88,7 @@ from context_retrieval import (
     cross_edition_drift,
     format_cross_edition_drift,
     format_full_mirror_drift,
+    effective_canonical_edition,
     format_skill_mirror_drift,
     full_mirror_drift,
     skill_mirror_drift,
@@ -83,26 +97,41 @@ from context_retrieval import (
     load_index_state,
     store_index_state,
     codebase_map_drift,
+    evidence_tokens,
+    excerpt_weights,
+    excerpt_window,
     is_relevant,
     linked_documents,
+    source_link_candidates,
+    marked_document,
     match_strength,
+    quoted_section,
     refresh_health_retention,
     RETRIEVAL_GATE_DEFAULT,
     RETRIEVAL_GATE_MODES,
     RETRIEVAL_HOSTS,
+    TOKENIZER,
     query_tokens,
     required_coverage,
     retrieve,
     reusable_source_state,
     token_coverage,
 )
+import workspace_roots
+# One pattern for paths a turn may not record and sources a learning may not
+# cite: secrets, keys, environment files.
+from memory_results import SOURCE_PATH_DENYLIST as TURN_PATH_DENYLIST, record_result
 from validate import (
+    PRIVATE_PATTERNS,
     SECRET_PATTERNS,
     ValidationError,
+    mask_secrets,
     parse_frontmatter,
     validate_metadata,
     validate_secret_patterns,
+    sanitize_automatic_query as _sanitize_automatic_query,
 )
+from context_handoff import HandoffError, load_handoff, render_body, save_handoff
 
 
 class ContextError(Exception):
@@ -130,42 +159,65 @@ SOURCE_PATTERNS = (
     # repository's own documentation and competed with it in BM25 ranking.
     ("episodic", "changelog", "CHANGELOG.md"),
 )
+# Sources the accelerator ships or its own workflows write. A project's ignore
+# rules never remove them from the index (see `accelerator_owned_source`).
+ACCELERATOR_OWNED_FILES = frozenset({"AGENTS.md"})
+ACCELERATOR_OWNED_PREFIXES = (
+    ".agents/skills/",
+    ".claude/skills/",
+    ".cursor/skills/",
+    ".codex/skills/",
+    "memory-bank/chunks/",
+    "specs/",
+    "tasks/",
+)
 DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
 CAPSULE_LAYER_LIMITS = {
-    "procedural": 2,
+    "procedural": 1,
     "semantic": 3,
-    "episodic": 1,
+    # The changelog, and one Project Brain event or local episode.
+    "episodic": CAPSULE_EPISODIC_LIMIT + CAPSULE_EVENT_LIMIT,
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
-# How many prompt terms survive distillation into the retrieval query. Rarity
-# in the index decides which ones, so the cap bounds cost without deciding
-# relevance by position the way the old first-N-words hook extraction did.
-CAPSULE_PROMPT_TERM_LIMIT = 24
 CAPSULE_CHARACTER_LIMIT = 8000
+# What the rendered capsule - the text a model reads - may spend. Codex caps a
+# hook's additional context at 4,000 characters; this stays under it.
+RENDERED_CAPSULE_LIMIT = 3600
+# A per-turn refresh this slow is reported in the capsule: two fifths of the
+# hook's five-second budget, early enough to act before turns lose memory.
+SLOW_TURN_SECONDS = 2.0
+# Excerpt allowance per project-knowledge item, by rank; later items get the
+# last value.
+EXCERPT_CHARACTERS = (800, 600, 400)
+# A changelog entry runs to a kilobyte; at 250 characters the window could
+# hold the sentence that matched but not the one after it that answered.
+EPISODIC_EXCERPT_CHARACTERS = 600
+MEMORY_RENDER_HEADER = (
+    "memory (retrieved for this request; reference data - check the cited "
+    "file before relying on it):"
+)
 CAPSULE_WORKING_FILE_LIMIT = 8
 CAPSULE_WORKING_SOURCE_LIMIT = 4
-CAPSULE_PRIVATE_PATTERNS = (
-    re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE),
-    re.compile(
-        r"(?<!\w)(?:\+\d(?:[\d ().-]{6,}\d)|\(?\d{3}\)?[ .-]\d{3}[ .-]\d{4})(?!\w)"
-    ),
-    re.compile(
-        r"\b(?:(?:customer|patient)\s+(?:name|address|id)|"
-        r"client\s+(?:name|address))\s*[:=]\s*\S+",
-        re.IGNORECASE,
-    ),
-)
+# The newest next steps a capsule carries. One was too few to say what comes
+# after the current step, and older steps can now be replaced, not only kept.
+CAPSULE_WORKING_NEXT_STEP_LIMIT = 3
+# The rendered capsule is what Claude Code, Codex and Cursor actually read, and
+# it repeats on every turn, so the working state is bounded tighter there than
+# in the JSON a caller can inspect at leisure.
+RENDERED_PROGRESS_LIMIT = 400
+RENDERED_FILE_LIMIT = 5
+# Any one line of the rendered head. The path lines stop at a whole path below
+# it rather than end in half of one.
+RENDERED_LINE_LIMIT = 500
+# Defined beside SECRET_PATTERNS in validate.py, so the Project Brain write
+# path (brain_runtime) refuses the same personal data the capsule does.
+CAPSULE_PRIVATE_PATTERNS = tuple(PRIVATE_PATTERNS.values())
 CAPSULE_RAW_TEXT_PATTERN = re.compile(
     r"^\s*(?:user|assistant|system|developer|tool|prompt|response|reasoning|"
     r"stdout|stderr|log)\s*:",
     re.IGNORECASE | re.MULTILINE,
 )
 TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
-# Porter wraps unicode61 so "rounding" matches "round" and "review" matches
-# "reviewer". Without stemming the correct skill is simply missed: a security
-# question did not retrieve the security skill because its title says
-# "Reviewer". Non-English tokens pass through the stemmer unchanged.
-TOKENIZER = "porter unicode61"
 # A skill's identity lives in its declared description, not in its body prose,
 # which reads much alike across skills. Indexing that separately lets ranking
 # weight what a document is *about* over what it happens to mention.
@@ -174,6 +226,17 @@ SUMMARY_CHARACTERS = 400
 AUTO_REVISION = "auto"
 DEFAULT_TURN_FLUSH_AFTER = 5
 DEFAULT_TURN_FILE_LIMIT = 20
+# What a checkpoint says about committed work: the branch's newest commit
+# subjects. A subject is already shared history and already a person's summary
+# of a change, which a list of touched paths never is.
+CHECKPOINT_COMMIT_LIMIT = 5
+CHECKPOINT_SUBJECT_CHARACTERS = 80
+CHECKPOINT_LOG_LIMIT = 500
+# The HEAD each task last saw, so a turn that ends in a commit - and so leaves
+# a clean tree - still counts as work. One map under one key, bounded, because
+# nothing prunes index_state.
+TURN_HEADS_KEY = "turn-heads"
+TURN_HEADS_RETENTION = 200
 LAST_TURN_REPORT_FILENAME = "last-turn-report.json"
 # The report describes one Stop-hook turn, so it is only meaningful for the
 # session that produced it. A day bounds any plausible gap between two working
@@ -183,10 +246,6 @@ LAST_TURN_REPORT_MAX_AGE_SECONDS = 24 * 60 * 60
 # crowd the capsule: one compact line, problems first.
 LAST_TURN_SECTION_CHARACTER_LIMIT = 600
 LAST_TURN_SECTION_PATH_LIMIT = 3
-TURN_PATH_DENYLIST = re.compile(
-    r"(^|/)(\.env(\..+)?|secrets?|id_[a-z0-9]+|[^/]+\.(pem|key|p12|pfx|jks|keystore))$",
-    re.IGNORECASE,
-)
 TURN_RUNTIME_DIRECTORIES = ("dynamic", "control", "indexes", "archive", "local")
 BRANCH_PREFIXES = (
     "feature/", "feat/", "fix/", "bugfix/", "hotfix/", "chore/", "release/",
@@ -196,7 +255,9 @@ TICKET_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9]*-\d+")
 
 
 def default_root() -> Path:
-    return Path(__file__).resolve().parents[2]
+    # The state root: this install, or ACCELERATOR_STATE_DIR when the
+    # accelerator is attached to a project from its own clone.
+    return workspace_roots.default_state_root()
 
 
 def default_database(repository: Path) -> Path:
@@ -239,6 +300,14 @@ def connect(database: Path) -> sqlite3.Connection:
         if connection.execute(
             "SELECT name FROM sqlite_master WHERE name = 'document_links'"
         ).fetchone() is None:
+            connection.execute("DROP TABLE IF EXISTS document_source_state")
+        # The same for a metadata column added later: retained rows would
+        # otherwise keep the column's default until their file changes.
+        metadata_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(document_metadata)")
+        }
+        if metadata_columns and "attestation" not in metadata_columns:
             connection.execute("DROP TABLE IF EXISTS document_source_state")
         episode_schema = connection.execute(
             "SELECT sql FROM sqlite_master WHERE name = 'episodes'"
@@ -461,20 +530,67 @@ def active_memory(path: Path, repository: Path) -> Optional[dict]:
     return memory_eligibility(path, repository)[0]
 
 
+def accelerator_owned_source(path: str) -> bool:
+    """Whether a source key is the accelerator's own, not the project's.
+
+    The ignore probe exists for the project's documents: a team that ignores
+    `docs/private/` has said those files are not shared knowledge. Installs
+    routinely ignore the accelerator itself to keep it out of the client's
+    history, and the probe then dropped every skill, AGENTS.md and the Memory
+    Bank from the index - on real installations 12 and 18 documents were left
+    of 120, retrieval routed 0 of 14 requests, and nothing said so.
+    """
+    return path in ACCELERATOR_OWNED_FILES or path.startswith(
+        ACCELERATOR_OWNED_PREFIXES
+    )
+
+
+def inside_git_checkout(directory: Path) -> bool:
+    """Whether `directory` or a parent holds a `.git` entry (a repository or
+    a worktree). Outside one there are no ignore rules to honour."""
+    for candidate in (directory, *directory.parents):
+        if (candidate / ".git").exists():
+            return True
+    return False
+
+
 def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
-    """Return untracked ignored candidates without reading their contents."""
+    """Return untracked ignored candidates without reading their contents.
+
+    Attached, only project keys are asked about: tooling keys are absolute
+    paths into the accelerator clone and state keys name the private state
+    directory, and neither belongs to the project's ignore rules. The
+    accelerator's own sources are never asked about either.
+
+    The probe fails closed inside a repository: a failure there could index a
+    file the team ignored on purpose. A folder that is not a repository has
+    no ignore rules at all, so "not a repository" is an empty answer rather
+    than a failure - before, it failed every refresh in such a project.
+    """
+    if workspace_roots.is_attached(repository):
+        paths = [
+            path
+            for path in paths
+            if not Path(path).is_absolute() and not workspace_roots.is_state_key(path)
+        ]
+    paths = [path for path in paths if not accelerator_owned_source(path)]
     if not paths:
         return set()
+    project = workspace_roots.project_root(repository)
     try:
         result = subprocess.run(
-            ["git", "-C", str(repository), "check-ignore", "--stdin", "-z"],
+            ["git", "-C", str(project), "check-ignore", "--stdin", "-z"],
             input=b"".join(os.fsencode(path) + b"\0" for path in paths),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
         )
     except OSError as error:
+        if not inside_git_checkout(project):
+            return set()
         raise ContextError("Git ignore probe failed") from error
+    if result.returncode == 128 and not inside_git_checkout(project):
+        return set()
     if result.returncode not in (0, 1):
         raise ContextError(
             f"Git ignore probe failed with exit status {result.returncode}"
@@ -500,8 +616,8 @@ def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
     the extra stat calls `is_file()`/`is_symlink()` would each spend.
     """
     candidates: list[SourceCandidate] = []
-    for layer, kind, pattern in SOURCE_PATTERNS:
-        for path in sorted(repository.glob(pattern)):
+    for layer, kind, pattern, base in source_scan_plan(repository):
+        for path in sorted(base.glob(pattern)):
             try:
                 status = os.lstat(path)
             except OSError:
@@ -513,12 +629,58 @@ def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
                     layer,
                     kind,
                     path,
-                    path.relative_to(repository).as_posix(),
+                    workspace_roots.key_for(repository, base, path),
                     (status.st_mtime_ns, status.st_size),
                     pattern,
                 )
             )
     return candidates
+
+
+SKILL_TREE_DIRECTORIES = (".agents", ".claude", ".cursor", ".codex")
+
+
+def skill_key_parts(key: str) -> tuple[str, str]:
+    """A skill document's tool directory and its path inside that skills tree.
+
+    `.claude/skills/review/SKILL.md` gives `(".claude", "review/SKILL.md")`.
+    An attached tooling key is an absolute path, so the tree is found by its
+    last occurrence rather than by the first path segment.
+    """
+    found = ("", key)
+    best = -1
+    for directory in SKILL_TREE_DIRECTORIES:
+        marker = f"{directory}/skills/"
+        position = key.rfind("/" + marker)
+        start = position + 1 if position >= 0 else (0 if key.startswith(marker) else -1)
+        if start > best:
+            best = start
+            found = (directory, key[start + len(marker):])
+    return found
+
+
+def source_scan_plan(repository: Path) -> list[tuple[str, str, str, Path]]:
+    """Each source pattern with the root it is read from.
+
+    Installed, every root is the repository and the plan is SOURCE_PATTERNS
+    as written. Attached, policy and skills come from the accelerator clone
+    and also from the project (its own AGENTS.md or skills, if any), durable
+    memory from the state directory, and every other document from the
+    project, because the accelerator's own README, specs and changelog
+    describe the accelerator rather than the work.
+    """
+    layout = workspace_roots.roots(repository)
+    plan: list[tuple[str, str, str, Path]] = []
+    for layer, kind, pattern in SOURCE_PATTERNS:
+        if kind == "memory":
+            bases = (layout.state,)
+        elif layer == "procedural":
+            bases = (layout.tooling, layout.project)
+        else:
+            bases = (layout.project,)
+        for base in dict.fromkeys(bases):
+            plan.append((layer, kind, pattern, base))
+    return plan
 
 
 def _cache_entry_is_current(
@@ -549,9 +711,13 @@ def discover_documents(
     repository: Path,
     reusable: Optional[SourceState] = None,
     candidates: Optional[list[SourceCandidate]] = None,
-) -> tuple[list[DocumentRow], SourceState, SourceState, list[dict[str, str]]]:
-    """Return changed documents, the retained cache subset, the new cache, and
-    every candidate dropped along the way with the reason it was dropped.
+) -> tuple[
+    list[DocumentRow], SourceState, SourceState, list[dict[str, str]], dict[str, tuple[str, int]]
+]:
+    """Return changed documents, the retained cache subset, the new cache,
+    every candidate dropped along the way with the reason it was dropped, and
+    the documents indexed with masked values: path -> (digest of the file as
+    read, values masked).
 
     ``reusable`` maps already-indexed paths to the (mtime_ns, size, boundary)
     recorded by the last successful index. A candidate whose stat still matches
@@ -576,6 +742,7 @@ def discover_documents(
     retained: SourceState = {}
     state: SourceState = {}
     excluded: list[dict[str, str]] = []
+    masked: dict[str, tuple[str, int]] = {}
     skill_keys: set[str] = set()
     claimed: set[str] = set()
     if candidates is None:
@@ -598,19 +765,17 @@ def discover_documents(
             # the metadata primary key aborts the whole refresh.
             continue
         claimed.add(relative_path)
-        skill_key = (
-            relative_path.split("/skills/", maxsplit=1)[1] if kind == "skill" else None
-        )
+        skill_key = skill_key_parts(relative_path)[1] if kind == "skill" else None
         if skill_key is not None and skill_key in skill_keys:
-            # A mirrored copy of an already-indexed skill. Only a copy that
-            # passes validation claims the key, so a later copy can never win
-            # it and never needs to be read or scanned.
+            # A mirrored copy of an already-indexed skill. Only an indexed copy
+            # claims the key, so a later copy can never win it and never needs
+            # to be read or scanned.
             continue
         cached = cache.get(relative_path)
         if cached is not None and _cache_entry_is_current(kind, cached, current):
             # Unchanged since the last successful index and still inside its
-            # calendar boundary, so it already passed secret and
-            # active-memory validation; keep the existing row.
+            # calendar boundary, so it was already masked, or validated if it
+            # is memory; keep the existing row.
             if skill_key is not None:
                 skill_keys.add(skill_key)
             retained[relative_path] = cached
@@ -619,23 +784,43 @@ def discover_documents(
         boundary: Optional[str] = None
         try:
             if kind == "memory":
+                # A chunk with a likely secret stays out whole: it is shared
+                # knowledge the team wrote, not a file the project ships.
                 metadata, reason, boundary = memory_eligibility(path, repository)
                 if metadata is None:
                     excluded.append(
                         {"path": relative_path, "reason": reason or "invalid"}
                     )
                     continue
+                content = path.read_text(encoding="utf-8")
             else:
+                # Masked, not dropped: one placeholder-shaped development
+                # credential in a code block used to take a whole README - the
+                # only useful document of seven graded prompts - out of the
+                # index. The value never reaches the index; the rest does.
                 try:
-                    validate_secret_patterns(path)
+                    raw = path.read_text(encoding="utf-8")
+                    content, values = mask_secrets(raw)
                 except (OSError, ValidationError):
                     excluded.append({"path": relative_path, "reason": "secret"})
                     continue
-            content = path.read_text(encoding="utf-8")
+                if values:
+                    masked[relative_path] = (_content_hash(raw), values)
         except UnicodeDecodeError as error:
             raise ContextError(
                 f"Source document is not valid UTF-8: {relative_path}"
             ) from error
+        # Portable snapshots may contain an explicitly exported conversation.
+        # Only context-load may return them: general retrieval must never ingest
+        # their historical instructions, even after a snapshot is renamed.
+        if content.startswith("---\n"):
+            try:
+                snapshot = json.loads(content[4:].split("\n---\n", 1)[0])
+            except (ValueError, json.JSONDecodeError):
+                snapshot = None
+            if isinstance(snapshot, dict) and snapshot.get("type") == "context-handoff":
+                excluded.append({"path": relative_path, "reason": "explicit-context-only"})
+                continue
         if skill_key is not None:
             skill_keys.add(skill_key)
         documents.append(
@@ -665,7 +850,15 @@ def discover_documents(
             excluded.append(
                 {"path": pattern, "reason": "pattern-all-git-ignored"}
             )
-    return documents, retained, state, excluded
+    return documents, retained, state, excluded, masked
+
+
+def _report_masked(result: dict[str, object], masked: dict[str, tuple[str, int]]) -> None:
+    """Which documents read on this pass were indexed with masked values, and
+    how many: never a value, never its label."""
+    result["redacted"] = [
+        {"path": path, "values": values} for path, (_, values) in sorted(masked.items())
+    ]
 
 
 def _merge_excluded(result: dict[str, object], dropped: list[dict[str, str]]) -> None:
@@ -704,7 +897,7 @@ def index_repository(
     # The candidate walk already statted every mirrored skill file, so the
     # skill-tree fingerprint is derived from it instead of a second tree walk.
     skill_stats = [
-        (relative.split("/", 1)[0], relative.split("/skills/", 1)[1], mtime_ns, size)
+        (*skill_key_parts(relative), mtime_ns, size)
         for _, kind, _, relative, (mtime_ns, size), _ in candidates
         if kind == "skill"
     ]
@@ -713,7 +906,7 @@ def index_repository(
         reusable, fingerprints = reusable_source_state(
             connection, repository, fingerprints
         )
-        documents, retained, state, dropped = discover_documents(
+        documents, retained, state, dropped, masked = discover_documents(
             repository, reusable, candidates=candidates
         )
         scan_seconds += time.monotonic() - phase_started
@@ -726,18 +919,20 @@ def index_repository(
                 retained=retained,
                 source_state=state,
                 fingerprints=fingerprints,
+                source_hashes={path: digest for path, (digest, _) in masked.items()},
             )
         except RetrievalError:
             # The cache disagreed with the index; fall through and rebuild.
             phase_started = time.monotonic()
         else:
             _merge_excluded(result, dropped)
+            _report_masked(result, masked)
             result["phase_seconds"] = {
                 "stat": round(scan_seconds, 6),
                 "index": round(time.monotonic() - index_started, 6),
             }
             return result
-    documents, _, state, dropped = discover_documents(
+    documents, _, state, dropped, masked = discover_documents(
         repository, candidates=candidates
     )
     scan_seconds += time.monotonic() - phase_started
@@ -745,8 +940,10 @@ def index_repository(
     result = index_documents(
         connection, repository, documents, source_state=state,
         fingerprints=fingerprints,
+        source_hashes={path: digest for path, (digest, _) in masked.items()},
     )
     _merge_excluded(result, dropped)
+    _report_masked(result, masked)
     result["phase_seconds"] = {
         "stat": round(scan_seconds, 6),
         "index": round(time.monotonic() - index_started, 6),
@@ -769,6 +966,7 @@ def search_documents(
     limit: int,
     layer: Optional[str] = None,
     relevant_only: bool = False,
+    strong_only: bool = False,
 ) -> list[dict[str, object]]:
     """Search the index.
 
@@ -783,10 +981,16 @@ def search_documents(
     capsule says so the two are indistinguishable inside a turn.
     """
     coverage: dict[str, int] = {}
-    distinctive: set[str] = set()
+    distinctive: dict[str, list[str]] = {}
     minimum = 0
     if relevant_only:
         tokens = informative_tokens(connection, query_tokens(query))
+        # Broad skill discovery keeps its routing contract; automatic capsules
+        # use strong_only and must ignore acknowledgements/intent-only terms.
+        if layer != "procedural" or strong_only:
+            tokens = evidence_tokens(tokens)
+        if not tokens:
+            return []
         coverage, distinctive = token_coverage(connection, tokens)
         minimum = required_coverage(tokens)
         match_expression = " OR ".join(f'"{token}"' for token in tokens)
@@ -798,6 +1002,7 @@ def search_documents(
         conditions.append("layer = ?")
         parameters.append(layer)
     parameters.append(limit if not relevant_only else limit * 10)
+    markers = ("", "") if relevant_only else ("[", "]")
     rows = connection.execute(
         f"""
         SELECT
@@ -805,18 +1010,20 @@ def search_documents(
             layer,
             kind,
             title,
-            snippet(documents, 5, '[', ']', ' … ', 18) AS snippet
+            snippet(documents, 5, ?, ?, ' … ', 18) AS snippet
         FROM documents
         WHERE {' AND '.join(conditions)}
         ORDER BY bm25(documents), path
         LIMIT ?
         """,
-        parameters,
+        (*markers, *parameters),
     ).fetchall()
     selected = [
         row
         for row in rows
-        if is_relevant(row["path"], coverage, distinctive, minimum)
+        if is_relevant(row["path"], coverage, distinctive, minimum, str(row["title"] or ""),
+                       anchored=row["layer"] != "procedural")
+        and not (strong_only and coverage.get(row["path"], 0) < minimum)
     ] if relevant_only else rows
     items = [dict(row) for row in selected[:limit]]
     if relevant_only:
@@ -832,6 +1039,8 @@ def search_episodes(
     query: str,
     limit: int,
 ) -> list[dict[str, object]]:
+    if not evidence_tokens(query_tokens(query)):
+        return []
     rows = connection.execute(
         """
         SELECT
@@ -849,19 +1058,7 @@ def search_episodes(
         """,
         (fts_query(query), limit),
     ).fetchall()
-    return [
-        {
-            "id": row["id"],
-            "layer": "episodic",
-            "summary": row["summary"],
-            "outcome": row["outcome"],
-            "files": json.loads(row["files"]),
-            "verification": json.loads(row["verification"]),
-            "sources": json.loads(row["sources"]),
-            "created_at": row["created_at"],
-        }
-        for row in rows
-    ]
+    return [episode_item(row) for row in rows]
 
 
 def build_capsule_query(
@@ -957,6 +1154,14 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
     return " ".join(token for _, token, _ in kept)
 
 
+def sanitize_automatic_query(text: str) -> str:
+    """The prompt an automatic path searches with (`automatic_query`)."""
+    try:
+        return _sanitize_automatic_query(text)
+    except ValidationError as error:
+        raise ContextError(str(error)) from error
+
+
 def reject_capsule_privacy(
     label: str,
     prose: list[str],
@@ -974,11 +1179,24 @@ def reject_capsule_privacy(
 
 
 def validate_direct_query_request(arguments: argparse.Namespace) -> None:
-    """Reject unsafe direct queries before opening or mutating local state."""
+    """Reject unsafe direct queries before opening or mutating local state.
+
+    A query a person typed is refused whole, so they see what was wrong. The
+    automatic paths pass `refresh --sanitize`, and their prompt is cleaned
+    instead (`sanitize_automatic_query`); what remains is held to the same
+    checks. A prompt with nothing left to search is withheld, not replaced
+    by the task goal or the branch name.
+    """
     if arguments.command in {"context", "retrieve"}:
         query = arguments.query
     elif arguments.command == "refresh":
         query = arguments.query
+        if query is not None and getattr(arguments, "sanitize", False):
+            query = arguments.query = sanitize_automatic_query(query)
+            if not query.strip():
+                arguments.query = None
+                arguments.query_withheld = True
+                return
     else:
         return
     if query is None:
@@ -1039,7 +1257,9 @@ def project_working_task(
     omitted["working_files"] = max(
         0, len(files) - CAPSULE_WORKING_FILE_LIMIT
     )
-    omitted["working_next_steps"] = max(0, len(normalized_steps) - 1)
+    omitted["working_next_steps"] = max(
+        0, len(normalized_steps) - CAPSULE_WORKING_NEXT_STEP_LIMIT
+    )
     omitted["working_sources"] = max(
         0, len(sources) - CAPSULE_WORKING_SOURCE_LIMIT
     )
@@ -1047,8 +1267,9 @@ def project_working_task(
         "task_id": validate_task_id(task_id),
         "goal": " ".join(goal.split()),
         "progress": " ".join(displayed.split()),
-        "next_steps": normalized_steps[-1:],
-        "files": files[:CAPSULE_WORKING_FILE_LIMIT],
+        "next_steps": normalized_steps[-CAPSULE_WORKING_NEXT_STEP_LIMIT:],
+        # Newest last, so the tail is the work in hand.
+        "files": files[-CAPSULE_WORKING_FILE_LIMIT:],
         "sources": sources[:CAPSULE_WORKING_SOURCE_LIMIT],
     }, omitted
 
@@ -1110,6 +1331,7 @@ def deduplicate_capsule_layers(capsule: dict[str, object]) -> None:
 
 def build_context_packet(
     connection: sqlite3.Connection,
+    repository: Path,
     query: str,
     task_id: Optional[str],
     limit: int,
@@ -1141,16 +1363,16 @@ def build_context_packet(
         "warnings": capsule_warnings,
         "omitted": omitted,
     }
-    if not include_retrieval:
+    if not include_retrieval or not evidence_tokens(query_tokens(request_query)):
         return packet
 
     retrieval_query = build_capsule_query(request_query, working)
     procedural_limit = min(limit, CAPSULE_LAYER_LIMITS["procedural"])
     semantic_limit = min(limit, CAPSULE_LAYER_LIMITS["semantic"])
-    episodic_limit = min(limit, CAPSULE_LAYER_LIMITS["episodic"])
+    episodic_limit = min(limit, CAPSULE_EPISODIC_LIMIT)  # lightweight: no history search
     procedural = search_documents(
         connection, request_query, procedural_limit, "procedural",
-        relevant_only=True,
+        relevant_only=True, strong_only=True,
     )
     semantic = search_documents(
         connection, request_query, semantic_limit, "semantic",
@@ -1164,7 +1386,7 @@ def build_context_packet(
         if len(deduplicate_context_items(procedural)) < procedural_limit:
             procedural += search_documents(
                 connection, retrieval_query, procedural_limit, "procedural",
-                relevant_only=True,
+                relevant_only=True, strong_only=True,
             )
         if len(deduplicate_context_items(semantic)) < semantic_limit:
             semantic += search_documents(
@@ -1188,7 +1410,16 @@ def build_context_packet(
         )
         if not found
     ]
-    packet["procedural"] = deduplicate_context_items(procedural)[:procedural_limit]
+    semantic += source_link_candidates(
+        connection, repository, semantic,
+        {str(item["path"]) for item in semantic},
+    )
+    # The governed capsule's rule: a skill's sub-file vacates the slot rather
+    # than handing it to a weaker skill.
+    # The governed capsule's rule: hosts list their skills and load their
+    # instruction files themselves, so no procedural item is carried. The
+    # search above still runs, for `no_match`.
+    packet["procedural"] = []
     packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
     packet["episodic"] = deduplicate_context_items(episodic)[:episodic_limit]
     return packet
@@ -1202,6 +1433,73 @@ def capsule_character_count(capsule: dict[str, object]) -> int:
     return len(serialize_capsule(capsule))
 
 
+def truncate_progress(progress: str, keep: int) -> str:
+    """Cut a progress narrative to ``keep`` characters from both ends.
+
+    A narrative opens with what the work is bound by and ends with where it
+    now stands. Keeping only the tail preserves the action and discards the
+    reason for it, which is what lets a later turn "optimize" away a decision
+    whose justification the capsule no longer carries.
+    """
+    if keep >= len(progress):
+        return progress
+    head = keep // 2
+    tail = keep - head
+    return f"{progress[:head]}…{progress[-tail:]}"
+
+
+# Capsule sections the budget may remove, in the order a report names them.
+# A capsule that silently lost a constraint reads exactly like a complete
+# one, so these counters have to reach the prompt, not only the JSON. The
+# goal and next-step counts exist only in the rendered text, which bounds
+# lines the JSON carries whole.
+COMPACTION_LABELS = (
+    ("procedural", "procedural result(s)"),
+    ("semantic", "semantic result(s)"),
+    ("episodic", "episodic result(s)"),
+    ("working_files", "working file(s)"),
+    ("working_sources", "working source(s)"),
+    ("working_next_steps", "next step(s)"),
+    ("working_goal_characters", "characters of the goal"),
+    ("working_progress_characters", "characters of progress"),
+    ("working_next_step_characters", "characters of next steps"),
+    ("last_turn_characters", "characters of the last-turn report"),
+)
+COMPACTION_ADVICE = (
+    "re-read the cited source before revising a decision it no longer explains"
+)
+# What the compaction line keeps when the rendered ceiling has no room for its
+# counts. It is never dropped: the line used to yield whole, so a capsule cut
+# at the ceiling - exactly when the cut is tightest - read as a complete one.
+COMPACTION_MARKER = f"compaction: lossy view — {COMPACTION_ADVICE}"
+
+
+def compaction_summary(
+    capsule: dict[str, object], rendered: Optional[dict[str, int]] = None
+) -> Optional[str]:
+    """Name what this capsule no longer shows, or None when it shows all.
+
+    ``rendered`` is what the rendered text cuts besides: the JSON carries a
+    working state the text bounds again, and the text is what a host hands to
+    the model. Each count is added to the capsule's own ``omitted`` count, so
+    a task's files are reported once - as all the ones the text leaves out.
+    """
+    counts: dict[str, int] = {}
+    omitted = capsule.get("omitted")
+    for source in (omitted if isinstance(omitted, dict) else {}, rendered or {}):
+        for key, value in source.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                counts[key] = counts.get(key, 0) + value
+    parts = [
+        f"{counts[key]} {label}"
+        for key, label in COMPACTION_LABELS
+        if counts.get(key, 0) > 0
+    ]
+    if not parts:
+        return None
+    return ", ".join(parts)
+
+
 def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
     compacted = json.loads(serialize_capsule(capsule))
     omitted = compacted["omitted"]
@@ -1211,6 +1509,8 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
         "working_sources",
         "working_progress_characters",
         "last_turn_characters",
+        "semantic",
+        "episodic",
     ):
         omitted.setdefault(key, 0)
     working = compacted["working"]
@@ -1225,16 +1525,19 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
             continue
         if compacted["episodic"]:
             compacted["episodic"].pop()
+            omitted["episodic"] += 1
             continue
         if compacted["semantic"]:
             compacted["semantic"].pop()
+            omitted["semantic"] += 1
             continue
         if working is not None and len(working["sources"]) > 1:
             working["sources"].pop()
             omitted["working_sources"] += 1
             continue
         if working is not None and len(working["files"]) > 1:
-            working["files"].pop()
+            # Oldest first: the newest file is the work in hand.
+            working["files"].pop(0)
             omitted["working_files"] += 1
             continue
         if working is not None and working["progress"]:
@@ -1248,7 +1551,7 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
             omitted["working_progress_characters"] += (
                 len(working["progress"]) - keep
             )
-            working["progress"] = f"…{working['progress'][-keep:]}"
+            working["progress"] = truncate_progress(working["progress"], keep)
             continue
         raise ContextError(
             "mandatory Task Capsule content exceeds "
@@ -1258,10 +1561,34 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
     return compacted
 
 
+def synchronize_capsule_views(capsule: dict[str, object]) -> None:
+    """Hold `selected` and `categories` to the documents the layers carry."""
+    selected_paths = {
+        item["path"]
+        for layer in DOCUMENT_LAYERS
+        for item in capsule.get(layer) or []
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    capsule["selected"] = [
+        item
+        for item in capsule.get("selected", [])
+        if isinstance(item, dict) and item.get("path") in selected_paths
+    ]
+    categories = capsule.get("categories")
+    if isinstance(categories, dict):
+        for category, items in categories.items():
+            categories[category] = [
+                item
+                for item in items
+                if isinstance(item, dict) and item.get("path") in selected_paths
+            ]
+
+
 def enforce_governed_capsule_contract(
     capsule: dict[str, object],
 ) -> dict[str, object]:
-    """Apply the shared 2/3/1 and 8,000-character contract to governed output."""
+    """Apply the shared layer limits and 8,000-character contract to governed
+    output: no procedural item reaches it (see retrieve), 3 semantic, 2 episodic."""
     compacted = json.loads(serialize_capsule(capsule))
     compacted["procedural"] = compacted.get("procedural", [])[
         :CAPSULE_LAYER_LIMITS["procedural"]
@@ -1272,52 +1599,56 @@ def enforce_governed_capsule_contract(
     compacted["episodic"] = compacted.get("episodic", [])[
         :CAPSULE_LAYER_LIMITS["episodic"]
     ]
-    compacted["omitted"] = {
-        "procedural": max(
-            0,
-            len(capsule.get("procedural", []))
-            - CAPSULE_LAYER_LIMITS["procedural"],
-        ),
-        "semantic": max(
-            0,
-            len(capsule.get("semantic", [])) - CAPSULE_LAYER_LIMITS["semantic"],
-        ),
-        "episodic": max(
-            0,
-            len(capsule.get("episodic", [])) - CAPSULE_LAYER_LIMITS["episodic"],
-        ),
-    }
+    # Merge rather than replace: the working-state counters were computed
+    # when the task was projected, and a governed capsule drops working
+    # content of its own below. Losing them here would report a partial
+    # capsule as a complete one.
+    omitted = dict(compacted.get("omitted") or {})
+    omitted.update(
+        {
+            "procedural": max(
+                0,
+                len(capsule.get("procedural", []))
+                - CAPSULE_LAYER_LIMITS["procedural"],
+            ),
+            "semantic": max(
+                0,
+                len(capsule.get("semantic", []))
+                - CAPSULE_LAYER_LIMITS["semantic"],
+            ),
+            "episodic": max(
+                0,
+                len(capsule.get("episodic", []))
+                - CAPSULE_LAYER_LIMITS["episodic"],
+            ),
+        }
+    )
+    for key in ("working_progress_characters", "last_turn_characters"):
+        omitted.setdefault(key, 0)
+    compacted["omitted"] = omitted
 
     working = compacted.get("working")
     if isinstance(working, dict):
-        working["next_steps"] = list(working.get("next_steps", []))[-1:]
-        working["files"] = list(working.get("files", []))[
-            :CAPSULE_WORKING_FILE_LIMIT
-        ]
-        working["sources"] = list(working.get("sources", []))[
-            :CAPSULE_WORKING_SOURCE_LIMIT
-        ]
-
-    def synchronize_views() -> None:
-        selected_paths = {
-            item["path"]
-            for layer in DOCUMENT_LAYERS
-            for item in compacted[layer]
-            if isinstance(item, dict) and isinstance(item.get("path"), str)
-        }
-        compacted["selected"] = [
-            item
-            for item in compacted.get("selected", [])
-            if isinstance(item, dict) and item.get("path") in selected_paths
-        ]
-        categories = compacted.get("categories")
-        if isinstance(categories, dict):
-            for category, items in categories.items():
-                categories[category] = [
-                    item
-                    for item in items
-                    if isinstance(item, dict) and item.get("path") in selected_paths
-                ]
+        next_steps = list(working.get("next_steps", []))
+        files = list(working.get("files", []))
+        sources = list(working.get("sources", []))
+        working["next_steps"] = next_steps[-CAPSULE_WORKING_NEXT_STEP_LIMIT:]
+        # A task's files are kept newest last; the head of the list is the
+        # first thing the branch ever touched, not the work in hand.
+        working["files"] = files[-CAPSULE_WORKING_FILE_LIMIT:]
+        working["sources"] = sources[:CAPSULE_WORKING_SOURCE_LIMIT]
+        # `omitted` is the same object stored above, so these land in the
+        # capsule: the projection limits hide governed working state exactly
+        # as the lightweight projection does, and hiding it unreported is
+        # what makes a partial view read as the whole task. Added to rather
+        # than replaced: a working state that arrives already projected
+        # carries its own counts and is within the limits here.
+        for key, before, after in (
+            ("working_next_steps", next_steps, working["next_steps"]),
+            ("working_files", files, working["files"]),
+            ("working_sources", sources, working["sources"]),
+        ):
+            omitted[key] = int(omitted.get(key) or 0) + len(before) - len(after)
 
     # Snippets are discovery aids. Bounding each rendered copy leaves the full
     # source and its hash in the auditable manifest while avoiding duplicated
@@ -1336,18 +1667,27 @@ def enforce_governed_capsule_contract(
         for item in collection:
             if isinstance(item, dict) and isinstance(item.get("snippet"), str):
                 item["snippet"] = item["snippet"][:320]
-    synchronize_views()
+    synchronize_capsule_views(compacted)
 
     while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
         if compacted.get("last_turn"):
+            omitted["last_turn_characters"] += len(compacted["last_turn"])
             compacted["last_turn"] = None
+            continue
+        related = _related_positions(compacted["semantic"])
+        if related:
+            # Related knowledge fills capacity left after direct matches, so it
+            # is the first to give it back - before history the query found.
+            compacted["semantic"].pop(related[-1])
+            compacted["omitted"]["semantic"] += 1
+            synchronize_capsule_views(compacted)
             continue
         dropped = False
         for layer in ("episodic", "semantic", "procedural"):
             if compacted[layer]:
                 compacted[layer].pop()
                 compacted["omitted"][layer] += 1
-                synchronize_views()
+                synchronize_capsule_views(compacted)
                 dropped = True
                 break
         if dropped:
@@ -1356,13 +1696,27 @@ def enforce_governed_capsule_contract(
             excess = capsule_character_count(compacted) - CAPSULE_CHARACTER_LIMIT
             keep = max(0, len(working["progress"]) - excess - 1)
             if keep:
-                working["progress"] = f"…{working['progress'][-keep:]}"
+                omitted["working_progress_characters"] += (
+                    len(working["progress"]) - keep
+                )
+                working["progress"] = truncate_progress(working["progress"], keep)
                 continue
         raise ContextError(
             "mandatory Task Capsule content exceeds "
             f"{CAPSULE_CHARACTER_LIMIT} characters"
         )
     return compacted
+
+
+RELATED_SELECTIONS = ("source-link", *AUTOMATIC_LINK_SELECTIONS)
+
+
+def _related_positions(items: object) -> list[int]:
+    """Positions of items a relation brought in rather than the query."""
+    return [
+        index for index, item in enumerate(items if isinstance(items, list) else [])
+        if isinstance(item, dict) and item.get("selection") in RELATED_SELECTIONS
+    ]
 
 
 def validate_task_id(task_id: str) -> str:
@@ -1389,6 +1743,18 @@ def validate_paths(label: str, values: list[str]) -> list[str]:
 
 def merge_unique(existing: list[str], additions: list[str]) -> list[str]:
     return list(dict.fromkeys((*existing, *additions)))
+
+
+def merge_recent(existing: list[str], additions: list[str]) -> list[str]:
+    """Merge with re-touched values moved to the end, so the tail is newest.
+
+    The capsule projects a task's newest files. Under `merge_unique` a file
+    edited all along kept the position of its first touch, so the file being
+    worked on now fell out of the projection while long-finished ones stayed.
+    """
+    added = list(dict.fromkeys(additions))
+    seen = set(added)
+    return [value for value in existing if value not in seen] + added
 
 
 def reject_secrets(record_type: str, values: list[str]) -> None:
@@ -1586,20 +1952,22 @@ def update_working_task(
     sources: list[str],
     *,
     auto_checkpoint: Optional[str] = None,
+    replace_next_steps: bool = False,
 ) -> dict[str, object]:
     """Merge an update into the lightweight working task.
 
     ``progress`` is the operator's narrative; ``auto_checkpoint`` is the
     automated turn flush's own field, replaced wholesale on every flush. They
     are separate parameters so automation can checkpoint without ever
-    overwriting what the operator wrote.
+    overwriting what the operator wrote. ``replace_next_steps`` makes
+    ``next_steps`` the whole list, so a step that is done can leave it.
     """
     task_id = validate_task_id(task_id)
     next_steps = normalize_values("Working task next step", next_steps)
     files = validate_paths("Working task file", files)
     sources = normalize_values("Working task source", sources)
     if progress is None and auto_checkpoint is None and not (
-        next_steps or files or sources
+        next_steps or files or sources or replace_next_steps
     ):
         raise ContextError("Working task update requires a changed field")
     if progress is not None:
@@ -1646,10 +2014,12 @@ def update_working_task(
                     else auto_checkpoint
                 ),
                 json.dumps(
-                    merge_unique(json.loads(row["next_steps"]), next_steps),
+                    next_steps
+                    if replace_next_steps
+                    else merge_unique(json.loads(row["next_steps"]), next_steps),
                     ensure_ascii=False,
                 ),
-                json.dumps(merge_unique(json.loads(row["files"]), files), ensure_ascii=False),
+                json.dumps(merge_recent(json.loads(row["files"]), files), ensure_ascii=False),
                 json.dumps(
                     merge_unique(json.loads(row["sources"]), sources), ensure_ascii=False
                 ),
@@ -1849,7 +2219,7 @@ def codebase_map_status(
         return []
     status: list[dict[str, object]] = []
     for row in rows:
-        path = repository / row["path"]
+        path = workspace_roots.resolve(repository, row["path"])
         try:
             content = path.read_text(encoding="utf-8")
         except OSError:
@@ -2002,6 +2372,12 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
     error = report.get("error")
     if isinstance(error, str) and error:
         parts.append(f"turn failed: {error}")
+    if count("discarded_turns"):
+        parts.append(
+            f"this branch's task is closed: {count('discarded_turns')} turn(s) "
+            "after its completion were not recorded; start a new task to keep "
+            "further work"
+        )
     for label, key in (
         ("promotion blocked", "promotion_blocked"),
         ("promotion failed", "promotion_failed"),
@@ -2081,8 +2457,21 @@ def assemble_capsule(
     paths: Optional[list[str]] = None,
     host: str = "cli",
     entry_point: str = "retrieve",
+    allow_unprovisioned: bool = False,
+    session_id: Optional[str] = None,
+    transcript: Optional[str] = None,
+    render: bool = False,
+    prompt: Optional[str] = None,
+    automatic_links: bool = False,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
+
+    ``prompt`` is the whole request ``query`` was distilled from; recorded
+    history is searched with all of it (see history_query).
+
+    ``automatic_links`` seeds the file-edge channel - paths ``prompt`` names
+    and files this branch touched on its last turns - for automatic entry
+    points (refresh, hook-context); explicit retrieval stays deterministic.
 
     ``refresh_index`` exists so a caller that already refreshed does not index
     twice; retrieval reads the index rather than the sources, so the refresh
@@ -2092,6 +2481,16 @@ def assemble_capsule(
     knows - where the query came from, and what the index phases cost - and
     are recorded in the governed manifest. A caller that refreshed elsewhere
     passes its own timings; one that refreshes here has them measured for it.
+
+    ``allow_unprovisioned`` lets the prompt-time refresh retrieve for a branch
+    whose governed task does not exist yet - every read-only session, and the
+    first turns of every branch until the checkpoint provisions it. The
+    capsule then carries the retrieval layers with no working state, instead
+    of nothing but a warning.
+
+    ``render`` says the caller delivers the rendered text rather than the
+    JSON: a governed capsule then keeps only the items that text shows, and
+    retrieval records only those as delivered (see shown_in_render).
     """
     warnings: list[str] = []
     if refresh_index:
@@ -2107,6 +2506,7 @@ def assemble_capsule(
     if mode == "lightweight":
         result = build_context_packet(
             connection,
+            repository,
             query,
             task_id,
             limit,
@@ -2122,16 +2522,50 @@ def assemble_capsule(
     # guards build_context_packet would have applied.
     reject_secrets("Task Capsule", [query])
     reject_capsule_privacy("Task Capsule request", [query])
-    binding = governed_binding(connection, task_id)
+    if prompt is not None:
+        reject_secrets("Task Capsule", [prompt])
+        reject_capsule_privacy("Task Capsule request", [prompt])
+    try:
+        binding = governed_binding(connection, task_id)
+    except ContextError as error:
+        if not allow_unprovisioned or "Working task not found" not in str(error):
+            raise
+        binding = None
     request_query = build_capsule_query(query, None)
-    local_episodes = search_episodes(
-        connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
-    )
-    result = retrieve(
+    seeds: Optional[dict[str, list[str]]] = None
+    if automatic_links:
+        seeds = {"prompt": [], "touched": recent_touched_paths(connection, task_id)}
+        if prompt:
+            try:
+                seeds["prompt"] = prompt_path_seeds(connection, repository, prompt)
+            except (OSError, ValueError, sqlite3.Error):
+                # Seeds add one item at most; they never cost the capsule.
+                seeds["prompt"] = []
+
+    def pack(result: dict[str, object]) -> dict[str, object]:
+        # Inside retrieve(), before it records anything: what the delivered
+        # capsule leaves out is not recorded as handed.
+        deduplicate_capsule_layers(result)
+        result["query_source"] = query_source
+        # The print tail dereferences result["warnings"]; retrieve() has no such key.
+        result["warnings"] = warnings
+        result["last_turn"] = last_turn
+        if binding is None:
+            # Rendered as "working: not recorded yet" plus how far the first
+            # checkpoint is, by the same fields the Cursor warming capsule uses.
+            result["kind"] = "warming"
+            result["task_id"] = task_id
+            result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
+        capsule = enforce_governed_capsule_contract(result)
+        if render:
+            shown_in_render(connection, capsule)
+        return capsule
+
+    return retrieve(
         connection,
         repository,
         request_query,
-        binding["task_uuid"],
+        binding["task_uuid"] if binding is not None else None,
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
         query_source=query_source,
@@ -2140,14 +2574,12 @@ def assemble_capsule(
         paths=paths,
         host=host,
         entry_point=entry_point,
-        local_episodes=local_episodes,
+        history_text=prompt if prompt is not None else query,
+        automatic_seeds=seeds,
+        session_id=session_id,
+        transcript=transcript,
+        pack=pack,
     )
-    deduplicate_capsule_layers(result)
-    result["query_source"] = query_source
-    # The print tail dereferences result["warnings"]; retrieve() has no such key.
-    result["warnings"] = warnings
-    result["last_turn"] = last_turn
-    return enforce_governed_capsule_contract(result)
 
 
 def hook_capsule_query(
@@ -2155,9 +2587,9 @@ def hook_capsule_query(
 ) -> tuple[str, str]:
     """The query the hook should ask with, and where it came from.
 
-    Cursor has no prompt-submit event, so its only automatic memory entry
-    supplies a task identifier - usually a branch name - and the governed path
-    then tokenized that slug and retrieved on it. A branch called `main` asks
+    A hook without a prompt - Cursor's stop and session-start renders -
+    supplies only a task identifier, usually a branch name, and the governed
+    path then tokenized that slug and retrieved on it. A branch called `main` asks
     memory for documents about the word "main"; `chore/accelerator-hardening`
     asks for a release skill. The enrichment `build_capsule_query` already
     performs for the lightweight path is applied here instead, so the question
@@ -2207,21 +2639,25 @@ def assemble_hook_context(
     task_id: str,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     host: str = "cli",
+    render: bool = False,
 ) -> Optional[dict[str, object]]:
     """Return a governed capsule or a sanitized pre-provision warming capsule."""
     task_id = validate_task_id(task_id)
     reject_capsule_privacy("Task Capsule request", [], [task_id])
     if mode == "lightweight":
-        if find_working_task(connection, task_id) is not None:
+        local_task = find_working_task(connection, task_id)
+        if local_task is not None:
+            working, _ = project_working_task(local_task)
+            query = build_capsule_query("", working) or task_id
             return assemble_capsule(
                 connection,
                 repository,
                 mode=mode,
-                query=task_id,
+                query=query,
                 task_id=task_id,
                 limit=3,
                 ephemeral=True,
-                query_source="task-id",
+                query_source="task",
                 gate_mode=gate_mode,
                 host=host,
                 entry_point="hook-context",
@@ -2247,6 +2683,8 @@ def assemble_hook_context(
                 gate_mode=gate_mode,
                 host=host,
                 entry_point="hook-context",
+                render=render,
+                automatic_links=True,
             )
 
     files, excluded = changed_paths(repository)
@@ -2270,31 +2708,392 @@ def assemble_hook_context(
     }
 
 
-def print_capsule(capsule: dict[str, object]) -> None:
+def _bounded_cut(text: object, limit: int) -> tuple[str, int]:
+    """``text`` on one line within ``limit``, and how many characters it lost."""
+    collapsed = " ".join(str(text or "").split())
+    if len(collapsed) <= limit:
+        return collapsed, 0
+    kept = collapsed[: limit - 1].rstrip()
+    return kept + "…", len(collapsed) - len(kept)
+
+
+def _bounded(text: object, limit: int) -> str:
+    return _bounded_cut(text, limit)[0]
+
+
+def _whole_paths(label: str, paths: list[str]) -> list[str]:
+    """The leading ``paths`` that fit one rendered line after ``label``.
+
+    Whole paths only: a path cut in half names no file. Even the first is
+    omitted if it cannot fit; the caller counts it as omitted.
+    """
+    kept: list[str] = []
+    width = len(label)
+    for path in paths:
+        width += len(path) + (2 if kept else 0)
+        if width > RENDERED_LINE_LIMIT:
+            if kept:
+                break
+            width = len(label)
+            continue
+        kept.append(path)
+    return kept
+
+
+def working_state_lines(capsule: dict[str, object]) -> list[str]:
+    """The task's state as the rendered capsule shows it, under `working:`."""
+    return rendered_working_state(capsule)[0]
+
+
+def rendered_working_state(
+    capsule: dict[str, object],
+) -> tuple[list[str], dict[str, int]]:
+    """The task's state as the rendered capsule shows it, and what it cuts.
+
+    The JSON capsule always carried progress, next steps and files, but the
+    rendered capsule - the only form Claude Code, Codex and Cursor read -
+    printed the goal alone. "Continue where we left off" then retrieved skill
+    pointers and never the place the work stopped. Every line is bounded and
+    left out when empty, because the rendered capsule repeats on every turn.
+
+    The bounds cut what the JSON holds whole, so the cuts are returned in
+    `omitted` terms for the compaction line: a narrative cut here and never
+    counted read as the task's complete state. Progress keeps both ends, as
+    `truncate_progress` does for the JSON budget - the constraint opens it and
+    where the work now stands closes it.
+    """
+    working = capsule.get("working")
+    if not isinstance(working, dict):
+        return [], {}
+    cuts = {
+        "working_progress_characters": 0,
+        "working_next_step_characters": 0,
+        "working_files": 0,
+        "working_sources": 0,
+    }
+    lines: list[str] = []
+    if working.get("phase"):
+        lines.append(f"phase: {working['phase']}")
+    progress = " ".join(str(working.get("progress") or "").split())
+    if len(progress) > RENDERED_PROGRESS_LIMIT:
+        keep = RENDERED_PROGRESS_LIMIT - 1
+        cuts["working_progress_characters"] = len(progress) - keep
+        progress = truncate_progress(progress, keep)
+    if progress:
+        lines.append(f"progress: {progress}")
+    for step in working.get("next_steps") or []:
+        text, lost = _bounded_cut(step, RENDERED_PROGRESS_LIMIT // 2)
+        cuts["working_next_step_characters"] += lost
+        lines.append(f"next: {text}")
+    files = [str(path) for path in working.get("files") or []]
+    if files:
+        # Newest last in the task, so the tail is the work in hand: the
+        # newest that fit, shown in the task's order.
+        recent = _whole_paths(
+            "recent files: ", files[-RENDERED_FILE_LIMIT:][::-1]
+        )[::-1]
+        cuts["working_files"] = len(files) - len(recent)
+        lines.append("recent files: " + ", ".join(recent))
+    sources = [str(path) for path in working.get("sources") or []]
+    if sources:
+        # The task's own citations, first first as the budget keeps them:
+        # the source a compaction line says to re-read.
+        cited = _whole_paths("sources: ", sources)
+        cuts["working_sources"] = len(sources) - len(cited)
+        lines.append("sources: " + ", ".join(cited))
+    record = capsule.get("task_record")
+    if isinstance(record, str) and record:
+        lines.append(f"task record: {record}")
+    return lines, cuts
+
+
+class Excerpt(str):
+    """An excerpt's text, carrying the heading of the section it quotes."""
+
+    heading = ""
+
+
+def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> str:
+    """The part of a document that answers the query, bounded to `limit`.
+
+    A pointer - path and title - carried the answer in 0 of 49 measured
+    questions, and agents opened 0 of 148 skill pointers they were handed: a
+    pointer is only worth something if it is followed, and it was not. The
+    section sharing the most query terms is what gets delivered, the stretch
+    of it where the terms are; a document with no matching section gives its
+    opening prose instead. The capsule marks matches with the index's own
+    tokenizer (capsule_excerpts); this form marks the given words as written.
+    """
+    pattern = (
+        re.compile(
+            r"\b(" + "|".join(re.escape(term) for term in sorted(terms, key=len, reverse=True)) + r")\b",
+            re.IGNORECASE,
+        )
+        if terms
+        else None
+    )
+    marked = pattern.sub(lambda m: f"\x02{m.group(0)}\x03", content) if pattern else content
+    section = quoted_section(marked, title)
+    if section is None:
+        return ""
+    text = excerpt_window(section["units"], max(1, limit - len(section["shown"]) - 2) if section["shown"] else limit)
+    return _bounded(f"{section['shown']}: {text}" if section["shown"] else text, limit)
+
+
+def capsule_excerpts(
+    connection: sqlite3.Connection, capsule: dict[str, object]
+) -> dict[str, str]:
+    """Answer-bearing text for the capsule's project knowledge, by path.
+
+    Skills get none: every host loads its skills itself, so a skill line names
+    which one applies and its text is one Skill call away. Weak matches get
+    none: one shared rare word is a reason to mention a document, not to quote
+    it. Each value is an Excerpt whose ``heading`` names the section quoted.
+    """
+    query = str(capsule.get("query") or "")
+    weights = excerpt_weights(connection, query) if query else {}
+    excerpts: dict[str, str] = {}
+    rank = 0
+    for layer in ("semantic", "episodic"):
+        for item in capsule.get(layer) or []:
+            if (
+                layer == "episodic" and isinstance(item, dict)
+                and "path" not in item and item.get("id") is not None
+            ):
+                # A local episode has no document to quote: its outcome is
+                # what it learned. Without it only a 160-character summary
+                # reached the reader.
+                outcome = _bounded(str(item.get("outcome") or ""), EPISODIC_EXCERPT_CHARACTERS)
+                if outcome:
+                    excerpt = Excerpt(outcome)
+                    excerpt.heading = ""
+                    excerpts[f"episode {item['id']}"] = excerpt
+                continue
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                continue
+            if item.get("match") == "distinctive":
+                continue
+            if item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("kind") == "brain-task":
+                # What a sibling task says about the shared file: its goal and
+                # the files it touched, the shared one first. 12 of the 14
+                # answers held by tasks on the evaluation were Files entries.
+                limit = EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
+                rank += 1
+                try:
+                    row = connection.execute(
+                        "SELECT content FROM documents WHERE path = ?", (item["path"],)
+                    ).fetchone()
+                except sqlite3.Error:
+                    row = None
+                text, heading = linked_task_excerpt(
+                    str(row[0]) if row else "", str(item.get("via") or ""), limit
+                )
+                if text:
+                    excerpt = Excerpt(text)
+                    excerpt.heading = heading
+                    excerpts[item["path"]] = excerpt
+                continue
+            limit = (
+                EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
+                if layer == "semantic"
+                else EPISODIC_EXCERPT_CHARACTERS
+            )
+            rank += 1
+            marked = marked_document(connection, item["path"], query) if query else None
+            if marked is None:
+                try:
+                    row = connection.execute(
+                        "SELECT content FROM documents WHERE path = ?", (item["path"],)
+                    ).fetchone()
+                except sqlite3.Error:
+                    row = None
+                marked = str(row[0]) if row is not None else None
+            section = (
+                quoted_section(marked, str(item.get("title") or ""), weights)
+                if marked
+                else None
+            )
+            text = excerpt_window(section["units"], limit, weights) if section else ""
+            if not text and isinstance(item.get("snippet"), str):
+                text = _bounded(item["snippet"].replace("[", "").replace("]", ""), limit)
+            if text:
+                excerpt = Excerpt(text)
+                excerpt.heading = section["shown"] if section else ""
+                excerpts[item["path"]] = excerpt
+    return excerpts
+
+
+_TASK_SECTION = re.compile(r"^## (.+?)\s*$", re.M)
+_TASK_LIST_ITEM = re.compile(r"^- `?([^`\n]+?)`?\s*$")
+
+
+def linked_task_excerpt(content: str, via: str, limit: int) -> tuple[str, str]:
+    """A linked task's goal and its files, the shared one first: (text,
+    heading of the list quoted)."""
+    sections: dict[str, str] = {}
+    matches = list(_TASK_SECTION.finditer(content))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        sections[match.group(1).strip()] = content[match.end():end].strip()
+    goal = next((part.strip() for part in sections.get("Goal", "").split("\n\n") if part.strip()), "")
+    heading = "Sources" if via and via in sections.get("Sources", "") and via not in sections.get("Files", "") else "Files"
+    entries = [
+        found.group(1).strip()
+        for line in sections.get(heading, "").splitlines()
+        if (found := _TASK_LIST_ITEM.match(line.strip()))
+    ]
+    ordered = ([via] if via in entries else []) + [entry for entry in reversed(entries) if entry != via]
+    parts = []
+    if goal:
+        parts.append(f"Goal: {' '.join(goal.split())}.")
+    if ordered:
+        parts.append(f"{heading}: {', '.join(ordered[:6])}")
+    return _bounded(" ".join(parts), limit), heading
+
+
+def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
+    if "path" in item:
+        label, title = _bounded(item["path"], 260), str(item.get("title") or "")
+        if section:
+            # The section the excerpt below quotes: a later question answered
+            # by another section of the document is handed that one too.
+            label += " § " + _bounded(section.replace(" — ", " - "), 80)
+    else:
+        label, title = f"episode {item.get('id')}", str(item.get("summary") or "")
+    marks = []
+    if item.get("match") == "distinctive":
+        # Admitted on one rare term rather than on covering the query: still
+        # worth naming, not worth being read as an answer.
+        marks.append("weak match")
+    if item.get("match") == "conflict":
+        marks.append("conflicts with another item here")
+    if item.get("attestation") == "agent":
+        marks.append("agent-attested, not reviewed by a person")
+    if item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("via"):
+        marks.append(
+            f"linked through {_bounded(str(item['via']), 160)}, "
+            + ("named in the request" if item["selection"] == "prompt-link" else "changed in this task")
+        )
+    changed = item.get("source_changed")
+    if isinstance(changed, list) and changed:
+        # One path and a count: a changed citation keeps records in the
+        # capsule now, and three long paths per item ate the excerpts.
+        more = f" +{len(changed) - 1} more" if len(changed) > 1 else ""
+        marks.append(
+            f"cited file changed: {_bounded(str(changed[0]), 120)}{more}; "
+            "check it before relying on this"
+        )
+    suffix = f" ({'; '.join(marks)})" if marks else ""
+    return f"- {kind} {label} — {_bounded(title, 160)}{suffix}"
+
+
+def render_capsule_lines(
+    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
+) -> list[str]:
+    """The capsule as Claude Code, Codex, Cursor and Harness deliver it."""
+    return _render_capsule(capsule, excerpts)[0]
+
+
+def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) -> None:
+    """Leave in a capsule only the items its rendered text shows.
+
+    The text is held to RENDERED_CAPSULE_LIMIT by dropping whole entries once
+    the excerpts are gone - skills first, then the weakest knowledge - and a
+    dropped entry never reaches the model. Retrieval used to record it as
+    handed all the same, so the next turns left it out as an item that
+    "still applies". The capsule now stops carrying it, retrieval records
+    only what the capsule holds, and the text rendered from the capsule shows
+    every item it holds: they fitted without their excerpts, beside the
+    compaction marker that every drop puts in front of them first.
+    """
+    _, shown = _render_capsule(capsule, capsule_excerpts(connection, capsule))
+    kept = {id(item) for item in shown}
+    omitted = capsule.get("omitted")
+    for layer in DOCUMENT_LAYERS:
+        items = capsule.get(layer)
+        if not isinstance(items, list):
+            continue
+        capsule[layer] = [
+            item for item in items if not isinstance(item, dict) or id(item) in kept
+        ]
+        dropped = len(items) - len(capsule[layer])
+        if dropped and isinstance(omitted, dict) and isinstance(omitted.get(layer), int):
+            omitted[layer] += dropped
+    synchronize_capsule_views(capsule)
+
+
+def _render_capsule(
+    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
+) -> tuple[list[str], list[dict[str, object]]]:
+    """The rendered lines, and the items they show."""
+    excerpts = dict(excerpts or {})
+    # Excerpts are document text on its way into a prompt: held to the same
+    # personal-data and secret screen as the query. capsule_excerpts already
+    # chose and sized them; the bound here only keeps text from elsewhere
+    # inside the ceiling. Each keeps the heading of the section it quotes.
+    for layer in ("semantic", "episodic"):
+        for item in capsule.get(layer) or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path", f"episode {item.get('id')}"))
+            raw = excerpts.get(path)
+            if not raw:
+                continue
+            try:
+                safe = sanitize_automatic_query(str(raw))
+            except ContextError:
+                safe = ""
+            limit = max(EXCERPT_CHARACTERS) if layer == "semantic" else EPISODIC_EXCERPT_CHARACTERS
+            excerpt = Excerpt(_bounded(safe, limit))
+            excerpt.heading = getattr(raw, "heading", "")
+            excerpts[path] = excerpt
+
     # The first line is the render marker: the Cursor hooks accept a capsule
     # only if it starts with "working:", which is how a broken render is kept
     # from replacing a good rule now that they no longer parse JSON.
+    head: list[str] = []
+    # What the head's own bounds cut from the task's state, beside what the
+    # capsule's `omitted` counters say its JSON lost.
+    cuts: dict[str, int] = {}
     working = capsule["working"]
-    if working is None:
-        print("working: unavailable")
+    if working is None and capsule.get("kind") == "warming":
+        # A branch whose task the first checkpoint has not created yet: the
+        # layers below are still this turn's retrieval.
+        head.append(
+            "working: not recorded yet (the task starts at the "
+            f"{DEFAULT_TURN_FLUSH_AFTER}-turn checkpoint)"
+        )
+    elif working is None:
+        head.append("working: unavailable")
     else:
-        print(f"working: {working['task_id']} — {working['goal']}")
+        goal, cuts["working_goal_characters"] = _bounded_cut(working["goal"], 200)
+        head.append(f"working: {_bounded(working['task_id'], 200)} — {goal}")
+        state, state_cuts = rendered_working_state(capsule)
+        cuts.update(state_cuts)
+        head.extend(_bounded(line, RENDERED_LINE_LIMIT) for line in state)
     if capsule.get("kind") == "warming":
-        # Pre-provision progress is the one field the serialized form carried
-        # that the warning text does not: how far along the boundary is.
-        print(f"warming: {capsule['pending_turns']} turn(s) pending")
-    for warning in capsule["warnings"]:
-        print(f"warning: {warning}")
+        head.append(f"warming: {capsule['pending_turns']} turn(s) pending")
+    for warning in capsule["warnings"][:3]:
+        head.append(f"warning: {_bounded(warning, 160)}")
+    # The JSON form has carried these counters all along; the rendered form
+    # is what a prompt-time hook shows, so without this line a compacted
+    # capsule reaches the model looking complete. It counts what the text
+    # itself cuts, too: the text is the only form the model reads.
+    dropped = compaction_summary(capsule, cuts)
+    compaction: Optional[str] = (
+        f"compaction: omitted {dropped} — this capsule is a lossy view; "
+        f"{COMPACTION_ADVICE}"
+        if dropped
+        else None
+    )
+    tail: list[str] = []
     if capsule.get("last_turn"):
-        print(f"Last turn: {capsule['last_turn']}")
-    # Both lines come after the "working:" marker on purpose - the Cursor
-    # hooks reject a capsule that does not open with it.
+        tail.append(f"Last turn: {_bounded(capsule['last_turn'], 600)}")
     source = capsule.get("query_source")
     if source in ("task", "task-id"):
-        # Printed after the "working:" render marker. A capsule retrieved on a
-        # branch slug and one retrieved on the task's own goal are worth very
-        # different amounts, and looked identical until this line existed.
-        print(
+        # A capsule retrieved on a branch slug and one retrieved on the task's
+        # own goal are worth very different amounts.
+        tail.append(
             "query: from task goal"
             if source == "task"
             else "query: from branch name only"
@@ -2303,32 +3102,132 @@ def print_capsule(capsule: dict[str, object]) -> None:
     if isinstance(gate, dict) and gate.get("mode") == "enforce" and gate.get(
         "decision"
     ) == "skip":
-        # Only in enforce, and only on a skip: in shadow the verdict lives in
-        # the manifest, because the capsule is zero-sum against its character
-        # ceiling and a line saying "this turn retrieved normally" buys the
-        # reader nothing. An empty capsule and a withheld one are different
-        # facts and must not render the same.
-        print(f"gate: skipped — {gate.get('reason', 'unknown')}")
+        # An empty capsule and a withheld one are different facts and must
+        # not render the same.
+        tail.append(f"gate: skipped — {gate.get('reason', 'unknown')}")
+    repeated = capsule.get("repeated")
+    if isinstance(repeated, int) and repeated > 0:
+        tail.append(
+            f"memory: {repeated} item(s) handed earlier in this conversation "
+            "still apply"
+        )
     no_match = capsule.get("no_match")
-    if no_match:
+    delivered = any(capsule.get(layer) for layer in DOCUMENT_LAYERS) or bool(repeated)
+    if no_match and not delivered:
         # "Memory has nothing for this" is an answer, and until it was said
-        # out loud it looked exactly like "memory was not consulted".
-        print(f"no-match: {', '.join(sorted(str(layer) for layer in no_match))}")
-    for layer in DOCUMENT_LAYERS:
-        for item in capsule[layer] or []:
-            if item.get("match") == "distinctive" and "path" in item:
-                # Admitted on one rare term rather than on covering the
-                # query: still worth a slot, not worth being read as an answer.
-                print(f"weak-match: {item['path']}")
-    for layer in DOCUMENT_LAYERS:
-        items = capsule[layer]
-        if not items:
-            continue
-        print(f"{layer}:")
-        for item in items:
-            label = item["path"] if "path" in item else f"episode {item['id']}"
-            title = item["title"] if "title" in item else item["summary"]
-            print(f"  {label} — {title}")
+        # out loud it looked exactly like "memory was not consulted". Beside
+        # delivered knowledge an empty layer tells the reader nothing.
+        tail.append(f"no-match: {', '.join(sorted(str(layer) for layer in no_match))}")
+    # Project knowledge first, with its text; then the past; then which
+    # skills apply, by name.
+    entries: list[tuple[str, dict[str, object], str]] = []
+    kinds = {"semantic": "memory", "episodic": "history", "procedural": "skill"}
+    for layer in ("semantic", "episodic", "procedural"):
+        for item in capsule.get(layer) or []:
+            if isinstance(item, dict):
+                kind = kinds[layer]
+                if layer == "procedural" and item.get("kind") == "policy":
+                    kind = "policy"
+                entries.append((layer, item, kind))
+    excerpt_of = {
+        id(item): excerpts.get(str(item.get("path", f"episode {item.get('id')}"))) for _, item, _ in entries
+    }
+    # Kept when shrinking drops the excerpt: it still says where to look.
+    section_of = {
+        key: getattr(text, "heading", "") for key, text in excerpt_of.items()
+    }
+
+    def assemble() -> list[str]:
+        lines = [*head, *([compaction] if compaction else []), *tail]
+        if entries:
+            lines.append(MEMORY_RENDER_HEADER)
+        for _, item, kind in entries:
+            lines.append(_item_line(item, kind, section_of.get(id(item)) or ""))
+            text = excerpt_of.get(id(item))
+            if text:
+                lines.append(f"  {text}")
+        return lines
+
+    def size(lines: list[str]) -> int:
+        return sum(len(line) + 1 for line in lines)
+
+    lines = assemble()
+    # Over the ceiling the excerpts shrink first, tail first, then go; then
+    # the compaction line gives up its counts for COMPACTION_MARKER; then
+    # skills, then related knowledge (a link brought it, not the query), then
+    # the weakest knowledge, then the head's lines from the last. Working
+    # state is cut only by those last drops: its own lines are bounded where
+    # they are built. The marker is never dropped, and it goes in before the
+    # first thing this loop drops, so a capsule the ceiling cut never reads as
+    # a complete one. shown_in_render keeps the items one render shows, and
+    # the capsule it leaves renders again with those items and a line that
+    # now counts the dropped ones: that render fits them beside the same
+    # marker, or beside the counted line where it fits, so the items recorded
+    # are the ones the final text shows.
+    while size(lines) > RENDERED_CAPSULE_LIMIT:
+        shrinkable = [
+            key for key in reversed(list(excerpt_of)) if excerpt_of[key]
+        ]
+        if shrinkable:
+            key = shrinkable[0]
+            text = excerpt_of[key] or ""
+            excerpt_of[key] = _bounded(text, len(text) // 2) if len(text) > 120 else None
+        elif compaction != COMPACTION_MARKER:
+            compaction = COMPACTION_MARKER
+        elif any(layer == "procedural" for layer, _, _ in entries):
+            index = max(
+                position
+                for position, (layer, _, _) in enumerate(entries)
+                if layer == "procedural"
+            )
+            entries.pop(index)
+        elif _related_positions([item for _, item, _ in entries]):
+            entries.pop(_related_positions([item for _, item, _ in entries])[-1])
+        elif entries:
+            entries.pop()
+        elif tail:
+            tail.pop()
+        elif len(head) > 1:
+            head.pop()
+        else:
+            break
+        lines = assemble()
+    return lines, [item for _, item, _ in entries]
+
+
+def print_capsule(
+    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
+) -> None:
+    for line in render_capsule_lines(capsule, excerpts):
+        print(line)
+
+
+def promote_on_resolution(
+    repository: Path, record: dict[str, object], owner: str
+) -> Optional[dict[str, object]]:
+    """Promote a record the moment it reaches a promotable state.
+
+    Promotion used to wait for the turn boundary, five turns and often days
+    after the resolving update. By then the fix that resolved the finding had
+    edited the files it cites, and the record never became durable memory:
+    on a real project 2 of 70 resolved findings were ever served. Promoting on
+    the resolving update digests the citations while they still say what was
+    verified. A failure here never undoes the update; it is reported.
+    """
+    states = PROMOTABLE_STATES.get(str(record.get("type")))
+    if (
+        states is None
+        or record.get("status") not in states
+        or record.get("authority") != "verified"
+    ):
+        return None
+    try:
+        return auto_promote(repository, owner=owner, only={str(record["id"])})
+    except (BrainError, OSError) as error:
+        return {
+            "enabled": True, "promoted": [], "blocked": [], "skipped": 0,
+            "failed": [{"record_id": str(record.get("id")), "reason": str(error)}],
+        }
 
 
 def revision_argument(value: str) -> object:
@@ -2377,6 +3276,7 @@ def apply_governed_update(
     phase: Optional[str] = None,
     auto_checkpoint: Optional[str] = None,
     allow_phase_regression: bool = False,
+    replace_next_steps: bool = False,
 ) -> dict[str, object]:
     """Update the authoritative Brain task and its local compatibility binding."""
     with mutation_lock(repository):
@@ -2397,6 +3297,7 @@ def apply_governed_update(
                 phase=phase,
                 auto_checkpoint=auto_checkpoint,
                 allow_phase_regression=allow_phase_regression,
+                replace_next_steps=replace_next_steps,
             )
             refresh_governed_binding(
                 connection,
@@ -2415,9 +3316,11 @@ def apply_governed_update(
 
 
 def git_output(repository: Path, arguments: list[str], label: str) -> bytes:
+    # Git always describes the project: attached, the state directory is not
+    # a checkout and the accelerator clone is not the work.
     try:
         result = subprocess.run(
-            ["git", "-C", str(repository), *arguments],
+            ["git", "-C", str(workspace_roots.project_root(repository)), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -2435,7 +3338,7 @@ def _readiness_git_probe(
     """Run a bounded Git metadata probe without making status fail."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(repository), *arguments],
+            ["git", "-C", str(workspace_roots.project_root(repository)), *arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -2637,9 +3540,9 @@ def retrieval_report(
         "entry_point": dict(sorted(entry_points.items())),
         "empty_selection": empty_selection,
         "local_episode_count": local_episode_count,
-        # Membership counted from the manifest, which records the selection
-        # before the capsule's character ladder may drop an item, so this is
-        # an upper bound on what the model was actually shown.
+        # Membership counted from the manifest, which records what the
+        # delivered capsule carried after its character limits: the rendered
+        # text for a refresh or a printed capsule, the JSON for `--json`.
         "top_paths": dict(
             sorted(paths.items(), key=lambda pair: (-pair[1], pair[0]))[:20]
         ),
@@ -3128,6 +4031,25 @@ def rebind_governed_task(
     return {**governed_task_view(record), "already_bound": False}
 
 
+def closed_task_record(
+    connection: sqlite3.Connection, repository: Path, task_id: str
+) -> Optional[str]:
+    """The id of this task id's completed or cancelled record, if that is all
+    there is: no live binding, and a terminal Brain record of the same name."""
+    try:
+        governed_binding(connection, task_id)
+        return None
+    except ContextError:
+        pass
+    try:
+        record = get_record(repository, task_id)
+    except BrainError:
+        return None
+    if record.get("type") == "task" and record.get("status") in TERMINAL_STATES:
+        return str(record["id"])
+    return None
+
+
 def ensure_working_task(
     connection: sqlite3.Connection,
     repository: Path,
@@ -3226,6 +4148,12 @@ def complete_governed_task(
             event = record_completion_event(
                 repository, task, outcome, verification, owner
             )
+            if event is not None:
+                # The snapshot predates the event, so it has no entry for it;
+                # marked absent, the restore below removes it with the rest
+                # rather than leave "Completed" beside a reopened task.
+                created = dynamic_path(repository, {"type": "event", "id": event})
+                snapshot[created] = None
             connection.commit()
         except Exception:
             connection.rollback()
@@ -3272,7 +4200,7 @@ def record_completion_event(
             source
             for source in list(task.get("sources") or [])
             if isinstance(source, str)
-            and (repository / source.split("#", 1)[0]).is_file()
+            and workspace_roots.resolve(repository, source).is_file()
         ]
         event = create_record(
             repository,
@@ -3555,6 +4483,114 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     return allowed, excluded
 
 
+def head_commit(repository: Path) -> Optional[str]:
+    try:
+        head = os.fsdecode(
+            git_output(
+                repository,
+                ["rev-parse", "--verify", "--quiet", "HEAD"],
+                "Git HEAD probe",
+            )
+        ).strip()
+    except ContextError:
+        return None
+    return head or None
+
+
+def head_advanced(
+    connection: sqlite3.Connection, repository: Path, task_id: str
+) -> bool:
+    """Whether HEAD moved since this task's previous turn; remember it now.
+
+    A turn that ends in a commit leaves a clean tree, and a clean tree was read
+    as a turn with nothing in it, so committed work - the work that mattered
+    most - never reached the buffer or the checkpoint. The first turn a task
+    sees only records the commit, so visiting a branch still mints nothing.
+    Best-effort: losing the record costs one uncounted turn.
+    """
+    head = head_commit(repository)
+    if head is None:
+        return False
+    try:
+        stored = json.loads(load_index_state(connection).get(TURN_HEADS_KEY) or "{}")
+    except (ValueError, sqlite3.Error):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    previous = stored.pop(task_id, None)
+    stored[task_id] = head
+    for stale in list(stored)[: max(0, len(stored) - TURN_HEADS_RETENTION)]:
+        stored.pop(stale, None)
+    try:
+        with connection:
+            store_index_state(
+                connection,
+                {TURN_HEADS_KEY: json.dumps(stored, separators=(",", ":"))},
+            )
+    except sqlite3.Error:
+        pass
+    return isinstance(previous, str) and previous != head
+
+
+def checkpoint_safe(text: str) -> bool:
+    """Whether text may enter a checkpoint without tripping a privacy gate.
+
+    The same gates every working-task write applies. A commit subject that
+    fails one is left out rather than refused: a checkpoint must never fail
+    on what someone once typed into a commit.
+    """
+    return not (
+        any(pattern.search(text) for pattern in SECRET_PATTERNS.values())
+        or any(pattern.search(text) for pattern in CAPSULE_PRIVATE_PATTERNS)
+        or CAPSULE_RAW_TEXT_PATTERN.search(text)
+    )
+
+
+def branch_commit_subjects(
+    connection: sqlite3.Connection, repository: Path
+) -> tuple[list[str], int]:
+    """This branch's newest commit subjects, and how many commits it has.
+
+    Measured from the merge base with the default branch, so the list is the
+    branch's own story rather than the project's history. On the default
+    branch itself, or without one, there is no branch story and the list is
+    empty. Merges are left out, and so is any subject `checkpoint_safe`
+    rejects; both still count toward the total.
+    """
+    target = cached_default_branch(connection, repository)
+    head = head_commit(repository)
+    if target is None or head is None:
+        return [], 0
+    try:
+        base = os.fsdecode(
+            git_output(repository, ["merge-base", "HEAD", target], "Git merge-base probe")
+        ).strip()
+        if not base or base == head:
+            return [], 0
+        listing = git_output(
+            repository,
+            [
+                "log", "--no-merges", "-z", "--format=%s",
+                f"--max-count={CHECKPOINT_LOG_LIMIT}", f"{base}..HEAD", "--", ".",
+            ],
+            "Git log probe",
+        )
+    except ContextError:
+        return [], 0
+    subjects = [
+        " ".join(os.fsdecode(item).split()) for item in listing.split(b"\0")
+    ]
+    subjects = [subject for subject in subjects if subject]
+    shown = [
+        subject
+        if len(subject) <= CHECKPOINT_SUBJECT_CHARACTERS
+        else subject[: CHECKPOINT_SUBJECT_CHARACTERS - 1].rstrip() + "…"
+        for subject in subjects
+        if checkpoint_safe(subject)
+    ]
+    return shown[:CHECKPOINT_COMMIT_LIMIT], len(subjects)
+
+
 def append_turn_delta(
     connection: sqlite3.Connection, task_id: str, files: list[str]
 ) -> int:
@@ -3568,6 +4604,33 @@ def append_turn_delta(
             ),
         )
     return int(cursor.lastrowid)
+
+
+def recent_touched_paths(
+    connection: sqlite3.Connection, task_id: str, limit: int = TOUCH_SEED_LIMIT
+) -> list[str]:
+    """Files this branch changed on its last few turns, newest first - also
+    before its task exists, on a branch's first turns."""
+    try:
+        rows = connection.execute(
+            "SELECT files FROM turn_deltas WHERE task_id = ? ORDER BY id DESC LIMIT 5", (task_id,)
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    paths: list[str] = []
+    for row in rows:
+        try:
+            files = json.loads(row[0])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(files, list):
+            continue
+        for path in reversed(files):
+            if isinstance(path, str) and path not in paths:
+                paths.append(path)
+            if len(paths) >= limit:
+                return paths
+    return paths
 
 
 def pending_turn_deltas(
@@ -3616,7 +4679,33 @@ def flush_turn_deltas(
     )
     if omitted:
         checkpoint += f" {omitted} path(s) beyond the per-flush limit are not listed."
+    # Paths say where work happened; commit subjects say what it was. They
+    # follow the counts so the checkpoint still opens the way readers expect.
+    subjects, commits = branch_commit_subjects(connection, repository)
+    if subjects:
+        checkpoint += " Branch commits, newest first: " + "; ".join(subjects)
+        if commits > len(subjects):
+            checkpoint += f" (+{commits - len(subjects)} more)"
+        checkpoint += "."
+    elif commits:
+        checkpoint += f" {commits} commit(s) on this branch."
     files = files[:file_limit]
+    closed = closed_task_record(connection, repository, task_id) if mode != "lightweight" else None
+    if closed is not None:
+        # The branch's task was completed and work went on: every flush tried
+        # to reattach the closed task, failed, and kept the buffer - so the
+        # turn boundary, and the promotion and compaction that ride on it,
+        # never ran again. The turns after completion belong to no task;
+        # they are dropped and said so, and maintenance proceeds.
+        with connection:
+            connection.executemany(
+                "DELETE FROM turn_deltas WHERE id = ?",
+                [(row["id"],) for row in pending],
+            )
+        return {
+            "revision": None, "files_omitted": 0, "provisioned": False,
+            "rebound": None, "closed_task": closed, "discarded_turns": len(pending),
+        }
     ensured = ensure_working_task(connection, repository, task_id, mode, owner)
     if mode == "lightweight":
         result = update_working_task(
@@ -3658,8 +4747,12 @@ def run_turn(
         raise ContextError("--max-files must be a positive integer")
     task_id = validate_task_id(arguments.task_id)
     files, path_excluded = changed_paths(repository)
+    # A turn that ended in a commit leaves a clean tree and is still work.
+    committed = head_advanced(connection, repository, task_id)
     delta_id = (
-        append_turn_delta(connection, task_id, files) if files else None
+        append_turn_delta(connection, task_id, files)
+        if files or committed
+        else None
     )
     buffered = len(pending_turn_deltas(connection, task_id))
     flushed = None
@@ -3674,9 +4767,9 @@ def run_turn(
         )
     # Maintenance runs only on the boundary where a flush actually
     # happened. The Stop hook drives this command under a hard
-    # timeout on every turn, so an ordinary turn must stay at one
-    # git status probe plus a local buffer write — a SIGTERM there
-    # interrupts nothing mid-mutation.
+    # timeout on every turn, so an ordinary turn must stay at a git
+    # status probe, a HEAD probe and local state writes — a SIGTERM
+    # there interrupts nothing mid-mutation.
     completion_candidates: list[dict[str, object]] = []
     promotion = {
         "enabled": False, "promoted": [], "failed": [],
@@ -3713,13 +4806,17 @@ def run_turn(
         "files": len(files),
         "excluded": path_excluded,
         "pending": 0 if flushed else buffered,
-        "flushed": flushed is not None,
+        "flushed": flushed is not None and not flushed.get("closed_task"),
         "revision": flushed.get("revision") if flushed else None,
         "files_omitted": flushed.get("files_omitted") if flushed else 0,
         "provisioned": bool(flushed and flushed.get("provisioned")),
         # The UUID of the pre-existing record the flush restored the local
         # binding to — the second-machine signal. None on an ordinary flush.
         "rebound": flushed.get("rebound") if flushed else None,
+        # The completed task the buffered turns were meant for, when the
+        # branch went on after completion; those turns were dropped.
+        "closed_task": flushed.get("closed_task") if flushed else None,
+        "discarded_turns": flushed.get("discarded_turns", 0) if flushed else 0,
         "completion_candidates": completion_candidates,
         "promoted": promotion["promoted"],
         "promotion_failed": promotion["failed"],
@@ -3743,6 +4840,8 @@ def run_turn(
             "pending": result["pending"],
             "provisioned": result["provisioned"],
             "rebound": result["rebound"],
+            "closed_task": result["closed_task"],
+            "discarded_turns": result["discarded_turns"],
             "completion_candidates": [
                 str(item["task_id"]) for item in completion_candidates
             ],
@@ -3772,6 +4871,11 @@ def run_turn(
     if not arguments.json:
         if result["rebound"]:
             print(f"binding restored to existing task: {result['rebound']}")
+        if result["closed_task"]:
+            print(
+                f"task {task_id} is closed: {result['discarded_turns']} turn(s) "
+                "after its completion were not recorded"
+            )
         for item in completion_candidates:
             print(
                 "completion candidate (explicit complete required): "
@@ -3991,7 +5095,10 @@ def export_bundle(
 def _export_source_commit(repository: Path) -> Optional[str]:
     try:
         completed = subprocess.run(
-            ["git", "-C", str(repository), "rev-parse", "HEAD"],
+            [
+                "git", "-C", str(workspace_roots.project_root(repository)),
+                "rev-parse", "HEAD",
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -4014,6 +5121,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Project Brain actor/owner (default: PROJECT_BRAIN_OWNER or local)",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    context_save = commands.add_parser(
+        "context-save",
+        help="write a curated, portable continuation handoff without task-state mutation",
+    )
+    context_save.add_argument("--input", required=True, help="path to one curated JSON object")
+    context_save.add_argument("--output", type=Path, required=True)
+    context_save.add_argument("--detail", choices=("summary", "topic", "full"), required=True)
+    context_save.add_argument("--topic")
+    context_save.add_argument("--task-id")
+    context_save.add_argument("--source-client", choices=("codex", "claude", "cursor", "other"), required=True)
+    context_save.add_argument("--transcript", type=Path)
+    context_save.add_argument("--json", action="store_true")
+
+    context_load = commands.add_parser(
+        "context-load",
+        help="read a curated continuation handoff and report repository drift",
+    )
+    context_load.add_argument("--input", type=Path, required=True)
+    context_load.add_argument("--include-transcript", action="store_true")
+    context_load.add_argument("--json", action="store_true")
 
     index = commands.add_parser("index", help="refresh the local document index")
     index.add_argument(
@@ -4087,7 +5215,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     refresh.add_argument("--task-id")
+    refresh.add_argument(
+        "--session-id",
+        help=(
+            "the host conversation this capsule is for; what it was handed in "
+            "its last few turns is not handed again"
+        ),
+    )
+    refresh.add_argument(
+        "--transcript",
+        help=(
+            "with --session-id: the host's transcript of that conversation; a "
+            "compaction recorded there since the last turn means nothing "
+            "counts as handed any more"
+        ),
+    )
+    refresh.add_argument(
+        "--sanitize",
+        action="store_true",
+        help=(
+            "cut secrets, personal data and transcript-style prefixes out of "
+            "--query instead of refusing it (the automatic paths pass this)"
+        ),
+    )
     refresh.add_argument("--limit", type=int, default=3)
+    refresh.add_argument("--path", action="append", default=[], dest="paths",
+        help="also deliver documents citing this canonical source path")
     refresh.add_argument(
         "--ephemeral",
         action="store_true",
@@ -4172,14 +5325,22 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--task-id", required=True)
     update.add_argument("--progress")
     update.add_argument("--next-step", action="append", default=[])
+    update.add_argument(
+        "--replace-next-steps",
+        action="store_true",
+        help=(
+            "make this call's --next-step values the whole list instead of "
+            "appending them; with none given, clear it"
+        ),
+    )
     update.add_argument("--file", action="append", default=[])
     update.add_argument("--source", action="append", default=[])
     update.add_argument(
         "--phase",
         choices=TASK_PHASE_INPUTS,
         help=(
-            "delivery phase; aliases implementing/execution/review are stored "
-            "as implementation/implementation/verification"
+            "delivery phase; aliases implementing/execution/review/quality are "
+            "stored as implementation/implementation/verification/verification"
         ),
     )
     update.add_argument("--revision", type=revision_argument)
@@ -4307,6 +5468,38 @@ def build_parser() -> argparse.ArgumentParser:
     create_brain.add_argument("--confidence", type=float, default=1.0)
     create_brain.add_argument("--json", action="store_true")
 
+    record = commands.add_parser(
+        "record-result",
+        help=(
+            "record a run's progress, next steps and up to three source-backed "
+            "findings or decisions; replaying the same --result-id with the "
+            "same content completes a save that stopped half way"
+        ),
+    )
+    record.add_argument("--task-id", required=True)
+    record.add_argument(
+        "--result-id",
+        required=True,
+        help="stable for this result: the same ID and content is a replay, never a second copy",
+    )
+    record.add_argument("--revision", type=revision_argument, required=True)
+    record.add_argument(
+        "--input",
+        required=True,
+        help=(
+            "JSON object with progress, next_steps, learnings (type, title, "
+            "consequence, sources) and verified; '-' reads standard input"
+        ),
+    )
+    record.add_argument(
+        "--attestation",
+        choices=("agent", "person"),
+        default="agent",
+        help="who checked the learnings against their sources (default: agent)",
+    )
+    record.add_argument("--reason")
+    record.add_argument("--json", action="store_true")
+
     update_brain = commands.add_parser(
         "brain-update", help="CAS-update a governed dynamic Brain record"
     )
@@ -4314,6 +5507,14 @@ def build_parser() -> argparse.ArgumentParser:
     update_brain.add_argument("--revision", type=revision_argument, required=True)
     update_brain.add_argument("--progress")
     update_brain.add_argument("--next-step", action="append", default=[])
+    update_brain.add_argument(
+        "--replace-next-steps",
+        action="store_true",
+        help=(
+            "make this call's --next-step values the whole list instead of "
+            "appending them; with none given, clear it"
+        ),
+    )
     update_brain.add_argument("--file", action="append", default=[])
     update_brain.add_argument("--source", action="append", default=[])
     update_brain.add_argument("--conflict", action="append", default=[])
@@ -4369,10 +5570,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     links = commands.add_parser(
         "links",
-        help="show every eligible document that cites a given source path",
+        help="show every eligible document that cites, or active task that touched, a given path",
     )
     links.add_argument(
-        "--path", required=True, help="the source path to look up citations of"
+        "--path", required=True, help="the path to look up citations and touches of"
     )
     links.add_argument(
         "--prefix",
@@ -4473,6 +5674,15 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--promotion-id", required=True)
     apply.add_argument("--json", action="store_true")
 
+    promote_auto = commands.add_parser(
+        "promote-auto",
+        help=(
+            "run automatic promotion now, under the same rules as a turn "
+            "boundary; does nothing unless automatic_promotion is enabled"
+        ),
+    )
+    promote_auto.add_argument("--json", action="store_true")
+
     export = commands.add_parser(
         "export",
         help="write a privacy-filtered bundle of Brain records and Memory Bank chunks",
@@ -4497,15 +5707,87 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def utf8_output() -> None:
+    """Print UTF-8 whatever the console's code page.
+
+    Every capsule carries '…' and '—'. On Windows a pipe takes the ANSI code
+    page, the first such character raised UnicodeEncodeError, and the hook
+    delivered nothing on every turn.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            continue
+
+
 def main() -> int:
+    utf8_output()
     arguments = build_parser().parse_args()
     repository = arguments.root.resolve()
 
     try:
+        problem = workspace_roots.configuration_error()
+        if problem is not None:
+            raise ContextError(problem)
+        if workspace_roots.is_attached(repository) and os.name != "nt":
+            # Attached state is the project's memory kept outside it, so it is
+            # its owner's alone: whatever this run creates there - records, the
+            # index database and its journals, logs, receipts - is owner-only,
+            # whatever umask the hook or the tool passed on. Installed state
+            # lives in the project and keeps the project's permissions.
+            os.umask(0o077)
+        # Attached, the state directory is created on first use; installed,
+        # this does nothing and a missing root stays an error.
+        ensure_attached_state(repository)
         if not repository.is_dir():
             raise ContextError(
                 f"Repository root must be an existing directory: {repository}"
             )
+        # Portable handoffs deliberately run before opening SQLite.  Loading a
+        # handoff is read-only, and saving one must not create a competing
+        # local task/cache or mutate governed Project Brain state. A handoff
+        # belongs to the project: Git, cited files and relative paths are the
+        # project's, which is the state root itself unless attached.
+        if arguments.command in ("context-save", "context-load"):
+            handoff_project = workspace_roots.project_root(repository)
+
+            def in_project(path: Path) -> Path:
+                return path if path.is_absolute() else handoff_project / path
+
+        if arguments.command == "context-save":
+            result = save_handoff(
+                handoff_project,
+                input_json=str(in_project(Path(arguments.input))),
+                output=in_project(arguments.output),
+                detail=arguments.detail,
+                topic=arguments.topic,
+                task_id=arguments.task_id,
+                source_client=arguments.source_client,
+                transcript_path=in_project(arguments.transcript) if arguments.transcript else None,
+                state_root=repository,
+            )
+            if arguments.json:
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                print(f"Context handoff saved: {result['output']}.")
+            return 0
+        if arguments.command == "context-load":
+            result = load_handoff(
+                handoff_project, in_project(arguments.input), include_transcript=arguments.include_transcript
+            )
+            if arguments.json:
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                print(f"Context handoff loaded: {result['input']}.")
+                if result["drift"]:
+                    print(f"  {len(result['drift'])} source drift item(s); review before continuing.")
+                    print(json.dumps(result["drift"], ensure_ascii=False, indent=2))
+                print(render_body(result["context"]))
+                if "transcript" in result:
+                    print("## Visible transcript\n")
+                    sys.stdout.write(result["transcript"])
+            return 0
         # Direct query commands have a strict CLI contract: reject the original
         # value before connect() can create a database or an index/manifest can
         # be refreshed. Host hooks remain fail-safe by swallowing this nonzero
@@ -4546,6 +5828,12 @@ def main() -> int:
                         print(
                             f"Excluded: {len(dropped)} document(s) ({summary}); "
                             "--json lists the paths."
+                        )
+                    redacted = result.get("redacted") or []
+                    if isinstance(redacted, list) and redacted:
+                        print(
+                            f"Redacted: {sum(int(item.get('values') or 0) for item in redacted)} "
+                            f"value(s) in {len(redacted)} document(s); --json lists the paths."
                         )
                 return 0
 
@@ -4602,6 +5890,7 @@ def main() -> int:
                         arguments.next_step,
                         arguments.file,
                         arguments.source,
+                        replace_next_steps=arguments.replace_next_steps,
                     )
                 else:
                     binding = governed_binding(connection, arguments.task_id)
@@ -4611,6 +5900,7 @@ def main() -> int:
                         or arguments.file
                         or arguments.source
                         or arguments.phase
+                        or arguments.replace_next_steps
                     ):
                         raise ContextError("Working task update requires a changed field")
                     if progress is not None and not progress.strip():
@@ -4641,6 +5931,7 @@ def main() -> int:
                         owner=owner,
                         phase=arguments.phase,
                         allow_phase_regression=arguments.allow_phase_regression,
+                        replace_next_steps=arguments.replace_next_steps,
                     )
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -4738,6 +6029,20 @@ def main() -> int:
                     raise ContextError(
                         "Agent messages require governed mode"
                     )
+                if arguments.command == "msg-dispatch":
+                    # A subagent that finishes on a branch the first
+                    # checkpoint has not provisioned yet would otherwise
+                    # lose its record silently: subagent-dispatch.sh reports
+                    # a failed write, but reads a missing task as no channel
+                    # to report to. A completion is real work, which is what
+                    # provisioning waits for. Any refusal (a terminal task)
+                    # is left to the lookup below to report as it always did.
+                    try:
+                        ensure_working_task(
+                            connection, repository, arguments.task_id, mode, owner
+                        )
+                    except (ContextError, BrainError):
+                        pass
                 # The audit trail outlives the local binding: a completed or
                 # archived task has no binding, but its journal must stay
                 # readable (and refuse writes with the honest terminal error),
@@ -4862,6 +6167,52 @@ def main() -> int:
                     print(f"Delegation capsule is valid ({len(content)} characters).")
                 return 0 if not problems else 1
 
+            if arguments.command == "record-result":
+                raw = (
+                    sys.stdin.read()
+                    if arguments.input == "-"
+                    else Path(arguments.input).read_text(encoding="utf-8")
+                )
+                try:
+                    data = json.loads(raw)
+                except ValueError as error:
+                    raise ContextError("The result must be a JSON object") from error
+                revision = arguments.revision
+                if revision == AUTO_REVISION:
+                    from brain_runtime import find_task
+
+                    revision = find_task(
+                        repository, validate_task_id(arguments.task_id)
+                    )[1]["revision"]
+                reason = arguments.reason or (
+                    "Saved with context.py record-result; agent-attested, "
+                    "not reviewed by a person"
+                    if arguments.attestation == "agent"
+                    else "Saved with context.py record-result; reviewed by a person"
+                )
+                result = record_result(
+                    repository,
+                    arguments.task_id,
+                    arguments.result_id,
+                    revision,
+                    data,
+                    owner=owner,
+                    reason=reason,
+                    attestation=arguments.attestation,
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    states = ", ".join(
+                        f"{item['type']} {item['title']!r} {item['state']}"
+                        for item in result["records"]
+                    ) or "no learnings"
+                    print(
+                        ("Result already recorded" if result["replayed"] else "Result recorded")
+                        + f": {states}."
+                    )
+                return 0
+
             if arguments.command == "brain-create":
                 external_id = validate_task_id(arguments.external_id)
                 title = arguments.title.strip()
@@ -4917,6 +6268,7 @@ def main() -> int:
                     and arguments.transition is None
                     and arguments.phase is None
                     and arguments.authority is None
+                    and not arguments.replace_next_steps
                 ):
                     raise ContextError("Brain record update requires a changed field")
                 reject_secrets(
@@ -4944,13 +6296,22 @@ def main() -> int:
                         phase=arguments.phase,
                         authority=arguments.authority,
                         reason=arguments.reason,
+                        replace_next_steps=arguments.replace_next_steps,
                     )
+                promotion = promote_on_resolution(repository, result, owner)
                 if arguments.json:
-                    print(json.dumps(result, ensure_ascii=False))
+                    print(json.dumps(
+                        {**result, "promotion": promotion} if promotion else result,
+                        ensure_ascii=False,
+                    ))
                 else:
                     print(
                         f"Project Brain {result['type']} updated: {result['id']}."
                     )
+                    for item in (promotion or {}).get("promoted", []):
+                        print(f"Promoted to durable memory: {item['memory_id']}.")
+                    for item in (promotion or {}).get("blocked", []):
+                        print(f"warning: not promoted: {item['reason']}")
                 return 0
 
             if arguments.command == "brain-get":
@@ -5097,6 +6458,7 @@ def main() -> int:
                     "database": str(database),
                     "automatic_memory": automatic_memory_readiness(repository),
                     "consolidation": consolidation,
+                    "workspace": workspace_roots.describe(repository),
                 }
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
@@ -5136,6 +6498,7 @@ def main() -> int:
                     load_config(repository),
                     arguments.path,
                     prefix=arguments.prefix,
+                    ref_kinds=("source", "file"),
                 )
                 result = {
                     "path": arguments.path,
@@ -5156,7 +6519,7 @@ def main() -> int:
                     print(json.dumps(result, ensure_ascii=False))
                 elif not selected:
                     print(
-                        f"No eligible document cites {arguments.path}."
+                        f"No eligible document cites or touched {arguments.path}."
                         + (
                             f" {len(withheld)} withheld by policy or freshness."
                             if withheld
@@ -5169,7 +6532,10 @@ def main() -> int:
                             f"{item['layer']} {item['kind']}: "
                             f"{item['path']} — {item['title']}"
                         )
-                        print(f"  cites {item['ref_path']} ({item['ref_kind']})")
+                        if item["ref_kind"] == "file":
+                            print(f"  touched {item['ref_path']}")
+                        else:
+                            print(f"  cites {item['ref_path']} ({item['ref_kind']})")
                     for item in withheld:
                         print(f"withheld {item['path']}: {item['reason']}")
                 return 0
@@ -5217,11 +6583,12 @@ def main() -> int:
                     paths=arguments.paths,
                     host=arguments.host,
                     entry_point=arguments.command,
+                    render=not arguments.json,
                 )
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    print_capsule(result)
+                    print_capsule(result, capsule_excerpts(connection, result))
                 return 0
 
             if arguments.command == "hook-context":
@@ -5232,6 +6599,7 @@ def main() -> int:
                     task_id=arguments.task_id,
                     gate_mode=gate_mode,
                     host=arguments.host,
+                    render=not arguments.json,
                 )
                 if result is None:
                     # A valid current branch with no meaningful change has no
@@ -5265,7 +6633,7 @@ def main() -> int:
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    print_capsule(result)
+                    print_capsule(result, capsule_excerpts(connection, result))
                 return 0
 
             if arguments.command == "refresh":
@@ -5302,11 +6670,28 @@ def main() -> int:
                             gate_mode=gate_mode,
                             host=arguments.host,
                             entry_point="refresh",
+                            allow_unprovisioned=True,
+                            session_id=arguments.session_id,
+                            transcript=arguments.transcript,
+                            paths=arguments.paths,
+                            # Every refresh with a query renders: hosts put
+                            # capsule_text in front of the model.
+                            render=True,
+                            prompt=arguments.query,
+                            automatic_links=True,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh
                         # above stands on its own and is already done.
-                        warnings.append(f"Capsule unavailable: {error}")
+                        # Name the consequence, not just the cause: an
+                        # unexplained "unavailable" reads as a formality, and
+                        # the turn proceeds as if task context had been
+                        # consulted when none was assembled.
+                        warnings.append(
+                            f"Capsule unavailable: {error}. No task context "
+                            "was assembled this turn; read the canonical "
+                            "sources directly."
+                        )
                     retrieval_seconds = time.monotonic() - retrieval_started
                 codebase = codebase_map_status(connection, repository)
                 phases = {
@@ -5327,6 +6712,16 @@ def main() -> int:
                     ),
                     "reused": index_result.get("reused", 0),
                     "counts": index_result.get("layers", {}),
+                    # Writes no longer fail on a chunk past its review date,
+                    # which was the only place that ever said so out loud.
+                    # The chunk still leaves retrieval; this keeps the loss
+                    # visible on every turn until someone re-verifies it.
+                    "overdue_review": sum(
+                        1
+                        for item in index_result.get("excluded", [])
+                        if isinstance(item, dict)
+                        and item.get("reason") == "overdue-review"
+                    ),
                     "parity_drift": index_result.get("parity_drift", []),
                     # Wall-clock seconds per phase, so an operator can see
                     # which side of the work approaches the hook budget.
@@ -5334,8 +6729,24 @@ def main() -> int:
                     "warnings": warnings,
                     "capsule": capsule,
                 }
+                # A prompt the sanitizer left nothing of is still this turn:
+                # the host learns memory had nothing to search, and the
+                # operator report stays out of the prompt.
+                withheld = bool(getattr(arguments, "query_withheld", False))
+                if withheld:
+                    result["query_withheld"] = True
+                excerpts = (
+                    capsule_excerpts(connection, capsule) if capsule is not None else {}
+                )
+                if capsule is not None:
+                    # What a host puts in front of the model: Harness inserts
+                    # this text instead of the JSON, which repeated every item
+                    # three times and carried no answer-bearing text.
+                    result["capsule_text"] = "\n".join(
+                        render_capsule_lines(capsule, excerpts)
+                    )
                 if arguments.validate:
-                    errors = validate_repository(repository)
+                    errors = validate_repository(repository, check_freshness=False)
                     result["brain_validation"] = "valid" if not errors else "invalid"
                     warnings.extend(errors)
                 # The series the `health` command reads. Deliberately carries
@@ -5361,11 +6772,26 @@ def main() -> int:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     counts = result["counts"]
+                    # With --query this is a turn's delivery, read by a model
+                    # on every prompt: the layer and timing report is only
+                    # worth its characters when something is wrong. Without
+                    # it, it is the operator's /memory report and stays whole.
+                    per_turn = capsule is not None or withheld
+                    healthy = all(
+                        layers[layer] == "updated" for layer in DOCUMENT_LAYERS
+                    )
                     for layer in DOCUMENT_LAYERS:
+                        if per_turn and healthy:
+                            break
                         suffix = (
                             f" ({counts[layer]} documents)" if layer in counts else ""
                         )
                         print(f"{layer}: {result[layer]}{suffix}")
+                    if result["overdue_review"]:
+                        print(
+                            f"memory review: {result['overdue_review']} chunk(s) "
+                            "overdue, not served until re-verified (bank-audit)"
+                        )
                     for item in codebase:
                         behind = item["commits_behind"]
                         print(
@@ -5381,20 +6807,26 @@ def main() -> int:
                     # does not take was the only place these numbers appeared,
                     # so a run creeping toward the ceiling was invisible to
                     # everyone who could act on it.
-                    print(
-                        "phases: "
-                        + " ".join(
-                            f"{name} {round(float(phases[name]) * 1000)}ms"
-                            for name in ("stat", "index", "retrieval")
-                            if isinstance(phases.get(name), (int, float))
-                        )
+                    elapsed = sum(
+                        float(phases[name])
+                        for name in ("stat", "index", "retrieval")
+                        if isinstance(phases.get(name), (int, float))
                     )
+                    if not per_turn or elapsed >= SLOW_TURN_SECONDS:
+                        print(
+                            "phases: "
+                            + " ".join(
+                                f"{name} {round(float(phases[name]) * 1000)}ms"
+                                for name in ("stat", "index", "retrieval")
+                                if isinstance(phases.get(name), (int, float))
+                            )
+                        )
                     if "brain_validation" in result:
                         print(f"brain-validation: {result['brain_validation']}")
                     for warning in warnings:
                         print(f"warning: {warning}")
                     if capsule is not None:
-                        print_capsule(capsule)
+                        print_capsule(capsule, excerpts)
                 return 0 if all(
                     layers[layer] == "updated" for layer in DOCUMENT_LAYERS
                 ) else 1
@@ -5442,15 +6874,35 @@ def main() -> int:
                 return 0
 
             if arguments.command == "validate":
-                errors = validate_repository(repository)
-                result = {"valid": not errors, "errors": errors}
+                # A record whose cited file changed is intact: retrieval serves
+                # it marked for checking. It is listed, and does not fail the
+                # project the way a broken record does.
+                errors = validate_repository(repository, check_freshness=False)
+                states = stale_record_states(repository)
+                result = {
+                    "valid": not errors, "errors": errors, "stale": [path for path, _ in states],
+                }
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
-                elif errors:
+                else:
                     for error in errors:
                         print(error)
-                else:
-                    print("Project Brain validation passed.")
+                    if not errors:
+                        print("Project Brain validation passed.")
+                    for path, state in states:
+                        where = (
+                            " (archived: never retrieved)"
+                            if "/project-brain/archive/" in path.replace("\\", "/") else ""
+                        )
+                        reading = {
+                            "changed": "a cited source changed after the record was written; "
+                                       "retrieval serves it marked for checking",
+                            "source-missing": "a cited source no longer exists; "
+                                              "retrieval leaves the record out",
+                            "source-undigested": "a cited source has no stored digest; "
+                                                 "retrieval leaves the record out",
+                        }[state]
+                        print(f"Warning: {path}: {reading}{where}")
                 return 0 if not errors else 1
 
             if arguments.command == "parity":
@@ -5481,7 +6933,8 @@ def main() -> int:
                     else:
                         print("Cross-edition core parity passed.")
                     return 0 if not cross else 1
-                canonical = str(load_config(repository)["canonical_edition"])
+                configured = str(load_config(repository)["canonical_edition"])
+                canonical = effective_canonical_edition(repository, configured)
                 # Report through the result path rather than an exception, so
                 # --json produces a machine-readable drift list on failure too.
                 # Raising first made the --json branch unreachable, and a caller
@@ -5493,6 +6946,8 @@ def main() -> int:
                     "canonical_edition": canonical,
                     "drift": drift,
                 }
+                if canonical != configured:
+                    result["configured_canonical_edition"] = configured
                 if not arguments.skills_only:
                     # Full mode adds the MIRROR_RULES contract: every mirrored
                     # class (skills including non-markdown files, hooks,
@@ -5512,7 +6967,12 @@ def main() -> int:
                         print(format_full_mirror_drift(mirror_drift), file=sys.stderr)
                     if result["valid"]:
                         scope = "Skill mirror" if arguments.skills_only else "Mirror"
-                        print(f"{scope} parity passed ({canonical} canonical).")
+                        stand_in = (
+                            f"; configured {configured} is not installed here"
+                            if canonical != configured
+                            else ""
+                        )
+                        print(f"{scope} parity passed ({canonical} canonical{stand_in}).")
                 return 0 if result["valid"] else 1
 
             if arguments.command == "compact":
@@ -5671,10 +7131,28 @@ def main() -> int:
                     )
                 return 0
 
+            if arguments.command == "promote-auto":
+                # The turn boundary is the only other caller, and it waits for
+                # `--flush-after` turns. Knowledge recorded deliberately, as a
+                # reviewed session result is, should not wait for a counter.
+                result = auto_promote(repository, owner=owner)
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                elif not result["enabled"]:
+                    print("Automatic promotion is disabled in runtime.json.")
+                else:
+                    print(
+                        f"Promoted {len(result['promoted'])} record(s); "
+                        f"{len(result['blocked'])} blocked, "
+                        f"{len(result['failed'])} failed, "
+                        f"{result['skipped']} deferred."
+                    )
+                return 0
+
             raise ContextError(f"Unsupported command: {arguments.command}")
         finally:
             connection.close()
-    except (ContextError, BrainError, RetrievalError, OSError, sqlite3.Error) as error:
+    except (ContextError, HandoffError, BrainError, RetrievalError, OSError, sqlite3.Error) as error:
         print(f"context: {error}", file=sys.stderr)
         return 1
 

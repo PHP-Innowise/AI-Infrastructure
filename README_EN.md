@@ -54,8 +54,35 @@ router, or dependency-injection container.
 
 ## How to Add an Accelerator to a Project
 
-For a real project, use the
-[inventory-driven installer](install/README.md) from this repository root.
+The quickest way copies nothing into the project. Clone this repository once,
+run `./harness-server start`, open the printed address and, in **Sessions**,
+choose **Choose a project folder** - as DeepSeek Harness chooses a workspace. The Harness detects
+the edition from `composer.json` (`laravel/framework` → Laravel,
+`symfony/framework-bundle` → Symfony, WordPress → WordPress, otherwise PHP Core)
+and attaches it from the clone: every Claude Code, Codex or Cursor session gets
+the edition's policy, skills, agents, commands and hooks, and the project's
+memory (Project Brain, Memory Bank, index) is kept in the Harness state, not in
+the project. `git pull` in the clone updates every attached project at once.
+From a terminal, `python3 <clone>/scripts/accelerator_attach.py run
+claude|codex|cursor` run in the project folder does the same. Details and
+limits: [docs/ATTACHED-MODE.md](docs/ATTACHED-MODE.md).
+
+To start the accelerator like any other application, run
+`./accelerator-app install` once in the clone (in Git Bash on Windows).
+**AI Accelerator**, with the hare logo, then appears among the installed
+applications: in the application menu of GNOME, KDE and other XDG desktops on
+Linux, in Launchpad and Spotlight on macOS, and in the Start menu and
+**Settings › Apps** on Windows. A click starts the Harness from the clone if it
+is not running and opens it in the browser. Only a shortcut and an icon are
+written to the system, and the application updates itself: when `main` moves
+on, an **Update** button appears in the page header, and one click pulls the
+changes, refreshes the application and restarts it. Installing a new CLI needs
+no reinstall. `./accelerator-app uninstall` removes the application; projects
+and their memory stay. Details:
+[harness/README.md](harness/README.md#desktop-application).
+
+When a team wants the accelerator's files in the project's own Git history, use
+the [inventory-driven installer](install/README.md) from this repository root.
 Start with `--dry-run`, select only the required AI integrations, resolve every
 reported collision manually, and then repeat the command without `--dry-run`.
 The installer refuses collisions before copying and does not install project
@@ -82,6 +109,11 @@ itself. Claude Code, Cursor, and Codex do not automatically search
 - `tests/` — repository-level tests.
 - `docs/` — shared documentation.
 - `harness/` — optional orchestration harness.
+
+`install/`, `scripts/`, `tests/`, `docs/`, `harness/`, the root `CHANGELOG.md`,
+and CI (`.github/workflows/`) serve the monorepository itself and are not
+copied into a project along with an edition. Each edition carries its released
+version in a `VERSION` file, which the session-start hook prints.
 
 ## Shared Architecture: Command → Agent → Skill
 
@@ -185,7 +217,12 @@ Every edition combines three separate components:
 - **Memory Bank — what is remembered permanently.** It stores small,
   Git-tracked chunks of reusable constraints, decisions, domain knowledge,
   integration contracts, and operational lessons. Independently reviewed
-  chunks and automatic unreviewed promotions are labeled distinctly.
+  chunks and automatic unreviewed promotions are labeled distinctly. A new
+  chunk is identified as `MEM-YYYYMMDD-xxxxxxxx` (the date plus eight hex
+  characters derived from the source record's UUID), so promotions on two
+  machines or in two branches never race for a shared counter; `INDEX.md` is
+  not appended by hand but regenerated deterministically with
+  `context.py reindex-bank`. Legacy `MEM-NNNN` chunks stay valid.
 
 Governed mode is the default. Project Brain owns shared active-work state;
 `memory-bank/local/context.db` is only a disposable index plus local
@@ -205,8 +242,10 @@ and must be verified against the cited current source.
 
 Raw conversations, prompts, responses, hidden reasoning, logs, credentials,
 secrets, customer or personal data, and unredacted incident payloads do not
-belong in any of these stores. Ignored, private, unauthorized, stale,
-superseded, terminal, or invalid records are excluded as applicable.
+belong in any of these stores. Ignored, private, unauthorized, superseded,
+terminal, or invalid records, and records whose cited source was deleted, are
+excluded as applicable; a record whose cited file changed is kept and marked
+for checking.
 
 ### Governed User Flow
 
@@ -237,9 +276,43 @@ python3 memory-bank/scripts/context.py retrieve \
 ~~~
 
 `context` remains a compatibility alias for `retrieve`; new documentation and
-automation should use `retrieve`. Indexing and retrieval are explicit. Hooks
-report metadata such as mode, index health, active binding count, and validation
-status; they do not index, retrieve, print records, or inject prompt context.
+automation should use `retrieve`.
+
+Alongside the explicit command, the hooks run an automatic memory loop:
+
+- the session-start hook (`local-context.sh`) prints metadata only — edition
+  version, mode, index health, active binding count, and validation status; it
+  never prints records or injects context (on Cursor it also re-renders the
+  rule described in the tool table). Validation results are cached per
+  repository state, so a second start does not pay for them again;
+- the prompt hook (`UserPromptSubmit` in Claude Code and Codex) runs
+  `context.py refresh --sanitize`: it incrementally refreshes the three index
+  layers and injects the Task Capsule into the prompt. On Cursor the same hook
+  runs on `beforeSubmitPrompt` and writes the capsule into the
+  `working-memory.mdc` rule instead;
+- the turn-end hook (`Stop`) runs `context.py turn`: changed paths are buffered
+  in ignored local state and flushed into the authoritative task every fifth
+  turn. Maintenance — promoting anything still eligible, compaction, and
+  reporting a merged branch as a completion candidate (a task is never closed
+  automatically) — runs on that same boundary, so heavy work never happens on
+  every turn under the hook timeout.
+
+Each turn's outcome is written to `memory-bank/local/last-turn-report.json`
+(what flushed, what was promoted, what was blocked and why, which paths were
+excluded), and the next capsule shows a "Last turn" section, so the automatic
+pipeline stays visible to the operator.
+
+A second hook, `context-continuity.sh`, runs on the same session-start, prompt
+and turn-end events (on Cursor: `sessionStart`, `beforeSubmitPrompt` and
+`afterAgentResponse`) and is not part of the memory loop. By default it keeps
+the visible text of every chat — each prompt and final answer — in ignored
+local `.context-handoff/`, bound to the checkout and branch; text that looks
+like a secret is not stored. At session start it injects nothing unless a
+merge of chosen chats was prepared with `context-load merge`: the next new
+session of the chosen client on that branch then receives a preview of those
+chats, capped at 6,000 bytes, as context. `CONTEXT_CONTINUITY_DISABLED=1`
+turns capture and delivery off. See
+[Context Handoff](docs/CONTEXT-HANDOFF.md).
 
 ### Authority-Aware `memory` and `checkpoint`
 
@@ -269,9 +342,20 @@ At the start of a complex request and before a complex phase handoff, the agent
 derives a concise sanitized retrieval query and builds a Task Capsule from
 optional Working Memory and `context` retrieval. The raw request is not copied
 into the packet. The complete packet is capped at 8,000 Unicode characters and
-contains at most two Procedural, three Semantic, and one Episodic result.
+contains at most three Semantic and two Episodic results and no Procedural item:
+skills are left to the host's own list.
 Retrieved entries are short snippets with source paths; the next agent reads a
 full source only when its current step requires it.
+
+The retrieval query is distilled from the whole prompt rather than its opening
+words: up to 24 terms are selected by rarity in the index, so a point made at
+the end of a long request is not lost. Ranking modulates BM25 with the record's
+authority, declared confidence, and a freshness decay over `updated_at`, so a
+verified record outranks an observed one and a fresh record outranks a stale
+one, all else being equal. A query typed on the command line that carries a
+secret or personal data is refused before it reaches the index or a retrieval
+manifest; the prompt hooks pass `--sanitize`, which cuts those parts out of the
+prompt instead and withholds retrieval when nothing is left.
 
 Simple tasks stay in the current context. Fresh contexts are reserved for
 research-to-planning, planning-to-implementation,
@@ -303,6 +387,26 @@ python3 memory-bank/scripts/context.py complete \
 python3 memory-bank/scripts/context.py compact
 ~~~
 
+Companion maintenance commands:
+
+~~~bash
+# restore the machine-local binding on another machine or in a fresh clone
+# (the task record exists in Git, the local binding does not)
+python3 memory-bank/scripts/context.py rebind --task-id BAUMAS-133
+
+# regenerate memory-bank/INDEX.md deterministically from chunk frontmatter
+python3 memory-bank/scripts/context.py reindex-bank
+
+# check skill, hook, command, and agent mirrors inside the edition; add
+# --cross-edition to check the shared core is byte-identical across editions
+python3 memory-bank/scripts/context.py parity
+python3 memory-bank/scripts/context.py parity --cross-edition
+~~~
+
+Automatic rebinding is built into the turn flush: when a task record exists in
+Git but its local binding does not, the binding is restored by branch name and
+the restoration is stated in the turn report.
+
 To hand accumulated context to another person or to a team repository, write a
 bundle:
 
@@ -319,10 +423,25 @@ is no `import`: a bundle is a handoff artifact, not a second installation.
 
 Governed cross-store mutations use revision checks and rollback/compensation so
 a failed Brain or SQLite update does not leave a split authoritative state.
-Promotion into Memory Bank is automatic by default: the turn-end hook promotes
-resolved findings and bugs, closed incidents, and accepted decisions without
-asking, and never claims a review that did not happen — `reviewer` stays null,
-`review_mode` is `automatic`, and the chunk is tagged `auto-promoted`. Durable
+Promotion into Memory Bank is automatic by default: a resolved finding or bug,
+a closed incident, or an accepted decision is promoted without asking as soon
+as the update that resolves it lands (the turn-flush boundary picks up anything
+still eligible), and a review that did not happen is never claimed —
+`reviewer` stays null, `review_mode` is `automatic`, and the chunk is tagged
+`auto-promoted`. Only records whose authority is `verified` qualify. Records
+are created as `observed` by default. An update accepts one authority step,
+`observed` to `verified`: `brain-update --authority verified` takes it under a
+revision check and records it in the record's transition ledger. The `verify`
+skill does this for confirmed records before their terminal status, and
+`record-result` (the `memory_record_result` MCP tool) does it for each
+learning it saves, writing who checked the claim into that ledger entry
+(`[attestation:agent]` unless a person checked it; a chunk promoted from an
+agent-attested record is tagged `agent-attested`). The exception is
+`brain-create --authority verified`: it writes a record that is `verified`
+from the start, with no ledger entry for the step and no attestation, and
+promotion reads the record's authority field rather than its ledger, so such
+a record is promoted like any other. A blocked promotion and its reason appear
+in the turn report and in the next capsule. Durable
 memory is therefore accumulated, not curated: treat a retrieved chunk as a
 pointer to its cited source, not as a vetted fact. Set `automatic_promotion` to
 `false` in `project-brain/config/runtime.json` for the reviewed sequence, where
@@ -332,10 +451,18 @@ approves it before atomic application. Lightweight mode retains the older local
 which are non-authoritative and lost when its SQLite database is deleted.
 
 The implementation is local, dependency-free Python with SQLite FTS5. It does
-not provide embeddings, vector search, MCP, LangGraph, or a central memory
-service. Claude Code and Codex receive a fresh bounded Task Capsule through
-prompt hooks; Cursor receives the previous turn's capsule through an
-auto-rendered local rule.
+not provide embeddings, vector search, LangGraph, or a central memory service.
+Claude Code and Codex receive a fresh bounded Task Capsule through prompt
+hooks; Cursor receives the previous turn's capsule through an auto-rendered
+local rule. Each edition also ships a local memory MCP server,
+`memory-bank/scripts/mcp_server.py`, which the client starts over standard
+input and output. The installer registers it for each selected client, as
+`harness-memory` in `.mcp.json` and `.cursor/mcp.json` and as
+`harness_memory` in `.codex/config.toml`; the client still asks for trust and
+tool approval. Its four tools — `memory_status`, `memory_retrieve`,
+`memory_checkpoint` and `memory_record_result` — work on the same Project
+Brain and Memory Bank as the CLI, and `context.py record-result` is the same
+write path without it. See the edition's `memory-bank/MCP.md`.
 
 A three-scenario Task Capsule pressure test measured 96.4%, 97.2%, and 97.2%
 fewer transferred characters while retaining each exact Working file set and
@@ -351,7 +478,8 @@ MCP servers are optional external integrations. The accelerator does not
 require them, and teams should enable only the servers that correspond to
 systems the project actually uses. A small, relevant toolset consumes less
 context and creates a smaller security boundary than installing every
-available server.
+available server. The local memory server described above is part of the
+accelerator, not one of these integrations.
 
 Useful integrations include:
 
@@ -503,7 +631,19 @@ overwriting anything. `infra-build` combines both phases.
 
 The generator inspects the actual `composer.json`, framework, dependencies,
 integrations, architecture, and CI/CD instead of copying a Laravel, Symfony,
-or PHP Core template. See
+or PHP Core template. A generated accelerator receives the same memory layer as
+the ready-to-use editions: the context-brain runtime under
+`memory-bank/scripts/`, the `project-brain/` skeleton, and the automatic-memory
+hooks, including capsule delivery for Cursor.
+
+Generated output is upgradable in place. Every `infra-generate` run writes
+`.infra-manifest.json` into the target (generator version from the root
+`VERSION`, the profile it consumed, and the sha256 of every file it generated)
+and stamps the version on the first line of the generated `AGENTS.md`. Later,
+`infra-update` compares hashes: a file the team never touched is replaced with
+its new version; a file the team edited is never overwritten and lands in a
+"requires decision" report with three-way context; a file absent from the
+manifest is left alone entirely. See
 [Infrastructure-Creator/README.md](Infrastructure-Creator/README.md) for the
 complete guide.
 
@@ -513,12 +653,40 @@ complete guide.
   does not automatically belong in Symfony or PHP Core.
 - Evaluate a universal policy in `PHP Core/` first, then adapt it to the
   relevant framework boundaries instead of copying it blindly.
-- Within one edition, mirror supported skill, agent, and command changes
-  across `.claude/`, `.cursor/`, `.agents/`, and `.codex/`.
+- Never edit a mirror by hand. Skills are canonical in `.agents/skills`; hooks,
+  commands, agents, and policy documents are canonical in `.claude`. After
+  editing the canon, run `python3 scripts/build_mirrors.py --write` and the
+  `.claude`, `.cursor`, and `.codex` mirrors are regenerated from the
+  `MIRROR_RULES` table in `memory-bank/scripts/context_retrieval.py`
+  (`Infrastructure-Creator/mirror_rules.py` for the generator). A legitimate
+  per-mirror difference belongs in that table as a rule or an exception, never
+  as a silently diverging file.
 - Record the change in the edition's `CHANGELOG.md` and run its `DOD.md`
   verification. Changes to the shared core (the memory/context core,
   Project Brain, hooks, mirror machinery, root `scripts/`) are recorded in
   the root `CHANGELOG.md` instead; CI enforces this on pull requests.
+
+### Checks Before Handing Work Over
+
+`scripts/check.py` runs the same steps as CI (`.github/workflows/`), one group
+per job; [docs/CI.md](docs/CI.md) says what each job verifies:
+
+~~~bash
+python3 scripts/check.py                               # every CI job; exit 1 on any failure
+python3 scripts/check.py --list                        # every command, and what would skip here
+python3 scripts/check.py --group lint --group mirrors  # only these jobs
+~~~
+
+The context budget (each edition's `AGENTS.md`, skill descriptions, commands,
+agents, and skill bodies) is measured by `scripts/context_budget.py`; the
+ceilings live in `scripts/token_budget.json`. That file states a policy of
+about five percent headroom, but ceilings have been raised inconsistently:
+some were refit to the observed value plus five percent, others raised by
+exactly the growth of one change. Headroom therefore runs from a few bytes to
+just under five percent of the ceiling, and where it is a few bytes one added
+sentence in an `AGENTS.md` can fail CI's lint job. Trim the text or raise the
+ceiling in the same change; `python3 scripts/context_budget.py --headroom`
+lists what each category has left.
 
 For stack-specific details, open the selected edition's README. For its
 durable memory, open the corresponding guide and then that edition's

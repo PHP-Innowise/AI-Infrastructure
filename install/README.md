@@ -5,6 +5,10 @@ Core, or WordPress accelerator into an existing project from a versioned product
 inventory. It copies the selected production payload into the target root and
 refuses unsupported collisions before writing anything.
 
+To use an edition without copying anything into the project, attach it from
+this clone instead: [docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md). Install
+when the team wants the accelerator's files in the project's own Git history.
+
 Use this installer for ready-made editions. For projects with substantial
 custom architecture, integrations, or internal conventions, use
 [Infrastructure-Creator](../Infrastructure-Creator/README.md). For a non-PHP
@@ -61,6 +65,17 @@ lowercase `tasks/` scaffolds. Source-only research, test suites, worked
 examples, and bundled uppercase `Task/` product/design material remain useful
 in this repository but are not copied into a consuming project.
 
+Memory written while working inside an edition is source-only too. Every
+Memory Bank chunk (`memory-bank/chunks/**`) and the governed Brain runtime
+files (`project-brain/control/handoffs/*.md`, `control/messages/*.jsonl`,
+`control/retrieval-manifests/*.json` and `project-brain/dynamic/*/*.md`) are
+excluded, so a consuming project starts from the empty memory index and Brain
+indexes and the `.gitkeep` placeholders that create the runtime's directories,
+never from another project's knowledge or tasks. A seed chunk or record added
+there is not installed: `--verify-inventories` reports it as `UNCLASSIFIED`
+until the inventories are regenerated, which lists it under
+`excluded_tracked_paths`.
+
 `Task/` and `tasks/` are intentionally different:
 
 - uppercase `Task/` is optional client-input space. A consuming project or
@@ -94,6 +109,14 @@ Available tool values are:
 - `--tool codex` for `.agents/` and `.codex/`.
 
 Repeat `--tool` to select multiple integrations. Omit it to install all three.
+
+The selected clients automatically receive project Memory MCP registration:
+`.mcp.json` for Claude, `.cursor/mcp.json` for Cursor, and a managed table in
+`.codex/config.toml` for Codex. The installer detects Python with SQLite FTS5
+and uses portable launchers across worktrees and nested directories. It merges
+only the memory entry, preserves other servers/settings, and refuses a foreign
+same-name entry even under `--overwrite`. Native workspace trust/tool approval
+remains under client control. See [memory integration](../docs/MEMORY-INTEGRATION.md).
 Shared policy, workflow, Memory Bank, and Project Brain files are included with
 every selection. Tool selection narrows native integration trees; it does not
 re-add source-only files excluded from the production payload.
@@ -101,11 +124,21 @@ re-add source-only files excluded from the production payload.
 `--merge-existing` handles the standard root files commonly present in an
 existing project:
 
-- identical files are reported as `UNCHANGED`;
+- identical files are reported as `UNCHANGED`, except that one which must be
+  executable and is not (a hook from an install made before executable bits
+  were enforced) keeps its content, gets the bit, and is reported as
+  `FIX_MODE` (`WOULD_FIX_MODE` in a dry run);
+- the files the project owns after the first install - `tasks/.task-counter`, `specs/MANIFEST.md`, `memory-bank/INDEX.md`, the Project Brain indexes and `project-brain/config/runtime.json` - are kept as they are under every mode and reported as `KEPT`, so a reinstall neither collides on them nor resets the task counter; configuration keys a newer release adds fall back to the runtime defaults;
 - `.gitignore` and `.gitattributes` retain project entries and receive only
-  missing accelerator directives in an installer-managed block;
+  missing accelerator directives in an installer-managed block; the installed
+  `.gitattributes` directive is `*.sh text eol=lf`, so hooks keep LF in a
+  Windows clone. Installs made before this release received the edition's
+  mirror list with `-diff` on every path, which shows an edited hook as
+  "Binary files differ" in review; delete those lines by hand;
 - existing `AGENTS.md` retains project policy first and receives a marked,
   replaceable accelerator policy block;
+- existing `.claude/CLAUDE.md` keeps its content and receives the managed
+  `@../AGENTS.md` import block;
 - existing `README.md` remains untouched and the accelerator documentation is
   installed as `ACCELERATOR.md`.
 
@@ -420,7 +453,8 @@ Use the saved transcript, the pre-install recovery point, and Git diff:
   required. Removing only an installer-managed block is safe only after review:
   additive merges can omit accelerator directives that already existed in the
   project, and those project-owned lines must remain;
-- do nothing for `UNCHANGED` records.
+- do nothing for `UNCHANGED` records; a `FIX_MODE` record only added an
+  executable bit, which `chmod -x` takes away again.
 
 The installer has no automatic rollback command. A transcript records what the
 successful run reported, but it does not contain previous file contents.

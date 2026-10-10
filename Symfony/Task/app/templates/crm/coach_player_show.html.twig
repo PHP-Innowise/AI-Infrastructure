@@ -1,0 +1,80 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ player.firstName }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ player.firstName }}</h1>
+        <p>Skill level: {{ membership.skillLevel }} · Age: {{ player.ageOn(now)|default('n/a') }}</p>
+
+        {# AC-03-44: attendance limited to sessions with this coach. #}
+        <section>
+            <h2>Attendance with you</h2>
+            <p class="skeleton-caption">
+                {{ attendedCount }} of {{ totalCount }} events
+                ({{ totalCount > 0 ? (100 * attendedCount / totalCount)|round : 0 }}%)
+            </p>
+            {% if attendanceRecords is empty %}
+                <p>No shared sessions yet.</p>
+            {% else %}
+                <table>
+                    <thead><tr><th>Date</th><th>Event</th><th>Status</th></tr></thead>
+                    <tbody>
+                        {% for record in attendanceRecords %}
+                            <tr>
+                                <td>{{ record.event.startsAt|date('Y-m-d') }}</td>
+                                <td>{{ record.event.title }}</td>
+                                <td>{{ record.status|capitalize }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% endif %}
+        </section>
+
+        {# AC-03-45: read-only labels/flags. #}
+        <section>
+            <h2>Labels <span class="skeleton-caption">(read-only)</span></h2>
+            {% for playerLabel in labels %}
+                <span class="badge" style="background:{{ playerLabel.label.colorHex }}">{{ playerLabel.label.name }}</span>
+            {% else %}
+                <p>No labels.</p>
+            {% endfor %}
+        </section>
+
+        <section>
+            <h2>Flags <span class="skeleton-caption">(read-only)</span></h2>
+            {% for flag in activeFlags %}
+                <span class="badge">{{ flag.flagType }}</span>
+            {% else %}
+                <p>No active flags.</p>
+            {% endfor %}
+        </section>
+
+        {# AC-03-46..49: this coach's own session feedback. #}
+        <section>
+            <h2>Your Feedback</h2>
+            {% for feedback in pastFeedback %}
+                <div class="note">
+                    <p>[{{ feedback.event.title }}] - [{{ feedback.createdAt|date('Y-m-d') }}]: {{ feedback.noteText }}</p>
+                    {# AC-03-49: own feedback, editable/deletable within 24h — editing itself
+                       is a follow-up UI polish item (see the coder's final report); delete
+                       is wired here since it needs no additional input beyond confirmation. #}
+                    {% if feedback.editWindowExpiresAt > now %}
+                        <form method="post" action="{{ path('crm_coach_player_feedback_delete', {membership: membership.id, feedback: feedback.id}) }}">
+                            <input type="hidden" name="_token" value="{{ csrf_token('coach-feedback-delete' ~ feedback.id) }}">
+                            <button type="submit">Delete</button>
+                        </form>
+                    {% endif %}
+                </div>
+            {% else %}
+                <p>No feedback added yet.</p>
+            {% endfor %}
+
+            <p>+ Add Session Feedback</p>
+            {{ form_start(feedbackForm, {action: path('crm_coach_player_feedback_add', {membership: membership.id})}) }}
+                {{ form_widget(feedbackForm) }}
+            {{ form_end(feedbackForm) }}
+        </section>
+    </div>
+{% endblock %}

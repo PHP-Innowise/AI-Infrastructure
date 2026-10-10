@@ -1,0 +1,48 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Family — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Family</h1>
+        <p><a class="button button--primary" href="{{ path('identity_portal_child_create') }}">+ Add child</a></p>
+
+        {% if links is empty %}
+            <p>No children yet.</p>
+        {% endif %}
+
+        {% for link in links %}
+            {% set child = link.childPlayer %}
+            <div class="skeleton-card">
+                <h2>{{ child.firstName }}</h2>
+                <p class="skeleton-caption">Age {{ child.ageOn(now) }}</p>
+
+                <h3>Trainers</h3>
+                <ul>
+                    {% for membership in membershipsByChild[child.id] ?? [] %}
+                        <li>
+                            {{ membership.trainer.businessName }} — since {{ membership.joinedAt|date('Y-m-d') }}
+                            ·
+                            <a href="{{ path('identity_portal_child_trainer_remove', {child: child.id, trainer: membership.trainer.id}) }}">Remove</a>
+                        </li>
+                    {% endfor %}
+                </ul>
+
+                <p>
+                    <a href="{{ path('identity_portal_child_edit', {child: child.id}) }}">Edit</a>
+                    ·
+                    <a href="{{ path('identity_portal_child_trainer_add', {child: child.id}) }}">Add a trainer</a>
+                    ·
+                    <a href="{{ path('identity_portal_child_token_approval', {child: child.id}) }}">Token approval setting</a>
+                </p>
+
+                {# AC-01-18: the context selector — switch which child (or
+                   "Me") the portal is currently acting for. #}
+                <form method="post" action="{{ path('identity_portal_context_child_switch', {child: child.id}) }}">
+                    <input type="hidden" name="_token" value="{{ csrf_token('child-context' ~ child.id) }}">
+                    <button type="submit">Switch to {{ child.firstName }}</button>
+                </form>
+            </div>
+        {% endfor %}
+    </div>
+{% endblock %}
