@@ -268,7 +268,7 @@ class ProcessCatalogPhaseVocabularyTest(unittest.TestCase):
 
 
 class RuntimeFixedDecisionDocTest(unittest.TestCase):
-    """C3: the quartet's status must be documented where a reader would
+    """C3: the six runtime guides' status must be documented where a reader would
     otherwise mistake it for a selection failure, and must name the gate codes
     that actually enforce the substituted bar."""
 
@@ -278,6 +278,14 @@ class RuntimeFixedDecisionDocTest(unittest.TestCase):
         "RUNTIME_COMMAND_UNSUPPORTED",
         "RUNTIME_PROJECT_CLAIM_UNSUPPORTED",
     )
+    GUIDES = {
+        "memory-bank",
+        "project-brain",
+        "checkpoint",
+        "memory",
+        "context-save",
+        "context-load",
+    }
 
     def test_catalog_states_the_status_and_the_substituted_bar(self) -> None:
         text = PROCESS_CATALOG_DOC.read_text(encoding="utf-8")
@@ -317,9 +325,25 @@ class RuntimeFixedDecisionDocTest(unittest.TestCase):
                 ("memory-bank/scripts/context.py", match.group(1)), allowed
             )
 
+    def test_registry_and_catalog_keep_the_complete_runtime_guide_set(self) -> None:
+        """Every generated target needs both portable handoff entry points."""
+        registry = json.loads(
+            (ROOT / ".agents/skills/skill-forge/references/candidate-registry.json")
+            .read_text(encoding="utf-8")
+        )
+        runtime_fixed = {
+            candidate["id"]
+            for candidate in registry["candidates"]
+            if candidate.get("mode") == "runtime-fixed"
+        }
+        self.assertEqual(self.GUIDES, runtime_fixed)
+        text = PROCESS_CATALOG_DOC.read_text(encoding="utf-8")
+        for guide in self.GUIDES:
+            self.assertIn(f"### `{guide}`", text)
+
 
 class InventoryReportingSplitDocTest(unittest.TestCase):
-    """C3(d): a run that produced five derived skills plus the quartet must
+    """C3(d): a run that produced five derived skills plus runtime guides must
     never be summarized as nine skills 'for your project'."""
 
     def test_infra_generate_output_template_splits_the_two_classes(self) -> None:

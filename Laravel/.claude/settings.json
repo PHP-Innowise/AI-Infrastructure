@@ -78,6 +78,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/local-context.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
+            "timeout": 8
           }
         ]
       }
@@ -89,6 +94,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/working-memory-read.sh",
             "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
+            "timeout": 8
           }
         ]
       }
@@ -99,6 +109,11 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/working-memory-write.sh",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/context-continuity.sh",
             "timeout": 8
           }
         ]

@@ -17,6 +17,8 @@ it at the top of every session.
 
 ### Added
 
+- `context-save` and `context-load` for Codex, Claude Code and Cursor: save a curated summary or topic handoff, or preserve an explicitly exported visible conversation verbatim in `full` mode, as a task artifact under `tasks/`; loading it in another checkout, machine or client reports branch, commit and file drift. Handoffs stay out of the index and never write Project Brain, Memory Bank or SQLite. Shared runtime changes are recorded in the root changelog.
+- Merge chosen chats into a new task: the `context-continuity` hook (one script for session start, prompt and end of turn) keeps each chat's visible prompts and final answers in ignored `.context-handoff/`; `context-load merge` freezes 2-8 of them into an attributed archive for the next new session in the chosen client, which receives a bounded preview with conflicts left unresolved for the agent. Only a prepared merge is delivered - a new session otherwise starts with the Task Capsule alone. `CONTEXT_CONTINUITY_DISABLED=1` turns snapshots off.
 - `.cursor-plugin/plugin.json` loads this edition in place for an attached Cursor Agent session (`--plugin-dir`), pointing at the edition's own `.cursor` rules, skills, agents, commands and `hooks.json`; it is excluded from installs. The SessionStart banner (`local-context.sh`) names the clone and the state directory when the edition is attached, and describes the project rather than the hook's working directory. See [docs/ATTACHED-MODE.md](../docs/ATTACHED-MODE.md).
 
 ### Fixed

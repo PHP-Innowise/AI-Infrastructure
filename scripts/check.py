@@ -267,6 +267,7 @@ HARNESS_TESTS = (
 # A guard never hides a step CI runs: the drift test fails on it, and here it
 # fails under --strict.
 HARNESS_TESTS_NEWER = (
+    "tests.test_harness_merge",
     "tests.test_harness_run_activity",
     "tests.test_harness_commands",
     "tests.test_harness_process_runtime",

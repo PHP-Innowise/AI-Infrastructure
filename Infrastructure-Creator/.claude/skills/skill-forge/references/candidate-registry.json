@@ -805,6 +805,22 @@
       "mode": "runtime-fixed"
     },
     {
+      "catalog": "php-process-skills.md#context-save",
+      "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "runtime-fixed: always generated, never rejected",
+      "id": "context-save",
+      "mode": "runtime-fixed"
+    },
+    {
+      "catalog": "php-process-skills.md#context-load",
+      "category": "process",
+      "falsifier": null,
+      "falsifier_absent": "runtime-fixed: always generated, never rejected",
+      "id": "context-load",
+      "mode": "runtime-fixed"
+    },
+    {
       "catalog": "php-specialty-skills.md#orm-patterns",
       "category": "specialty",
       "falsifier": {

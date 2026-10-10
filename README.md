@@ -13,3 +13,5 @@ CI and local checks: [docs/CI.md](docs/CI.md)
 Browser workspace: [Harness server](harness/README.md#browser-server) — `./harness-server start --project /path/to/project`
 
 Multi-service AI coordination: [System coordinator](docs/AI-SYSTEM-ORCHESTRATION.md) — stack-neutral service catalog, impact map, bounded context, change plans and sequential workers with recovery.
+
+Context for another task: [Merge chats, save and load across Codex, Claude and Cursor](docs/CONTEXT-HANDOFF.md)

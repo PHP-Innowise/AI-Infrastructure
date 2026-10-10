@@ -84,6 +84,8 @@
 .claude/skills/memory-seed/assets/scripts/automatic_query.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/brain_runtime.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context.py -diff linguist-generated=true
+.claude/skills/memory-seed/assets/scripts/context_continuity.py -diff linguist-generated=true
+.claude/skills/memory-seed/assets/scripts/context_handoff.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/mcp_config.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/mcp_server.py -diff linguist-generated=true
@@ -228,6 +230,8 @@
 .cursor/skills/memory-seed/assets/scripts/automatic_query.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/brain_runtime.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context.py -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/scripts/context_continuity.py -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/scripts/context_handoff.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context_retrieval.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/mcp_config.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/mcp_server.py -diff linguist-generated=true

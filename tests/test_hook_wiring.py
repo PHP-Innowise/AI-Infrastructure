@@ -252,6 +252,7 @@ class HookWiringTest(unittest.TestCase):
                 errors: list = []
                 validator.validate_hook_wiring(root, tools, files, errors)
                 validator.validate_required_wiring(root, tools, files, errors)
+                validator.validate_continuity_wiring(root, tools, files, errors)
                 self.assertEqual(errors, [])
 
     # -- behaviour ----------------------------------------------------------

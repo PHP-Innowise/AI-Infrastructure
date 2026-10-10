@@ -15,6 +15,55 @@ Filenames and sizes are validated, and stored bytes are checked before use.
 Attachments are reference data and are not automatically executed or promoted
 into Memory Bank. A failed send retains the selected files for correction.
 
+## Merge chats into a new task
+
+In **Sessions**, choose **Merge** next to **Recent sessions** in the sidebar.
+Select 2–8 finished chats of the project chosen in the sidebar, choose
+**Continue with selected chats**, then select Codex, Claude or Cursor, adjust
+the new task's message and settings, and choose **Merge into new task**.
+Sources may use different providers. The new task starts a fresh native session
+in the project folder. The original chats stay unchanged and open from the
+links above the composer; **Cancel merge** returns to an ordinary new session.
+
+The new task preserves an immutable, attributed copy of each source's visible
+user and assistant messages, including decisions and progress written there.
+**View saved context** shows those messages by source. A bounded preview and the
+full local archive path are passed on the first launch; the agent must read
+omitted context and reconcile conflicting decisions against the current code.
+Conflicts remain explicitly unevaluated until then. Nested merges retain their
+inherited sources. Later source messages do not change the saved snapshot.
+
+This covers conversations captured by Harness, not external client chat lists
+or a full native transcript export. Tool output, hidden reasoning, attached
+file contents, memory notices and memory-draft blocks are not copied. Native
+file-read permissions still apply; an agent that cannot read the full archive
+must report the limitation. Claude receives access to the individual archive
+directory. This is not a read-only filesystem boundary in Edit mode: changing
+that file makes the next first-launch integrity check fail, while the database
+snapshot remains available in the UI.
+
+Otherwise a merged task is an ordinary new session: project memory works as it
+does for any new session, and helpers, models and budgets are chosen as usual.
+It always runs the native workflow in the project folder, without attachments
+or Clash. A Claude task starts with a written instruction, not a Claude Code
+command, which would reach the CLI without the merged context. The launch sets
+`CONTEXT_CONTINUITY_RESTORE_DISABLED=1`, so a native merge prepared with
+`context-load merge` for that client is not consumed by this Harness task; the
+project's hooks keep capturing its chat.
+
+Running chats and Creator, Fleet, Clash or System Orchestration runs cannot be
+selected. A source is limited to 512 KiB of visible messages and 10,000 events;
+an archive to 2 MiB; stored archives to 128 and 64 MiB of serialized history.
+Exceeding a limit rejects the new merge without truncating or deleting saved
+context. Archives live privately in the Harness state directory and SQLite,
+outside project Git. Retries with the same request identity create at most one
+task. A merged task that stopped before its provider created a native session
+(after a server restart, a full queue or a failed start) offers **Restart merged
+task**. This explicitly reruns its first message; inspect any partial work
+first. Automatic duplicate-request retries only requeue targets that never
+started a launch. Once a native session exists, use ordinary follow-ups.
+Startup removes orphan archives left by a crash before the database commit.
+
 ## System orchestration in the browser
 
 **System Orchestration** coordinates development changes across registered

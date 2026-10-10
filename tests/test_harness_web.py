@@ -127,6 +127,39 @@ class HarnessWebTests(unittest.TestCase):
         return {"project_id": self.project_id, "provider": "codex", "prompt": "Inspect the fixture",
                 "mode": "plan", "workflow": "native", "project_context": False, **changes}
 
+    def test_merge_creates_fresh_task_with_frozen_sources_and_requires_token(self):
+        import uuid
+        source_ids = []
+        for prompt in ('Decision A; progress A', 'Decision B; progress B'):
+            status, data, _ = self.post('/api/sessions', self.options(provider='claude', prompt=prompt))
+            self.assertEqual(201, status)
+            source_ids.append(data['session']['id'])
+            self.server.sessions._status(source_ids[-1], 'completed')
+        body = {'source_ids': source_ids, 'request_id': str(uuid.uuid4()),
+                'destination': self.options(provider='claude', prompt='Continue merged work')}
+        self.assertEqual(403, self.post('/api/sessions/merge', body, headers={'X-Harness-Token': None})[0])
+        status, data, _ = self.post('/api/sessions/merge', body)
+        self.assertEqual(201, status)
+        target = data['session']
+        self.assertIsNone(target['native_session_id'])
+        self.assertEqual(source_ids, [source['id'] for source in target['merge']['sources']])
+        self.assertEqual(target['id'], self.post('/api/sessions/merge', body)[1]['session']['id'])
+        status, archive, _ = self.request('/api/sessions/' + target['id'] + '/merge')
+        self.assertEqual(200, status)
+        self.assertIn('Decision A', json.dumps(archive))
+        self.assertEqual(400, self.request('/api/sessions/' + target['id'] + '/merge?unexpected=1')[0])
+        self.assertEqual(400, self.request('/api/sessions/' + source_ids[0] + '/merge')[0])
+        self.assertEqual(400, self.post('/api/sessions/merge?unexpected=1', body)[0])
+        self.assertEqual(400, self.post('/api/sessions/merge', {**body, 'source_ids': [source_ids[0]]})[0])
+        restart='/api/sessions/' + target['id'] + '/restart-merge'
+        self.assertEqual(400,self.post(restart,{})[0])
+        self.server.sessions._status(target['id'],'interrupted')
+        self.assertEqual(403,self.post(restart,{},headers={'X-Harness-Token':None})[0])
+        self.assertEqual(400,self.post(restart,{'unexpected':True})[0])
+        status,resumed,_=self.post(restart,{})
+        self.assertEqual(200,status); self.assertEqual('queued',resumed['session']['status'])
+        self.assertEqual(target['id'],resumed['session']['id'])
+
     def test_session_attachments_are_validated_bound_to_messages_and_downloaded_as_data(self):
         body = 'Требования <script>example</script>\n'.encode() * 2000
         upload = {'name':'requirements.txt', 'data':base64.b64encode(body).decode()}
