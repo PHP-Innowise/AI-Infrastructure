@@ -129,8 +129,12 @@ class FakeRepoMixin:
         self._tmp.cleanup()
 
 
-class BashValidatorTest(unittest.TestCase):
+class BashValidatorTest(FakeRepoMixin, unittest.TestCase):
     HOOK = "bash-validator.sh"
+
+    # Commands that reach the repetition guard run against a throwaway repo:
+    # its counters are keyed by repo root and removed on cleanup, so one suite
+    # run cannot inherit the previous run's counts and start warning.
 
     @staticmethod
     def payload(command: str) -> dict:
@@ -139,7 +143,9 @@ class BashValidatorTest(unittest.TestCase):
     def test_safe_command_passes(self) -> None:
         for tool in MIRRORS:
             with self.subTest(tool=tool):
-                result = run_hook(tool, self.HOOK, self.payload("ls -la src/"))
+                result = run_hook(
+                    tool, self.HOOK, self.payload("ls -la src/"), cwd=self.repo_a
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, "")
 
@@ -168,9 +174,39 @@ class BashValidatorTest(unittest.TestCase):
         )
         for tool in MIRRORS:
             with self.subTest(tool=tool):
-                result = run_hook(tool, self.HOOK, self.payload(command))
+                result = run_hook(
+                    tool, self.HOOK, self.payload(command), cwd=self.repo_a
+                )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stderr, "")
+
+    def test_repeated_identical_command_warns_then_blocks(self) -> None:
+        # A command loop touches no file, so loop-detection.sh cannot see it.
+        # Counting is per exact command string: a changed command starts over.
+        command = self.payload("vendor/bin/phpunit --filter Broken")
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                codes = [
+                    run_hook(tool, self.HOOK, command, cwd=self.repo_a).returncode
+                    for _ in range(12)
+                ]
+                self.assertEqual([0] * 5, codes[:5])
+                self.assertEqual([1] * 6, codes[5:11])
+                blocked = run_hook(tool, self.HOOK, command, cwd=self.repo_a)
+                self.assertEqual(2, blocked.returncode)
+                self.assertIn("BLOCKED", blocked.stderr)
+                # Codex has no slash commands: its mirror names the skill.
+                self.assertIn(
+                    "systematic-debugger" if tool == "codex" else "/debugger",
+                    blocked.stderr,
+                )
+                fresh = run_hook(
+                    tool,
+                    self.HOOK,
+                    self.payload("vendor/bin/phpunit --filter Other"),
+                    cwd=self.repo_a,
+                )
+                self.assertEqual(0, fresh.returncode, fresh.stderr)
 
     def test_nested_destructive_command_still_blocked(self) -> None:
         # The full nested command must survive extraction so the pattern
@@ -802,6 +838,66 @@ class ReadHookInputTest(unittest.TestCase):
             result, argv = self.run_hook("claude", "not json", Path(directory))
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(["refresh", "--host", "claude"], argv)
+
+    def run_failing(self, tool: str, directory: Path, body: str, budget: str = "5"):
+        """The read hook against a stand-in CLI that runs ``body``."""
+        root = directory / tool
+        hooks = root / MIRRORS[tool][0]
+        hooks.mkdir(parents=True, exist_ok=True)
+        shutil.copy(hook_path(tool, "working-memory-read.sh"), hooks)
+        cli = root / "memory-bank/scripts/context.py"
+        cli.parent.mkdir(parents=True, exist_ok=True)
+        cli.write_text(body, encoding="utf-8")
+        return subprocess.run(
+            [BASH, str(hooks / "working-memory-read.sh")],
+            input=json.dumps({"prompt": "cobalt allocation"}),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CONTEXT_TASK_ID": "TASK-INPUT",
+                 "CONTEXT_CAPSULE_DELIVERED": "", "CONTEXT_HOOK_BUDGET": budget},
+            timeout=HOOK_TIMEOUT,
+        )
+
+    def test_a_failed_refresh_says_memory_was_not_consulted(self) -> None:
+        # An empty hook and a crashed one looked identical from inside the
+        # turn; only the crashed one may not be read as memory consulted.
+        crash = (
+            "import sys\n"
+            "sys.stderr.write('Traceback (most recent call last):\\n')\n"
+            "sys.stderr.write('context: database is locked\\n')\n"
+            "sys.exit(3)\n"
+        )
+        with tempfile.TemporaryDirectory(prefix="hook-input-") as directory:
+            for tool in ("claude", "codex"):
+                with self.subTest(tool=tool):
+                    result = self.run_failing(tool, Path(directory), crash)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertIn(
+                        "Memory refresh unavailable: it exited 3 — "
+                        "context: database is locked.",
+                        result.stdout,
+                    )
+                    self.assertIn("NOT consulted this turn", result.stdout)
+                    self.assertNotIn("Traceback", result.stdout)
+
+    def test_a_refresh_past_its_budget_says_so(self) -> None:
+        if shutil.which("timeout") is None:
+            self.skipTest("no timeout(1): the budget is not enforced here")
+        with tempfile.TemporaryDirectory(prefix="hook-input-") as directory:
+            result = self.run_failing(
+                "claude", Path(directory), "import time\ntime.sleep(5)\n", budget="1"
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("exceeded its 1s budget", result.stdout)
+            self.assertIn("NOT consulted this turn", result.stdout)
+
+    def test_a_quiet_successful_refresh_stays_silent(self) -> None:
+        # A prompt the sanitizer left nothing of: status 0, nothing to say.
+        with tempfile.TemporaryDirectory(prefix="hook-input-") as directory:
+            for tool in ("claude", "codex"):
+                with self.subTest(tool=tool):
+                    result = self.run_failing(tool, Path(directory), "pass\n")
+                    self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
 
 
 class CursorPromptHookTest(unittest.TestCase):
@@ -1759,16 +1855,56 @@ class SubagentDispatchTest(WriteLockMixin, unittest.TestCase):
         result = self.run_dispatch({"agent_type": "coder"})
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def failing_cli(self, message: str) -> None:
+        (self.repo / "memory-bank" / "scripts" / "context.py").write_text(
+            f"import sys\nsys.stderr.write({message!r} + '\\n')\nsys.exit(1)\n",
+            encoding="utf-8",
+        )
+
+    def test_a_lost_completion_write_is_reported(self) -> None:
+        # The flows read the channel as the record of who finished; a write
+        # that failed in silence made a finished agent look unfinished.
+        self.failing_cli("context: database is locked")
+        result = self.run_dispatch({"agent_type": "coder"})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('completion of "coder" was NOT recorded', result.stdout)
+        self.assertIn("database is locked", result.stdout)
+        self.assertIn("NOT recorded", result.stderr)
+
+    def test_no_channel_means_nothing_to_report(self) -> None:
+        for message in (
+            "context: Working task not found: feat/demo",
+            "context: Agent messages require governed mode",
+        ):
+            with self.subTest(message=message):
+                self.failing_cli(message)
+                result = self.run_dispatch({"agent_type": "coder"})
+                self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
+
 
 class MirrorConsistencyTest(unittest.TestCase):
-    def test_bash_validator_mirrors_are_byte_identical(self) -> None:
-        # Documented invariant: bash-validator has zero per-mirror
-        # adaptations inside an edition.
+    def test_bash_validator_mirrors_differ_only_by_counter_namespace(self) -> None:
+        # Documented invariant: bash-validator's per-mirror adaptations are
+        # the counter directory its repetition guard shares with
+        # loop-detection.sh, which is namespaced per tool so two hosts driving
+        # one checkout cannot inflate each other's counts, and the Codex
+        # mirror naming the debugger skill instead of the slash command.
+        # Everything else - every pattern, threshold and message - is
+        # identical, so a rule added to one host reaches all three.
         contents = {
-            tool: hook_path(tool, "bash-validator.sh").read_bytes() for tool in MIRRORS
+            tool: hook_path(tool, "bash-validator.sh").read_text(encoding="utf-8")
+            for tool in MIRRORS
         }
-        self.assertEqual(contents["claude"], contents["cursor"])
-        self.assertEqual(contents["claude"], contents["codex"])
+        for tool, text in contents.items():
+            self.assertIn(f"/tmp/{MIRRORS[tool][2]}-loop-detection-", text)
+        normalized = {
+            tool: text.replace(
+                f"/tmp/{MIRRORS[tool][2]}-loop-detection-", "/tmp/TOOL-loop-detection-"
+            ).replace("systematic-debugger", "/debugger")
+            for tool, text in contents.items()
+        }
+        self.assertEqual(normalized["claude"], normalized["cursor"])
+        self.assertEqual(normalized["claude"], normalized["codex"])
 
 
 if __name__ == "__main__":

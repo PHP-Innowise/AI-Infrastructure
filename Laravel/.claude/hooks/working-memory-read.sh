@@ -10,7 +10,10 @@
 # runs on Stop; see working-memory-write.sh.
 #
 # The layer report is printed even when it fails. A request that silently reads
-# a stale index is worse than one told which layer went stale.
+# a stale index is worse than one told which layer went stale. The same applies
+# one level up: a refresh that never ran must say so. An empty hook and a
+# crashed one look identical from inside the turn, and the difference decides
+# whether working memory may be treated as consulted at all.
 
 set -u
 
@@ -116,8 +119,15 @@ if [ -n "$QUERY" ] && [ -n "$TASK_ID" ]; then
   [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT" ] && ARGUMENTS+=(--transcript "$TRANSCRIPT")
 fi
 
-REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>/dev/null)
+# stderr goes to a private file rather than /dev/null: when the refresh
+# fails, its last line is what names the failure below.
+ERROR_FILE=$(mktemp "${TMPDIR:-/tmp}/working-memory-read.XXXXXX" 2>/dev/null) || ERROR_FILE=/dev/null
+REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>"$ERROR_FILE")
 HOOK_STATUS=$?
+# One bounded line: enough to name the failure, never enough to paste a trace
+# or anything the CLI refused to accept into the prompt.
+DETAIL=$(grep -v '^[[:space:]]*$' "$ERROR_FILE" 2>/dev/null | tail -n 1 | tr '\t' ' ' | cut -c1-160)
+[ "$ERROR_FILE" = /dev/null ] || rm -f "$ERROR_FILE" 2>/dev/null
 
 # Recorded before the early exit below, because the one case worth measuring
 # is the one that produces no report: on a timeout `timeout` returns 124 and
@@ -139,7 +149,19 @@ if [ -n "$HEALTH_DIR" ] && { [ -d "$HEALTH_DIR" ] || mkdir -p "$HEALTH_DIR" 2>/d
     >> "$HEALTH_DIR/refresh-health.ndjson" 2>/dev/null || true
 fi
 
-[ -n "$REPORT" ] || exit 0
+if [ -z "$REPORT" ]; then
+  # A refresh that succeeded with nothing to say - a prompt the sanitizer
+  # left nothing of - stays silent. One that failed says so, and says what
+  # follows from it, instead of leaving the turn to assume memory was read.
+  [ "$HOOK_STATUS" -eq 0 ] && exit 0
+  if [ "$HOOK_STATUS" -eq 124 ]; then
+    echo "Memory refresh unavailable: it exceeded its ${BUDGET_SECONDS}s budget."
+  else
+    echo "Memory refresh unavailable: it exited $HOOK_STATUS${DETAIL:+ — $DETAIL}."
+  fi
+  echo "Working memory was NOT consulted this turn. Read the canonical sources directly."
+  exit 0
+fi
 
 # The capsule names itself: its memory section says the text is reference
 # data to check against the cited file, so no banner precedes it.

@@ -9,7 +9,7 @@
 
 ### UserPromptSubmit: Working-Memory Read
 **Script:** `working-memory-read.sh`
-**Purpose:** Runs `context.py refresh`, which re-indexes procedural (AGENTS.md, CLAUDE.md, skills), semantic (README, docs, specs, active Memory Bank chunks, task documents) and episodic (CHANGELOG.md) memory in one incremental pass; on a per-turn refresh the layer report prints only when a layer failed or the turn was slow. With a task — from `CONTEXT_TASK_ID` or the current branch — the same process also assembles a bounded Task Capsule with `--ephemeral`, so the per-request manifest, which records the query text, stays in ignored local state rather than shared Git history. The capsule gives each item of project knowledge the passage that answers the request, at most one skill by name, and stays under 3,600 characters. `--sanitize` cuts secrets, personal data and pasted transcript prefixes out of the prompt instead of refusing the turn its memory, and the conversation's `session_id` is passed so an item handed in its last few turns is not handed again. Before the branch's governed task exists - the Stop hook creates it at the first checkpoint, after several file-changing turns, and a read-only session never gets one - the capsule still carries the retrieval layers and opens with `working: not recorded yet`. A capsule failure is reported as a warning; the layer refresh stands.
+**Purpose:** Runs `context.py refresh`, which re-indexes procedural (AGENTS.md, CLAUDE.md, skills), semantic (README, docs, specs, active Memory Bank chunks, task documents) and episodic (CHANGELOG.md) memory in one incremental pass; on a per-turn refresh the layer report prints only when a layer failed or the turn was slow. With a task — from `CONTEXT_TASK_ID` or the current branch — the same process also assembles a bounded Task Capsule with `--ephemeral`, so the per-request manifest, which records the query text, stays in ignored local state rather than shared Git history. The capsule gives each item of project knowledge the passage that answers the request, at most one skill by name, and stays under 3,600 characters. `--sanitize` cuts secrets, personal data and pasted transcript prefixes out of the prompt instead of refusing the turn its memory, and the conversation's `session_id` is passed so an item handed in its last few turns is not handed again. Before the branch's governed task exists - the Stop hook creates it at the first checkpoint, after several file-changing turns, and a read-only session never gets one - the capsule still carries the retrieval layers and opens with `working: not recorded yet`. A capsule failure is reported as a warning; the layer refresh stands. A refresh that exits non-zero without a report says so - the exit status (or the exceeded budget) and the last line of its error - followed by `Working memory was NOT consulted this turn`; one that succeeds with nothing to say stays silent.
 **Return:** Always 0 (context tooling must never block a prompt)
 **Budget:** `CONTEXT_HOOK_BUDGET` seconds, default 5
 **Stands down:** when `CONTEXT_CAPSULE_DELIVERED=1`, set by a host that already put this turn's capsule into the prompt (the Harness does). The Stop hook still checkpoints the task.
@@ -51,7 +51,9 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 
 **Tests:** the shared corpus `tests/fixtures/bash-validator-corpus.json` in the accelerator repository runs every case through every shipped copy (`.claude`, `.cursor`, `.codex`) and its host's payload shape.
 
-**Return:** 0 = safe command, 2 = block
+**Repetition guard:** below the framework rules, every command that passed them is counted per exact command string in `/tmp/claude-loop-detection-<repo-key>/`, the directory `loop-detection.sh` uses and the SessionStart hook clears. The same command a sixth time warns, a twelfth time blocks with a pointer to `/debugger`; any change to the command starts its own count. A command loop touches no file, so the edit counter cannot see it.
+
+**Return:** 0 = safe command, 1 = warning (sixth identical command), 2 = block
 
 ### PreToolUse (Agent|Task): Subagent Gate
 **Script:** `subagent-gate.sh`
@@ -62,7 +64,7 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 
 ### SubagentStop: Subagent Dispatch Observer
 **Script:** `subagent-dispatch.sh`
-**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`, one sanitized line from the final assistant message) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3, the context runtime, or a resolvable task.
+**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`, one sanitized line from the final assistant message) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3, the context runtime, or a resolvable task. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported on stdout and stderr, so a flow does not read the gap as an unfinished agent.
 **Return:** Always 0 (observation must never break a turn)
 
 ### PostToolUse (Edit): Loop Detection

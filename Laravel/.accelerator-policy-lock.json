@@ -152,7 +152,7 @@
     ".claude/CLAUDE.md": "bf7730a5fdef92a5cd417424a2568d079d8f98a8a628e24c543c868b07d5329f",
     ".claude/DOD.md": "58df98a27a22a1d922a6a1482a0fbbaee22acd32ed2e4e5e53c73541221b530a",
     ".claude/GOLDEN-PRINCIPLES.md": "d9fd0c88bffb9bfd2ceb73d66eabd0b83fcee42ab5b8f7ceee78daf063f59b84",
-    ".claude/STABILIZATION.md": "353315aab0460205bac84382a9695fc71fa01524883eb20900c97c97819020b3",
+    ".claude/STABILIZATION.md": "5de817755c4f597ff9545f9404b56eed07498548eec3e727871cc94c62df1783",
     ".claude/agents/api-designer-agent.md": "d84c59805709976f6c0e022ec9b7b69b5e54393219cb27346888203c18605d06",
     ".claude/agents/architect-agent.md": "8d857b70afedb465128efa1aac0ed3df88f7f43f4f01e641fb001a1b585cb560",
     ".claude/agents/architecture-implementer-agent.md": "f2a544b71b10d0c3997571c813ecbd9412f472731f8b80270d74c2d7f45c049f",
@@ -251,7 +251,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "e733224e70bad8721e1ec9bf03f574a7e59ce969d28be11ea762e9792a8fb8d4"
   },
-  "policy_digest": "d02cd3c2e3c9cc411c506611eafab87fda3b2f3a03be33c5dc63eac0f776597d",
+  "policy_digest": "1cd12d172ad0c1cdbf252f9efeed2f9d00b7025c2348e37a100540698e14d9a7",
   "release": "2.0.0",
   "schema_version": 1
 }

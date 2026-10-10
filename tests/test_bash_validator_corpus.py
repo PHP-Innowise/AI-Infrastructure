@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -112,6 +113,38 @@ def codex_payload(command: str, cwd: Path) -> dict:
 
 PAYLOADS = {".claude": claude_payload, ".cursor": cursor_payload, ".codex": codex_payload}
 
+# The edition hooks count identical commands per session (the repetition
+# guard) under /tmp/<host>-loop-detection-<key>, keyed by the Git root of the
+# working directory. Run from an edition, every case would add to the counters
+# of this checkout - and of a live session in it - and a rerun of the suite
+# would cross the warning threshold. The hooks run from a scratch directory
+# outside any repository instead; its counters are removed with it. Within one
+# run a command reaches a host's counter once per edition, below the warning.
+SCRATCH: Path | None = None
+
+
+def counter_key(directory: Path) -> str:
+    """The key the hooks compute: the Git root, else the directory, by cksum."""
+    return subprocess.run(
+        ["bash", "-c", 'printf %s "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" | cksum | cut -d" " -f1'],
+        cwd=str(directory), capture_output=True, text=True, check=True,
+        timeout=HOOK_TIMEOUT,
+    ).stdout.strip()
+
+
+def setUpModule() -> None:
+    global SCRATCH
+    SCRATCH = Path(tempfile.mkdtemp(prefix="bash-validator-corpus-"))
+
+
+def tearDownModule() -> None:
+    if SCRATCH is None:
+        return
+    key = counter_key(SCRATCH)
+    for host in HOST_DIRS:
+        shutil.rmtree(Path("/tmp") / "{}-loop-detection-{}".format(host.lstrip("."), key), ignore_errors=True)
+    shutil.rmtree(SCRATCH, ignore_errors=True)
+
 
 def load_corpus() -> dict:
     return json.loads(CORPUS.read_text(encoding="utf-8"))
@@ -141,7 +174,7 @@ def run_hook(hook: Path, host: str, command: str) -> subprocess.CompletedProcess
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        cwd=str(root),
+        cwd=str(SCRATCH or root),
         timeout=HOOK_TIMEOUT,
     )
 

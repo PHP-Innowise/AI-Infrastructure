@@ -318,7 +318,19 @@ _WM_PROMPT_SESSION_CURSOR = r'''  # The rule is re-sent whole with every request
   # of it as "handed earlier": no --session-id. JSON, for capsule_text.
   ARGUMENTS+=(--json)
 '''
-_WM_DELIVERY_PROMPT = r'''[ -n "$REPORT" ] || exit 0
+_WM_DELIVERY_PROMPT = r'''if [ -z "$REPORT" ]; then
+  # A refresh that succeeded with nothing to say - a prompt the sanitizer
+  # left nothing of - stays silent. One that failed says so, and says what
+  # follows from it, instead of leaving the turn to assume memory was read.
+  [ "$HOOK_STATUS" -eq 0 ] && exit 0
+  if [ "$HOOK_STATUS" -eq 124 ]; then
+    echo "Memory refresh unavailable: it exceeded its ${BUDGET_SECONDS}s budget."
+  else
+    echo "Memory refresh unavailable: it exited $HOOK_STATUS${DETAIL:+ — $DETAIL}."
+  fi
+  echo "Working memory was NOT consulted this turn. Read the canonical sources directly."
+  exit 0
+fi
 
 # The capsule names itself: its memory section says the text is reference
 # data to check against the cited file, so no banner precedes it.
@@ -565,6 +577,16 @@ MIRROR_RULES: dict[str, Any] = {
                         [
                             "consider using /debugger.",
                             "consider using systematic-debugger.",
+                        ],
+                        # bash-validator's repetition guard names the same
+                        # escalation.
+                        [
+                            "escalate to /debugger for a root cause.",
+                            "escalate to systematic-debugger for a root cause.",
+                        ],
+                        [
+                            "If it keeps failing, /debugger instead",
+                            "If it keeps failing, systematic-debugger instead",
                         ],
                         [_WM_THIRD_PARTY, ""],
                     ],

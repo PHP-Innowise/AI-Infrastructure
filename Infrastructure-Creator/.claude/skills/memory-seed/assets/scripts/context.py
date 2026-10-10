@@ -1418,6 +1418,51 @@ def capsule_character_count(capsule: dict[str, object]) -> int:
     return len(serialize_capsule(capsule))
 
 
+def truncate_progress(progress: str, keep: int) -> str:
+    """Cut a progress narrative to ``keep`` characters from both ends.
+
+    A narrative opens with what the work is bound by and ends with where it
+    now stands. Keeping only the tail preserves the action and discards the
+    reason for it, which is what lets a later turn "optimize" away a decision
+    whose justification the capsule no longer carries.
+    """
+    if keep >= len(progress):
+        return progress
+    head = keep // 2
+    tail = keep - head
+    return f"{progress[:head]}…{progress[-tail:]}"
+
+
+# Capsule sections the budget may remove, in the order a report names them.
+# A capsule that silently lost a constraint reads exactly like a complete
+# one, so these counters have to reach the prompt, not only the JSON.
+COMPACTION_LABELS = (
+    ("procedural", "procedural result(s)"),
+    ("semantic", "semantic result(s)"),
+    ("episodic", "episodic result(s)"),
+    ("working_files", "working file(s)"),
+    ("working_sources", "working source(s)"),
+    ("working_next_steps", "next step(s)"),
+    ("working_progress_characters", "characters of progress"),
+    ("last_turn_characters", "characters of the last-turn report"),
+)
+
+
+def compaction_summary(capsule: dict[str, object]) -> Optional[str]:
+    """Name what this capsule no longer shows, or None when it shows all."""
+    omitted = capsule.get("omitted")
+    if not isinstance(omitted, dict):
+        return None
+    parts = [
+        f"{omitted[key]} {label}"
+        for key, label in COMPACTION_LABELS
+        if isinstance(omitted.get(key), int) and omitted[key] > 0
+    ]
+    if not parts:
+        return None
+    return ", ".join(parts)
+
+
 def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
     compacted = json.loads(serialize_capsule(capsule))
     omitted = compacted["omitted"]
@@ -1427,6 +1472,8 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
         "working_sources",
         "working_progress_characters",
         "last_turn_characters",
+        "semantic",
+        "episodic",
     ):
         omitted.setdefault(key, 0)
     working = compacted["working"]
@@ -1441,9 +1488,11 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
             continue
         if compacted["episodic"]:
             compacted["episodic"].pop()
+            omitted["episodic"] += 1
             continue
         if compacted["semantic"]:
             compacted["semantic"].pop()
+            omitted["semantic"] += 1
             continue
         if working is not None and len(working["sources"]) > 1:
             working["sources"].pop()
@@ -1465,7 +1514,7 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
             omitted["working_progress_characters"] += (
                 len(working["progress"]) - keep
             )
-            working["progress"] = f"…{working['progress'][-keep:]}"
+            working["progress"] = truncate_progress(working["progress"], keep)
             continue
         raise ContextError(
             "mandatory Task Capsule content exceeds "
@@ -1513,35 +1562,56 @@ def enforce_governed_capsule_contract(
     compacted["episodic"] = compacted.get("episodic", [])[
         :CAPSULE_LAYER_LIMITS["episodic"]
     ]
-    compacted["omitted"] = {
-        "procedural": max(
-            0,
-            len(capsule.get("procedural", []))
-            - CAPSULE_LAYER_LIMITS["procedural"],
-        ),
-        "semantic": max(
-            0,
-            len(capsule.get("semantic", [])) - CAPSULE_LAYER_LIMITS["semantic"],
-        ),
-        "episodic": max(
-            0,
-            len(capsule.get("episodic", [])) - CAPSULE_LAYER_LIMITS["episodic"],
-        ),
-    }
+    # Merge rather than replace: the working-state counters were computed
+    # when the task was projected, and a governed capsule drops working
+    # content of its own below. Losing them here would report a partial
+    # capsule as a complete one.
+    omitted = dict(compacted.get("omitted") or {})
+    omitted.update(
+        {
+            "procedural": max(
+                0,
+                len(capsule.get("procedural", []))
+                - CAPSULE_LAYER_LIMITS["procedural"],
+            ),
+            "semantic": max(
+                0,
+                len(capsule.get("semantic", []))
+                - CAPSULE_LAYER_LIMITS["semantic"],
+            ),
+            "episodic": max(
+                0,
+                len(capsule.get("episodic", []))
+                - CAPSULE_LAYER_LIMITS["episodic"],
+            ),
+        }
+    )
+    for key in ("working_progress_characters", "last_turn_characters"):
+        omitted.setdefault(key, 0)
+    compacted["omitted"] = omitted
 
     working = compacted.get("working")
     if isinstance(working, dict):
-        working["next_steps"] = list(working.get("next_steps", []))[
-            -CAPSULE_WORKING_NEXT_STEP_LIMIT:
-        ]
+        next_steps = list(working.get("next_steps", []))
+        files = list(working.get("files", []))
+        sources = list(working.get("sources", []))
+        working["next_steps"] = next_steps[-CAPSULE_WORKING_NEXT_STEP_LIMIT:]
         # A task's files are kept newest last; the head of the list is the
         # first thing the branch ever touched, not the work in hand.
-        working["files"] = list(working.get("files", []))[
-            -CAPSULE_WORKING_FILE_LIMIT:
-        ]
-        working["sources"] = list(working.get("sources", []))[
-            :CAPSULE_WORKING_SOURCE_LIMIT
-        ]
+        working["files"] = files[-CAPSULE_WORKING_FILE_LIMIT:]
+        working["sources"] = sources[:CAPSULE_WORKING_SOURCE_LIMIT]
+        # `omitted` is the same object stored above, so these land in the
+        # capsule: the projection limits hide governed working state exactly
+        # as the lightweight projection does, and hiding it unreported is
+        # what makes a partial view read as the whole task. Added to rather
+        # than replaced: a working state that arrives already projected
+        # carries its own counts and is within the limits here.
+        for key, before, after in (
+            ("working_next_steps", next_steps, working["next_steps"]),
+            ("working_files", files, working["files"]),
+            ("working_sources", sources, working["sources"]),
+        ):
+            omitted[key] = int(omitted.get(key) or 0) + len(before) - len(after)
 
     # Snippets are discovery aids. Bounding each rendered copy leaves the full
     # source and its hash in the auditable manifest while avoiding duplicated
@@ -1564,6 +1634,7 @@ def enforce_governed_capsule_contract(
 
     while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
         if compacted.get("last_turn"):
+            omitted["last_turn_characters"] += len(compacted["last_turn"])
             compacted["last_turn"] = None
             continue
         related = _related_positions(compacted["semantic"])
@@ -1588,7 +1659,10 @@ def enforce_governed_capsule_contract(
             excess = capsule_character_count(compacted) - CAPSULE_CHARACTER_LIMIT
             keep = max(0, len(working["progress"]) - excess - 1)
             if keep:
-                working["progress"] = f"…{working['progress'][-keep:]}"
+                omitted["working_progress_characters"] += (
+                    len(working["progress"]) - keep
+                )
+                working["progress"] = truncate_progress(working["progress"], keep)
                 continue
         raise ContextError(
             "mandatory Task Capsule content exceeds "
@@ -2895,6 +2969,19 @@ def _render_capsule(
         head.append(f"warming: {capsule['pending_turns']} turn(s) pending")
     for warning in capsule["warnings"][:3]:
         head.append(f"warning: {_bounded(warning, 160)}")
+    # The JSON form has carried these counters all along; the rendered form
+    # is what a prompt-time hook shows, so without this line a compacted
+    # capsule reaches the model looking complete.
+    dropped = compaction_summary(capsule)
+    compaction_line = (
+        f"compaction: omitted {dropped} — this capsule is a lossy view; "
+        "re-read the cited source before revising a decision it no "
+        "longer explains"
+        if dropped
+        else None
+    )
+    if compaction_line:
+        head.append(compaction_line)
     if capsule.get("last_turn"):
         head.append(f"Last turn: {_bounded(capsule['last_turn'], 600)}")
     source = capsule.get("query_source")
@@ -2961,9 +3048,12 @@ def _render_capsule(
 
     lines = assemble()
     # Over the ceiling the excerpts shrink first, tail first, then go; then
-    # skills, then related knowledge (a link brought it, not the query), then
-    # the weakest knowledge. Working state is never cut here:
-    # its own lines are bounded where they are built.
+    # the compaction line; then skills, then related knowledge (a link
+    # brought it, not the query), then the weakest knowledge. Working state
+    # is never cut here: its own lines are bounded where they are built. The
+    # compaction line yields before any entry, so the drops it reports never
+    # cost the capsule one more item - which also keeps the items
+    # shown_in_render records equal to the ones the final text shows.
     while size(lines) > RENDERED_CAPSULE_LIMIT:
         shrinkable = [
             key for key in reversed(list(excerpt_of)) if excerpt_of[key]
@@ -2972,6 +3062,8 @@ def _render_capsule(
             key = shrinkable[0]
             text = excerpt_of[key] or ""
             excerpt_of[key] = _bounded(text, len(text) // 2) if len(text) > 120 else None
+        elif compaction_line in head:
+            head.remove(compaction_line)
         elif any(layer == "procedural" for layer, _, _ in entries):
             index = max(
                 position
@@ -5763,8 +5855,9 @@ def main() -> int:
                 if arguments.command == "msg-dispatch":
                     # A subagent that finishes on a branch the first
                     # checkpoint has not provisioned yet would otherwise
-                    # lose its record: subagent-dispatch.sh sends the error
-                    # to /dev/null. A completion is real work, which is what
+                    # lose its record silently: subagent-dispatch.sh reports
+                    # a failed write, but reads a missing task as no channel
+                    # to report to. A completion is real work, which is what
                     # provisioning waits for. Any refusal (a terminal task)
                     # is left to the lookup below to report as it always did.
                     try:
@@ -6413,7 +6506,15 @@ def main() -> int:
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh
                         # above stands on its own and is already done.
-                        warnings.append(f"Capsule unavailable: {error}")
+                        # Name the consequence, not just the cause: an
+                        # unexplained "unavailable" reads as a formality, and
+                        # the turn proceeds as if task context had been
+                        # consulted when none was assembled.
+                        warnings.append(
+                            f"Capsule unavailable: {error}. No task context "
+                            "was assembled this turn; read the canonical "
+                            "sources directly."
+                        )
                     retrieval_seconds = time.monotonic() - retrieval_started
                 codebase = codebase_map_status(connection, repository)
                 phases = {
