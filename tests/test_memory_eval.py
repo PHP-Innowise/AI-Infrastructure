@@ -22,6 +22,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -56,6 +57,10 @@ PATH_D = f"{FINDINGS}/{RECORD_D}.md"
 CHUNK = "memory-bank/chunks/MEM-20260810-0a1b2c3d-invoice-rounding.md"  # committed at T2
 SAME_DAY_CHUNK = "memory-bank/chunks/MEM-20260805-5a5a5a5a-export-format.md"  # never committed, p1's day
 ANSWER = "Invoice totals use banker's rounding to two decimals"
+NO_ARCHIVE = {key: 0 for key in (
+    "archive_from_git", "archive_from_worktree", "archive_dropped_future", "archive_undetermined",
+    "archive_unreconstructable_updated", "archive_updated_after", "archive_still_dynamic",
+)}
 
 
 def git(cwd: Path, *arguments: str, when: Optional[str] = None) -> None:
@@ -362,7 +367,7 @@ class EndToEndTest(unittest.TestCase):
             # written after the prompt; B existed uncommitted; the same-day
             # chunk cannot be placed before or after it.
             {"from_git": 1, "from_worktree": 1, "dropped_future": 3, "undetermined": 1, "updated_after": 0,
-             "unreconstructable_updated": 0},
+             "unreconstructable_updated": 0, **NO_ARCHIVE},
         )
         self.assertNotIn(CHUNK, p1["existed_useful"])
         self.assertNotIn(CHUNK, p1["delivered"])
@@ -376,7 +381,7 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(
             p2["provenance"],
             {"from_git": 3, "from_worktree": 2, "dropped_future": 1, "undetermined": 0, "updated_after": 0,
-             "unreconstructable_updated": 0},
+             "unreconstructable_updated": 0, **NO_ARCHIVE},
         )
 
     def test_as_of_now_includes_the_future_document(self) -> None:
@@ -821,6 +826,92 @@ class ScoringTest(unittest.TestCase):
         self.assertIsNone(parse("yesterday"))
 
 
+class MechanismCounterTest(unittest.TestCase):
+    """Counters that show which mechanism delivered what, never a path."""
+
+    def test_delivery_breakdown_counts_kinds_selections_marks_and_skill_subfiles(self) -> None:
+        capsule = {
+            "procedural": [{"path": ".claude/skills/x/references/a.md", "kind": "skill"}],
+            "semantic": [
+                {"path": "README.md", "kind": "doc", "selection": "prompt-link"},
+                {"path": "project-brain/dynamic/findings/f.md", "kind": "brain-finding",
+                 "source_changed": ["src/A.php"]},
+                {"path": "docs/x.md", "kind": "Weird Kind!"},
+            ],
+            "episodic": [{"path": "CHANGELOG.md", "kind": "changelog"},
+                         {"path": "project-brain/dynamic/events/e.md", "kind": "brain-event",
+                          "selection": "source-link"}],
+        }
+        secret = "DB_" + "PASSWORD=" + "hunter22x"
+        item = memory_eval.score({"capsule": capsule, "capsule_text": secret}, {}, {}, [],
+                                 secret_patterns=memory_eval.runtime_policy().SECRET_PATTERNS)
+        self.assertEqual(1, item["skill_subfiles_delivered"])
+        self.assertEqual({"path-link": 0, "source-link": 1, "prompt-link": 1, "touch-link": 0},
+                         item["selections"])
+        self.assertEqual(1, item["source_changed_delivered"])
+        self.assertEqual({"doc": 1, "brain-finding": 1, "other": 1}, item["layer_kinds"]["semantic"])
+        self.assertEqual({"changelog": 1, "brain-event": 1}, item["layer_kinds"]["episodic"])
+        self.assertEqual(1, item["capsule_secret_matches"])
+        self.assertNotIn("src/A.php", json.dumps(item))
+        empty = memory_eval.score({"capsule": None}, {}, {}, [])
+        self.assertEqual(0, empty["skill_subfiles_delivered"])
+        self.assertIsNone(empty["capsule_secret_matches"])
+
+    def test_index_stats_reads_the_index_without_writing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            corpus = Path(temporary)
+            self.assertIsNone(memory_eval.index_stats(corpus))
+            database = corpus / "memory-bank/local/context.db"
+            database.parent.mkdir(parents=True)
+            connection = sqlite3.connect(database)
+            connection.execute("CREATE VIRTUAL TABLE documents USING fts5(path UNINDEXED, title, summary, content)")
+            connection.execute("CREATE TABLE document_links(path, ref_path, ref_kind)")
+            leaked = "MAIL_" + "PASSWORD=" + "mailpit7x"
+            for row in (("a", "A", "", "clean"), ("b", "B", "", leaked),
+                        ("c", "C", "", "DB_PASSWORD=[redacted: assigned credential]")):
+                connection.execute("INSERT INTO documents VALUES (?, ?, ?, ?)", row)
+            for row in (("a", "x", "source"), ("b", "y", "file"), ("c", "y", "file")):
+                connection.execute("INSERT INTO document_links VALUES (?, ?, ?)", row)
+            connection.commit()
+            connection.close()
+            before = (hashlib.sha256(database.read_bytes()).hexdigest(), database.stat().st_mtime_ns)
+            self.assertEqual({"documents": 3, "links": {"file": 2, "source": 1}, "secret_documents": 1},
+                             memory_eval.index_stats(corpus))
+            self.assertEqual(before, (hashlib.sha256(database.read_bytes()).hexdigest(),
+                                      database.stat().st_mtime_ns))
+            database.write_bytes(b"not sqlite")
+            self.assertIsNone(memory_eval.index_stats(corpus))
+
+    def test_summary_counters_are_none_when_a_result_predates_them(self) -> None:
+        new = memory_eval.score({"capsule": {"procedural": [], "semantic": [], "episodic": []}}, {}, {}, [],
+                                secret_patterns={})
+        new.update(status="ok", refresh={"index": {"documents": 3, "links": {"file": 2}, "secret_documents": 0},
+                                         "index_seconds": 0.5})
+        legacy = {"status": "ok", "class": "silent", "delivered": [], "useful_delivered": [],
+                  "noise_delivered": [], "unjudged": [], "existed_useful": []}
+        both = memory_eval.summarize({"new": new})
+        self.assertEqual(0, both["skill_subfiles_delivered"])
+        self.assertEqual({"file": 2}, both["index_link_rows"])
+        self.assertEqual(1, both["index_snapshots_with_links"])
+        self.assertEqual(0.5, both["index_latency_p95"])
+        mixed = memory_eval.summarize({"new": new, "legacy": legacy})
+        for key in ("skill_subfiles_delivered", "index_link_rows", "secret_documents", "episodic_brain_events",
+                    "capsule_secret_matches"):
+            self.assertIsNone(mixed[key], key)
+
+    @unittest.skipIf(os.name == "nt", "POSIX modes")
+    def test_results_are_written_owner_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "r.json"
+            old = os.umask(0o022)
+            try:
+                memory_eval.write_json(target, {})
+            finally:
+                os.umask(old)
+            self.assertEqual(0o600, stat.S_IMODE(target.stat().st_mode))
+            self.assertEqual([target], list(Path(temporary).iterdir()))
+
+
 class RefreshOutcomeTest(unittest.TestCase):
     """A prompt is scored only on a refresh that succeeded; the runtime itself is replaced."""
 
@@ -999,6 +1090,74 @@ class ReconstructionTest(unittest.TestCase):
         counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment, "keep")
         self.assertEqual((counts["from_worktree"], counts["updated_after"]), (1, 1))
         self.assertTrue((self.corpus / PATH_B).is_file())
+
+
+    ARCHIVED = "project-brain/archive/finding/55555555-5555-4555-8555-555555555555.md"
+
+    def archived(self, root: Path, created: str, updated: str = "") -> Path:
+        text = finding("55555555-5555-4555-8555-555555555555", "E", "goal", created, "e", updated=updated)
+        return write(root, self.ARCHIVED, text.replace('"status": "open"', '"status": "resolved"'))
+
+    def test_an_archived_record_that_existed_then_is_restored_so_its_chunk_validates(self) -> None:
+        self.archived(self.project, "2026-08-03T08:00:00Z", "2026-08-04T08:00:00Z")
+        name = "memory-bank/chunks/MEM-20260804-55555555-export-rounding.md"
+        text = chunk("MEM-20260804-55555555", "Export rounding", "2026-08-04", "2026-12-31", "Exports round.")
+        write(self.project, name, text.replace('"sources": ["docs/billing.md"]',
+                                               f'"sources": ["{self.ARCHIVED}", "docs/billing.md"]'))
+        for root in (self.project, self.corpus):
+            write(root, "docs/billing.md", "# Billing\n")
+        counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
+        self.assertEqual(1, counts["archive_from_worktree"])
+        self.assertTrue((self.corpus / self.ARCHIVED).is_file())
+        self.assertTrue((self.corpus / name).is_file())
+        scripts = str(ROOT / "PHP Core/memory-bank/scripts")
+        sys.path.insert(0, scripts)
+        try:
+            import validate as runtime_validate
+            metadata = runtime_validate.parse_frontmatter(self.corpus / name)
+            runtime_validate.validate_metadata(self.corpus / name, metadata, self.corpus)
+        finally:
+            sys.path.remove(scripts)
+
+    def test_an_archived_record_resolved_after_the_prompt_is_left_out_unless_kept(self) -> None:
+        self.archived(self.project, "2026-08-03T08:00:00Z", "2026-08-09T08:00:00Z")
+        counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
+        self.assertEqual(1, counts["archive_unreconstructable_updated"])
+        self.assertFalse((self.corpus / self.ARCHIVED).exists())
+        counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment, "keep")
+        self.assertEqual((1, 1), (counts["archive_from_worktree"], counts["archive_updated_after"]))
+        self.assertTrue((self.corpus / self.ARCHIVED).is_file())
+        self.assertTrue(memory_eval.contaminated(counts))
+
+    def test_an_archived_record_created_after_the_prompt_is_never_restored(self) -> None:
+        self.archived(self.project, "2026-08-20T08:00:00Z")
+        counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
+        self.assertEqual(1, counts["archive_dropped_future"])
+        self.assertFalse((self.corpus / self.ARCHIVED).exists())
+        # A materialized commit's archive obeys the same clock.
+        self.archived(self.corpus, "2026-08-20T08:00:00Z")
+        earlier = "project-brain/archive/finding/66666666-6666-4666-8666-666666666666.md"
+        write(self.corpus, earlier, finding("66666666-6666-4666-8666-666666666666", "F", "goal",
+                                            "2026-08-01T08:00:00Z", "f"))
+        counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
+        self.assertEqual((1, 1), (counts["archive_dropped_future"], counts["archive_from_git"]))
+        self.assertFalse((self.corpus / self.ARCHIVED).exists())
+        self.assertTrue((self.corpus / earlier).is_file())
+
+    def test_archived_handoffs_private_paths_and_records_still_active_are_not_restored(self) -> None:
+        old = "2026-08-01T08:00:00Z"
+        handoff = "project-brain/archive/handoffs/77777777-7777-4777-8777-777777777777.md"
+        private = "project-brain/archive/secrets/88888888-8888-4888-8888-888888888888.md"
+        write(self.project, handoff, finding("77777777-7777-4777-8777-777777777777", "H", "goal", old, "h"))
+        write(self.project, private, finding("88888888-8888-4888-8888-888888888888", "S", "goal", old, "s"))
+        self.archived(self.project, old)
+        write(self.corpus, f"{FINDINGS}/55555555-5555-4555-8555-555555555555.md",
+              finding("55555555-5555-4555-8555-555555555555", "E", "goal", old, "e"))
+        counts = memory_eval.reconstruct_memory(self.project, self.corpus, self.moment)
+        self.assertEqual(1, counts["archive_still_dynamic"])
+        self.assertEqual(0, counts["archive_from_worktree"])
+        for path in (handoff, private, self.ARCHIVED):
+            self.assertFalse((self.corpus / path).exists(), path)
 
 
 class OverlayTest(unittest.TestCase):

@@ -68,6 +68,14 @@ Nothing is written into the project. All work happens in the cache (default
    - What cannot be placed - a chunk written on the prompt's own day with no
      promotion record and a later modification time - is left out and
      counted as `undetermined`.
+   - Archived Brain records (`project-brain/archive/**`, never archived
+     handoffs) follow the same rule, counted under `archive_*`. The runtime
+     never indexes or renders them; a promoted chunk cites the record it came
+     from and fails validation without it, as it would not in the project.
+     No project commits its archive, so the working tree's copy is the only
+     source; one that is still active in `project-brain/dynamic/` at the
+     prompt's commit is skipped (`archive_still_dynamic`). An archived body
+     kept under `--updated-after keep` marks the turn contaminated.
    If the commit lacks `project-brain/config/runtime.json`, the working tree's
    copy is used (configuration such as a retrieval gate, not knowledge).
 3. **The runtime under test.** The edition comes from `--edition`: `auto` (the
@@ -224,14 +232,23 @@ judgments and passages files, and the start and finish times. Each item has
 `status` (`ok`, or `skipped` with a `reason` such as `no-history`,
 `refresh-timeout` or `refresh-error`), `edition` and `edition_source`,
 `commit`, `provenance` (`from_git`, `from_worktree`, `dropped_future`,
-`undetermined`, `updated_after`, `unreconstructable_updated`; `config_from_worktree` when the working
+`undetermined`, `updated_after`, `unreconstructable_updated`, the seven
+`archive_*` counts; `config_from_worktree` when the working
 tree's `runtime.json` was used; under `--as-of now`, `future_present`), the
 overlay counts, `history_linked`,
 `refresh` (exit status, seconds, the warm-up's seconds and exit status, the
 runtime's phase timings, a warning count, each memory layer's state -
-`updated`, `failed`, or `other` for anything else - and a stderr tail with any
-line quoting the prompt withheld), and, when `ok`, the score below. `summary`
-is what `report` prints.
+`updated`, `failed`, or `other` for anything else - a stderr tail with any
+line quoting the prompt withheld, `source_links` counters, and `index`: the
+corpus index's document count, link rows by kind and how many indexed
+documents still match a secret pattern), and, when `ok`, the score below.
+The score also carries mechanism counters, as fixed words and numbers only:
+`layer_kinds` (item kinds per layer), `selections` (items each link
+mechanism chose), `source_changed_delivered`, `skill_subfiles_delivered`
+(skill files other than `SKILL.md` in the procedural slot) and
+`capsule_secret_matches`. `summary` is what `report` prints; its mechanism
+totals are absent (`-`) when any item predates them, never zero. Result files
+are written owner-only (0600).
 
 ## What the numbers mean
 

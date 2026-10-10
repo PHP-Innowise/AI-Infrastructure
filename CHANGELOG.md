@@ -26,6 +26,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **The memory evaluation stand restores archived records and counts each
+  mechanism.** Archived Brain records that existed at the prompt are restored
+  from the working tree under the as-of rule already used for active records,
+  so a promoted chunk citing its archived source validates as it does in the
+  project (no evaluated project commits its archive). Items carry counts of
+  item kinds per layer, link selections, changed-citation items, skill
+  sub-files in the procedural slot and secret-pattern matches in the capsule;
+  `refresh.index` counts indexed documents, link rows by kind and indexed
+  documents matching a secret pattern. Results are written owner-only.
+
 - **A governed retrieval manifest that carries source-link counters
   validates.** Manifests now declare schema version 4, which is version 3 plus
   `source_links`. Version 3 had shipped with an exact key set, so every
