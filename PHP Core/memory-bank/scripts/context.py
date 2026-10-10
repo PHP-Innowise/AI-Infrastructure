@@ -206,6 +206,9 @@ CAPSULE_WORKING_NEXT_STEP_LIMIT = 3
 # in the JSON a caller can inspect at leisure.
 RENDERED_PROGRESS_LIMIT = 400
 RENDERED_FILE_LIMIT = 5
+# Any one line of the rendered head. The path lines stop at a whole path below
+# it rather than end in half of one.
+RENDERED_LINE_LIMIT = 500
 # Defined beside SECRET_PATTERNS in validate.py, so the Project Brain write
 # path (brain_runtime) refuses the same personal data the capsule does.
 CAPSULE_PRIVATE_PATTERNS = tuple(PRIVATE_PATTERNS.values())
@@ -1447,7 +1450,9 @@ def truncate_progress(progress: str, keep: int) -> str:
 
 # Capsule sections the budget may remove, in the order a report names them.
 # A capsule that silently lost a constraint reads exactly like a complete
-# one, so these counters have to reach the prompt, not only the JSON.
+# one, so these counters have to reach the prompt, not only the JSON. The
+# goal and next-step counts exist only in the rendered text, which bounds
+# lines the JSON carries whole.
 COMPACTION_LABELS = (
     ("procedural", "procedural result(s)"),
     ("semantic", "semantic result(s)"),
@@ -1455,20 +1460,40 @@ COMPACTION_LABELS = (
     ("working_files", "working file(s)"),
     ("working_sources", "working source(s)"),
     ("working_next_steps", "next step(s)"),
+    ("working_goal_characters", "characters of the goal"),
     ("working_progress_characters", "characters of progress"),
+    ("working_next_step_characters", "characters of next steps"),
     ("last_turn_characters", "characters of the last-turn report"),
 )
+COMPACTION_ADVICE = (
+    "re-read the cited source before revising a decision it no longer explains"
+)
+# What the compaction line keeps when the rendered ceiling has no room for its
+# counts. It is never dropped: the line used to yield whole, so a capsule cut
+# at the ceiling - exactly when the cut is tightest - read as a complete one.
+COMPACTION_MARKER = f"compaction: lossy view — {COMPACTION_ADVICE}"
 
 
-def compaction_summary(capsule: dict[str, object]) -> Optional[str]:
-    """Name what this capsule no longer shows, or None when it shows all."""
+def compaction_summary(
+    capsule: dict[str, object], rendered: Optional[dict[str, int]] = None
+) -> Optional[str]:
+    """Name what this capsule no longer shows, or None when it shows all.
+
+    ``rendered`` is what the rendered text cuts besides: the JSON carries a
+    working state the text bounds again, and the text is what a host hands to
+    the model. Each count is added to the capsule's own ``omitted`` count, so
+    a task's files are reported once - as all the ones the text leaves out.
+    """
+    counts: dict[str, int] = {}
     omitted = capsule.get("omitted")
-    if not isinstance(omitted, dict):
-        return None
+    for source in (omitted if isinstance(omitted, dict) else {}, rendered or {}):
+        for key, value in source.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                counts[key] = counts.get(key, 0) + value
     parts = [
-        f"{omitted[key]} {label}"
+        f"{counts[key]} {label}"
         for key, label in COMPACTION_LABELS
-        if isinstance(omitted.get(key), int) and omitted[key] > 0
+        if counts.get(key, 0) > 0
     ]
     if not parts:
         return None
@@ -2683,41 +2708,100 @@ def assemble_hook_context(
     }
 
 
-def _bounded(text: object, limit: int) -> str:
+def _bounded_cut(text: object, limit: int) -> tuple[str, int]:
+    """``text`` on one line within ``limit``, and how many characters it lost."""
     collapsed = " ".join(str(text or "").split())
     if len(collapsed) <= limit:
-        return collapsed
-    return collapsed[: limit - 1].rstrip() + "…"
+        return collapsed, 0
+    kept = collapsed[: limit - 1].rstrip()
+    return kept + "…", len(collapsed) - len(kept)
+
+
+def _bounded(text: object, limit: int) -> str:
+    return _bounded_cut(text, limit)[0]
+
+
+def _whole_paths(label: str, paths: list[str]) -> list[str]:
+    """The leading ``paths`` that fit one rendered line after ``label``.
+
+    Whole paths only, and at least the first: a path cut in half names no
+    file, and the line's own bound used to cut the last one silently.
+    """
+    kept: list[str] = []
+    width = len(label)
+    for path in paths:
+        width += len(path) + (2 if kept else 0)
+        if kept and width > RENDERED_LINE_LIMIT:
+            break
+        kept.append(path)
+    return kept
 
 
 def working_state_lines(capsule: dict[str, object]) -> list[str]:
-    """The task's state as the rendered capsule shows it, under `working:`.
+    """The task's state as the rendered capsule shows it, under `working:`."""
+    return rendered_working_state(capsule)[0]
+
+
+def rendered_working_state(
+    capsule: dict[str, object],
+) -> tuple[list[str], dict[str, int]]:
+    """The task's state as the rendered capsule shows it, and what it cuts.
 
     The JSON capsule always carried progress, next steps and files, but the
     rendered capsule - the only form Claude Code, Codex and Cursor read -
     printed the goal alone. "Continue where we left off" then retrieved skill
     pointers and never the place the work stopped. Every line is bounded and
     left out when empty, because the rendered capsule repeats on every turn.
+
+    The bounds cut what the JSON holds whole, so the cuts are returned in
+    `omitted` terms for the compaction line: a narrative cut here and never
+    counted read as the task's complete state. Progress keeps both ends, as
+    `truncate_progress` does for the JSON budget - the constraint opens it and
+    where the work now stands closes it.
     """
     working = capsule.get("working")
     if not isinstance(working, dict):
-        return []
+        return [], {}
+    cuts = {
+        "working_progress_characters": 0,
+        "working_next_step_characters": 0,
+        "working_files": 0,
+        "working_sources": 0,
+    }
     lines: list[str] = []
     if working.get("phase"):
         lines.append(f"phase: {working['phase']}")
-    progress = _bounded(working.get("progress"), RENDERED_PROGRESS_LIMIT)
+    progress = " ".join(str(working.get("progress") or "").split())
+    if len(progress) > RENDERED_PROGRESS_LIMIT:
+        keep = RENDERED_PROGRESS_LIMIT - 1
+        cuts["working_progress_characters"] = len(progress) - keep
+        progress = truncate_progress(progress, keep)
     if progress:
         lines.append(f"progress: {progress}")
     for step in working.get("next_steps") or []:
-        lines.append(f"next: {_bounded(step, RENDERED_PROGRESS_LIMIT // 2)}")
+        text, lost = _bounded_cut(step, RENDERED_PROGRESS_LIMIT // 2)
+        cuts["working_next_step_characters"] += lost
+        lines.append(f"next: {text}")
     files = [str(path) for path in working.get("files") or []]
     if files:
-        # Newest last in the task, so the tail is the work in hand.
-        lines.append("recent files: " + ", ".join(files[-RENDERED_FILE_LIMIT:]))
+        # Newest last in the task, so the tail is the work in hand: the
+        # newest that fit, shown in the task's order.
+        recent = _whole_paths(
+            "recent files: ", files[-RENDERED_FILE_LIMIT:][::-1]
+        )[::-1]
+        cuts["working_files"] = len(files) - len(recent)
+        lines.append("recent files: " + ", ".join(recent))
+    sources = [str(path) for path in working.get("sources") or []]
+    if sources:
+        # The task's own citations, first first as the budget keeps them:
+        # the source a compaction line says to re-read.
+        cited = _whole_paths("sources: ", sources)
+        cuts["working_sources"] = len(sources) - len(cited)
+        lines.append("sources: " + ", ".join(cited))
     record = capsule.get("task_record")
     if isinstance(record, str) and record:
         lines.append(f"task record: {record}")
-    return lines
+    return lines, cuts
 
 
 class Excerpt(str):
@@ -2916,7 +3000,8 @@ def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) 
     handed all the same, so the next turns left it out as an item that
     "still applies". The capsule now stops carrying it, retrieval records
     only what the capsule holds, and the text rendered from the capsule shows
-    every item it holds: they fitted without their excerpts.
+    every item it holds: they fitted without their excerpts, beside the
+    compaction marker that every drop puts in front of them first.
     """
     _, shown = _render_capsule(capsule, capsule_excerpts(connection, capsule))
     kept = {id(item) for item in shown}
@@ -2964,6 +3049,9 @@ def _render_capsule(
     # only if it starts with "working:", which is how a broken render is kept
     # from replacing a good rule now that they no longer parse JSON.
     head: list[str] = []
+    # What the head's own bounds cut from the task's state, beside what the
+    # capsule's `omitted` counters say its JSON lost.
+    cuts: dict[str, int] = {}
     working = capsule["working"]
     if working is None and capsule.get("kind") == "warming":
         # A branch whose task the first checkpoint has not created yet: the
@@ -2975,32 +3063,34 @@ def _render_capsule(
     elif working is None:
         head.append("working: unavailable")
     else:
-        head.append(f"working: {_bounded(working['task_id'], 200)} — {_bounded(working['goal'], 200)}")
-        head.extend(_bounded(line, 500) for line in working_state_lines(capsule))
+        goal, cuts["working_goal_characters"] = _bounded_cut(working["goal"], 200)
+        head.append(f"working: {_bounded(working['task_id'], 200)} — {goal}")
+        state, state_cuts = rendered_working_state(capsule)
+        cuts.update(state_cuts)
+        head.extend(_bounded(line, RENDERED_LINE_LIMIT) for line in state)
     if capsule.get("kind") == "warming":
         head.append(f"warming: {capsule['pending_turns']} turn(s) pending")
     for warning in capsule["warnings"][:3]:
         head.append(f"warning: {_bounded(warning, 160)}")
     # The JSON form has carried these counters all along; the rendered form
     # is what a prompt-time hook shows, so without this line a compacted
-    # capsule reaches the model looking complete.
-    dropped = compaction_summary(capsule)
-    compaction_line = (
+    # capsule reaches the model looking complete. It counts what the text
+    # itself cuts, too: the text is the only form the model reads.
+    dropped = compaction_summary(capsule, cuts)
+    compaction: Optional[str] = (
         f"compaction: omitted {dropped} — this capsule is a lossy view; "
-        "re-read the cited source before revising a decision it no "
-        "longer explains"
+        f"{COMPACTION_ADVICE}"
         if dropped
         else None
     )
-    if compaction_line:
-        head.append(compaction_line)
+    tail: list[str] = []
     if capsule.get("last_turn"):
-        head.append(f"Last turn: {_bounded(capsule['last_turn'], 600)}")
+        tail.append(f"Last turn: {_bounded(capsule['last_turn'], 600)}")
     source = capsule.get("query_source")
     if source in ("task", "task-id"):
         # A capsule retrieved on a branch slug and one retrieved on the task's
         # own goal are worth very different amounts.
-        head.append(
+        tail.append(
             "query: from task goal"
             if source == "task"
             else "query: from branch name only"
@@ -3011,10 +3101,10 @@ def _render_capsule(
     ) == "skip":
         # An empty capsule and a withheld one are different facts and must
         # not render the same.
-        head.append(f"gate: skipped — {gate.get('reason', 'unknown')}")
+        tail.append(f"gate: skipped — {gate.get('reason', 'unknown')}")
     repeated = capsule.get("repeated")
     if isinstance(repeated, int) and repeated > 0:
-        head.append(
+        tail.append(
             f"memory: {repeated} item(s) handed earlier in this conversation "
             "still apply"
         )
@@ -3024,7 +3114,7 @@ def _render_capsule(
         # "Memory has nothing for this" is an answer, and until it was said
         # out loud it looked exactly like "memory was not consulted". Beside
         # delivered knowledge an empty layer tells the reader nothing.
-        head.append(f"no-match: {', '.join(sorted(str(layer) for layer in no_match))}")
+        tail.append(f"no-match: {', '.join(sorted(str(layer) for layer in no_match))}")
     # Project knowledge first, with its text; then the past; then which
     # skills apply, by name.
     entries: list[tuple[str, dict[str, object], str]] = []
@@ -3045,7 +3135,7 @@ def _render_capsule(
     }
 
     def assemble() -> list[str]:
-        lines = list(head)
+        lines = [*head, *([compaction] if compaction else []), *tail]
         if entries:
             lines.append(MEMORY_RENDER_HEADER)
         for _, item, kind in entries:
@@ -3060,12 +3150,17 @@ def _render_capsule(
 
     lines = assemble()
     # Over the ceiling the excerpts shrink first, tail first, then go; then
-    # the compaction line; then skills, then related knowledge (a link
-    # brought it, not the query), then the weakest knowledge. Working state
-    # is never cut here: its own lines are bounded where they are built. The
-    # compaction line yields before any entry, so the drops it reports never
-    # cost the capsule one more item - which also keeps the items
-    # shown_in_render records equal to the ones the final text shows.
+    # the compaction line gives up its counts for COMPACTION_MARKER; then
+    # skills, then related knowledge (a link brought it, not the query), then
+    # the weakest knowledge, then the head's lines from the last. Working
+    # state is cut only by those last drops: its own lines are bounded where
+    # they are built. The marker is never dropped, and it goes in before the
+    # first thing this loop drops, so a capsule the ceiling cut never reads as
+    # a complete one. shown_in_render keeps the items one render shows, and
+    # the capsule it leaves renders again with those items and a line that
+    # now counts the dropped ones: that render fits them beside the same
+    # marker, or beside the counted line where it fits, so the items recorded
+    # are the ones the final text shows.
     while size(lines) > RENDERED_CAPSULE_LIMIT:
         shrinkable = [
             key for key in reversed(list(excerpt_of)) if excerpt_of[key]
@@ -3074,8 +3169,8 @@ def _render_capsule(
             key = shrinkable[0]
             text = excerpt_of[key] or ""
             excerpt_of[key] = _bounded(text, len(text) // 2) if len(text) > 120 else None
-        elif compaction_line in head:
-            head.remove(compaction_line)
+        elif compaction != COMPACTION_MARKER:
+            compaction = COMPACTION_MARKER
         elif any(layer == "procedural" for layer, _, _ in entries):
             index = max(
                 position
@@ -3087,6 +3182,8 @@ def _render_capsule(
             entries.pop(_related_positions([item for _, item, _ in entries])[-1])
         elif entries:
             entries.pop()
+        elif tail:
+            tail.pop()
         elif len(head) > 1:
             head.pop()
         else:

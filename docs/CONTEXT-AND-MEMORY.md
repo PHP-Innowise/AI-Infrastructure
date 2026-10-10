@@ -1488,10 +1488,12 @@ durations (`stat`, `index`, `retrieval`) so an operator can see which side of
 the work is approaching the hook budget.
 
 The rendered capsule leads with the task itself: after `working: <task> —
-<goal>` come bounded `phase:`, `progress:`, `next:`, `recent files:` and
-`task record:` lines. Until they existed the plain capsule — the only form the
-hooks hand to a model — printed the goal alone, so a request to continue
-retrieved skill pointers and never the place the work stopped. The same turn
+<goal>` come bounded `phase:`, `progress:`, `next:`, `recent files:`,
+`sources:` and `task record:` lines, and a `compaction:` line whenever those
+bounds or the capsule budget left something out. Until they existed the plain
+capsule — the only form the hooks hand to a model — printed the goal alone, so
+a request to continue retrieved skill pointers and never the place the work
+stopped. The same turn
 spends no slot on what the model already has: the task's own record and
 handoff are excluded as `working-task`, and the instruction files the host
 loads by itself as `host-loaded` — `CLAUDE.md` and its `@path` imports for

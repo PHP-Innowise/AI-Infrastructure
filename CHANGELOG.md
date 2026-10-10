@@ -1775,84 +1775,41 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
-- **The repetition guard and the edit counter no longer trust a counter
-  directory someone else made.** Both kept their counts in
-  `/tmp/<host>-loop-detection-<repo-key>/`, a predictable name they accepted
-  whoever had created it, and read and wrote the counters through symbolic
-  links: another user on a shared host could plant a counter of 11 that
-  blocked a first `php artisan test`, or link `cmd-<md5 of "git status">` to
-  `~/.bashrc` and have the next `git status` overwrite it with a number.
-  `loop-detection.sh` also fed a stored count to shell arithmetic, so a planted
-  `a[$(cmd)]` ran `cmd`, and in the guard a stored `08` aborted the arithmetic
-  and turned the guard off for that command. The counters now live in
-  `${TMPDIR:-/tmp}/<host>-loop-detection-<uid>-<repo-key>/`, created with mode
-  700; one that is a symbolic link or belongs to another user turns the count
-  off, a counter that is a symbolic link is never read or written, and a count
-  is accepted only as digits, read in base 10. The same in all four editions
-  and all three hosts.
+- **The `compaction:` line reports what the rendered capsule cuts, and the
+  ceiling no longer removes it.** The line counted only what the JSON budget
+  and the governed contract dropped, while the rendered text - the only form
+  Claude Code, Codex and Cursor read - cut again: progress to its first 399
+  characters, five of the task's files, the goal and each next step past
+  their bounds, the last of five long paths in half, and every working source.
+  A 1,100-character progress therefore reached the model without the step it
+  ended on and with no compaction line, and a task with 20 files showed 5 and
+  reported 12 omitted. `rendered_working_state` now returns those cuts and
+  the line adds them to the JSON counters (20 files: 15 omitted); progress
+  keeps its opening and its end, as `truncate_progress` does for the JSON;
+  path lines stop at a whole path; and a `sources:` line shows the task's
+  cited sources, the ones the line asks the model to re-read. At the
+  3,600-character ceiling the line used to go whole before any entry, so a
+  capsule whose JSON had dropped results read as complete exactly when it was
+  tightest; it now gives up its counts for a fixed `compaction: lossy view`
+  marker, which is never dropped and goes in before the first entry the
+  ceiling drops. The marker costs about 100 characters in a capsule the
+  ceiling cuts; the drop order (excerpts, the line's counts, skills, related
+  knowledge, the weakest knowledge) and the 8,000/3,600 limits are unchanged,
+  and `shown_in_render` still records exactly what the text shows. Tests in
+  `memory-bank/tests/test_context.py` and the `WorkingStateCapsuleTest`,
+  `RelatedItemBudgetTest` and `DeliveryTest` cases in
+  `project-brain/tests/test_runtime.py`; the generator asset follows.
 
-- **A command's repetition count is its session's, and polling is not a
-  loop.** The count was keyed by the command and the checkout alone: every
-  Claude Code, Codex or Harness session in one checkout added to it, and a new
-  session's start wiped the counts of every session still running there. Counters are now keyed by the payload's `session_id` (Cursor
-  `conversation_id`), and `local-context.sh` deletes only its own session's
-  counters and those untouched for a day; the edit counts of
-  `loop-detection.sh` are per session the same way. A read-only status query
-  standing alone - `gh pr checks/status/view`, `gh run list/view/watch`,
-  `git status`, `docker [compose] ps/logs`, `kubectl get/describe/logs`,
-  `tail`, optionally after `sleep N &&` and piped into filters - is no longer
-  counted: waiting for CI was refused on the twelfth poll. Chained with
-  anything else it counts as before.
-
-- **An edit by Codex, or by Claude Code's `Write`, restarts a command's
-  repetition count.** The count restarts when `loop-detection.sh` recorded an
-  edit since the command last ran, but Codex edits through `apply_patch`,
-  whose payload has no `file_path`, and Claude Code ran the hook for `Edit`
-  only. On Codex a fix-and-rerun loop was refused from its twelfth run, and
-  on Claude Code whenever the fix was a `Write`. `loop-detection.sh` now
-  counts every file an `apply_patch` call names on its `*** Add File:`,
-  `*** Update File:` and `*** Move to:` lines, and a `NotebookEdit`'s
-  `notebook_path`; `.claude/settings.json` wires it for
-  `Edit|Write|MultiEdit|NotebookEdit`.
-
-- **The repetition and edit-loop warnings reach the model on Claude Code and
-  Codex.** Both warned on stderr or stdout with exit 1, which Claude Code and
-  Codex treat as a non-blocking hook error shown to the user only, so the
-  agent first met either guard at its block. Their Claude and Codex copies
-  now exit 0 with `hookSpecificOutput.additionalContext`, which both hosts
-  add to the model's context next to the tool result, as their hook
-  documentation says. Cursor documents no such channel for `afterFileEdit` or
-  for a shell command it lets run (`agent_message` accompanies a denial), so
-  its copies still warn with exit 1 and the warning stays the user's; the
-  hook READMEs and `docs/TOOL-INTEGRATIONS.md` say so.
-
-- **Cursor no longer serves another task's working memory after a failed
-  render.** The stop and session-start hooks removed the rule
-  `.cursor/rules/working-memory.mdc` only when `hook-context` said the branch
-  had no context (status 3); a failure, a timeout, a broken render or an
-  enforce-mode skip kept the rule whichever task it named, and the prompt
-  hook never touched it without a capsule. After `git switch` to a branch
-  whose render kept failing - a name with `#` is enough, because the task ID
-  is refused - Cursor sent the previous branch's capsule with every prompt.
-  All three hooks now keep a rule they did not rewrite only when its header
-  names the current task, and remove it otherwise; an enforce-mode skip still
-  never empties the current task's rule.
-
-- **A lost subagent completion reaches the orchestrator and names its error.**
-  `subagent-dispatch.sh` reported a failed `msg-dispatch` on stdout and stderr
-  from `SubagentStop`, where Claude Code shows a hook's output to nobody but
-  the debug log, and the report quoted the first 160 characters of the error:
-  for an uncaught exception, `Traceback (most recent call last):` and the
-  install path. The report now quotes the error's last non-blank line, as
-  `working-memory-read.sh` does, and on Claude Code it is also left in the
-  ignored `memory-bank/local/unrecorded-completions`; the same script, wired
-  on `PostToolUse` for `Agent|Task` (the event Claude Code documents for
-  adding context to the parent after a subagent returns), hands it to the
-  orchestrator once as `additionalContext`. Cursor's report stays in its
-  hooks output.
-
-- **The hook READMEs describe the repetition guard as it runs.** The Cursor
-  READMEs listed only exit codes 0 and 2 for a validator that exits 1 on its
-  warning, and no README said that an edit restarts the count; they now give
-  each host's exit codes and warning channel, the edit reset, polling, the
-  session keying and the counter directory.
+- **A project built inside an edition keeps its work under `Task/`.** The
+  practiceperfect branches built an application inside `Laravel/` and
+  `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
+  and governed Brain records in the editions' own `specs/`, `codebase/`,
+  `memory-bank/chunks/` and `project-brain/`. There the editions' hooks and
+  index read them as the edition's memory (the Symfony session hook counted
+  six chunks and reported `brain-validation=invalid`), the installer listed
+  the specs as distribution files, the Laravel index masked three values in a
+  schema spec, and two of its PHP snippets failed the lint. The 52 files now
+  sit at the same relative paths under `<Edition>/Task/project-work/`, with
+  the project's `specs/MANIFEST.md` and `.memory-counter` beside them; the
+  editions' own copies are back to their seeds. `scripts/check_php_snippets.py`
+  no longer lints `Task/` material, which the installer already excludes.

@@ -2262,6 +2262,119 @@ class ContextEngineTest(unittest.TestCase):
         self.assertIn("118 characters of progress", rendered)
         self.assertIn("re-read the cited source", rendered)
 
+    def test_print_capsule_reports_what_its_own_bounds_cut(self) -> None:
+        # The JSON holds every character of this working state; the rendered
+        # text - the only form a host hands the model - bounds the goal, the
+        # progress and each next step, shows five files and, until now, no
+        # source. None of those cuts reached the compaction line.
+        progress = (
+            "CONSTRAINT keep the v1 endpoint. " + "middle " * 140
+            + "NOW: step 4 of 6, writing the rollback test"
+        )
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-RENDER",
+            "working": {
+                "task_id": "CAPSULE-RENDER",
+                "goal": "g" * 250,
+                "progress": progress,
+                "next_steps": ["n" * 260, "Verify."],
+                "files": [f"src/File{index}.php" for index in range(8)],
+                "sources": ["specs/a.md", "specs/b.md"],
+            },
+            "procedural": [],
+            "semantic": [],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {"working_files": 12},
+        }
+
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            CONTEXT.print_capsule(capsule)
+        lines = stream.getvalue().splitlines()
+
+        progress_line = next(line for line in lines if line.startswith("progress: "))
+        self.assertTrue(progress_line.startswith("progress: CONSTRAINT"), progress_line)
+        self.assertTrue(progress_line.endswith("writing the rollback test"), progress_line)
+        self.assertIn(
+            "recent files: src/File3.php, src/File4.php, src/File5.php, "
+            "src/File6.php, src/File7.php",
+            lines,
+        )
+        self.assertIn("sources: specs/a.md, specs/b.md", lines)
+        compaction = next(line for line in lines if line.startswith("compaction: "))
+        limit = CONTEXT.RENDERED_PROGRESS_LIMIT
+        self.assertIn("15 working file(s)", compaction)
+        self.assertIn("51 characters of the goal", compaction)
+        self.assertIn(f"{len(progress) - (limit - 1)} characters of progress", compaction)
+        self.assertIn(f"{260 - (limit // 2 - 1)} characters of next steps", compaction)
+        # The JSON still holds all of it: only the text cut it.
+        self.assertEqual({"working_files": 12}, capsule["omitted"])
+
+    def test_path_lines_stop_at_a_whole_path(self) -> None:
+        # Five long paths ran past the line bound, which cut the last one in
+        # half and counted nothing.
+        files = [f"src/{'f' * 100}{index}.php" for index in range(5)]
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-PATHS",
+            "working": {
+                "task_id": "CAPSULE-PATHS", "goal": "Long paths.",
+                "progress": "", "next_steps": [], "files": files, "sources": [],
+            },
+            "procedural": [], "semantic": [], "episodic": [], "warnings": [],
+            "omitted": {},
+        }
+
+        lines = CONTEXT.render_capsule_lines(capsule)
+
+        shown = next(line for line in lines if line.startswith("recent files: "))
+        self.assertEqual(
+            "recent files: " + ", ".join(files[1:]), shown
+        )
+        self.assertIn("compaction: omitted 1 working file(s)", "\n".join(lines))
+
+    def test_the_compaction_line_survives_the_rendered_ceiling(self) -> None:
+        # Excerpts gone, the line used to yield whole before any entry, so a
+        # capsule whose head and entries sat just under the ceiling reached
+        # the model with no sign that its JSON had dropped anything.
+        capsule = {
+            "query": "capsule",
+            "task_id": "CAPSULE-CEILING",
+            "working": {
+                "task_id": "CAPSULE-CEILING", "goal": "Hold the ceiling.",
+                "progress": "Entries fill the capsule.", "next_steps": [],
+                "files": [], "sources": [],
+            },
+            "procedural": [],
+            "semantic": [
+                {
+                    "path": f"specs/item-{index}.md", "layer": "semantic",
+                    "kind": "spec", "title": f"Item {index} " + "t" * 150,
+                }
+                for index in range(3)
+            ],
+            "episodic": [],
+            "warnings": [],
+            "omitted": {},
+        }
+        complete = CONTEXT.render_capsule_lines(capsule)
+        capsule["omitted"] = {"semantic": 2, "working_files": 4, "working_sources": 1}
+        ceiling = sum(len(line) + 1 for line in complete) + 110
+
+        with mock.patch.object(CONTEXT, "RENDERED_CAPSULE_LIMIT", ceiling):
+            lines = CONTEXT.render_capsule_lines(capsule)
+
+        self.assertLessEqual(sum(len(line) + 1 for line in lines), ceiling)
+        self.assertEqual(
+            3, sum(line.startswith("- memory specs/item-") for line in lines), lines
+        )
+        compaction = [line for line in lines if line.startswith("compaction:")]
+        self.assertEqual(1, len(compaction), lines)
+        self.assertIn("lossy view", compaction[0])
+        self.assertIn("re-read the cited source", compaction[0])
+
     def test_print_capsule_stays_silent_when_nothing_was_omitted(self) -> None:
         capsule = {
             "query": "capsule",

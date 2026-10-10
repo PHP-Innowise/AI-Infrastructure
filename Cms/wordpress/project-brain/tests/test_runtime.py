@@ -5384,24 +5384,67 @@ class WorkingStateCapsuleTest(RuntimeHarness):
         self.assertIn(f"task record: project-brain/dynamic/tasks/{uuid}.md", lines)
 
     def test_the_rendered_progress_is_bounded(self) -> None:
+        # About a thousand characters: the constraint first, the current step
+        # last. The text kept the first 399 and no compaction line said so,
+        # so every later turn read the constraint without the step it was on.
         self.start("TASK-LONG")
+        progress = (
+            "CONSTRAINT keep the v1 endpoint. " + "cobalt " * 140
+            + "NOW: step 4 of 6, writing the rollback test"
+        )
         update = self.run_cli(
             "update", "--task-id", "TASK-LONG", "--revision", "auto",
-            "--progress", "cobalt " * 400, "--json",
+            "--progress", progress, "--json",
         )
         self.assertEqual(0, update.returncode, update.stderr)
         rendered = self.run_cli(
             "retrieve", "cobalt", "--task-id", "TASK-LONG", "--ephemeral"
         )
-        line = next(
-            line for line in rendered.stdout.splitlines()
-            if line.startswith("progress: ")
-        )
+        lines = rendered.stdout.splitlines()
+        line = next(line for line in lines if line.startswith("progress: "))
         self.assertLessEqual(
             len(line), len("progress: ") + context_cli.RENDERED_PROGRESS_LIMIT
         )
         self.assertGreater(len(line), context_cli.RENDERED_PROGRESS_LIMIT // 2)
-        self.assertTrue(line.endswith("…"), line)
+        self.assertTrue(line.startswith("progress: CONSTRAINT keep the v1 endpoint."), line)
+        self.assertTrue(line.endswith("NOW: step 4 of 6, writing the rollback test"), line)
+        self.assertIn("…", line)
+        compaction = next(
+            (line for line in lines if line.startswith("compaction: ")), ""
+        )
+        cut = len(progress.strip()) - (context_cli.RENDERED_PROGRESS_LIMIT - 1)
+        self.assertIn(f"omitted {cut} characters of progress", compaction, rendered.stdout)
+
+    def test_the_rendered_file_count_is_every_file_the_text_leaves_out(self) -> None:
+        # The capsule's JSON keeps eight of twenty files and the text five of
+        # those; the line counted the twelve the JSON lost, not the fifteen
+        # the model never saw.
+        self.start("TASK-FILES")
+        update = self.run_cli(
+            "update", "--task-id", "TASK-FILES", "--revision", "auto",
+            "--progress", "Twenty files touched.",
+            *[argument for index in range(20) for argument in ("--file", f"app/F{index}.php")],
+            "--json",
+        )
+        self.assertEqual(0, update.returncode, update.stderr)
+        rendered = self.run_cli(
+            "retrieve", "cobalt", "--task-id", "TASK-FILES", "--ephemeral"
+        )
+        lines = rendered.stdout.splitlines()
+        files = next(line for line in lines if line.startswith("recent files: "))
+        self.assertEqual(
+            context_cli.RENDERED_FILE_LIMIT,
+            len(files[len("recent files: "):].split(", ")),
+        )
+        compaction = next(
+            (line for line in lines if line.startswith("compaction: ")), ""
+        )
+        self.assertIn(
+            f"omitted {20 - context_cli.RENDERED_FILE_LIMIT} working file(s)",
+            compaction, rendered.stdout,
+        )
+        # The task's own citation is shown, not left to the task record.
+        self.assertIn("sources: specs/authority.md", lines)
 
     def test_the_task_does_not_point_at_its_own_record(self) -> None:
         # It matched every prompt that shared a word with its own goal and took
@@ -5921,12 +5964,16 @@ class RelatedItemBudgetTest(RuntimeHarness):
 
     def test_the_rendered_text_drops_a_linked_item_before_the_changelog(self) -> None:
         capsule = self.capsule()
+        # Long enough that leaving frees room for the compaction marker the
+        # drop brings, as well as the 20 characters below.
+        capsule["semantic"][1]["title"] = "Linked " + "l" * 120
         full, _ = context_cli._render_capsule(capsule, {})
         size = sum(len(line) + 1 for line in full)
         # Room for all but one entry: the linked one leaves, history stays.
         with mock.patch.object(context_cli, "RENDERED_CAPSULE_LIMIT", size - 20):
-            _, shown = context_cli._render_capsule(capsule, {})
+            lines, shown = context_cli._render_capsule(capsule, {})
         self.assertEqual(["specs/direct.md", "CHANGELOG.md"], [item["path"] for item in shown])
+        self.assertIn(context_cli.COMPACTION_MARKER, lines)
 
 
 class FileLinkSeedTest(RuntimeHarness):
@@ -10146,8 +10193,9 @@ class DeliveryTest(RuntimeHarness):
     def test_an_item_the_rendered_text_leaves_out_is_handed_on_the_next_turn(self) -> None:
         # The rendered text drops whole entries once the excerpts are gone,
         # and an entry it dropped was recorded as handed. A ceiling that holds
-        # the working state and two of the three item lines, measured on a
-        # capsule that shows all three, makes the renderer the one to drop.
+        # the working state, the compaction marker every drop brings and two
+        # of the three item lines, measured on a capsule that shows all three,
+        # makes the renderer the one to drop.
         self.write_dispatch_notes(depth=8, title_words=1)
         self.start("TASK-DELIVER")
         arguments = (
@@ -10164,12 +10212,25 @@ class DeliveryTest(RuntimeHarness):
         header = lines.index(context_cli.MEMORY_RENDER_HEADER)
         items = [line for line in lines[header + 1:] if line.startswith("- ")]
         self.assertEqual(3, len(items), lines)
-        ceiling = sum(len(line) + 1 for line in [*lines[: header + 1], *items[:2]]) + 10
+        self.assertFalse(any(line.startswith("compaction:") for line in lines), lines)
+        # Room for the marker, not for the line with its counts: at the
+        # ceiling the line yielded whole, and the dropped entry left no trace
+        # in the text the model reads.
+        marker = len("compaction: lossy view — re-read the cited source before "
+                     "revising a decision it no longer explains")
+        ceiling = sum(len(line) + 1 for line in [*lines[: header + 1], *items[:2]]) + marker + 11
         with mock.patch.object(context_cli, "RENDERED_CAPSULE_LIMIT", ceiling):
             first = refresh_in_process("--session-id", "c-render")
         self.assertLessEqual(len(first["capsule_text"]), ceiling)
         left_out = self.assert_recorded_as_shown(first)
         self.assertEqual(1, first["capsule"]["omitted"]["semantic"])
+        self.assertTrue(
+            any(
+                line.startswith("compaction:")
+                for line in first["capsule_text"].splitlines()
+            ),
+            first["capsule_text"],
+        )
         second = refresh_in_process("--session-id", "c-render")
         self.assertEqual([left_out], self.shown_notes(second))
         self.assertEqual(2, second["capsule"]["repeated"])
@@ -10218,6 +10279,10 @@ class DeliveryTest(RuntimeHarness):
         self.assertEqual(len(items) - len(kept), capsule["omitted"]["semantic"])
         text = "\n".join(context_cli.render_capsule_lines(capsule, {}))
         self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+        # Entries were dropped, so the text says it is a lossy view.
+        self.assertTrue(
+            any(line.startswith("compaction:") for line in text.splitlines()), text
+        )
         for path in kept:
             line = next(line for line in text.splitlines() if path in line)
             self.assertIn("agent-attested, not reviewed by a person", line)
