@@ -37,8 +37,12 @@ FRAGMENT_SHAPES = (
 
 
 def tracked_markdown(root: Path) -> list[Path]:
+    # A `Task/` directory holds a client's own material - epics, an
+    # application built inside an edition, the specs written for it - which
+    # the installer excludes (`Task/**`); its snippets are not what the
+    # accelerator ships.
     result = subprocess.run(
-        ["git", "ls-files", "-z", "--", "*.md"],
+        ["git", "ls-files", "-z", "--", "*.md", ":(glob,exclude)**/Task/**"],
         cwd=root,
         capture_output=True,
         check=True,

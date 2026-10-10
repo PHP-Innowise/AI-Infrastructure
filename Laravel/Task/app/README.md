@@ -11,9 +11,9 @@ Vite asset build.
 - Requirements are derived in [`../../specs/`](../../specs) from the read-only
   client material in [`../Epics/`](../Epics). Those epics are never edited.
 - The platform design, including the tenancy model this stack is shaped around,
-  is in [`specs/architect-architecture.md`](../../specs/architect-architecture.md),
+  is in [`specs/architect-architecture.md`](../project-work/specs/architect-architecture.md),
   with the seam resolutions in
-  [`specs/architect-reconciliation.md`](../../specs/architect-reconciliation.md).
+  [`specs/architect-reconciliation.md`](../project-work/specs/architect-reconciliation.md).
 
 ---
 

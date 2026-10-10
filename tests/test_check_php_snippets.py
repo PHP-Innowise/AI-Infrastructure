@@ -58,6 +58,19 @@ class SnippetGateTest(unittest.TestCase):
         _, failures = self.check({"": "<?php\nfunction broken( {"})
         self.assertEqual(1, len(failures))
 
+    def test_client_task_material_is_not_linted(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="snippet-gate-") as raw:
+            root = Path(raw)
+            client = root / "Laravel" / "Task" / "project-work" / "specs"
+            client.mkdir(parents=True)
+            (client / "schema.md").write_text(f"{FENCE}php\n$x = ;\n{FENCE}\n", encoding="utf-8")
+            (root / "doc.md").write_text(f"{FENCE}php\n$total = 1;\n{FENCE}\n", encoding="utf-8")
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            subprocess.run(["git", "add", "--all"], cwd=root, check=True)
+            counts, failures = check_php_snippets.check(root)
+        self.assertEqual([], failures)
+        self.assertEqual(1, counts["statements"])
+
 
 if __name__ == "__main__":
     unittest.main()

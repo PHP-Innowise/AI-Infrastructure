@@ -1639,6 +1639,20 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **A project built inside an edition keeps its work under `Task/`.** The
+  practiceperfect branches built an application inside `Laravel/` and
+  `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
+  and governed Brain records in the editions' own `specs/`, `codebase/`,
+  `memory-bank/chunks/` and `project-brain/`. There the editions' hooks and
+  index read them as the edition's memory (the Symfony session hook counted
+  six chunks and reported `brain-validation=invalid`), the installer listed
+  the specs as distribution files, the Laravel index masked three values in a
+  schema spec, and two of its PHP snippets failed the lint. The 52 files now
+  sit at the same relative paths under `<Edition>/Task/project-work/`, with
+  the project's `specs/MANIFEST.md` and `.memory-counter` beside them; the
+  editions' own copies are back to their seeds. `scripts/check_php_snippets.py`
+  no longer lints `Task/` material, which the installer already excludes.
+
 - **The QA tooling job runs locally, and its evidence names the interpreter
   in a repository venv.** `qa-tooling` came in from the QA branch with a
   `pip install` into the runner's own Python, which `scripts/check.py` cannot
