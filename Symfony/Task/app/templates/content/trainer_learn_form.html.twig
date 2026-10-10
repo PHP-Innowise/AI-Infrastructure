@@ -1,0 +1,34 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Create Learn Playlist — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>+ Create Learn Playlist</h1>
+
+        {{ form_start(form) }}
+            {{ form_row(form.title) }}
+            {{ form_row(form.description) }}
+            {{ form_row(form.filterSkillLevels) }}
+            {{ form_row(form.filterPositions) }}
+            {{ form_row(form.filterAgeLevels) }}
+            {{ form_row(form.isPublic) }}
+            {{ form_row(form.audience) }}
+
+            <h2>Videos</h2>
+            {# AC-04-2: reordering is drag-and-drop in the finished UI
+               (coder-frontend/Stimulus territory); this skeleton form
+               relies on the collection's own submitted order, matching
+               PlaylistService::createLearnPlaylist()'s own sequencing. #}
+            <div>
+                {% for video in form.videos %}
+                    <fieldset>
+                        {{ form_widget(video) }}
+                    </fieldset>
+                {% endfor %}
+            </div>
+
+            {{ form_row(form.submit) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

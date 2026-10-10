@@ -1,0 +1,28 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ form.name }} — Attendance{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ form.name }} — Attendance</h1>
+
+        {% if submissions is empty %}
+            <p>No registrations yet.</p>
+        {% else %}
+            {{ form_start(formView) }}
+                <table>
+                    <thead><tr><th>Participant</th><th>Attended</th></tr></thead>
+                    <tbody>
+                    {% for submission in submissions %}
+                        <tr>
+                            <td>{{ submission.participantName }}</td>
+                            <td>{{ form_widget(formView[('attendance_' ~ submission.id)]) }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+                {{ form_row(formView.submit) }}
+            {{ form_end(formView) }}
+        {% endif %}
+    </div>
+{% endblock %}

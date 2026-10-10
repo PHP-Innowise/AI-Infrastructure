@@ -1,0 +1,11 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Link not available — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>This link is invalid or has expired</h1>
+        <p>Please request a new one.</p>
+        <p><a href="{{ path('identity_auth_login') }}">Back to sign in</a></p>
+    </div>
+{% endblock %}

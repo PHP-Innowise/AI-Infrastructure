@@ -1,0 +1,68 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}LPPP Analytics — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>LPPP Analytics</h1>
+        <p><a href="{{ path('content_super_admin_analytics_export') }}">Export CSV</a></p>
+
+        <h2>Content Stats</h2>
+        <dl>
+            <dt>Total playlists</dt><dd>{{ contentStats.totalPlaylists }}</dd>
+            <dt>Total drills</dt><dd>{{ contentStats.totalDrills }}</dd>
+            <dt>Public</dt><dd>{{ contentStats.publicCount }}</dd>
+            <dt>Private</dt><dd>{{ contentStats.privateCount }}</dd>
+        </dl>
+
+        <h3>Top 10 Public Drills</h3>
+        <ol>
+            {% for drill in topDrills %}
+                <li>{{ drill.title }} — By {{ drill.trainerName }} — used by {{ drill.usedByTrainers }} trainer{{ drill.usedByTrainers == 1 ? '' : 's' }}</li>
+            {% endfor %}
+        </ol>
+
+        <h3>Top Content Creators</h3>
+        <ol>
+            {% for creator in topCreators %}
+                <li>
+                    <a href="{{ path('content_super_admin_analytics', {trainer: creator.trainerId}) }}">{{ creator.trainerName }}</a>
+                    — {{ creator.publicItemCount }} public item{{ creator.publicItemCount == 1 ? '' : 's' }}
+                </li>
+            {% endfor %}
+        </ol>
+
+        <h2>Engagement Stats</h2>
+        <dl>
+            <dt>Total views (all-time)</dt><dd>{{ engagement.totalViewsAllTime }}</dd>
+            <dt>Total views (this week)</dt><dd>{{ engagement.totalViewsThisWeek }}</dd>
+            <dt>Average watch time per player</dt><dd>{{ engagement.avgWatchTimeSeconds|round }}s</dd>
+            <dt>Completion rate</dt><dd>{{ (engagement.completionRate * 100)|round }}%</dd>
+        </dl>
+
+        <h2>Growth Trends</h2>
+        <table>
+            <thead><tr><th>Week</th><th>Content created</th><th>Views</th><th>New public items</th></tr></thead>
+            <tbody>
+                {% for row in trends %}
+                    <tr>
+                        <td>{{ row.weekStart }}</td>
+                        <td>{{ row.contentCreated }}</td>
+                        <td>{{ row.views }}</td>
+                        <td>{{ row.newPublicItems }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {% if trainerDrilldown %}
+            <h2>Trainer #{{ trainerId }} drill-down</h2>
+            <dl>
+                <dt>Playlists</dt><dd>{{ trainerDrilldown.playlists }}</dd>
+                <dt>Drills</dt><dd>{{ trainerDrilldown.drills }}</dd>
+                <dt>Public items</dt><dd>{{ trainerDrilldown.publicItems }}</dd>
+                <dt>Views</dt><dd>{{ trainerDrilldown.views }}</dd>
+            </dl>
+        {% endif %}
+    </div>
+{% endblock %}

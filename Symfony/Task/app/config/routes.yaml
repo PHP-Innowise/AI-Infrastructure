@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=../vendor/symfony/routing/Loader/schema/routing.schema.json
+
+# This file is the entry point to configure the routes of your app.
+# Methods with the #[Route] attribute are automatically imported.
+# See also https://symfony.com/doc/current/routing.html
+
+# To list all registered routes, run the following command:
+#   bin/console debug:router
+
+controllers:
+    resource: routing.controllers
+
+# Controllers live inside their owning module (src/Identity/Controller,
+# src/Scheduling/Controller, ...), not only in a single src/Controller. One
+# attribute import over src/ picks up every module's routes without a new
+# entry per module.
+# See specs/architect-architecture.md "Module map".
+modules:
+    resource: '../src/'
+    type: attribute
+    exclude: '../src/{Controller,DependencyInjection,Entity,Kernel.php}'

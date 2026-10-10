@@ -1,0 +1,38 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ account.email }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ account.profile ? account.profile.fullName : account.email }}</h1>
+        <p>
+            {{ account.email }} · {{ account.role.label }} ·
+            <strong>{{ account.status.value }}</strong>
+        </p>
+
+        <p>
+            <a href="{{ path('administration_user_edit', {account: account.id}) }}">Edit</a>
+        </p>
+
+        {% if account.status.value == 'active' %}
+            <p>
+                <a class="button" href="{{ path('administration_user_deactivate', {account: account.id}) }}">Deactivate</a>
+                {% if account.role.value == 'trainer' or account.role.value == 'coach' or account.role.value == 'player' %}
+                    <form method="post" action="{{ path('administration_impersonation_start', {account: account.id}) }}" style="display:inline">
+                        <input type="hidden" name="_token" value="{{ csrf_token('impersonate' ~ account.id) }}">
+                        <button type="submit" class="button">Impersonate</button>
+                    </form>
+                {% endif %}
+            </p>
+        {% elseif account.status.value == 'inactive' %}
+            <form method="post" action="{{ path('administration_user_reactivate', {account: account.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('reactivate' ~ account.id) }}">
+                <button type="submit" class="button">Reactivate</button>
+            </form>
+        {% endif %}
+
+        {% if account.status.value != 'deleted' %}
+            <p><a href="{{ path('administration_user_delete', {account: account.id}) }}">Delete (GDPR)</a></p>
+        {% endif %}
+    </div>
+{% endblock %}

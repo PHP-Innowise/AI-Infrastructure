@@ -1,0 +1,11 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Processing — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Processing your payment</h1>
+        <p role="status">We're confirming your payment now — we'll email you as soon as it's done.</p>
+        <p><a href="{{ path('billing_portal_transactions') }}">View transaction history</a></p>
+    </div>
+{% endblock %}

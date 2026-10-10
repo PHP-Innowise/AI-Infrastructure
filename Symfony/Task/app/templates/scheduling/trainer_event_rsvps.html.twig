@@ -1,0 +1,49 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}RSVP List — {{ event.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>RSVP List</h1>
+        {# AC-02-44: "15 of 20 registered", plus "Event Full - No spots available" once full. #}
+        <p class="skeleton-caption">{{ event.title }} — {{ rsvpRows|length }} of {{ event.capacity }} registered</p>
+        {% if rsvpRows|length >= event.capacity %}
+            <p role="alert">Event Full - No spots available</p>
+        {% endif %}
+
+        <p>
+            <a class="button button--primary" href="{{ path('scheduling_trainer_event_rsvp_add', {event: event.id}) }}">Add a player</a>
+            ·
+            <a href="{{ path('scheduling_trainer_event_rsvps_export', {event: event.id}) }}">Export CSV</a>
+        </p>
+
+        {% if rsvpRows is empty %}
+            <p>No registrations yet.</p>
+        {% else %}
+            <table>
+                <thead>
+                    <tr><th>Player</th><th>Age</th><th>Skill</th><th>RSVP Time</th><th>Payment</th><th>Availability</th><th></th></tr>
+                </thead>
+                <tbody>
+                    {% for row in rsvpRows %}
+                        <tr>
+                            <td>{{ row.name }}</td>
+                            <td>{{ row.age }}</td>
+                            <td>{{ row.skillLevel }}</td>
+                            <td>{{ row.requestedAt }}</td>
+                            <td>{{ row.paymentStatus }}</td>
+                            <td>{{ row.availability }}</td>
+                            <td>
+                                {# AC-02-45: trainer can remove a player from the roster (issuing a refund if paid — RsvpService::remove()). #}
+                                <form method="post" action="{{ path('scheduling_trainer_event_rsvp_remove', {event: event.id, rsvp: row.rsvpId}) }}" style="display:inline" onsubmit="return confirm('Remove this player from the event?');">
+                                    <input type="hidden" name="_token" value="{{ csrf_token('rsvp-remove' ~ row.rsvpId) }}">
+                                    <button type="submit">Remove</button>
+                                </form>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

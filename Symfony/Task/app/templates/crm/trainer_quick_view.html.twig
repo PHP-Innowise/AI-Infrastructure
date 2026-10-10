@@ -1,0 +1,81 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Quick View Dashboard — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Quick View Dashboard</h1>
+
+        {# AC-03-35 #}
+        <section>
+            <h2>Events This Week</h2>
+            <p>{{ metrics.eventsThisWeek }} ({{ metrics.eventsDeltaVsLastWeek >= 0 ? '+' }}{{ metrics.eventsDeltaVsLastWeek }} vs last week)</p>
+        </section>
+
+        {# AC-03-36 #}
+        <section>
+            <h2>RSVPs This Week</h2>
+            <ul>
+                {% for type, count in metrics.rsvpsThisWeekByType %}
+                    <li>{{ type|capitalize }}: {{ count }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+
+        {# AC-03-37/BR-03-16..19 #}
+        <section>
+            <h2>Top Players</h2>
+            {% if metrics.topPlayers is empty %}
+                <p>No qualifying players in the last 90 days.</p>
+            {% else %}
+                <ol>
+                    {% for row in metrics.topPlayers %}
+                        <li>{{ row.name }} - {{ row.sessionCount }} session{{ row.sessionCount == 1 ? '' : 's' }}</li>
+                    {% endfor %}
+                </ol>
+            {% endif %}
+        </section>
+
+        {# AC-03-38 #}
+        <section>
+            <h2>Flag Alerts</h2>
+            <ul>
+                {% for type, count in metrics.flagCountsByType %}
+                    <li><a href="{{ path('crm_trainer_players_index', {'flags[]': type}) }}">{{ type|capitalize }}: {{ count }}</a></li>
+                {% endfor %}
+            </ul>
+        </section>
+
+        {# AC-03-39 #}
+        <section>
+            <h2>ShareLink Tracking</h2>
+            <p>{{ metrics.shareLinkOpensThisWeek }} link opens this week</p>
+            <p>{{ metrics.newPlayersThisWeek }} new players joined via ShareLink this week</p>
+        </section>
+
+        {# AC-03-40, optional MVP #}
+        <section>
+            <h2>Attendance Trends</h2>
+            {% if metrics.attendanceRateThisWeek is not null %}
+                <p>Attendance rate: {{ metrics.attendanceRateThisWeek }}% this week (vs {{ metrics.attendanceRateLastWeek }}% last week)</p>
+                <p>No-show rate: {{ metrics.noShowRateThisWeek }}% this week</p>
+            {% else %}
+                <p>No attendance recorded this week.</p>
+            {% endif %}
+        </section>
+
+        {# AC-03-66: Coach Hours Tracking #}
+        <section>
+            <h2>Coach Hours</h2>
+            {% if metrics.coachHours is empty %}
+                <p>No confirmed coach assignments yet.</p>
+            {% else %}
+                <ul>
+                    {% for row in metrics.coachHours %}
+                        <li>{{ row.name }} has done {{ row.hoursTotal|round(1) }} hours (covered {{ row.sessionsCount }} event{{ row.sessionsCount == 1 ? '' : 's' }})</li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        </section>
+    </div>
+{% endblock %}

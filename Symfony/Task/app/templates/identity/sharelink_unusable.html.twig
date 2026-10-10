@@ -1,0 +1,10 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Invitation unavailable — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>This invitation has expired</h1>
+        <p>Ask {{ shareLink.trainer.businessName }} for a new invitation.</p>
+    </div>
+{% endblock %}

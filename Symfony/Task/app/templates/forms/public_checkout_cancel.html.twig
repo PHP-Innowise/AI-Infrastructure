@@ -1,0 +1,15 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Payment not completed — {{ form.name }}{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ form.trainer.businessName }}</p>
+        <h1>Payment not completed</h1>
+        {# "Risks & Mitigations — Risk: Payment Processing Failures": a
+           clear message and a support contact. No self-service retry link
+           is offered — see the coder's final report for why. #}
+        <p role="status">Your payment for <strong>{{ form.name }}</strong> was not completed, so your spot was not reserved.</p>
+        <p>If you'd like to try again, please contact {{ form.trainer.businessName }} directly.</p>
+    </div>
+{% endblock %}

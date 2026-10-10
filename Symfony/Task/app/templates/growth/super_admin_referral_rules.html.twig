@@ -1,0 +1,16 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Referral Program — System Settings — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Referral Program</h1>
+
+        {# AC-06-29: "views the current rule (e.g. '3 referral purchases = 1 token')" #}
+        <p>Current rule: {{ current.referralsRequired }} referral purchase{{ current.referralsRequired == 1 ? '' : 's' }} = {{ current.tokensAwarded }} token{{ current.tokensAwarded == 1 ? '' : 's' }}{{ current.refereeWelcomeBonus ? ' (referee also gets a welcome token)' : '' }}.</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

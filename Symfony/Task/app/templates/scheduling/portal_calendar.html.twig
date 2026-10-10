@@ -1,0 +1,54 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Training Calendar — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Training Calendar</h1>
+
+        <nav>
+            <a href="{{ path('scheduling_portal_calendar', {view: 'day'}) }}">Day</a>
+            ·
+            <a href="{{ path('scheduling_portal_calendar', {view: 'week'}) }}">Week</a>
+            ·
+            <a href="{{ path('scheduling_portal_calendar', {view: 'month'}) }}">Month</a>
+        </nav>
+
+        <form method="get" action="{{ path('scheduling_portal_calendar') }}">
+            <input type="hidden" name="view" value="{{ view }}">
+            <input type="search" name="q" placeholder="Search by title or location">
+            <button type="submit">Search</button>
+        </form>
+
+        {% if rows is empty %}
+            <p>No events found.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Title</th><th>Date/Time</th><th>Location</th><th>Capacity</th><th>Price</th><th></th></tr></thead>
+                <tbody>
+                    {% for row in rows %}
+                        {% set event = row.event %}
+                        <tr>
+                            <td>{{ event.title }}</td>
+                            <td>{{ event.startsAt|date('Y-m-d H:i', event.trainer.timezone) }}</td>
+                            <td>{{ event.location }}</td>
+                            <td>{{ event.capacity }}</td>
+                            <td>
+                                {% if event.free %}Free
+                                {% else %}
+                                    {% if event.usdPricingEnabled %}${{ (event.usdPriceMinorUnits / 100)|number_format(2) }}{% endif %}
+                                    {% if event.usdPricingEnabled and event.tokenPricingEnabled %} OR {% endif %}
+                                    {% if event.tokenPricingEnabled %}{{ event.tokenPrice }} token{{ event.tokenPrice > 1 ? 's' : '' }}{% endif %}
+                                {% endif %}
+                            </td>
+                            <td>
+                                {% if row.availabilityBadge %}<span>{{ row.availabilityBadge }}</span>{% endif %}
+                                <a href="{{ path('scheduling_portal_event_show', {event: event.id}) }}">View</a>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

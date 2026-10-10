@@ -1,0 +1,14 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Decline assignment — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Decline assignment</h1>
+        <p>{{ assignment.event.title }} — {{ assignment.event.startsAt|date('Y-m-d H:i', assignment.event.trainer.timezone) }}</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

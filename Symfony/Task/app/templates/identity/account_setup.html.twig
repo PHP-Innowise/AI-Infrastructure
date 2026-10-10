@@ -1,0 +1,15 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Set up your account — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">PracticePerfect</p>
+        <h1>Set up your account</h1>
+        <p>Choose a password to activate your trainer account.</p>
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}
