@@ -455,11 +455,23 @@ The rendered capsule — the plain output, which is what the hooks hand to
 Claude Code, Codex, and Cursor — opens with `working: <task> — <goal>` and
 then the task's state, each line bounded and left out when empty: `phase:`,
 `progress:` (manual progress, then the automatic checkpoint, at most 400
-characters), one `next:` line per step, `recent files:` (the five newest), and
-in governed mode `task record:`, the path of the full record. Selected project
-knowledge/history also carries its already-filtered excerpt. The complete text
-is capped at 3,600 characters; excerpts shrink first, then optional entries.
-Source-change and weak-match caveats stay beside the source.
+characters, keeping its opening and its end), one `next:` line per step,
+`recent files:` (the five newest, whole paths only), `sources:` (the task's
+cited sources), and in governed mode `task record:`, the path of the full
+record. Selected project knowledge/history also carries its already-filtered
+excerpt. The complete text is capped at 3,600 characters; excerpts shrink
+first, then optional entries. Source-change and weak-match caveats stay beside
+the source.
+
+Whenever the capsule shows less than its sources hold, a `compaction:` line
+after the warnings says so: it counts what the JSON budget dropped and what
+the rendered text cut on top (the goal, progress and next steps past their
+bounds, every file and source the text leaves out), and asks the model to
+re-read the cited source before revising a decision the capsule no longer
+explains. At the 3,600-character ceiling the line gives up its counts for the
+fixed `compaction: lossy view — …` marker before any entry is dropped; the
+marker itself is never dropped, so a capsule cut at the ceiling still reads as
+lossy.
 
 Acknowledgements alone do not retrieve. Procedural context admits one strong
 match; a weak semantic match needs a title/path term or an identifier-shaped

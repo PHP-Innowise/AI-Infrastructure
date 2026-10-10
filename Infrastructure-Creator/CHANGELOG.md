@@ -6,6 +6,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`memory-seed` asset: the `compaction:` line counts what the rendered
+  capsule cuts and survives the ceiling.** A generated project's runtime adds
+  the rendered text's own cuts (goal, progress and next-step characters, files
+  and sources it leaves out) to the line, keeps both ends of the rendered
+  progress, shows the task's `sources:`, and at the 3,600-character ceiling
+  keeps a fixed `compaction: lossy view` marker instead of removing the line
+  (see the root `CHANGELOG.md`). Synced with `scripts/asset_parity.py
+  --write`; policy lock regenerated.
 - **`hook-forge` requires hook stdin to be read with the bash builtin.** A
   generated validator that read its payload through an external `cat` lost it
   on a system without `cat` and allowed every command before its

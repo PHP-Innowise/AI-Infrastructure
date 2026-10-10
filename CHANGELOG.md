@@ -1775,6 +1775,31 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **The `compaction:` line reports what the rendered capsule cuts, and the
+  ceiling no longer removes it.** The line counted only what the JSON budget
+  and the governed contract dropped, while the rendered text - the only form
+  Claude Code, Codex and Cursor read - cut again: progress to its first 399
+  characters, five of the task's files, the goal and each next step past
+  their bounds, the last of five long paths in half, and every working source.
+  A 1,100-character progress therefore reached the model without the step it
+  ended on and with no compaction line, and a task with 20 files showed 5 and
+  reported 12 omitted. `rendered_working_state` now returns those cuts and
+  the line adds them to the JSON counters (20 files: 15 omitted); progress
+  keeps its opening and its end, as `truncate_progress` does for the JSON;
+  path lines stop at a whole path; and a `sources:` line shows the task's
+  cited sources, the ones the line asks the model to re-read. At the
+  3,600-character ceiling the line used to go whole before any entry, so a
+  capsule whose JSON had dropped results read as complete exactly when it was
+  tightest; it now gives up its counts for a fixed `compaction: lossy view`
+  marker, which is never dropped and goes in before the first entry the
+  ceiling drops. The marker costs about 100 characters in a capsule the
+  ceiling cuts; the drop order (excerpts, the line's counts, skills, related
+  knowledge, the weakest knowledge) and the 8,000/3,600 limits are unchanged,
+  and `shown_in_render` still records exactly what the text shows. Tests in
+  `memory-bank/tests/test_context.py` and the `WorkingStateCapsuleTest`,
+  `RelatedItemBudgetTest` and `DeliveryTest` cases in
+  `project-brain/tests/test_runtime.py`; the generator asset follows.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
   practiceperfect branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
