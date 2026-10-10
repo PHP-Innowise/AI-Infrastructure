@@ -7,6 +7,7 @@ import hashlib
 from bisect import bisect_left, bisect_right
 import json
 import math
+import posixpath
 import re
 import sqlite3
 import stat
@@ -39,7 +40,7 @@ from brain_runtime import (
     validate_record,
     validate_schema_file,
 )
-from automatic_query import source_path_problem
+from automatic_query import SECRET_PATTERNS, source_path_problem
 from validate import secret_policy_fingerprint
 
 
@@ -771,6 +772,38 @@ GRAPH_ANCHOR_LIMIT = 2
 GRAPH_ROW_LIMIT = 32
 GRAPH_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
 GRAPH_CANDIDATE_LIMIT = CAPSULE_SEMANTIC_LIMIT
+# File edges. An active Brain task's files[] become `document_links` rows of
+# kind `file` - "this task touched that file", never "cites" - and only the
+# automatic seed channel reads them: files named in the request, and files the
+# current task touched. One such item per capsule, after strong matches.
+FILE_LINK_LIMIT = 1
+# A file linked from more than five documents is a hub (a root config, a base
+# class) and links nothing. On two real installations the measured fan-in had
+# a gap between 4 and 7, and the paths at 7 or more were root docs and config;
+# Aider's repository map damps identifiers defined in more than five files.
+FILE_LINK_HUB_LIMIT = 5
+# The newest files[] entries of a task that become rows (a task held 27 at most).
+FILE_LINK_RECORD_LIMIT = 50
+FILE_LINK_POOL = 8
+PROMPT_SEED_LIMIT = 6
+TOUCH_SEED_LIMIT = 8
+PROMPT_SEED_SCAN_CHARS = 16384
+AUTOMATIC_LINK_SELECTIONS = ("prompt-link", "touch-link")
+LINK_KINDS = ("source", "file")
+FILE_LINK_TRACKED_KEY = "file-link-tracked"
+FILE_LINK_STATE_PREFIXES = ("project-brain/", "memory-bank/")
+FILE_LINK_EXCLUDED_PARTS = frozenset({
+    "var", "node_modules", "vendor", ".phpunit.cache", "coverage", ".idea", ".vscode",
+    ".devcontainer", "__pycache__",
+})
+FILE_LINK_EXCLUDED_PREFIXES = (
+    "public/build/", "public/bundles/", "public/hot", "bootstrap/cache/", "storage/framework/",
+    "storage/logs/",
+)
+FILE_LINK_EXCLUDED_NAMES = frozenset({
+    "composer.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "symfony.lock",
+    ".phpunit.result.cache",
+})
 # One index_state row holding a JSON map of task UUID -> last retrieval, not
 # one row per task: nothing prunes index_state (it is upsert-only), so a key
 # per task would grow for the life of the database.
@@ -1601,20 +1634,13 @@ def _chunk_digests(content: str) -> str:
 
 
 def _link_rows(path: str, sources: object) -> list[tuple[str, str, str]]:
-    """One `document_links` row per source a document declares.
+    """One `document_links` row per source a document declares (`source`).
 
-    `ref_kind` carries a single value, `source`, and the two candidates for a
-    second were both rejected on evidence rather than left for later:
-
-    * `fingerprint` is dead by construction — `sources_are_fresh` requires the
-      fingerprint path set to equal the sources path set, so it can never name
-      anything `source` does not already name.
-    * `file` (a task's `files[]`) is Git churn in the wrong frame. Every live
-      task in this repository records twenty entries led by phpunit cache,
-      vendored JavaScript and dev container dumps, and `changed_paths` writes
-      them relative to the Git toplevel while every other path in the index is
-      relative to the repository root. Linking them would fill the table with
-      build artifacts that resolve to nothing.
+    A task's `files[]` become rows of their own kind, `file`, in
+    `_file_link_rows`; they mean "touched", never "cites", and nothing that
+    reads citations reads them. `fingerprint` stays out: `sources_are_fresh`
+    requires the fingerprint path set to equal the sources path set, so it
+    can never name anything `source` does not already name.
     """
     if not isinstance(sources, list):
         return []
@@ -1628,6 +1654,73 @@ def _link_rows(path: str, sources: object) -> list[tuple[str, str, str]]:
         if reference:
             rows.append((path, reference, "source"))
     return sorted(set(rows))
+
+
+def _file_link_problem(path: object) -> Optional[str]:
+    """Why a path may not become a file edge or a seed, or None.
+
+    A task's files[] used to be refused as links outright: build output,
+    vendored code and caches in the wrong frame. They are now screened one by
+    one - shape, sensitive and private paths, runtime state, directories,
+    build output and lockfiles, anything shaped like a secret - and what
+    remains is checked against Git's index.
+    """
+    if not isinstance(path, str) or not path or any(char in path for char in "\n\r\0"):
+        return "shape"
+    if path.startswith("./"):
+        path = path[2:]
+    if posixpath.normpath(path) != path.rstrip("/") or path in (".", ""):
+        return "shape"
+    if source_path_problem(path):
+        return "sensitive"
+    if path.startswith(FILE_LINK_STATE_PREFIXES):
+        return "state"
+    if path.endswith("/"):
+        return "directory"
+    parts = path.split("/")
+    if (
+        any(part.casefold() in FILE_LINK_EXCLUDED_PARTS for part in parts)
+        or path.startswith(FILE_LINK_EXCLUDED_PREFIXES)
+        or parts[-1] in FILE_LINK_EXCLUDED_NAMES
+    ):
+        return "build"
+    if any(pattern.search(path) for pattern in SECRET_PATTERNS.values()):
+        return "secret"
+    return None
+
+
+def _tracked_paths(repository: Path, paths: list[str]) -> Optional[set[str]]:
+    """The paths Git's index holds as files, project-relative; None when Git
+    cannot say (no checkout, no git): then no file edge is written.
+
+    One `git cat-file --batch-check` over stdin: no argument-length limit on
+    Windows, staged files count without a commit, and `:./path` resolves in
+    the project's own frame when the project is a subdirectory of the
+    checkout. A directory or a submodule is not a blob, so it drops out.
+    """
+    if not paths:
+        return set()
+    project = workspace_roots.project_root(repository)
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project), "cat-file", "--batch-check=%(objecttype)"],
+            input="".join(":./" + path + "\n" for path in paths).encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.decode("utf-8", "replace").splitlines()
+    if len(lines) != len(paths):
+        return None
+    return {path for path, line in zip(paths, lines) if line == "blob"}
+
+
+def _file_link_rows(path: str, files: list[str], tracked: set[str]) -> list[tuple[str, str, str]]:
+    return sorted({(path, file, "file") for file in files if file in tracked})
 
 
 def _legacy_metadata(
@@ -1651,13 +1744,18 @@ def _legacy_metadata(
 
 
 def _brain_documents(
-    repository: Path, config: dict[str, Any]
+    repository: Path, config: dict[str, Any], stored: Optional[dict[str, str]] = None
 ) -> tuple[
     list[tuple[str, str, str, str, str]],
     list[tuple[object, ...]],
     list[dict[str, str]],
     list[tuple[str, str, str]],
+    dict[str, str],
 ]:
+    """The eligible Brain records and handoffs as index rows, their links, and
+    index-state entries to store with them (the tracked-file cache)."""
+    file_candidates: dict[str, tuple[str, int, list[str]]] = {}
+    state_updates: dict[str, str] = {}
     documents: list[tuple[str, str, str, str, str]] = []
     metadata_rows: list[tuple[object, ...]] = []
     excluded: list[dict[str, str]] = []
@@ -1706,6 +1804,15 @@ def _brain_documents(
             )
         )
         links.extend(_link_rows(relative, record.get("sources")))
+        if record["type"] == "task":
+            files = [
+                file[2:] if file.startswith("./") else file
+                for file in record["files"][-FILE_LINK_RECORD_LIMIT:]
+                if isinstance(file, str)
+            ]
+            files = [file for file in files if _file_link_problem(file) is None]
+            if files:
+                file_candidates[relative] = (record["id"], int(record["revision"]), files)
     handoffs = brain_root(repository) / "control" / "handoffs"
     if handoffs.is_dir():
         for path in sorted(handoffs.glob("*.md")):
@@ -1740,7 +1847,28 @@ def _brain_documents(
             # From the handoff's own frontmatter, not the task's: the link
             # describes what this document declares.
             links.extend(_link_rows(relative, handoff.get("sources")))
-    return documents, metadata_rows, excluded, links
+    if file_candidates:
+        union = sorted({file for _, _, files in file_candidates.values() for file in files})
+        key = hashlib.sha256(json.dumps(
+            [union, sorted((identifier, revision) for identifier, revision, _ in file_candidates.values())]
+        ).encode("utf-8")).hexdigest()
+        try:
+            cached = json.loads((stored or {}).get(FILE_LINK_TRACKED_KEY) or "{}")
+        except ValueError:
+            cached = {}
+        tracked: Optional[set[str]]
+        if isinstance(cached, dict) and cached.get("key") == key:
+            # Asked once per change of the tasks' files, never per prompt.
+            tracked = set(cached.get("tracked") or []) & set(union)
+        else:
+            tracked = _tracked_paths(repository, union)
+            if tracked is not None:
+                state_updates[FILE_LINK_TRACKED_KEY] = json.dumps(
+                    {"key": key, "tracked": sorted(tracked)}
+                )
+        for relative, (_, _, files) in file_candidates.items():
+            links.extend(_file_link_rows(relative, files, tracked or set()))
+    return documents, metadata_rows, excluded, links, state_updates
 
 
 def _layer_counts(connection: sqlite3.Connection) -> tuple[int, dict[str, int]]:
@@ -1810,8 +1938,8 @@ def index_documents(
         parity_drift = skill_mirror_drift(
             workspace_roots.tooling_root(repository), str(config["canonical_edition"])
         )
-    brain_documents, brain_metadata, excluded, brain_links = _brain_documents(
-        repository, config
+    brain_documents, brain_metadata, excluded, brain_links, state_updates = _brain_documents(
+        repository, config, stored
     )
     documents = [*legacy_documents, *brain_documents]
     metadata = [
@@ -1915,6 +2043,7 @@ def index_documents(
                 # The index content changed, so every cache derived from it
                 # (token frequencies) is invalid from this point on.
                 INDEX_GENERATION_KEY: new_uuid(),
+                **state_updates,
             },
         )
         total, layers = _layer_counts(connection)
@@ -2704,7 +2833,10 @@ def delivery_identity(
     """
     path = str(item["path"])
     revision = str(item.get("source_hash") or "")
-    if item.get("layer") == "procedural" or item.get("match") == "distinctive":
+    if (
+        item.get("layer") == "procedural" or item.get("match") == "distinctive"
+        or item.get("selection") in AUTOMATIC_LINK_SELECTIONS
+    ):
         return path, revision
     marked = marked_document(connection, path, query)
     section = (
@@ -2832,7 +2964,7 @@ def _candidates(
     evidence = evidence_tokens(tokens)
     if not evidence:
         # Nothing in the request is about anything: "thanks", "ok, go on".
-        return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None}
+        return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None, "coverage": {}}
     coverage, distinctive = token_coverage(connection, evidence)
     minimum = required_coverage(evidence)
     rows = connection.execute(
@@ -2905,6 +3037,9 @@ def _candidates(
         "top_score": (
             round(float(result[0]["adjusted_score"]), 6) if result else None
         ),
+        # Internal, never serialized (gate signals name their keys): how many
+        # distinct query terms each document holds, for the file-edge channel.
+        "coverage": coverage,
     }
     return result, diagnostics
 
@@ -3436,8 +3571,13 @@ def linked_documents(
     *,
     prefix: bool = False,
     max_rows: Optional[int] = None,
+    ref_kinds: tuple[str, ...] = ("source",),
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Every eligible document that declares `reference` among its sources.
+
+    ``ref_kinds`` defaults to citations. `file` rows mean an active task
+    touched the path, not that it cites it; only `links` and the automatic
+    seed channel read them.
 
     Routed through `_runtime_filter` rather than reimplementing its checks,
     because a link query is a retrieval and the same policy has to apply.
@@ -3460,6 +3600,10 @@ def linked_documents(
         parameters = (reference,)
     if max_rows is not None and (type(max_rows) is not int or max_rows < 1):
         raise RetrievalError("Source-link row limit must be a positive integer")
+    if not ref_kinds or not set(ref_kinds) <= set(LINK_KINDS):
+        raise RetrievalError(f"Link kinds must be among: {', '.join(LINK_KINDS)}")
+    predicate = f"({predicate}) AND l.ref_kind IN ({', '.join('?' for _ in ref_kinds)})"
+    parameters = (*parameters, *ref_kinds)
     rows = connection.execute(
         f"""
         SELECT
@@ -3483,6 +3627,230 @@ def linked_documents(
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         candidates.append(item)
     return _runtime_filter(repository, candidates, config)
+
+
+_PROMPT_PATH = re.compile(
+    r"(?<![\w@:/\\.-])(?:\./)?((?:[\w.-]+/)+[\w-]+(?:\.[\w-]+)*\.[A-Za-z0-9]{1,8})(?![\w/-])"
+)
+_PROMPT_ABSOLUTE = re.compile(r"(?<![\w.-])(/(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,8})")
+_PROMPT_BACKSLASH = re.compile(r"(?<![\w\\])((?:[\w.-]+\\)+[\w.-]+\.[A-Za-z0-9]{1,8})")
+_PROMPT_FQCN = re.compile(r"\\?((?:[A-Z][A-Za-z0-9_]*\\+)+[A-Z][A-Za-z0-9_]*)")
+_PROMPT_BARE_FILE = re.compile(r"(?<![\w/\\.-])([\w-]+\.[A-Za-z0-9]{1,8})(?![\w/-])")
+_PROMPT_SYMBOL = re.compile(r"(?<![\w\\$])([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)(?![\w\\(])")
+COMPOSER_READ_LIMIT = 256 * 1024
+LINK_PATH_SCAN_LIMIT = 20000
+
+
+def _composer_psr4(project: Path) -> list[tuple[str, list[str]]]:
+    """composer.json's PSR-4 prefixes (autoload and autoload-dev), longest
+    first, each with its directories; nothing when it cannot be read."""
+    path = project / "composer.json"
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > COMPOSER_READ_LIMIT:
+            return []
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+    prefixes: dict[str, list[str]] = {}
+    for section in ("autoload", "autoload-dev"):
+        mapping = document.get(section, {}).get("psr-4") if isinstance(document.get(section), dict) else None
+        if not isinstance(mapping, dict):
+            continue
+        for prefix, directories in mapping.items():
+            if not isinstance(prefix, str):
+                continue
+            key = prefix.rstrip("\\") + "\\" if prefix else ""
+            for directory in directories if isinstance(directories, list) else [directories]:
+                if not isinstance(directory, str):
+                    continue
+                directory = directory[2:] if directory.startswith("./") else directory
+                directory = directory.rstrip("/")
+                if directory and source_path_problem(directory + "/x.php"):
+                    continue
+                prefixes.setdefault(key, []).append(directory)
+    return sorted(prefixes.items(), key=lambda entry: -len(entry[0]))
+
+
+def prompt_path_seeds(connection: sqlite3.Connection, repository: Path, text: str) -> list[str]:
+    """Paths the request names - written out, as a PHP class (through
+    composer.json's PSR-4 map), or as a bare file or class name - that some
+    document is linked to. Read in memory only: nothing is written anywhere.
+    """
+    text = text[:PROMPT_SEED_SCAN_CHARS]
+    project = workspace_roots.project_root(repository)
+    found: list[str] = []
+    found.extend(_PROMPT_PATH.findall(text))
+    root = project.as_posix().rstrip("/") + "/"
+    for absolute in _PROMPT_ABSOLUTE.findall(text):
+        if absolute.startswith(root):
+            found.append(absolute[len(root):])
+    found.extend(path.replace("\\", "/") for path in _PROMPT_BACKSLASH.findall(text))
+    names = [re.sub(r"\\+", "\\\\", name) for name in _PROMPT_FQCN.findall(text)]
+    bare = [name for name in _PROMPT_BARE_FILE.findall(text) if "/" not in name]
+    symbols = _PROMPT_SYMBOL.findall(text)
+    if names:
+        for name in names:
+            for prefix, directories in _composer_psr4(project):
+                if not name.startswith(prefix):
+                    continue
+                rest = name[len(prefix):].replace("\\", "/")
+                found.extend(
+                    (f"{directory}/{rest}.php" if directory else f"{rest}.php") for directory in directories[:2]
+                )
+                break
+    linked_paths: Optional[list[str]] = None
+
+    def link_paths() -> list[str]:
+        nonlocal linked_paths
+        if linked_paths is None:
+            linked_paths = [
+                row[0] for row in connection.execute(
+                    "SELECT DISTINCT ref_path FROM document_links WHERE ref_kind IN ('source', 'file') LIMIT ?",
+                    (LINK_PATH_SCAN_LIMIT,),
+                )
+            ]
+        return linked_paths
+
+    for name in names:
+        segments = name.split("\\")
+        if len(segments) > 1:
+            suffix = "/".join(segments[1:]) + ".php"
+            found.extend([path for path in link_paths() if path.endswith("/" + suffix)][:2])
+    for name in bare:
+        found.extend([path for path in link_paths() if path.rsplit("/", 1)[-1] == name][:2])
+    for symbol in symbols:
+        found.extend([
+            path for path in link_paths()
+            if posixpath.splitext(path.rsplit("/", 1)[-1])[0] == symbol
+        ][:2])
+    seeds: list[str] = []
+    for path in dict.fromkeys(item[2:] if item.startswith("./") else item for item in found):
+        if len(seeds) >= PROMPT_SEED_LIMIT:
+            break
+        if _file_link_problem(path) is not None:
+            continue
+        if connection.execute(
+            "SELECT 1 FROM document_links WHERE ref_path = ? LIMIT 1", (path,)
+        ).fetchone():
+            seeds.append(path)
+    return seeds
+
+
+def _automatic_link_candidates(
+    connection: sqlite3.Connection,
+    repository: Path,
+    config: dict[str, Any],
+    seeds: list[tuple[str, str]],
+    filtered: list[dict[str, Any]],
+    *,
+    own_paths: set[str],
+    coverage: dict[str, int],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """At most FILE_LINK_LIMIT documents linked to a seed path, shaped like
+    ranked candidates and marked `prompt-link` or `touch-link`.
+
+    A seed is a path the request named (`prompt`) or the current task touched
+    (`touch`). It reaches documents that cite it (`source` rows) and other
+    active tasks that touched it (`file` rows); a path linked from more than
+    FILE_LINK_HUB_LIMIT documents is a hub and reaches nothing. A document
+    reached only through touched files must also share an informative query
+    term: file sharing alone is dense on real projects, and "continue" must
+    not hand over a sibling task.
+    """
+    blocked = {item["path"] for item in filtered if item.get("match") != "distinctive"} | own_paths
+    found: dict[str, dict[str, Any]] = {}
+    for index, (seed, origin) in enumerate(seeds):
+        for kind_rank, kind in enumerate(LINK_KINDS):
+            rows = [
+                row[0] for row in connection.execute(
+                    "SELECT path FROM document_links INDEXED BY document_links_source_path "
+                    "WHERE ref_path = ? AND ref_kind = ? ORDER BY path LIMIT ?",
+                    (seed, kind, FILE_LINK_HUB_LIMIT + 1 + len(own_paths)),
+                )
+            ]
+            others = [path for path in rows if path not in own_paths]
+            if len(others) > FILE_LINK_HUB_LIMIT:
+                continue
+            for path in others:
+                if path in blocked:
+                    continue
+                rank = (0 if origin == "prompt" else 1, kind_rank, index)
+                entry = found.setdefault(path, {"rank": rank, "seeds": set(), "via": seed, "prompt": False})
+                if rank < entry["rank"]:
+                    entry["rank"], entry["via"] = rank, seed
+                entry["seeds"].add(seed)
+                entry["prompt"] = entry["prompt"] or origin == "prompt"
+    if not found:
+        return [], []
+    pool = sorted(found, key=lambda path: (*found[path]["rank"], -len(found[path]["seeds"]), path))
+    pool = pool[:FILE_LINK_POOL]
+    marks = ",".join("?" for _ in pool)
+    rows = connection.execute(
+        f"""
+        SELECT
+            d.path, d.layer, d.kind, d.title, d.content,
+            m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+            m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
+            m.updated_at, m.confidence, m.attestation
+        FROM documents AS d
+        JOIN document_metadata AS m ON m.path = d.path
+        WHERE d.path IN ({marks})
+        """,
+        pool,
+    ).fetchall()
+    candidates = []
+    for row in rows:
+        item = dict(row)
+        content = str(item.pop("content") or "")
+        if item["layer"] != "semantic" or item["category"] not in ("durable", "dynamic"):
+            continue
+        item["conflicts"] = json.loads(item["conflicts"])
+        item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        if item["conflicts"] or _has_incoming_conflict(connection, item.get("record_id")):
+            continue
+        entry = found[item["path"]]
+        if not entry["prompt"] and coverage.get(item["path"], 0) < 1:
+            continue
+        item["_body"] = content
+        candidates.append(item)
+    eligible, _ = _runtime_filter(repository, candidates, config)
+    eligible.sort(key=lambda item: (
+        found[item["path"]]["rank"], bool(item.get("source_changed")),
+        "".join(chr(0x10FFFF - ord(char)) for char in str(item.get("updated_at") or "")), item["path"],
+    ))
+    for item in eligible:
+        entry = found[item["path"]]
+        item["selection"] = "prompt-link" if entry["prompt"] else "touch-link"
+        item["via"] = entry["via"]
+        item["match"] = None
+        item["rank"] = None
+        item["adjusted_score"] = 0.0
+        item["snippet"] = _body_snippet(item.pop("_body"))
+        item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
+    for item in candidates:
+        item.pop("_body", None)
+    return eligible[:FILE_LINK_LIMIT], [
+        {"path": item["path"], "reason": "file-link-limit"} for item in eligible[FILE_LINK_LIMIT:]
+    ]
+
+
+def _insert_automatic_links(
+    filtered: list[dict[str, Any]], linked: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """`filtered` with the linked documents placed after its last strong
+    semantic match (or explicit path link) and before weak matches; a weak
+    match that a link confirms moves there. Nothing else changes order."""
+    if not linked:
+        return filtered
+    moved = {item["path"] for item in linked}
+    rest = [item for item in filtered if item["path"] not in moved]
+    anchors = [
+        index for index, item in enumerate(rest)
+        if item.get("selection") == "path-link"
+        or (item["category"] != "policy" and item["layer"] != "episodic" and item.get("match") == "covered")
+    ]
+    position = anchors[-1] + 1 if anchors else 0
+    return rest[:position] + linked + rest[position:]
 
 
 def _shared_source_documents(
@@ -3666,8 +4034,11 @@ def _source_link_candidates(
         if remaining <= 0:
             stats["truncated"] = True
             break
+        # Citations only: an active task that merely touched the anchor is
+        # not a neighbour of what the anchor says.
         linked, withheld = linked_documents(
             connection, repository, config, anchor["path"], max_rows=remaining,
+            ref_kinds=("source",),
         )
         stats["anchors"] += 1
         count = len(linked) + len(withheld)
@@ -3896,6 +4267,9 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
         # Checked only by the agent that wrote it: worth reading, and worth
         # checking before relying on it.
         public["attestation"] = "agent"
+    if item.get("via"):
+        # The path an automatic link came through; capsule JSON only.
+        public["via"] = item["via"]
     return public
 
 
@@ -3915,6 +4289,7 @@ def retrieve(
     host: str = "cli",
     entry_point: str = "retrieve",
     history_text: Optional[str] = None,
+    automatic_seeds: Optional[dict[str, list[str]]] = None,
     session_id: Optional[str] = None,
     transcript: Optional[str] = None,
     pack: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
@@ -3937,6 +4312,11 @@ def retrieve(
 
     ``history_text`` is the text recorded history is searched with - the whole
     request, where ``query`` is its distilled form; ``query`` when omitted.
+
+    ``automatic_seeds`` - only automatic entry points pass it - names paths
+    the request mentions (`prompt`) and the current task touched (`touched`);
+    one document linked to them may join the semantic layer after the strong
+    matches (`_automatic_link_candidates`).
 
     ``pack`` turns the result into the capsule as the caller delivers it -
     the layer and character limits of its JSON, the ceiling of its rendered
@@ -4034,6 +4414,29 @@ def retrieve(
         # Ahead of the query's own matches, because `_apply_budgets` and the
         # per-layer ladder both honour input order and the caller named these.
         filtered = [*linked, *filtered]
+    if automatic_seeds is not None:
+        own_paths: set[str] = set()
+        if task_path is not None and task is not None:
+            own_paths = {
+                task_path.relative_to(repository).as_posix(),
+                handoff_path(repository, task["id"]).relative_to(repository).as_posix(),
+            }
+        task_files = list(reversed(task["files"])) if task is not None else []
+        seeds = [(path, "prompt") for path in automatic_seeds.get("prompt", [])[:PROMPT_SEED_LIMIT]]
+        touched = [
+            path for path in [*automatic_seeds.get("touched", []), *task_files]
+            if _file_link_problem(path) is None
+        ]
+        seeds += [(path, "touch") for path in list(dict.fromkeys(touched))[:TOUCH_SEED_LIMIT]]
+        unique: dict[str, tuple[str, str]] = {}
+        for path, origin in seeds:
+            unique.setdefault(path, (path, origin))
+        automatic_linked, automatic_excluded = _automatic_link_candidates(
+            connection, repository, config, list(unique.values()), filtered,
+            own_paths=own_paths | history_paths, coverage=diagnostics.get("coverage") or {},
+        )
+        filter_excluded.extend(automatic_excluded)
+        filtered = _insert_automatic_links(filtered, automatic_linked)
     graph_candidates, graph_stats = _source_link_candidates(
         connection, repository, config, graph_anchors,
         {item["path"] for item in filtered} | history_paths,
@@ -4349,7 +4752,7 @@ def retrieve(
     ][:CAPSULE_SEMANTIC_LIMIT]
     # Category grouping must not move related knowledge ahead of direct
     # hits when the renderer spends its character allowance.
-    semantic.sort(key=lambda item: item.get("selection") == "source-link")
+    semantic.sort(key=lambda item: item.get("selection") in ("source-link", *AUTOMATIC_LINK_SELECTIONS))
     result: dict[str, Any] = {
         "query": query,
         "task_id": task["external_id"] if task is not None else None,

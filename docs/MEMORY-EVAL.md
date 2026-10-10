@@ -248,7 +248,10 @@ mechanism chose), `source_changed_delivered`, `skill_subfiles_delivered`
 (skill files other than `SKILL.md` in the procedural slot) and
 `capsule_secret_matches`. `summary` is what `report` prints; its mechanism
 totals are absent (`-`) when any item predates them, never zero. Result files
-are written owner-only (0600).
+are written owner-only (0600). The stand runs no hook and binds no task
+(`--task-id eval/<id>`), so file links seeded by touched files never fire
+there; links seeded by paths named in the prompt do, and count under
+`selections`.
 
 ## What the numbers mean
 

@@ -100,7 +100,10 @@ unreachable from each other lexically — measured at 0 of 2, and 2 of 2 through
 the link index. Path-linked items lead their layer, are recorded in the
 manifest with `selection: "path-link"` and no `match`, and do not change
 `no_match`, which stays a statement about the query. `links` reports the same
-citations without retrieving; both apply the full runtime filter.
+citations without retrieving, and also the active tasks that touched the path;
+both apply the full runtime filter. Automatic retrieval (`refresh`,
+`hook-context`) may add one document linked to a path the request names or the
+task touched, after the strong matches, marked `prompt-link` or `touch-link`.
 Category budgets are policy 1,200; handoff 1,500; durable 3,500; dynamic 1,500;
 evidence 2,000 estimated tokens. Internal candidate selection may escalate to
 its 12,000-token conflict ceiling, but the delivered capsule is always capped

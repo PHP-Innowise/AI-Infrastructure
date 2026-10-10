@@ -26,6 +26,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **File edges: the files a task touched link it to the work that follows.**
+  An active Brain task's `files[]` (Git-tracked, screened) become
+  `document_links` rows of kind `file`. Automatic retrieval seeds them with
+  the paths a request names - written out, as a PHP class through
+  `composer.json` PSR-4, or as a bare file or class name - and the files the
+  branch touched on its last turns, and may add one linked document after the
+  strong matches, marked `prompt-link` or `touch-link`. A hub file (more than
+  five links) reaches nothing; a document reached only through touched files
+  must share an informative query term. `--path`, MCP `paths` and source-link
+  expansion still read citations only; `links` also shows touches. The manifest
+  schema's `selection` gains the two values.
+
 - **A Brain record whose cited file was edited stays retrievable, marked.**
   Any edit to a cited file used to evict the record at the next index -
   accepted decisions, open findings and events alike - and its source links

@@ -68,6 +68,9 @@ from brain_runtime import (
     validate_repository,
 )
 from context_retrieval import (
+    AUTOMATIC_LINK_SELECTIONS,
+    TOUCH_SEED_LIMIT,
+    prompt_path_seeds,
     CAPSULE_EPISODIC_LIMIT,
     CAPSULE_EVENT_LIMIT,
     CAPSULE_PROMPT_TERM_LIMIT,
@@ -2330,11 +2333,16 @@ def assemble_capsule(
     transcript: Optional[str] = None,
     render: bool = False,
     prompt: Optional[str] = None,
+    automatic_links: bool = False,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
     ``prompt`` is the whole request ``query`` was distilled from; recorded
     history is searched with all of it (see history_query).
+
+    ``automatic_links`` seeds the file-edge channel - paths ``prompt`` names
+    and files this branch touched on its last turns - for automatic entry
+    points (refresh, hook-context); explicit retrieval stays deterministic.
 
     ``refresh_index`` exists so a caller that already refreshed does not index
     twice; retrieval reads the index rather than the sources, so the refresh
@@ -2395,6 +2403,15 @@ def assemble_capsule(
             raise
         binding = None
     request_query = build_capsule_query(query, None)
+    seeds: Optional[dict[str, list[str]]] = None
+    if automatic_links:
+        seeds = {"prompt": [], "touched": recent_touched_paths(connection, task_id)}
+        if prompt:
+            try:
+                seeds["prompt"] = prompt_path_seeds(connection, repository, prompt)
+            except (OSError, ValueError, sqlite3.Error):
+                # Seeds add one item at most; they never cost the capsule.
+                seeds["prompt"] = []
 
     def pack(result: dict[str, object]) -> dict[str, object]:
         # Inside retrieve(), before it records anything: what the delivered
@@ -2429,6 +2446,7 @@ def assemble_capsule(
         host=host,
         entry_point=entry_point,
         history_text=prompt if prompt is not None else query,
+        automatic_seeds=seeds,
         session_id=session_id,
         transcript=transcript,
         pack=pack,
@@ -2537,6 +2555,7 @@ def assemble_hook_context(
                 host=host,
                 entry_point="hook-context",
                 render=render,
+                automatic_links=True,
             )
 
     files, excluded = changed_paths(repository)
@@ -2663,6 +2682,26 @@ def capsule_excerpts(
                 continue
             if item.get("match") == "distinctive":
                 continue
+            if item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("kind") == "brain-task":
+                # What a sibling task says about the shared file: its goal and
+                # the files it touched, the shared one first. 12 of the 14
+                # answers held by tasks on the evaluation were Files entries.
+                limit = EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
+                rank += 1
+                try:
+                    row = connection.execute(
+                        "SELECT content FROM documents WHERE path = ?", (item["path"],)
+                    ).fetchone()
+                except sqlite3.Error:
+                    row = None
+                text, heading = linked_task_excerpt(
+                    str(row[0]) if row else "", str(item.get("via") or ""), limit
+                )
+                if text:
+                    excerpt = Excerpt(text)
+                    excerpt.heading = heading
+                    excerpts[item["path"]] = excerpt
+                continue
             limit = (
                 EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
                 if layer == "semantic"
@@ -2693,6 +2732,34 @@ def capsule_excerpts(
     return excerpts
 
 
+_TASK_SECTION = re.compile(r"^## (.+?)\s*$", re.M)
+_TASK_LIST_ITEM = re.compile(r"^- `?([^`\n]+?)`?\s*$")
+
+
+def linked_task_excerpt(content: str, via: str, limit: int) -> tuple[str, str]:
+    """A linked task's goal and its files, the shared one first: (text,
+    heading of the list quoted)."""
+    sections: dict[str, str] = {}
+    matches = list(_TASK_SECTION.finditer(content))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        sections[match.group(1).strip()] = content[match.end():end].strip()
+    goal = next((part.strip() for part in sections.get("Goal", "").split("\n\n") if part.strip()), "")
+    heading = "Sources" if via and via in sections.get("Sources", "") and via not in sections.get("Files", "") else "Files"
+    entries = [
+        found.group(1).strip()
+        for line in sections.get(heading, "").splitlines()
+        if (found := _TASK_LIST_ITEM.match(line.strip()))
+    ]
+    ordered = ([via] if via in entries else []) + [entry for entry in reversed(entries) if entry != via]
+    parts = []
+    if goal:
+        parts.append(f"Goal: {' '.join(goal.split())}.")
+    if ordered:
+        parts.append(f"{heading}: {', '.join(ordered[:6])}")
+    return _bounded(" ".join(parts), limit), heading
+
+
 def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
     if "path" in item:
         label, title = _bounded(item["path"], 260), str(item.get("title") or "")
@@ -2711,6 +2778,11 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
         marks.append("conflicts with another item here")
     if item.get("attestation") == "agent":
         marks.append("agent-attested, not reviewed by a person")
+    if item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("via"):
+        marks.append(
+            f"linked through {_bounded(str(item['via']), 160)}, "
+            + ("named in the request" if item["selection"] == "prompt-link" else "changed in this task")
+        )
     changed = item.get("source_changed")
     if isinstance(changed, list) and changed:
         # One path and a count: a changed citation keeps records in the
@@ -4309,6 +4381,33 @@ def append_turn_delta(
     return int(cursor.lastrowid)
 
 
+def recent_touched_paths(
+    connection: sqlite3.Connection, task_id: str, limit: int = TOUCH_SEED_LIMIT
+) -> list[str]:
+    """Files this branch changed on its last few turns, newest first - also
+    before its task exists, on a branch's first turns."""
+    try:
+        rows = connection.execute(
+            "SELECT files FROM turn_deltas WHERE task_id = ? ORDER BY id DESC LIMIT 5", (task_id,)
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    paths: list[str] = []
+    for row in rows:
+        try:
+            files = json.loads(row[0])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(files, list):
+            continue
+        for path in reversed(files):
+            if isinstance(path, str) and path not in paths:
+                paths.append(path)
+            if len(paths) >= limit:
+                return paths
+    return paths
+
+
 def pending_turn_deltas(
     connection: sqlite3.Connection, task_id: str
 ) -> list[sqlite3.Row]:
@@ -5225,10 +5324,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     links = commands.add_parser(
         "links",
-        help="show every eligible document that cites a given source path",
+        help="show every eligible document that cites, or active task that touched, a given path",
     )
     links.add_argument(
-        "--path", required=True, help="the source path to look up citations of"
+        "--path", required=True, help="the path to look up citations and touches of"
     )
     links.add_argument(
         "--prefix",
@@ -6108,6 +6207,7 @@ def main() -> int:
                     load_config(repository),
                     arguments.path,
                     prefix=arguments.prefix,
+                    ref_kinds=("source", "file"),
                 )
                 result = {
                     "path": arguments.path,
@@ -6128,7 +6228,7 @@ def main() -> int:
                     print(json.dumps(result, ensure_ascii=False))
                 elif not selected:
                     print(
-                        f"No eligible document cites {arguments.path}."
+                        f"No eligible document cites or touched {arguments.path}."
                         + (
                             f" {len(withheld)} withheld by policy or freshness."
                             if withheld
@@ -6141,7 +6241,10 @@ def main() -> int:
                             f"{item['layer']} {item['kind']}: "
                             f"{item['path']} — {item['title']}"
                         )
-                        print(f"  cites {item['ref_path']} ({item['ref_kind']})")
+                        if item["ref_kind"] == "file":
+                            print(f"  touched {item['ref_path']}")
+                        else:
+                            print(f"  cites {item['ref_path']} ({item['ref_kind']})")
                     for item in withheld:
                         print(f"withheld {item['path']}: {item['reason']}")
                 return 0
@@ -6284,6 +6387,7 @@ def main() -> int:
                             # capsule_text in front of the model.
                             render=True,
                             prompt=arguments.query,
+                            automatic_links=True,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh

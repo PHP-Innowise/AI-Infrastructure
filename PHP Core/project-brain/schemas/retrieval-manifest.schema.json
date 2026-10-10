@@ -38,7 +38,7 @@
           "estimated_tokens": {"type": "integer", "minimum": 1},
           "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "match": {"enum": ["covered", "distinctive", "conflict"]},
-          "selection": {"enum": ["path-link", "source-link"]},
+          "selection": {"enum": ["path-link", "source-link", "prompt-link", "touch-link"]},
           "source_changed": {"type": "boolean"},
           "score": {"type": "number", "minimum": 0},
           "rank": {"type": ["integer", "null"], "minimum": 1}

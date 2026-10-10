@@ -421,7 +421,10 @@ whose own `.gitignore` carried a bare `docs` entry indexed 96 accelerator
 skills, one `README.md`, and none of its own design documents, without a word.
 
 The same pass builds `document_links`, the reverse index of which document
-declares which source, read by `links` and by `retrieve --path`. It is derived
+declares which source (`ref_kind` `source`), read by `links` and by `retrieve
+--path`, and which active Brain task touched which file (`ref_kind` `file`,
+from the task's newest 50 `files[]` entries Git tracks, screened; see "Files
+the work touched" below), rebuilt with the records on every refresh. It is derived
 and disposable: rows follow their document, and when the table is absent the
 runtime drops the stat cache so the first index after an upgrade re-reads
 every candidate. Populating it incrementally would leave it complete only for
@@ -649,6 +652,50 @@ Three properties worth knowing when reading a manifest:
   the *query* — the capsule line and `gate.signals.no_match` both read it that
   way. The two answer different questions: whether the caller's words found
   anything there, and whether the caller's path did.
+
+`--path`, MCP `paths` and the automatic source-linked expansion read citations
+only (`source` rows); `links` also lists active tasks that touched the path
+(`touched <path>`).
+
+#### Files the work touched (2026-10-10)
+
+The source links above had nothing to stand on: on the 121 evaluated prompts
+the link table was empty in every snapshot, because no indexed record carried a
+source. What records do carry is `files[]`: the checkpoint writes the files a
+task's turns changed, and 12 of the 14 answers that tasks held on the evaluated
+prompts were entries of that list. A task's `files[]` now become `file` rows:
+
+- **Which files.** Only paths Git's index holds as files (one `git cat-file
+  --batch-check` per change of the tasks' files, cached in the index state, so
+  never per prompt; outside a checkout no row is written), project-relative,
+  and not sensitive, runtime state, build output, a lockfile, a directory or
+  secret-shaped. Only active tasks: completed ones are not indexed.
+- **Who reads them.** An automatic channel, on `refresh` (hooks, Harness, MCP
+  `memory_retrieve`) and `hook-context`, seeded by paths the request names -
+  written out, as a PHP class through `composer.json`'s PSR-4 map, or as a bare
+  file or class name that some link names - and by the files this branch
+  touched on its last turns and its task's newest `files[]`. A seed reaches the
+  documents that cite it and the other active tasks that touched it. Explicit
+  retrieval stays deterministic and does not seed.
+- **Restraint.** One item per capsule (`FILE_LINK_LIMIT`), placed after the
+  strong lexical matches inside the three semantic slots; a weak match a link
+  confirms moves there. A file linked from more than five documents is a hub
+  and reaches nothing. A document reached only through touched files must also
+  share an informative query term: file sharing is dense on real projects (on
+  two installations every active task shared a file with another), and
+  "continue" must not hand over a sibling task. The current task's own record
+  and handoff are never candidates.
+- **What it shows.** The item is marked `prompt-link` or `touch-link` in the
+  manifest (no `match`, no rank) and `linked through <path>` in the capsule; a
+  linked task quotes its goal and its files, the shared one first.
+- **Not done.** Edges through commits (record and commit, files changed
+  together) wait until live link density is measured: they add a second hop
+  over edges that are still sparse.
+
+The evaluation stand runs no hook and has no working task, so touched-file
+seeds are not measured there; their go/no-go is prospective - live `file` rows
+per project, the share of turns with a `prompt-link` or `touch-link`, and
+labels of what they delivered.
 
 ### Skill pointers in the procedural layer: a measured negative
 

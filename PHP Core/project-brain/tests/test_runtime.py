@@ -5631,6 +5631,325 @@ class ChangedSourceRecordTest(RuntimeHarness):
         self.assertNotIn("src/B.php", output.getvalue())
 
 
+class FileEdgeFixture(RuntimeHarness):
+    """Active Brain tasks whose files[] become file edges."""
+
+    SHARED = "app/Billing/InvoiceTotal.php"
+
+    def fillers(self, count: int = 16) -> None:
+        # A corpus large enough that the query's words stay informative: in a
+        # handful of documents every shared word is a stop word.
+        for number in range(count):
+            self.repository.joinpath(f"specs/filler-{number}.md").write_text(
+                f"# Filler {number}\n\nUnrelated filler paragraph number {number} about tooling.\n",
+                encoding="utf-8",
+            )
+
+    def track(self, *paths: str, content: str = "<?php\n") -> None:
+        for path in paths:
+            target = self.repository / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repository), "add", "--", *paths], check=True, capture_output=True)
+
+    def task(self, task_id: str, goal: str, *files: str, next_step: str = "") -> dict:
+        arguments = ["start", "--task-id", task_id, "--goal", goal, "--json"]
+        for file in files:
+            arguments += ["--file", file]
+        result = self.run_cli(*arguments)
+        self.assertEqual(0, result.returncode, result.stderr)
+        record = json.loads(result.stdout)
+        if next_step:
+            updated = self.run_cli("update", "--task-id", task_id, "--revision", str(record["revision"]),
+                                   "--next-step", next_step, "--json")
+            self.assertEqual(0, updated.returncode, updated.stderr)
+            record = json.loads(updated.stdout)
+        return record
+
+    def record_path(self, task_id: str) -> str:
+        path, _, _ = brain.find_task(self.repository, task_id)
+        return path.relative_to(self.repository).as_posix()
+
+    def link_rows(self, kind: str) -> set:
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            return set(connection.execute(
+                "SELECT path, ref_path FROM document_links WHERE ref_kind = ?", (kind,)
+            ).fetchall())
+        finally:
+            connection.close()
+
+    def refresh(self, query: str, task_id: str = "TASK-CUR", *extra: str) -> dict:
+        result = self.run_cli("refresh", "--query", query, "--task-id", task_id, "--sanitize",
+                              "--ephemeral", "--json", *extra)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def manifest(self, capsule: dict) -> dict:
+        return json.loads((self.repository / capsule["manifest"]).read_text(encoding="utf-8"))
+
+    @staticmethod
+    def by_path(capsule: dict) -> dict:
+        return {item.get("path"): item for layer in ("semantic", "episodic", "procedural")
+                for item in capsule[layer]}
+
+
+class FileEdgeIndexTest(FileEdgeFixture):
+    def test_only_tracked_project_files_of_an_active_task_become_file_rows(self) -> None:
+        self.track(self.SHARED, "var/cache/prod/Container.php", "composer.lock", "public/build/app.js")
+        self.repository.joinpath("app/Untracked.php").write_text("<?php\n", encoding="utf-8")
+        self.repository.joinpath("docs").mkdir(exist_ok=True)
+        self.task("TASK-A", "Edge fixture.", self.SHARED, "var/cache/prod/Container.php", "composer.lock",
+                  "public/build/app.js", "app/Untracked.php", "docs/", ".env", "../outside.php", "/abs/x.php",
+                  "project-brain/dynamic/tasks/x.md", "vendor/a/b.php", "PHP Core/app/X.php")
+        self.assertEqual(0, self.run_cli("index").returncode)
+        rows = {ref for path, ref in self.link_rows("file") if path == self.record_path("TASK-A")}
+        self.assertEqual({self.SHARED}, rows)
+
+    def test_links_reports_a_touch_separately_from_a_citation(self) -> None:
+        self.track(self.SHARED)
+        self.task("TASK-A", "Edge fixture.", self.SHARED)
+        brain.create_record(self.repository, "finding", "FIND-ROUND", "Totals are stored in minor units", [],
+                            [self.SHARED], owner="alice", goal="Totals are stored in minor units")
+        self.assertEqual(0, self.run_cli("index").returncode)
+        as_json = json.loads(self.run_cli("links", "--path", self.SHARED, "--json").stdout)
+        kinds = {item["path"]: item["ref_kind"] for item in as_json["documents"]}
+        self.assertEqual("file", kinds[self.record_path("TASK-A")])
+        self.assertIn("source", kinds.values())
+        text = self.run_cli("links", "--path", self.SHARED).stdout
+        self.assertIn(f"touched {self.SHARED}", text)
+        self.assertIn(f"cites {self.SHARED} (source)", text)
+
+    def test_tracked_probe_runs_once_per_task_revision(self) -> None:
+        self.track(self.SHARED)
+        record = self.task("TASK-A", "Edge fixture.", self.SHARED)
+        connection = context_cli.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            with mock.patch.object(retrieval.subprocess, "run", wraps=subprocess.run) as calls:
+                context_cli.index_repository(connection, self.repository, incremental=True)
+                context_cli.index_repository(connection, self.repository, incremental=True)
+                probes = [call for call in calls.call_args_list if "cat-file" in call.args[0]]
+                self.assertEqual(1, len(probes))
+                updated = self.run_cli("update", "--task-id", "TASK-A", "--revision", str(record["revision"]),
+                                       "--progress", "Moved on.")
+                self.assertEqual(0, updated.returncode, updated.stderr)
+                context_cli.index_repository(connection, self.repository, incremental=True)
+                probes = [call for call in calls.call_args_list if "cat-file" in call.args[0]]
+                self.assertEqual(2, len(probes))
+            state = retrieval.load_index_state(connection)
+        finally:
+            connection.close()
+        cached = json.loads(state[retrieval.FILE_LINK_TRACKED_KEY])
+        self.assertEqual([self.SHARED], cached["tracked"])
+
+    def test_outside_a_git_checkout_there_are_no_file_rows_and_refresh_works(self) -> None:
+        shutil.rmtree(self.repository / ".git")
+        self.repository.joinpath("app").mkdir()
+        self.repository.joinpath("app/A.php").write_text("<?php\n", encoding="utf-8")
+        self.task("TASK-A", "Edge fixture.", "app/A.php")
+        payload = self.refresh("edge fixture", "TASK-A")
+        self.assertIsNotNone(payload["capsule"])
+        self.assertEqual(set(), self.link_rows("file"))
+
+
+class AutomaticFileLinkTest(FileEdgeFixture):
+    QUERY = "cobalt authority rounding wrong"
+
+    def sibling(self, next_step: str = "Check the rounding of stored totals.") -> None:
+        self.fillers()
+        self.track(self.SHARED)
+        self.task("TASK-OTHER", "Vermilion ledger migration.", self.SHARED, next_step=next_step)
+        self.task("TASK-CUR", "Apply the cobalt authority rule.", self.SHARED)
+
+    def test_a_sibling_task_sharing_a_touched_file_and_a_term_is_delivered_after_strong_matches(self) -> None:
+        self.sibling()
+        payload = self.refresh(self.QUERY)
+        capsule = payload["capsule"]
+        paths = [item["path"] for item in capsule["semantic"]]
+        other = self.record_path("TASK-OTHER")
+        self.assertIn(other, paths)
+        self.assertIn("specs/authority.md", paths)
+        self.assertLess(paths.index("specs/authority.md"), paths.index(other))
+        item = self.by_path(capsule)[other]
+        self.assertEqual("touch-link", item["selection"])
+        self.assertEqual(self.SHARED, item["via"])
+        self.assertNotIn(self.record_path("TASK-CUR"), paths)
+        selected = {entry["path"]: entry for entry in self.manifest(capsule)["selected"]}
+        self.assertEqual("touch-link", selected[other]["selection"])
+        self.assertNotIn("match", selected[other])
+        self.assertIsNone(selected[other]["rank"])
+        self.assertNotIn("file-link-limit", [entry["reason"] for entry in self.manifest(capsule)["excluded"]])
+
+    def test_a_touch_without_any_shared_informative_term_delivers_nothing(self) -> None:
+        self.sibling(next_step="")
+        for query in ("the cobalt authority rule", "continue"):
+            capsule = self.refresh(query)["capsule"]
+            self.assertNotIn(self.record_path("TASK-OTHER"), self.by_path(capsule), query)
+
+    def test_a_hub_file_links_nothing(self) -> None:
+        self.fillers(30)
+        self.track("app/Shared.php", "app/Rare.php")
+        for number in range(1, 7):
+            self.task(f"TASK-H{number}", f"Hub task {number}.", "app/Shared.php", next_step="Fix rounding.")
+        self.task("TASK-R", "Rare task.", "app/Rare.php", next_step="Fix rounding.")
+        self.task("TASK-CUR", "Apply the cobalt authority rule.", "app/Shared.php", "app/Rare.php")
+        capsule = self.refresh(self.QUERY)["capsule"]
+        touch = [path for path, item in self.by_path(capsule).items() if item.get("selection") == "touch-link"]
+        self.assertEqual([self.record_path("TASK-R")], touch)
+
+    def test_touch_links_never_displace_covered_matches(self) -> None:
+        for number in range(3):
+            self.repository.joinpath(f"specs/round-{number}.md").write_text(
+                f"# Round {number}\n\nThe cobalt authority rounding note {number}.\n", encoding="utf-8")
+        self.sibling()
+        capsule = self.refresh("cobalt authority rounding")["capsule"]
+        allowed = {f"specs/round-{n}.md" for n in range(3)} | {"specs/authority.md"}
+        self.assertTrue({item["path"] for item in capsule["semantic"]} <= allowed, capsule["semantic"])
+        self.assertNotIn(self.record_path("TASK-OTHER"), [item["path"] for item in capsule["semantic"]])
+
+    def test_explicit_path_and_source_link_expansion_ignore_touch_rows(self) -> None:
+        self.track("README.md", self.SHARED, content="# Readme\n\ncobalt authority readme.\n")
+        self.task("TASK-OTHER", "Vermilion ledger migration.", "README.md", self.SHARED)
+        self.task("TASK-CUR", "Apply the cobalt authority rule.")
+        result = self.run_cli("retrieve", "zzz unrelated", "--task-id", "TASK-CUR", "--path", self.SHARED, "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        capsule = json.loads(result.stdout)
+        other = self.record_path("TASK-OTHER")
+        self.assertNotEqual("path-link", self.by_path(capsule).get(other, {}).get("selection"))
+        capsule = self.refresh("cobalt authority readme")["capsule"]
+        self.assertNotEqual("source-link", self.by_path(capsule).get(other, {}).get("selection"))
+        self.assertEqual(0, self.manifest(capsule)["source_links"]["candidates"])
+
+    def test_a_prompt_named_class_upgrades_a_weak_match_to_a_prompt_link(self) -> None:
+        self.fillers()
+        self.track(self.SHARED)
+        self.repository.joinpath("composer.json").write_text('{"autoload":{"psr-4":{"App\\\\":"app/"}}}',
+                                                               encoding="utf-8")
+        self.write_chunk_citing(self.SHARED)
+        self.task("TASK-CUR", "Apply the cobalt authority rule.")
+        payload = self.refresh("InvoiceTotal and the cobalt authority rule")
+        chunk = next(path for path in self.by_path(payload["capsule"]) if str(path).startswith("memory-bank/chunks/"))
+        item = self.by_path(payload["capsule"])[chunk]
+        self.assertEqual("prompt-link", item["selection"])
+        self.assertNotIn("match", item)
+        line = next(line for line in payload["capsule_text"].splitlines() if chunk in line)
+        self.assertNotIn("weak match", line)
+        self.assertIn(f"linked through {self.SHARED}, named in the request", line)
+
+    def write_chunk_citing(self, source: str) -> None:
+        today = datetime.now(timezone.utc).date()
+        memory_id = f"MEM-{today.strftime('%Y%m%d')}-0a1b2c3d"
+        metadata = {
+            "id": memory_id, "title": "InvoiceTotal persistence", "type": "convention", "status": "active",
+            "scope": ["application"], "tags": ["billing"], "created": today.isoformat(),
+            "last_verified": today.isoformat(), "review_after": (today + timedelta(days=90)).isoformat(),
+            "sources": [source], "supersedes": [], "superseded_by": None, "valid_from": today.isoformat(),
+            "valid_to": None, "source_digests": [],
+        }
+        path = self.repository / f"memory-bank/chunks/{memory_id}-invoice-total.md"
+        path.write_text("---\n" + json.dumps(metadata, indent=2) + "\n---\n\n# InvoiceTotal persistence\n\n"
+                        "## Durable Context\n\nTotals are persisted in minor units.\n", encoding="utf-8")
+
+    def test_rendered_touch_link_quotes_the_goal_and_the_shared_file(self) -> None:
+        self.sibling()
+        payload = self.refresh(self.QUERY)
+        text = payload["capsule_text"]
+        other = self.record_path("TASK-OTHER")
+        lines = text.splitlines()
+        index = next(position for position, line in enumerate(lines) if other in line)
+        self.assertIn("§ Files", lines[index])
+        self.assertIn(f"linked through {self.SHARED}, changed in this task", lines[index])
+        self.assertTrue(lines[index + 1].strip().startswith("Goal: Vermilion ledger migration"))
+        self.assertIn(self.SHARED, lines[index + 1])
+        self.assertLessEqual(len(text), 3600)
+
+    def test_touch_link_manifest_validates(self) -> None:
+        self.sibling()
+        ephemeral = self.refresh(self.QUERY)["capsule"]
+        brain.validate_schema_file(self.repository, "retrieval-manifest", self.manifest(ephemeral))
+        result = self.run_cli("refresh", "--query", self.QUERY,
+                              "--task-id", "TASK-CUR", "--sanitize", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        governed = json.loads(result.stdout)["capsule"]
+        manifest = self.manifest(governed)
+        brain.validate_schema_file(self.repository, "retrieval-manifest", manifest)
+        self.assertIn("touch-link", [entry.get("selection") for entry in manifest["selected"]])
+        self.assertEqual([], brain.validate_repository(self.repository))
+
+    def test_pending_turn_files_seed_links_before_the_task_exists(self) -> None:
+        self.fillers()
+        self.track(self.SHARED)
+        subprocess.run(["git", "-C", str(self.repository), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-q", "-m", "base"], check=True, capture_output=True)
+        self.task("TASK-OTHER", "Vermilion ledger migration.", self.SHARED, next_step="Check the rounding.")
+        (self.repository / self.SHARED).write_text("<?php\n// edited\n", encoding="utf-8")
+        turned = self.run_cli("turn", "--task-id", "feature/new-branch")
+        self.assertEqual(0, turned.returncode, turned.stderr)
+        capsule = self.refresh(self.QUERY, "feature/new-branch")["capsule"]
+        self.assertEqual("warming", capsule["kind"])
+        item = self.by_path(capsule).get(self.record_path("TASK-OTHER"))
+        self.assertIsNotNone(item, capsule)
+        self.assertEqual("touch-link", item["selection"])
+
+
+class FileLinkSeedTest(RuntimeHarness):
+    def link_table(self, *paths: str):
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE document_links(path TEXT, ref_path TEXT, ref_kind TEXT)")
+        connection.executemany("INSERT INTO document_links VALUES ('doc.md', ?, 'file')", [(path,) for path in paths])
+        return connection
+
+    def test_prompt_paths_are_extracted_normalised_and_screened(self) -> None:
+        connection = self.link_table("app/Billing/InvoiceTotal.php", "src/Http/Kernel.php", "tests/Unit/FooTest.php")
+        root = self.repository.as_posix()
+        text = (f"see ./app/Billing/InvoiceTotal.php and {root}/src/Http/Kernel.php and tests\\Unit\\FooTest.php "
+                "and/or .env ../x.php node.js FooTest " + "x" * 16384 + " app/Late/Path.php")
+        self.assertEqual(
+            ["app/Billing/InvoiceTotal.php", "src/Http/Kernel.php", "tests/Unit/FooTest.php"],
+            retrieval.prompt_path_seeds(connection, self.repository, text),
+        )
+
+    def test_fqcn_maps_through_psr4_autoload_and_autoload_dev(self) -> None:
+        connection = self.link_table("app/Billing/InvoiceTotal.php", "extra/Money.php", "tests/Unit/FooTest.php")
+        self.repository.joinpath("composer.json").write_text(json.dumps({
+            "autoload": {"psr-4": {"App\\": "app/", "Acme\\Lib\\": ["lib/", "./extra/"]}},
+            "autoload-dev": {"psr-4": {"Tests\\": "tests/"}},
+        }), encoding="utf-8")
+        text = "\\App\\Billing\\InvoiceTotal::total() and Acme\\\\Lib\\\\Money and Tests\\Unit\\FooTest"
+        self.assertEqual(
+            ["app/Billing/InvoiceTotal.php", "extra/Money.php", "tests/Unit/FooTest.php"],
+            retrieval.prompt_path_seeds(connection, self.repository, text),
+        )
+        self.repository.joinpath("composer.json").unlink()
+        self.assertEqual(["app/Billing/InvoiceTotal.php"],
+                         retrieval.prompt_path_seeds(connection, self.repository, "App\\Billing\\InvoiceTotal"))
+
+    def test_insert_automatic_links_lands_after_the_last_covered_semantic_match(self) -> None:
+        def item(path, match="covered", category="evidence", layer="semantic", **extra):
+            return {"path": path, "match": match, "category": category, "layer": layer, **extra}
+        filtered = [item("skill", category="policy", layer="procedural"), item("A"), item("B", "distinctive"),
+                    item("C"), item("x", "distinctive"), item("E", layer="episodic")]
+        linked = [item("L", None), item("x", None)]
+        self.assertEqual(["skill", "A", "B", "C", "L", "x", "E"],
+                         [entry["path"] for entry in retrieval._insert_automatic_links(filtered, linked)])
+        self.assertEqual(["L", "B"], [entry["path"] for entry in retrieval._insert_automatic_links(
+            [item("B", "distinctive")], [item("L", None)])])
+        self.assertEqual(["P", "L", "B"], [entry["path"] for entry in retrieval._insert_automatic_links(
+            [item("P", None, selection="path-link"), item("B", "distinctive")], [item("L", None)])])
+
+    def test_file_link_problem_rejects_state_build_lock_and_sensitive_paths(self) -> None:
+        for path in ("app/A.php", "src/Kernel.php", ".claude/skills/x/SKILL.md"):
+            with self.subTest(path=path):
+                self.assertIsNone(retrieval._file_link_problem(path))
+        token = "ghp_" + "A" * 36
+        for path in ("var/log/a", "public/build/m.json", "composer.lock", "memory-bank/INDEX.md",
+                     "project-brain/config/runtime.json", "docs/", ".env.local", "a/../b", "/abs", "a\\b",
+                     "storage/logs/x.log", "node_modules/x.js", f"src/{token}.php"):
+            with self.subTest(path=path):
+                self.assertIsNotNone(retrieval._file_link_problem(path))
+
+
 class CapsuleNoiseTest(RuntimeHarness):
     def capsule(self, query: str) -> dict:
         result = self.run_cli("refresh", "--query", query, "--task-id", "TASK-NOISE",
