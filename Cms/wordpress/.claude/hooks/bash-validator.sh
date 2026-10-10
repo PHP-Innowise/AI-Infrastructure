@@ -1383,9 +1383,9 @@ fi
 # container's or a cluster's state and logs (docker [compose] ps/logs,
 # kubectl get/describe/logs), a log tail - changes its answer without any
 # edit, so asking again is waiting and is not counted. Optionally after a
-# `sleep N &&` and piped into filters; chained with anything else it counts
+# `sleep N &&` and piped into head/tail/wc/cut/grep/jq; any other chain counts
 # like any command.
-BV_POLL_QUERY='^(sleep [0-9.]+[smhd]? *(&&|;) *)?(git status|gh pr (checks|status|view)|gh run (list|view|watch)|docker (compose )?(ps|logs)|kubectl (get|describe|logs)|tail)( [^;&`$()<>]*)?$'
+BV_POLL_QUERY='^(sleep [0-9.]+[smhd]? *(&&|;) *)?(git status|gh pr (checks|status|view)|gh run (list|view|watch)|docker (compose )?(ps|logs)|kubectl (get|describe|logs)|tail)( [^;&`$()<>|]*)?(\| *(head|tail|wc|cut|grep|jq)( [^;&`$()<>|]*)?)*$'
 if [[ "$COMMAND" =~ $BV_POLL_QUERY ]] && [[ "$COMMAND" != *'||'* ]] && [[ "$COMMAND" != *$'\n'* ]]; then
   exit 0
 fi

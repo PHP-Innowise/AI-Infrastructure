@@ -1783,6 +1783,11 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **Status polling exemptions stop at read filters.** A status command piped
+  into an arbitrary program, such as `git status | tee status-copy.txt`, was
+  exempted from repetition counting. Only head, tail, wc, cut, grep and jq
+  pipelines are exempt now; action pipelines are counted like other commands.
+
 - **`PROTOCOL.md` and the `project-brain` skill admit the capsule and the MCP
   server.** `project-brain/PROTOCOL.md` said no MCP server and no automatic
   prompt injection are part of the runtime, and the `project-brain` skill told

@@ -321,14 +321,13 @@ class BashValidatorTest(FakeRepoMixin, unittest.TestCase):
                         [(0, "", "")] * 13,
                         [(r.returncode, r.stdout, r.stderr) for r in results],
                     )
-            with self.subTest(tool=tool, command="chained"):
-                # Chained with anything else, it counts like any command.
-                chained = self.payload("gh pr checks 44 && vendor/bin/phpunit")
-                codes = [
-                    run_hook(tool, self.HOOK, chained, cwd=self.repo_a).returncode
-                    for _ in range(12)
-                ]
-                self.assertEqual(2, codes[-1])
+            for command in ("gh pr checks 44 && vendor/bin/phpunit",
+                            "git status | tee status-copy.txt", "git status | sh"):
+                with self.subTest(tool=tool, command=command):
+                    # An action after a status query is counted, through a pipe too.
+                    codes = [run_hook(tool, self.HOOK, self.payload(command), cwd=self.repo_a).returncode
+                             for _ in range(12)]
+                    self.assertEqual(2, codes[-1])
 
     def test_sessions_keep_their_own_counts(self) -> None:
         # Two sessions in one checkout: neither adds to the other's count, and
