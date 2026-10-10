@@ -1567,6 +1567,14 @@ def enforce_governed_capsule_contract(
         if compacted.get("last_turn"):
             compacted["last_turn"] = None
             continue
+        related = _related_positions(compacted["semantic"])
+        if related:
+            # Related knowledge fills capacity left after direct matches, so it
+            # is the first to give it back - before history the query found.
+            compacted["semantic"].pop(related[-1])
+            compacted["omitted"]["semantic"] += 1
+            synchronize_capsule_views(compacted)
+            continue
         dropped = False
         for layer in ("episodic", "semantic", "procedural"):
             if compacted[layer]:
@@ -1588,6 +1596,17 @@ def enforce_governed_capsule_contract(
             f"{CAPSULE_CHARACTER_LIMIT} characters"
         )
     return compacted
+
+
+RELATED_SELECTIONS = ("source-link", *AUTOMATIC_LINK_SELECTIONS)
+
+
+def _related_positions(items: object) -> list[int]:
+    """Positions of items a relation brought in rather than the query."""
+    return [
+        index for index, item in enumerate(items if isinstance(items, list) else [])
+        if isinstance(item, dict) and item.get("selection") in RELATED_SELECTIONS
+    ]
 
 
 def validate_task_id(task_id: str) -> str:
@@ -2943,7 +2962,8 @@ def _render_capsule(
 
     lines = assemble()
     # Over the ceiling the excerpts shrink first, tail first, then go; then
-    # skills, then the weakest knowledge. Working state is never cut here:
+    # skills, then related knowledge (a link brought it, not the query), then
+    # the weakest knowledge. Working state is never cut here:
     # its own lines are bounded where they are built.
     while size(lines) > RENDERED_CAPSULE_LIMIT:
         shrinkable = [
@@ -2960,6 +2980,8 @@ def _render_capsule(
                 if layer == "procedural"
             )
             entries.pop(index)
+        elif _related_positions([item for _, item, _ in entries]):
+            entries.pop(_related_positions([item for _, item, _ in entries])[-1])
         elif entries:
             entries.pop()
         elif len(head) > 1:

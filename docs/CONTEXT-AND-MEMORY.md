@@ -687,7 +687,9 @@ prompts were entries of that list. A task's `files[]` now become `file` rows:
   and handoff are never candidates.
 - **What it shows.** The item is marked `prompt-link` or `touch-link` in the
   manifest (no `match`, no rank) and `linked through <path>` in the capsule; a
-  linked task quotes its goal and its files, the shared one first.
+  linked task quotes its goal and its files, the shared one first. Under the
+  capsule's 8,000- and 3,600-character limits a linked item (like a
+  `source-link`) is the first to give its place back, before history.
 - **Not done.** Edges through commits (record and commit, files changed
   together) wait until live link density is measured: they add a second hop
   over edges that are still sparse.

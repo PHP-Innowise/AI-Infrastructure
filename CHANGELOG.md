@@ -26,6 +26,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **Related knowledge gives its place back first.** When the capsule's JSON
+  passes 8,000 characters or its text 3,600, an item a link brought in
+  (`source-link`, `prompt-link`, `touch-link`) is dropped before history the
+  query found; the JSON limit used to drop the changelog first, and on one
+  evaluated prompt a linked record pushed out the useful changelog entry.
+
 - **File edges: the files a task touched link it to the work that follows.**
   An active Brain task's `files[]` (Git-tracked, screened) become
   `document_links` rows of kind `file`. Automatic retrieval seeds them with

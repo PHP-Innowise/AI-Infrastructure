@@ -99,7 +99,7 @@
     ".agents/skills/memory-seed/assets/runtime-contract.json": "9fe2c1ce1d3da625581b0c5602381001396a79146f3cbcf45bf25fa4f6a466b0",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "13e09d26050f26bf4ba15af6c034ea236c1b2ee85c0fa7937f399f27e1987933",
     ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "04303ff2941344ffa230933640e0851eadb29f4394f1f030320d8f813b53c596",
-    ".agents/skills/memory-seed/assets/scripts/context.py": "8fc87595d85e62c4292b599f8c29f79136fefb0c05eeb4da34f9ca1380f403a0",
+    ".agents/skills/memory-seed/assets/scripts/context.py": "40e24d6b8211f2302de555e2e3012c3ca6c27be51ff4817c7a94e573a8e4b332",
     ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "36218b1352d3ad6fc3d4e6ad8c69bc7b0256f43174796163f9e2c2de5378706c",
     ".agents/skills/memory-seed/assets/scripts/mcp_config.py": "966f2e53b693483c3ffa3c809c3a0f9e003c1ac522a71f919ae9a1e1b9892e6e",
     ".agents/skills/memory-seed/assets/scripts/mcp_server.py": "4f1fc78ccda9ffb061a6975313a7226a9741cad6a49d62543ec82c17911263fd",
@@ -170,7 +170,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "4a87c3ba8c45a3d89f8018e043b7a0736b624b3bb1b481612b9ac064ae010634"
   },
-  "policy_digest": "1ed121ddcac6fe570a41cc5db85c855b3dbb3c553a75935d3ee9707d572c9214",
+  "policy_digest": "47670ef5ec8a3276f65a2f21569fd55e915e4bbf3592bc4f980fcaf14a73e0a3",
   "release": "2.5.0",
   "schema_version": 1
 }

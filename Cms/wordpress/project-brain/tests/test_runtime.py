@@ -5892,6 +5892,39 @@ class AutomaticFileLinkTest(FileEdgeFixture):
         self.assertEqual("touch-link", item["selection"])
 
 
+class RelatedItemBudgetTest(RuntimeHarness):
+    """Under the capsule's limits, an item a relation brought in gives its
+    place back before history the query found."""
+
+    def capsule(self) -> dict:
+        return {
+            "working": None, "warnings": [], "procedural": [], "selected": [], "omitted": {},
+            "semantic": [
+                {"path": "specs/direct.md", "layer": "semantic", "title": "Direct", "snippet": "d" * 300},
+                {"path": "project-brain/dynamic/tasks/t.md", "layer": "semantic", "title": "Linked",
+                 "snippet": "l" * 300, "selection": "prompt-link", "via": "app/A.php"},
+            ],
+            "episodic": [{"path": "CHANGELOG.md", "layer": "episodic", "title": "Changelog", "snippet": "c" * 300}],
+        }
+
+    def test_the_json_contract_drops_a_linked_item_before_the_changelog(self) -> None:
+        capsule = self.capsule()
+        capsule["filler"] = "x" * 7000
+        result = context_cli.enforce_governed_capsule_contract(capsule)
+        self.assertEqual(["CHANGELOG.md"], [item["path"] for item in result["episodic"]])
+        self.assertEqual(["specs/direct.md"], [item["path"] for item in result["semantic"]])
+        self.assertEqual(1, result["omitted"]["semantic"])
+
+    def test_the_rendered_text_drops_a_linked_item_before_the_changelog(self) -> None:
+        capsule = self.capsule()
+        full, _ = context_cli._render_capsule(capsule, {})
+        size = sum(len(line) + 1 for line in full)
+        # Room for all but one entry: the linked one leaves, history stays.
+        with mock.patch.object(context_cli, "RENDERED_CAPSULE_LIMIT", size - 20):
+            _, shown = context_cli._render_capsule(capsule, {})
+        self.assertEqual(["specs/direct.md", "CHANGELOG.md"], [item["path"] for item in shown])
+
+
 class FileLinkSeedTest(RuntimeHarness):
     def link_table(self, *paths: str):
         connection = sqlite3.connect(":memory:")
