@@ -273,6 +273,7 @@ class OpenTests(Isolated):
             return subprocess.CompletedProcess(command, 0, start, "")
         return run, calls
 
+    @unittest.skipIf(os.name == "nt", "a login shell's PATH is read on POSIX only")
     def test_a_click_starts_the_harness_with_the_shell_path_of_today_then_the_recorded_one(self):
         app.save_config()
         opened = []
@@ -316,6 +317,7 @@ class OpenTests(Isolated):
         app.notify.assert_called_once()
         self.assertIn("Server could not start", app.notify.call_args.args[0])
 
+    @unittest.skipIf(os.name == "nt", "a login shell's PATH is read on POSIX only")
     def test_the_shell_path_is_read_between_marks_whatever_the_shell_prints_around_it(self):
         seen = []
 

@@ -16,7 +16,34 @@ from memory_results import check_source, record_result
 
 VERSION = '2025-06-18'
 MAX_MESSAGE = 128 * 1024
+# A JSON-RPC message of this server nests a few levels. Deeper input is a
+# parse error decided here: the parser's own limit follows the C stack, and a
+# newer Python parsed 60,000 levels and answered "invalid request" instead.
+MAX_DEPTH = 64
 REASON = 'Saved through Memory MCP; agent-attested, not reviewed by a person'
+
+
+def too_deep(raw):
+    """Whether a message's arrays and objects nest past MAX_DEPTH, strings aside."""
+    depth = 0
+    quoted = escaped = False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:  # backslash
+                escaped = True
+            elif byte == 0x22:  # quote
+                quoted = False
+        elif byte == 0x22:
+            quoted = True
+        elif byte in (0x5B, 0x7B):  # [ {
+            depth += 1
+            if depth > MAX_DEPTH:
+                return True
+        elif byte in (0x5D, 0x7D):  # ] }
+            depth -= 1
+    return False
 
 
 def text(value, label, limit):
@@ -179,6 +206,7 @@ def serve(memory, incoming=sys.stdin.buffer, outgoing=sys.stdout):
         identifier = None
         try:
             if len(raw) > MAX_MESSAGE: raise ValueError('Message too large')
+            if too_deep(raw): raise ValueError('Message nested too deeply')
             request = json.loads(raw, parse_constant=lambda _: (_ for _ in ()).throw(ValueError('Nonfinite JSON')))
             if not isinstance(request, dict) or request.get('jsonrpc') != '2.0' or not isinstance(request.get('method'), str):
                 response = {'jsonrpc': '2.0', 'id': None, 'error': {'code': -32600, 'message': 'Invalid JSON-RPC request'}}

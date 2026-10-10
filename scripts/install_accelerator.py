@@ -1227,9 +1227,12 @@ class _HandleCalls:
                           self.FILE_OPEN, self.FILE_NON_DIRECTORY_FILE, os.O_RDONLY | os.O_BINARY)
 
     def create_file(self, name: str, mode: int, folder: int) -> int:
-        # GENERIC_WRITE covers the data, the flush and the times.
-        return self._open(name, folder, self.GENERIC_WRITE | self.FILE_READ_ATTRIBUTES, self.FILE_CREATE,
-                          self.FILE_NON_DIRECTORY_FILE, os.O_WRONLY | os.O_BINARY)
+        # GENERIC_WRITE covers the data, the flush and the times. SYNCHRONIZE is
+        # named on its own: NtCreateFile checks the requested mask for it,
+        # before generic rights are mapped, whenever synchronous I/O is asked
+        # for, and answers STATUS_INVALID_PARAMETER without it.
+        return self._open(name, folder, self.GENERIC_WRITE | self.FILE_READ_ATTRIBUTES | self.SYNCHRONIZE,
+                          self.FILE_CREATE, self.FILE_NON_DIRECTORY_FILE, os.O_WRONLY | os.O_BINARY)
 
     def fstat(self, descriptor: int) -> os.stat_result:
         """Status from the handle: a link (S_IFLNK) for a name-surrogate reparse point."""

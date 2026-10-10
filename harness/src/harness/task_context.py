@@ -150,7 +150,7 @@ class TaskContext:
                 or not isinstance(capsule.get('working'), dict)
                 or capsule['working'].get('task_id') != task.get('external_id')):
             raise SessionError('Retrieved context does not match the linked task and revision. Prepare it again.')
-        for layer, limit in (('procedural', 2), ('semantic', 3), ('episodic', 1)):
+        for layer, limit in (('procedural', 2), ('semantic', 3), ('episodic', 2)):
             values = capsule.get(layer)
             if not isinstance(values, list) or len(values) > limit or any(not isinstance(item, dict) for item in values):
                 raise SessionError('The runtime returned an invalid task capsule.')

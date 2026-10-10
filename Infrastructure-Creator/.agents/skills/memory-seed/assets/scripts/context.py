@@ -59,7 +59,7 @@ from brain_runtime import (
     rollback_created_record,
     review_promotion,
     apply_promotion,
-    stale_records,
+    stale_record_states,
     restore_record_state,
     snapshot_record_state,
     update_record,
@@ -68,7 +68,15 @@ from brain_runtime import (
     validate_repository,
 )
 from context_retrieval import (
+    AUTOMATIC_LINK_SELECTIONS,
+    TOUCH_SEED_LIMIT,
+    prompt_path_seeds,
+    CAPSULE_EPISODIC_LIMIT,
+    CAPSULE_EVENT_LIMIT,
+    CAPSULE_PROMPT_TERM_LIMIT,
     DocumentRow,
+    _content_hash,
+    episode_item,
     EVIDENCE_STOPWORDS,
     RetrievalError,
     STOPWORD_DOCUMENT_RATIO,
@@ -117,6 +125,7 @@ from validate import (
     PRIVATE_PATTERNS,
     SECRET_PATTERNS,
     ValidationError,
+    mask_secrets,
     parse_frontmatter,
     validate_metadata,
     validate_secret_patterns,
@@ -165,13 +174,10 @@ DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
 CAPSULE_LAYER_LIMITS = {
     "procedural": 1,
     "semantic": 3,
-    "episodic": 1,
+    # The changelog, and one Project Brain event or local episode.
+    "episodic": CAPSULE_EPISODIC_LIMIT + CAPSULE_EVENT_LIMIT,
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
-# How many prompt terms survive distillation into the retrieval query. Rarity
-# in the index decides which ones, so the cap bounds cost without deciding
-# relevance by position the way the old first-N-words hook extraction did.
-CAPSULE_PROMPT_TERM_LIMIT = 24
 CAPSULE_CHARACTER_LIMIT = 8000
 # What the rendered capsule - the text a model reads - may spend. Codex caps a
 # hook's additional context at 4,000 characters; this stays under it.
@@ -701,9 +707,13 @@ def discover_documents(
     repository: Path,
     reusable: Optional[SourceState] = None,
     candidates: Optional[list[SourceCandidate]] = None,
-) -> tuple[list[DocumentRow], SourceState, SourceState, list[dict[str, str]]]:
-    """Return changed documents, the retained cache subset, the new cache, and
-    every candidate dropped along the way with the reason it was dropped.
+) -> tuple[
+    list[DocumentRow], SourceState, SourceState, list[dict[str, str]], dict[str, tuple[str, int]]
+]:
+    """Return changed documents, the retained cache subset, the new cache,
+    every candidate dropped along the way with the reason it was dropped, and
+    the documents indexed with masked values: path -> (digest of the file as
+    read, values masked).
 
     ``reusable`` maps already-indexed paths to the (mtime_ns, size, boundary)
     recorded by the last successful index. A candidate whose stat still matches
@@ -728,6 +738,7 @@ def discover_documents(
     retained: SourceState = {}
     state: SourceState = {}
     excluded: list[dict[str, str]] = []
+    masked: dict[str, tuple[str, int]] = {}
     skill_keys: set[str] = set()
     claimed: set[str] = set()
     if candidates is None:
@@ -752,15 +763,15 @@ def discover_documents(
         claimed.add(relative_path)
         skill_key = skill_key_parts(relative_path)[1] if kind == "skill" else None
         if skill_key is not None and skill_key in skill_keys:
-            # A mirrored copy of an already-indexed skill. Only a copy that
-            # passes validation claims the key, so a later copy can never win
-            # it and never needs to be read or scanned.
+            # A mirrored copy of an already-indexed skill. Only an indexed copy
+            # claims the key, so a later copy can never win it and never needs
+            # to be read or scanned.
             continue
         cached = cache.get(relative_path)
         if cached is not None and _cache_entry_is_current(kind, cached, current):
             # Unchanged since the last successful index and still inside its
-            # calendar boundary, so it already passed secret and
-            # active-memory validation; keep the existing row.
+            # calendar boundary, so it was already masked, or validated if it
+            # is memory; keep the existing row.
             if skill_key is not None:
                 skill_keys.add(skill_key)
             retained[relative_path] = cached
@@ -769,19 +780,28 @@ def discover_documents(
         boundary: Optional[str] = None
         try:
             if kind == "memory":
+                # A chunk with a likely secret stays out whole: it is shared
+                # knowledge the team wrote, not a file the project ships.
                 metadata, reason, boundary = memory_eligibility(path, repository)
                 if metadata is None:
                     excluded.append(
                         {"path": relative_path, "reason": reason or "invalid"}
                     )
                     continue
+                content = path.read_text(encoding="utf-8")
             else:
+                # Masked, not dropped: one placeholder-shaped development
+                # credential in a code block used to take a whole README - the
+                # only useful document of seven graded prompts - out of the
+                # index. The value never reaches the index; the rest does.
                 try:
-                    validate_secret_patterns(path)
+                    raw = path.read_text(encoding="utf-8")
+                    content, values = mask_secrets(raw)
                 except (OSError, ValidationError):
                     excluded.append({"path": relative_path, "reason": "secret"})
                     continue
-            content = path.read_text(encoding="utf-8")
+                if values:
+                    masked[relative_path] = (_content_hash(raw), values)
         except UnicodeDecodeError as error:
             raise ContextError(
                 f"Source document is not valid UTF-8: {relative_path}"
@@ -815,7 +835,15 @@ def discover_documents(
             excluded.append(
                 {"path": pattern, "reason": "pattern-all-git-ignored"}
             )
-    return documents, retained, state, excluded
+    return documents, retained, state, excluded, masked
+
+
+def _report_masked(result: dict[str, object], masked: dict[str, tuple[str, int]]) -> None:
+    """Which documents read on this pass were indexed with masked values, and
+    how many: never a value, never its label."""
+    result["redacted"] = [
+        {"path": path, "values": values} for path, (_, values) in sorted(masked.items())
+    ]
 
 
 def _merge_excluded(result: dict[str, object], dropped: list[dict[str, str]]) -> None:
@@ -863,7 +891,7 @@ def index_repository(
         reusable, fingerprints = reusable_source_state(
             connection, repository, fingerprints
         )
-        documents, retained, state, dropped = discover_documents(
+        documents, retained, state, dropped, masked = discover_documents(
             repository, reusable, candidates=candidates
         )
         scan_seconds += time.monotonic() - phase_started
@@ -876,18 +904,20 @@ def index_repository(
                 retained=retained,
                 source_state=state,
                 fingerprints=fingerprints,
+                source_hashes={path: digest for path, (digest, _) in masked.items()},
             )
         except RetrievalError:
             # The cache disagreed with the index; fall through and rebuild.
             phase_started = time.monotonic()
         else:
             _merge_excluded(result, dropped)
+            _report_masked(result, masked)
             result["phase_seconds"] = {
                 "stat": round(scan_seconds, 6),
                 "index": round(time.monotonic() - index_started, 6),
             }
             return result
-    documents, _, state, dropped = discover_documents(
+    documents, _, state, dropped, masked = discover_documents(
         repository, candidates=candidates
     )
     scan_seconds += time.monotonic() - phase_started
@@ -895,8 +925,10 @@ def index_repository(
     result = index_documents(
         connection, repository, documents, source_state=state,
         fingerprints=fingerprints,
+        source_hashes={path: digest for path, (digest, _) in masked.items()},
     )
     _merge_excluded(result, dropped)
+    _report_masked(result, masked)
     result["phase_seconds"] = {
         "stat": round(scan_seconds, 6),
         "index": round(time.monotonic() - index_started, 6),
@@ -1011,19 +1043,7 @@ def search_episodes(
         """,
         (fts_query(query), limit),
     ).fetchall()
-    return [
-        {
-            "id": row["id"],
-            "layer": "episodic",
-            "summary": row["summary"],
-            "outcome": row["outcome"],
-            "files": json.loads(row["files"]),
-            "verification": json.loads(row["verification"]),
-            "sources": json.loads(row["sources"]),
-            "created_at": row["created_at"],
-        }
-        for row in rows
-    ]
+    return [episode_item(row) for row in rows]
 
 
 def build_capsule_query(
@@ -1334,7 +1354,7 @@ def build_context_packet(
     retrieval_query = build_capsule_query(request_query, working)
     procedural_limit = min(limit, CAPSULE_LAYER_LIMITS["procedural"])
     semantic_limit = min(limit, CAPSULE_LAYER_LIMITS["semantic"])
-    episodic_limit = min(limit, CAPSULE_LAYER_LIMITS["episodic"])
+    episodic_limit = min(limit, CAPSULE_EPISODIC_LIMIT)  # lightweight: no history search
     procedural = search_documents(
         connection, request_query, procedural_limit, "procedural",
         relevant_only=True, strong_only=True,
@@ -1379,7 +1399,12 @@ def build_context_packet(
         connection, repository, semantic,
         {str(item["path"]) for item in semantic},
     )
-    packet["procedural"] = deduplicate_context_items(procedural)[:procedural_limit]
+    # The governed capsule's rule: a skill's sub-file vacates the slot rather
+    # than handing it to a weaker skill.
+    # The governed capsule's rule: hosts list their skills and load their
+    # instruction files themselves, so no procedural item is carried. The
+    # search above still runs, for `no_match`.
+    packet["procedural"] = []
     packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
     packet["episodic"] = deduplicate_context_items(episodic)[:episodic_limit]
     return packet
@@ -1476,7 +1501,8 @@ def synchronize_capsule_views(capsule: dict[str, object]) -> None:
 def enforce_governed_capsule_contract(
     capsule: dict[str, object],
 ) -> dict[str, object]:
-    """Apply the shared 1/3/1 and 8,000-character contract to governed output."""
+    """Apply the shared layer limits and 8,000-character contract to governed
+    output: no procedural item reaches it (see retrieve), 3 semantic, 2 episodic."""
     compacted = json.loads(serialize_capsule(capsule))
     compacted["procedural"] = compacted.get("procedural", [])[
         :CAPSULE_LAYER_LIMITS["procedural"]
@@ -1540,6 +1566,14 @@ def enforce_governed_capsule_contract(
         if compacted.get("last_turn"):
             compacted["last_turn"] = None
             continue
+        related = _related_positions(compacted["semantic"])
+        if related:
+            # Related knowledge fills capacity left after direct matches, so it
+            # is the first to give it back - before history the query found.
+            compacted["semantic"].pop(related[-1])
+            compacted["omitted"]["semantic"] += 1
+            synchronize_capsule_views(compacted)
+            continue
         dropped = False
         for layer in ("episodic", "semantic", "procedural"):
             if compacted[layer]:
@@ -1561,6 +1595,17 @@ def enforce_governed_capsule_contract(
             f"{CAPSULE_CHARACTER_LIMIT} characters"
         )
     return compacted
+
+
+RELATED_SELECTIONS = ("source-link", *AUTOMATIC_LINK_SELECTIONS)
+
+
+def _related_positions(items: object) -> list[int]:
+    """Positions of items a relation brought in rather than the query."""
+    return [
+        index for index, item in enumerate(items if isinstance(items, list) else [])
+        if isinstance(item, dict) and item.get("selection") in RELATED_SELECTIONS
+    ]
 
 
 def validate_task_id(task_id: str) -> str:
@@ -2305,8 +2350,17 @@ def assemble_capsule(
     session_id: Optional[str] = None,
     transcript: Optional[str] = None,
     render: bool = False,
+    prompt: Optional[str] = None,
+    automatic_links: bool = False,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
+
+    ``prompt`` is the whole request ``query`` was distilled from; recorded
+    history is searched with all of it (see history_query).
+
+    ``automatic_links`` seeds the file-edge channel - paths ``prompt`` names
+    and files this branch touched on its last turns - for automatic entry
+    points (refresh, hook-context); explicit retrieval stays deterministic.
 
     ``refresh_index`` exists so a caller that already refreshed does not index
     twice; retrieval reads the index rather than the sources, so the refresh
@@ -2357,6 +2411,9 @@ def assemble_capsule(
     # guards build_context_packet would have applied.
     reject_secrets("Task Capsule", [query])
     reject_capsule_privacy("Task Capsule request", [query])
+    if prompt is not None:
+        reject_secrets("Task Capsule", [prompt])
+        reject_capsule_privacy("Task Capsule request", [prompt])
     try:
         binding = governed_binding(connection, task_id)
     except ContextError as error:
@@ -2364,9 +2421,15 @@ def assemble_capsule(
             raise
         binding = None
     request_query = build_capsule_query(query, None)
-    local_episodes = search_episodes(
-        connection, request_query, CAPSULE_LAYER_LIMITS["episodic"]
-    )
+    seeds: Optional[dict[str, list[str]]] = None
+    if automatic_links:
+        seeds = {"prompt": [], "touched": recent_touched_paths(connection, task_id)}
+        if prompt:
+            try:
+                seeds["prompt"] = prompt_path_seeds(connection, repository, prompt)
+            except (OSError, ValueError, sqlite3.Error):
+                # Seeds add one item at most; they never cost the capsule.
+                seeds["prompt"] = []
 
     def pack(result: dict[str, object]) -> dict[str, object]:
         # Inside retrieve(), before it records anything: what the delivered
@@ -2400,7 +2463,8 @@ def assemble_capsule(
         paths=paths,
         host=host,
         entry_point=entry_point,
-        local_episodes=local_episodes,
+        history_text=prompt if prompt is not None else query,
+        automatic_seeds=seeds,
         session_id=session_id,
         transcript=transcript,
         pack=pack,
@@ -2509,6 +2573,7 @@ def assemble_hook_context(
                 host=host,
                 entry_point="hook-context",
                 render=render,
+                automatic_links=True,
             )
 
     files, excluded = changed_paths(repository)
@@ -2618,9 +2683,42 @@ def capsule_excerpts(
     rank = 0
     for layer in ("semantic", "episodic"):
         for item in capsule.get(layer) or []:
+            if (
+                layer == "episodic" and isinstance(item, dict)
+                and "path" not in item and item.get("id") is not None
+            ):
+                # A local episode has no document to quote: its outcome is
+                # what it learned. Without it only a 160-character summary
+                # reached the reader.
+                outcome = _bounded(str(item.get("outcome") or ""), EPISODIC_EXCERPT_CHARACTERS)
+                if outcome:
+                    excerpt = Excerpt(outcome)
+                    excerpt.heading = ""
+                    excerpts[f"episode {item['id']}"] = excerpt
+                continue
             if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                 continue
             if item.get("match") == "distinctive":
+                continue
+            if item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("kind") == "brain-task":
+                # What a sibling task says about the shared file: its goal and
+                # the files it touched, the shared one first. 12 of the 14
+                # answers held by tasks on the evaluation were Files entries.
+                limit = EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
+                rank += 1
+                try:
+                    row = connection.execute(
+                        "SELECT content FROM documents WHERE path = ?", (item["path"],)
+                    ).fetchone()
+                except sqlite3.Error:
+                    row = None
+                text, heading = linked_task_excerpt(
+                    str(row[0]) if row else "", str(item.get("via") or ""), limit
+                )
+                if text:
+                    excerpt = Excerpt(text)
+                    excerpt.heading = heading
+                    excerpts[item["path"]] = excerpt
                 continue
             limit = (
                 EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
@@ -2652,6 +2750,34 @@ def capsule_excerpts(
     return excerpts
 
 
+_TASK_SECTION = re.compile(r"^## (.+?)\s*$", re.M)
+_TASK_LIST_ITEM = re.compile(r"^- `?([^`\n]+?)`?\s*$")
+
+
+def linked_task_excerpt(content: str, via: str, limit: int) -> tuple[str, str]:
+    """A linked task's goal and its files, the shared one first: (text,
+    heading of the list quoted)."""
+    sections: dict[str, str] = {}
+    matches = list(_TASK_SECTION.finditer(content))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        sections[match.group(1).strip()] = content[match.end():end].strip()
+    goal = next((part.strip() for part in sections.get("Goal", "").split("\n\n") if part.strip()), "")
+    heading = "Sources" if via and via in sections.get("Sources", "") and via not in sections.get("Files", "") else "Files"
+    entries = [
+        found.group(1).strip()
+        for line in sections.get(heading, "").splitlines()
+        if (found := _TASK_LIST_ITEM.match(line.strip()))
+    ]
+    ordered = ([via] if via in entries else []) + [entry for entry in reversed(entries) if entry != via]
+    parts = []
+    if goal:
+        parts.append(f"Goal: {' '.join(goal.split())}.")
+    if ordered:
+        parts.append(f"{heading}: {', '.join(ordered[:6])}")
+    return _bounded(" ".join(parts), limit), heading
+
+
 def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
     if "path" in item:
         label, title = _bounded(item["path"], 260), str(item.get("title") or "")
@@ -2670,12 +2796,19 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
         marks.append("conflicts with another item here")
     if item.get("attestation") == "agent":
         marks.append("agent-attested, not reviewed by a person")
+    if item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("via"):
+        marks.append(
+            f"linked through {_bounded(str(item['via']), 160)}, "
+            + ("named in the request" if item["selection"] == "prompt-link" else "changed in this task")
+        )
     changed = item.get("source_changed")
     if isinstance(changed, list) and changed:
+        # One path and a count: a changed citation keeps records in the
+        # capsule now, and three long paths per item ate the excerpts.
+        more = f" +{len(changed) - 1} more" if len(changed) > 1 else ""
         marks.append(
-            "cited file changed since this was verified: "
-            + ", ".join(_bounded(path, 160) for path in changed[:3])
-            + " — check it before relying on this"
+            f"cited file changed: {_bounded(str(changed[0]), 120)}{more}; "
+            "check it before relying on this"
         )
     suffix = f" ({'; '.join(marks)})" if marks else ""
     return f"- {kind} {label} — {_bounded(title, 160)}{suffix}"
@@ -2828,7 +2961,8 @@ def _render_capsule(
 
     lines = assemble()
     # Over the ceiling the excerpts shrink first, tail first, then go; then
-    # skills, then the weakest knowledge. Working state is never cut here:
+    # skills, then related knowledge (a link brought it, not the query), then
+    # the weakest knowledge. Working state is never cut here:
     # its own lines are bounded where they are built.
     while size(lines) > RENDERED_CAPSULE_LIMIT:
         shrinkable = [
@@ -2845,6 +2979,8 @@ def _render_capsule(
                 if layer == "procedural"
             )
             entries.pop(index)
+        elif _related_positions([item for _, item, _ in entries]):
+            entries.pop(_related_positions([item for _, item, _ in entries])[-1])
         elif entries:
             entries.pop()
         elif len(head) > 1:
@@ -4266,6 +4402,33 @@ def append_turn_delta(
     return int(cursor.lastrowid)
 
 
+def recent_touched_paths(
+    connection: sqlite3.Connection, task_id: str, limit: int = TOUCH_SEED_LIMIT
+) -> list[str]:
+    """Files this branch changed on its last few turns, newest first - also
+    before its task exists, on a branch's first turns."""
+    try:
+        rows = connection.execute(
+            "SELECT files FROM turn_deltas WHERE task_id = ? ORDER BY id DESC LIMIT 5", (task_id,)
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    paths: list[str] = []
+    for row in rows:
+        try:
+            files = json.loads(row[0])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(files, list):
+            continue
+        for path in reversed(files):
+            if isinstance(path, str) and path not in paths:
+                paths.append(path)
+            if len(paths) >= limit:
+                return paths
+    return paths
+
+
 def pending_turn_deltas(
     connection: sqlite3.Connection, task_id: str
 ) -> list[sqlite3.Row]:
@@ -5182,10 +5345,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     links = commands.add_parser(
         "links",
-        help="show every eligible document that cites a given source path",
+        help="show every eligible document that cites, or active task that touched, a given path",
     )
     links.add_argument(
-        "--path", required=True, help="the source path to look up citations of"
+        "--path", required=True, help="the path to look up citations and touches of"
     )
     links.add_argument(
         "--prefix",
@@ -5396,6 +5559,12 @@ def main() -> int:
                         print(
                             f"Excluded: {len(dropped)} document(s) ({summary}); "
                             "--json lists the paths."
+                        )
+                    redacted = result.get("redacted") or []
+                    if isinstance(redacted, list) and redacted:
+                        print(
+                            f"Redacted: {sum(int(item.get('values') or 0) for item in redacted)} "
+                            f"value(s) in {len(redacted)} document(s); --json lists the paths."
                         )
                 return 0
 
@@ -6059,6 +6228,7 @@ def main() -> int:
                     load_config(repository),
                     arguments.path,
                     prefix=arguments.prefix,
+                    ref_kinds=("source", "file"),
                 )
                 result = {
                     "path": arguments.path,
@@ -6079,7 +6249,7 @@ def main() -> int:
                     print(json.dumps(result, ensure_ascii=False))
                 elif not selected:
                     print(
-                        f"No eligible document cites {arguments.path}."
+                        f"No eligible document cites or touched {arguments.path}."
                         + (
                             f" {len(withheld)} withheld by policy or freshness."
                             if withheld
@@ -6092,7 +6262,10 @@ def main() -> int:
                             f"{item['layer']} {item['kind']}: "
                             f"{item['path']} — {item['title']}"
                         )
-                        print(f"  cites {item['ref_path']} ({item['ref_kind']})")
+                        if item["ref_kind"] == "file":
+                            print(f"  touched {item['ref_path']}")
+                        else:
+                            print(f"  cites {item['ref_path']} ({item['ref_kind']})")
                     for item in withheld:
                         print(f"withheld {item['path']}: {item['reason']}")
                 return 0
@@ -6234,6 +6407,8 @@ def main() -> int:
                             # Every refresh with a query renders: hosts put
                             # capsule_text in front of the model.
                             render=True,
+                            prompt=arguments.query,
+                            automatic_links=True,
                         )
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh
@@ -6425,8 +6600,10 @@ def main() -> int:
                 # it marked for checking. It is listed, and does not fail the
                 # project the way a broken record does.
                 errors = validate_repository(repository, check_freshness=False)
-                stale = stale_records(repository)
-                result = {"valid": not errors, "errors": errors, "stale": stale}
+                states = stale_record_states(repository)
+                result = {
+                    "valid": not errors, "errors": errors, "stale": [path for path, _ in states],
+                }
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
@@ -6434,11 +6611,20 @@ def main() -> int:
                         print(error)
                     if not errors:
                         print("Project Brain validation passed.")
-                    for path in stale:
-                        print(
-                            f"Warning: {path}: a cited source changed after the "
-                            "record was written; retrieval marks it for checking"
+                    for path, state in states:
+                        where = (
+                            " (archived: never retrieved)"
+                            if "/project-brain/archive/" in path.replace("\\", "/") else ""
                         )
+                        reading = {
+                            "changed": "a cited source changed after the record was written; "
+                                       "retrieval serves it marked for checking",
+                            "source-missing": "a cited source no longer exists; "
+                                              "retrieval leaves the record out",
+                            "source-undigested": "a cited source has no stored digest; "
+                                                 "retrieval leaves the record out",
+                        }[state]
+                        print(f"Warning: {path}: {reading}{where}")
                 return 0 if not errors else 1
 
             if arguments.command == "parity":

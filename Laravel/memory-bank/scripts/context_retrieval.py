@@ -7,6 +7,7 @@ import hashlib
 from bisect import bisect_left, bisect_right
 import json
 import math
+import posixpath
 import re
 import sqlite3
 import stat
@@ -39,7 +40,8 @@ from brain_runtime import (
     validate_record,
     validate_schema_file,
 )
-from automatic_query import source_path_problem
+from automatic_query import SECRET_PATTERNS, source_path_problem
+from validate import secret_policy_fingerprint
 
 
 BUDGETS = {
@@ -60,11 +62,49 @@ SNIPPET_WINDOW_CHARS = 320
 # What a document whose cited file changed since verification keeps of its
 # relevance: it still ranks, below fresh knowledge of equal fit.
 SOURCE_CHANGED_WEIGHT = 0.5
-# One: see `procedural_ranked` in `retrieve`.
+# The one skill or instruction file ranking picks per turn. The capsule does
+# not carry it (see `retrieve`): the manifest records the pick as
+# `host-listed`, so routing stays measurable.
 CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
+# Repository history the main query ranks: the changelog.
 CAPSULE_EPISODIC_LIMIT = 1
+# Recorded history: one Project Brain event or local episode, found by its own
+# search (history_query). It used to share the changelog's single slot, which
+# the changelog held on every turn of the 121 evaluated prompts that had an
+# event - while 19 answers sat in events never delivered.
+CAPSULE_EVENT_LIMIT = 1
+HISTORY_KIND = "brain-event"
+# How many prompt terms survive into a retrieval query. Rarity in the index
+# decides which ones, so the cap bounds cost without deciding relevance by
+# position the way the old first-N-words hook extraction did.
+CAPSULE_PROMPT_TERM_LIMIT = 24
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
+# The one file of a skill a host lists and invokes. Everything else indexed from
+# a skills tree - references/, agents/, rules/, an AGENTS.md inside a skill, a
+# note at the tree's root such as `SKILL FLOW.md` - is material a SKILL.md sends
+# the agent to. It stays indexed for `search`, but never holds the capsule's
+# procedural slot: on 121 graded prompts such files were useful 1 time in 185
+# judgments against 71 in 627 for SKILL.md, and on the 19 turns one held the
+# slot the next skill down was useful on none.
+SKILL_ENTRY_FILENAME = "SKILL.md"
+
+
+def procedural_slot_eligible(kind: str, path: str) -> bool:
+    """Whether a procedural document may hold the capsule's procedural slot.
+
+    Root policy (AGENTS.md, CLAUDE.md) may; a skill document only if it is a
+    skill's entry file. Keys are POSIX on every platform and an attached
+    tooling key is absolute, so the basename is the last segment.
+    """
+    if kind != "skill":
+        return True
+    directory, _, name = path.rpartition("/")
+    # A SKILL.md lying directly in a skills tree belongs to no skill.
+    return name == SKILL_ENTRY_FILENAME and not any(
+        directory == f"{tool}/skills" or directory.endswith(f"/{tool}/skills")
+        for tool in SKILL_EDITIONS
+    )
 # Skills whose body documents the host tool itself rather than a workflow this
 # repository owns. `skill-creator` instructs the agent to drive its own product
 # CLI - `codex exec`, `cursor-agent --print`, `claude -p` - with different
@@ -689,9 +729,10 @@ CROSS_EDITION_ALLOWED_DRIFT = {
 }
 
 MANIFEST_SCOPES = ("governed", "local")
-# Version 3 adds the host and retrieval entry point. Older manifests stay
-# valid: the validator keys its strict key set off the declared version.
-MANIFEST_SCHEMA_VERSION = 3
+# Version 3 adds the host and retrieval entry point, version 4 the counters
+# of automatic source-linked expansion. Older manifests stay valid: the
+# validator keys its strict key set off the declared version.
+MANIFEST_SCHEMA_VERSION = 4
 # Where the query that produced a retrieval came from. `prompt` is the user's
 # own request, `task` the goal and state of the active task, `task-id` a bare
 # identifier or branch name with no task text behind it, and `explicit` an
@@ -733,6 +774,38 @@ GRAPH_ANCHOR_LIMIT = 2
 GRAPH_ROW_LIMIT = 32
 GRAPH_SOURCE_BYTE_LIMIT = 8 * 1024 * 1024
 GRAPH_CANDIDATE_LIMIT = CAPSULE_SEMANTIC_LIMIT
+# File edges. An active Brain task's files[] become `document_links` rows of
+# kind `file` - "this task touched that file", never "cites" - and only the
+# automatic seed channel reads them: files named in the request, and files the
+# current task touched. One such item per capsule, after strong matches.
+FILE_LINK_LIMIT = 1
+# A file linked from more than five documents is a hub (a root config, a base
+# class) and links nothing. On two real installations the measured fan-in had
+# a gap between 4 and 7, and the paths at 7 or more were root docs and config;
+# Aider's repository map damps identifiers defined in more than five files.
+FILE_LINK_HUB_LIMIT = 5
+# The newest files[] entries of a task that become rows (a task held 27 at most).
+FILE_LINK_RECORD_LIMIT = 50
+FILE_LINK_POOL = 8
+PROMPT_SEED_LIMIT = 6
+TOUCH_SEED_LIMIT = 8
+PROMPT_SEED_SCAN_CHARS = 16384
+AUTOMATIC_LINK_SELECTIONS = ("prompt-link", "touch-link")
+LINK_KINDS = ("source", "file")
+FILE_LINK_TRACKED_KEY = "file-link-tracked"
+FILE_LINK_STATE_PREFIXES = ("project-brain/", "memory-bank/")
+FILE_LINK_EXCLUDED_PARTS = frozenset({
+    "var", "node_modules", "vendor", ".phpunit.cache", "coverage", ".idea", ".vscode",
+    ".devcontainer", "__pycache__",
+})
+FILE_LINK_EXCLUDED_PREFIXES = (
+    "public/build/", "public/bundles/", "public/hot", "bootstrap/cache/", "storage/framework/",
+    "storage/logs/",
+)
+FILE_LINK_EXCLUDED_NAMES = frozenset({
+    "composer.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "symfony.lock",
+    ".phpunit.result.cache",
+})
 # One index_state row holding a JSON map of task UUID -> last retrieval, not
 # one row per task: nothing prunes index_state (it is upsert-only), so a key
 # per task would grow for the life of the database.
@@ -805,6 +878,7 @@ LOCAL_MANIFEST_RETENTION = 200
 DELETE_CHUNK = 500
 INDEX_CONFIG_KEY = "config-fingerprint"
 INDEX_SKILL_KEY = "skill-tree-fingerprint"
+INDEX_SECRET_POLICY_KEY = "secret-policy-fingerprint"
 INDEX_PARITY_KEY = "skill-parity-drift"
 # A fresh value is stamped whenever index_documents rewrites the tables, so
 # anything derived from index content (the token-frequency cache below) can
@@ -1119,6 +1193,7 @@ def index_fingerprints(
     return {
         INDEX_CONFIG_KEY: config_fingerprint(repository),
         INDEX_SKILL_KEY: skill_tree_fingerprint(repository, skill_stats),
+        INDEX_SECRET_POLICY_KEY: secret_policy_fingerprint(),
     }
 
 
@@ -1135,6 +1210,10 @@ def reusable_source_state(
     if stored.get(INDEX_CONFIG_KEY) != fingerprints[INDEX_CONFIG_KEY]:
         # Runtime configuration decides eligibility for every indexed record,
         # so a configuration change invalidates the whole cache.
+        return {}, fingerprints
+    if stored.get(INDEX_SECRET_POLICY_KEY) != fingerprints[INDEX_SECRET_POLICY_KEY]:
+        # Indexed text is masked by the secret patterns, so a changed pattern
+        # set must reach documents whose files did not change.
         return {}, fingerprints
     indexed = {row[0] for row in connection.execute("SELECT path FROM documents")}
     return {
@@ -1557,20 +1636,13 @@ def _chunk_digests(content: str) -> str:
 
 
 def _link_rows(path: str, sources: object) -> list[tuple[str, str, str]]:
-    """One `document_links` row per source a document declares.
+    """One `document_links` row per source a document declares (`source`).
 
-    `ref_kind` carries a single value, `source`, and the two candidates for a
-    second were both rejected on evidence rather than left for later:
-
-    * `fingerprint` is dead by construction — `sources_are_fresh` requires the
-      fingerprint path set to equal the sources path set, so it can never name
-      anything `source` does not already name.
-    * `file` (a task's `files[]`) is Git churn in the wrong frame. Every live
-      task in this repository records twenty entries led by phpunit cache,
-      vendored JavaScript and dev container dumps, and `changed_paths` writes
-      them relative to the Git toplevel while every other path in the index is
-      relative to the repository root. Linking them would fill the table with
-      build artifacts that resolve to nothing.
+    A task's `files[]` become rows of their own kind, `file`, in
+    `_file_link_rows`; they mean "touched", never "cites", and nothing that
+    reads citations reads them. `fingerprint` stays out: `sources_are_fresh`
+    requires the fingerprint path set to equal the sources path set, so it
+    can never name anything `source` does not already name.
     """
     if not isinstance(sources, list):
         return []
@@ -1586,7 +1658,76 @@ def _link_rows(path: str, sources: object) -> list[tuple[str, str, str]]:
     return sorted(set(rows))
 
 
-def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:
+def _file_link_problem(path: object) -> Optional[str]:
+    """Why a path may not become a file edge or a seed, or None.
+
+    A task's files[] used to be refused as links outright: build output,
+    vendored code and caches in the wrong frame. They are now screened one by
+    one - shape, sensitive and private paths, runtime state, directories,
+    build output and lockfiles, anything shaped like a secret - and what
+    remains is checked against Git's index.
+    """
+    if not isinstance(path, str) or not path or any(char in path for char in "\n\r\0"):
+        return "shape"
+    if path.startswith("./"):
+        path = path[2:]
+    if posixpath.normpath(path) != path.rstrip("/") or path in (".", ""):
+        return "shape"
+    if source_path_problem(path):
+        return "sensitive"
+    if path.startswith(FILE_LINK_STATE_PREFIXES):
+        return "state"
+    if path.endswith("/"):
+        return "directory"
+    parts = path.split("/")
+    if (
+        any(part.casefold() in FILE_LINK_EXCLUDED_PARTS for part in parts)
+        or path.startswith(FILE_LINK_EXCLUDED_PREFIXES)
+        or parts[-1] in FILE_LINK_EXCLUDED_NAMES
+    ):
+        return "build"
+    if any(pattern.search(path) for pattern in SECRET_PATTERNS.values()):
+        return "secret"
+    return None
+
+
+def _tracked_paths(repository: Path, paths: list[str]) -> Optional[set[str]]:
+    """The paths Git's index holds as files, project-relative; None when Git
+    cannot say (no checkout, no git): then no file edge is written.
+
+    One `git cat-file --batch-check` over stdin: no argument-length limit on
+    Windows, staged files count without a commit, and `:./path` resolves in
+    the project's own frame when the project is a subdirectory of the
+    checkout. A directory or a submodule is not a blob, so it drops out.
+    """
+    if not paths:
+        return set()
+    project = workspace_roots.project_root(repository)
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project), "cat-file", "--batch-check=%(objecttype)"],
+            input="".join(":./" + path + "\n" for path in paths).encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = result.stdout.decode("utf-8", "replace").splitlines()
+    if len(lines) != len(paths):
+        return None
+    return {path for path, line in zip(paths, lines) if line == "blob"}
+
+
+def _file_link_rows(path: str, files: list[str], tracked: set[str]) -> list[tuple[str, str, str]]:
+    return sorted({(path, file, "file") for file in files if file in tracked})
+
+
+def _legacy_metadata(
+    path: str, kind: str, content: str, source_hash: Optional[str] = None
+) -> tuple[object, ...]:
     # Repository documents carry no provenance timestamp or confidence of
     # their own: '' means "never decayed" and 1.0 keeps them rank-neutral.
     # A chunk promoted from a claim only its agent checked says so in its tags.
@@ -1598,20 +1739,25 @@ def _legacy_metadata(path: str, kind: str, content: str) -> tuple[object, ...]:
     )
     return (
         path, category_for(kind), "public", "*", "verified", "active",
-        _content_hash(content), None, "[]",
+        source_hash or _content_hash(content), None, "[]",
         _chunk_digests(content) if kind == "memory" else "[]",
         "", 1.0, attested,
     )
 
 
 def _brain_documents(
-    repository: Path, config: dict[str, Any]
+    repository: Path, config: dict[str, Any], stored: Optional[dict[str, str]] = None
 ) -> tuple[
     list[tuple[str, str, str, str, str]],
     list[tuple[object, ...]],
     list[dict[str, str]],
     list[tuple[str, str, str]],
+    dict[str, str],
 ]:
+    """The eligible Brain records and handoffs as index rows, their links, and
+    index-state entries to store with them (the tracked-file cache)."""
+    file_candidates: dict[str, tuple[str, int, list[str]]] = {}
+    state_updates: dict[str, str] = {}
     documents: list[tuple[str, str, str, str, str]] = []
     metadata_rows: list[tuple[object, ...]] = []
     excluded: list[dict[str, str]] = []
@@ -1660,6 +1806,15 @@ def _brain_documents(
             )
         )
         links.extend(_link_rows(relative, record.get("sources")))
+        if record["type"] == "task":
+            files = [
+                file[2:] if file.startswith("./") else file
+                for file in record["files"][-FILE_LINK_RECORD_LIMIT:]
+                if isinstance(file, str)
+            ]
+            files = [file for file in files if _file_link_problem(file) is None]
+            if files:
+                file_candidates[relative] = (record["id"], int(record["revision"]), files)
     handoffs = brain_root(repository) / "control" / "handoffs"
     if handoffs.is_dir():
         for path in sorted(handoffs.glob("*.md")):
@@ -1694,7 +1849,28 @@ def _brain_documents(
             # From the handoff's own frontmatter, not the task's: the link
             # describes what this document declares.
             links.extend(_link_rows(relative, handoff.get("sources")))
-    return documents, metadata_rows, excluded, links
+    if file_candidates:
+        union = sorted({file for _, _, files in file_candidates.values() for file in files})
+        key = hashlib.sha256(json.dumps(
+            [union, sorted((identifier, revision) for identifier, revision, _ in file_candidates.values())]
+        ).encode("utf-8")).hexdigest()
+        try:
+            cached = json.loads((stored or {}).get(FILE_LINK_TRACKED_KEY) or "{}")
+        except ValueError:
+            cached = {}
+        tracked: Optional[set[str]]
+        if isinstance(cached, dict) and cached.get("key") == key:
+            # Asked once per change of the tasks' files, never per prompt.
+            tracked = set(cached.get("tracked") or []) & set(union)
+        else:
+            tracked = _tracked_paths(repository, union)
+            if tracked is not None:
+                state_updates[FILE_LINK_TRACKED_KEY] = json.dumps(
+                    {"key": key, "tracked": sorted(tracked)}
+                )
+        for relative, (_, _, files) in file_candidates.items():
+            links.extend(_file_link_rows(relative, files, tracked or set()))
+    return documents, metadata_rows, excluded, links, state_updates
 
 
 def _layer_counts(connection: sqlite3.Connection) -> tuple[int, dict[str, int]]:
@@ -1731,12 +1907,18 @@ def index_documents(
     retained: Optional[SourceState] = None,
     source_state: Optional[SourceState] = None,
     fingerprints: Optional[dict[str, str]] = None,
+    source_hashes: Optional[dict[str, str]] = None,
 ) -> dict[str, object]:
     """Replace the index, reusing rows the caller proved unchanged.
 
     ``retained`` holds repository documents whose stat still matches the last
     successful index; their rows survive untouched and ``legacy_documents``
     then carries only the new or changed ones. ``None`` rebuilds everything.
+
+    ``source_hashes`` gives the file digest of a document whose indexed text
+    is not the file's text (masked secret values). Governed retrieval
+    re-hashes the file on disk, so the stored hash must be the file's, or the
+    document is excluded as stale on every turn.
 
     Project Brain records are always rebuilt: their eligibility depends on
     configuration, lifecycle, and cross-record conflict state rather than on
@@ -1758,12 +1940,12 @@ def index_documents(
         parity_drift = skill_mirror_drift(
             workspace_roots.tooling_root(repository), str(config["canonical_edition"])
         )
-    brain_documents, brain_metadata, excluded, brain_links = _brain_documents(
-        repository, config
+    brain_documents, brain_metadata, excluded, brain_links, state_updates = _brain_documents(
+        repository, config, stored
     )
     documents = [*legacy_documents, *brain_documents]
     metadata = [
-        _legacy_metadata(path, kind, content)
+        _legacy_metadata(path, kind, content, (source_hashes or {}).get(path))
         for path, _, kind, _, _, content in legacy_documents
     ] + brain_metadata
     # Only durable chunks carry `sources` among repository documents; the rest
@@ -1863,6 +2045,7 @@ def index_documents(
                 # The index content changed, so every cache derived from it
                 # (token frequencies) is invalid from this point on.
                 INDEX_GENERATION_KEY: new_uuid(),
+                **state_updates,
             },
         )
         total, layers = _layer_counts(connection)
@@ -2100,6 +2283,201 @@ def required_coverage(tokens: list[str]) -> int:
     merely mentions a word from it.
     """
     return MIN_TOKEN_COVERAGE if len(tokens) >= MIN_TOKEN_COVERAGE else 1
+
+
+def episode_item(row: Any) -> dict[str, Any]:
+    """A local episode as the capsule carries it."""
+    return {
+        "id": row["id"],
+        "layer": "episodic",
+        "summary": row["summary"],
+        "outcome": row["outcome"],
+        "files": json.loads(row["files"]),
+        "verification": json.loads(row["verification"]),
+        "sources": json.loads(row["sources"]),
+        "created_at": row["created_at"],
+    }
+
+
+def history_query(connection: sqlite3.Connection, text: str) -> Optional[dict[str, Any]]:
+    """The terms of a request that reach recorded history, and the bar for it.
+
+    Recorded history - Project Brain events and local episodes - is matched by
+    its subject only (an event's title and goal, an episode's summary and
+    outcome) against every informative term of the whole request, not the 24
+    the main query keeps: an event's words also occur in the changelog, the
+    README and the task documents, so they are never among the corpus-rarest,
+    and the distillation dropped every subject term of all 13 answer-holding
+    events on the evaluated prompts.
+
+    An item is admitted when it covers `required_coverage` distinct terms and
+    its matched terms weigh at least that many terms that each occur in a
+    single indexed document - evidence no likelier by chance than as many
+    unique words co-occurring. The weights are those excerpt_weights uses;
+    no constant is tuned. Of the terms that reach any history subject the
+    CAPSULE_PROMPT_TERM_LIMIT rarest count, so a long prompt cannot win by
+    length. Nothing here is persisted.
+    """
+    try:
+        tokens = evidence_tokens(query_tokens(text))
+    except RetrievalError:
+        return None
+    if not tokens:
+        return None
+    try:
+        documents = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        events_indexed = connection.execute(
+            "SELECT COUNT(*) FROM documents WHERE kind = ?", (HISTORY_KIND,)
+        ).fetchone()[0]
+    except sqlite3.Error:
+        return None
+    try:
+        episodes = connection.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+    except sqlite3.Error:
+        episodes = 0
+    total = documents + episodes
+    if not total or not (events_indexed or episodes):
+        return None
+    frequencies = token_document_frequencies(connection, tokens)
+    events: dict[str, set[str]] = {}
+    recorded: dict[str, set[int]] = {}
+    counts: dict[str, int] = {}
+    for token in tokens:
+        events[token] = set()
+        recorded[token] = set()
+        if events_indexed and frequencies.get(token):
+            try:
+                events[token] = {
+                    row[0] for row in connection.execute(
+                        "SELECT path FROM documents WHERE documents MATCH ? AND kind = ?",
+                        (f'summary : "{token}"', HISTORY_KIND),
+                    )
+                }
+            except sqlite3.Error:
+                pass
+        if episodes:
+            try:
+                recorded[token] = {
+                    row[0] for row in connection.execute(
+                        "SELECT rowid FROM episodes WHERE episodes MATCH ?",
+                        (f'{{summary outcome}} : "{token}"',),
+                    )
+                }
+            except sqlite3.Error:
+                pass
+        # `complete` writes an event and an equivalent episode: counting both
+        # would make the event's own words look common, so an episode adds to
+        # a term's frequency only where no document has the term.
+        counts[token] = frequencies.get(token) or len(recorded[token])
+    pool = [token for token in tokens if 0 < counts[token] <= total * STOPWORD_DOCUMENT_RATIO]
+    reach = [token for token in pool if events[token] or recorded[token]]
+    if not reach:
+        return None
+    position = {token: index for index, token in enumerate(tokens)}
+    terms = sorted(reach, key=lambda token: (counts[token], position[token]))[
+        :CAPSULE_PROMPT_TERM_LIMIT
+    ]
+    terms.sort(key=position.__getitem__)
+    minimum = required_coverage(pool)
+    return {
+        "terms": terms,
+        "weights": {
+            token: max(0.05, math.log((total + 1) / (counts[token] + 0.5))) for token in terms
+        },
+        "minimum": minimum,
+        "floor": minimum * max(0.05, math.log((total + 1) / 1.5)),
+        "events": {token: events[token] for token in terms},
+        "episodes": {token: recorded[token] for token in terms},
+    }
+
+
+def _history_candidates(
+    connection: sqlite3.Connection, history: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[tuple[float, float, dict[str, Any]]]]:
+    """Admitted events, ranked like candidates, and admitted episodes as
+    (ranked score, matched weight, episode)."""
+    def admitted(members: dict[str, set[Any]]) -> dict[Any, float]:
+        count: dict[Any, int] = {}
+        mass: dict[Any, float] = {}
+        for token, found in members.items():
+            for member in found:
+                count[member] = count.get(member, 0) + 1
+                mass[member] = mass.get(member, 0.0) + history["weights"][token]
+        # The tolerance keeps a match of exactly `minimum` unique terms on
+        # the right side of float rounding.
+        return {
+            member: mass[member]
+            for member in count
+            if count[member] >= history["minimum"] and mass[member] + 1e-9 >= history["floor"]
+        }
+
+    event_mass = admitted(history["events"])
+    events: list[dict[str, Any]] = []
+    if event_mass:
+        marks = ",".join("?" for _ in event_mass)
+        rows = connection.execute(
+            f"""
+            SELECT
+                d.rowid AS document_rowid, d.path, d.layer, d.kind, d.title,
+                m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+                m.source_hash, m.record_id, m.conflicts,
+                m.source_fingerprints, m.updated_at, m.confidence, m.attestation
+            FROM documents AS d
+            JOIN document_metadata AS m ON m.path = d.path
+            WHERE d.kind = ? AND d.path IN ({marks})
+            """,
+            (HISTORY_KIND, *sorted(event_mass)),
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            item["conflicts"] = json.loads(item["conflicts"])
+            item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+            item["match"] = "covered"
+            item["score"] = -event_mass[item["path"]]
+            item["adjusted_score"] = event_mass[item["path"]] * ranking_weight(
+                item["authority"], item["confidence"], item["updated_at"]
+            )
+            events.append(item)
+        events.sort(key=lambda item: (-item["adjusted_score"], item["path"]))
+        for rank, item in enumerate(events, start=1):
+            item["rank"] = rank
+        _quote_candidates(connection, events, " ".join(history["terms"]), history["terms"])
+    episode_mass = admitted(history["episodes"])
+    episodes: list[tuple[float, float, dict[str, Any]]] = []
+    if episode_mass:
+        marks = ",".join("?" for _ in episode_mass)
+        rows = connection.execute(
+            "SELECT rowid AS id, summary, outcome, files, verification, sources, created_at "
+            f"FROM episodes WHERE rowid IN ({marks})",
+            tuple(sorted(episode_mass)),
+        ).fetchall()
+        for row in rows:
+            episode = episode_item(row)
+            mass = episode_mass[row["id"]]
+            episodes.append((mass * ranking_weight("observed", 1.0, row["created_at"]), mass, episode))
+        episodes.sort(key=lambda entry: (-entry[0], -int(entry[2]["id"])))
+    return events, episodes
+
+
+def _best_history_event(
+    repository: Path, events: list[dict[str, Any]], config: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """The best admitted event that passes the runtime filters.
+
+    The filters only remove a candidate or lower its score, so once the next
+    candidate's unfiltered score cannot beat the best filtered one, no later
+    one can: usually one or two files are read, however many events exist.
+    """
+    best: Optional[dict[str, Any]] = None
+    excluded: list[dict[str, str]] = []
+    for item in events:
+        if best is not None and item["adjusted_score"] <= best["adjusted_score"]:
+            break
+        kept, dropped = _runtime_filter(repository, [item], config)
+        excluded.extend(dropped)
+        if kept and (best is None or kept[0]["adjusted_score"] > best["adjusted_score"]):
+            best = kept[0]
+    return ([best] if best is not None else []), excluded
 
 
 # The part of a document a capsule quotes. A capsule that names a document
@@ -2457,7 +2835,10 @@ def delivery_identity(
     """
     path = str(item["path"])
     revision = str(item.get("source_hash") or "")
-    if item.get("layer") == "procedural" or item.get("match") == "distinctive":
+    if (
+        item.get("layer") == "procedural" or item.get("match") == "distinctive"
+        or item.get("selection") in AUTOMATIC_LINK_SELECTIONS
+    ):
         return path, revision
     marked = marked_document(connection, path, query)
     section = (
@@ -2575,13 +2956,17 @@ def _candidates(
     The diagnostics are computed here anyway and were discarded at the end of
     the call. A gate that has to decide whether this turn is worth retrieving
     for cannot recompute them without repeating the work.
+
+    Project Brain events are not candidates here: they reach the capsule only
+    through their own search (`history_query`), so they neither take rows of
+    this window nor set the episodic floor the changelog is held to.
     """
     ensure_metadata_tables(connection)
     tokens = informative_tokens(connection, query_tokens(query))
     evidence = evidence_tokens(tokens)
     if not evidence:
         # Nothing in the request is about anything: "thanks", "ok, go on".
-        return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None}
+        return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None, "coverage": {}}
     coverage, distinctive = token_coverage(connection, evidence)
     minimum = required_coverage(evidence)
     rows = connection.execute(
@@ -2594,11 +2979,11 @@ def _candidates(
             bm25(documents, ?, ?, ?, ?, ?, ?) AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
-        WHERE documents MATCH ?
+        WHERE documents MATCH ? AND d.kind != ?
         ORDER BY score, d.path
         LIMIT ?
         """,
-        (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), limit),
+        (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), HISTORY_KIND, limit),
     ).fetchall()
     result = []
     for row in rows:
@@ -2654,6 +3039,9 @@ def _candidates(
         "top_score": (
             round(float(result[0]["adjusted_score"]), 6) if result else None
         ),
+        # Internal, never serialized (gate signals name their keys): how many
+        # distinct query terms each document holds, for the file-edge channel.
+        "coverage": coverage,
     }
     return result, diagnostics
 
@@ -3078,6 +3466,8 @@ def _runtime_filter(
                 content = path.read_text(encoding="utf-8") if path.is_file() else None
             except OSError:
                 content = None
+            # `source_hash` is the file's digest even when the indexed text is
+            # masked, so this compares the file with the file it was indexed from.
             if content is None or _content_hash(content) != candidate["source_hash"]:
                 reason = "stale"
         if reason is None and candidate["kind"] == "codebase" and content is not None:
@@ -3183,8 +3573,13 @@ def linked_documents(
     *,
     prefix: bool = False,
     max_rows: Optional[int] = None,
+    ref_kinds: tuple[str, ...] = ("source",),
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Every eligible document that declares `reference` among its sources.
+
+    ``ref_kinds`` defaults to citations. `file` rows mean an active task
+    touched the path, not that it cites it; only `links` and the automatic
+    seed channel read them.
 
     Routed through `_runtime_filter` rather than reimplementing its checks,
     because a link query is a retrieval and the same policy has to apply.
@@ -3207,6 +3602,10 @@ def linked_documents(
         parameters = (reference,)
     if max_rows is not None and (type(max_rows) is not int or max_rows < 1):
         raise RetrievalError("Source-link row limit must be a positive integer")
+    if not ref_kinds or not set(ref_kinds) <= set(LINK_KINDS):
+        raise RetrievalError(f"Link kinds must be among: {', '.join(LINK_KINDS)}")
+    predicate = f"({predicate}) AND l.ref_kind IN ({', '.join('?' for _ in ref_kinds)})"
+    parameters = (*parameters, *ref_kinds)
     rows = connection.execute(
         f"""
         SELECT
@@ -3230,6 +3629,230 @@ def linked_documents(
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         candidates.append(item)
     return _runtime_filter(repository, candidates, config)
+
+
+_PROMPT_PATH = re.compile(
+    r"(?<![\w@:/\\.-])(?:\./)?((?:[\w.-]+/)+[\w-]+(?:\.[\w-]+)*\.[A-Za-z0-9]{1,8})(?![\w/-])"
+)
+_PROMPT_ABSOLUTE = re.compile(r"(?<![\w.-])(/(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,8})")
+_PROMPT_BACKSLASH = re.compile(r"(?<![\w\\])((?:[\w.-]+\\)+[\w.-]+\.[A-Za-z0-9]{1,8})")
+_PROMPT_FQCN = re.compile(r"\\?((?:[A-Z][A-Za-z0-9_]*\\+)+[A-Z][A-Za-z0-9_]*)")
+_PROMPT_BARE_FILE = re.compile(r"(?<![\w/\\.-])([\w-]+\.[A-Za-z0-9]{1,8})(?![\w/-])")
+_PROMPT_SYMBOL = re.compile(r"(?<![\w\\$])([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]*)+)(?![\w\\(])")
+COMPOSER_READ_LIMIT = 256 * 1024
+LINK_PATH_SCAN_LIMIT = 20000
+
+
+def _composer_psr4(project: Path) -> list[tuple[str, list[str]]]:
+    """composer.json's PSR-4 prefixes (autoload and autoload-dev), longest
+    first, each with its directories; nothing when it cannot be read."""
+    path = project / "composer.json"
+    try:
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > COMPOSER_READ_LIMIT:
+            return []
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+    prefixes: dict[str, list[str]] = {}
+    for section in ("autoload", "autoload-dev"):
+        mapping = document.get(section, {}).get("psr-4") if isinstance(document.get(section), dict) else None
+        if not isinstance(mapping, dict):
+            continue
+        for prefix, directories in mapping.items():
+            if not isinstance(prefix, str):
+                continue
+            key = prefix.rstrip("\\") + "\\" if prefix else ""
+            for directory in directories if isinstance(directories, list) else [directories]:
+                if not isinstance(directory, str):
+                    continue
+                directory = directory[2:] if directory.startswith("./") else directory
+                directory = directory.rstrip("/")
+                if directory and source_path_problem(directory + "/x.php"):
+                    continue
+                prefixes.setdefault(key, []).append(directory)
+    return sorted(prefixes.items(), key=lambda entry: -len(entry[0]))
+
+
+def prompt_path_seeds(connection: sqlite3.Connection, repository: Path, text: str) -> list[str]:
+    """Paths the request names - written out, as a PHP class (through
+    composer.json's PSR-4 map), or as a bare file or class name - that some
+    document is linked to. Read in memory only: nothing is written anywhere.
+    """
+    text = text[:PROMPT_SEED_SCAN_CHARS]
+    project = workspace_roots.project_root(repository)
+    found: list[str] = []
+    found.extend(_PROMPT_PATH.findall(text))
+    root = project.as_posix().rstrip("/") + "/"
+    for absolute in _PROMPT_ABSOLUTE.findall(text):
+        if absolute.startswith(root):
+            found.append(absolute[len(root):])
+    found.extend(path.replace("\\", "/") for path in _PROMPT_BACKSLASH.findall(text))
+    names = [re.sub(r"\\+", "\\\\", name) for name in _PROMPT_FQCN.findall(text)]
+    bare = [name for name in _PROMPT_BARE_FILE.findall(text) if "/" not in name]
+    symbols = _PROMPT_SYMBOL.findall(text)
+    if names:
+        for name in names:
+            for prefix, directories in _composer_psr4(project):
+                if not name.startswith(prefix):
+                    continue
+                rest = name[len(prefix):].replace("\\", "/")
+                found.extend(
+                    (f"{directory}/{rest}.php" if directory else f"{rest}.php") for directory in directories[:2]
+                )
+                break
+    linked_paths: Optional[list[str]] = None
+
+    def link_paths() -> list[str]:
+        nonlocal linked_paths
+        if linked_paths is None:
+            linked_paths = [
+                row[0] for row in connection.execute(
+                    "SELECT DISTINCT ref_path FROM document_links WHERE ref_kind IN ('source', 'file') LIMIT ?",
+                    (LINK_PATH_SCAN_LIMIT,),
+                )
+            ]
+        return linked_paths
+
+    for name in names:
+        segments = name.split("\\")
+        if len(segments) > 1:
+            suffix = "/".join(segments[1:]) + ".php"
+            found.extend([path for path in link_paths() if path.endswith("/" + suffix)][:2])
+    for name in bare:
+        found.extend([path for path in link_paths() if path.rsplit("/", 1)[-1] == name][:2])
+    for symbol in symbols:
+        found.extend([
+            path for path in link_paths()
+            if posixpath.splitext(path.rsplit("/", 1)[-1])[0] == symbol
+        ][:2])
+    seeds: list[str] = []
+    for path in dict.fromkeys(item[2:] if item.startswith("./") else item for item in found):
+        if len(seeds) >= PROMPT_SEED_LIMIT:
+            break
+        if _file_link_problem(path) is not None:
+            continue
+        if connection.execute(
+            "SELECT 1 FROM document_links WHERE ref_path = ? LIMIT 1", (path,)
+        ).fetchone():
+            seeds.append(path)
+    return seeds
+
+
+def _automatic_link_candidates(
+    connection: sqlite3.Connection,
+    repository: Path,
+    config: dict[str, Any],
+    seeds: list[tuple[str, str]],
+    filtered: list[dict[str, Any]],
+    *,
+    own_paths: set[str],
+    coverage: dict[str, int],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """At most FILE_LINK_LIMIT documents linked to a seed path, shaped like
+    ranked candidates and marked `prompt-link` or `touch-link`.
+
+    A seed is a path the request named (`prompt`) or the current task touched
+    (`touch`). It reaches documents that cite it (`source` rows) and other
+    active tasks that touched it (`file` rows); a path linked from more than
+    FILE_LINK_HUB_LIMIT documents is a hub and reaches nothing. A document
+    reached only through touched files must also share an informative query
+    term: file sharing alone is dense on real projects, and "continue" must
+    not hand over a sibling task.
+    """
+    blocked = {item["path"] for item in filtered if item.get("match") != "distinctive"} | own_paths
+    found: dict[str, dict[str, Any]] = {}
+    for index, (seed, origin) in enumerate(seeds):
+        for kind_rank, kind in enumerate(LINK_KINDS):
+            rows = [
+                row[0] for row in connection.execute(
+                    "SELECT path FROM document_links INDEXED BY document_links_source_path "
+                    "WHERE ref_path = ? AND ref_kind = ? ORDER BY path LIMIT ?",
+                    (seed, kind, FILE_LINK_HUB_LIMIT + 1 + len(own_paths)),
+                )
+            ]
+            others = [path for path in rows if path not in own_paths]
+            if len(others) > FILE_LINK_HUB_LIMIT:
+                continue
+            for path in others:
+                if path in blocked:
+                    continue
+                rank = (0 if origin == "prompt" else 1, kind_rank, index)
+                entry = found.setdefault(path, {"rank": rank, "seeds": set(), "via": seed, "prompt": False})
+                if rank < entry["rank"]:
+                    entry["rank"], entry["via"] = rank, seed
+                entry["seeds"].add(seed)
+                entry["prompt"] = entry["prompt"] or origin == "prompt"
+    if not found:
+        return [], []
+    pool = sorted(found, key=lambda path: (*found[path]["rank"], -len(found[path]["seeds"]), path))
+    pool = pool[:FILE_LINK_POOL]
+    marks = ",".join("?" for _ in pool)
+    rows = connection.execute(
+        f"""
+        SELECT
+            d.path, d.layer, d.kind, d.title, d.content,
+            m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+            m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
+            m.updated_at, m.confidence, m.attestation
+        FROM documents AS d
+        JOIN document_metadata AS m ON m.path = d.path
+        WHERE d.path IN ({marks})
+        """,
+        pool,
+    ).fetchall()
+    candidates = []
+    for row in rows:
+        item = dict(row)
+        content = str(item.pop("content") or "")
+        if item["layer"] != "semantic" or item["category"] not in ("durable", "dynamic"):
+            continue
+        item["conflicts"] = json.loads(item["conflicts"])
+        item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        if item["conflicts"] or _has_incoming_conflict(connection, item.get("record_id")):
+            continue
+        entry = found[item["path"]]
+        if not entry["prompt"] and coverage.get(item["path"], 0) < 1:
+            continue
+        item["_body"] = content
+        candidates.append(item)
+    eligible, _ = _runtime_filter(repository, candidates, config)
+    eligible.sort(key=lambda item: (
+        found[item["path"]]["rank"], bool(item.get("source_changed")),
+        "".join(chr(0x10FFFF - ord(char)) for char in str(item.get("updated_at") or "")), item["path"],
+    ))
+    for item in eligible:
+        entry = found[item["path"]]
+        item["selection"] = "prompt-link" if entry["prompt"] else "touch-link"
+        item["via"] = entry["via"]
+        item["match"] = None
+        item["rank"] = None
+        item["adjusted_score"] = 0.0
+        item["snippet"] = _body_snippet(item.pop("_body"))
+        item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
+    for item in candidates:
+        item.pop("_body", None)
+    return eligible[:FILE_LINK_LIMIT], [
+        {"path": item["path"], "reason": "file-link-limit"} for item in eligible[FILE_LINK_LIMIT:]
+    ]
+
+
+def _insert_automatic_links(
+    filtered: list[dict[str, Any]], linked: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """`filtered` with the linked documents placed after its last strong
+    semantic match (or explicit path link) and before weak matches; a weak
+    match that a link confirms moves there. Nothing else changes order."""
+    if not linked:
+        return filtered
+    moved = {item["path"] for item in linked}
+    rest = [item for item in filtered if item["path"] not in moved]
+    anchors = [
+        index for index, item in enumerate(rest)
+        if item.get("selection") == "path-link"
+        or (item["category"] != "policy" and item["layer"] != "episodic" and item.get("match") == "covered")
+    ]
+    position = anchors[-1] + 1 if anchors else 0
+    return rest[:position] + linked + rest[position:]
 
 
 def _shared_source_documents(
@@ -3413,8 +4036,11 @@ def _source_link_candidates(
         if remaining <= 0:
             stats["truncated"] = True
             break
+        # Citations only: an active task that merely touched the anchor is
+        # not a neighbour of what the anchor says.
         linked, withheld = linked_documents(
             connection, repository, config, anchor["path"], max_rows=remaining,
+            ref_kinds=("source",),
         )
         stats["anchors"] += 1
         count = len(linked) + len(withheld)
@@ -3643,6 +4269,9 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
         # Checked only by the agent that wrote it: worth reading, and worth
         # checking before relying on it.
         public["attestation"] = "agent"
+    if item.get("via"):
+        # The path an automatic link came through; capsule JSON only.
+        public["via"] = item["via"]
     return public
 
 
@@ -3661,7 +4290,8 @@ def retrieve(
     paths: Optional[list[str]] = None,
     host: str = "cli",
     entry_point: str = "retrieve",
-    local_episodes: Optional[list[dict[str, Any]]] = None,
+    history_text: Optional[str] = None,
+    automatic_seeds: Optional[dict[str, list[str]]] = None,
     session_id: Optional[str] = None,
     transcript: Optional[str] = None,
     pack: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
@@ -3681,6 +4311,14 @@ def retrieve(
     not depend on a task. Without a task there is no working state and no
     own record to exclude, and the manifest stays in ignored local state:
     governed history is kept per task.
+
+    ``history_text`` is the text recorded history is searched with - the whole
+    request, where ``query`` is its distilled form; ``query`` when omitted.
+
+    ``automatic_seeds`` - only automatic entry points pass it - names paths
+    the request mentions (`prompt`) and the current task touched (`touched`);
+    one document linked to them may join the semantic layer after the strong
+    matches (`_automatic_link_candidates`).
 
     ``pack`` turns the result into the capsule as the caller delivers it -
     the layer and character limits of its JSON, the ceiling of its rendered
@@ -3720,14 +4358,17 @@ def retrieve(
         task_path, task, _ = find_task(repository, task_identifier)
         validate_record(task)
     config = load_config(repository)
-    local_episodes = list(local_episodes or [])
     candidates, diagnostics = _candidates(connection, query, max(20, limit * 10))
+    # Recorded history has its own search over the whole request: events and
+    # local episodes share one slot beside the changelog's.
+    history = history_query(connection, query if history_text is None else history_text)
+    event_candidates, episode_candidates = (
+        _history_candidates(connection, history) if history else ([], [])
+    )
     # Taken before any filter runs, so "nothing matched" cannot be confused
-    # with "everything that matched was withheld". Only the layers a governed
-    # capsule fills from this call are answered for; the episodic layer is
-    # assembled by the caller and reports itself.
+    # with "everything that matched was withheld".
     matched_layers = {item["layer"] for item in candidates}
-    if local_episodes:
+    if event_candidates or episode_candidates:
         matched_layers.add("episodic")
     no_match = [
         layer
@@ -3739,6 +4380,16 @@ def retrieve(
     # again keeps fresh knowledge of equal fit ahead of it. Stable, so
     # nothing else moves.
     filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
+    chosen_event, history_excluded = _best_history_event(repository, event_candidates, config)
+    filter_excluded.extend(history_excluded)
+    history_episode: list[dict[str, Any]] = []
+    if episode_candidates and (
+        not chosen_event or episode_candidates[0][0] > chosen_event[0]["adjusted_score"]
+    ):
+        # Ties go to the event: it is the team's record, the episode a
+        # machine-local note of the same kind.
+        history_episode, chosen_event = [episode_candidates[0][2]], []
+    history_paths = {item["path"] for item in chosen_event}
     graph_anchors = [
         item for item in filtered
         if item["layer"] == "semantic" and item.get("match") == "covered"
@@ -3758,20 +4409,46 @@ def retrieve(
             repository,
             config,
             paths,
-            {item["path"] for item in filtered},
+            {item["path"] for item in filtered} | history_paths,
         )
         path_matched_count = len(linked) + len(link_excluded)
         filter_excluded.extend(link_excluded)
         # Ahead of the query's own matches, because `_apply_budgets` and the
         # per-layer ladder both honour input order and the caller named these.
         filtered = [*linked, *filtered]
+    if automatic_seeds is not None:
+        own_paths: set[str] = set()
+        if task_path is not None and task is not None:
+            own_paths = {
+                task_path.relative_to(repository).as_posix(),
+                handoff_path(repository, task["id"]).relative_to(repository).as_posix(),
+            }
+        task_files = list(reversed(task["files"])) if task is not None else []
+        seeds = [(path, "prompt") for path in automatic_seeds.get("prompt", [])[:PROMPT_SEED_LIMIT]]
+        touched = [
+            path for path in [*automatic_seeds.get("touched", []), *task_files]
+            if _file_link_problem(path) is None
+        ]
+        seeds += [(path, "touch") for path in list(dict.fromkeys(touched))[:TOUCH_SEED_LIMIT]]
+        unique: dict[str, tuple[str, str]] = {}
+        for path, origin in seeds:
+            unique.setdefault(path, (path, origin))
+        automatic_linked, automatic_excluded = _automatic_link_candidates(
+            connection, repository, config, list(unique.values()), filtered,
+            own_paths=own_paths | history_paths, coverage=diagnostics.get("coverage") or {},
+        )
+        filter_excluded.extend(automatic_excluded)
+        filtered = _insert_automatic_links(filtered, automatic_linked)
     graph_candidates, graph_stats = _source_link_candidates(
         connection, repository, config, graph_anchors,
-        {item["path"] for item in filtered},
+        {item["path"] for item in filtered} | history_paths,
     )
     # Related knowledge fills remaining capacity after direct matches and
     # explicit paths; provenance alone never gives it priority over them.
     filtered.extend(graph_candidates)
+    # The history search's event goes through the same conflict expansion,
+    # exclusions and budget as everything else, ahead in the budget queue.
+    filtered = [*chosen_event, *filtered]
     # A promoted chunk and the record it was promoted from say the same thing,
     # and both used to take a slot. The chunk is the durable form, so the
     # record yields to it.
@@ -3862,11 +4539,29 @@ def retrieve(
         for item in selected
         if item["category"] == "policy" and item.get("match") != "distinctive"
     ]
+    # A skill's own sub-file at the head of that ranking does not hand its slot
+    # down: the next skill is a weaker match for a request whose best
+    # procedural match was a detail inside some skill (19 replayed turns:
+    # refilling added 0 useful skills and 5 noise).
+    head = procedural_ranked[:CAPSULE_PROCEDURAL_LIMIT]
+    vacated_paths = {
+        item["path"] for item in head
+        if not procedural_slot_eligible(item["kind"], item["path"])
+    }
+    procedural_ranked = [item for item in head if item["path"] not in vacated_paths]
+    # Nor does the pick go into the capsule. Every host lists its skills and
+    # loads its instruction files itself, and in real sessions agents took
+    # none of the 71 skills a capsule named - no Skill call, no SKILL.md read
+    # on those turns - while accelerator skills were used on 1.1% of Claude
+    # turns at all. The line cost room the answer-bearing excerpts need; the
+    # pick stays in the manifest as `host-listed` and `search` finds skills.
+    listed_paths = {item["path"] for item in procedural_ranked}
+    procedural_ranked = []
     # The semantic layer is built from categories and the episodic layer from
     # the layer column, and the two taxonomies overlap: `category_for` has no
     # `changelog` branch, so CHANGELOG.md is category 'evidence' AND layer
     # 'episodic'. Without this filter it takes one of the three semantic slots
-    # and the single episodic slot at once, and the degradation ladder then
+    # and an episodic slot at once, and the degradation ladder then
     # drops real content to stay inside the budget. Filtering here rather than
     # after the split matters twice over: the freed slot goes to the next
     # ranked candidate instead of being lost, and the manifest written below
@@ -3884,14 +4579,24 @@ def retrieve(
     # governed records live there. Ranking it here puts it through the same
     # filters, the same budget and the same audit record as everything else,
     # and makes H1-03's `episodic-layer` exclusion reason literally true.
-    episodic_ranked = [item for item in selected if item["layer"] == "episodic"]
+    episodic_ranked = [
+        item for item in selected
+        if item["layer"] == "episodic" and item["kind"] != HISTORY_KIND
+    ]
+    # The history search's event first; an event a path or a conflict brought
+    # in only after it.
+    event_ranked = [
+        item for item in selected
+        if item["layer"] == "episodic" and item["kind"] == HISTORY_KIND
+    ]
     capsule_selected = [
         *procedural_ranked[:CAPSULE_PROCEDURAL_LIMIT],
         *semantic_ranked[:CAPSULE_SEMANTIC_LIMIT],
+        *event_ranked[:CAPSULE_EVENT_LIMIT],
         *episodic_ranked[:CAPSULE_EPISODIC_LIMIT],
     ]
-    local_episode_selected = local_episodes[
-        : max(0, CAPSULE_EPISODIC_LIMIT - len(episodic_ranked[:CAPSULE_EPISODIC_LIMIT]))
+    local_episode_selected = history_episode[
+        : max(0, CAPSULE_EVENT_LIMIT - len(event_ranked[:CAPSULE_EVENT_LIMIT]))
     ]
     local_episode_tokens = sum(
         _estimate_tokens(_serialized_episode(episode))
@@ -3969,7 +4674,10 @@ def retrieve(
             # A document held back because its own layer will carry it is not
             # a document that ran out of room.
             "reason": (
-                "episodic-layer" if item["layer"] == "episodic" else "layer-limit"
+                "episodic-layer" if item["layer"] == "episodic"
+                else "skill-subfile" if item["path"] in vacated_paths
+                else "host-listed" if item["path"] in listed_paths
+                else "layer-limit"
             ),
         }
         for item in selected
@@ -4006,7 +4714,9 @@ def retrieve(
         previous=previous if isinstance(previous, dict) else None,
         diagnostics=diagnostics,
         no_match=no_match,
-        matched_count=len(candidates) + len(local_episodes) + path_matched_count,
+        matched_count=(
+            len(candidates) + len(event_candidates) + len(episode_candidates) + path_matched_count
+        ),
         selected_count=len(selected) + len(local_episode_selected),
         # The selection above already left out what this conversation holds.
         conversation=session is not None,
@@ -4030,19 +4740,30 @@ def retrieve(
         public = _public_item(item)
         groups[item["category"]].append(public)
     procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
+    history_items = [
+        item for group in groups.values() for item in group if item["layer"] == "episodic"
+    ]
+    # Recorded history (an event, or a local episode) first, then the
+    # changelog: the text ceiling shrinks from the tail, and the changelog's
+    # long sections are what gives way.
+    recorded = [item for item in history_items if item["kind"] == HISTORY_KIND][:CAPSULE_EVENT_LIMIT]
+    recorded.extend(local_episode_selected[: CAPSULE_EVENT_LIMIT - len(recorded)])
     episodic = [
-        item
-        for group in groups.values()
-        for item in group
-        if item["layer"] == "episodic"
-    ][:CAPSULE_EPISODIC_LIMIT]
-    episodic.extend(local_episode_selected[: CAPSULE_EPISODIC_LIMIT - len(episodic)])
+        *recorded,
+        *[item for item in history_items if item["kind"] != HISTORY_KIND][:CAPSULE_EPISODIC_LIMIT],
+    ]
+    # Episodic items are history, not knowledge slots: a delivered event used
+    # to be counted here too (category `dynamic`), then removed as a
+    # duplicate, and the third semantic item was lost with it.
     semantic = [
-        *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
+        item
+        for category in ("handoff", "durable", "dynamic", "evidence")
+        for item in groups[category]
+        if item["layer"] != "episodic"
     ][:CAPSULE_SEMANTIC_LIMIT]
     # Category grouping must not move related knowledge ahead of direct
     # hits when the renderer spends its character allowance.
-    semantic.sort(key=lambda item: item.get("selection") == "source-link")
+    semantic.sort(key=lambda item: item.get("selection") in ("source-link", *AUTOMATIC_LINK_SELECTIONS))
     result: dict[str, Any] = {
         "query": query,
         "task_id": task["external_id"] if task is not None else None,

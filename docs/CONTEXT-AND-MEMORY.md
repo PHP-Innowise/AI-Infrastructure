@@ -184,8 +184,7 @@ no record reports a completion that did not happen.
 `event` is the only record type mapped to the episodic layer. An `incident`
 stays semantic even though it is also a record of something that happened: an
 open incident is active, urgent, promotable content, and moving it to the
-single episodic slot would take it out of the runtime filters, the budget and
-the manifest.
+history slot would take it out of the semantic layer's three slots.
 
 The episodic slot of a governed capsule is ranked by `retrieve()` along with
 everything else. It used to be fetched separately by a query that never joined
@@ -195,11 +194,49 @@ That was harmless while the only episodic document was the changelog; it stops
 being harmless once governed records live there.
 
 Machine-local episodes also enter capsule assembly before the retrieval gate,
-not as an unaccounted append after it. They can fill only the unused part of the
-single episodic slot, contribute to the capsule and token ceilings, and their
-content hashes participate in repeat detection. A version 3 manifest records
-only `local_episode_count` and their aggregate
-`token_estimates.local_episodes`: it never stores a local episode ID or body.
+not as an unaccounted append after it. They share the recorded-history slot
+with events (below), contribute to the capsule and token ceilings, and their
+content hashes participate in repeat detection. A manifest records only
+`local_episode_count` and their aggregate `token_estimates.local_episodes`: it
+never stores a local episode ID or body.
+
+### Recorded history beside the changelog (2026-10-10)
+
+The episodic layer holds two items: the changelog, ranked by the main query as
+before, and one recorded history item - a Project Brain event or a local
+episode - found by a search of its own. They used to share one slot. On the 121
+evaluated prompts the changelog held it on every turn that had an event, while
+19 existing answers sat in 13 automatically written events that were never
+delivered; every subject term of those events had been dropped by the 24-term
+distillation, because an event's words also occur in the changelog, the README
+and the task documents and are never among the corpus-rarest.
+
+- **The search.** `history_query` matches every informative term of the whole
+  request (document frequency at most half the index) against the subject only
+  - an event's title and goal, an episode's summary and outcome - and keeps,
+  of the terms that reach any history subject, the 24 rarest, so a long prompt
+  cannot win by length. Events are no longer candidates of the main query: they
+  take none of its rows and do not set the episodic floor the changelog is held
+  to.
+- **The bar.** An item is admitted when it covers `required_coverage` distinct
+  terms and its matched terms weigh at least that many terms that each occur in
+  a single indexed document, `k * ln((N + 1) / 1.5)` with the weights
+  `excerpt_weights` uses: evidence no likelier by chance than as many unique
+  words co-occurring. Nothing is tuned to the evaluation prompts, and the bar
+  is absolute: it never admits the best item of a bad list.
+- **One slot.** The best admitted event that passes the runtime filters, or
+  the best local episode if it ranks higher (ties go to the event: `complete`
+  writes both). An episode adds to a term's frequency only where no document
+  has the term, so the twin does not make the event's own words look common.
+- **Render.** The history item renders before the changelog, so under the
+  3,600-character ceiling the changelog's long excerpt shrinks first; a local
+  episode now quotes its outcome, not only a summary.
+- **Cost.** At most two FTS lookups per informative term, only when events or
+  episodes exist: a few milliseconds per prompt.
+
+The governed JSON contract is 1/3/2; lightweight mode keeps one history item,
+because it has no such search. A delivered event no longer takes one of the
+three semantic slots on its way out, which had lost the third semantic item.
 
 ## Governed and Lightweight Ownership
 
@@ -353,14 +390,23 @@ The indexer discovers eligible files from fixed repository patterns, including:
 - eligible active Project Brain dynamic records and handoffs.
 
 Before reading a discovered repository document, the runtime excludes
-Git-ignored paths. It skips symlinks and non-files, rejects likely
-secret-bearing content, includes only validated active Memory Bank chunks, and
-requires UTF-8. Invalid UTF-8 aborts the refresh without replacing the prior
+Git-ignored paths. It skips symlinks and non-files, masks each value a secret
+pattern recognises in a repository document (`[redacted: <label>]`, the key
+such as `MAILER_PASSWORD` kept) and excludes a document whose masking does not
+converge, includes only validated active Memory Bank chunks (a chunk with a
+likely secret is still excluded whole), and requires UTF-8. The stored source
+hash of a masked document is the file's, so governed retrieval does not call it
+stale; `index --json` lists masked documents under `redacted` with a count of
+values, never the values. A change to the secret patterns re-reads every
+document once. Invalid UTF-8 aborts the refresh without replacing the prior
 index.
 
 For Brain records, eligibility is checked before insertion. Private,
-disallowed-privacy, disallowed-authority, terminal, superseded, stale, or
-invalid records are excluded with safe reason metadata. Handoffs are indexed
+disallowed-privacy, disallowed-authority, terminal, superseded, or invalid
+records, and records whose cited source was deleted (`source-missing`) or never
+digested (`source-undigested`), are excluded with safe reason metadata. A record
+whose cited file was edited is indexed; retrieval marks it `source_changed` and
+ranks it at half its score, as it does a chunk. Handoffs are indexed
 only when their task is eligible and the handoff validates against it.
 
 Indexing replaces the FTS document and metadata tables transactionally. It does
@@ -375,7 +421,10 @@ whose own `.gitignore` carried a bare `docs` entry indexed 96 accelerator
 skills, one `README.md`, and none of its own design documents, without a word.
 
 The same pass builds `document_links`, the reverse index of which document
-declares which source, read by `links` and by `retrieve --path`. It is derived
+declares which source (`ref_kind` `source`), read by `links` and by `retrieve
+--path`, and which active Brain task touched which file (`ref_kind` `file`,
+from the task's newest 50 `files[]` entries Git tracks, screened; see "Files
+the work touched" below), rebuilt with the records on every refresh. It is derived
 and disposable: rows follow their document, and when the table is absent the
 runtime drops the stat cache so the first index after an upgrade re-reads
 every candidate. Populating it incrementally would leave it complete only for
@@ -604,6 +653,52 @@ Three properties worth knowing when reading a manifest:
   way. The two answer different questions: whether the caller's words found
   anything there, and whether the caller's path did.
 
+`--path`, MCP `paths` and the automatic source-linked expansion read citations
+only (`source` rows); `links` also lists active tasks that touched the path
+(`touched <path>`).
+
+#### Files the work touched (2026-10-10)
+
+The source links above had nothing to stand on: on the 121 evaluated prompts
+the link table was empty in every snapshot, because no indexed record carried a
+source. What records do carry is `files[]`: the checkpoint writes the files a
+task's turns changed, and 12 of the 14 answers that tasks held on the evaluated
+prompts were entries of that list. A task's `files[]` now become `file` rows:
+
+- **Which files.** Only paths Git's index holds as files (one `git cat-file
+  --batch-check` per change of the tasks' files, cached in the index state, so
+  never per prompt; outside a checkout no row is written), project-relative,
+  and not sensitive, runtime state, build output, a lockfile, a directory or
+  secret-shaped. Only active tasks: completed ones are not indexed.
+- **Who reads them.** An automatic channel, on `refresh` (hooks, Harness, MCP
+  `memory_retrieve`) and `hook-context`, seeded by paths the request names -
+  written out, as a PHP class through `composer.json`'s PSR-4 map, or as a bare
+  file or class name that some link names - and by the files this branch
+  touched on its last turns and its task's newest `files[]`. A seed reaches the
+  documents that cite it and the other active tasks that touched it. Explicit
+  retrieval stays deterministic and does not seed.
+- **Restraint.** One item per capsule (`FILE_LINK_LIMIT`), placed after the
+  strong lexical matches inside the three semantic slots; a weak match a link
+  confirms moves there. A file linked from more than five documents is a hub
+  and reaches nothing. A document reached only through touched files must also
+  share an informative query term: file sharing is dense on real projects (on
+  two installations every active task shared a file with another), and
+  "continue" must not hand over a sibling task. The current task's own record
+  and handoff are never candidates.
+- **What it shows.** The item is marked `prompt-link` or `touch-link` in the
+  manifest (no `match`, no rank) and `linked through <path>` in the capsule; a
+  linked task quotes its goal and its files, the shared one first. Under the
+  capsule's 8,000- and 3,600-character limits a linked item (like a
+  `source-link`) is the first to give its place back, before history.
+- **Not done.** Edges through commits (record and commit, files changed
+  together) wait until live link density is measured: they add a second hop
+  over edges that are still sparse.
+
+The evaluation stand runs no hook and has no working task, so touched-file
+seeds are not measured there; their go/no-go is prospective - live `file` rows
+per project, the share of turns with a `prompt-link` or `touch-link`, and
+labels of what they delivered.
+
 ### Skill pointers in the procedural layer: a measured negative
 
 A separate idea was tested here and rejected on measurement, and the result is
@@ -645,6 +740,31 @@ the same runtime with two slots). The price is the bench's skill-routing view:
 an acceptable skill reaches the capsule on Symfony golden-en .59 instead of
 .71, because the second slot is gone; the ranking itself (hit@1, hit@2) is
 unchanged, and so is the routing floor, which measures ranking.
+
+**2026-10-10: a skill's sub-file never holds the procedural slot.** Files a
+`SKILL.md` sends the agent to - `references/`, `agents/`, `rules/`, an
+`AGENTS.md` inside a skill, a note at the tree's root such as `SKILL FLOW.md` -
+were useful 1 time in 185 judgments on 121 graded prompts, against 71 in 627
+for `SKILL.md`. When one heads the procedural ranking the slot stays empty and
+the manifest records `skill-subfile`; it is not refilled, because on the 19
+replayed turns where a sub-file held the slot the next skill down was useful on
+none (5 noise, 6 unjudged). The rule is structural - the file's place in its
+tree - not a score threshold. The sub-files stay indexed: `search` returns
+them. On a vacated turn `no-match` still reports that the procedural layer
+matched, as it does for a skill admitted on one rare term.
+
+**2026-10-10: the capsule carries no skill.** Measured in the real sessions of
+the five evaluated projects since January: on the 71 Claude Code turns where a
+capsule named an accelerator skill, the agent made no Skill call and read no
+`SKILL.md` at all; accelerator skills were used on 24 of 2,265 Claude turns
+(1.1%), and on Codex mostly because the user typed `$code-reviewer`. Of the 35
+graded core prompts with a useful skill, the agent used any accelerator skill
+on 4. Every host lists its skills and loads its instruction files itself, so
+the procedural line only took room from the excerpts that carry answers. The
+procedural ranking still runs: its pick is recorded in the manifest as
+`host-listed` (a sub-file pick as `skill-subfile`), `no_match` still reports
+the layer, and `search` returns skills. The evaluation stand reports skill
+routing apart from project knowledge (`skill_*`, `knowledge_*`).
 
 ### The retrieval gate
 
@@ -704,7 +824,8 @@ in one skip rate.
 
 Whatever the reason a document leaves, `index` names it rather than dropping
 it silently — `retired`, `overdue-review`, a non-active status, `invalid`, or
-`secret` — so a red validator and a quietly shrinking index can no longer
+`secret` (a chunk with a likely secret, or a document whose masking did not
+converge) — so a red validator and a quietly shrinking index can no longer
 disagree about the same chunk.
 
 ## Search and Governed Retrieval
@@ -878,8 +999,9 @@ filtered out.
 Freshness has three checks:
 
 - the indexed document's current hash must match the hash stored when indexed;
-- for Brain records and handoffs, cited source paths must still match the
-  stored source fingerprints;
+- for Brain records, handoffs and chunks, a cited source that no longer exists
+  excludes the document; one whose digest moved on keeps it, marked
+  `source_changed` and ranked at `SOURCE_CHANGED_WEIGHT`;
 - for a codebase map under `codebase/`, the commits landed on its
   `mapped_scope` since its `mapped_commit` must stay within
   `codebase_map_max_drift`.
@@ -970,11 +1092,12 @@ measurement.
 The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
-policy filtering, the delivered capsule is independently capped at 1
-procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
-Snippets are deterministically shortened as needed.
+policy filtering, the delivered capsule is independently capped at 3 semantic
+and 2 episodic items (the changelog and one recorded event or episode) and
+8,000 serialized characters; it carries no procedural item. Snippets are
+deterministically shortened as needed.
 
-A selected local episode uses only the remaining episodic slot. Its estimate is
+A selected local episode shares the recorded-history slot with events. Its estimate is
 included in `token_estimates.local_episodes` and in the total ceiling even
 though its identity and content are deliberately absent from the manifest.
 

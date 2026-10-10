@@ -310,9 +310,11 @@ python3 memory-bank/scripts/context.py index [--incremental] [--json]
 Rebuilds the disposable FTS5 document index from eligible policy, skills,
 documentation, specifications, active Memory Bank chunks, task documents,
 capability epics, changelog, active Brain records, and handoffs. It filters
-Git-ignored candidates before reading them, rejects likely secrets, deduplicates
-mirrored skills, and replaces the previous document/metadata index in one
-SQLite transaction.
+Git-ignored candidates before reading them, masks likely secret values in
+repository documents (and excludes Memory Bank chunks that carry one),
+deduplicates mirrored skills, and replaces the previous document/metadata index
+in one SQLite transaction. Its text output adds `Redacted: N value(s) in M
+document(s)` when masking happened; a masked document is cached like any other.
 
 `--incremental` reuses every row whose source modification time and size are
 unchanged **and whose calendar boundary has not passed**, so only new,
@@ -443,8 +445,9 @@ hard ceiling, with an escalation reason. Privacy, authority, lifecycle, owner,
 and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
 
-The delivered capsule has a separate final contract in both modes: at most 1
-procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
+The delivered capsule has a separate final contract: at most 3 semantic and 2
+episodic items (the changelog and one recorded event or episode; lightweight
+mode keeps one), no procedural item, and 8,000 serialized characters.
 Its working state carries the three newest next steps, the eight newest
 files, and four sources.
 
@@ -464,12 +467,19 @@ term. Eligible candidate tails below 30% of the best score in their own layer
 leave as `score-floor`, after privacy/freshness/host filtering. Explicit source
 links and conflicting evidence stay eligible.
 
-Two kinds of candidate never take a slot, and both are recorded in the
+Three kinds of candidate never take a slot, and all are recorded in the
 manifest's `excluded`. The task's own record and handoff leave as
 `working-task`: the state above already carries them. With `--host claude` or
 `--host codex` the instruction files that host loads by itself leave as
 `host-loaded` — `CLAUDE.md` and whatever it imports with `@path` for Claude
-Code, `AGENTS.md` for Codex. The default `--host cli` excludes neither.
+Code, `AGENTS.md` for Codex. The default `--host cli` excludes neither. A file
+under a skills tree other than a skill's own `SKILL.md` (`references/`,
+`agents/`, `rules/`, an `AGENTS.md` inside a skill, `SKILL FLOW.md`) never takes
+the procedural pick: when one ranks first it leaves as `skill-subfile`, with
+no next-skill refill. The capsule carries no procedural item at all - hosts
+list their skills and load their instruction files - and the pick a skill or
+instruction file would have been is recorded as `host-listed`. `search` still
+finds skills.
 
 It also reports the quality of what it found. `no-match: <layers>` names the
 layers where no candidate passed the relevance test — measured before any

@@ -164,6 +164,16 @@ class TaskContextTests(unittest.TestCase):
         self.addCleanup(builder.stop)
         self.addCleanup(self.close_managers)
 
+    def test_a_capsule_with_a_changelog_and_an_event_is_valid(self):
+        task = {'external_id': 'TASK-H', 'id': 'uuid-h', 'revision': 2}
+        capsule = {'task_id': 'TASK-H', 'task_uuid': 'uuid-h', 'task_revision': 2,
+                   'working': {'task_id': 'TASK-H'}, 'procedural': [], 'semantic': [],
+                   'episodic': [{'path': 'project-brain/dynamic/events/x.md'}, {'path': 'CHANGELOG.md'}]}
+        TaskContext._validate_capsule(capsule, task)
+        capsule['episodic'].append({'path': 'docs/third.md'})
+        with self.assertRaises(sessions.SessionError):
+            TaskContext._validate_capsule(capsule, task)
+
     def close_managers(self):
         for manager in self.knowledge_managers:
             manager.close()

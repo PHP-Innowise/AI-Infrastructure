@@ -122,6 +122,20 @@ class MemoryMcpTests(unittest.TestCase):
         recorded = {item['path']: item['estimated_tokens'] for item in manifest['selected']}
         self.assertEqual(chunk['estimated_tokens'], recorded[chunk['path']])
 
+    def test_a_masked_value_never_reaches_an_mcp_client(self):
+        (self.root / 'README.md').write_text(
+            '# Mail\n\nThe heron catcher receives development mail.\n\n'
+            '```env\nMAILER_PASSWORD=mailpit\n```\n', encoding='utf-8')
+        response = self.call('memory_retrieve', task_id='TASK-MASK', query='heron catcher development mail')
+        self.assertFalse(response['isError'], response)
+        result = response['structuredContent']
+        self.assertIn('README.md', [item['path'] for item in result['capsule']['semantic']])
+        self.assertNotIn('mailpit', json.dumps(response))
+        manifest = json.loads((self.root / result['capsule']['manifest']).read_text())
+        hashes = {item['path']: item['source_hash'] for item in manifest['selected']}
+        self.assertEqual(hashlib.sha256((self.root / 'README.md').read_bytes()).hexdigest(),
+                         hashes['README.md'])
+
     def test_first_retrieve_automatically_delivers_source_linked_answers(self):
         query, paths = source_link_fixture(self.root)
         response = self.call('memory_retrieve', task_id='TASK-AUTO-SOURCES', query=query)
@@ -324,6 +338,20 @@ class MemoryMcpTests(unittest.TestCase):
         self.assertEqual(-32700, replies[1]['error']['code'])
         self.assertEqual(7, replies[2]['id'])
         self.assertIn('tools', replies[2]['result'])
+
+    def test_nesting_past_the_limit_is_a_parse_error_whatever_the_stack(self):
+        # Shallow enough for any parser, deeper than any message of this
+        # server: the answer must not depend on the C stack of the host.
+        over = '[' * 65 + ']' * 65
+        within = json.dumps({'jsonrpc': '2.0', 'id': 8, 'method': 'ping',
+                             'params': {'_meta': {'nested': '[[[[ not structure ]]]]'}}})
+        result = subprocess.run([sys.executable, str(self.server), '--root', str(self.root)],
+            input=over + '\n' + within + '\n', capture_output=True, text=True, timeout=20)
+        self.assertEqual(0, result.returncode, result.stderr)
+        answers = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(-32700, answers[0]['error']['code'])
+        self.assertEqual(8, answers[1]['id'])
+        self.assertEqual({}, answers[1]['result'])
 
     def test_invalid_jsonrpc_shape_and_repeated_initialize(self):
         replies = self.exchange([[], {'jsonrpc': '1.0', 'method': 'ping', 'id': 1},

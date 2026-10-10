@@ -72,6 +72,7 @@ import os
 import platform
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -80,7 +81,7 @@ import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Pattern, Sequence, Set, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "scripts") not in sys.path:
@@ -102,6 +103,9 @@ CLASSES = ("useful", "noise-only", "unjudged-only", "silent")
 CANON_SKILLS = ".agents/skills/"
 TOOL_SKILLS = (".claude/skills/", ".cursor/skills/", ".codex/skills/")
 RECORDS = "project-brain/dynamic"
+ARCHIVE = "project-brain/archive"
+ARCHIVE_COUNTS = ("archive_from_git", "archive_from_worktree", "archive_dropped_future", "archive_undetermined",
+                  "archive_unreconstructable_updated", "archive_updated_after", "archive_still_dynamic")
 HANDOFFS = "project-brain/control/handoffs"
 PROMOTIONS = "project-brain/control/promotions"
 CHUNKS = "memory-bank/chunks"
@@ -250,9 +254,12 @@ def read_json(path: Path) -> Any:
 
 
 def write_json(path: Path, document: Any) -> None:
+    """Results name client paths and prompt ids: owner-only, whatever the umask."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    temporary.write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
     os.replace(temporary, path)
 
 
@@ -477,8 +484,8 @@ class Repository:
 _SNAPSHOT_POLICY = None
 
 
-def snapshot_path_allowed(relative: str) -> bool:
-    """Never read environment/credential/dependency files into an evaluation."""
+def runtime_policy() -> Any:
+    """The runtime-under-test's shared source and secret policy module."""
     global _SNAPSHOT_POLICY
     if _SNAPSHOT_POLICY is None:
         path = ROOT / "PHP Core/memory-bank/scripts/automatic_query.py"
@@ -488,6 +495,12 @@ def snapshot_path_allowed(relative: str) -> bool:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         _SNAPSHOT_POLICY = module
+    return _SNAPSHOT_POLICY
+
+
+def snapshot_path_allowed(relative: str) -> bool:
+    """Never read environment/credential/dependency files into an evaluation."""
+    runtime_policy()
     parts = PurePosixPath(relative).parts
     return not (
         _SNAPSHOT_POLICY.SOURCE_PATH_DENYLIST.search(relative)
@@ -680,6 +693,32 @@ def memory_documents(root: Path) -> Iterator[Tuple[str, str]]:
                 yield path.relative_to(root).as_posix(), kind
 
 
+def archived_records(root: Path) -> Iterator[str]:
+    """Relative paths of archived Brain records (never archived handoffs).
+
+    The runtime never indexes or renders them; they exist so that a chunk
+    citing the record it was promoted from validates, as it does in the
+    project itself."""
+    top = root / ARCHIVE
+    if not top.is_dir() or top.is_symlink():
+        return
+    for directory, folders, files in os.walk(top):
+        here = Path(directory)
+        folders[:] = sorted(
+            name for name in folders
+            if not (here / name).is_symlink() and not (here == top and name == "handoffs")
+        )
+        for name in sorted(files):
+            if name.startswith(".") or not name.endswith(".md"):
+                continue
+            path = here / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            relative = path.relative_to(root).as_posix()
+            if snapshot_path_allowed(relative):
+                yield relative
+
+
 def promotion_windows(root: Path) -> Dict[str, Window]:
     """When each promoted chunk was written: after its promotion was proposed,
     at or before the promotion was marked applied."""
@@ -748,6 +787,7 @@ def reconstruct_memory(
     """
     counts = {"from_git": 0, "from_worktree": 0, "dropped_future": 0, "undetermined": 0, "updated_after": 0,
               "unreconstructable_updated": 0}
+    counts.update({key: 0 for key in ARCHIVE_COUNTS})
     promotions = promotion_windows(corpus)
     promotions.update(promotion_windows(project))
     committed: Set[str] = set()
@@ -763,32 +803,68 @@ def reconstruct_memory(
         # A handoff is a rolling summary: the working tree holds today's text.
         if relative in committed or kind == "handoff":
             continue
-        source = project / relative
-        window = creation_window(source, kind, promotions)
-        if window is not None and window[0] > moment:
-            counts["dropped_future"] += 1
-            continue
-        try:
-            modified = modified_at(source)
-        except OSError:
-            continue
-        # A file unmodified since before the prompt existed then, as it is now.
-        if (window is not None and window[1] <= moment) or modified <= moment:
-            # The document's own edit time decides: a copy tool can preserve
-            # or restore an older mtime over a body written after the prompt.
-            edited = changed_after(source, kind, moment)
-            if edited and updated_after == "drop":
-                counts["unreconstructable_updated"] += 1
-                continue
-            target = corpus / relative
-            prepare_parent(corpus, target)
-            shutil.copy2(source, target)
+        outcome = restore_from_worktree(project, corpus, relative, kind, moment, promotions, updated_after)
+        if outcome == "from_worktree+updated_after":
             counts["from_worktree"] += 1
-            if edited:
-                counts["updated_after"] += 1
+            counts["updated_after"] += 1
+        elif outcome is not None:
+            counts[outcome] += 1
+    # Archived records: the runtime never indexes or renders them, but a
+    # promoted chunk cites the record it came from and fails validation when
+    # that file is absent. No project commits its archive, so the working
+    # tree's copy is taken under the very rule used for active records.
+    archived: Set[str] = set()
+    for relative in list(archived_records(corpus)):
+        archived.add(relative)
+        window = creation_window(corpus / relative, "record", promotions)
+        if window is not None and window[0] > moment:
+            (corpus / relative).unlink()
+            counts["archive_dropped_future"] += 1
         else:
-            counts["undetermined"] += 1
+            counts["archive_from_git"] += 1
+    active = {path.name for path in (corpus / RECORDS).rglob("*.md")} if (corpus / RECORDS).is_dir() else set()
+    for relative in list(archived_records(project)):
+        if relative in archived:
+            continue
+        if PurePosixPath(relative).name in active:
+            # Still active at the prompt: archived later, and already present.
+            counts["archive_still_dynamic"] += 1
+            continue
+        outcome = restore_from_worktree(project, corpus, relative, "record", moment, promotions, updated_after)
+        if outcome == "from_worktree+updated_after":
+            counts["archive_from_worktree"] += 1
+            counts["archive_updated_after"] += 1
+        elif outcome is not None:
+            counts["archive_" + outcome] += 1
     return counts
+
+
+def restore_from_worktree(
+    project: Path, corpus: Path, relative: str, kind: str, moment: datetime,
+    promotions: Dict[str, Window], updated_after: str,
+) -> Optional[str]:
+    """Copy one working-tree memory document into the corpus if it existed at
+    `moment`; return which count it falls under (None: unreadable)."""
+    source = project / relative
+    window = creation_window(source, kind, promotions)
+    if window is not None and window[0] > moment:
+        return "dropped_future"
+    try:
+        modified = modified_at(source)
+    except OSError:
+        return None
+    # A file unmodified since before the prompt existed then, as it is now.
+    if not ((window is not None and window[1] <= moment) or modified <= moment):
+        return "undetermined"
+    # The document's own edit time decides: a copy tool can preserve
+    # or restore an older mtime over a body written after the prompt.
+    edited = changed_after(source, kind, moment)
+    if edited and updated_after == "drop":
+        return "unreconstructable_updated"
+    target = corpus / relative
+    prepare_parent(corpus, target)
+    shutil.copy2(source, target)
+    return "from_worktree+updated_after" if edited else "from_worktree"
 
 
 def count_present(corpus: Path, moment: datetime) -> Dict[str, int]:
@@ -1250,6 +1326,7 @@ def score(
     answer_existed: Sequence[str] = (),
     *,
     expected_passages: Optional[Set[str]] = None,
+    secret_patterns: Optional[Mapping[str, Pattern[str]]] = None,
 ) -> Dict[str, Any]:
     """Score one refresh result. Paths and counts only: no capsule text."""
     result = result if isinstance(result, dict) else {}
@@ -1278,6 +1355,50 @@ def score(
         "answer_passages_delivered": sum(value in haystack for value in delivered_answers),
         "query_withheld": withheld,
         "capsule_chars": len(text),
+        **delivery_breakdown(result.get("capsule")),
+        "capsule_secret_matches": (
+            sum(1 for pattern in secret_patterns.values() if pattern.search(text))
+            if secret_patterns is not None else None
+        ),
+    }
+
+
+ITEM_KIND = re.compile(r"[a-z][a-z0-9-]{0,31}")
+SELECTIONS = ("path-link", "source-link", "prompt-link", "touch-link")
+
+
+def delivery_breakdown(capsule: object) -> Dict[str, Any]:
+    """Which mechanism delivered what: counts and fixed words only.
+
+    Per layer the item kinds (an unrecognised kind is `other`), how many items
+    each link mechanism selected, how many carried a changed citation, and how
+    many skill sub-files held the procedural slot."""
+    kinds: Dict[str, Dict[str, int]] = {layer: {} for layer in LAYERS}
+    selections = {name: 0 for name in SELECTIONS}
+    changed = 0
+    subfiles = 0
+    if isinstance(capsule, dict):
+        for layer in LAYERS:
+            items = capsule.get(layer)
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                kind = item.get("kind")
+                kind = kind if isinstance(kind, str) and ITEM_KIND.fullmatch(kind) else "other"
+                kinds[layer][kind] = kinds[layer].get(kind, 0) + 1
+                if item.get("selection") in selections:
+                    selections[item["selection"]] += 1
+                if item.get("source_changed"):
+                    changed += 1
+                path = item.get("path")
+                if (layer == "procedural" and isinstance(path, str) and is_skill(normalise_path(path))
+                        and PurePosixPath(path).name != "SKILL.md"):
+                    subfiles += 1
+    return {
+        "layer_kinds": kinds,
+        "selections": selections,
+        "source_changed_delivered": changed,
+        "skill_subfiles_delivered": subfiles,
     }
 
 
@@ -1372,6 +1493,44 @@ def source_link_stats(corpus: Path, result: Dict[str, Any]) -> Optional[Dict[str
     return clean
 
 
+def index_stats(corpus: Path) -> Optional[Dict[str, Any]]:
+    """Counters of the corpus's index, read-only: documents, link rows by kind,
+    and documents whose stored text still matches a secret pattern."""
+    database = corpus / "memory-bank/local/context.db"
+    if not database.is_file() or database.is_symlink():
+        return None
+    connection = None
+    try:
+        connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+        documents = connection.execute("SELECT count(*) FROM documents").fetchone()[0]
+        links: Dict[str, int] = {}
+        try:
+            for kind, number in connection.execute(
+                "SELECT ref_kind, count(*) FROM document_links GROUP BY ref_kind"
+            ):
+                key = kind if isinstance(kind, str) and ITEM_KIND.fullmatch(kind) else "other"
+                links[key] = links.get(key, 0) + int(number)
+        except sqlite3.OperationalError:
+            links = {}
+        patterns = list(runtime_policy().SECRET_PATTERNS.values())
+        secret = 0
+        for title, summary, content in connection.execute("SELECT title, summary, content FROM documents"):
+            text = "\n".join(value for value in (title, summary, content) if isinstance(value, str))
+            if any(pattern.search(text) for pattern in patterns):
+                secret += 1
+        return {"documents": int(documents), "links": links, "secret_documents": secret}
+    except (sqlite3.Error, OSError, EvalError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def contaminated(provenance: Dict[str, Any]) -> bool:
+    """Today's body of a document edited after the prompt is in the corpus."""
+    return bool(provenance.get("updated_after") or provenance.get("archive_updated_after"))
+
+
 def percentile(values: Sequence[float], share: float) -> Optional[float]:
     if not values:
         return None
@@ -1426,6 +1585,138 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         "mean_unjudged": mean("unjudged"),
         "latency_p50": percentile(seconds, 0.50),
         "latency_p95": percentile(seconds, 0.95),
+        **mechanism_totals(evaluated),
+        **knowledge_and_skill_totals(evaluated),
+    }
+
+
+def knowledge_class(item: Dict[str, Any]) -> str:
+    """The turn's class with skills left out: what project knowledge did."""
+    def keep(key: str) -> List[str]:
+        return [path for path in item.get(key) or [] if not is_skill(normalise_path(path))]
+    return classify(keep("delivered"), keep("useful_delivered"), keep("noise_delivered"),
+                    bool(item.get("query_withheld")))
+
+
+def skill_outcome(item: Dict[str, Any]) -> str:
+    """How the procedural slot did on this turn.
+
+    With a labelled-useful skill: `hit` (a useful one delivered), `wrong`
+    (another skill delivered), `empty` (none). Without one: `silent`,
+    `noise` (a skill labelled noise delivered) or `unjudged`.
+    """
+    def skills(key: str) -> List[str]:
+        return [path for path in item.get(key) or [] if is_skill(normalise_path(path))]
+    delivered = skills("delivered")
+    if skills("existed_useful"):
+        if skills("useful_delivered"):
+            return "hit"
+        return "wrong" if delivered else "empty"
+    if not delivered:
+        return "silent"
+    return "noise" if skills("noise_delivered") else "unjudged"
+
+
+def knowledge_and_skill_totals(evaluated: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Project knowledge and skill routing, apart.
+
+    Agents in real sessions followed none of the 71 skills a capsule named
+    and called accelerator skills on 1.1% of Claude turns, while skills were
+    53 of 66 missed useful paths on the core set: a turn counted `useful`
+    for a skill is useful on the label, not in what the agent did. The
+    knowledge measures leave skills out; skill routing is reported on its
+    own. Computed from each item's paths, so older results have them too.
+    """
+    classes = Counter(knowledge_class(item) for item in evaluated)
+    outcomes = Counter(skill_outcome(item) for item in evaluated)
+
+    def knowledge(key: str) -> int:
+        return sum(
+            1 for item in evaluated for path in item.get(key) or []
+            if not is_skill(normalise_path(path))
+        )
+    return {
+        "knowledge_useful": classes.get("useful", 0),
+        "knowledge_noise_only": classes.get("noise-only", 0),
+        "knowledge_unjudged_only": classes.get("unjudged-only", 0),
+        "knowledge_silent": classes.get("silent", 0),
+        "knowledge_could_help": sum(
+            1 for item in evaluated
+            if any(not is_skill(normalise_path(path)) for path in item.get("existed_useful") or [])
+        ),
+        "knowledge_useful_paths_delivered": knowledge("useful_delivered"),
+        "knowledge_useful_paths_existed": knowledge("existed_useful"),
+        "knowledge_noise_paths": knowledge("noise_delivered"),
+        "skill_with_useful": sum(outcomes.get(name, 0) for name in ("hit", "wrong", "empty")),
+        "skill_hit": outcomes.get("hit", 0),
+        "skill_wrong": outcomes.get("wrong", 0),
+        "skill_empty": outcomes.get("empty", 0),
+        "skill_without_useful": sum(outcomes.get(name, 0) for name in ("silent", "noise", "unjudged")),
+        "skill_silent": outcomes.get("silent", 0),
+        "skill_noise": outcomes.get("noise", 0),
+        "skill_unjudged": outcomes.get("unjudged", 0),
+    }
+
+
+def mechanism_totals(evaluated: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Path totals and mechanism counters. A counter is None when any item
+    lacks it (a result written before it existed): missing never reads as 0."""
+    def total(key: str) -> int:
+        return sum(len(item.get(key) or []) for item in evaluated)
+
+    def counted(key: str) -> Optional[int]:
+        if not evaluated or any(type(item.get(key)) is not int for item in evaluated):
+            return None
+        return sum(item[key] for item in evaluated)
+
+    breakdown = bool(evaluated) and all(isinstance(item.get("layer_kinds"), dict) for item in evaluated)
+    kinds: Optional[Dict[str, Dict[str, int]]] = None
+    selections: Optional[Dict[str, int]] = None
+    if breakdown:
+        kinds = {layer: {} for layer in LAYERS}
+        selections = {name: 0 for name in SELECTIONS}
+        for item in evaluated:
+            for layer, counts in item["layer_kinds"].items():
+                for kind, number in (counts or {}).items():
+                    kinds.setdefault(layer, {})[kind] = kinds.setdefault(layer, {}).get(kind, 0) + number
+            for name, number in (item.get("selections") or {}).items():
+                if name in selections:
+                    selections[name] += number
+    indexes = [((item.get("refresh") or {}).get("index")) for item in evaluated]
+    indexed = bool(evaluated) and all(isinstance(entry, dict) for entry in indexes)
+    link_rows: Optional[Dict[str, int]] = None
+    if indexed:
+        link_rows = {}
+        for entry in indexes:
+            for kind, number in (entry.get("links") or {}).items():
+                link_rows[kind] = link_rows.get(kind, 0) + number
+    index_seconds = [
+        float(item["refresh"]["index_seconds"])
+        for item in evaluated
+        if isinstance((item.get("refresh") or {}).get("index_seconds"), (int, float))
+    ]
+    return {
+        "useful_paths_delivered": total("useful_delivered"),
+        "useful_paths_existed": total("existed_useful"),
+        "noise_paths": total("noise_delivered"),
+        "unjudged_paths": total("unjudged"),
+        "layer_kinds": kinds,
+        "selections": selections,
+        "episodic_brain_events": (
+            sum(item["layer_kinds"].get("episodic", {}).get("brain-event", 0) for item in evaluated)
+            if breakdown else None
+        ),
+        "source_changed_delivered": counted("source_changed_delivered"),
+        "skill_subfiles_delivered": counted("skill_subfiles_delivered"),
+        "capsule_secret_matches": counted("capsule_secret_matches"),
+        "index_link_rows": link_rows,
+        "index_snapshots_with_links": (
+            sum(1 for entry in indexes if any((entry.get("links") or {}).values())) if indexed else None
+        ),
+        "secret_documents": sum(entry["secret_documents"] for entry in indexes) if indexed else None,
+        "capsule_chars_max": max((item.get("capsule_chars") or 0 for item in evaluated), default=None),
+        "index_latency_p50": percentile(index_seconds, 0.50),
+        "index_latency_p95": percentile(index_seconds, 0.95),
     }
 
 
@@ -1590,7 +1881,7 @@ class Run:
                 shutil.copytree(materialize(project, tree, self.cache), corpus)
                 item["provenance"] = reconstruct_memory(project, corpus, moment, self.arguments.updated_after)
                 # Today's body of a document edited after the prompt is in the corpus.
-                item["contaminated"] = bool(item["provenance"].get("updated_after"))
+                item["contaminated"] = contaminated(item["provenance"])
                 # Configuration, not knowledge: when the commit lacks the
                 # project's runtime.json (a retrieval gate, a privacy scope),
                 # its working-tree copy beats the edition's defaults.
@@ -1657,10 +1948,14 @@ class Run:
             graph_stats = source_link_stats(corpus, result)
             if graph_stats is not None:
                 item["refresh"]["source_links"] = graph_stats
+            stats = index_stats(corpus)
+            if stats is not None:
+                item["refresh"]["index"] = stats
             prompt_passages = self.passages.get(prompt["id"], {})
             item.update(score(
                 result, grades, prompt_passages, existed, answered,
                 expected_passages=existing_answer_passages(corpus, answered, prompt_passages),
+                secret_patterns=runtime_policy().SECRET_PATTERNS,
             ))
             item["status"] = "ok"
         except Skip as skip:
@@ -1752,9 +2047,34 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("mean unjudged per turn", "mean_unjudged"),
     ("latency p50 (s)", "latency_p50"),
     ("latency p95 (s)", "latency_p95"),
+    ("knowledge: useful turns", "knowledge_useful"),
+    ("knowledge: could help", "knowledge_could_help"),
+    ("knowledge: noise-only turns", "knowledge_noise_only"),
+    ("knowledge: unjudged-only turns", "knowledge_unjudged_only"),
+    ("knowledge: silent turns", "knowledge_silent"),
+    ("knowledge: useful paths delivered", "knowledge_useful_paths_delivered"),
+    ("knowledge: noise paths", "knowledge_noise_paths"),
+    ("skills: a useful one delivered", "skill_hit"),
+    ("skills: another one delivered", "skill_wrong"),
+    ("skills: none delivered", "skill_empty"),
+    ("skills: noise where none was useful", "skill_noise"),
+    ("skills: silent where none was useful", "skill_silent"),
+    ("useful paths delivered", "useful_paths_delivered"),
+    ("noise paths", "noise_paths"),
+    ("unjudged paths", "unjudged_paths"),
+    ("skill sub-files in procedural", "skill_subfiles_delivered"),
+    ("Brain events in episodic", "episodic_brain_events"),
+    ("changed-citation items delivered", "source_changed_delivered"),
+    ("snapshots with link rows", "index_snapshots_with_links"),
+    ("indexed documents matching a secret", "secret_documents"),
+    ("capsules matching a secret", "capsule_secret_matches"),
+    ("max capsule chars", "capsule_chars_max"),
+    ("index latency p50 (s)", "index_latency_p50"),
+    ("index latency p95 (s)", "index_latency_p95"),
 )
 SHARED_ROWS = {"useful", "answer_in_text", "noise_only", "unjudged_only", "silent", "could_help",
-               "answer_could_help", "contaminated"}
+               "answer_could_help", "contaminated", "knowledge_useful", "knowledge_could_help",
+               "knowledge_noise_only", "knowledge_unjudged_only", "knowledge_silent"}
 # Rows about a run's coverage; every other row measures its evaluated prompts.
 COVERAGE_ROWS = {"prompts", "evaluated", "skipped_total"}
 
@@ -1778,7 +2098,15 @@ def row_cell(summary: Dict[str, Any], key: str) -> str:
         return f"{int(value)}/{int(summary.get('answer_could_help') or 0)}"
     if key == "answer_passage_recall":
         return f"{value:.1%}"
-    if key.startswith("latency"):
+    if key == "useful_paths_delivered":
+        return f"{int(value)}/{int(summary.get('useful_paths_existed') or 0)}"
+    if key == "knowledge_useful_paths_delivered":
+        return f"{int(value)}/{int(summary.get('knowledge_useful_paths_existed') or 0)}"
+    if key in ("skill_hit", "skill_wrong", "skill_empty"):
+        return f"{int(value)}/{int(summary.get('skill_with_useful') or 0)}"
+    if key in ("skill_noise", "skill_silent"):
+        return f"{int(value)}/{int(summary.get('skill_without_useful') or 0)}"
+    if key.startswith(("latency", "index_latency")):
         return f"{value:.3f}"
     if key.startswith("mean"):
         return f"{value:.2f}"
@@ -1836,7 +2164,7 @@ def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
             if len(values) == 2 and values[0] is not None and values[1] is not None:
                 change = values[1] - values[0]
                 delta = (f"{change * 100:+.1f}pp" if key == "answer_passage_recall"
-                         else f"{change:+.3f}" if key.startswith(("mean", "latency"))
+                         else f"{change:+.3f}" if key.startswith(("mean", "latency", "index_latency"))
                          else f"{int(change):+d}")
                 row += delta.rjust(cell)
             else:
@@ -1862,6 +2190,9 @@ def paired_diff(
         "useful": lambda item: item.get("class") == "useful",
         "noise-only": lambda item: item.get("class") == "noise-only",
         "answer": lambda item: bool(item.get("answer_in_text")),
+        "knowledge useful": lambda item: knowledge_class(item) == "useful",
+        "knowledge noise-only": lambda item: knowledge_class(item) == "noise-only",
+        "skill hit": lambda item: skill_outcome(item) == "hit",
     }
     changes = {}
     for name, test in tests.items():

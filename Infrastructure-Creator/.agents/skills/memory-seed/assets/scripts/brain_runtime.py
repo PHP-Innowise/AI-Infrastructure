@@ -664,15 +664,21 @@ def validate_schema_file(repository: Path, name: str, value: Any) -> None:
     validate_schema_value(value, schema)
 
 
-def fingerprint(repository: Path, source: str) -> dict[str, str]:
+def _cited_file(repository: Path, source: str) -> Path:
+    """The regular file inside the repository a citation names."""
     relative = source.split("#", 1)[0]
     path = workspace_roots.resolve(repository, relative).resolve()
     if not workspace_roots.contains(repository, path):
         raise BrainError(f"Source escapes repository: {relative}")
     if not path.is_file() or path.is_symlink():
         raise BrainError(f"Source does not exist or is not a regular file: {relative}")
+    return path
+
+
+def fingerprint(repository: Path, source: str) -> dict[str, str]:
+    path = _cited_file(repository, source)
     digest = hashlib.sha256(_line_ending_neutral(path.read_bytes())).hexdigest()
-    return {"path": relative, "sha256": digest}
+    return {"path": source.split("#", 1)[0], "sha256": digest}
 
 
 def _line_ending_neutral(data: bytes) -> bytes:
@@ -785,6 +791,41 @@ def source_changes(
         if current != expected:
             changed.append(path)
     return changed, missing
+
+
+def citation_problem(repository: Path, record: dict[str, Any]) -> Optional[str]:
+    """Why a record's citations cannot be checked at all, or None.
+
+    `source-undigested`: a cited local path has no stored digest, or the
+    stored digests are malformed - there is nothing to compare an edit with.
+    `source-missing`: a digested path no longer resolves to a regular file in
+    the repository - there is nothing left to check the knowledge against.
+    An EDITED citation is not a problem here: retrieval serves the record
+    marked `source_changed` and ranked at SOURCE_CHANGED_WEIGHT. Existence
+    only, no file is read, so the per-turn rebuild of Brain rows does not
+    grow with the size of the files records cite.
+    """
+    fingerprints = record.get("source_fingerprints")
+    if not isinstance(fingerprints, list):
+        return "source-undigested"
+    digested: set[str] = set()
+    for item in fingerprints:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("sha256"), str)
+        ):
+            return "source-undigested"
+        digested.add(item["path"])
+    expected = {source.split("#", 1)[0] for source in digestible_sources(record.get("sources"))}
+    if not expected <= digested:
+        return "source-undigested"
+    for path in sorted(digested):
+        try:
+            _cited_file(repository, path)
+        except (BrainError, OSError, ValueError):
+            return "source-missing"
+    return None
 
 
 def _require_string(record: dict[str, Any], key: str) -> None:
@@ -1679,6 +1720,12 @@ def read_messages(
 
 
 def record_is_eligible(repository: Path, record: dict[str, Any], config: dict[str, Any]) -> tuple[bool, str]:
+    """Whether retrieval may index a record, and the reason if not.
+
+    A record whose cited file was edited is eligible (retrieval marks it); one
+    whose cited file is gone (`source-missing`) or was never digested
+    (`source-undigested`) is not.
+    """
     if record.get("privacy") == "private":
         return False, "private"
     if record.get("privacy") not in config["allowed_privacy"]:
@@ -1696,8 +1743,14 @@ def record_is_eligible(repository: Path, record: dict[str, Any], config: dict[st
         return False, "lifecycle"
     if record.get("superseded_by") is not None:
         return False, "superseded"
-    if not sources_are_fresh(repository, record):
-        return False, "stale"
+    # An edited citation no longer evicts the record: retrieval marks it and
+    # ranks it down (context_retrieval._runtime_filter), as it does a chunk.
+    # Any edit used to evict it - accepted decisions, open findings and
+    # events alike - and its links went with it. Only a citation that cannot
+    # be checked at all keeps the record out.
+    problem = citation_problem(repository, record)
+    if problem is not None:
+        return False, problem
     return True, "eligible"
 
 
@@ -1726,21 +1779,30 @@ def rebuild_indexes(repository: Path) -> None:
     atomic_json(archive_path, archived)
 
 
-def stale_records(repository: Path) -> list[str]:
-    """Records whose cited source changed after they were written.
-
-    Reported beside validation, not as a failure of it: the record is intact
-    and retrieval marks it for checking.
-    """
-    stale = []
+def stale_record_states(repository: Path) -> list[tuple[str, str]]:
+    """Records whose cited sources are no longer what they were when written,
+    each with its state: `changed` (retrieval serves it marked for checking),
+    `source-missing` or `source-undigested` (retrieval leaves it out).
+    Archived records are listed too, though they are never retrieved."""
+    stale: list[tuple[str, str]] = []
     for path, record, _ in iter_records(repository, include_archive=True):
         try:
             fresh = sources_are_fresh(repository, record)
         except (BrainError, OSError):
             continue
         if not fresh:
-            stale.append(str(path))
+            stale.append((str(path), citation_problem(repository, record) or "changed"))
     return stale
+
+
+def stale_records(repository: Path) -> list[str]:
+    """Records whose cited source changed after they were written.
+
+    Reported beside validation, not as a failure of it: an edited citation
+    leaves the record intact and retrieval serves it marked for checking; a
+    deleted or undigested one keeps it out of retrieval.
+    """
+    return [path for path, _ in stale_record_states(repository)]
 
 
 def validate_repository(
@@ -1883,6 +1945,10 @@ def validate_repository(
             "local_episode_count",
         },
     }
+    # Version 4 adds the counters of automatic source-linked expansion.
+    # Version 3 shipped, so a version 3 manifest that carried them would be
+    # rejected by every runtime that validates version 3 exactly.
+    manifest_keys_by_version[4] = manifest_keys_by_version[3] | {"source_links"}
     version_1_token_keys = {
         "policy", "handoff", "durable", "dynamic", "evidence", "total",
         "target", "hard",
@@ -1891,6 +1957,7 @@ def validate_repository(
         1: version_1_token_keys,
         2: version_1_token_keys,
         3: version_1_token_keys | {"local_episodes"},
+        4: version_1_token_keys | {"local_episodes"},
     }
     manifests = brain_root(repository) / "control" / "retrieval-manifests"
     if manifests.is_dir():
@@ -2501,7 +2568,7 @@ def promotion_eligibility_error(
         return f"record content contains {found}"
     if sources_are_fresh(repository, record):
         return None
-    if allow_changed_sources:
+    if allow_changed_sources and citation_problem(repository, record) is None:
         # The automatic path promotes knowledge whose cited files were edited
         # after it was verified: the chunk keeps the digests taken at
         # verification, so retrieval serves it marked "source changed"
@@ -2509,18 +2576,7 @@ def promotion_eligibility_error(
         # resolved findings were blocked here for good, because promotion ran
         # days after the fix that resolved them had edited the cited files.
         # A deleted citation, or one the record never digested, still blocks.
-        expected = {
-            source.split("#", 1)[0]
-            for source in digestible_sources(record.get("sources"))
-        }
-        digested = {
-            item.get("path")
-            for item in record.get("source_fingerprints") or []
-            if isinstance(item, dict)
-        }
-        _, missing = source_changes(repository, record.get("source_fingerprints"))
-        if expected <= digested and not missing:
-            return None
+        return None
     stale = [
         item["path"]
         for item in record["source_fingerprints"]

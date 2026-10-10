@@ -7,7 +7,7 @@
     "selected", "excluded", "token_estimates", "provider", "escalation_reason"
   ],
   "properties": {
-    "schema_version": {"enum": [1, 2, 3]},
+    "schema_version": {"enum": [1, 2, 3, 4]},
     "id": {"type": "string", "format": "uuid"},
     "created_at": {"type": "string", "format": "date-time"},
     "query": {"type": "string", "minLength": 1},
@@ -38,7 +38,7 @@
           "estimated_tokens": {"type": "integer", "minimum": 1},
           "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "match": {"enum": ["covered", "distinctive", "conflict"]},
-          "selection": {"enum": ["path-link", "source-link"]},
+          "selection": {"enum": ["path-link", "source-link", "prompt-link", "touch-link"]},
           "source_changed": {"type": "boolean"},
           "score": {"type": "number", "minimum": 0},
           "rank": {"type": ["integer", "null"], "minimum": 1}

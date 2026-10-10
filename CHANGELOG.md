@@ -26,6 +26,121 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **Memory MCP: a message nested past 64 levels is a parse error on every
+  Python.** The server relied on the JSON parser's recursion limit, which now
+  follows the C stack; a newer Python parsed 60,000 levels and answered
+  "invalid request" (installation CI). The depth is checked before parsing,
+  strings aside.
+
+- **A Windows sync can create files.** The installer's descriptor-relative
+  `create_file` asked `NtCreateFile` for synchronous I/O without naming
+  `SYNCHRONIZE` in the access mask; the call checks the requested mask before
+  generic rights are mapped and answered "The parameter is incorrect", so no
+  new file could be written by a Windows `--sync`. The two desktop-app tests
+  that read a login shell's POSIX PATH are skipped on Windows, where the
+  application does not read one.
+
+- **The Task Capsule carries no skill.** In real sessions of the five
+  evaluated projects agents took none of the 71 skills a capsule named (no
+  Skill call, no `SKILL.md` read on those turns), and used accelerator skills
+  on 1.1% of Claude turns at all; every host lists its skills and loads its
+  instruction files itself. The procedural line only took room from
+  answer-bearing excerpts. Ranking still picks one and the manifest records it
+  as `host-listed`; `search` still returns skills; lightweight mode follows.
+  `AGENTS.md` (four editions), the `project-brain` skill, `PROTOCOL.md` and the
+  READMEs say so.
+
+- **The memory evaluation stand reads project knowledge and skill routing
+  apart.** Agents in real sessions followed none of the 71 skills a capsule
+  named and used accelerator skills on 1.1% of Claude turns, while skills were
+  53 of the 66 useful paths the core set missed. The summary adds
+  `knowledge_*` turn classes and paths with skills left out, and `skill_*`
+  routing outcomes (useful one, another one, none; noise or silence where
+  none was useful), computed from each item's paths so older results have
+  them too.
+
+- **Related knowledge gives its place back first.** When the capsule's JSON
+  passes 8,000 characters or its text 3,600, an item a link brought in
+  (`source-link`, `prompt-link`, `touch-link`) is dropped before history the
+  query found; the JSON limit used to drop the changelog first, and on one
+  evaluated prompt a linked record pushed out the useful changelog entry.
+
+- **File edges: the files a task touched link it to the work that follows.**
+  An active Brain task's `files[]` (Git-tracked, screened) become
+  `document_links` rows of kind `file`. Automatic retrieval seeds them with
+  the paths a request names - written out, as a PHP class through
+  `composer.json` PSR-4, or as a bare file or class name - and the files the
+  branch touched on its last turns, and may add one linked document after the
+  strong matches, marked `prompt-link` or `touch-link`. A hub file (more than
+  five links) reaches nothing; a document reached only through touched files
+  must share an informative query term. `--path`, MCP `paths` and source-link
+  expansion still read citations only; `links` also shows touches. The manifest
+  schema's `selection` gains the two values.
+
+- **A Brain record whose cited file was edited stays retrievable, marked.**
+  Any edit to a cited file used to evict the record at the next index -
+  accepted decisions, open findings and events alike - and its source links
+  with it; on the evaluation 77 record admissions with sources were all
+  excluded this way. The record is now indexed, and retrieval marks it
+  `source_changed` and ranks it at half its score, as it already did chunks.
+  Only a citation that no longer exists (`source-missing`) or was never
+  digested (`source-undigested`) keeps a record out, checked by existence
+  alone so the per-turn rebuild hashes no cited file. `validate` says which
+  case each warning is, and the capsule's mark names one file and counts the
+  rest.
+
+- **Recorded history has its own slot and its own search.** The capsule's
+  episodic layer carries the changelog and one Project Brain event or local
+  episode; they used to share one slot, which the changelog held on every
+  evaluated turn that had an event while 19 answers sat in events never
+  delivered. Events are found by `history_query`: every informative term of
+  the whole request, matched against the event's subject, admitted when it
+  covers two terms whose weight equals at least two terms unique in the index -
+  no tuned constant. Events leave the main query's window and floor. A local
+  episode follows the same rule and now renders its outcome. A delivered event
+  no longer costs the third semantic item. The governed contract is 1/3/2
+  (lightweight mode keeps one history item); `AGENTS.md`, the project-brain
+  skill, `PROTOCOL.md` and READMEs say so, and the Harness accepts two history
+  items.
+
+- **A skill's sub-files no longer take the capsule's procedural slot.**
+  References, agents, rules files, an `AGENTS.md` inside a skill and
+  `SKILL FLOW.md` were useful 1 time in 185 judgments against 71 in 627 for
+  `SKILL.md`. When one ranks first the slot stays empty - the next skill down
+  was useful on none of the 19 replayed turns - and the manifest records
+  `skill-subfile`. Lightweight mode applies the same rule. They remain
+  searchable with `search`.
+
+- **A document with a detected credential is masked in the index, not
+  dropped.** One placeholder-shaped development credential in a code block
+  (`password: admin`) used to take a whole README out of retrieval; on the
+  121-prompt evaluation it was the only useful document of seven holdout
+  prompts. The indexer now replaces each value a secret pattern recognises
+  with `[redacted: <label>]`, keeping the key, and excludes the document only
+  when masking does not converge. The stored source hash stays the file's, so
+  governed retrieval does not call a masked document stale. `index --json`
+  reports `redacted` paths with a count of values. A change to the secret
+  patterns re-reads every document once. Memory Bank chunks with a likely
+  secret are still excluded whole.
+
+- **The memory evaluation stand restores archived records and counts each
+  mechanism.** Archived Brain records that existed at the prompt are restored
+  from the working tree under the as-of rule already used for active records,
+  so a promoted chunk citing its archived source validates as it does in the
+  project (no evaluated project commits its archive). Items carry counts of
+  item kinds per layer, link selections, changed-citation items, skill
+  sub-files in the procedural slot and secret-pattern matches in the capsule;
+  `refresh.index` counts indexed documents, link rows by kind and indexed
+  documents matching a secret pattern. Results are written owner-only.
+
+- **A governed retrieval manifest that carries source-link counters
+  validates.** Manifests now declare schema version 4, which is version 3 plus
+  `source_links`. Version 3 had shipped with an exact key set, so every
+  governed manifest written since the counters were added failed
+  `context.py validate` ("retrieval manifest does not match strict schema").
+  Versions 1-3 keep validating; a version 3 manifest that carries the counters
+  is still rejected.
+
 - **Automatic excerpts keep the evidence they score, and related knowledge can
   share a current code source.** Adjacent FTS highlights retain each term's
   weight; exact section-score ties prefer body evidence; oversized sentences

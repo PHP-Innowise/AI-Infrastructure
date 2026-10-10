@@ -68,6 +68,14 @@ Nothing is written into the project. All work happens in the cache (default
    - What cannot be placed - a chunk written on the prompt's own day with no
      promotion record and a later modification time - is left out and
      counted as `undetermined`.
+   - Archived Brain records (`project-brain/archive/**`, never archived
+     handoffs) follow the same rule, counted under `archive_*`. The runtime
+     never indexes or renders them; a promoted chunk cites the record it came
+     from and fails validation without it, as it would not in the project.
+     No project commits its archive, so the working tree's copy is the only
+     source; one that is still active in `project-brain/dynamic/` at the
+     prompt's commit is skipped (`archive_still_dynamic`). An archived body
+     kept under `--updated-after keep` marks the turn contaminated.
    If the commit lacks `project-brain/config/runtime.json`, the working tree's
    copy is used (configuration such as a retrieval gate, not knowledge).
 3. **The runtime under test.** The edition comes from `--edition`: `auto` (the
@@ -224,16 +232,46 @@ judgments and passages files, and the start and finish times. Each item has
 `status` (`ok`, or `skipped` with a `reason` such as `no-history`,
 `refresh-timeout` or `refresh-error`), `edition` and `edition_source`,
 `commit`, `provenance` (`from_git`, `from_worktree`, `dropped_future`,
-`undetermined`, `updated_after`, `unreconstructable_updated`; `config_from_worktree` when the working
+`undetermined`, `updated_after`, `unreconstructable_updated`, the seven
+`archive_*` counts; `config_from_worktree` when the working
 tree's `runtime.json` was used; under `--as-of now`, `future_present`), the
 overlay counts, `history_linked`,
 `refresh` (exit status, seconds, the warm-up's seconds and exit status, the
 runtime's phase timings, a warning count, each memory layer's state -
-`updated`, `failed`, or `other` for anything else - and a stderr tail with any
-line quoting the prompt withheld), and, when `ok`, the score below. `summary`
-is what `report` prints.
+`updated`, `failed`, or `other` for anything else - a stderr tail with any
+line quoting the prompt withheld, `source_links` counters, and `index`: the
+corpus index's document count, link rows by kind and how many indexed
+documents still match a secret pattern), and, when `ok`, the score below.
+The score also carries mechanism counters, as fixed words and numbers only:
+`layer_kinds` (item kinds per layer), `selections` (items each link
+mechanism chose), `source_changed_delivered`, `skill_subfiles_delivered`
+(skill files other than `SKILL.md` in the procedural slot) and
+`capsule_secret_matches`. `summary` is what `report` prints; its mechanism
+totals are absent (`-`) when any item predates them, never zero. Result files
+are written owner-only (0600). The stand runs no hook and binds no task
+(`--task-id eval/<id>`), so file links seeded by touched files never fire
+there; links seeded by paths named in the prompt do, and count under
+`selections`.
 
 ## What the numbers mean
+
+**Knowledge and skills are read apart.** In real sessions agents followed
+none of the 71 skills a capsule named (no Skill call, no `SKILL.md` read on
+those turns) and used accelerator skills on 1.1% of Claude turns; on Codex the
+user picked them (`$code-reviewer`). Skills were 53 of the 66 useful paths the
+core set missed. A turn counted `useful` for a skill is useful on its label,
+not in what the agent did, so the summary also reports:
+
+- `knowledge_*` - the turn classes, could-help, useful and noise paths with
+  every skill path left out: what project knowledge did;
+- `skill_*` - the procedural slot as a routing question. Where a
+  labelled-useful skill existed: `skill_hit` (a useful one delivered),
+  `skill_wrong` (another one), `skill_empty` (none), out of
+  `skill_with_useful`. Where none did: `skill_silent`, `skill_noise`,
+  `skill_unjudged`, out of `skill_without_useful`.
+
+Both are computed from each item's paths, so results written before them
+report them too.
 
 - **delivered** - item paths of the capsule's three layers, normalised. The
   layers of a `refresh` hold what its `capsule_text` shows: an item the

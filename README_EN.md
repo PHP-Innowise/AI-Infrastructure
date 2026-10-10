@@ -232,8 +232,10 @@ and must be verified against the cited current source.
 
 Raw conversations, prompts, responses, hidden reasoning, logs, credentials,
 secrets, customer or personal data, and unredacted incident payloads do not
-belong in any of these stores. Ignored, private, unauthorized, stale,
-superseded, terminal, or invalid records are excluded as applicable.
+belong in any of these stores. Ignored, private, unauthorized, superseded,
+terminal, or invalid records, and records whose cited source was deleted, are
+excluded as applicable; a record whose cited file changed is kept and marked
+for checking.
 
 ### Governed User Flow
 
@@ -296,7 +298,8 @@ At the start of a complex request and before a complex phase handoff, the agent
 derives a concise sanitized retrieval query and builds a Task Capsule from
 optional Working Memory and `context` retrieval. The raw request is not copied
 into the packet. The complete packet is capped at 8,000 Unicode characters and
-contains at most two Procedural, three Semantic, and one Episodic result.
+contains at most three Semantic and two Episodic results and no Procedural item:
+skills are left to the host's own list.
 Retrieved entries are short snippets with source paths; the next agent reads a
 full source only when its current step requires it.
 

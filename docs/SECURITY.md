@@ -111,8 +111,8 @@ Store sanitized facts and operational consequences instead: configuration key
 names without values, redacted examples, aggregate metadata, reproducible
 recovery steps, and links to authorized canonical sources.
 
-Secret-pattern checks are defense in depth. They reject known token-like
-values without echoing the suspected value, but they cannot recognize every
+Secret-pattern checks are defense in depth. Writes reject known token-like
+values and the index masks them, without echoing the suspected value, but they cannot recognize every
 secret or every form of personal/customer data. Human review remains required.
 
 ## Imported Content and Prompt Injection
@@ -184,7 +184,8 @@ access control.
 The indexer selects approved repository documentation and context sources. It:
 
 - asks Git which candidates are ignored before reading their contents;
-- excludes likely secrets and invalid active Memory Bank chunks;
+- masks likely secret values in repository documents before storage, and
+  excludes chunks carrying them and invalid active Memory Bank chunks;
 - excludes ineligible Project Brain records before FTS storage;
 - rejects invalid UTF-8 without replacing the prior valid index;
 - deduplicates mirrored skills by indexing canonical `.agents/skills/`;
