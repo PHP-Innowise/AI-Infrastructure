@@ -339,8 +339,14 @@ the backup-first recovery in
 ## Network and MCP Posture
 
 The Project Brain runtime itself uses local SQLite FTS5 and has no network
-service, MCP server, embedding store, or automatic prompt injection. The
-current Codex project config requires no MCP servers.
+service or embedding store. Its one MCP server is the local memory server
+`memory-bank/scripts/mcp_server.py` (registered as `harness-memory` in
+`.mcp.json` and `.cursor/mcp.json`, and as `harness_memory` in the Codex
+project config), which the client starts over standard input and output and
+which works on the project's own Project Brain and Memory Bank; see
+`memory-bank/MCP.md` in an edition. The prompt hook delivers the bounded Task
+Capsule with each prompt (on Cursor through a local rule; see
+[Context and Memory](CONTEXT-AND-MEMORY.md)).
 
 Other workflows may use tool-native web access, GitHub tooling, package
 registries, or Infrastructure-Creator's stack research. Treat every network

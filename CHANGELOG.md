@@ -83,6 +83,14 @@ edition's own files remain in that edition's changelog.
   - The fine-grained GitHub token pattern the branch added was already in
     `automatic_query.py`, and mirror executable bits were already kept by
     `build_mirrors.py`.
+  - The context-budget ceilings in `scripts/token_budget.json` rise by the
+    growth this brings and no more: `agents_md_bytes` by 419 bytes in each PHP
+    edition (Laravel 12135, Symfony 16069, PHP Core 11959, WordPress 16090),
+    `frontmatter_bytes` by 604 in Laravel, Symfony and PHP Core, `body_bytes`
+    by 7,765 in Laravel, Symfony and WordPress, the PHP Core skill count from
+    37 to 39, and Infrastructure-Creator's `body_bytes` by 4,231 to 281856.
+    PHP Core's `AGENTS.md` and the generator's skill bodies keep the 3 bytes
+    of headroom they had before.
 
 - **Memory MCP: a message nested past 64 levels is a parse error on every
   Python.** The server relied on the JSON parser's recursion limit, which now
@@ -1775,8 +1783,35 @@ edition's own files remain in that edition's changelog.
 
 ### Fixed
 
+- **The READMEs describe the memory the editions ship.** README_EN and
+  README_RU said a record reaches `verified` only through
+  `brain-update --authority verified`, when `brain-create --authority verified`
+  writes one already verified, with no ledger entry, and promotion reads only
+  the field. They said the memory has no MCP, when every edition ships the
+  local `harness-memory` server and the installer registers it. They named one
+  session-start hook that never injects context and left out
+  `context-continuity.sh`, which keeps every chat's visible prompts and answers
+  in `.context-handoff/` and delivers a prepared merge at session start. And
+  they promised about five percent of context-budget headroom where several
+  ceilings sit a few bytes above the measured value. Both READMEs now say what
+  the code does. `docs/SECURITY.md` and `docs/TOOL-INTEGRATIONS.md` no longer
+  say the shipped Codex configuration has no MCP server, `docs/CI.md` no
+  longer promises the headroom, and `install/README.md` names the chunk and
+  Brain-runtime exclusions a seed chunk would fall under.
+
+- **This changelog's history matches the code.** The 2026-08-12 entry said the
+  installer was `main`'s version unchanged and that project chunks and Brain
+  runtime stayed installed; the merge that wrote it had added
+  `memory-bank/chunks/**` and four Brain-runtime patterns to
+  `EXCLUDED_PATH_PATTERNS`, and its counts predated them. It now records the
+  patterns and the committed inventory's counts. The 2026-08-10 entry, whose
+  `PROJECT_WORK_AREAS` rule never reached this line, is marked superseded. The
+  QA artifact integrity tooling entry, which a merge had placed by context
+  inside `## 2.0.0`, moves to Unreleased: 2.0.0 has no `scripts/qa`. The
+  context-handoff entry records the budget ceilings it raised.
+
 - **A project built inside an edition keeps its work under `Task/`.** The
-  practiceperfect branches built an application inside `Laravel/` and
+  client-application branches built an application inside `Laravel/` and
   `Symfony/` and left its derived specs, `codebase/` map, five memory chunks
   and governed Brain records in the editions' own `specs/`, `codebase/`,
   `memory-bank/chunks/` and `project-brain/`. There the editions' hooks and
@@ -2716,27 +2751,56 @@ edition's own files remain in that edition's changelog.
 
 ### 2026-08-12 the Symfony inventory, regenerated under schema 2
 
-- `scripts/install_accelerator.py` reverts to `main`'s version. The
-  `PROJECT_WORK_AREAS` prefix list this branch added on 2026-08-10 solved the
-  same problem — a project built inside an edition should not have to be
-  listed as a distribution file — and `main`'s `excluded_tracked_paths` solves
-  it better: the exclusions are recorded in the inventory itself and validated
-  on load, rather than implied by a tuple in the script, and `Task/**` covers
-  what `Task/app/` covered. Two mechanisms for one rule would be worse than
-  either, so the earlier one is removed rather than merged alongside.
-- `install/inventories/symfony.json` regenerated for this branch's tree: 645
-  installed, 800 excluded. The 760 files of `Task/app/` land in
-  `excluded_tracked_paths`, which is what the 2026-08-10 entry was after.
-- Left as `main` classifies them, and flagged rather than changed here: the
-  derived `specs/`, `codebase/`, `memory-bank/chunks/` and the governed brain
-  runtime under `project-brain/control/` and `project-brain/dynamic/` match no
-  exclusion pattern, so they are recorded as installed — 35 files of one
-  project's own output that an installation would copy into a consumer's tree.
-  Extending `EXCLUDED_PATH_PATTERNS` would fix it in one line, but that is
-  shared-core policy belonging to whoever reworked this module, not to a pull
-  request about the Symfony application.
+This entry and the next come from the client-application branches, which
+built a project inside `Symfony/` and `Laravel/`; they reached this history
+when those branches were merged into the integration of all branches on
+2026-10-10. Corrected on 2026-10-10: as first written, this entry said the
+installer was `main`'s version unchanged and that project chunks and Brain
+records stayed installed, while the merge that wrote it had added the
+exclusions below, as its commit message says, and its inventory counts were
+taken before it did.
 
-### 2026-08-10 installation inventories exclude project work
+- `scripts/install_accelerator.py` takes `main`'s version instead of this
+  branch's own. The `PROJECT_WORK_AREAS` prefix list this branch added on
+  2026-08-10 solved the same problem — a project built inside an edition
+  should not have to be listed as a distribution file — and `main`'s
+  `excluded_tracked_paths` solves it better: the exclusions are recorded in
+  the inventory itself and validated on load, rather than implied by a tuple
+  in the script, and `Task/**` covers what `Task/app/` covered. Two mechanisms
+  for one rule would be worse than either, so the earlier one is removed
+  rather than merged alongside.
+- `main`'s `EXCLUDED_PATH_PATTERNS` gains two groups of patterns, each
+  `main`'s own intent applied to a tree `main` never had.
+  `memory-bank/chunks/**`: the production index override
+  (`memory-bank/.install/INDEX.md`) ships an empty table, so a clean install
+  is meant to carry no chunks, and `MEM-0001` was
+  excluded by exact path only because it was the one chunk `main` had; the
+  project's own chunks failed validation twice once installed, absent from
+  the shipped `INDEX.md` and citing sources under `Task/app/` that are not
+  installed. The governed Brain runtime, matched by file type so the
+  `.gitkeep` placeholders that create its directories still ship:
+  `project-brain/control/handoffs/*.md`,
+  `project-brain/control/messages/*.jsonl`,
+  `project-brain/control/retrieval-manifests/*.json` and
+  `project-brain/dynamic/*/*.md`; the shipped
+  `project-brain/indexes/active.json` is `[]`, so another project's tasks
+  would make it stale on arrival.
+- `install/inventories/symfony.json` regenerated for this branch's tree: 634
+  installed, 811 excluded. The 760 files of `Task/app/` land in
+  `excluded_tracked_paths`, which is what the 2026-08-10 entry was after.
+- Still recorded as installed: the project's derived `specs/` and its
+  `codebase/` map, 22 files that match no exclusion pattern. They left the
+  payload on 2026-10-10, when the integration moved them under
+  `Task/project-work/` (see "A project built inside an edition keeps its work
+  under `Task/`" under Fixed above).
+
+### 2026-08-10 installation inventories exclude project work — superseded
+
+Superseded on 2026-08-12 by the entry above: `scripts/install_accelerator.py`
+took `main`'s `excluded_tracked_paths` instead, and the `PROJECT_WORK_AREAS`
+rule described here is not in the code. Until the integration moved them under
+`Task/project-work/`, the derived `specs/` and `codebase/` this rule skipped
+were recorded as installed. Kept as the record of what the branch tried.
 
 - `scripts/install_accelerator.py` no longer requires an inventory entry for
   files an edition accumulates while a project is built inside it: `Task/app/`,
@@ -2751,6 +2815,45 @@ edition's own files remain in that edition's changelog.
   verified, deleting one still fails, and an unlisted file outside those areas
   is still reported. The trade-off is recorded in the module: a distribution
   file mistakenly placed under one of those prefixes is no longer caught here.
+
+### 2026-08-06 QA artifact integrity tooling
+
+Made on the side branch `fix/updates-after-tests` and not part of the 2.0.0
+release, which has no `scripts/qa`; it reached this history when that branch
+was merged into the integration of all branches on 2026-10-10. The
+`qa-tooling` job's repository venv and `check.py` group are under Fixed above.
+
+- Added strict schemas and fail-closed builders for the 75-run disposition
+  ledger and reconstructed workbook. Builders require the complete,
+  checksum-verified historical package, use composite run/case/defect
+  identities, namespace only the four Codex defects, and never emit partial
+  or fabricated historical artifacts.
+- QA artifact validation now applies Draft 2020-12 schemas to the catalog,
+  ledger, and run evidence, confines checksum entries to their evidence root,
+  binds run/case/classification identity, cross-checks assertion status and
+  ancillary evidence documents, ties each command exit code to a unique
+  assertion, rejects malformed/duplicate checksum entries and evidence
+  symlinks, and requires a complete consistent package before approving
+  reproduced passes. CI validates the committed ledger and reconstructed
+  workbook.
+- Added the data-driven `TC-AI-001..018` runner with deterministic command
+  mappings, focused-regression discovery gates, explicit native-host skips,
+  split command streams, immediate exit codes, assertion arithmetic, Git
+  snapshots, provenance, inventories, and per-run SHA-256 manifests. Optional
+  local tools such as ShellCheck are now recorded as explicit skips when absent
+  instead of being misclassified as accelerator failures. Embedded shell
+  commands use the pinned QA interpreter, while generated evidence redacts
+  machine-local repository and interpreter paths.
+- Added a reproducible disposition-policy overlay that assigns approved owner
+  labels, proposes package-backed historical Pass dispositions, binds
+  checksum-addressed Codex rerun evidence, and records the
+  `evidence-backed-local-v1` approval boundary. Only checksum-backed,
+  defect-free historical Passes and fully passed Codex reruns are approved;
+  historical non-passes, defect-bearing historical Passes, skipped/failed
+  checks, native observations, and external findings remain pending.
+- Added synthetic QA tooling tests, CI coverage, minimal non-client fixtures,
+  and release validation for exact IDs/counts, workbook tables/formulas,
+  evidence checksums, RUN-057 withholding, and final-disposition strictness.
 
 ## 2.0.0 - 2026-08-07
 
@@ -2787,40 +2890,6 @@ edition's own files remain in that edition's changelog.
 - Added frozen retrieval-quality gates, disabled-by-default metadata telemetry
   with explicit `N/A`, and focused concurrency coverage. Promotion docs now
   distinguish truthful automatic mode from independent reviewed mode.
-
-### 2026-08-06 QA artifact integrity tooling
-
-- Added strict schemas and fail-closed builders for the 75-run disposition
-  ledger and reconstructed workbook. Builders require the complete,
-  checksum-verified historical package, use composite run/case/defect
-  identities, namespace only the four Codex defects, and never emit partial
-  or fabricated historical artifacts.
-- QA artifact validation now applies Draft 2020-12 schemas to the catalog,
-  ledger, and run evidence, confines checksum entries to their evidence root,
-  binds run/case/classification identity, cross-checks assertion status and
-  ancillary evidence documents, ties each command exit code to a unique
-  assertion, rejects malformed/duplicate checksum entries and evidence
-  symlinks, and requires a complete consistent package before approving
-  reproduced passes. CI validates the committed ledger and reconstructed
-  workbook.
-- Added the data-driven `TC-AI-001..018` runner with deterministic command
-  mappings, focused-regression discovery gates, explicit native-host skips,
-  split command streams, immediate exit codes, assertion arithmetic, Git
-  snapshots, provenance, inventories, and per-run SHA-256 manifests. Optional
-  local tools such as ShellCheck are now recorded as explicit skips when absent
-  instead of being misclassified as accelerator failures. Embedded shell
-  commands use the pinned QA interpreter, while generated evidence redacts
-  machine-local repository and interpreter paths.
-- Added a reproducible disposition-policy overlay that assigns approved owner
-  labels, proposes package-backed historical Pass dispositions, binds
-  checksum-addressed Codex rerun evidence, and records the
-  `evidence-backed-local-v1` approval boundary. Only checksum-backed,
-  defect-free historical Passes and fully passed Codex reruns are approved;
-  historical non-passes, defect-bearing historical Passes, skipped/failed
-  checks, native observations, and external findings remain pending.
-- Added synthetic QA tooling tests, CI coverage, minimal non-client fixtures,
-  and release validation for exact IDs/counts, workbook tables/formulas,
-  evidence checksums, RUN-057 withholding, and final-disposition strictness.
 
 ### 2026-08-03 QA defect fixes (TC-066, TC-021/TC-061/DEF-007) — superseded
 

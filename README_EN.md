@@ -280,11 +280,11 @@ automation should use `retrieve`.
 
 Alongside the explicit command, the hooks run an automatic memory loop:
 
-- the session-start hook prints metadata only — edition version, mode, index
-  health, active binding count, and validation status; it never prints records
-  or injects context (on Cursor it also re-renders the rule described in the
-  tool table). Validation results are cached per repository state, so a second
-  start does not pay for them again;
+- the session-start hook (`local-context.sh`) prints metadata only — edition
+  version, mode, index health, active binding count, and validation status; it
+  never prints records or injects context (on Cursor it also re-renders the
+  rule described in the tool table). Validation results are cached per
+  repository state, so a second start does not pay for them again;
 - the prompt hook (`UserPromptSubmit` in Claude Code and Codex) runs
   `context.py refresh --sanitize`: it incrementally refreshes the three index
   layers and injects the Task Capsule into the prompt. On Cursor the same hook
@@ -301,6 +301,18 @@ Each turn's outcome is written to `memory-bank/local/last-turn-report.json`
 (what flushed, what was promoted, what was blocked and why, which paths were
 excluded), and the next capsule shows a "Last turn" section, so the automatic
 pipeline stays visible to the operator.
+
+A second hook, `context-continuity.sh`, runs on the same session-start, prompt
+and turn-end events (on Cursor: `sessionStart`, `beforeSubmitPrompt` and
+`afterAgentResponse`) and is not part of the memory loop. By default it keeps
+the visible text of every chat — each prompt and final answer — in ignored
+local `.context-handoff/`, bound to the checkout and branch; text that looks
+like a secret is not stored. At session start it injects nothing unless a
+merge of chosen chats was prepared with `context-load merge`: the next new
+session of the chosen client on that branch then receives a preview of those
+chats, capped at 6,000 bytes, as context. `CONTEXT_CONTINUITY_DISABLED=1`
+turns capture and delivery off. See
+[Context Handoff](docs/CONTEXT-HANDOFF.md).
 
 ### Authority-Aware `memory` and `checkpoint`
 
@@ -417,11 +429,19 @@ as the update that resolves it lands (the turn-flush boundary picks up anything
 still eligible), and a review that did not happen is never claimed —
 `reviewer` stays null, `review_mode` is `automatic`, and the chunk is tagged
 `auto-promoted`. Only records whose authority is `verified` qualify. Records
-are created as `observed`, and the single legal way to raise one is
-`brain-update --authority verified` under a revision check, recorded in the
-record's transition ledger; the `verify` skill does this for confirmed records
-before their terminal status. A blocked promotion and its reason appear in the
-turn report and in the next capsule. Durable
+are created as `observed` by default. An update accepts one authority step,
+`observed` to `verified`: `brain-update --authority verified` takes it under a
+revision check and records it in the record's transition ledger. The `verify`
+skill does this for confirmed records before their terminal status, and
+`record-result` (the `memory_record_result` MCP tool) does it for each
+learning it saves, writing who checked the claim into that ledger entry
+(`[attestation:agent]` unless a person checked it; a chunk promoted from an
+agent-attested record is tagged `agent-attested`). The exception is
+`brain-create --authority verified`: it writes a record that is `verified`
+from the start, with no ledger entry for the step and no attestation, and
+promotion reads the record's authority field rather than its ledger, so such
+a record is promoted like any other. A blocked promotion and its reason appear
+in the turn report and in the next capsule. Durable
 memory is therefore accumulated, not curated: treat a retrieved chunk as a
 pointer to its cited source, not as a vetted fact. Set `automatic_promotion` to
 `false` in `project-brain/config/runtime.json` for the reviewed sequence, where
@@ -431,10 +451,18 @@ approves it before atomic application. Lightweight mode retains the older local
 which are non-authoritative and lost when its SQLite database is deleted.
 
 The implementation is local, dependency-free Python with SQLite FTS5. It does
-not provide embeddings, vector search, MCP, LangGraph, or a central memory
-service. Claude Code and Codex receive a fresh bounded Task Capsule through
-prompt hooks; Cursor receives the previous turn's capsule through an
-auto-rendered local rule.
+not provide embeddings, vector search, LangGraph, or a central memory service.
+Claude Code and Codex receive a fresh bounded Task Capsule through prompt
+hooks; Cursor receives the previous turn's capsule through an auto-rendered
+local rule. Each edition also ships a local memory MCP server,
+`memory-bank/scripts/mcp_server.py`, which the client starts over standard
+input and output. The installer registers it for each selected client, as
+`harness-memory` in `.mcp.json` and `.cursor/mcp.json` and as
+`harness_memory` in `.codex/config.toml`; the client still asks for trust and
+tool approval. Its four tools — `memory_status`, `memory_retrieve`,
+`memory_checkpoint` and `memory_record_result` — work on the same Project
+Brain and Memory Bank as the CLI, and `context.py record-result` is the same
+write path without it. See the edition's `memory-bank/MCP.md`.
 
 A three-scenario Task Capsule pressure test measured 96.4%, 97.2%, and 97.2%
 fewer transferred characters while retaining each exact Working file set and
@@ -450,7 +478,8 @@ MCP servers are optional external integrations. The accelerator does not
 require them, and teams should enable only the servers that correspond to
 systems the project actually uses. A small, relevant toolset consumes less
 context and creates a smaller security boundary than installing every
-available server.
+available server. The local memory server described above is part of the
+accelerator, not one of these integrations.
 
 Useful integrations include:
 
@@ -650,9 +679,13 @@ python3 scripts/check.py --group lint --group mirrors  # only these jobs
 
 The context budget (each edition's `AGENTS.md`, skill descriptions, commands,
 agents, and skill bodies) is measured by `scripts/context_budget.py`; the
-ceilings live in `scripts/token_budget.json` and sit about five percent above
-current values, so CI catches a regression instead of complaining about every
-edit.
+ceilings live in `scripts/token_budget.json`. That file states a policy of
+about five percent headroom, but a ceiling is raised by exactly the growth of
+the change that justifies it, so several sit only a few bytes above the
+measured value, and one added sentence in an `AGENTS.md` can fail CI's lint
+job. Trim the text or raise the ceiling in the same change;
+`python3 scripts/context_budget.py --headroom` lists what each category has
+left.
 
 For stack-specific details, open the selected edition's README. For its
 durable memory, open the corresponding guide and then that edition's
