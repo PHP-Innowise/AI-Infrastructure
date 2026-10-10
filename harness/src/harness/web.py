@@ -304,6 +304,9 @@ class Handler(BaseHTTPRequestHandler):
                 store.get(sid)
                 item, body, _ = store.attachments.read(sid, identifier)
                 self.reply(200, body, 'application/octet-stream', filename=item['name'])
+            elif path.startswith('/api/sessions/') and path.endswith('/merge') and len(path.split('/')) == 5:
+                if parsed.query: raise SessionError('Invalid merge archive request.')
+                self.reply(200, store.merge_archive(path.split('/')[3]))
             elif path.startswith('/api/sessions/') and path.endswith('/sdd') and len(path.split('/')) == 5:
                 if parsed.query:
                     raise SessionError('Invalid SDD document request.')
@@ -473,6 +476,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith('/api/creator/') and len(path.split('/')) == 4:
                 if urlsplit(self.path).query: raise SessionError('Invalid Creator action.')
                 self.reply(200, self.server.creator.act(path.split('/')[3],data))
+            elif path == '/api/sessions/merge':
+                if urlsplit(self.path).query: raise SessionError('Invalid merge request.')
+                self.reply(201, {'session': store.merge(data)})
+            elif path.startswith('/api/sessions/') and path.endswith('/restart-merge') and len(path.split('/')) == 5:
+                if data or urlsplit(self.path).query: raise SessionError('Invalid merge restart request.')
+                self.reply(200, {'session': store.restart_merge(path.split('/')[3])})
             elif path == '/api/sessions':
                 self.reply(201, {'session': store.create(data)})
             elif path == '/api/projects':

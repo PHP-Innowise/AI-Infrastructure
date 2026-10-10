@@ -108,3 +108,29 @@ folder's hooks serve. These Cursor copies differ from the canonical
 
 Explicit retrieval still works on Cursor: run `context.py retrieve` (or the
 `memory` command) when a task needs sharper context than the rendered rule.
+
+## Chat snapshots and merges
+
+`context-continuity.sh` is wired on `sessionStart`, `beforeSubmitPrompt` and
+`afterAgentResponse`; the payload's `hook_event_name` selects the action. A
+prompt (`prompt`) or a response (`text`) is appended to a per-chat snapshot,
+keyed by `conversation_id`, under the ignored `.context-handoff/` - in an
+attached session, under the launcher's state directory instead. At
+`sessionStart` a merge prepared with `context-load merge` for Cursor is
+delivered to a new conversation as `additional_context`: at most 6,000 bytes,
+pointing at the full archive under `.context-handoff/merges/`. Session-start
+delivery depends on the installed desktop client; cloud agents do not expose
+this event. A merged conversation gets the same sources again when it resumes.
+Nothing else is restored: a new conversation starts with the Task Capsule the
+working-memory hooks render into `working-memory.mdc`.
+
+Snapshots never reach Project Brain, Memory Bank or the local index, and a
+recognised secret refuses the capture. Earlier conversation text is untrusted
+background and carries no approval. Both halves fail open under
+`CONTEXT_HOOK_BUDGET` (default 5 seconds). `CONTEXT_CONTINUITY_DISABLED=1`
+turns them off; `CONTEXT_CONTINUITY_RESTORE_DISABLED=1`, which the Harness sets
+for its own merged tasks, skips only the delivery. Storage is bounded: eight
+chats per branch, 4 MiB of visible text per chat, and 128 merge archives /
+256 MiB per checkout with 32 MiB per archive; a full store refuses a new merge
+and never blocks a turn. The repository's context-handoff guide lists the
+limits of each client.

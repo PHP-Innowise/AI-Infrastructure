@@ -26,18 +26,24 @@ Checks:
     else is an error, not a skip: a bare Claude/Codex path exits 127 from a
     subdirectory, and a wrapper, a trailing "|| true" or a quoted typo hides a
     dead hook or swallows its blocking exit 2 - every one of them fails open.
-    Every hook hook-forge registers must also be wired in that exact form.
+    Every hook hook-forge registers must also be wired in that exact form,
+    and context-continuity.sh - one unargumented script that dispatches on
+    the payload's hook_event_name - on each event it serves (session start,
+    prompt, end of turn) and calling context_continuity.py --event hook.
   - The seeded memory-bank passes its own scripts/validate.py.
-  - The context-brain runtime is present (context.py, brain_runtime.py,
-    context_retrieval.py, validate.py under memory-bank/scripts/) and the
-    project-brain/ skeleton is seeded with a substituted runtime.json whose
-    canonical_edition points at a skills tree that actually exists.
+  - The context-brain runtime is present (RUNTIME_SCRIPTS under
+    memory-bank/scripts/: context.py, context_handoff.py,
+    context_continuity.py, brain_runtime.py, context_retrieval.py,
+    validate.py and the modules they import) and the project-brain/ skeleton
+    is seeded with a substituted runtime.json whose canonical_edition points
+    at a skills tree that actually exists.
   - Smoke: `python3 memory-bank/scripts/context.py status --json` and
     `... validate` both exit 0 inside the generated tree; status exposes a
     structurally valid active/retrieval-only/degraded automatic-memory report.
-  - Every selected edition includes the memory quartet skills (memory-bank,
-    project-brain, checkpoint, memory) and their agent/command wrappers where
-    that edition carries those layers.
+  - Every selected edition includes the six memory-continuity skills
+    (memory-bank, project-brain, checkpoint, memory, context-save,
+    context-load) and their agent/command wrappers where that edition carries
+    those layers.
   - The upgrade contract: .infra-manifest.json exists, parses, carries a
     semver generator_version and a TASK reference, a valid mode (full/merge),
     a well-formed optional decisions map (standing kept/merged decisions),
@@ -104,12 +110,21 @@ APPROVED_VERBATIM_PLACEHOLDERS = {
 }
 
 # Always-generated skills that operate the shared memory layer; every selected
-# edition must carry all four (plus wrappers where the edition has those layers).
-MEMORY_QUARTET = ("memory-bank", "project-brain", "checkpoint", "memory")
+# edition must carry all six (plus wrappers where the edition has those layers).
+MEMORY_CONTINUITY_SKILLS = (
+    "memory-bank",
+    "project-brain",
+    "checkpoint",
+    "memory",
+    "context-save",
+    "context-load",
+)
 
 # The context-brain runtime memory-seed installs verbatim.
 RUNTIME_SCRIPTS = (
     "context.py",
+    "context_handoff.py",
+    "context_continuity.py",
     "brain_runtime.py",
     "context_retrieval.py",
     "validate.py",
@@ -136,6 +151,7 @@ BASE_HOOKS = (
     "file-naming-validator.sh",
     "loop-detection.sh",
     "working-memory-write.sh",
+    "context-continuity.sh",
     "subagent-gate.sh",
     # Ships in every edition; wired on Claude/Cursor and deliberately
     # unregistered on Codex, where multi-agent is off and nothing stops.
@@ -212,6 +228,21 @@ WIRED_HOOKS = {
     "codex": tuple(
         hook for hook in REQUIRED_HOOKS["codex"] if hook != "subagent-dispatch.sh"
     ),
+}
+
+# context-continuity.sh is one script for every lifecycle event it serves: the
+# client names the event in its payload (`hook_event_name`) and the runtime
+# acts on it - a session start delivers a merge prepared with `context-load
+# merge`, a prompt or a final answer is captured. Wiring it once is not
+# enough: a missing capture event silently loses the user's request or the
+# answer from the chat's snapshot, and a missing start event never hands a new
+# task the merge prepared for it. Each event below must run the script in
+# hook-forge's exact form, with no argument - the payload selects the action.
+CONTINUITY_HOOK = "context-continuity.sh"
+CONTINUITY_EVENTS = {
+    "claude": ("SessionStart", "UserPromptSubmit", "Stop"),
+    "cursor": ("sessionStart", "beforeSubmitPrompt", "afterAgentResponse"),
+    "codex": ("SessionStart", "UserPromptSubmit", "Stop"),
 }
 
 # Edition -> (skills dir relative to target, has_agents, has_commands)
@@ -410,7 +441,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
     skill_names = collect_skill_names(skills_rel, files)
     if not skill_names:
         errors.append(f"[{edition}] no manifest-owned skills under {skills_rel}")
-    for required_skill in MEMORY_QUARTET:
+    for required_skill in MEMORY_CONTINUITY_SKILLS:
         if required_skill not in skill_names:
             errors.append(
                 f"[{edition}] memory-layer skill '{required_skill}' missing under {skills_rel}"
@@ -456,7 +487,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                     errors.append(
                         f"[{edition}] {af}: invokes '{invokes}' is not a generated skill"
                     )
-            for required_skill in MEMORY_QUARTET:
+            for required_skill in MEMORY_CONTINUITY_SKILLS:
                 required_rel = f"{agents_rel}/{required_skill}-agent.md"
                 if required_skill in skill_names and not is_owned(files, required_rel):
                     errors.append(
@@ -485,7 +516,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                     validate_flow(
                         edition, cf, text, roster or skill_names, write_agents, errors
                     )
-            for required_skill in MEMORY_QUARTET:
+            for required_skill in MEMORY_CONTINUITY_SKILLS:
                 required_rel = f"{commands_rel}/{required_skill}.md"
                 if required_skill in skill_names and not is_owned(files, required_rel):
                     errors.append(
@@ -525,6 +556,24 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
             expected_rel = f"{hooks_rel}/{expected}"
             if not is_owned(files, expected_rel):
                 errors.append(f"[{edition}] required hook is not manifest-owned: {expected_rel}")
+        continuity_rel = f"{hooks_rel}/{CONTINUITY_HOOK}"
+        if is_owned(files, continuity_rel):
+            # One unargumented script serves every event, so it must hand the
+            # payload to the runtime's event dispatch, and name its own host:
+            # a session start answers in that host's context envelope.
+            source = (target / continuity_rel).read_text(
+                encoding="utf-8", errors="replace"
+            )
+            if (
+                "memory-bank/scripts/context_continuity.py" not in source
+                or not re.search(r"--event[ =]hook\b", source)
+                or not re.search(rf"--host[ =]{edition}\b", source)
+            ):
+                errors.append(
+                    f"[{edition}] {continuity_rel} does not call "
+                    "memory-bank/scripts/context_continuity.py with "
+                    f"--host {edition} --event hook (hook-forge step 6)"
+                )
         if edition == "cursor":
             # Cursor's read path: the prompt, stop and sessionStart hooks must
             # render the capsule into the alwaysApply working-memory rule, and
@@ -642,6 +691,14 @@ def resolve_wired_scripts(edition: str, command: str) -> tuple:
     return scripts, unanchored
 
 
+def event_commands(document, event: str) -> list:
+    """Every command string wired on one native hook event."""
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return []
+    return collect_wired_commands(hooks.get(event, []))
+
+
 def validate_hook_wiring(
     target: Path, editions: list, files: dict, errors: list
 ) -> None:
@@ -747,6 +804,42 @@ def validate_required_wiring(
                     f"[{edition}] {wiring_rel} does not wire {script} in "
                     f"hook-forge's exact form ({HOOK_FORGE_FORMS[edition]}), "
                     "so that guard never runs (hook-forge step 9)"
+                )
+
+
+def validate_continuity_wiring(
+    target: Path, editions: list, files: dict, errors: list
+) -> None:
+    """context-continuity.sh must run on every lifecycle event it serves.
+
+    validate_required_wiring proves the script is wired somewhere; this
+    proves it is wired where it acts. A start event that does not run it
+    never hands a new task the merge `context-load merge` prepared for it, and
+    a prompt or answer event that does not run it leaves that half of the
+    chat out of the snapshot - nothing else would notice either. The command
+    must be hook-forge's exact form, with no argument: the payload's
+    `hook_event_name` selects the action. An unowned or unreadable wiring file
+    is already reported by validate_hook_wiring.
+    """
+    for edition in editions:
+        hooks_rel, wiring_rel = EDITION_HOOK_WIRING[edition]
+        if not is_owned(files, wiring_rel):
+            continue
+        try:
+            document = json.loads((target / wiring_rel).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        script = f"{hooks_rel}/{CONTINUITY_HOOK}"
+        for event in CONTINUITY_EVENTS[edition]:
+            wired = {
+                hook_forge_script(edition, command)
+                for command in event_commands(document, event)
+            }
+            if script not in wired:
+                errors.append(
+                    f"[{edition}] {wiring_rel} does not run {CONTINUITY_HOOK} on "
+                    f"{event} in hook-forge's exact form "
+                    f"({HOOK_FORGE_FORMS[edition]}, no argument) (hook-forge step 9)"
                 )
 
 
@@ -1220,6 +1313,7 @@ def main() -> int:
     validate_hooks(target, editions, files, errors)
     validate_hook_wiring(target, editions, files, errors)
     validate_required_wiring(target, editions, files, errors)
+    validate_continuity_wiring(target, editions, files, errors)
     validate_claude_policy_import(target, editions, errors)
     validate_memory_mcp(target, editions, files, errors)
     validate_memory_bank(

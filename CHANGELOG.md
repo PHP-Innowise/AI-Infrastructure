@@ -34,6 +34,56 @@ edition's own files remain in that edition's changelog.
   `--phase` help and the round-trip test in `project-brain/tests` list it;
   the generator asset follows.
 
+- **Merge chats into a new task, and hand curated context to another one.**
+  Ported from the `codex/context-handoff` branch onto the automatic memory.
+  - `context-save` / `context-load` skills and `/context-save`, `/context-load`
+    commands in all four editions, backed by `memory-bank/scripts/context_handoff.py`
+    and `context.py context-save|context-load`: a curated `summary`, `topic` or
+    `full` handoff (an explicitly exported visible conversation kept verbatim)
+    with provenance and file fingerprints, written under `tasks/` and loaded
+    with branch/commit/file drift. Handoffs never write Project Brain, Memory
+    Bank or SQLite and are excluded from indexing even when renamed. Curated
+    fields refuse personal data as well as secrets (`sensitive_label`, the
+    policy of every authored memory). In an attached session paths resolve in
+    the project and a handoff is never written into the accelerator state.
+  - `context-continuity.sh`, one argument-free root-anchored hook per tool on
+    session start, prompt and end of turn (Claude `SessionStart`,
+    `UserPromptSubmit`, `Stop`; Codex the same through the root-finding
+    launcher; Cursor `sessionStart`, `beforeSubmitPrompt`, `afterAgentResponse`),
+    dispatches on the payload's `hook_event_name` to
+    `memory-bank/scripts/context_continuity.py`. It keeps each chat's visible
+    prompts and final answers in ignored `.context-handoff/` (the launcher's
+    state directory when attached), and `context-load merge` freezes 2-8 chosen
+    chats into an attributed archive that the next new session of the chosen
+    client receives as a bounded preview (6,000 bytes). The branch's automatic
+    replay of up to eight recent chats into every new session was not taken:
+    the Task Capsule already carries a branch's work into the next session, so
+    only an explicitly prepared merge is delivered. Locking works on Windows
+    (`msvcrt`) as well as POSIX. `CONTEXT_CONTINUITY_DISABLED=1` turns
+    snapshots off; `CONTEXT_CONTINUITY_RESTORE_DISABLED=1` skips delivery.
+  - Harness **Merge chats** (the **Merge** button beside the session list):
+    2-8 inactive ordinary chats of a project start a fresh Codex, Claude or
+    Cursor task with a frozen, source-attributed archive of their
+    Harness-visible messages (private state archive and SQLite record, retry
+    by request identity, restart of an interrupted merged task, bounded
+    storage, orphan cleanup at start). The merged task keeps the automatic
+    memory of any new session (the branch refused a Brain link); a Claude
+    merged task cannot start with a `/` command, which would skip the merged
+    context. Its launch sets `CONTEXT_CONTINUITY_RESTORE_DISABLED=1` so a
+    native merge prepared for that client is not consumed. `create()` now
+    commits the session row, its settings, a merge archive and the first
+    message together, and a native launch whose prompt cannot be built (a
+    changed archive, a missing workspace) fails with its reason instead of
+    "Run failed (SessionError)". CI's Harness step (and `scripts/check.py`)
+    runs the new `tests.test_harness_merge`.
+  - Infrastructure Creator seeds `context_handoff.py` and
+    `context_continuity.py`, generates the two skills and the hook, and the
+    bootstrap verifier checks the hook's per-event wiring in the one
+    root-anchored form per hook.
+  - The fine-grained GitHub token pattern the branch added was already in
+    `automatic_query.py`, and mirror executable bits were already kept by
+    `build_mirrors.py`.
+
 - **Memory MCP: a message nested past 64 levels is a parse error on every
   Python.** The server relied on the JSON parser's recursion limit, which now
   follows the C stack; a newer Python parsed 60,000 levels and answered

@@ -63,8 +63,8 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
 - Every proposed skill MUST prove distinct selection, owned scope, procedure,
   output, evidence, and routing value. Catalog membership alone is not a reason
   to generate it; unsupported or overlapping skills are pruned or merged.
-  Two exceptions are unconditional by design: the runtime-fixed memory
-  quartet, and the **golden development set** (`requirements-analyst`,
+  Two exceptions are unconditional by design: the six runtime-fixed
+  memory-continuity guides, and the **golden development set** (`requirements-analyst`,
   `coding`, `refactorer`, `testing`, `debugging`, `performance`,
   `code-review`, `security-review`) - the
   loop every codebase lives in is always generated, in any weather. Evidence
@@ -121,6 +121,13 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   stamped target `AGENTS.md` and `.infra-manifest.json`. `infra-update` MUST NOT
   overwrite any file whose hash differs from that manifest without an explicit
   per-file human decision, and MUST NOT touch files the manifest does not list.
+- Generated output keeps chat snapshots for every selected client: one
+  unargumented `context-continuity.sh` stores visible prompt/answer text in
+  ignored `.context-handoff/` via `memory-bank/scripts/context_continuity.py`,
+  and a session start receives only a merge prepared with `context-load merge`.
+  It MUST NOT scrape private account/session storage, keep hidden reasoning, or
+  write Project Brain, Memory Bank or SQLite. A `context-save full` transcript
+  stays in its explicit `tasks/TASK-NNN/context-save-*.md` artifact.
 - Root `.gitignore` is a narrowly scoped shared-file exception: forges declare
   exact requirements, only generation/update orchestration composes them, and
   a pre-existing file is changed only by explicit append approval with

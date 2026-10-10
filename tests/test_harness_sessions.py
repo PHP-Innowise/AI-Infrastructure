@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from unittest.mock import patch, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness" / "src"))
@@ -29,13 +30,20 @@ behavior = config["behavior"]
 if behavior == "no_stdin":
     time.sleep(30)
 sys.stdin.read()
+marker = 'Full captured source archive: '
+if marker in config.get('prompt', ''):
+    archive = json.loads(config['prompt'].split(marker, 1)[1].splitlines()[0])
+    pathlib.Path(config['pid_path'] + '.merge').write_text(json.dumps({
+        'archive': json.loads(pathlib.Path(archive).read_text()), 'argv': sys.argv,
+        'restore_disabled': os.environ.get('CONTEXT_CONTINUITY_RESTORE_DISABLED'),
+        'capture_disabled': os.environ.get('CONTEXT_CONTINUITY_DISABLED')}))
 for line in config.get('prompt', '').splitlines():
     if line.startswith('[{"name":') and '"path":' in line:
         import base64
         files = json.loads(line)
         pathlib.Path(config['pid_path'] + '.attachments').write_text(json.dumps([
             base64.b64encode(pathlib.Path(item['path']).read_bytes()).decode() for item in files]))
-if config["provider"] == "claude":
+if config["provider"] in ("claude", "cursor"):
     print(json.dumps({"type": "system", "subtype": "init", "session_id": "native-original"}), flush=True)
     if behavior == "signed_out":
         # What Claude Code 2.1.278 printed on 2026-10-06 when its OAuth sign-in had expired.
@@ -178,6 +186,42 @@ class SessionTests(unittest.TestCase):
         pid = int(pid_path.read_text())
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
+
+    def test_merged_launches_read_frozen_sources_and_preserve_capture_for_all_providers(self):
+        from harness import chat_merge
+        manager=self.manager()
+        manager.providers['cursor'].update(available=True,executable=str(self.fake))
+        source_ids=[self.create(manager,prompt='Source API decision'),self.create(manager,prompt='Source UI progress')]
+        for sid in source_ids: self.settled(manager,sid)
+        for provider in ('codex','claude','cursor'):
+            with self.subTest(provider=provider):
+                row=manager.merge({'source_ids':source_ids,'request_id':str(uuid.uuid4()),'destination':{
+                    'project_id':next(iter(manager.projects)), 'provider':provider,'prompt':'Continue combined work'}})
+                final=self.settled(manager,row['id'])
+                self.assertEqual('completed',final['status'])
+                call=self.calls[-1]; evidence=json.loads(Path(call['pid_path']+'.merge').read_text())
+                self.assertEqual(source_ids,[source['id'] for source in evidence['archive']['sources']])
+                self.assertIsNone(call['session_id'])
+                self.assertEqual('1',evidence['restore_disabled']); self.assertIsNone(evidence['capture_disabled'])
+                if provider=='claude':
+                    self.assertIn('--add-dir',evidence['argv'])
+                    self.assertIn(str(chat_merge.archive_path(manager,row['id']).parent),evidence['argv'])
+                    self.assertNotIn(str(manager.state_dir/'merges'),evidence['argv'])
+
+    def test_a_changed_merge_archive_fails_the_first_launch_with_its_reason_and_starts_no_provider(self):
+        from harness import chat_merge
+        manager=self.manager()
+        source_ids=[self.create(manager,prompt='Source A'),self.create(manager,prompt='Source B')]
+        for sid in source_ids: self.settled(manager,sid)
+        with manager.lock:
+            row=manager.merge({'source_ids':source_ids,'request_id':str(uuid.uuid4()),'destination':{
+                'project_id':next(iter(manager.projects)),'provider':'codex','prompt':'Continue combined work'}})
+            chat_merge.archive_path(manager,row['id']).write_text('{}')
+        launched=len(self.calls)
+        final=self.settled(manager,row['id'])
+        self.assertEqual(('failed',None),(final['status'],final['native_session_id']))
+        self.assertEqual(launched,len(self.calls))
+        self.assertIn('The saved merge archive changed or is unavailable.',[event.get('text') for event in manager.events(row['id'])])
 
     def test_sdd_phases_validate_documents_resume_and_retain_launch_settings(self):
         from harness import sdd

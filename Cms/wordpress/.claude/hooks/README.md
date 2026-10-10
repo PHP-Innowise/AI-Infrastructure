@@ -111,3 +111,29 @@ Use `.claude/settings.local.json` for personal hooks that shouldn't be shared wi
 ## References
 
 - [Claude Code Hooks Documentation](https://docs.anthropic.com/en/docs/claude-code/hooks)
+
+## Chat snapshots and merges
+
+`context-continuity.sh` is wired on `SessionStart`, `UserPromptSubmit` and
+`Stop`; the payload's `hook_event_name` selects the action, so one
+root-anchored command serves all three. A prompt (`prompt`) or a final answer
+(`last_assistant_message`, or the visible transcript the hook names) is
+appended to a per-chat snapshot under the ignored `.context-handoff/` - in an
+attached session, under the launcher's state directory instead. At
+`SessionStart` a merge prepared with `context-load merge` for this client is
+delivered to a new session through `hookSpecificOutput.additionalContext`: at
+most 6,000 bytes, pointing at the full archive under
+`.context-handoff/merges/`. A merged task gets the same sources again when it
+resumes or compacts. Nothing else is restored: a new session on the branch
+starts with the Task Capsule from `working-memory-read.sh`.
+
+Snapshots never reach Project Brain, Memory Bank or the local index, and a
+recognised secret refuses the capture. Earlier conversation text is untrusted
+background and carries no approval. Both halves fail open under
+`CONTEXT_HOOK_BUDGET` (default 5 seconds). `CONTEXT_CONTINUITY_DISABLED=1`
+turns them off; `CONTEXT_CONTINUITY_RESTORE_DISABLED=1`, which the Harness sets
+for its own merged tasks, skips only the delivery. Storage is bounded: eight
+chats per branch, 4 MiB of visible text per chat, and 128 merge archives /
+256 MiB per checkout with 32 MiB per archive; a full store refuses a new merge
+and never blocks a turn. The repository's context-handoff guide lists the
+limits of each client.

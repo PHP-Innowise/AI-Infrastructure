@@ -53,6 +53,10 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   the turn's memory budget twice. The `.claude`/`.cursor` mirrors and the
   policy lock are regenerated.
 
+### Added
+
+- **Generated projects get `context-save`/`context-load` and chat snapshots.** `memory-seed` copies `context_handoff.py` and `context_continuity.py` with the other runtime scripts, and the runtime contract declares their command forms, the `.context-handoff/` and `tasks/TASK-NNN/context-save-*.md` paths and the chat-snapshot boundaries. `skill-forge` always generates two more runtime-fixed guides, six in all: `context-save` (a curated summary or topic handoff, or a `full` one with an explicitly exported visible transcript, as a task artifact) and `context-load` (validate one handoff and report drift, or `merge` 2-8 captured chats into a frozen archive for the next new task). `hook-forge` generates `context-continuity.sh`, one script with no argument, wired after the existing hooks on session start, prompt and end of turn (Claude and Codex `SessionStart`/`UserPromptSubmit`/`Stop`, Cursor `sessionStart`/`beforeSubmitPrompt`/`afterAgentResponse`) in each edition's root-anchored form. It calls `context_continuity.py --event hook`, which reads the payload's event name, keeps visible prompt and answer text in ignored `.context-handoff/`, and at session start delivers only a merge prepared for that new task: nothing else is restored, because the Task Capsule already carries a branch's work. `CONTEXT_CONTINUITY_DISABLED=1` turns snapshots off. `bootstrap-verifier` requires the two skills and their wrappers, the two runtime scripts, a hook that calls the runtime with its own `--host` and `--event hook`, and the hook on each of its events (`validate_continuity_wiring`); `tests/test_context_continuity_generator.py` covers the gate. Mirrors and policy lock regenerated.
+
 ### Fixed
 
 - **`memory-seed` asset: the Memory MCP refuses over-nested messages itself.** A message nested past 64 levels is a parse error before the JSON parser runs, on every Python (see the root `CHANGELOG.md`). Policy lock regenerated.

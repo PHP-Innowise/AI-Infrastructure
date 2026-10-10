@@ -1426,7 +1426,11 @@ Session-start hooks can report metadata such as:
 - validation status;
 - Memory Bank availability.
 
-Session-start hooks print no record bodies and inject no context.
+Session-start hooks print no record bodies and inject no context. The one
+exception is `context-continuity.sh`, which delivers a chat merge prepared
+for a new task with `context-load merge` and otherwise prints nothing; it
+also keeps each chat's visible text in ignored `.context-handoff/` on prompt
+and end of turn. See [Context Handoff](CONTEXT-HANDOFF.md).
 
 Two further hooks automate working memory when the edition enables them:
 

@@ -142,6 +142,8 @@ const projectGitState = {projectId:null,data:null,pending:false,error:null,epoch
 // Workspace › Existing Git worktree: the project's other checkouts; `preferred` is the choice a draft or the person made.
 const projectWorktreeState = {projectId:null,data:null,pending:false,error:null,epoch:0,controller:null,preferred:''};
 const fleetUi = {lenses:new Set(),initialized:false,reviewers:new Map(),stage:null,resultKey:null,reportOpenedFor:null};
+// Merge chats: the new task's chosen sources while it is a draft, with the request identity its retries reuse.
+const mergeUi = {draft:null,selected:new Set(),archiveEpoch:0,sourcesKey:null};
 const active = session => session && ['queued','running'].includes(session.status);
 const isFleetSession = session => session?.workflow === 'fleet-review';
 const statusLabel = value => ({queued:'Queued',running:'Running',completed:'Process complete',failed:'Failed',cancelled:'Cancelled',interrupted:'Interrupted',awaiting_context:'Review context',awaiting_approval:'Awaiting approval',rejected:'Report rejected'})[value] || value || 'Ready';
@@ -794,7 +796,8 @@ function captureSessionPreferences() {
     worktree:projectWorktreeState.preferred};
 }
 function saveSessionPreferences(projectId = sessionDraftProject || $('project').value) {
-  if (!sessionPreferencesReady || restoringSessionPreferences || !state.bootstrap) return;
+  // A merge draft forces a native task in the project folder; that is not the project's saved preference.
+  if (!sessionPreferencesReady || restoringSessionPreferences || !state.bootstrap || mergeUi.draft) return;
   if (!state.selectedId && brainLinkStrict() && (brainLinkDraft.loading || brainLinkDraft.error)) return;
   if (state.selectedId) projectId = $('project').value;
   if (!projectFor(projectId)) return;
@@ -1140,7 +1143,7 @@ const sessionOptions = {open:null};
 function renderSessionOptions() {
   const hasSession = Boolean(state.selectedId), session = state.selected, fleet = fleetSelected(), clashMode = clashSelected();
   for (const id of ['project','provider','workflow']) $(id).closest('label').hidden = hasSession;
-  const shown = {project:!hasSession, helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
+  const shown = {project:!hasSession, helpers:!clashMode && !session?.creator, clash:clashAvailable() && !fleet && !isFleetSession(session) && !session?.creator && !mergeUi.draft, workspace:!hasSession, brain:!hasSession, budgets:!session?.creator, models:!fleet && !clashMode && !fleetDryRun()};
   const valid = sessionOptions.validity || {}, invalid = {project:!projectFor($('project').value), helpers:valid.helpers === false, clash:valid.clash === false, workspace:valid.workspace === false, brain:valid.brain === false, budgets:valid.budgets === false || !$('session-budgets-agent-error').hidden, models:valid.models === false};
   const on = {project:Boolean(projectFor($('project').value)?.accelerator?.mode), helpers:fleet || $('agents-enabled').checked, clash:clashMode, workspace:$('workspace').value !== 'project', brain:brainLinkActive(), budgets:budgetSummary(sessionBudgets()) !== 'No limits', models:Boolean(modelRouting())};
   const count = $('agent-count').valueAsNumber, git = projectGitState.projectId === $('project').value ? projectGitState.data : null, branch = $('worktree-branch').value.trim();
@@ -1201,6 +1204,7 @@ document.addEventListener('click',event => {
   if (button.closest('.model-field')) updateControls(); else if ($(button.getAttribute('aria-controls'))) $(button.getAttribute('aria-controls')).hidden = !expanded;
 });
 function updateControls() {
+  enforceMergeDraft();
   const hasSession = Boolean(state.selectedId); const pending = Boolean(state.pending); const ready = Boolean(state.bootstrap) && !state.authFailed;
   const fleet = fleetSelected(); const dryRun = fleetDryRun(); const existingFleet = isFleetSession(state.selected);
   if (fleet && !hasSession && !dryRun && !$('agents-enabled').disabled && fleetUi.autoHelpers !== $('workflow').value) { fleetUi.autoTicked = !$('agents-enabled').checked; $('agents-enabled').checked = true; fleetUi.autoHelpers = $('workflow').value; }
@@ -1259,6 +1263,7 @@ function updateControls() {
   $('composer-note').classList.toggle('shortcut',$('composer-note').textContent === 'Ctrl / ⌘ + Enter to send');
   const caption = terminalLinkedTask ? 'The linked Brain task is completed or cancelled. Start a new session with an active or new task to continue.' : reviewing && !noResume ? 'You review the prepared workspace and context before the agent runs.' : remembering && !noResume && !clashMode && !fleet ? 'Project memory is retrieved for each message and saved when the run completes.' : clashMode && !hasSession ? 'Both participants share the session budgets.' : clashMode && !noResume ? 'A follow-up starts the next cycle; both native sessions resume. Untick Clash for a normal follow-up.' : fleet && !hasSession ? 'Scope and reviewers are fixed once the review starts.' : noResume ? systemOwned === 'run' ? 'This launch belongs to a system change. Resume, cancel or review it under System Orchestration › Changes.' : systemOwned === 'scan' ? 'This is an AI scan of service folders. Start a new scan from the system editor.' : state.selected.status === 'cancelled' ? 'Cancelled before a resumable native session was created.' : 'No resumable native session was returned. Start a new session to continue.' : '';
   $('composer-caption').textContent = caption; $('composer-caption').hidden = !caption;
+  applyMergeControls();
   const signInNote = !dryRun && provider?.available && signedOut(provider.id) ? `${provider.name} is not signed in. Sign in from a terminal with ${signIn.states[provider.id].login || 'its CLI'}${hasSession ? ', then send again' : ''}; this page checks again when you come back to it.` : '';
   const providerNote = dryRun ? 'Offline dry-run can use any provider selection; no native CLI is launched.' : ready && !provider?.available ? 'No provider is ready. Install and sign in with a native CLI, then restart the Harness server.' : signInNote || (provider?.id === 'cursor' ? 'Cursor can’t disable or cap helpers; helper settings are instructions only.' : '');
   const switchTo = signInNote && !hasSession ? (state.bootstrap?.providers || []).find(item => item.available && signIn.states[item.id]?.state === 'signed_in') : null;
@@ -1295,7 +1300,7 @@ $('agent-count').addEventListener('input',updateControls);
 $('prompt').addEventListener('keydown',event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); if (!$('send').disabled) $('session-form').requestSubmit(); } });
 function stopPolling() { clearTimeout(state.pollTimer); state.pollTimer = null; state.pollController?.abort(); state.pollController = null; }
 function newSession(prompt = '', projectId = $('project').value, show = true) {
-  saveSessionPreferences();
+  saveSessionPreferences(); discardMergeDraft(); closeMergeArchive();
   clearAttachments();
   stopPolling(); state.epoch++; state.selectedId = null; state.selected = null; state.loading = false; state.eventIds.clear(); state.assistantTexts.clear(); state.stepCalls.clear(); runView.reset(); $('events').replaceChildren(); $('prompt').value = prompt;
   sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); sddSlugTouched = false; $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height');
@@ -1308,6 +1313,136 @@ function newSession(prompt = '', projectId = $('project').value, show = true) {
   $('project').value = projectId; restoreProjectPreferences(projectId);
 }
 $('new-session').addEventListener('click',() => { if (!state.pending) newSession(); });
+// Merge chats: 2–8 finished ordinary chats of one project start a new native task in the project folder. The server
+// freezes their visible messages; the first launch reads a preview and the saved archive. Sources stay unchanged.
+const MERGE_PROMPT = 'Continue the work from these chats. Keep each chat’s decisions and progress, name any conflicts between them, and propose the next steps.';
+const mergeSourceEligible = (session, projectId) => session.project_id === projectId && !['queued','running','awaiting_context','awaiting_approval'].includes(session.status)
+  && !session.creator && !session.clash && !session.fleet && !session.system_run && !session.system_discovery && !isFleetSession(session);
+const mergeRestartable = session => Boolean(session?.merge && !session.native_session_id && ['interrupted','failed'].includes(session.status));
+function discardMergeDraft() { mergeUi.draft = null; mergeUi.sourcesKey = null; }
+function closeMergeArchive() {
+  mergeUi.archiveEpoch++; $('merge-archive-content').hidden = true; $('merge-archive-content').replaceChildren();
+  $('merge-archive').setAttribute('aria-expanded','false'); $('merge-archive').textContent = 'View saved context';
+}
+// A draft is an ordinary native task in the project folder, without attachments or Clash; another project or session ends it.
+function enforceMergeDraft() {
+  if (mergeUi.draft && (state.selectedId || mergeUi.draft.projectId !== $('project').value)) discardMergeDraft();
+  if (!mergeUi.draft) return;
+  if ($('workflow').value !== 'native') $('workflow').value = 'native';
+  if ($('workspace').value !== 'project') $('workspace').value = 'project';
+  $('clash-enabled').checked = false;
+  if (attachedFiles.length) clearAttachments();
+}
+function renderMergeContext() {
+  const draft = mergeUi.draft, merge = draft || state.selected?.merge || null, pending = Boolean(state.pending);
+  $('merge-context').hidden = !merge;
+  if (!merge) { mergeUi.sourcesKey = null; return; }
+  const restartable = !draft && mergeRestartable(state.selected), count = merge.sources.length;
+  $('merge-context-title').textContent = draft ? `New task from ${count} chats` : `Merged from ${count} chats`;
+  // A started task needs only its sources; the note explains a draft and a task that can restart.
+  $('merge-context-note').textContent = draft ? 'Describe the new task below and choose its provider. It starts in this project folder with a saved copy of these chats’ messages; the chats stay as they are.'
+    : restartable ? 'The provider never started a conversation for this task. Restart runs its first message again with the same saved chats; check any partial work first.' : '';
+  $('merge-context-note').hidden = !$('merge-context-note').textContent;
+  $('merge-clear').hidden = !draft; $('merge-clear').disabled = pending;
+  $('merge-restart').hidden = !restartable; $('merge-restart').disabled = pending || !state.bootstrap || state.authFailed;
+  $('merge-archive').hidden = Boolean(draft);
+  const key = JSON.stringify([draft ? 'draft' : state.selectedId,merge.sources.map(source => [source.id,source.title,source.provider,source.branch]),pending]);
+  if (mergeUi.sourcesKey === key) return; mergeUi.sourcesKey = key;
+  $('merge-context-sources').replaceChildren(...merge.sources.map(source => {
+    const label = [source.title || 'Untitled chat',providerFor(source.provider)?.name || source.provider,source.branch].filter(Boolean).join(' · ');
+    // A draft names its chats without leaving the draft; a saved task links to each of them.
+    if (draft) return el('span','merge-source',label);
+    const link = el('button','merge-source',label); link.type = 'button'; link.disabled = pending; link.title = 'Open this chat';
+    link.addEventListener('click',() => { if (state.pending) return; if (state.sessions.some(item => item.id === source.id)) openHistorySession(source.id); else selectSession(source.id); });
+    return link;
+  }));
+}
+function applyMergeControls() {
+  $('merge-chats').disabled = Boolean(state.pending) || !state.bootstrap || state.authFailed;
+  renderMergeContext();
+  const note = $('composer-note');
+  if (mergeUi.draft) {
+    for (const id of ['workflow','workspace','existing-worktree','worktree-branch','clash-enabled','attach-files','attachment-input']) $(id).disabled = true;
+    // A Claude Code command goes to the CLI as typed, so the merged chats would not reach it; the runner refuses it too.
+    const command = $('provider').value === 'claude' && /^\s*\//.test($('prompt').value);
+    if (command) { $('send').disabled = true; note.textContent = 'Start with a written instruction: a Claude Code command would skip the merged chats.'; }
+    $('send-label').textContent = state.pending === 'create' ? 'Merging…' : 'Merge into new task';
+  } else if (mergeRestartable(state.selected)) {
+    note.textContent = 'Use Restart merged task above, or New session in the sidebar.';
+    $('composer-caption').textContent = 'Restart runs the first message again with the same saved chats.'; $('composer-caption').hidden = false;
+  }
+  note.classList.toggle('shortcut',note.textContent === 'Ctrl / ⌘ + Enter to send');
+}
+function renderMergeSelection() {
+  const count = mergeUi.selected.size;
+  $('merge-selection-count').textContent = count ? `${count} of 8 chats selected` : 'No chats selected';
+  $('merge-picker-continue').disabled = count < 2 || count > 8;
+  for (const box of $('merge-options').querySelectorAll('input')) box.disabled = !box.checked && count >= 8;
+}
+async function openMergePicker() {
+  if (state.pending || !state.bootstrap || state.authFailed) return;
+  const projectId = $('project-switcher').value || $('project').value;
+  await refreshSessions();
+  mergeUi.selected.clear(); $('merge-picker').dataset.project = projectId;
+  const options = state.sessions.filter(session => mergeSourceEligible(session,projectId));
+  $('merge-options').replaceChildren($('merge-options').querySelector('legend') || el('legend','sr-only','Chats to merge'));
+  for (const session of options) {
+    const choice = el('label','merge-choice'), box = el('input'), info = el('span');
+    box.type = 'checkbox'; box.value = session.id;
+    info.append(el('strong','',session.title || 'Untitled chat'),el('small','',[providerFor(session.provider)?.name || session.provider,sessionStatusLabel(session),dateLabel(session.updated_at)].filter(Boolean).join(' · ')));
+    box.addEventListener('change',() => { if (box.checked) mergeUi.selected.add(session.id); else mergeUi.selected.delete(session.id); renderMergeSelection(); });
+    choice.append(box,info); $('merge-options').append(choice);
+  }
+  if (options.length < 2) $('merge-options').append(el('p','knowledge-note','Finish at least two chats in this project to merge them. Running, Creator, Fleet, Clash and System Orchestration sessions are not listed.'));
+  renderMergeSelection(); $('merge-picker').showModal();
+}
+$('merge-chats').addEventListener('click',openMergePicker);
+$('merge-picker-cancel').addEventListener('click',() => $('merge-picker').close());
+$('merge-picker-continue').addEventListener('click',() => {
+  const projectId = $('merge-picker').dataset.project;
+  // Selection order is source order in the saved context.
+  const sources = [...mergeUi.selected].map(id => state.sessions.find(session => session.id === id)).filter(Boolean).map(({id,title,provider}) => ({id,title,provider}));
+  if (sources.length < 2 || sources.length > 8 || !projectFor(projectId) || state.pending) return;
+  $('merge-picker').close();
+  newSession(MERGE_PROMPT,projectId);
+  mergeUi.draft = {projectId,sources,request_id:crypto.randomUUID(),signature:null};
+  updateControls(); $('prompt').focus();
+});
+$('merge-clear').addEventListener('click',() => {
+  if (state.pending || !mergeUi.draft) return;
+  discardMergeDraft(); if ($('prompt').value === MERGE_PROMPT) $('prompt').value = '';
+  // The draft forced a native task in the project folder; the project's own saved choices come back.
+  restoreProjectPreferences($('project').value); updateControls(); $('prompt').focus();
+});
+$('merge-restart').addEventListener('click',async () => {
+  const sid = state.selectedId; if (state.pending || !mergeRestartable(state.selected)) return;
+  state.pending = 'restart-merge'; showError('composer-error',''); updateControls();
+  try { const data = await api(`/api/sessions/${encodeURIComponent(sid)}/restart-merge`,{method:'POST',body:{}}); if (data.session) upsert(data.session); if (sid === state.selectedId) { stopPolling(); state.pending = null; await pollSession(state.epoch); } }
+  catch (error) { if (sid === state.selectedId) showError('composer-error',textError(error)); }
+  finally { state.pending = null; updateControls(); }
+});
+$('merge-archive').addEventListener('click',async () => {
+  if (!$('merge-archive-content').hidden) { closeMergeArchive(); return; }
+  const sid = state.selectedId, epoch = ++mergeUi.archiveEpoch; if (!sid) return;
+  $('merge-archive').disabled = true;
+  try {
+    const bundle = await api(`/api/sessions/${encodeURIComponent(sid)}/merge`);
+    if (sid !== state.selectedId || epoch !== mergeUi.archiveEpoch) return;
+    const sections = [];
+    const add = (sources, depth) => { for (const source of Array.isArray(sources) ? sources : []) {
+      const section = el('section');
+      section.append(el('h4','',`${depth ? 'Inherited · ' : ''}${source.title || 'Untitled chat'} · ${providerFor(source.provider)?.name || source.provider}`));
+      if (source.branch) section.append(el('p','knowledge-note',`Branch: ${source.branch}`));
+      for (const message of Array.isArray(source.messages) ? source.messages : []) { const item = el('div','merge-message'); item.dataset.role = message.role; item.append(el('strong','',message.role === 'user' ? 'You' : 'Assistant'),el('p','',String(message.text ?? ''))); section.append(item); }
+      sections.push(section);
+      if (source.inherited_context && depth < 8) add(source.inherited_context.sources,depth + 1);
+    } };
+    add(bundle.sources,0);
+    $('merge-archive-content').replaceChildren(...sections); $('merge-archive-content').hidden = false;
+    $('merge-archive').setAttribute('aria-expanded','true'); $('merge-archive').textContent = 'Hide saved context';
+  } catch (error) { if (sid === state.selectedId) showError('composer-error',textError(error)); }
+  finally { $('merge-archive').disabled = false; }
+});
 function fleetCost(value) { return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `$${value.toFixed(4).replace(/0+$/,'').replace(/\.$/,'.00')}` : null; }
 function observeFleetEvent(event) {
   if (event.kind === 'fleet_stage' && typeof event.stage === 'string') fleetUi.stage = {stage:event.stage,status:typeof event.status === 'string' ? event.status : ''};
@@ -1502,6 +1637,7 @@ async function pollSession(epoch) {
 }
 async function selectSession(id) {
   if (state.pending) return;
+  discardMergeDraft(); if (id !== state.selectedId) closeMergeArchive();
   if (id !== state.selectedId) { sessionOptions.open = null; $('session-settings-toggle').setAttribute('aria-expanded','false'); $('sessions-view').classList.remove('output-resized'); $('sessions-view').style.removeProperty('--configuration-height'); }
   clearAttachments();
   saveSessionPreferences(); ++preferenceEpoch; restoringSessionPreferences = false;
@@ -1521,9 +1657,18 @@ $('session-form').addEventListener('submit',async event => {
   const prompt = $('prompt').value.trim(); const followup = Boolean(state.selectedId); state.pending = followup ? 'followup' : 'create'; showError('composer-error',''); updateControls();
   const turn = {prompt,agents_enabled:$('agents-enabled').checked,agent_count:$('agent-count').valueAsNumber,model_routing:modelRouting(),...(followup && $('workflow').value === 'native' && modelRouting() ? {mode:$('mode').value} : {}),...($('workflow').value === 'sdd' ? {sdd:sddSettings()} : {}),...(clashSelected() ? {clash:clashSettings()} : followup ? {clash:null} : {}),model:fleetDryRun() ? null : selectedModel(),thinking_effort:fleetDryRun() ? null : $('thinking-effort').value || null};
   const body = followup ? turn : {...turn,budgets:sessionBudgets(),project_id:$('project').value,provider:$('provider').value,mode:$('mode').value,workflow:$('workflow').value,project_context:true,workspace:$('workspace').value,...($('workspace').value === 'worktree' && $('worktree-branch').value.trim() ? {worktree_branch:$('worktree-branch').value.trim()} : {}),...($('workspace').value === 'existing-worktree' ? {worktree_id:$('existing-worktree').value} : {}),...(fleetSelected() ? {fleet:fleetSettings()} : {}),...(brainLinkActive() ? {brain:brainLinkConfig()} : {})};
+  const merging = !followup && Boolean(mergeUi.draft);
   try {
-    if (attachedFiles.length) body.attachments = await Promise.all(attachedFiles.map(encodeAttachment));
-    const data = await api(followup ? `/api/sessions/${encodeURIComponent(state.selectedId)}/messages` : '/api/sessions',{method:'POST',body});
+    if (attachedFiles.length && !merging) body.attachments = await Promise.all(attachedFiles.map(encodeAttachment));
+    let endpoint = followup ? `/api/sessions/${encodeURIComponent(state.selectedId)}/messages` : '/api/sessions', payload = body;
+    if (merging) {
+      // One request identity per draft and destination: resending the same request returns its task instead of a second one.
+      const draft = mergeUi.draft, signature = JSON.stringify(body);
+      if (draft.signature !== null && draft.signature !== signature) draft.request_id = crypto.randomUUID();
+      draft.signature = signature; endpoint = '/api/sessions/merge';
+      payload = {source_ids:draft.sources.map(source => source.id),request_id:draft.request_id,destination:body};
+    }
+    const data = await api(endpoint,{method:'POST',body:payload});
     if (!followup && !data.session?.id) throw new Error('The runner did not return a session. Refresh the session list before retrying.');
     if (data.session) { upsert(data.session); if (followup) applySessionSettings(data.session); } $('prompt').value = ''; clearAttachments();
     if (!followup) { state.pending = null; await selectSession(data.session.id); }

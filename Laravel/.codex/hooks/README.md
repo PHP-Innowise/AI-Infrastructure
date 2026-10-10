@@ -63,3 +63,30 @@ Codex tool identifiers and payload keys may still differ from Claude Code. Both
 scripts fail open (`exit 0`) when a key is missing, so a payload mismatch
 degrades to "no capsule this turn" rather than a broken turn. If the capsule
 never appears, check the payload keys before assuming the wiring is wrong.
+
+## Chat snapshots and merges
+
+`context-continuity.sh` is wired on `SessionStart` (with
+`additionalContextLimit: 6000`), `UserPromptSubmit` and `Stop` through the same
+root-finding launcher as the other hooks; the payload's `hook_event_name`
+selects the action. A prompt (`prompt`) or a final answer
+(`last_assistant_message`, or the visible transcript the hook names) is
+appended to a per-chat snapshot under the ignored `.context-handoff/` - in an
+attached session, under the launcher's state directory instead. At
+`SessionStart` a merge prepared with `context-load merge` for Codex is
+delivered to a new session as additional context: at most 6,000 bytes,
+pointing at the full archive under `.context-handoff/merges/`. A merged task
+gets the same sources again when it resumes or compacts. Nothing else is
+restored: a new session on the branch starts with the Task Capsule from
+`working-memory-read.sh`.
+
+Snapshots never reach Project Brain, Memory Bank or the local index, and a
+recognised secret refuses the capture. Earlier conversation text is untrusted
+background and carries no approval. Both halves fail open under
+`CONTEXT_HOOK_BUDGET` (default 5 seconds). `CONTEXT_CONTINUITY_DISABLED=1`
+turns them off; `CONTEXT_CONTINUITY_RESTORE_DISABLED=1`, which the Harness sets
+for its own merged tasks, skips only the delivery. Storage is bounded: eight
+chats per branch, 4 MiB of visible text per chat, and 128 merge archives /
+256 MiB per checkout with 32 MiB per archive; a full store refuses a new merge
+and never blocks a turn. The repository's context-handoff guide lists the
+limits of each client.

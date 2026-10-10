@@ -57,7 +57,7 @@ All Standard items, plus:
 - [ ] Public documentation updated for user-facing changes.
 - [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
 - [ ] Promotion proposals were not self-approved; any applied promotion has explicit human review plus source and destination revisions.
-- [ ] The SessionStart hook stays metadata-only and never prints Project Brain or Memory Bank records; the prompt hook's Task Capsule stays bounded and carries pointers and working state, never record bodies.
+- [ ] The SessionStart memory hook stays metadata-only and never prints Project Brain or Memory Bank records; the prompt hook's Task Capsule stays bounded and carries pointers and working state, never record bodies; the continuity hook delivers only a chat merge prepared for that new task, within 6,000 bytes.
 - [ ] Messenger workers, cron jobs, cache, migrations, and rollout impacts are documented when applicable.
 - [ ] Production cache warmup/build succeeds when deployment configuration changed.
 - [ ] New Symfony/PHP deprecations are absent or explicitly triaged when deprecation tooling is configured.

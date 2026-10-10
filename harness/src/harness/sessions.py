@@ -540,6 +540,10 @@ class Sessions:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
                 data TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS events_session ON events(session_id,id);
+            CREATE TABLE IF NOT EXISTS session_merges (
+                session_id TEXT PRIMARY KEY, request_id TEXT UNIQUE NOT NULL,
+                request_hash TEXT NOT NULL, bundle TEXT NOT NULL,
+                summary TEXT NOT NULL, context TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS registered_projects (
                 id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE);
         ''')
@@ -557,6 +561,8 @@ class Sessions:
                     self.db.close()
                     raise SessionError('Another runner still owns this state directory.')
                 time.sleep(.05)
+        from . import chat_merge
+        chat_merge.recover(self)
         # UI registrations survive restarts; missing folders remain visible for
         # diagnosis without preventing the other projects from loading.
         for row in self.db.execute('SELECT id,path FROM registered_projects ORDER BY rowid'):
@@ -623,12 +629,16 @@ class Sessions:
 
     def _event(self, session_id, event):
         with self.lock:
-            launch = getattr(self,'launch_ids',{}).get(session_id)
-            if launch: event = {**event,'launch_id':launch}
-            # When it was stored, to the millisecond; like launch_id, outside the launch's output limit.
-            if 'at' not in event: event = {**event,'at':datetime.now(timezone.utc).isoformat(timespec='milliseconds')}
-            self.db.execute("INSERT INTO events(session_id,data) VALUES (?,?)", (session_id, json.dumps(event, ensure_ascii=False)))
+            self._insert_event(session_id, event)
             self.db.commit()
+
+    def _insert_event(self, session_id, event):
+        """Store one event, uncommitted, stamped as _event stamps it; create() commits it with the session row."""
+        launch = getattr(self,'launch_ids',{}).get(session_id)
+        if launch: event = {**event,'launch_id':launch}
+        # When it was stored, to the millisecond; like launch_id, outside the launch's output limit.
+        if 'at' not in event: event = {**event,'at':datetime.now(timezone.utc).isoformat(timespec='milliseconds')}
+        self.db.execute("INSERT INTO events(session_id,data) VALUES (?,?)", (session_id, json.dumps(event, ensure_ascii=False)))
 
     def _status(self, sid, status):
         with self.lock:
@@ -650,6 +660,10 @@ class Sessions:
         result['capsule_meter'] = capsule_meter(result['brain']['capsule'], result['brain'].get('capsule_text')) if isinstance(result['brain'], dict) and isinstance(result['brain'].get('capsule'), dict) else None
         result['context_last'] = self._context_last(sid)
         result['launch'] = self._launch_last(sid)
+        # A task started from merged chats names its sources; the frozen messages stay behind merge_archive().
+        with self.lock:
+            merge = self.db.execute('SELECT summary FROM session_merges WHERE session_id=?', (sid,)).fetchone()
+        result['merge'] = json.loads(merge['summary']) if merge else None
         result.pop('fleet_action', None)
         return result
 
@@ -1102,13 +1116,95 @@ class Sessions:
         if self.held:
             raise SessionError(self.held)
 
-    def create(self, data, *, _creator=None, _system_run=None, _system_discovery=None):
+    # What a merged task's destination may carry: a new ordinary native session in the project folder, with the
+    # project's memory options like any other new session. No attachments, Clash, Fleet, SDD or worktrees.
+    MERGE_DESTINATION = frozenset(('project_id', 'provider', 'prompt', 'mode', 'workflow', 'model', 'thinking_effort',
+                                   'project_context', 'agents_enabled', 'agent_count', 'workspace', 'brain', 'budgets',
+                                   'model_routing'))
+
+    def merge(self, data):
+        """Start a fresh native task whose first launch reads a frozen archive of the selected chats.
+
+        `request_id` makes a retry idempotent: the same request returns its task, and requeues it only
+        when it never started a launch."""
+        from . import chat_merge
+        from .commands import LEADING
+        if not isinstance(data, dict) or set(data) != {'source_ids', 'request_id', 'destination'} or not isinstance(data['destination'], dict):
+            raise SessionError('Merge requires source_ids, request_id and destination settings.')
+        if not chat_merge.identity(data['request_id']):
+            raise SessionError('Invalid merge request identity.')
+        destination = data['destination']
+        if (set(destination) - self.MERGE_DESTINATION or destination.get('workflow', 'native') != 'native'
+                or destination.get('workspace', 'project') != 'project'):
+            raise SessionError('Merge starts an ordinary native task in the project folder, without attachments, '
+                               'Clash, Fleet, SDD or worktrees.')
+        prompt = destination.get('prompt')
+        if len(str(prompt if prompt is not None else '').encode('utf-8')) > 16384:
+            raise SessionError('The new merge task prompt must fit within 16 KiB.')
+        if destination.get('provider') == 'claude' and isinstance(prompt, str) and LEADING.match(prompt.strip()):
+            # A Claude Code command goes to the CLI as typed, and the merged context would not reach the agent.
+            raise SessionError('Start a merged task with a written instruction, not a Claude Code command.')
+        request_hash = hashlib.sha256(chat_merge.encoded(data)).hexdigest()
+        with self.lock:
+            existing = self.db.execute('SELECT session_id,request_hash FROM session_merges WHERE request_id=?', (data['request_id'],)).fetchone()
+            if existing:
+                if existing['request_hash'] != request_hash:
+                    raise SessionError('This merge request identity was already used with different settings.')
+                row = self.get(existing['session_id'])
+                launched = self.db.execute('SELECT 1 FROM launches WHERE session_id=? LIMIT 1', (row['id'],)).fetchone()
+                if row['status'] == 'interrupted' and not row['native_session_id'] and not launched:
+                    return self.restart_merge(row['id'])
+                return row
+            self.admit()
+            self.project(destination.get('project_id'))
+            bundle = chat_merge.prepare(self, data['source_ids'], destination['project_id'])
+            return self.create(destination, _merge={'bundle': bundle, 'request_id': data['request_id'], 'request_hash': request_hash})
+
+    def merge_archive(self, sid):
+        self.get(sid)
+        with self.lock:
+            row = self.db.execute('SELECT bundle FROM session_merges WHERE session_id=?', (sid,)).fetchone()
+        if not row:
+            raise SessionError('This task has no merged source archive.')
+        return json.loads(row['bundle'])
+
+    def restart_merge(self, sid):
+        """Rerun a merged task's first message when no native session was created; its sources stay as saved."""
+        with self.lock:
+            session = self.get(sid)
+            if not session.get('merge') or session['native_session_id'] or session['status'] not in ('interrupted', 'failed'):
+                raise SessionError('Only an interrupted or failed merged task without a native session can restart.')
+            self.admit()
+            if self.jobs.full() or self.stopping.is_set():
+                raise SessionError('The run queue is full or the server is stopping.')
+            self._workspace(session)
+            if not self.providers.get(session['provider'], {}).get('available'):
+                raise SessionError('This provider CLI is unavailable.')
+            first = self.db.execute('SELECT data FROM events WHERE session_id=? ORDER BY id LIMIT 1', (sid,)).fetchone()
+            event = json.loads(first['data']) if first else {}
+            prompt = validate_prompt(event.get('text') if event.get('kind') == 'user' else None)
+            self.cancelled.discard(sid)
+            generation = self.generations[sid] = uuid.uuid4().hex
+            self._status(sid, 'queued')
+            try:
+                self.jobs.put_nowait((sid, prompt, generation))
+            except queue.Full:
+                self._status(sid, 'interrupted')
+                raise SessionError('The run queue is full.') from None
+            self._event(sid, {'kind': 'status', 'text': 'Merged task restarted from its first message with the saved sources.'})
+            return self.get(sid)
+
+    def create(self, data, *, _creator=None, _system_run=None, _system_discovery=None, _merge=None):
         if not isinstance(data, dict):
             raise SessionError("Session options must be a JSON object.")
         if set(data) - {"project_id", "provider", "prompt", "mode", "workflow", "model", "thinking_effort", "project_context", "agents_enabled", "agent_count", "workspace", "worktree_branch", "worktree_id", "fleet", "brain", "budgets", "sdd", "model_routing", "attachments", "clash"}:
             raise SessionError("Unknown session option.")
         if 'worktree_id' in data and data.get('workspace') != 'existing-worktree':
             raise SessionError('A listed worktree is only valid for the Existing Git worktree workspace.')
+        if _merge is not None and (_creator is not None or _system_run is not None or _system_discovery is not None
+                                   or set(data) - self.MERGE_DESTINATION or data.get('workflow', 'native') != 'native'
+                                   or data.get('workspace', 'project') != 'project'):
+            raise SessionError('Invalid internal merge request.')
         if _system_run is not None:
             if (not isinstance(_system_run, dict) or set(_system_run) != {'run_id', 'nonce'}
                     or any(not isinstance(v, str) or not re.fullmatch('[a-f0-9]{32}', v) for v in _system_run.values())
@@ -1193,23 +1289,38 @@ class Sessions:
             else:
                 path, workspace, branch, common = existing or self._new_workspace(project, data, sid)
             attached = self.attachments.save(sid, files)
-            self.db.execute("""INSERT INTO sessions
-                (id,title,project_id,project_path,provider,model,mode,workflow,project_context,
-                 status,native_session_id,created_at,updated_at,agents_enabled,agent_count,thinking_effort,
-                 workspace,branch,git_common_dir,fleet,fleet_action,brain,system_run,system_discovery)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (sid, prompt[:80], project['id'], str(path), provider['id'], model, mode, workflow, int(context), 'queued', None, now(), now(), int(agents_enabled), agent_count, effort, workspace, branch, common, json.dumps(fleet) if fleet else None, 'start' if fleet else None, json.dumps(brain) if brain else None, json.dumps(_system_run) if _system_run else None, json.dumps(_system_discovery) if _system_discovery else None))
-            self.db.commit()
-            self.db.execute('UPDATE sessions SET budgets=?,sdd=?,model_routing=?,clash=? WHERE id=?',
-                            (json.dumps(budgets), json.dumps(sdd_settings) if sdd_settings else None,
-                             json.dumps(model_routing) if model_routing else None,
-                             json.dumps(clash_settings) if clash_settings else None, sid))
-            self.db.commit()
-            if _creator:
-                self.db.execute('UPDATE sessions SET creator=? WHERE id=?', (json.dumps(_creator), sid))
-                self.db.commit()
-            self._event(sid, {"kind": "user", "text": prompt, **({'attachments': attached} if attached else {})})
+            try:
+                # The session row, its settings, a merge's archive and the first message are one commit:
+                # a failure leaves no task without its message and no archive without its task.
+                with self.db:
+                    self.db.execute("""INSERT INTO sessions
+                        (id,title,project_id,project_path,provider,model,mode,workflow,project_context,
+                         status,native_session_id,created_at,updated_at,agents_enabled,agent_count,thinking_effort,
+                         workspace,branch,git_common_dir,fleet,fleet_action,brain,system_run,system_discovery)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (sid, prompt[:80], project['id'], str(path), provider['id'], model, mode, workflow, int(context), 'queued', None, now(), now(), int(agents_enabled), agent_count, effort, workspace, branch, common, json.dumps(fleet) if fleet else None, 'start' if fleet else None, json.dumps(brain) if brain else None, json.dumps(_system_run) if _system_run else None, json.dumps(_system_discovery) if _system_discovery else None))
+                    self.db.execute('UPDATE sessions SET budgets=?,sdd=?,model_routing=?,clash=? WHERE id=?',
+                                    (json.dumps(budgets), json.dumps(sdd_settings) if sdd_settings else None,
+                                     json.dumps(model_routing) if model_routing else None,
+                                     json.dumps(clash_settings) if clash_settings else None, sid))
+                    if _creator:
+                        self.db.execute('UPDATE sessions SET creator=? WHERE id=?', (json.dumps(_creator), sid))
+                    if _merge:
+                        from . import chat_merge
+                        chat_merge.persist(self, sid, _merge)
+                    self._insert_event(sid, {"kind": "user", "text": prompt, **({'attachments': attached} if attached else {})})
+            except BaseException:
+                if _merge:
+                    from . import chat_merge
+                    chat_merge.cleanup(self, sid)
+                raise
             generation = self.generations[sid] = uuid.uuid4().hex
-            self.jobs.put_nowait((sid, prompt, generation))
+            try:
+                self.jobs.put_nowait((sid, prompt, generation))
+            except queue.Full:
+                # The row is saved; a merged task offers Restart merged task, and a retry of its request requeues it.
+                self._status(sid, 'interrupted')
+                raise SessionError('The run queue is full; the merged task is saved and can be restarted.' if _merge
+                                   else 'The run queue is full.') from None
         return self.get(sid)
 
     def set_budgets(self, sid, data):
@@ -1524,6 +1635,11 @@ class Sessions:
             # from an empty prompt, and their reviewers do not own the linked task.
             from .memory_draft import instruction
             prompt += '\n\n' + instruction()
+        if session.get('merge') and not session.get('native_session_id'):
+            from . import chat_merge
+            # A merged task's first launch: the sources' bounded preview and the archive path, last, so the
+            # "Current task:" line that closes it introduces the message. Counted as instructions in Usage.
+            prefix += chat_merge.launch_context(self, session['id'])
         text = prefix + prompt + '\n\nHarness session delegation requirement:\n' + delegation
         if session['provider'] == 'claude' and text.startswith('/'):
             # Nothing came before the message, and Claude Code would read a leading slash as one of its commands.
@@ -1771,7 +1887,15 @@ class Sessions:
             request = self.state_dir / 'creator' / creator['run_id'] / ('request-' + creator['nonce'] + '.json')
             command = [sys.executable, str(Path(__file__).with_name('creator_runner.py')), '--request', str(request)]
         else:
-            prompt = self._prompt(session, prompt, ledger := {}, route)
+            try:
+                prompt = self._prompt(session, prompt, ledger := {}, route)
+            except SessionError as error:
+                # Say why, as for an SDD check: a changed merge archive or attachment, or a missing workspace.
+                with self.lock:
+                    if sid not in self.cancelled and not self.stopping.is_set() and self.generations.get(sid) == generation:
+                        self._event(sid, {'kind': 'error', 'text': str(error)})
+                        self._status(sid, 'failed')
+                return
             command = providers.build_command(provider, self.providers[provider]['executable'], project, prompt,
                 mode=session['mode'], model=session['model'], session_id=session['native_session_id'],
                 agents_enabled=session['agents_enabled'], agent_count=session['agent_count'],
@@ -1781,6 +1905,10 @@ class Sessions:
                 command = providers.codex_instruction_budget(command, Path(project))
             if provider == 'claude':
                 attachment_dirs = self.attachments.directories(sid)
+                if session.get('merge'):
+                    from . import chat_merge
+                    # Only this task's own archive folder, never the folder of every merge.
+                    attachment_dirs.extend(chat_merge.directories(self, sid))
                 if attachment_dirs:
                     command.extend(['--add-dir', *attachment_dirs])
             # An attached accelerator rides on this launch from the clone.
@@ -1815,6 +1943,10 @@ class Sessions:
         environment = {**os.environ, **providers.agent_environment(provider, session['agents_enabled'], session['agent_count'])}
         if accelerator:
             environment.update(accelerator.environment)
+        if session.get('merge'):
+            # This task carries an explicit, frozen selection of chats. A native merge that `context-load merge`
+            # prepared for this client is not consumed here; the hooks still capture this task's chat.
+            environment['CONTEXT_CONTINUITY_RESTORE_DISABLED'] = '1'
         # Only this launch can say its capsule is in the prompt; never inherit the claim.
         environment.pop('CONTEXT_CAPSULE_DELIVERED', None)
         environment.pop('CONTEXT_MEMORY_RECOVERY', None)
