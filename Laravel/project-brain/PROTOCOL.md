@@ -23,7 +23,8 @@ Engine is a disposable lexical index and local binding/cache.
 - Task phases are stored only as `understanding`, `planning`,
   `implementation`, `verification`, or `finalization`. Input compatibility
   aliases normalize at the mutation boundary: `implementing` and `execution`
-  become `implementation`; `review` becomes `verification`.
+  become `implementation`; `review` and `quality` (the Phase Map's Quality
+  row) become `verification`.
 - Completion is always explicit and requires the caller's current numeric
   revision. Turn maintenance may report sanitized branch-merge evidence as a
   completion candidate, but it never closes the task or creates an episode.

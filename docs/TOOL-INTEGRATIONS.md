@@ -120,7 +120,11 @@ capsule is delivered through `.cursor/rules/working-memory.mdc`:
   lose what was retrieved for the latest prompt, which is what the next request
   carries when Cursor reads its rules before the hook runs. The Cursor mirror of
   `local-context.sh` always renders it at session start, so a fresh session or
-  a branch switch does not keep the previous session's render.
+  a branch switch does not keep the previous session's render. Until the
+  working task is provisioned at the fifth-turn flush, these two renders carry
+  a sanitized warming capsule (pending turns and changed-file counts) instead
+  of governed context; for a branch with neither a task nor changes they render
+  nothing and remove another branch's rule instead of serving it.
 - Every render stands down when `CONTEXT_CAPSULE_DELIVERED=1`: the Harness has
   put the capsule into the prompt already.
 

@@ -5114,8 +5114,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--phase",
         choices=TASK_PHASE_INPUTS,
         help=(
-            "delivery phase; aliases implementing/execution/review are stored "
-            "as implementation/implementation/verification"
+            "delivery phase; aliases implementing/execution/review/quality are "
+            "stored as implementation/implementation/verification/verification"
         ),
     )
     update.add_argument("--revision", type=revision_argument)
