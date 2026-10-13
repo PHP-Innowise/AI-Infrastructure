@@ -93,3 +93,37 @@ Explicit retrieval still works on Cursor: run `context.py retrieve` (or the
 ## References
 
 - Cursor Hooks: https://cursor.com/docs/hooks
+
+## Automatic conversation continuity
+
+`context-continuity.sh capture` runs on `beforeSubmitPrompt` (`prompt`) and `afterAgentResponse` (`text`);
+`context-continuity.sh restore` runs on `sessionStart`. Installed infrastructure
+enables this path by default: no save/load command or confirmation is required.
+The hook calls `memory-bank/scripts/context_continuity.py`, writes private local
+state under the ignored `.context-handoff/`, and sends a bounded excerpt of the
+source conversations to a new task through native hook context output.
+Only the current repository and branch qualify. Prior conversation text is
+untrusted background; it cannot authorize actions in the new task.
+
+Native hook transcripts are optional and format-dependent. When unavailable,
+the final assistant text still supplies continuity. Full history is never
+injected automatically or placed in Project Brain, Memory Bank, or SQLite.
+Capture is silent; both actions fail open under `CONTEXT_HOOK_BUDGET` (default
+5 seconds). See the repository's context-handoff guide for limitations.
+
+Cursor session-start context delivery depends on the installed desktop client;
+cloud agents do not expose this lifecycle event.
+
+New tasks receive a frozen merge of up to eight same-branch captured chats.
+Each source retains its visible context, decisions and progress; contradictions
+remain unresolved until checked. The 6,000-byte UTF-8 total preview points to
+`.context-handoff/merges/` for full captured source text. Reopening a task keeps
+its source set. `context-load merge` can prepare a selected set for the next new
+task; the hook does not itself create a native client task. A stable native
+session identity is required; Cursor uses `conversation_id`.
+
+Frozen merge storage is capped at 128 archives / 256 MiB per checkout, with
+a 32 MiB serialized limit per archive. Full storage prevents new merges, keeps
+existing archives intact, and never blocks a client turn. Remove obsolete local
+archives to make room. Codex continuity commands resolve from the Git root so
+starting a session in a project subdirectory still runs the adapter.

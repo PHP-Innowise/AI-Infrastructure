@@ -103,6 +103,7 @@ from validate import (
     validate_metadata,
     validate_secret_patterns,
 )
+from context_handoff import HandoffError, load_handoff, render_body, save_handoff
 
 
 class ContextError(Exception):
@@ -636,6 +637,17 @@ def discover_documents(
             raise ContextError(
                 f"Source document is not valid UTF-8: {relative_path}"
             ) from error
+        # Portable snapshots may contain an explicitly exported conversation.
+        # Only context-load may return them: general retrieval must never ingest
+        # their historical instructions, even after a snapshot is renamed.
+        if content.startswith("---\n"):
+            try:
+                snapshot = json.loads(content[4:].split("\n---\n", 1)[0])
+            except (ValueError, json.JSONDecodeError):
+                snapshot = None
+            if isinstance(snapshot, dict) and snapshot.get("type") == "context-handoff":
+                excluded.append({"path": relative_path, "reason": "explicit-context-only"})
+                continue
         if skill_key is not None:
             skill_keys.add(skill_key)
         documents.append(
@@ -4015,6 +4027,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    context_save = commands.add_parser(
+        "context-save",
+        help="write a curated, portable continuation handoff without task-state mutation",
+    )
+    context_save.add_argument("--input", required=True, help="path to one curated JSON object")
+    context_save.add_argument("--output", type=Path, required=True)
+    context_save.add_argument("--detail", choices=("summary", "topic", "full"), required=True)
+    context_save.add_argument("--topic")
+    context_save.add_argument("--task-id")
+    context_save.add_argument("--source-client", choices=("codex", "claude", "cursor", "other"), required=True)
+    context_save.add_argument("--transcript", type=Path)
+    context_save.add_argument("--json", action="store_true")
+
+    context_load = commands.add_parser(
+        "context-load",
+        help="read a curated continuation handoff and report repository drift",
+    )
+    context_load.add_argument("--input", type=Path, required=True)
+    context_load.add_argument("--include-transcript", action="store_true")
+    context_load.add_argument("--json", action="store_true")
+
     index = commands.add_parser("index", help="refresh the local document index")
     index.add_argument(
         "--incremental",
@@ -4506,6 +4539,41 @@ def main() -> int:
             raise ContextError(
                 f"Repository root must be an existing directory: {repository}"
             )
+        # Portable handoffs deliberately run before opening SQLite.  Loading a
+        # handoff is read-only, and saving one must not create a competing
+        # local task/cache or mutate governed Project Brain state.
+        if arguments.command == "context-save":
+            result = save_handoff(
+                repository,
+                input_json=str(repository / arguments.input),
+                output=repository / arguments.output,
+                detail=arguments.detail,
+                topic=arguments.topic,
+                task_id=arguments.task_id,
+                source_client=arguments.source_client,
+                transcript_path=repository / arguments.transcript if arguments.transcript else None,
+            )
+            if arguments.json:
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                print(f"Context handoff saved: {result['output']}.")
+            return 0
+        if arguments.command == "context-load":
+            result = load_handoff(
+                repository, repository / arguments.input, include_transcript=arguments.include_transcript
+            )
+            if arguments.json:
+                print(json.dumps(result, ensure_ascii=False))
+            else:
+                print(f"Context handoff loaded: {result['input']}.")
+                if result["drift"]:
+                    print(f"  {len(result['drift'])} source drift item(s); review before continuing.")
+                    print(json.dumps(result["drift"], ensure_ascii=False, indent=2))
+                print(render_body(result["context"]))
+                if "transcript" in result:
+                    print("## Visible transcript\n")
+                    sys.stdout.write(result["transcript"])
+            return 0
         # Direct query commands have a strict CLI contract: reject the original
         # value before connect() can create a database or an index/manifest can
         # be refreshed. Host hooks remain fail-safe by swallowing this nonzero
@@ -5674,7 +5742,7 @@ def main() -> int:
             raise ContextError(f"Unsupported command: {arguments.command}")
         finally:
             connection.close()
-    except (ContextError, BrainError, RetrievalError, OSError, sqlite3.Error) as error:
+    except (ContextError, HandoffError, BrainError, RetrievalError, OSError, sqlite3.Error) as error:
         print(f"context: {error}", file=sys.stderr)
         return 1
 

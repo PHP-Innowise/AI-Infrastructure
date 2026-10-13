@@ -67,6 +67,7 @@ OPTIONAL_KEYS = {
 SECRET_PATTERNS = {
     "private key": re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     "GitHub token": re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    "GitHub fine-grained token": re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     "AWS access key": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     "OpenAI-style token": re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b"),
     "Stripe secret key": re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{16,}\b"),

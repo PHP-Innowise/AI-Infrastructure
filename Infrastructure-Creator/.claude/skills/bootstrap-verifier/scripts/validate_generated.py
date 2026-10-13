@@ -97,12 +97,21 @@ APPROVED_VERBATIM_PLACEHOLDERS = {
 }
 
 # Always-generated skills that operate the shared memory layer; every selected
-# edition must carry all four (plus wrappers where the edition has those layers).
-MEMORY_QUARTET = ("memory-bank", "project-brain", "checkpoint", "memory")
+# edition must carry all six (plus wrappers where the edition has those layers).
+MEMORY_CONTINUITY_SKILLS = (
+    "memory-bank",
+    "project-brain",
+    "checkpoint",
+    "memory",
+    "context-save",
+    "context-load",
+)
 
 # The context-brain runtime memory-seed installs verbatim.
 RUNTIME_SCRIPTS = (
     "context.py",
+    "context_handoff.py",
+    "context_continuity.py",
     "brain_runtime.py",
     "context_retrieval.py",
     "validate.py",
@@ -121,6 +130,7 @@ BASE_HOOKS = (
     "file-naming-validator.sh",
     "loop-detection.sh",
     "working-memory-write.sh",
+    "context-continuity.sh",
     "subagent-gate.sh",
     # Ships in every edition; wired on Claude/Cursor and deliberately
     # unregistered on Codex, where multi-agent is off and nothing stops.
@@ -137,6 +147,28 @@ EDITION_HOOK_WIRING = {
     "claude": (".claude/hooks", ".claude/settings.json"),
     "cursor": (".cursor/hooks", ".cursor/hooks.json"),
     "codex": (".codex/hooks", ".codex/hooks.json"),
+}
+
+# The adapter's positional mode is part of its host contract. Merely shipping
+# the script is insufficient: a missing event silently loses either the user
+# requirement or the final response, while a missing restore loses the next
+# task's bounded historical excerpt.
+CONTINUITY_WIRING = {
+    "claude": {
+        "SessionStart": ".claude/hooks/context-continuity.sh restore",
+        "UserPromptSubmit": ".claude/hooks/context-continuity.sh capture",
+        "Stop": ".claude/hooks/context-continuity.sh capture",
+    },
+    "cursor": {
+        "sessionStart": ".cursor/hooks/context-continuity.sh restore",
+        "beforeSubmitPrompt": ".cursor/hooks/context-continuity.sh capture",
+        "afterAgentResponse": ".cursor/hooks/context-continuity.sh capture",
+    },
+    "codex": {
+        "SessionStart": ".codex/hooks/context-continuity.sh restore",
+        "UserPromptSubmit": ".codex/hooks/context-continuity.sh capture",
+        "Stop": ".codex/hooks/context-continuity.sh capture",
+    },
 }
 
 # Edition -> (skills dir relative to target, has_agents, has_commands)
@@ -335,7 +367,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
     skill_names = collect_skill_names(skills_rel, files)
     if not skill_names:
         errors.append(f"[{edition}] no manifest-owned skills under {skills_rel}")
-    for required_skill in MEMORY_QUARTET:
+    for required_skill in MEMORY_CONTINUITY_SKILLS:
         if required_skill not in skill_names:
             errors.append(
                 f"[{edition}] memory-layer skill '{required_skill}' missing under {skills_rel}"
@@ -381,7 +413,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                     errors.append(
                         f"[{edition}] {af}: invokes '{invokes}' is not a generated skill"
                     )
-            for required_skill in MEMORY_QUARTET:
+            for required_skill in MEMORY_CONTINUITY_SKILLS:
                 required_rel = f"{agents_rel}/{required_skill}-agent.md"
                 if required_skill in skill_names and not is_owned(files, required_rel):
                     errors.append(
@@ -410,7 +442,7 @@ def validate_edition(target: Path, edition: str, files: dict, errors: list) -> N
                     validate_flow(
                         edition, cf, text, roster or skill_names, write_agents, errors
                     )
-            for required_skill in MEMORY_QUARTET:
+            for required_skill in MEMORY_CONTINUITY_SKILLS:
                 required_rel = f"{commands_rel}/{required_skill}.md"
                 if required_skill in skill_names and not is_owned(files, required_rel):
                     errors.append(
@@ -450,6 +482,18 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
             expected_rel = f"{hooks_rel}/{expected}"
             if not is_owned(files, expected_rel):
                 errors.append(f"[{edition}] required hook is not manifest-owned: {expected_rel}")
+        continuity_rel = f"{hooks_rel}/context-continuity.sh"
+        if is_owned(files, continuity_rel):
+            continuity = target / continuity_rel
+            source = continuity.read_text(encoding="utf-8", errors="replace")
+            if (
+                "memory-bank/scripts/context_continuity.py" not in source
+                or "--event" not in source
+            ):
+                errors.append(
+                    f"[{edition}] {continuity_rel} does not call the bounded "
+                    "context-continuity runtime"
+                )
         read_hook_rel = f"{hooks_rel}/working-memory-read.sh"
         if edition == "cursor" and is_owned(files, read_hook_rel):
             errors.append(
@@ -502,6 +546,14 @@ def collect_wired_commands(node) -> list:
     return commands
 
 
+def event_commands(document: dict, event: str) -> list[str]:
+    """Return command values only from one native hook event."""
+    hooks = document.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    return collect_wired_commands(hooks.get(event, []))
+
+
 def validate_hook_wiring(
     target: Path, editions: list, files: dict, errors: list
 ) -> None:
@@ -524,6 +576,12 @@ def validate_hook_wiring(
         commands = collect_wired_commands(document)
         if not commands:
             errors.append(f"{wiring_path}: no hook commands wired")
+        for event, required_command in CONTINUITY_WIRING[edition].items():
+            if required_command not in event_commands(document, event):
+                errors.append(
+                    f"[{edition}] {wiring_rel}: context-continuity {required_command.rsplit(' ', 1)[1]} "
+                    f"is not wired on {event}"
+                )
         for command in commands:
             # Check every token ending in .sh, not just the first: a wiring of
             # the form "bash .claude/hooks/x.sh" (against hook-forge's bare-path

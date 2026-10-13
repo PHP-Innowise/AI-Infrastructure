@@ -5,6 +5,10 @@
       {
         "command": ".cursor/hooks/local-context.sh",
         "timeout": 15
+      },
+      {
+        "command": ".cursor/hooks/context-continuity.sh restore",
+        "timeout": 8
       }
     ],
     "subagentStart": [
@@ -34,6 +38,18 @@
       {
         "command": ".cursor/hooks/loop-detection.sh",
         "timeout": 5
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": ".cursor/hooks/context-continuity.sh capture",
+        "timeout": 8
+      }
+    ],
+    "afterAgentResponse": [
+      {
+        "command": ".cursor/hooks/context-continuity.sh capture",
+        "timeout": 8
       }
     ],
     "stop": [

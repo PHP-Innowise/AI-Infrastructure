@@ -97,6 +97,7 @@ class WorkflowSmokeTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         for name in (
             "context.py",
+            "context_handoff.py",
             "brain_runtime.py",
             "context_retrieval.py",
             "validate.py",

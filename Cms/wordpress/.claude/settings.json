@@ -85,6 +85,11 @@
             "type": "command",
             "command": ".claude/hooks/local-context.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/context-continuity.sh restore",
+            "timeout": 8
           }
         ]
       }
@@ -96,6 +101,11 @@
             "type": "command",
             "command": ".claude/hooks/working-memory-read.sh",
             "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/context-continuity.sh capture",
+            "timeout": 8
           }
         ]
       }
@@ -106,6 +116,11 @@
           {
             "type": "command",
             "command": ".claude/hooks/working-memory-write.sh",
+            "timeout": 8
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/context-continuity.sh capture",
             "timeout": 8
           }
         ]

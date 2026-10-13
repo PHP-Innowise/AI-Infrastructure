@@ -343,6 +343,7 @@ MIRROR_RULES: dict[str, Any] = {
                             "SKILLS_DIR=\"$ROOT_DIR/.cursor/skills\"",
                         ],
                         [" .claude; do", " .cursor; do"],
+                        ["--host claude", "--host cursor"],
                         # Cursor's read path: the Stop and sessionStart
                         # mirrors render the capsule into the alwaysApply
                         # rule .cursor/rules/working-memory.mdc (see the

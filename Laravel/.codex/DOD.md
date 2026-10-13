@@ -52,7 +52,7 @@ All Standard items, plus:
 - [ ] Public documentation updated for user-facing changes.
 - [ ] Durable reusable context was added to `memory-bank/` only when source-backed, non-sensitive, indexed, and not already authoritative in a spec.
 - [ ] Promotion proposals were not self-approved; any applied promotion has explicit human review plus source and destination revisions.
-- [ ] Session hooks remain metadata-only and do not index, retrieve, inject, or print Project Brain or Memory Bank records.
+- [ ] Session banners remain metadata-only; automatic continuity delivers only its bounded local historical excerpt and never raw Project Brain or Memory Bank records.
 - [ ] Queue/job, cache, scheduled-command (`app/Console/Kernel.php` or `routes/console.php`), and migration impacts are documented when applicable.
 - [ ] If this release includes a major Laravel version bump or changes queued job payload shapes, queues are drained/compatible before deploying (mixed-version job payloads across a Laravel major upgrade can fail).
 

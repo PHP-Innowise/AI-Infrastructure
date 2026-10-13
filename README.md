@@ -7,3 +7,5 @@ Installation guide: [install/README.md](install/README.md)
 CI and local checks: [docs/CI.md](docs/CI.md)
 
 Browser workspace: [Harness server](harness/README.md#browser-server) — `./harness-server start --project /path/to/project`
+
+Context for the next task: [Save and load across Codex, Claude and Cursor](docs/CONTEXT-HANDOFF.md)
