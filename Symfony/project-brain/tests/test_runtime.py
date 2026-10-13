@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import contextlib
@@ -3285,6 +3286,89 @@ class EpisodicPillarTest(RuntimeHarness):
         self.assertEqual(1, len(list(events.glob("*.md"))))
 
 
+class HistoryAdmissionTest(unittest.TestCase):
+    """A Porter alias is not a second independent admission signal."""
+
+    def setUp(self) -> None:
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute(
+            "CREATE VIRTUAL TABLE documents USING fts5("
+            "path,layer,kind,title,summary,content,tokenize='porter unicode61')"
+        )
+        self.connection.execute(
+            "CREATE VIRTUAL TABLE episodes USING fts5("
+            "summary,outcome,files UNINDEXED,verification UNINDEXED,"
+            "sources UNINDEXED,created_at UNINDEXED,tokenize='porter unicode61')"
+        )
+        retrieval.ensure_metadata_tables(self.connection)
+        # Rare, separate concepts keep the existing weighted floor meaningful.
+        for i in range(20):
+            self.connection.execute(
+                "INSERT INTO documents VALUES(?,?,?,?,?,?)",
+                (f"filler-{i}", "semantic", "doc", "Filler", "Unrelated note", "Unrelated note"),
+            )
+        self.connection.execute(
+            "INSERT INTO documents VALUES(?,?,?,?,?,?)",
+            ("cobalt", "semantic", "doc", "Cobalt", "Cobalt policy", "Cobalt policy"),
+        )
+
+    def tearDown(self) -> None:
+        self.connection.close()
+
+    def event(self, subject: str) -> None:
+        self.connection.execute(
+            "INSERT INTO documents VALUES(?,?,?,?,?,?)",
+            ("event", "episodic", "brain-event", subject, subject, subject),
+        )
+        self.connection.execute(
+            "INSERT INTO document_metadata("
+            "path,category,privacy,owner,authority,lifecycle,source_hash,conflicts) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            ("event", "dynamic", "team", "team", "observed", "completed", "digest", "[]"),
+        )
+
+    def episode(self, subject: str) -> None:
+        self.connection.execute(
+            "INSERT INTO episodes VALUES(?,?,?,?,?,?)",
+            (subject, "Completed.", "[]", "[]", "[]", "2026-10-01T00:00:00Z"),
+        )
+
+    def candidates(self, query: str) -> tuple:
+        history = retrieval.history_query(self.connection, query)
+        return retrieval._history_candidates(self.connection, history) if history else ([], [])
+
+    def test_aliases_cannot_admit_one_subject_word_as_two_event_signals(self) -> None:
+        self.event("Quasar rollout")
+        self.assertEqual([], self.candidates("quasar quasars cobalt")[0])
+
+    def test_aliases_cannot_admit_one_subject_word_as_two_episode_signals(self) -> None:
+        self.episode("Quasar rollout")
+        self.assertEqual([], self.candidates("quasar quasars cobalt")[1])
+
+    def test_single_concept_query_remains_valid(self) -> None:
+        self.event("Quasar rollout")
+        self.assertEqual(["event"], [row["path"] for row in self.candidates("quasar quasars")[0]])
+
+    def test_distinct_event_concepts_remain_admitted(self) -> None:
+        self.event("Quasar cobalt zirconium rollout")
+        self.assertEqual(
+            ["event"], [row["path"] for row in self.candidates("quasar cobalt zirconium")[0]],
+        )
+
+    def test_distinct_episode_concepts_remain_admitted(self) -> None:
+        self.episode("Quasar cobalt zirconium rollout")
+        self.assertEqual(
+            [1], [row[2]["id"] for row in self.candidates("quasar cobalt zirconium")[1]],
+        )
+
+    def test_raw_term_window_is_preserved(self) -> None:
+        words = [f"marker{1000+i}" for i in range(24)]
+        self.event("Quasar " + " ".join(words))
+        history = retrieval.history_query(self.connection, "quasar quasars " + " ".join(words))
+        self.assertEqual(["quasar", "quasars", *words[:22]], history["terms"])
+
+
 class HistorySlotTest(RuntimeHarness):
     """Recorded history - a Project Brain event or a local episode - has its
     own slot and its own search beside the changelog's."""
@@ -5979,6 +6063,7 @@ class RelatedItemBudgetTest(RuntimeHarness):
 class FileLinkSeedTest(RuntimeHarness):
     def link_table(self, *paths: str):
         connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
         connection.row_factory = sqlite3.Row
         connection.execute("CREATE TABLE document_links(path TEXT, ref_path TEXT, ref_kind TEXT)")
         connection.executemany("INSERT INTO document_links VALUES ('doc.md', ?, 'file')", [(path,) for path in paths])
@@ -9555,6 +9640,34 @@ class MetadataTelemetryTest(RuntimeHarness):
 
 
 class ExcerptWindowTest(unittest.TestCase):
+    def test_optional_introducer_cannot_replace_the_matching_sentence(self) -> None:
+        excerpt = retrieval.excerpt_window([
+            "Qualifier " * 5 + ":",
+            "\x02cobalt\x03 requires dual approval.",
+        ], 70)
+        self.assertIn("cobalt requires dual approval.", excerpt)
+        self.assertLessEqual(len(excerpt), 70)
+
+    def test_optional_introducer_cannot_drop_the_stronger_final_match(self) -> None:
+        excerpt = retrieval.excerpt_window([
+            "Qualifier " * 4 + ":",
+            "\x02ledger\x03 applies.",
+            "\x02cobalt\x03 requires approval.",
+        ], 75, {"ledger": 0.2, "cobalt": 4.0})
+        self.assertIn("ledger applies.", excerpt)
+        self.assertIn("cobalt requires approval.", excerpt)
+        self.assertLessEqual(len(excerpt), 75)
+
+    def test_introducer_can_replace_only_unmatched_trailing_context(self) -> None:
+        excerpt = retrieval.excerpt_window([
+            "When approval is required:",
+            "\x02cobalt\x03 needs two signatures.",
+            "Background detail " * 2 + ".",
+        ], 80)
+        self.assertIn("When approval is required:", excerpt)
+        self.assertIn("cobalt needs two signatures.", excerpt)
+        self.assertLessEqual(len(excerpt), 80)
+
     def test_adjacent_highlights_keep_each_terms_evidence_weight(self) -> None:
         weights = {"cobalt": 3.0, "escrow": 4.0}
         self.assertEqual((7.0, 2), retrieval._excerpt_score(["\x02cobalt escrow\x03"], weights))
@@ -10701,6 +10814,2383 @@ class SmallIndexRarityTest(RuntimeHarness):
         finally:
             connection.close()
         self.assertIn("specs/allocation.md", distinctive)
+
+
+class RetrievalDeliveryTraceTest(RuntimeHarness):
+    def setUp(self) -> None:
+        if not retrieval.TRACE_SAFE_DIRECTORY_IO:
+            self.skipTest("Optional trace sidecars require secure descriptor-relative filesystem APIs")
+        super().setUp()
+
+    def refresh_main(self) -> dict:
+        code, out, err = self.run_main("refresh", "--task-id", "TASK-TRACE", "--query",
+                                      "cobalt authority canonical", "--ephemeral", "--gate", "off", "--json",
+                                      "--trace-path", "specs/authority.md")
+        self.assertEqual(0, code, err)
+        return json.loads(out)
+
+    def refresh(self, *extra: str) -> dict:
+        result = self.run_cli("refresh", "--task-id", "TASK-TRACE", "--query",
+                              "cobalt authority canonical", "--ephemeral", "--gate", "off",
+                              "--json", *extra)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def trace(self, result: dict) -> dict:
+        manifest = Path(result["capsule"]["manifest"])
+        path = self.repository / "memory-bank/local/retrieval-traces" / manifest.name
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_watch_is_observational_and_final_text_hash_is_exact(self) -> None:
+        self.start("TASK-TRACE")
+        first = self.refresh()
+        second = self.refresh("--trace-path", "specs/authority.md", "--trace-path", "specs/missing.md")
+        self.assertEqual(first["capsule_text"], second["capsule_text"])
+        self.assertEqual(first["capsule"]["semantic"], second["capsule"]["semantic"])
+        trace = self.trace(second)
+        self.assertEqual(hashlib.sha256(second["capsule_text"].encode()).hexdigest(),
+                         trace["render"]["sha256"])
+        records = {item["path"]: item for item in trace["records"]}
+        events = records["specs/authority.md"]["events"]
+        self.assertTrue(any(event["stage"] == "search" for event in events))
+        self.assertTrue(any(event["stage"] == "delivery" for event in events))
+        self.assertEqual("unavailable", records["specs/missing.md"]["state"])
+        self.assertNotIn("The cobalt authority rule is canonical", json.dumps(trace))
+        self.assertEqual(4, json.loads((self.repository / second["capsule"]["manifest"]).read_text())["schema_version"])
+
+    def test_unobserved_record_is_unknown_and_protected_metadata_is_absent(self) -> None:
+        self.start("TASK-TRACE")
+        self.repository.joinpath("specs/unrelated.md").write_text("# Unrelated\n\nZirconium gateway.\n")
+        result = self.refresh("--trace-path", "specs/unrelated.md")
+        record = next(item for item in self.trace(result)["records"] if item["path"] == "specs/unrelated.md")
+        self.assertEqual("not_observed_in_bounded_search", record["state"])
+        collector = retrieval.RetrievalTrace({"allowed_privacy": ["public"], "owners": ["alice"]})
+        collector.observe({"path": "specs/private.md", "privacy": "restricted", "owner": "bob",
+                           "source_hash": "hidden"}, "search", "fetched")
+        self.assertEqual([], collector.snapshot()["records"])
+
+    def test_invalid_watch_paths_and_bounds(self) -> None:
+        for path in ("../escape.md", ".env", "specs/a\n.md", "/tmp/a", "specs/" + "x" * 512):
+            with self.subTest(path=path), self.assertRaises(retrieval.RetrievalError):
+                retrieval.validate_trace_paths([path])
+        with self.assertRaises(retrieval.RetrievalError):
+            retrieval.validate_trace_paths([f"specs/{i}.md" for i in range(17)])
+        self.assertEqual(["memory-bank/chunks/MEM-example.md"],
+                         retrieval.validate_trace_paths(["memory-bank/chunks/MEM-example.md"]))
+        self.assertEqual(["project-brain/dynamic/tasks/task.md"],
+                         retrieval.validate_trace_paths(["project-brain/dynamic/tasks/task.md"]))
+        collector = retrieval.RetrievalTrace({"allowed_privacy": ["public"], "owners": ["*"]})
+        for i in range(140):
+            item = {"path": f"specs/{i}.md", "privacy": "public", "source_hash": "a" * 64}
+            for _ in range(20):
+                collector.observe(item, "search", "fetched", rank=1)
+        records = collector.snapshot()["records"]
+        self.assertEqual(128, len(records))
+        self.assertTrue(all(len(item["events"]) <= 16 for item in records))
+
+    def test_final_renderer_records_sources_and_actual_shrunk_body(self) -> None:
+        item = {"path": "specs/a.md", "title": "Rule", "snippet": "answer-bearing prose", "layer": "semantic"}
+        capsule = {"working": None, "warnings": [], "omitted": {}, "semantic": [item],
+                   "episodic": [], "procedural": []}
+        excerpt = context_cli.Excerpt("sources evidence " * 25)
+        excerpt.heading = "Sources"
+        trace = {}
+        with mock.patch.object(context_cli, "RENDERED_CAPSULE_LIMIT", 300):
+            lines, shown = context_cli._render_capsule(capsule, {"specs/a.md": excerpt}, trace=trace)
+        self.assertEqual([item], shown)
+        record = trace["records"][0]
+        body = next((line[2:] for line in lines if line.startswith("  ")), "")
+        self.assertEqual("Sources", record["section"])
+        self.assertEqual(hashlib.sha256(body.encode()).hexdigest(), record["body_sha256"])
+        self.assertEqual(len(body.encode()), record["body_bytes"])
+        self.assertTrue(record["shrunk"])
+        self.assertFalse(record["snippet_in_body"])
+        self.assertGreater(record["initial_excerpt_bytes"], record["body_bytes"])
+
+    def test_empty_sanitized_excerpt_is_distinguished_from_missing_excerpt(self) -> None:
+        item = {"path": "specs/a.md", "title": "Rule", "snippet": "", "layer": "semantic"}
+        capsule = {"working": None, "warnings": [], "omitted": {}, "semantic": [item],
+                   "episodic": [], "procedural": []}
+        missing, sanitized = {}, {}
+        first, _ = context_cli._render_capsule(capsule, {}, trace=missing)
+        second, _ = context_cli._render_capsule(capsule, {"specs/a.md": "alice@example.com"}, trace=sanitized)
+        self.assertEqual(first, second)
+        self.assertEqual("no-excerpt", missing["records"][0]["body_reason"])
+        self.assertEqual("sanitized-empty", sanitized["records"][0]["body_reason"])
+        self.assertNotIn("alice", json.dumps(sanitized))
+        capsule["semantic"].append({"path": "specs/b.md", "title": "Other", "snippet": "", "layer": "semantic"})
+        trace = {}
+        context_cli._render_capsule(capsule, {"specs/a.md": "alice@example.com"}, trace=trace)
+        self.assertEqual(["sanitized-empty", "no-excerpt"], [record["body_reason"] for record in trace["records"]])
+        capsule["procedural"] = [{"path": "AGENTS.md", "title": "Policy", "kind": "policy"}]
+        capsule["semantic"] = []
+        lines, shown = context_cli._render_capsule(capsule, {}, trace=trace)
+        self.assertEqual(["AGENTS.md"], [item["path"] for item in shown])
+        self.assertEqual("no-excerpt", trace["records"][0]["body_reason"])
+
+    def test_printed_trace_includes_terminal_newline(self) -> None:
+        self.start("TASK-TRACE")
+        result = self.refresh()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            context_cli.print_capsule(result["capsule"], {}, repository=self.repository)
+        trace = self.trace(result)["render"]
+        encoded = stdout.getvalue().encode("utf-8")
+        self.assertEqual("printed_capsule", trace["form"])
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(), trace["sha256"])
+        self.assertEqual(len(encoded), trace["bytes"])
+
+    def test_parent_swap_and_malformed_sidecar_fail_open(self) -> None:
+        self.start("TASK-TRACE")
+        result = self.refresh()
+        identifier = Path(result["capsule"]["manifest"]).stem
+        directory = self.repository / "memory-bank/local/retrieval-traces"
+        path = directory / (identifier + ".json")
+        outside = self.repository / "outside"
+        outside.mkdir()
+        sentinel = outside / path.name
+        sentinel.write_bytes(path.read_bytes())
+        before = sentinel.read_bytes()
+        real_directory = retrieval._trace_directory
+        moved = directory.with_name("old-traces")
+        def swap(root, **kwargs):
+            descriptor = real_directory(root, **kwargs)
+            directory.rename(moved)
+            try:
+                directory.symlink_to(outside, target_is_directory=True)
+            except OSError as error:
+                moved.rename(directory)
+                if descriptor is not None:
+                    os.close(descriptor)
+                self.skipTest(f"Symlinks unavailable: {error}")
+            return descriptor
+        with mock.patch.object(retrieval, "_trace_directory", side_effect=swap):
+            retrieval.record_render_trace(self.repository, result["capsule"], {"sha256": "safe", "bytes": 0, "records": []})
+        self.assertEqual(before, sentinel.read_bytes())
+        directory.unlink()
+        moved.rename(directory)
+        path.write_text("[" * 2000 + "0" + "]" * 2000)
+        retrieval.record_render_trace(self.repository, result["capsule"], {"sha256": "safe", "bytes": 0, "records": []})
+        self.assertTrue(path.exists())
+
+    def test_hardlinked_sidecar_is_not_modified(self) -> None:
+        self.start("TASK-TRACE")
+        result = self.refresh()
+        path = self.repository / "memory-bank/local/retrieval-traces" / Path(result["capsule"]["manifest"]).name
+        outside = self.repository / "outside.json"
+        try:
+            os.link(path, outside)
+        except OSError as error:
+            self.skipTest(f"Hardlinks unavailable: {error}")
+        before = outside.read_bytes()
+        retrieval.record_render_trace(self.repository, result["capsule"], {"sha256": "safe", "bytes": 0, "records": []})
+        self.assertEqual(before, outside.read_bytes())
+
+    def test_missing_secure_filesystem_api_does_not_change_capsule(self) -> None:
+        self.start("TASK-TRACE")
+        before = self.refresh()["capsule_text"]
+        with mock.patch.object(retrieval, "TRACE_SAFE_DIRECTORY_IO", False):
+            result = self.refresh_main()
+        self.assertEqual(before, result["capsule_text"])
+        path = self.repository / "memory-bank/local/retrieval-traces" / Path(result["capsule"]["manifest"]).name
+        self.assertFalse(path.exists())
+
+    def test_finalization_error_keeps_output_and_trace_bounded(self) -> None:
+        self.start("TASK-TRACE")
+        result = self.refresh()
+        path = self.repository / "memory-bank/local/retrieval-traces" / Path(result["capsule"]["manifest"]).name
+        before = path.read_bytes()
+        stdout = io.StringIO()
+        with mock.patch.object(retrieval.os, "open", side_effect=OSError("finalization unavailable")), contextlib.redirect_stdout(stdout):
+            context_cli.print_capsule(result["capsule"], {"specs/authority.md": "The cobalt authority rule is canonical."},
+                                      repository=self.repository)
+        self.assertTrue(stdout.getvalue().startswith("working:"))
+        self.assertEqual(before, path.read_bytes())
+
+    def test_trace_write_failure_does_not_change_delivery(self) -> None:
+        self.start("TASK-TRACE")
+        before = self.refresh()["capsule_text"]
+        with mock.patch.object(retrieval, "_write_trace", side_effect=OSError("diagnostic storage unavailable")):
+            code, out, err = self.run_main("refresh", "--task-id", "TASK-TRACE", "--query",
+                                          "cobalt authority canonical", "--ephemeral", "--gate", "off", "--json")
+        self.assertEqual(0, code, err)
+        self.assertEqual(before, json.loads(out)["capsule_text"])
+
+    def test_admission_ranking_budget_and_layer_reasons_are_distinct(self) -> None:
+        self.start("TASK-TRACE")
+        def reasons(result):
+            record = next(item for item in self.trace(result)["records"] if item["path"] == "specs/authority.md")
+            return [(event["stage"], event["reason"]) for event in record["events"]]
+        with mock.patch.object(retrieval, "is_relevant", return_value=False):
+            self.assertIn(("admission", "term-coverage"), reasons(self.refresh_main()))
+        with mock.patch.object(retrieval, "RELATIVE_SCORE_FLOOR", 2.0):
+            self.assertIn(("ranking", "relative-score-floor"), reasons(self.refresh_main()))
+        with mock.patch.dict(retrieval.BUDGETS, {key: 0 for key in retrieval.BUDGETS}):
+            self.assertIn(("budget", "budget"), reasons(self.refresh_main()))
+        for index in range(7):
+            self.repository.joinpath(f"specs/rule-{index}.md").write_text(
+                "# Cobalt authority canonical\n\nCobalt authority canonical.\n")
+        result = self.refresh_main()
+        trace = self.trace(result)
+        self.assertTrue(any(event["reason"] == "layer-limit" for record in trace["records"] for event in record["events"]))
+
+    def test_retention_symlinks_and_pruned_finalization(self) -> None:
+        self.start("TASK-TRACE")
+        config_path = self.repository / "project-brain/config/runtime.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps({"mode": "governed", "local_manifest_retention": 1}))
+        first = self.refresh()
+        old = self.repository / "memory-bank/local/retrieval-traces" / Path(first["capsule"]["manifest"]).name
+        second = self.refresh()
+        self.assertFalse(old.exists())
+        current = self.repository / "memory-bank/local/retrieval-traces" / Path(second["capsule"]["manifest"]).name
+        self.assertEqual(1, len(list(current.parent.glob("*.json"))))
+        retrieval.record_render_trace(self.repository, first["capsule"], {"sha256": "x", "bytes": 0, "records": []})
+        self.assertFalse(old.exists())
+        before = current.stat().st_mtime_ns
+        retrieval.record_render_trace(self.repository, second["capsule"], {"sha256": "x", "bytes": 0, "records": []})
+        self.assertEqual(before, current.stat().st_mtime_ns)
+        current.unlink()
+        current.parent.rmdir()
+        outside = self.repository / "outside"
+        outside.mkdir()
+        try:
+            current.parent.symlink_to(outside, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"Symlinks unavailable: {error}")
+        self.assertEqual(second["capsule_text"], self.refresh()["capsule_text"])
+        self.assertEqual([], list(outside.iterdir()))
+
+    def test_retention_stays_bounded_after_clock_rollback(self) -> None:
+        self.start("TASK-TRACE")
+        first = self.refresh()
+        directory = self.repository / "memory-bank/local/retrieval-traces"
+        for index in (1, 2):
+            path = directory / f"00000000-0000-4000-8000-{index:012d}.json"
+            path.write_text("{}")
+            future = datetime.now(timezone.utc).timestamp() + 86400
+            os.utime(path, (future, future))
+        collector = retrieval.RetrievalTrace({"allowed_privacy": ["public"]})
+        identifier = "00000000-0000-4000-8000-000000000099"
+        retrieval._save_trace(self.repository, identifier, collector, {"local_manifest_retention": 2})
+        self.assertEqual(2, len(list(directory.glob("*.json"))))
+        self.assertTrue((directory / (identifier + ".json")).exists())
+
+    def test_retention_counts_new_trace_when_directory_listing_lags(self) -> None:
+        self.start("TASK-TRACE")
+        directory = self.repository / "memory-bank/local/retrieval-traces"
+        collector = retrieval.RetrievalTrace({"allowed_privacy": ["public"]})
+        real_listdir = os.listdir
+        for index in range(5):
+            identifier = f"00000000-0000-4000-8000-{index:012d}"
+            def lagged(handle):
+                return [name for name in real_listdir(handle) if name != identifier + ".json"]
+            with mock.patch.object(retrieval.os, "listdir", side_effect=lagged):
+                retrieval._save_trace(self.repository, identifier, collector, {"local_manifest_retention": 2})
+            self.assertLessEqual(len(list(directory.glob("*.json"))), 2)
+            self.assertTrue((directory / (identifier + ".json")).exists())
+
+
+class LinkedMemoryExcerptTest(unittest.TestCase):
+    """A cited filename must not replace the rule a linked record contributes."""
+    PATH = "memory-bank/chunks/MEM-example.md"
+    RULE = "Unsafe history does not cancel capture. A safe current event is independently scanned and appended."
+    SOURCES = ("src/continuity.py", "src/rejection.py")
+
+    def setUp(self) -> None:
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("CREATE VIRTUAL TABLE documents USING fts5(path,layer,kind,title,summary,content,tokenize='porter unicode61')")
+        retrieval.ensure_metadata_tables(self.connection)
+        for i in range(20):
+            self.connection.execute("INSERT INTO documents VALUES(?,?,?,?,?,?)",
+                                    (f"specs/filler-{i}.md", "semantic", "doc", "Filler", "Unrelated", "Unrelated zirconium."))
+
+    def tearDown(self) -> None:
+        self.connection.close()
+
+    def document(self, content: str, sources: tuple[str, ...] = SOURCES) -> None:
+        self.connection.execute("INSERT INTO documents VALUES(?,?,?,?,?,?)",
+                                (self.PATH, "semantic", "memory", "Safety boundary", "", content))
+        self.connection.executemany("INSERT INTO document_links(path,ref_path,ref_kind) VALUES(?,?,'source')",
+                                    [(self.PATH, source) for source in sources])
+
+    def capsule(self, selection: str = "prompt-link", query: str = "src/continuity.py src/rejection.py") -> dict:
+        item = {"path": self.PATH, "title": "Safety boundary", "layer": "semantic", "kind": "memory",
+                "snippet": "# Safety boundary\n\n" + self.RULE, "source_hash": "a" * 64}
+        if selection:
+            item["selection"] = selection
+        return {"working": None, "warnings": [], "omitted": {}, "query": query,
+                "semantic": [item], "episodic": [], "procedural": []}
+
+    def test_linked_rule_survives_filename_matches_in_sources(self) -> None:
+        self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        for selection in ("prompt-link", "touch-link", "source-link", "path-link"):
+            with self.subTest(selection=selection):
+                capsule = self.capsule(selection)
+                excerpts = context_cli.capsule_excerpts(self.connection, capsule)
+                text = "\n".join(context_cli.render_capsule_lines(capsule, excerpts))
+                self.assertIn("A safe current event is independently scanned and appended.", text)
+                self.assertNotEqual("Sources", getattr(excerpts[self.PATH], "heading", ""))
+                self.assertLessEqual(len(text), 3600)
+
+    def test_later_relevant_section_keeps_its_heading_and_answer(self) -> None:
+        self.document("# Safety boundary\n\nAn introductory overview.\n\n## Event capture\n"
+                      "ledger_queue appends the safe event after rejecting unsafe history.\n\n"
+                      "## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        capsule = self.capsule(query="ledger_queue src/continuity.py src/rejection.py")
+        excerpts = context_cli.capsule_excerpts(self.connection, capsule)
+        self.assertIn("ledger_queue appends the safe event", excerpts[self.PATH])
+        self.assertEqual("Event capture", excerpts[self.PATH].heading)
+
+    def test_explicit_sources_request_still_quotes_the_citations(self) -> None:
+        self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        excerpts = context_cli.capsule_excerpts(self.connection, self.capsule(query="Sources src/continuity.py src/rejection.py"))
+        self.assertIn("src/continuity.py", excerpts[self.PATH])
+        self.assertEqual("Sources", excerpts[self.PATH].heading)
+
+    def test_common_sources_heading_preserves_explicit_query_intent(self) -> None:
+        self.connection.execute("UPDATE documents SET content = 'Unrelated zirconium.\n\n## Sources\n- src/other.py'")
+        self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        for query in ("Sources src/continuity.py src/rejection.py", "Sources"):
+            with self.subTest(query=query):
+                excerpts = context_cli.capsule_excerpts(self.connection, self.capsule(query=query))
+                self.assertEqual("Sources", excerpts[self.PATH].heading)
+                self.assertIn("src/continuity.py", excerpts[self.PATH])
+
+    def test_annotated_source_fragment_is_substantive_prose(self) -> None:
+        self.document("# Safety boundary\n\nAn overview.\n\n## Sources\n"
+                      "- src/continuity.py#L15 — safe current events still get appended.\n")
+        excerpts = context_cli.capsule_excerpts(self.connection, self.capsule())
+        self.assertEqual("Sources", excerpts[self.PATH].heading)
+        self.assertIn("safe current events still get appended", excerpts[self.PATH])
+
+    def test_corrected_automatic_excerpt_has_a_new_delivery_identity(self) -> None:
+        self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        for selection in ("prompt-link", "touch-link"):
+            with self.subTest(selection=selection):
+                capsule = self.capsule(selection)
+                item = capsule["semantic"][0]
+                key, revision = retrieval.delivery_identity(self.connection, item, capsule["query"])
+                self.assertEqual(self.PATH + "#safety-boundary", key)
+                self.assertNotEqual((self.PATH, item["source_hash"]), (key, revision))
+
+    def test_unchanged_automatic_excerpt_keeps_whole_document_identity(self) -> None:
+        self.document("# Safety boundary\n\n" + self.RULE)
+        capsule = self.capsule()
+        item = capsule["semantic"][0]
+        self.assertEqual((self.PATH, item["source_hash"]),
+                         retrieval.delivery_identity(self.connection, item, capsule["query"]))
+
+    def test_substantive_heading_is_screened_in_render_and_trace(self) -> None:
+        self.document("# Safety boundary\n\n## Contact alice@example.test\n" + self.RULE
+                      + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        capsule = self.capsule()
+        excerpts = context_cli.capsule_excerpts(self.connection, capsule)
+        trace = {}
+        rendered = "\n".join(context_cli.render_capsule_lines(capsule, excerpts, trace=trace))
+        self.assertNotIn("alice@example.test", rendered)
+        self.assertNotIn("alice@example.test", json.dumps(trace))
+        self.assertIn("A safe current event is independently scanned and appended.", rendered)
+
+    def test_source_filename_is_not_an_explicit_footer_request(self) -> None:
+        for heading in ("Sources", "References"):
+            with self.subTest(heading=heading):
+                self.connection.execute("DELETE FROM documents WHERE path = ?", (self.PATH,))
+                self.connection.execute("DELETE FROM document_links WHERE path = ?", (self.PATH,))
+                source = "src/" + heading + ".py"
+                self.document("# Safety boundary\n\n" + self.RULE + "\n\n## " + heading + "\n- " + source + "\n", (source,))
+                excerpts = context_cli.capsule_excerpts(self.connection, self.capsule(query=source))
+                self.assertIn("A safe current event is independently scanned and appended.", excerpts[self.PATH])
+
+    def test_explanatory_sources_prose_is_not_treated_as_a_citation_list(self) -> None:
+        self.document("# Safety boundary\n\nAn overview.\n\n## Sources\n"
+                      "src/continuity.py is evidence for capture, without attesting claim correctness.\n")
+        excerpts = context_cli.capsule_excerpts(self.connection, self.capsule())
+        self.assertIn("without attesting claim correctness", excerpts[self.PATH])
+        self.assertEqual("Sources", excerpts[self.PATH].heading)
+
+    def test_sources_only_document_retains_its_pointer_excerpt(self) -> None:
+        self.document("# Safety boundary\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        excerpts = context_cli.capsule_excerpts(self.connection, self.capsule())
+        self.assertIn("src/continuity.py", excerpts[self.PATH])
+        self.assertEqual("Sources", excerpts[self.PATH].heading)
+
+    def test_lexical_selection_and_distinctive_pointer_are_unchanged(self) -> None:
+        self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        capsule = self.capsule(selection="")
+        excerpts = context_cli.capsule_excerpts(self.connection, capsule)
+        self.assertEqual("Sources", excerpts[self.PATH].heading)
+        capsule["semantic"][0]["match"] = "distinctive"
+        self.assertEqual({}, context_cli.capsule_excerpts(self.connection, capsule))
+
+    def test_source_link_repeat_identity_tracks_the_section_actually_quoted(self) -> None:
+        self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
+        capsule = self.capsule("source-link")
+        key, revision = retrieval.delivery_identity(self.connection, capsule["semantic"][0], capsule["query"])
+        self.assertEqual(self.PATH + "#safety-boundary", key)
+        self.assertTrue(revision)
+
+
+class CitationDigestCacheTest(unittest.TestCase):
+    def setUp(self):
+        self.directory=tempfile.TemporaryDirectory();self.addCleanup(self.directory.cleanup)
+        self.root=Path(self.directory.name);self.source=self.root/'source.txt';self.source.write_bytes(b'allow\n')
+        self.cache=brain._CitationDigestCache()
+    def digest(self,raw):return hashlib.sha256(brain._line_ending_neutral(raw)).hexdigest()
+    def test_hits_repeat_all_path_and_read_checks(self):
+        original=Path.read_bytes
+        with mock.patch.object(brain,'_cited_file',wraps=brain._cited_file) as check,mock.patch.object(Path,'read_bytes',autospec=True,side_effect=original) as read:
+            first=brain.fingerprint(self.root,'source.txt#one',_normalization_cache=self.cache)
+            second=brain.fingerprint(self.root,'source.txt#two',_normalization_cache=self.cache)
+        self.assertEqual(first,second);self.assertEqual((check.call_count,read.call_count),(2,2));self.assertEqual((self.cache.hits,self.cache.misses),(1,1))
+    def test_same_stat_edit_changes_digest(self):
+        first=brain.fingerprint(self.root,'source.txt',_normalization_cache=self.cache);old=self.source.stat()
+        self.source.write_bytes(b'deny!\n');os.utime(self.source,ns=(old.st_atime_ns,old.st_mtime_ns))
+        self.assertEqual(self.source.stat().st_size,old.st_size)
+        self.assertEqual(self.source.stat().st_mtime_ns,old.st_mtime_ns)
+        self.assertEqual(self.source.stat().st_ino,old.st_ino)
+        second=brain.fingerprint(self.root,'source.txt',_normalization_cache=self.cache)
+        self.assertNotEqual(first,second);self.assertEqual(second['sha256'],self.digest(b'deny!\n'))
+    def test_each_expected_digest_compares_independently(self):
+        expected=self.digest(b'allow\n');rows=[{'path':'source.txt','sha256':expected},{'path':'source.txt','sha256':'0'*64},None]
+        self.assertEqual(brain.source_changes(self.root,rows,_normalization_cache=self.cache),(['source.txt'],['None']))
+        self.assertEqual(self.cache.hits,1)
+    def test_missing_and_unreadable_after_hit(self):
+        brain.fingerprint(self.root,'source.txt',_normalization_cache=self.cache)
+        with mock.patch.object(Path,'read_bytes',side_effect=PermissionError('test read failure')):
+            with self.assertRaises(PermissionError):brain.fingerprint(self.root,'source.txt',_normalization_cache=self.cache)
+        self.source.unlink()
+        with self.assertRaises(brain.BrainError):brain.fingerprint(self.root,'source.txt',_normalization_cache=self.cache)
+    def test_exact_normalization_domains(self):
+        for raw in (b'a\nb\n',b'a\r\nb\r\n',b'a\rb\r',b'a\0\r\nb',b'a'*8192+b'\0\r\nb'):
+            with self.subTest(raw=raw[:30]):
+                self.assertEqual(self.cache.digest(raw),self.digest(raw));self.assertEqual(self.cache.digest(raw),self.digest(raw))
+        self.assertEqual(self.cache.digest(b'a\nb\n'),self.cache.digest(b'a\r\nb\r\n'))
+        self.assertNotEqual(self.cache.digest(b'a\rb\r'),self.cache.digest(b'a\nb\n'))
+    def test_limits_bypass_without_changing_digest(self):
+        for n in range(65):
+            raw=str(n).encode();self.assertEqual(self.cache.digest(raw),self.digest(raw))
+        self.assertEqual(len(self.cache._digests),64);self.assertEqual(self.cache.bypasses,1)
+        large=b'a'*1048577;self.assertEqual(self.cache.digest(large),self.digest(large));self.assertNotIn(large,self.cache._digests)
+        total=brain._CitationDigestCache()
+        for n in range(9):
+            raw=bytes([n])*1048576;self.assertEqual(total.digest(raw),self.digest(raw))
+        self.assertEqual(total._retained_bytes,8388608);self.assertEqual(len(total._digests),8)
+    def test_filter_discount_and_new_cache_for_each_call(self):
+        doc=self.root/'record.md';doc.write_text('body\n')
+        row={'path':'record.md','privacy':'team','owner':'local','authority':'verified','kind':'memory','lifecycle':'active','source_hash':retrieval._content_hash('body\n'),'source_fingerprints':[{'path':'source.txt','sha256':'0'*64}],'adjusted_score':4}
+        config={'allowed_privacy':['team'],'allowed_authority':['verified']};instances=[];real=retrieval._CitationDigestCache
+        def build():
+            value=real();instances.append(value);return value
+        with mock.patch.object(retrieval,'_CitationDigestCache',side_effect=build):
+            first=retrieval._runtime_filter(self.root,[copy.deepcopy(row)],config)
+            second=retrieval._runtime_filter(self.root,[copy.deepcopy(row)],config)
+        self.assertEqual(first,second);self.assertEqual(first[0][0]['adjusted_score'],2)
+        self.assertEqual(len(instances),2);self.assertEqual([item.misses for item in instances],[1,1]);self.assertEqual(row['adjusted_score'],4)
+
+
+class WindowObservationSessionTest(unittest.TestCase):
+    def setUp(self):
+        if not retrieval.TRACE_SAFE_DIRECTORY_IO:
+            self.skipTest("Window observations require secure descriptor-relative trace I/O")
+        self.fixture = RuntimeHarness()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.repository = self.fixture.repository
+        self.document = self.repository / 'specs/guide.md'
+        self.document.write_text('# Behavior\n\nRetryGuard requires fresh persisted membership.\n\n'
+                                 + 'Ordinary background sentence. ' * 200
+                                 + '\n\nDetachGuard refuses removal after a reparent.\n')
+        self.fixture.start('TASK-WINDOW')
+
+    def refresh(self, query='RetryGuard', session='window-1', transcript=None):
+        args = ['refresh', '--task-id', 'TASK-WINDOW', '--query', query, '--ephemeral', '--json', '--gate', 'shadow']
+        if session:
+            args.extend(['--session-id', session])
+        if transcript is not None:
+            args.extend(['--transcript', str(transcript)])
+        code, output, error = self.fixture.run_main(*args)
+        self.assertEqual(0, code, error)
+        return json.loads(output)
+
+    def trace(self, result):
+        identifier = Path(result['capsule']['manifest']).name
+        return json.loads((self.repository / 'memory-bank/local/retrieval-traces' / identifier).read_text())
+
+    def state(self):
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            return retrieval._load_session_deliveries(connection)
+        finally:
+            connection.close()
+
+    def replace_state(self, state):
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            with connection:
+                retrieval.store_index_state(connection, {retrieval.SESSION_DELIVERIES_KEY: json.dumps(state)})
+        finally:
+            connection.close()
+
+    def observation(self, result):
+        return next(item for item in self.trace(result)['records'] if item['path'] == 'specs/guide.md')['window_observation']
+
+    def test_different_window_is_observed_without_releasing_repeat(self):
+        first = self.refresh()
+        state = self.state()['window-1']
+        body = next(item for item in self.trace(first)['render']['records'] if item['path'] == 'specs/guide.md')
+        self.assertIn('RetryGuard requires', first['capsule_text'])
+        self.assertNotIn('DetachGuard refuses', first['capsule_text'])
+        second = self.refresh('DetachGuard')
+        self.assertNotIn('specs/guide.md', second['capsule_text'])
+        self.assertEqual(1, second['capsule']['repeated'])
+        after = self.state()['window-1']
+        self.assertEqual(state['items'], after['items'])
+        self.assertEqual(state['window_observation'], after['window_observation'])
+        observed = self.observation(second)
+        self.assertEqual('different-exposure-window', observed['classification'])
+        self.assertEqual(body['body_sha256'], observed['prior']['body_sha256'])
+        self.assertEqual(body['body_bytes'], observed['prior']['body_bytes'])
+        self.assertEqual('same-source', observed['source_relation'])
+        self.assertNotIn('DetachGuard', json.dumps(self.trace(second)))
+
+    def test_identical_window_retains_first_trace_pointer(self):
+        first = self.refresh()
+        refs = self.state()['window-1']['window_observation']
+        second = self.refresh()
+        self.assertEqual('same-window', self.observation(second)['classification'])
+        self.assertEqual(refs, self.state()['window-1']['window_observation'])
+        uuid = Path(first['capsule']['manifest']).stem
+        self.assertEqual(uuid, next(iter(refs['receipts'].values()))['manifest_id'])
+
+    def test_same_path_A_B_A_uses_each_sections_first_trace(self):
+        self.document.write_text('# Guide\n\n## Retry\nRetryGuard requires fresh persisted membership.\n\n'
+                                 + 'Ordinary background sentence. ' * 20
+                                 + '\n\n## Detach\nDetachGuard refuses removal after a reparent.\n')
+        first = self.refresh()
+        first_body = next(item for item in self.trace(first)['render']['records'] if item['path'] == 'specs/guide.md')
+        second = self.refresh('DetachGuard')
+        self.assertIn('DetachGuard refuses', second['capsule_text'])
+        state = self.state()['window-1']
+        self.assertEqual(2, len(state['items']))
+        self.assertEqual(2, len(state['window_observation']['receipts']))
+        third = self.refresh()
+        self.assertEqual('same-window', self.observation(third)['classification'])
+        self.assertEqual(first_body['body_sha256'], self.observation(third)['prior']['body_sha256'])
+        self.assertEqual(state['items'], self.state()['window-1']['items'])
+
+    def test_legacy_receipt_is_unknown_without_changing_suppression(self):
+        self.refresh()
+        state = self.state()
+        state['window-1'].pop('window_observation')
+        original = copy.deepcopy(state['window-1']['items'])
+        self.replace_state(state)
+        result = self.refresh('DetachGuard')
+        self.assertEqual('unknown-prior-render', self.observation(result)['classification'])
+        self.assertNotIn('specs/guide.md', result['capsule_text'])
+        self.assertEqual(original, self.state()['window-1']['items'])
+
+    def test_pruned_trace_stays_unknown_and_is_not_recreated(self):
+        first = self.refresh()
+        previous = self.repository / 'memory-bank/local/retrieval-traces' / Path(first['capsule']['manifest']).name
+        previous.unlink()
+        second = self.refresh('DetachGuard')
+        self.assertEqual('unknown-prior-render', self.observation(second)['classification'])
+        self.assertFalse(previous.exists())
+
+    def test_actual_compaction_replaces_pointer_only_with_new_delivery(self):
+        with tempfile.TemporaryDirectory(prefix='window-compaction-') as folder:
+            transcript = Path(folder) / 'transcript.jsonl'
+            transcript.write_text('{"type":"user"}\n')
+            first = self.refresh(transcript=transcript)
+            original = self.state()['window-1']['window_observation']
+            repeated = self.refresh('DetachGuard', transcript=transcript)
+            self.assertNotIn('specs/guide.md', repeated['capsule_text'])
+            self.assertEqual(original, self.state()['window-1']['window_observation'])
+            for marker in ('{"type":"system","subtype":"compact_boundary"}', '{"type":"compacted"}'):
+                with transcript.open('a') as handle:
+                    handle.write(marker + '\n')
+                fresh = self.refresh('DetachGuard', transcript=transcript)
+                self.assertIn('DetachGuard refuses', fresh['capsule_text'])
+                state = self.state()['window-1']
+                self.assertEqual(0, fresh['capsule']['repeated'])
+                self.assertEqual(1, len(state['window_observation']['receipts']))
+                ref = next(iter(state['window_observation']['receipts'].values()))
+                self.assertEqual(state['turn'], ref['handed_turn'])
+                self.assertEqual(Path(fresh['capsule']['manifest']).stem, ref['manifest_id'])
+                self.assertNotEqual(Path(first['capsule']['manifest']).stem, ref['manifest_id'])
+                self.assertEqual('same-window', self.observation(self.refresh('DetachGuard', transcript=transcript))['classification'])
+
+    def test_changed_source_outside_same_section_is_annotated(self):
+        self.document.write_text('# Guide\n\n## Behavior\nRetryGuard requires fresh persisted membership.\n\n## Other\nOriginal material.\n')
+        self.refresh()
+        before = self.state()['window-1']['items']
+        with self.document.open('a') as handle:
+            handle.write('\nUnrelated new other-section material.\n')
+        second = self.refresh()
+        self.assertNotIn('specs/guide.md', second['capsule_text'])
+        self.assertEqual(before, self.state()['window-1']['items'])
+        self.assertEqual('changed-source', self.observation(second)['source_relation'])
+
+    def test_failed_callback_changes_no_delivered_text_or_receipts(self):
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            previous_gate_state = retrieval._load_last_retrievals(connection)
+        finally:
+            connection.close()
+        normal = self.refresh(session='normal')
+        # Compare two first-delivery requests from the same gate baseline.
+        # A sequential second request otherwise sees the first's signature,
+        # an intentional independent retrieval behavior.
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            with connection:
+                retrieval.store_index_state(connection, {retrieval.LAST_RETRIEVAL_KEY: json.dumps(previous_gate_state)})
+        finally:
+            connection.close()
+        def failing(*_args):
+            raise ValueError('private observation failure')
+        with mock.patch.object(context_cli, 'describe_excerpt_windows', failing):
+            failed = self.refresh(session='failure')
+        self.assertEqual(normal['capsule_text'], failed['capsule_text'])
+        self.assertEqual(self.state()['normal']['items'], self.state()['failure']['items'])
+        for key in ('semantic', 'procedural', 'episodic', 'selected', 'categories', 'token_estimates', 'gate'):
+            self.assertEqual(normal['capsule'][key], failed['capsule'][key])
+
+    def test_mutating_callback_cannot_modify_the_admitted_items(self):
+        original = context_cli.describe_excerpt_windows
+        normal = self.refresh(session='normal')
+        def mutate(connection, capsule):
+            result = original(connection, capsule)
+            for item in capsule['semantic']:
+                item['snippet'] = 'observer mutation must stay private'
+                item['path'] = 'specs/changed.md'
+            capsule['semantic'].clear()
+            return result
+        with mock.patch.object(context_cli, 'describe_excerpt_windows', mutate):
+            mutated = self.refresh(session='mutated')
+        self.assertEqual(normal['capsule_text'], mutated['capsule_text'])
+        self.assertEqual(normal['capsule']['selected'], mutated['capsule']['selected'])
+        self.assertEqual(self.state()['normal']['items'], self.state()['mutated']['items'])
+
+
+class WindowObservationCompanionTest(unittest.TestCase):
+    def setUp(self):
+        self.connection = sqlite3.connect(':memory:')
+        self.connection.row_factory = sqlite3.Row
+        self.addCleanup(self.connection.close)
+        self.connection.execute('CREATE TABLE index_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+
+    def test_legacy_surrogate_key_survives_load_and_new_pointer_write(self):
+        key = 'legacy-' + chr(0xD800)
+        previous = {'session': {'turn': 1, 'items': {key: ['a' * 16, 1]},
+                                'window_observation': {'version': 1, 'receipts': {}}}}
+        retrieval.store_index_state(self.connection, {retrieval.SESSION_DELIVERIES_KEY: json.dumps(previous)})
+        loaded = retrieval._load_session_deliveries(self.connection)
+        self.assertEqual(previous['session']['items'], loaded['session']['items'])
+        fresh = 'specs/guide.md#behavior'
+        ref = {'revision': 'b' * 16, 'handed_turn': 2,
+               'manifest_id': '00000000-0000-4000-8000-000000000001',
+               'doc_ref': retrieval._window_key('specs/guide.md')}
+        retrieval._remember_session_deliveries(self.connection, 'session', 2, {fresh: ['b' * 16, 2]},
+                                            loaded, window_receipts={retrieval._window_key(fresh): ref})
+        stored = retrieval._load_session_deliveries(self.connection)['session']
+        self.assertEqual({key: ['a' * 16, 1], fresh: ['b' * 16, 2]}, stored['items'])
+        self.assertEqual({retrieval._window_key(fresh): ref}, stored['window_observation']['receipts'])
+
+    def test_reset_and_expiry_drop_only_observer_pointers_with_old_receipts(self):
+        key = 'specs/guide.md#behavior'
+        ref = {'revision': 'a' * 16, 'handed_turn': 1,
+               'manifest_id': '00000000-0000-4000-8000-000000000001',
+               'doc_ref': retrieval._window_key('specs/guide.md')}
+        prior = {'session': {'turn': 1, 'items': {key: ['a' * 16, 1]},
+                            'window_observation': {'version': 1, 'receipts': {retrieval._window_key(key): ref}}}}
+        for turn, reset in ((2, True), (5, False)):
+            with self.connection:
+                retrieval.store_index_state(self.connection, {retrieval.SESSION_DELIVERIES_KEY: json.dumps(prior)})
+            state = copy.deepcopy(prior)
+            retrieval._remember_session_deliveries(self.connection, 'session', turn, {}, state, reset=reset)
+            result = retrieval._load_session_deliveries(self.connection)['session']
+            self.assertEqual({}, result['items'])
+            self.assertNotIn('window_observation', result)
+
+    def test_malformed_companion_does_not_drop_valid_novelty(self):
+        key = 'specs/guide.md#behavior'
+        for observation in (None, {'version': True, 'receipts': {}}, {'version': 1, 'receipts': []},
+                            {'version': 1, 'receipts': {retrieval._window_key(key): {'arbitrary': ['nested']}}}):
+            state = {'session': {'turn': 1, 'items': {key: ['a' * 16, 1]}, 'window_observation': observation}}
+            retrieval.store_index_state(self.connection, {retrieval.SESSION_DELIVERIES_KEY: json.dumps(state)})
+            result = retrieval._load_session_deliveries(self.connection)['session']
+            self.assertEqual(state['session']['items'], result['items'])
+            self.assertNotIn('window_observation', result)
+
+    def test_interleaved_snapshots_keep_pointer_with_surviving_receipt(self):
+        initial = {'session': {'turn': 1, 'items': {'old-key': ['a' * 16, 1]}}}
+        with self.connection:
+            retrieval.store_index_state(self.connection, {retrieval.SESSION_DELIVERIES_KEY: json.dumps(initial)})
+        first, second = copy.deepcopy(initial), copy.deepcopy(initial)
+        for key, state, identifier in (('specs/guide.md#A', first, '00000000-0000-4000-8000-000000000001'),
+                                       ('specs/guide.md#B', second, '00000000-0000-4000-8000-000000000002')):
+            ref = {'revision': 'b' * 16, 'handed_turn': 2, 'manifest_id': identifier,
+                   'doc_ref': retrieval._window_key('specs/guide.md')}
+            retrieval._remember_session_deliveries(self.connection, 'session', 2, {key: ['b' * 16, 2]},
+                                                state, window_receipts={retrieval._window_key(key): ref})
+        result = retrieval._load_session_deliveries(self.connection)['session']
+        self.assertEqual({'old-key': ['a' * 16, 1], 'specs/guide.md#A': ['b' * 16, 2]}, result['items'])
+        self.assertEqual({retrieval._window_key('specs/guide.md#A')}, set(result['window_observation']['receipts']))
+        self.assertEqual('00000000-0000-4000-8000-000000000001',
+                         next(iter(result['window_observation']['receipts'].values()))['manifest_id'])
+
+
+class OrdinaryReceiptTransactionTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='ordinary-receipts-')
+        self.addCleanup(self.temporary.cleanup)
+        self.filename = Path(self.temporary.name) / 'state.db'
+        self.connection = self.open()
+        self.connection.execute('CREATE TABLE index_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        self.connection.execute('CREATE TABLE caller_work (value INTEGER NOT NULL)')
+        self.connection.execute('INSERT INTO caller_work VALUES (0)')
+        retrieval.ensure_metadata_tables(self.connection)
+        self.connection.commit()
+
+    def open(self, *, readonly=False, factory=sqlite3.Connection):
+        connection = sqlite3.connect(self.filename.as_uri() + '?mode=ro', uri=True, factory=factory) if readonly else sqlite3.connect(self.filename, factory=factory)
+        connection.row_factory = sqlite3.Row
+        self.addCleanup(connection.close)
+        return connection
+
+    def seed(self, sessions=None, baselines=None):
+        with self.connection:
+            retrieval.store_index_state(self.connection, {
+                retrieval.SESSION_DELIVERIES_KEY: json.dumps(sessions or {}),
+                retrieval.LAST_RETRIEVAL_KEY: json.dumps(baselines or {}),
+            })
+
+    def state(self, connection=None):
+        connection = connection or self.connection
+        return {r[0]: r[1] for r in connection.execute('SELECT key, value FROM index_state')}
+
+    def plan(self, identifier='session', turn=2, snapshot=None, **kwargs):
+        snapshot = retrieval._load_session_deliveries(self.connection) if snapshot is None else snapshot
+        return retrieval._ordinary_session_plan(identifier, turn, {'new': ['b' * 16, turn]}, snapshot, **kwargs)
+
+    def baseline(self, key='key', signature=None):
+        snapshot = retrieval._load_last_retrievals(self.connection)
+        return {'key': key, 'signature': signature or {'query': 'a' * 64, 'paths': 'b' * 64, 'task_revision': '1'},
+                'expected': retrieval._receipt_expectation(snapshot, key)}
+
+    def test_different_sessions_merge_stale_whole_maps(self):
+        self.seed()
+        first, second = {}, {}
+        retrieval._remember_session_deliveries(self.connection, 'first', 1, {'A': ['a' * 16, 1]}, first)
+        retrieval._remember_session_deliveries(self.open(), 'second', 1, {'B': ['b' * 16, 1]}, second)
+        self.assertEqual({'first', 'second'}, set(retrieval._load_session_deliveries(self.connection)))
+        self.assertEqual({'first', 'second'}, set(second))
+
+    def test_stale_target_rejects_entire_pair(self):
+        self.seed({'session': {'turn': 1, 'items': {'old': ['a' * 16, 1]}}})
+        stale, winner = self.plan(), self.plan()
+        self.assertEqual('committed', retrieval._commit_ordinary_receipts(self.open(), session=winner)[0])
+        before = self.state()
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(self.connection, session=stale, baseline=self.baseline())[0])
+        self.assertEqual(before, self.state())
+
+    def test_reset_cannot_be_undone_by_stale_projection(self):
+        self.seed({'session': {'turn': 1, 'items': {'old': ['a' * 16, 1]}}})
+        stale = self.plan()
+        reset = self.plan(reset=True)
+        reset['delivered'] = {}
+        self.assertEqual('committed', retrieval._commit_ordinary_receipts(self.connection, session=reset)[0])
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(self.open(), session=stale)[0])
+        self.assertEqual({'turn': 2, 'items': {}}, retrieval._load_session_deliveries(self.connection)['session'])
+
+    def test_distinct_baseline_keys_merge_and_same_key_conflicts(self):
+        self.seed()
+        first, second = self.baseline('first'), self.baseline('second')
+        retrieval._commit_ordinary_receipts(self.connection, baseline=first)
+        retrieval._commit_ordinary_receipts(self.open(), baseline=second)
+        self.assertEqual({'first', 'second'}, set(retrieval._load_last_retrievals(self.connection)))
+        stale = self.baseline('first')
+        retrieval._remember_retrieval(self.open(), 'first', {'query': 'c' * 64, 'paths': 'd' * 64, 'task_revision': '2'})
+        before = self.state()
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(self.connection, baseline=stale)[0])
+        self.assertEqual(before, self.state())
+
+    def fail_second_row(self):
+        self.connection.execute("CREATE TRIGGER abort_session BEFORE UPDATE ON index_state WHEN NEW.key='session-deliveries' BEGIN SELECT RAISE(ABORT, 'injected-second-row-failure'); END")
+
+    def test_second_row_error_rolls_back_both_owned_writes(self):
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        self.fail_second_row()
+        before = self.state()
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(self.connection, baseline=self.baseline(), session=self.plan())[0])
+        self.assertEqual(before, self.state())
+        self.assertFalse(self.connection.in_transaction)
+
+    def test_ambient_success_remains_pending_and_caller_can_rollback(self):
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        observer = self.open()
+        before = self.state(observer)
+        plan, baseline = self.plan(), self.baseline()
+        self.connection.execute('UPDATE caller_work SET value=1')
+        self.assertEqual('deferred', retrieval._commit_ordinary_receipts(self.connection, baseline=baseline, session=plan)[0])
+        self.assertTrue(self.connection.in_transaction)
+        self.assertNotEqual(before, self.state())
+        self.assertEqual(before, self.state(observer))
+        self.connection.rollback()
+        self.assertEqual(before, self.state())
+        self.assertEqual(0, self.connection.execute('SELECT value FROM caller_work').fetchone()[0])
+
+    def test_ambient_failure_preserves_unrelated_pending_work(self):
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        self.fail_second_row()
+        before = self.state()
+        plan, baseline = self.plan(), self.baseline()
+        self.connection.execute('UPDATE caller_work SET value=1')
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(self.connection, baseline=baseline, session=plan)[0])
+        self.assertTrue(self.connection.in_transaction)
+        self.assertEqual(before, self.state())
+        self.assertEqual(1, self.connection.execute('SELECT value FROM caller_work').fetchone()[0])
+        self.connection.rollback()
+
+    def test_readonly_and_closed_connections_are_best_effort(self):
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        before, plan = self.state(), self.plan()
+        closed = self.open()
+        closed.close()
+        for connection in (self.open(readonly=True), closed):
+            self.assertEqual('skipped', retrieval._commit_ordinary_receipts(connection, baseline=self.baseline(), session=plan)[0])
+        self.assertEqual(before, self.state())
+
+    def test_busy_budget_restores_caller_timeout(self):
+        import time
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        plan = self.plan()
+        locker = self.open()
+        locker.execute('BEGIN IMMEDIATE')
+        self.connection.execute('PRAGMA busy_timeout=2345')
+        start = time.monotonic()
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(self.connection, session=plan)[0])
+        self.assertLess(time.monotonic() - start, 0.6)
+        self.assertEqual(2345, self.connection.execute('PRAGMA busy_timeout').fetchone()[0])
+        locker.rollback()
+        self.assertEqual(1, retrieval._load_session_deliveries(self.connection)['session']['turn'])
+
+    def test_frozen_transcript_number_type_detects_stale_target(self):
+        self.seed({'session': {'turn': 1, 'items': {}, 'transcript': {'position': 1}}})
+        plan = self.plan()
+        self.seed({'session': {'turn': 1, 'items': {}, 'transcript': {'position': 1.0}}})
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(self.connection, session=plan)[0])
+        self.assertEqual(1.0, retrieval._load_session_deliveries(self.connection)['session']['transcript']['position'])
+
+    def test_session_and_baseline_mru_bounds_preserve_newest(self):
+        self.seed({str(i): {'turn': 1, 'items': {}} for i in range(50)},
+                  {str(i): {'query': 'a' * 64, 'paths': 'b' * 64, 'task_revision': '1'} for i in range(200)})
+        self.assertEqual('committed', retrieval._commit_ordinary_receipts(self.connection, baseline=self.baseline('new'), session=self.plan('new', 1))[0])
+        sessions = retrieval._load_session_deliveries(self.connection)
+        baselines = retrieval._load_last_retrievals(self.connection)
+        self.assertEqual([str(i) for i in range(1, 50)] + ['new'], list(sessions))
+        self.assertEqual([str(i) for i in range(1, 200)] + ['new'], list(baselines))
+
+    def test_sql_read_failure_does_not_become_empty_state(self):
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        plan, baseline = self.plan(), self.baseline()
+        self.connection.execute('ALTER TABLE index_state RENAME TO saved_state')
+        before = [tuple(row) for row in self.connection.execute('SELECT key,value FROM saved_state')]
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(self.connection, baseline=baseline, session=plan)[0])
+        self.assertEqual(before, [tuple(row) for row in self.connection.execute('SELECT key,value FROM saved_state')])
+
+    def test_cancellation_rolls_back_partial_pair_and_propagates(self):
+        class InterruptedConnection(sqlite3.Connection):
+            interrupted = False
+
+            def execute(self, sql, parameters=()):
+                if self.interrupted and sql.startswith('UPDATE index_state') and parameters[1] == retrieval.SESSION_DELIVERIES_KEY:
+                    raise KeyboardInterrupt()
+                return super().execute(sql, parameters)
+
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        connection = self.open(factory=InterruptedConnection)
+        before, plan, baseline = self.state(), self.plan(), self.baseline()
+        connection.interrupted = True
+        with self.assertRaises(KeyboardInterrupt):
+            retrieval._commit_ordinary_receipts(connection, baseline=baseline, session=plan)
+        self.assertFalse(connection.in_transaction)
+        self.assertEqual(before, self.state())
+
+    def test_malformed_legacy_maps_cost_only_repeated_bookkeeping(self):
+        with self.connection:
+            retrieval.store_index_state(self.connection, {
+                retrieval.SESSION_DELIVERIES_KEY: '[1]', retrieval.LAST_RETRIEVAL_KEY: '{invalid'})
+        self.assertEqual('committed', retrieval._commit_ordinary_receipts(
+            self.connection, baseline=self.baseline(), session=self.plan(turn=1))[0])
+        self.assertEqual(1, retrieval._load_session_deliveries(self.connection)['session']['turn'])
+        self.assertEqual({'key'}, set(retrieval._load_last_retrievals(self.connection)))
+
+    @unittest.skipUnless(hasattr(sqlite3, 'LEGACY_TRANSACTION_CONTROL'), 'requires Python3.12+ SQLite API')
+    def test_explicit_autocommit_connection_commits_owned_transaction(self):
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        connection = sqlite3.connect(self.filename, autocommit=True)
+        self.addCleanup(connection.close)
+        connection.row_factory = sqlite3.Row
+        self.assertEqual('committed', retrieval._commit_ordinary_receipts(
+            connection, baseline=self.baseline(), session=self.plan())[0])
+        self.assertFalse(connection.in_transaction)
+        self.assertEqual(2, retrieval._load_session_deliveries(self.connection)['session']['turn'])
+
+    @unittest.skipUnless(hasattr(sqlite3, 'LEGACY_TRANSACTION_CONTROL'), 'requires Python3.12+ SQLite API')
+    def test_explicit_autocommit_failure_cannot_commit_partial_pair_later(self):
+        self.seed({'session': {'turn': 1, 'items': {}}})
+        self.fail_second_row()
+        before = self.state()
+        connection = sqlite3.connect(self.filename, autocommit=True)
+        self.addCleanup(connection.close)
+        connection.row_factory = sqlite3.Row
+        self.assertEqual('skipped', retrieval._commit_ordinary_receipts(
+            connection, baseline=self.baseline(), session=self.plan())[0])
+        self.assertFalse(connection.in_transaction)
+        self.assertEqual(before, self.state())
+
+
+
+def _passive_funnel_item(doc_path='specs/public.md', privacy='public', owner='alice'):
+    return {'path': doc_path, 'privacy': privacy, 'owner': owner, 'source_hash': 'a' * 64, 'title': 'TITLE-SENTINEL', 'snippet': 'BODY-SENTINEL', 'query': 'QUERY-SENTINEL'}
+
+def _passive_funnel_snapshot(trace):
+    result = trace.snapshot()['funnel']
+    assert retrieval._PassiveFunnel.valid(result)
+    return result
+
+class PassiveFunnelContractTest(unittest.TestCase):
+
+    def trace(self):
+        return retrieval.RetrievalTrace({'allowed_privacy': ['public', 'restricted'], 'owners': ['alice']})
+
+    def test_protected_rows_cannot_change_counts_or_expose_any_carrier(self):
+        left, right = (self.trace(), self.trace())
+        for trace in (left, right):
+            trace.observe(_passive_funnel_item(), 'search', 'fetched', score=12345, rank=999)
+        denied = [_passive_funnel_item('specs/PRIVATE-SENTINEL.md', 'restricted', 'bob'), _passive_funnel_item('specs/TEAM-SENTINEL.md', 'team'), _passive_funnel_item('.env')]
+        for protected in denied:
+            for _ in range(150):
+                for stage, reason in [('search', 'fetched'), ('runtime', 'privacy'), ('runtime', 'owner')]:
+                    right.observe(protected, stage, reason)
+        right.funnel_boundary('queue_after_runtime', [_passive_funnel_item(), *denied])
+        left.funnel_boundary('queue_after_runtime', [_passive_funnel_item()])
+        self.assertEqual(_passive_funnel_snapshot(left), _passive_funnel_snapshot(right))
+        encoded = json.dumps(_passive_funnel_snapshot(right))
+        for sentinel in ('SENTINEL', 'alice', 'bob', 'a' * 64, '.env', '12345', '999'):
+            self.assertNotIn(sentinel, encoded)
+        right.observe(_passive_funnel_item('specs/alice.md', 'restricted'), 'search', 'fetched')
+        self.assertEqual(2, _passive_funnel_snapshot(right)['events']['search']['fetched']['count'])
+
+    def test_unknown_reasons_and_unseen_path_only_exclusions_cannot_become_counts(self):
+        trace = self.trace()
+        trace.observe(_passive_funnel_item(), 'search', 'fetched')
+        before = _passive_funnel_snapshot(trace)
+        trace.observe(_passive_funnel_item(), 'stage-SECRET-SENTINEL', 'reason-SECRET-SENTINEL', carrier='CARRIER-SENTINEL')
+        trace.observe(_passive_funnel_item(), 'runtime', 'reason-SECRET-SENTINEL')
+        trace.exclusions([{'path': 'specs/missing.md', 'reason': 'stale'}, {'path': 'specs/PRIVATE-SENTINEL.md', 'reason': 'stale'}], 'runtime')
+        trace.known_event('specs/missing.md', 'file-link', 'hub-limit')
+        self.assertEqual(before, _passive_funnel_snapshot(trace))
+        self.assertEqual('unknown', before['absence'])
+        self.assertEqual('not-instrumented', before['coverage']['history_pre_admission'])
+
+    def test_event_and_record_caps_do_not_vacuously_zero_observations(self):
+        trace = self.trace()
+        rows = [_passive_funnel_item(f'specs/{index}.md') for index in range(200)]
+        for row in rows:
+            for _ in range(20):
+                trace.observe(row, 'search', 'fetched')
+        trace.funnel_boundary('queue_after_runtime', rows)
+        result = trace.snapshot()
+        self.assertTrue(result['truncated'])
+        self.assertEqual(128, len(result['records']))
+        self.assertTrue(all((len(record['events']) <= 16 for record in result['records'])))
+        self.assertEqual({'count': 4000, 'state': 'exact'}, result['funnel']['events']['search']['fetched'])
+        self.assertEqual({'count': 200, 'state': 'exact'}, result['funnel']['boundaries']['queue_after_runtime'])
+
+    def test_counter_saturation_is_authorized_only_and_unknown_is_null(self):
+        with mock.patch.object(retrieval, 'FUNNEL_COUNT_LIMIT', 3):
+            trace = self.trace()
+            for _ in range(5):
+                trace.observe(_passive_funnel_item(), 'search', 'fetched')
+                trace.observe(_passive_funnel_item('specs/private.md', 'restricted', 'bob'), 'delivery', 'selected')
+            result = _passive_funnel_snapshot(trace)
+            self.assertEqual({'count': 3, 'state': 'lower-bound'}, result['events']['search']['fetched'])
+            self.assertEqual({'count': 0, 'state': 'exact'}, result['events']['delivery']['selected'])
+            self.assertTrue(all((value == {'count': None, 'state': 'unknown'} for value in result['boundaries'].values())))
+
+    def test_boundary_is_nonmutating_and_does_not_read_sources(self):
+        trace = self.trace()
+        rows = [_passive_funnel_item(), _passive_funnel_item('specs/private.md', 'restricted', 'bob')]
+        original = copy.deepcopy(rows)
+        with mock.patch.object(Path, 'read_text', side_effect=AssertionError('extra content read')):
+            trace.funnel_boundary('selected_post_pack', rows)
+        self.assertEqual(original, rows)
+        value = _passive_funnel_snapshot(trace)
+        self.assertEqual(1, value['boundaries']['selected_post_pack']['count'])
+        value['boundaries']['selected_post_pack']['count'] = 17
+        self.assertEqual(1, _passive_funnel_snapshot(trace)['boundaries']['selected_post_pack']['count'])
+
+    def test_real_runtime_source_eligibility_and_authorization_remain_authority(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = Path(temp)
+            (repository / 'specs').mkdir()
+            source = repository / 'specs/good.md'
+            source.write_text('# Cobalt canonical\n')
+            good = _passive_funnel_item('specs/good.md')
+            good.update(authority='verified', kind='spec', lifecycle='active', source_fingerprints=[], adjusted_score=1.0, source_hash=hashlib.sha256(source.read_bytes()).hexdigest())
+            rows = [good, {**good, 'source_hash': 'b' * 64}, {**good, 'privacy': 'restricted', 'owner': 'bob'}, {**good, 'authority': 'proposed'}]
+            config = {'allowed_privacy': ['public', 'restricted'], 'owners': ['alice'], 'allowed_authority': ['observed', 'verified']}
+            trace = retrieval.RetrievalTrace(config)
+            selected, excluded = retrieval._runtime_filter(repository, rows, config, trace=trace)
+            trace.funnel_boundary('queue_after_runtime', selected)
+            self.assertEqual([good], selected)
+            self.assertEqual(['stale', 'owner', 'authority'], [entry['reason'] for entry in excluded])
+            value = _passive_funnel_snapshot(trace)
+            self.assertEqual(1, value['events']['runtime']['stale']['count'])
+            self.assertEqual(1, value['events']['runtime']['authority']['count'])
+            self.assertEqual(1, value['boundaries']['queue_after_runtime']['count'])
+            self.assertNotIn('owner', value['events']['runtime'])
+
+    def test_observer_failures_preserve_old_records_and_do_not_export_errors(self):
+        trace = self.trace()
+        with mock.patch.object(retrieval._PassiveFunnel, 'event', side_effect=RuntimeError('SECRET-ERROR')):
+            trace.observe(_passive_funnel_item(), 'search', 'fetched')
+        result = trace.snapshot()
+        self.assertEqual({'stage': 'search', 'reason': 'fetched'}, result['records'][0]['events'][0])
+        self.assertEqual('unavailable', result['funnel']['observer_state'])
+        self.assertNotIn('SECRET-ERROR', json.dumps(result['funnel']))
+        trace = self.trace()
+        with mock.patch.object(retrieval._PassiveFunnel, 'boundary', side_effect=RuntimeError('SECRET-ERROR')):
+            trace.funnel_boundary('queue_after_runtime', [_passive_funnel_item()])
+        self.assertEqual('unavailable', _passive_funnel_snapshot(trace)['observer_state'])
+        with mock.patch.object(retrieval._PassiveFunnel, '__init__', side_effect=RuntimeError('SECRET-ERROR')):
+            self.assertEqual('unavailable', _passive_funnel_snapshot(self.trace())['observer_state'])
+
+    def test_cancellation_is_not_swallowed(self):
+        trace = self.trace()
+        with mock.patch.object(retrieval._PassiveFunnel, 'event', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            trace.observe(_passive_funnel_item(), 'search', 'fetched')
+        with mock.patch.object(retrieval._PassiveFunnel, 'boundary', side_effect=SystemExit), self.assertRaises(SystemExit):
+            trace.funnel_boundary('queue_after_runtime', [_passive_funnel_item()])
+
+    def test_failed_unavailable_template_omits_only_additive_child(self):
+        trace = self.trace()
+        trace.observe(_passive_funnel_item(), 'search', 'fetched')
+        legacy = trace.snapshot()
+        legacy.pop('funnel')
+        with mock.patch.object(retrieval, '_funnel_template', side_effect=RuntimeError('SECRET-TEMPLATE')):
+            failed = trace.snapshot()
+        self.assertEqual(legacy, failed)
+
+    def test_strict_child_rejects_carriers_unknown_fields_and_future_versions(self):
+        value = _passive_funnel_snapshot(self.trace())
+        edits = [lambda x: x.update(query='QUERY-SENTINEL'), lambda x: x.update(schema_version=2), lambda x: x.update(schema_version=True), lambda x: x['events']['search'].update(SECRET={}), lambda x: x['events']['search']['fetched'].update(count=True), lambda x: x['events']['search']['fetched'].update(state='SECRET'), lambda x: x['render'].update(source_sha256='a' * 64), lambda x: x['render'].update(emission='observed')]
+        for edit in edits:
+            malformed = copy.deepcopy(value)
+            edit(malformed)
+            self.assertFalse(retrieval._PassiveFunnel.valid(malformed))
+            sanitized = retrieval._PassiveFunnel.with_render(malformed, [])
+            self.assertTrue(retrieval._PassiveFunnel.valid(sanitized))
+            self.assertEqual('unavailable', sanitized['observer_state'])
+            self.assertNotIn('SENTINEL', json.dumps(sanitized))
+
+    def test_render_projection_never_claims_emission_or_consumption(self):
+        value = _passive_funnel_snapshot(self.trace())
+        records = []
+        for reason in retrieval.FUNNEL_RENDER_REASONS:
+            records.append({'body_reason': reason, 'body_bytes': 12 if reason == 'excerpt' else 0, 'header_present': True, 'pointer_only': reason != 'excerpt', 'path': 'PATH-SENTINEL', 'body_sha256': 'a' * 64, 'body': 'BODY-SENTINEL'})
+        result = retrieval._PassiveFunnel.with_render(value, records)
+        self.assertEqual('observed', result['render']['projection_state'])
+        self.assertEqual('capsule_projection', result['render']['scope'])
+        self.assertEqual(4, result['render']['headers']['count'])
+        self.assertTrue(all((counter['count'] == 1 for counter in result['render']['reasons'].values())))
+        self.assertEqual('unknown', result['render']['emission'])
+        self.assertEqual('unknown', result['render']['consumer'])
+        self.assertNotIn('SENTINEL', json.dumps(result))
+        self.assertEqual('unknown', retrieval._PassiveFunnel.with_render(value, [{'body_reason': 'SECRET'}])['render']['projection_state'])
+
+    def test_invalid_refinalization_cannot_retain_an_old_projection_claim(self):
+        value = _passive_funnel_snapshot(self.trace())
+        rendered = retrieval._PassiveFunnel.with_render(value, [{'body_reason': 'excerpt', 'body_bytes': 12, 'header_present': True, 'pointer_only': False}])
+        invalid = retrieval._PassiveFunnel.with_render(rendered, [{'body_reason': 'excerpt', 'body_bytes': 0, 'header_present': True, 'pointer_only': True}])
+        self.assertEqual('unknown', invalid['render']['projection_state'])
+        self.assertEqual({'count': None, 'state': 'unknown'}, invalid['render']['headers'])
+        self.assertEqual('unknown', invalid['render']['emission'])
+
+    def test_fixed_schema_size_is_bounded_even_at_every_numeric_cap(self):
+        value = _passive_funnel_snapshot(self.trace())
+
+        def maximize(node):
+            if isinstance(node, dict):
+                if set(node) == {'count', 'state'}:
+                    node.update(count=65535, state='lower-bound')
+                else:
+                    for child in node.values():
+                        maximize(child)
+        maximize(value)
+        self.assertTrue(retrieval._PassiveFunnel.valid(value))
+        self.assertLess(len(json.dumps(value, indent=2, sort_keys=True).encode()), 16 * 1024)
+
+class PassiveFunnelBoundaryTest(RuntimeHarness):
+
+    def setUp(self):
+        if not retrieval.TRACE_SAFE_DIRECTORY_IO:
+            self.skipTest('Optional trace sidecars require secure descriptor-relative filesystem APIs')
+        super().setUp()
+
+    def request(self, *extra):
+        code, output, error = self.run_main('refresh', '--task-id', 'TASK-PASSIVE', '--query', 'cobalt authority canonical', '--ephemeral', '--gate', 'off', '--json', *extra)
+        self.assertEqual(0, code, error)
+        result = json.loads(output)
+        trace_file = self.repository / 'memory-bank/local/retrieval-traces' / Path(result['capsule']['manifest']).name
+        return (result, trace_file, json.loads(trace_file.read_text()))
+
+    def test_actual_boundaries_render_projection_and_manifest_schema(self):
+        self.start('TASK-PASSIVE')
+        result, _, trace = self.request()
+        value = trace['funnel']
+        self.assertTrue(retrieval._PassiveFunnel.valid(value))
+        self.assertGreater(value['boundaries']['queue_after_runtime']['count'], 0)
+        self.assertEqual(len(result['capsule']['selected']), value['boundaries']['selected_post_pack']['count'])
+        self.assertEqual('unknown', value['boundaries']['repeat_withheld']['state'])
+        self.assertEqual('observed', value['render']['projection_state'])
+        self.assertEqual(len(trace['render']['records']), value['render']['headers']['count'])
+        self.assertEqual('unknown', value['render']['emission'])
+        self.assertEqual(4, json.loads((self.repository / result['capsule']['manifest']).read_text())['schema_version'])
+        self.assertNotIn('funnel', result['capsule'])
+
+    def test_actual_repeat_suppression_has_no_refill(self):
+        self.start('TASK-PASSIVE')
+        first, _, _ = self.request('--session-id', 'passive-session')
+        second, _, trace = self.request('--session-id', 'passive-session')
+        self.assertGreater(len(first['capsule']['selected']), 0)
+        self.assertEqual([], second['capsule']['selected'])
+        self.assertGreater(trace['funnel']['boundaries']['repeat_withheld']['count'], 0)
+        self.assertEqual(0, trace['funnel']['boundaries']['selected_post_pack']['count'])
+        self.assertEqual('unknown', trace['funnel']['absence'])
+
+    def test_actual_gate_and_pack_omission_are_separate(self):
+        self.start('TASK-PASSIVE')
+        real_gate = retrieval.gate_decision
+
+        def withheld(*args, **kwargs):
+            value = real_gate(*args, **kwargs)
+            value.update(mode='enforce', decision='skip')
+            return value
+        with mock.patch.object(retrieval, 'gate_decision', side_effect=withheld):
+            _, _, trace = self.request()
+        value = trace['funnel']
+        self.assertGreater(value['boundaries']['gate_input']['count'], 0)
+        self.assertEqual(value['boundaries']['gate_input']['count'], value['boundaries']['gate_withheld']['count'])
+        self.assertEqual(0, value['boundaries']['selected_post_pack']['count'])
+        with mock.patch.object(retrieval, '_shown_items', return_value=(set(), set())):
+            _, _, trace = self.request()
+        value = trace['funnel']
+        self.assertGreater(value['boundaries']['pack_input']['count'], 0)
+        self.assertEqual(value['boundaries']['pack_input']['count'], value['boundaries']['pack_omitted']['count'])
+        self.assertEqual(0, value['boundaries']['selected_post_pack']['count'])
+
+    def test_finalizer_filters_protected_render_and_preserves_old_sidecar(self):
+        self.start('TASK-PASSIVE')
+        result, trace_file, trace = self.request()
+        rendered = copy.deepcopy(trace['render'])
+        rendered['records'].append({'path': 'specs/PRIVATE-SENTINEL.md', 'header_present': True, 'body_reason': 'excerpt', 'body_bytes': 1, 'pointer_only': False})
+        retrieval.record_render_trace(self.repository, result['capsule'], rendered)
+        changed = json.loads(trace_file.read_text())
+        self.assertNotIn('PRIVATE-SENTINEL', json.dumps(changed['funnel']))
+        self.assertEqual(len(trace['render']['records']), changed['funnel']['render']['headers']['count'])
+        legacy = copy.deepcopy(changed)
+        legacy.pop('funnel')
+        trace_file.write_text(json.dumps(legacy))
+        retrieval.record_render_trace(self.repository, result['capsule'], rendered)
+        after = json.loads(trace_file.read_text())
+        self.assertNotIn('funnel', after)
+        self.assertEqual(legacy['records'], after['records'])
+
+    def test_structured_only_has_unknown_render_and_pack(self):
+        self.start('TASK-PASSIVE')
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        try:
+            context_cli.refresh_layers(connection, self.repository)
+            result = retrieval.retrieve(connection, self.repository, 'cobalt authority canonical', 'TASK-PASSIVE', limit=3, manifest_scope='local', gate_mode='off')
+        finally:
+            connection.close()
+        trace = json.loads((self.repository / 'memory-bank/local/retrieval-traces' / Path(result['manifest']).name).read_text())
+        self.assertEqual('unknown', trace['funnel']['render']['projection_state'])
+        self.assertEqual({'count': None, 'state': 'unknown'}, trace['funnel']['boundaries']['pack_input'])
+        self.assertGreater(trace['funnel']['boundaries']['selected_post_pack']['count'], 0)
+
+    def test_failure_preserves_current_runtime_output_and_selection(self):
+        self.start('TASK-PASSIVE')
+        ordinary, _, _ = self.request()
+        with mock.patch.object(retrieval._PassiveFunnel, 'event', side_effect=RuntimeError('SECRET-ERROR')):
+            failed, _, trace = self.request()
+        self.assertEqual(ordinary['capsule_text'], failed['capsule_text'])
+        self.assertEqual(ordinary['capsule']['selected'], failed['capsule']['selected'])
+        self.assertEqual('unavailable', trace['funnel']['observer_state'])
+
+    def test_template_failure_and_render_fallback_failure_do_not_withhold_output(self):
+        self.start('TASK-PASSIVE')
+        ordinary, _, _ = self.request()
+        with mock.patch.object(retrieval, '_funnel_template', side_effect=RuntimeError('SECRET-TEMPLATE')):
+            failed, _, trace = self.request()
+        self.assertEqual(ordinary['capsule_text'], failed['capsule_text'])
+        self.assertEqual(ordinary['capsule']['selected'], failed['capsule']['selected'])
+        self.assertNotIn('funnel', trace)
+        result, trace_file, trace = self.request()
+        with mock.patch.object(retrieval._PassiveFunnel, 'with_render', side_effect=RuntimeError('SECRET-RENDER')), mock.patch.object(retrieval, '_funnel_template', side_effect=RuntimeError('SECRET-FALLBACK')):
+            retrieval.record_render_trace(self.repository, result['capsule'], trace['render'])
+        after = json.loads(trace_file.read_text())
+        self.assertNotIn('funnel', after)
+        self.assertEqual(trace['records'], after['records'])
+        self.assertEqual(trace['render'], after['render'])
+_FUNNEL_SIZE_TRACE_ID = '33333333-3333-4333-8333-333333333333'
+
+def _funnel_size_encoded(value):
+    return (json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + '\n').encode()
+
+@unittest.skipUnless(retrieval.TRACE_SAFE_DIRECTORY_IO, 'Optional trace sidecars require secure descriptor-relative filesystem APIs')
+class PassiveFunnelTraceSizeTest(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        trace = retrieval.RetrievalTrace({'allowed_privacy': ['public'], 'owners': ['*']})
+        for index in range(128):
+            item = {'path': f'docs/cumin-{index:03}-' + 'r' * 400 + '.md', 'privacy': 'public', 'owner': 'fixture', 'source_hash': 'a' * 64}
+            for _ in range(16):
+                trace.observe(item, 'search', 'fetched', rank=1, matched_terms=1, required_terms=1, score=1, threshold=1, estimated_tokens=1)
+        cls.legacy = {**trace.snapshot(), 'id': _FUNNEL_SIZE_TRACE_ID, 'created_at': '2026-10-12T00:00:00Z'}
+        cls.legacy.pop('funnel')
+        cls.funnel = trace.snapshot()['funnel']
+
+    def payload(self, count):
+        result = copy.deepcopy(self.legacy)
+        result['records'] = result['records'][:count]
+        return result
+
+    @staticmethod
+    def render(value):
+        return {'sha256': 'f' * 64, 'bytes': 1200, 'form': 'capsule_text', 'records': [{'path': item['path'], 'header_present': True, 'header_sha256': 'b' * 64, 'body_bytes': 320, 'body_sha256': 'c' * 64, 'pointer_only': False, 'initial_excerpt_bytes': 320, 'body_reason': 'excerpt', 'section': 'none', 'section_sha256': 'd' * 64, 'snippet_sha256': 'e' * 64, 'snippet_bytes': 320, 'snippet_in_body': True, 'shrunk': False} for item in value['records'][:3]]}
+
+    def test_initial_near_cap_save_keeps_exact_legacy_bytes(self):
+        choices = [self.payload(count) for count in range(1, 129)]
+        legacy = next((value for value in reversed(choices) if len(_funnel_size_encoded(value)) <= retrieval.TRACE_FILE_LIMIT < len(_funnel_size_encoded({**value, 'funnel': self.funnel}))))
+        child = {**legacy, 'funnel': copy.deepcopy(self.funnel)}
+        before = copy.deepcopy(child)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                retrieval._write_trace(directory, _FUNNEL_SIZE_TRACE_ID, child)
+            finally:
+                os.close(directory)
+            target = Path(temporary) / (_FUNNEL_SIZE_TRACE_ID + '.json')
+            self.assertEqual(_funnel_size_encoded(legacy), target.read_bytes())
+            self.assertEqual([target], list(Path(temporary).iterdir()))
+        self.assertEqual(before, child)
+
+    def test_near_cap_finalization_preserves_exact_legacy_render(self):
+        choices = []
+        for count in range(1, 129):
+            legacy = self.payload(count)
+            render = self.render(legacy)
+            child = {**legacy, 'funnel': copy.deepcopy(self.funnel)}
+            final = {**legacy, 'render': render, 'funnel': retrieval._PassiveFunnel.with_render(self.funnel, render['records'])}
+            if len(_funnel_size_encoded(child)) <= retrieval.TRACE_FILE_LIMIT and len(_funnel_size_encoded({**legacy, 'render': render})) <= retrieval.TRACE_FILE_LIMIT < len(_funnel_size_encoded(final)):
+                choices.append((legacy, child, render))
+        self.assertTrue(choices)
+        legacy, child, render = choices[-1]
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary)
+            folder = repository / 'memory-bank/local/retrieval-traces'
+            folder.mkdir(parents=True)
+            target = folder / (_FUNNEL_SIZE_TRACE_ID + '.json')
+            target.write_bytes(_funnel_size_encoded(child))
+            retrieval.record_render_trace(repository, {'manifest': _FUNNEL_SIZE_TRACE_ID + '.json'}, render)
+            self.assertEqual(_funnel_size_encoded({**legacy, 'render': render}), target.read_bytes())
+            self.assertEqual([target], list(folder.iterdir()))
+
+    def test_small_trace_retains_new_child_and_input_is_not_mutated(self):
+        value = {**self.payload(1), 'funnel': copy.deepcopy(self.funnel)}
+        before = copy.deepcopy(value)
+        self.assertEqual(_funnel_size_encoded(value), retrieval._trace_payload_json(value).encode())
+        self.assertEqual(before, value)
+
+    def test_oversized_legacy_still_rejects_whole_write(self):
+        legacy = self.payload(128)
+        self.assertGreater(len(_funnel_size_encoded(legacy)), retrieval.TRACE_FILE_LIMIT)
+        value = {**legacy, 'funnel': copy.deepcopy(self.funnel)}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = os.open(temporary, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                retrieval._write_trace(directory, _FUNNEL_SIZE_TRACE_ID, value)
+            finally:
+                os.close(directory)
+            self.assertEqual([], list(Path(temporary).iterdir()))
+
+
+_FUNNEL_DIAGNOSIS_TRACE_ID = '11111111-1111-4111-8111-111111111111'
+
+@unittest.skipUnless(retrieval.TRACE_SAFE_DIRECTORY_IO and callable(getattr(os, 'getuid', None)), 'secure trace owner verification unavailable')
+class FunnelDiagnosisReaderTest(unittest.TestCase):
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.repository = Path(self.temp.name)
+        self.directory = self.repository / 'memory-bank/local/retrieval-traces'
+        self.directory.mkdir(parents=True)
+        self.trace_file = self.directory / (_FUNNEL_DIAGNOSIS_TRACE_ID + '.json')
+        self.capsule = {'manifest': 'memory-bank/local/retrieval-manifests/' + _FUNNEL_DIAGNOSIS_TRACE_ID + '.json'}
+        self.expected = {'form': 'capsule_text', 'bytes': 16, 'sha256': hashlib.sha256(b'cobalt canonical').hexdigest()}
+        self.render = {**self.expected, 'records': [{'path': 'specs/public.md', 'header_present': True, 'body_reason': 'excerpt', 'body_bytes': 16, 'pointer_only': False}]}
+        trace = retrieval.RetrievalTrace({'allowed_privacy': ['public'], 'owners': ['alice']})
+        trace.observe({'path': 'specs/public.md', 'privacy': 'public', 'owner': 'alice', 'source_hash': 'a' * 64}, 'search', 'fetched')
+        self.data = {**trace.snapshot(), 'id': _FUNNEL_DIAGNOSIS_TRACE_ID, 'render': self.render}
+        self.data['funnel'] = retrieval._PassiveFunnel.with_render(self.data['funnel'], self.render['records'])
+        self.write()
+
+    def write(self, data=None):
+        self.trace_file.write_text(json.dumps(self.data if data is None else data))
+
+    def diagnose(self):
+        return retrieval.diagnose_funnel(self.repository, self.capsule, self.expected)
+
+    def unknown(self):
+        self.assertEqual(retrieval.unknown_funnel_diagnosis(), self.diagnose())
+
+    def test_matching_current_projection_is_observed_without_content_carriers(self):
+        value = self.diagnose()
+        self.assertTrue(retrieval.valid_funnel_diagnosis(value))
+        self.assertEqual('observed', value['observation_state'])
+        self.assertEqual('unknown', value['source_coverage'])
+        self.assertEqual('unknown', value['emission'])
+        self.assertEqual('unknown', value['consumer'])
+        self.assertEqual('unknown', value['next_action'])
+        for sentinel in ('specs/public.md', _FUNNEL_DIAGNOSIS_TRACE_ID, 'a' * 64, 'alice', self.expected['sha256']):
+            self.assertNotIn(sentinel, json.dumps(value))
+        self.data['funnel']['events']['admission']['term-coverage'] = {'count': 65535, 'state': 'lower-bound'}
+        self.write()
+        value = self.diagnose()
+        self.assertEqual('inspect-observed-loss', value['next_action'])
+        self.assertEqual({'count': 65535, 'state': 'lower-bound'}, value['loss_observations']['term_coverage'])
+        self.assertNotIn('rate', json.dumps(value))
+        self.assertNotIn('hybrid', json.dumps(value))
+
+    def test_missing_old_omitted_unsupported_mismatch_and_unknown_projection_are_equivalent(self):
+        original = copy.deepcopy(self.data)
+        edits = [lambda x: x.pop('funnel'), lambda x: x.update(id='22222222-2222-4222-8222-222222222222'), lambda x: x.update(schema_version=2), lambda x: x.update(schema_version=True), lambda x: x['funnel'].update(schema_version=2), lambda x: x['funnel'].update(observer_state='unavailable'), lambda x: x['funnel']['render'].update(projection_state='unknown'), lambda x: x['render'].update(form='printed_capsule'), lambda x: x['render'].update(bytes=True), lambda x: x['render'].update(bytes=17), lambda x: x['render'].update(sha256='b' * 64), lambda x: x['funnel']['boundaries']['pack_input'].update(count=True), lambda x: x['funnel'].update(query='SECRET-SENTINEL')]
+        for edit in edits:
+            data = copy.deepcopy(original)
+            edit(data)
+            self.write(data)
+            self.unknown()
+        self.trace_file.unlink()
+        self.unknown()
+        (self.directory / '22222222-2222-4222-8222-222222222222.json').write_text(json.dumps(original))
+        self.unknown()
+
+    def test_duplicate_keys_invalid_utf8_oversize_symlink_hardlink_fifo_and_owner_are_unknown(self):
+        self.trace_file.write_text('{"id":"one","id":"two"}')
+        self.unknown()
+        self.trace_file.write_bytes(b'\xff')
+        self.unknown()
+        self.trace_file.write_bytes(b'x' * (retrieval.TRACE_FILE_LIMIT + 1))
+        self.unknown()
+        self.trace_file.unlink()
+        target = self.repository / 'outside.json'
+        target.write_text(json.dumps(self.data))
+        self.trace_file.symlink_to(target)
+        self.unknown()
+        self.trace_file.unlink()
+        os.link(target, self.trace_file)
+        self.unknown()
+        self.trace_file.unlink()
+        os.mkfifo(self.trace_file)
+        self.unknown()
+        self.trace_file.unlink()
+        self.write()
+        with mock.patch.object(retrieval.os, 'getuid', return_value=os.getuid() + 1):
+            self.unknown()
+        with mock.patch.object(retrieval.os, 'getuid', None):
+            self.unknown()
+        with mock.patch.object(retrieval, 'TRACE_SAFE_DIRECTORY_IO', False):
+            self.unknown()
+
+    def test_prune_or_replacement_during_the_one_read_is_unknown(self):
+        real_read = retrieval.os.read
+
+        def prune(*args):
+            value = real_read(*args)
+            self.trace_file.unlink()
+            return value
+        with mock.patch.object(retrieval.os, 'read', side_effect=prune):
+            self.unknown()
+        self.write()
+
+        def replace(*args):
+            value = real_read(*args)
+            self.trace_file.unlink()
+            self.write()
+            return value
+        with mock.patch.object(retrieval.os, 'read', side_effect=replace):
+            self.unknown()
+
+    def test_parent_symlink_and_inflight_content_mutation_are_unknown(self):
+        moved = self.repository / 'moved-traces'
+        self.directory.rename(moved)
+        self.directory.symlink_to(moved, target_is_directory=True)
+        self.unknown()
+        self.directory.unlink()
+        moved.rename(self.directory)
+        real_read = retrieval.os.read
+
+        def mutate(*args):
+            value = real_read(*args)
+            with self.trace_file.open('ab') as handle:
+                handle.write(b' ')
+            return value
+        with mock.patch.object(retrieval.os, 'read', side_effect=mutate):
+            self.unknown()
+
+    def test_capsule_manifest_scope_shape_is_strict_and_expected_form_is_current(self):
+        original = self.capsule['manifest']
+        for reference in [_FUNNEL_DIAGNOSIS_TRACE_ID + '.json', 'memory-bank/local/retrieval-traces/' + _FUNNEL_DIAGNOSIS_TRACE_ID + '.json', '/tmp/' + _FUNNEL_DIAGNOSIS_TRACE_ID + '.json', 'memory-bank/local/retrieval-manifests/../' + _FUNNEL_DIAGNOSIS_TRACE_ID + '.json']:
+            self.capsule['manifest'] = reference
+            self.unknown()
+        self.capsule['manifest'] = original
+        self.expected['form'] = 'printed_capsule'
+        self.unknown()
+
+    def test_existing_parent_record_caps_do_not_invent_complete_coverage(self):
+        self.data['truncated'] = True
+        self.data['records'][0]['events_truncated'] = True
+        self.write()
+        value = self.diagnose()
+        self.assertEqual('unknown', value['source_coverage'])
+        self.assertEqual('observed', value['observation_state'])
+        self.assertNotIn('truncated', json.dumps(value))
+        self.assertNotIn('saturated', json.dumps(value))
+        self.assertEqual('authorized-retained-records-only', value['coverage']['path_only_events'])
+
+    def test_parent_carriers_and_denied_record_metadata_are_not_exported(self):
+        before = self.diagnose()
+        self.data.update(query='QUERY-SENTINEL', owner='PRIVATE-OWNER-SENTINEL')
+        self.data['records'].append({'path': 'private/PATH-SENTINEL', 'owner': 'bob', 'privacy': 'restricted', 'body': 'BODY-SENTINEL', 'source_sha256': 'f' * 64, 'events': []})
+        self.write()
+        after = self.diagnose()
+        self.assertEqual(before, after)
+        self.assertNotIn('SENTINEL', json.dumps(after))
+
+    def test_reader_does_one_metadata_read_and_no_source_content_reads(self):
+        real_read = retrieval.os.read
+        with mock.patch.object(retrieval.os, 'read', wraps=real_read) as reads, mock.patch.object(Path, 'read_text', side_effect=AssertionError('source read')):
+            value = self.diagnose()
+        self.assertEqual('observed', value['observation_state'])
+        self.assertEqual(1, reads.call_count)
+
+    def test_regular_errors_are_unknown_but_cancellation_propagates(self):
+        with mock.patch.object(retrieval.os, 'read', side_effect=RuntimeError('SECRET-ERROR')):
+            self.unknown()
+        for error in (KeyboardInterrupt, SystemExit):
+            with mock.patch.object(retrieval.os, 'read', side_effect=error), self.assertRaises(error):
+                self.diagnose()
+
+    def test_summary_validator_rejects_arbitrary_fields_counts_and_recommendations(self):
+        value = self.diagnose()
+        for edit in [lambda x: x.update(body='SECRET'), lambda x: x.update(schema_version=True), lambda x: x.update(next_action='inspect-observed-loss'), lambda x: x.update(next_action='activate-hybrid'), lambda x: x.update(source_coverage='complete'), lambda x: x['loss_observations']['budget'].update(count=-1), lambda x: x['loss_observations']['budget'].update(count=65536), lambda x: x['boundaries']['pack_input'].update(owner='alice')]:
+            malformed = copy.deepcopy(value)
+            edit(malformed)
+            self.assertFalse(retrieval.valid_funnel_diagnosis(malformed))
+        malformed = retrieval.unknown_funnel_diagnosis()
+        malformed['boundaries']['pack_input'] = {'count': 0, 'state': 'exact'}
+        self.assertFalse(retrieval.valid_funnel_diagnosis(malformed))
+
+@unittest.skipUnless(retrieval.TRACE_SAFE_DIRECTORY_IO and callable(getattr(os, 'getuid', None)), 'secure trace owner verification unavailable')
+class AutomaticFunnelDiagnosisTest(RuntimeHarness):
+
+    def request(self, json_output=True, query=True):
+        args = ['refresh', '--task-id', 'TASK-DIAG', '--ephemeral', '--gate', 'off']
+        if query:
+            args += ['--query', 'cobalt authority canonical']
+        if json_output:
+            args += ['--json']
+        code, out, err = self.run_main(*args)
+        self.assertEqual(0, code, err)
+        health = [json.loads(line) for line in context_cli.refresh_health_path(self.repository).read_text().splitlines()]
+        return (out, health)
+
+    def test_json_and_plain_health_bind_correct_forms_without_new_render(self):
+        self.start('TASK-DIAG')
+        with mock.patch.object(context_cli, 'render_capsule_lines', wraps=context_cli.render_capsule_lines) as renderer:
+            out, health = self.request()
+            json_calls = renderer.call_count
+        value = json.loads(out)
+        self.assertEqual('observed', value['funnel_diagnosis']['observation_state'])
+        self.assertEqual(value['funnel_diagnosis'], health[-1]['funnel_diagnosis'])
+        self.assertNotIn('funnel_diagnosis', value['capsule'])
+        with mock.patch.object(context_cli, 'render_capsule_lines', wraps=context_cli.render_capsule_lines) as renderer:
+            plain, health = self.request(False)
+            plain_calls = renderer.call_count
+        self.assertEqual('observed', health[-1]['funnel_diagnosis']['observation_state'])
+        self.assertEqual('unknown', health[-1]['funnel_diagnosis']['emission'])
+        self.assertEqual(2, len(health))
+        self.assertNotIn('diagnosis', plain)
+        self.assertEqual(json_calls + 1, plain_calls)
+
+    def test_failed_printed_finalizer_keeps_plain_diagnosis_unknown(self):
+        self.start('TASK-DIAG')
+        original = context_cli.record_render_trace
+
+        def finalizer(repository, capsule, render):
+            if render.get('form') != 'printed_capsule':
+                original(repository, capsule, render)
+        with mock.patch.object(context_cli, 'record_render_trace', side_effect=finalizer):
+            _, health = self.request(False)
+        self.assertEqual(retrieval.unknown_funnel_diagnosis(), health[-1]['funnel_diagnosis'])
+
+    def test_failed_emission_still_keeps_exactly_one_legacy_health_row(self):
+        self.start('TASK-DIAG')
+
+        def broken_print(*args, **kwargs):
+            if kwargs.get('file') is None:
+                raise OSError('synthetic broken pipe')
+            return print(*args, **kwargs)
+        with mock.patch.object(context_cli, 'print', side_effect=broken_print, create=True):
+            code, out, _ = self.run_main('refresh', '--task-id', 'TASK-DIAG', '--ephemeral', '--gate', 'off')
+        self.assertEqual(1, code)
+        self.assertEqual('', out)
+        health = [json.loads(line) for line in context_cli.refresh_health_path(self.repository).read_text().splitlines()]
+        self.assertEqual(1, len(health))
+        self.assertEqual('refresh', health[0]['source'])
+        self.assertEqual(retrieval.unknown_funnel_diagnosis(), health[0]['funnel_diagnosis'])
+
+    def test_consumer_cancellation_keeps_one_legacy_row_and_propagates(self):
+        self.start('TASK-DIAG')
+        for json_output, error in [(True, KeyboardInterrupt), (False, SystemExit)]:
+            args = ['refresh', '--task-id', 'TASK-DIAG', '--query', 'cobalt authority canonical', '--ephemeral', '--gate', 'off']
+            if json_output:
+                args += ['--json']
+            before = len(context_cli.refresh_health_path(self.repository).read_text().splitlines()) if context_cli.refresh_health_path(self.repository).exists() else 0
+            with mock.patch.object(context_cli, 'diagnose_funnel', side_effect=error), self.assertRaises(error):
+                self.run_main(*args)
+            rows = context_cli.refresh_health_path(self.repository).read_text().splitlines()
+            self.assertEqual(before + 1, len(rows))
+            self.assertEqual('refresh', json.loads(rows[-1])['source'])
+
+    def test_corrupt_consumer_return_is_not_exported_to_json_or_health(self):
+        self.start('TASK-DIAG')
+        with mock.patch.object(context_cli, 'diagnose_funnel', return_value={'body': 'SECRET-SENTINEL'}):
+            out, health = self.request()
+        self.assertNotIn('funnel_diagnosis', json.loads(out))
+        self.assertNotIn('funnel_diagnosis', health[-1])
+        self.assertNotIn('SECRET-SENTINEL', out)
+        self.assertNotIn('SECRET-SENTINEL', context_cli.refresh_health_path(self.repository).read_text())
+
+    def test_no_capsule_and_consumer_failures_do_not_change_ordinary_output(self):
+        self.start('TASK-DIAG')
+        out, health = self.request(query=False)
+        self.assertEqual(retrieval.unknown_funnel_diagnosis(), json.loads(out)['funnel_diagnosis'])
+        ordinary, _ = self.request()
+        with mock.patch.object(context_cli, 'diagnose_funnel', side_effect=RuntimeError('SECRET-ERROR')):
+            failed, health = self.request()
+        left, right = (json.loads(ordinary), json.loads(failed))
+        self.assertEqual(left['capsule_text'], right['capsule_text'])
+        self.assertEqual(left['capsule']['selected'], right['capsule']['selected'])
+        self.assertNotIn('funnel_diagnosis', right)
+        self.assertNotIn('funnel_diagnosis', health[-1])
+
+@unittest.skipUnless(retrieval.TRACE_SAFE_DIRECTORY_IO and callable(getattr(os, 'getuid', None)), 'secure trace owner verification unavailable')
+class FunnelDiagnosisCompleteReadTest(unittest.TestCase):
+
+    def fixture(self):
+        fixture = FunnelDiagnosisReaderTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        return fixture
+
+    def test_stable_short_valid_prefix_with_unread_invalid_tail_is_unavailable(self):
+        fixture = self.fixture()
+        prefix = json.dumps(fixture.data).encode('utf-8')
+        full_file = prefix + b'\n{"unread":"BODY-SENTINEL"}'
+        fixture.trace_file.write_bytes(full_file)
+        with self.assertRaises(ValueError):
+            json.loads(full_file)
+        before = fixture.trace_file.stat()
+        real_read = retrieval.os.read
+
+        def short_read(descriptor, amount):
+            observed = real_read(descriptor, amount)
+            self.assertEqual(full_file, observed)
+            return observed[:len(prefix)]
+        with mock.patch.object(retrieval.os, 'read', side_effect=short_read) as reads:
+            self.assertEqual(retrieval.unknown_funnel_diagnosis(), fixture.diagnose())
+        self.assertEqual(1, reads.call_count)
+        after = fixture.trace_file.stat()
+        for attribute in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'):
+            self.assertEqual(getattr(before, attribute), getattr(after, attribute))
+        self.assertEqual(full_file, fixture.trace_file.read_bytes())
+
+    def test_complete_utf8_read_uses_byte_size_and_exports_only_fixed_fields(self):
+        fixture = self.fixture()
+        fixture.data['query'] = 'PRIVATE-SENTINEL: кириллица 🦉'
+        encoded = json.dumps(fixture.data, ensure_ascii=False).encode('utf-8')
+        self.assertGreater(len(encoded), len(encoded.decode('utf-8')))
+        fixture.trace_file.write_bytes(encoded)
+        real_read = retrieval.os.read
+        with mock.patch.object(retrieval.os, 'read', wraps=real_read) as reads:
+            result = fixture.diagnose()
+        self.assertEqual('observed', result['observation_state'])
+        self.assertEqual(1, reads.call_count)
+        self.assertNotIn('PRIVATE-SENTINEL', json.dumps(result))
+        self.assertTrue(retrieval.valid_funnel_diagnosis(result))
+
+class UnavailableFunnelDiagnosisTest(unittest.TestCase):
+    def diagnose(self):
+        return retrieval.diagnose_funnel(
+            Path('.'),
+            {'manifest': 'memory-bank/local/retrieval-manifests/' + _FUNNEL_DIAGNOSIS_TRACE_ID + '.json'},
+            {'form': 'capsule_text', 'bytes': 16, 'sha256': hashlib.sha256(b'cobalt canonical').hexdigest()},
+        )
+
+    def test_unsupported_descriptor_io_is_unavailable_without_open_or_read(self):
+        with mock.patch.object(retrieval, 'TRACE_SAFE_DIRECTORY_IO', False), \
+             mock.patch.object(retrieval.os, 'open', side_effect=AssertionError('unexpected open')) as opens, \
+             mock.patch.object(retrieval.os, 'read', side_effect=AssertionError('unexpected read')) as reads:
+            self.assertEqual(retrieval.unknown_funnel_diagnosis(), self.diagnose())
+        self.assertEqual(0, opens.call_count)
+        self.assertEqual(0, reads.call_count)
+
+    def test_unverifiable_owner_is_unavailable_without_open_or_read(self):
+        with mock.patch.object(retrieval.os, 'getuid', None, create=True), \
+             mock.patch.object(retrieval.os, 'open', side_effect=AssertionError('unexpected open')) as opens, \
+             mock.patch.object(retrieval.os, 'read', side_effect=AssertionError('unexpected read')) as reads:
+            self.assertEqual(retrieval.unknown_funnel_diagnosis(), self.diagnose())
+        self.assertEqual(0, opens.call_count)
+        self.assertEqual(0, reads.call_count)
+
+class FunnelHealthSummaryTest(unittest.TestCase):
+    @staticmethod
+    def observed(count=0, state='exact'):
+        child = context_cli.unknown_funnel_diagnosis()
+        child['observation_state'] = 'observed'
+        groups = (child['loss_observations'], child['boundaries'], child['render_projection']['reasons'])
+        for group in groups:
+            for name in group:
+                group[name] = {'count': 0, 'state': 'exact'}
+        child['render_projection']['headers'] = {'count': 0, 'state': 'exact'}
+        child['loss_observations']['pack'] = {'count': count, 'state': state}
+        child['next_action'] = 'inspect-observed-loss' if count else 'unknown'
+        return child
+
+    def test_empty_and_missing_records_do_not_become_zero_observations(self):
+        for records in ([], [{}, {'hook_status': 124}]):
+            with self.subTest(records=len(records)):
+                summary = context_cli.funnel_diagnosis_summary(records)
+                counter = summary['loss_observations']['pack']
+                self.assertEqual({'known_records': 0, 'unknown_records': len(records),
+                                  'saturated_records': 0, 'sum_known_counts': None,
+                                  'state': 'unknown'}, counter)
+                self.assertEqual(len(records), summary['availability']['missing'])
+
+    def test_mixed_records_partition_unknown_and_saturation(self):
+        rejected = self.observed()
+        rejected['query'] = 'PRIVATE-SENTINEL'
+        records = [{'funnel_diagnosis': self.observed()},
+                   {'funnel_diagnosis': self.observed(3)},
+                   {'funnel_diagnosis': self.observed(65535, 'lower-bound')},
+                   {'funnel_diagnosis': context_cli.unknown_funnel_diagnosis()}, {},
+                   {'funnel_diagnosis': rejected}]
+        summary = context_cli.funnel_diagnosis_summary(records)
+        self.assertEqual({'observed': 3, 'unavailable': 1, 'missing': 1, 'rejected': 1}, summary['availability'])
+        self.assertEqual({'known_records': 3, 'unknown_records': 3, 'saturated_records': 1,
+                          'sum_known_counts': 65538, 'state': 'lower-bound'}, summary['loss_observations']['pack'])
+        self.assertEqual('unknown', summary['source_coverage'])
+        self.assertEqual('unmeasured', summary['quality'])
+        self.assertNotIn('PRIVATE-SENTINEL', json.dumps(summary))
+        self.assertNotIn('schema_version', summary)
+        self.assertEqual(1, summary['summary_schema_version'])
+
+    def test_exact_limit_is_not_saturated_and_consumer_tail_is_bounded(self):
+        summary = context_cli.funnel_diagnosis_summary([{'funnel_diagnosis': self.observed(65535)}])
+        self.assertEqual((65535, 0, 'exact'), tuple(summary['loss_observations']['pack'][name]
+                                                  for name in ('sum_known_counts', 'saturated_records', 'state')))
+        records = [{'funnel_diagnosis': self.observed(9)}, {}] + [
+            {'funnel_diagnosis': self.observed()} for _ in range(500)]
+        summary = context_cli.funnel_diagnosis_summary(records)
+        self.assertEqual((500, 2), (summary['records_considered'], summary['records_omitted_by_cap']))
+        self.assertEqual({'observed': 500, 'unavailable': 0, 'missing': 0, 'rejected': 0}, summary['availability'])
+        self.assertEqual((0, 'exact'), tuple(summary['loss_observations']['pack'][name]
+                                           for name in ('sum_known_counts', 'state')))
+        self.assertEqual(28, len(summary['loss_observations']) + len(summary['boundaries'])
+                         + 1 + len(summary['render_projection']['reasons']))
+
+    def test_unknown_slot_in_valid_observed_record_stays_unknown(self):
+        child = self.observed(2)
+        child['boundaries']['pack_input'] = {'count': None, 'state': 'unknown'}
+        summary = context_cli.funnel_diagnosis_summary([{'funnel_diagnosis': child}])
+        self.assertEqual('observed', next(key for key, count in summary['availability'].items() if count))
+        self.assertEqual({'known_records': 0, 'unknown_records': 1, 'saturated_records': 0,
+                          'sum_known_counts': None, 'state': 'unknown'}, summary['boundaries']['pack_input'])
+
+    def test_validator_failure_rejects_only_metadata_and_cancellation_propagates(self):
+        records = [{'funnel_diagnosis': self.observed(2)}, {}]
+        with mock.patch.object(context_cli, 'valid_funnel_diagnosis', side_effect=RuntimeError('metadata-only failure')):
+            summary = context_cli.funnel_diagnosis_summary(records)
+        self.assertEqual({'observed': 0, 'unavailable': 0, 'missing': 1, 'rejected': 1}, summary['availability'])
+        self.assertEqual((None, 2, 'unknown'), tuple(summary['loss_observations']['pack'][key]
+                                                  for key in ('sum_known_counts', 'unknown_records', 'state')))
+        for error in (KeyboardInterrupt('cancelled'), SystemExit(7)):
+            with mock.patch.object(context_cli, 'valid_funnel_diagnosis', side_effect=error):
+                with self.assertRaises(type(error)) as caught:
+                    context_cli.funnel_diagnosis_summary(records)
+            self.assertIs(error, caught.exception)
+
+
+class FunnelHealthCliTest(RuntimeHarness):
+    def test_new_metadata_preserves_old_health_fields_and_plain_output(self):
+        filename = context_cli.refresh_health_path(self.repository)
+        filename.parent.mkdir(parents=True, exist_ok=True)
+        records = [{'phase_seconds': {'index': 0.1}, 'hook_status': 0, 'omitted': {'semantic': 0}},
+                   {'phase_seconds': {'index': 0.3}, 'hook_status': 124, 'omitted': {'semantic': 1},
+                    'layers_updated': False}, {}]
+        def write(values):
+            filename.write_text('broken-json\n[]\n' + ''.join(json.dumps(item) + '\n' for item in values))
+        write(records)
+        old_json = self.run_cli('health', '--json', '--window', '2')
+        old_plain = self.run_cli('health', '--window', '2')
+        records[1]['funnel_diagnosis'] = FunnelHealthSummaryTest.observed(2)
+        records[2]['funnel_diagnosis'] = {'query': 'PRIVATE-SENTINEL'}
+        write(records)
+        new_json = self.run_cli('health', '--json', '--window', '2')
+        new_plain = self.run_cli('health', '--window', '2')
+        self.assertEqual((0, 0, 0, 0), (old_json.returncode, old_plain.returncode, new_json.returncode, new_plain.returncode))
+        self.assertEqual(old_plain.stdout, new_plain.stdout)
+        before, after = json.loads(old_json.stdout), json.loads(new_json.stdout)
+        before.pop('funnel_diagnosis')
+        diagnosis = after.pop('funnel_diagnosis')
+        self.assertEqual(before, after)
+        self.assertEqual((2, 0), (diagnosis['records_considered'], diagnosis['records_omitted_by_cap']))
+        self.assertEqual({'observed': 1, 'unavailable': 0, 'missing': 0, 'rejected': 1}, diagnosis['availability'])
+        self.assertNotIn('PRIVATE-SENTINEL', new_json.stdout)
+
+
+class _OrdinaryAcquisitionConnection(sqlite3.Connection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.before_acquire = None
+        self.after_acquire = None
+        self.before_second_write = None
+        self.after_unwind_error = None
+        self.before_restore = None
+        self.after_restore_error = None
+        self.restore_target = None
+        self.restore_attempts = 0
+        self.acquired = False
+        self.owned_name = None
+        self.closed_by_owner = False
+
+    def execute(self, sql, parameters=()):
+        acquisition = sql == 'BEGIN IMMEDIATE' or sql.startswith('SAVEPOINT ordinary_receipts_')
+        if acquisition:
+            if sql.startswith('SAVEPOINT '):
+                self.owned_name = sql.split()[-1]
+            if self.before_acquire is not None:
+                error, self.before_acquire = self.before_acquire, None
+                raise error
+        if (self.before_second_write is not None and sql.startswith('UPDATE index_state')
+                and parameters[1] == retrieval.SESSION_DELIVERIES_KEY):
+            error, self.before_second_write = self.before_second_write, None
+            raise error
+        if (self.restore_target is not None and sql.startswith('PRAGMA busy_timeout = ')
+                and sql.rsplit('=', 1)[1].strip() == str(self.restore_target)):
+            self.restore_attempts += 1
+            if self.before_restore is not None:
+                error, self.before_restore = self.before_restore, None
+                raise error
+        cursor = super().execute(sql, parameters)
+        if (self.after_restore_error is not None and sql.startswith('PRAGMA busy_timeout = ')
+                and sql.rsplit('=', 1)[1].strip() == str(self.restore_target)):
+            error, self.after_restore_error = self.after_restore_error, None
+            raise error
+        if acquisition:
+            self.acquired = True
+            if self.after_acquire is not None:
+                error, self.after_acquire = self.after_acquire, None
+                raise error
+        if (self.after_unwind_error is not None and
+                (sql == 'ROLLBACK' or sql.startswith('RELEASE SAVEPOINT ordinary_receipts_'))):
+            error, self.after_unwind_error = self.after_unwind_error, None
+            raise error
+        return cursor
+
+    def close(self):
+        super().close()
+        self.closed_by_owner = True
+
+
+class OrdinaryReceiptAcquisitionTest(unittest.TestCase):
+    def test_cleanup_entry_cancellation_retries_owned_unwind(self):
+        import ast
+        owner = next(item for item in ast.parse(Path(retrieval.__file__).read_text()).body
+                     if isinstance(item, ast.FunctionDef) and item.name == '_commit_ordinary_receipts')
+        outer = next(item for item in owner.body if isinstance(item, ast.Try))
+        finalizer = outer if outer.finalbody else outer.body[0]
+        entry = finalizer.finalbody[0].lineno
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                for error in (KeyboardInterrupt('cleanup-entry'), SystemExit(43)):
+                    with self.subTest(journal=journal, ambient=ambient, error=type(error).__name__):
+                        filename, connection, before, plans = self.open_case(journal, ambient)
+                        denied = self.deny_next_state_read(connection)
+                        hits = []
+                        def trace(frame, event, argument):
+                            if (event == 'line' and frame.f_code is retrieval._commit_ordinary_receipts.__code__
+                                    and frame.f_lineno == entry and not hits):
+                                hits.append(entry)
+                                raise error
+                            return trace
+                        try:
+                            sys.settrace(trace)
+                            with self.assertRaises(type(error)) as caught:
+                                retrieval._commit_ordinary_receipts(connection, **plans)
+                        finally:
+                            sys.settrace(None)
+                            connection.set_authorizer(lambda *arguments: sqlite3.SQLITE_OK)
+                        self.assertIs(error, caught.exception)
+                        self.assertEqual(1, len(hits))
+                        self.assertEqual(1, len(denied))
+                        self.assert_unwound(filename, connection, before, ambient)
+
+    def open_case(self, journal, ambient, *, autocommit=False):
+        temporary = tempfile.TemporaryDirectory(prefix='ordinary-acquisition-')
+        self.addCleanup(temporary.cleanup)
+        filename = Path(temporary.name) / 'state.db'
+        options = {'factory': _OrdinaryAcquisitionConnection}
+        if autocommit:
+            options['autocommit'] = True
+        connection = sqlite3.connect(filename, **options)
+        self.addCleanup(connection.close)
+        connection.row_factory = sqlite3.Row
+        self.assertEqual(journal.lower(), connection.execute('PRAGMA journal_mode=' + journal).fetchone()[0])
+        connection.execute('CREATE TABLE index_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        connection.execute('CREATE TABLE caller_work(value INTEGER NOT NULL)')
+        connection.execute('INSERT INTO caller_work VALUES(0)')
+        retrieval.ensure_metadata_tables(connection)
+        retrieval.store_index_state(connection, {
+            retrieval.LAST_RETRIEVAL_KEY: json.dumps({'initial': {'query': 'a' * 64}}),
+            retrieval.SESSION_DELIVERIES_KEY: json.dumps({'session': {'turn': 1, 'items': {'old': ['a' * 16, 1]}}}),
+            retrieval.INDEX_GENERATION_KEY: 'original-generation',
+        })
+        connection.commit()
+        connection.execute('PRAGMA busy_timeout=2347')
+        connection.restore_target = 2347
+        if ambient:
+            connection.execute('BEGIN')
+            connection.execute('UPDATE caller_work SET value=1')
+            connection.execute('SAVEPOINT caller_owned')
+        before = self.state(connection)
+        plan = retrieval._ordinary_session_plan('session', 2, {'new': ['b' * 16, 2]},
+                                                retrieval._load_session_deliveries(connection))
+        return filename, connection, before, {'baseline': {'key': 'next', 'signature': {'query': 'b' * 64}},
+                                               'session': plan}
+
+    @staticmethod
+    def state(connection):
+        rows = [tuple(row) for row in connection.execute(
+            'SELECT key,typeof(value),CAST(value AS BLOB) FROM index_state ORDER BY key')]
+        return rows, connection.execute('SELECT value FROM caller_work').fetchone()[0]
+
+    def assert_unwound(self, filename, connection, before, ambient):
+        self.assertEqual(before, self.state(connection))
+        self.assertEqual(2347, connection.execute('PRAGMA busy_timeout').fetchone()[0])
+        self.assertEqual(ambient, connection.in_transaction)
+        self.assertFalse(connection.closed_by_owner)
+        self.assertEqual(1, connection.execute('SELECT 1').fetchone()[0])
+        if ambient:
+            self.assertIsNotNone(connection.owned_name)
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'no such savepoint'):
+                connection.execute('RELEASE SAVEPOINT ' + connection.owned_name)
+            connection.execute('ROLLBACK TO SAVEPOINT caller_owned')
+            self.assertEqual(1, connection.execute('SELECT value FROM caller_work').fetchone()[0])
+            connection.execute('RELEASE SAVEPOINT caller_owned')
+            self.assertTrue(connection.in_transaction)
+        else:
+            observer = sqlite3.connect(filename, isolation_level=None, timeout=0.1)
+            try:
+                observer.execute('BEGIN IMMEDIATE')
+                observer.execute('ROLLBACK')
+            finally:
+                observer.close()
+
+    @staticmethod
+    def deny_next_state_read(connection):
+        denied = []
+        def authorizer(action, first, second, database, trigger):
+            if action == sqlite3.SQLITE_READ and first == 'index_state' and not denied:
+                denied.append((first, second))
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        connection.set_authorizer(authorizer)
+        return denied
+
+    def cancel_cleanup(self, connection, fragment, error, call):
+        source = Path(retrieval.__file__).read_text().splitlines()
+        hits = []
+        def trace(frame, event, argument):
+            if (event == 'line' and frame.f_code.co_filename == retrieval.__file__
+                    and frame.f_code.co_name == 'undo' and not hits
+                    and fragment in source[frame.f_lineno - 1]):
+                hits.append(frame.f_lineno)
+                raise error
+            return trace
+        try:
+            sys.settrace(trace)
+            with self.assertRaises(type(error)) as caught:
+                call()
+        finally:
+            sys.settrace(None)
+            connection.set_authorizer(lambda *arguments: sqlite3.SQLITE_OK)
+        self.assertIs(error, caught.exception)
+        self.assertEqual(1, len(hits))
+
+    def test_actual_sql_next_line_cancellation_unwinds_acquisition(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                for error in (KeyboardInterrupt('next-line'), SystemExit(17)):
+                    with self.subTest(journal=journal, ambient=ambient, error=type(error).__name__):
+                        filename, connection, before, plans = self.open_case(journal, ambient)
+                        hits = []
+                        def trace(frame, event, argument):
+                            if (event == 'line' and frame.f_code is retrieval._commit_ordinary_receipts.__code__
+                                    and connection.acquired and not hits):
+                                hits.append(frame.f_lineno)
+                                raise error
+                            return trace
+                        try:
+                            sys.settrace(trace)
+                            with self.assertRaises(type(error)) as caught:
+                                retrieval._commit_ordinary_receipts(connection, **plans)
+                        finally:
+                            sys.settrace(None)
+                        self.assertIs(error, caught.exception)
+                        self.assertEqual(1, len(hits))
+                        self.assert_unwound(filename, connection, before, ambient)
+
+    def test_delegate_then_cancellation_unwinds_acquisition(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                for error in (KeyboardInterrupt('after-SQL'), SystemExit(19)):
+                    with self.subTest(journal=journal, ambient=ambient, error=type(error).__name__):
+                        filename, connection, before, plans = self.open_case(journal, ambient)
+                        connection.after_acquire = error
+                        with self.assertRaises(type(error)) as caught:
+                            retrieval._commit_ordinary_receipts(connection, **plans)
+                        self.assertIs(error, caught.exception)
+                        self.assertTrue(connection.acquired)
+                        self.assert_unwound(filename, connection, before, ambient)
+
+    def test_definite_failed_begin_or_savepoint_preserves_caller_scope(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                for error in (sqlite3.OperationalError('before-SQL'), KeyboardInterrupt('before-SQL'), SystemExit(23)):
+                    with self.subTest(journal=journal, ambient=ambient, error=type(error).__name__):
+                        filename, connection, before, plans = self.open_case(journal, ambient)
+                        connection.before_acquire = error
+                        if isinstance(error, sqlite3.Error):
+                            self.assertEqual(('skipped', None), retrieval._commit_ordinary_receipts(connection, **plans))
+                        else:
+                            with self.assertRaises(type(error)) as caught:
+                                retrieval._commit_ordinary_receipts(connection, **plans)
+                            self.assertIs(error, caught.exception)
+                        self.assertFalse(connection.acquired)
+                        self.assert_unwound(filename, connection, before, ambient)
+
+    def test_delegate_then_sql_error_unwinds_partial_acquisition(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                with self.subTest(journal=journal, ambient=ambient):
+                    filename, connection, before, plans = self.open_case(journal, ambient)
+                    connection.after_acquire = sqlite3.OperationalError('after actual acquisition')
+                    self.assertEqual(('skipped', None), retrieval._commit_ordinary_receipts(connection, **plans))
+                    self.assertTrue(connection.acquired)
+                    self.assert_unwound(filename, connection, before, ambient)
+
+    def test_first_cancellation_during_real_sql_error_cleanup_retries_owned_unwind(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                fragments = ('"ROLLBACK TO SAVEPOINT "', '"RELEASE SAVEPOINT "') if ambient else ('"ROLLBACK"',)
+                for fragment in fragments:
+                    for error in (KeyboardInterrupt('cleanup'), SystemExit(29)):
+                        with self.subTest(journal=journal, ambient=ambient, fragment=fragment, error=type(error).__name__):
+                            filename, connection, before, plans = self.open_case(journal, ambient)
+                            denied = self.deny_next_state_read(connection)
+                            self.cancel_cleanup(connection, fragment, error,
+                                                lambda: retrieval._commit_ordinary_receipts(connection, **plans))
+                            self.assertEqual(1, len(denied))
+                            self.assert_unwound(filename, connection, before, ambient)
+
+    def test_pending_primary_survives_cleanup_sql_error_after_effects(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                for error in (KeyboardInterrupt('primary'), SystemExit(31)):
+                    with self.subTest(journal=journal, ambient=ambient, error=type(error).__name__):
+                        filename, connection, before, plans = self.open_case(journal, ambient)
+                        connection.before_second_write = error
+                        connection.after_unwind_error = sqlite3.OperationalError('cleanup SQL already succeeded')
+                        with self.assertRaises(type(error)) as caught:
+                            retrieval._commit_ordinary_receipts(connection, **plans)
+                        self.assertIs(error, caught.exception)
+                        self.assertIsNone(connection.after_unwind_error)
+                        self.assert_unwound(filename, connection, before, ambient)
+
+    def test_timeout_restore_cancellation_retries_and_propagates_exact_instance(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                for error in (KeyboardInterrupt('restore'), SystemExit(37)):
+                    with self.subTest(journal=journal, ambient=ambient, error=type(error).__name__):
+                        filename, connection, before, plans = self.open_case(journal, ambient)
+                        denied = self.deny_next_state_read(connection)
+                        connection.before_restore = error
+                        with self.assertRaises(type(error)) as caught:
+                            retrieval._commit_ordinary_receipts(connection, **plans)
+                        connection.set_authorizer(lambda *arguments: sqlite3.SQLITE_OK)
+                        self.assertIs(error, caught.exception)
+                        self.assertEqual(1, len(denied))
+                        self.assertEqual(2, connection.restore_attempts)
+                        self.assert_unwound(filename, connection, before, ambient)
+
+    def test_pending_primary_survives_timeout_restore_acknowledgement_error(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                for error in (KeyboardInterrupt('primary'), SystemExit(47)):
+                    for cleanup in (sqlite3.OperationalError('restore already succeeded'),
+                                    RuntimeError('restore already succeeded')):
+                        with self.subTest(journal=journal, ambient=ambient, error=type(error).__name__,
+                                          cleanup=type(cleanup).__name__):
+                            filename, connection, before, plans = self.open_case(journal, ambient)
+                            connection.before_second_write = error
+                            connection.after_restore_error = cleanup
+                            with self.assertRaises(type(error)) as caught:
+                                retrieval._commit_ordinary_receipts(connection, **plans)
+                            self.assertIs(error, caught.exception)
+                            self.assertIsNone(connection.after_restore_error)
+                            self.assert_unwound(filename, connection, before, ambient)
+
+    def test_none_wrappers_preserve_failed_views_and_successful_inplace_projection(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                with self.subTest(journal=journal, ambient=ambient):
+                    filename, connection, before, plans = self.open_case(journal, ambient)
+                    stored = retrieval._load_session_deliveries(connection)
+                    prior = copy.deepcopy(stored)
+                    connection.before_acquire = sqlite3.OperationalError('definite failure')
+                    self.assertIsNone(retrieval._remember_retrieval(connection, 'new', {}))
+                    connection.before_acquire = sqlite3.OperationalError('definite failure')
+                    self.assertIsNone(retrieval._remember_session_deliveries(connection, 'session', 2, {'new': ['b' * 16, 2]}, stored))
+                    self.assertEqual(prior, stored)
+                    self.assert_unwound(filename, connection, before, ambient)
+                    # Caller-owned savepoint was checked/released above; the
+                    # ambient outer transaction still belongs to this fixture.
+                    self.assertIsNone(retrieval._remember_retrieval(connection, 'new', {}))
+                    self.assertIsNone(retrieval._remember_session_deliveries(connection, 'session', 2, {'new': ['b' * 16, 2]}, stored))
+                    self.assertEqual(2, stored['session']['turn'])
+                    self.assertEqual(['b' * 16, 2], stored['session']['items']['new'])
+                    self.assertEqual(ambient, connection.in_transaction)
+                    if ambient:
+                        connection.execute('ROLLBACK')
+                        self.assertEqual(before[0], self.state(connection)[0])
+                        self.assertEqual(0, self.state(connection)[1])
+                        self.assertEqual(2, stored['session']['turn'])
+                    self.assertEqual(1, connection.execute('UPDATE index_state SET value=value WHERE key=?',
+                                                          (retrieval.LAST_RETRIEVAL_KEY,)).rowcount)
+                    if connection.in_transaction:
+                        connection.execute('ROLLBACK')
+
+    @unittest.skipUnless(hasattr(sqlite3, 'LEGACY_TRANSACTION_CONTROL'), 'requires Python3.12+ SQLite API')
+    def test_actual_autocommit_true_acquisition_and_cleanup_cancellation(self):
+        for journal in ('DELETE', 'WAL'):
+            for ambient in (False, True):
+                for cleanup in (False, True):
+                    for error in (KeyboardInterrupt('autocommit'), SystemExit(41)):
+                        with self.subTest(journal=journal, ambient=ambient, cleanup=cleanup, error=type(error).__name__):
+                            filename, connection, before, plans = self.open_case(journal, ambient, autocommit=True)
+                            self.assertTrue(connection.autocommit)
+                            if cleanup:
+                                denied = self.deny_next_state_read(connection)
+                                fragment = '"ROLLBACK TO SAVEPOINT "' if ambient else '"ROLLBACK"'
+                                self.cancel_cleanup(connection, fragment, error,
+                                                    lambda: retrieval._commit_ordinary_receipts(connection, **plans))
+                                self.assertEqual(1, len(denied))
+                            else:
+                                connection.after_acquire = error
+                                with self.assertRaises(type(error)) as caught:
+                                    retrieval._commit_ordinary_receipts(connection, **plans)
+                                self.assertIs(error, caught.exception)
+                            self.assert_unwound(filename, connection, before, ambient)
+
+
+class OrdinaryReceiptObservationTest(RuntimeHarness):
+    @staticmethod
+    def child(plans=True, status='committed'):
+        return {'schema_version': 1, 'observation_state': 'observed',
+                'plans_present': plans, 'returned_status': status}
+
+    def reader_fixture(self):
+        fixture = FunnelDiagnosisReaderTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        return fixture
+
+    def request(self, plain=False, query=True):
+        args = ['refresh', '--task-id', 'TASK-OBS', '--ephemeral', '--gate', 'off']
+        if query:
+            args += ['--query', 'cobalt authority canonical']
+        if not plain:
+            args += ['--json']
+        code, out, err = self.run_main(*args)
+        self.assertEqual(0, code, err)
+        rows = [json.loads(line) for line in context_cli.refresh_health_path(self.repository).read_text().splitlines()]
+        return out, rows
+
+    def test_ordinary_receipt_observation_matches_actual_returned_outcomes(self):
+        self.assertEqual(self.child(False, 'skipped'), retrieval._observe_ordinary_receipt(
+            retrieval._commit_ordinary_receipts(None), False))
+        for ambient, refused in ((False, False), (True, False), (False, True)):
+            fixture = OrdinaryReceiptAcquisitionTest()
+            self.addCleanup(fixture.doCleanups)
+            filename, db, before, plans = fixture.open_case('DELETE', ambient)
+            if refused:
+                db.before_second_write = sqlite3.OperationalError('invented refusal')
+            result = retrieval._commit_ordinary_receipts(db, **plans)
+            status = 'skipped' if refused else ('deferred' if ambient else 'committed')
+            self.assertEqual(status, result[0])
+            self.assertEqual(self.child(True, status), retrieval._observe_ordinary_receipt(result, True))
+            self.assertEqual(ambient, db.in_transaction)
+            self.assertFalse(db.closed_by_owner)
+            self.assertEqual(2347, db.execute('PRAGMA busy_timeout').fetchone()[0])
+            if refused:
+                self.assertEqual(before, fixture.state(db))
+            elif ambient:
+                db.execute('ROLLBACK')
+                self.assertEqual(0, db.execute('SELECT value FROM caller_work').fetchone()[0])
+            else:
+                with contextlib.closing(sqlite3.connect(filename)) as other:
+                    self.assertNotEqual(before[0], [tuple(row) for row in other.execute(
+                        'SELECT key,typeof(value),CAST(value AS BLOB) FROM index_state ORDER BY key')])
+
+    def test_ordinary_receipt_observation_never_interprets_unexpected_return(self):
+        class Hostile:
+            def __eq__(self, other): raise AssertionError('value hook')
+            def __iter__(self): raise AssertionError('projection traversal')
+            def __str__(self): raise AssertionError('format hook')
+        class Tuple(tuple): pass
+        class String(str): pass
+        for value in (None, [], ['committed', None], Tuple(('committed', None)),
+                      ('committed',), ('committed', None, None), (String('committed'), None),
+                      (Hostile(), None), ('unknown', Hostile())):
+            self.assertEqual(retrieval.unknown_ordinary_receipt(), retrieval._observe_ordinary_receipt(value, True))
+        self.assertEqual(self.child(), retrieval._observe_ordinary_receipt(('committed', Hostile()), True))
+        import weakref
+        self.start('TASK-OBS')
+        references = []
+        def returned(*args, **kwargs):
+            latest = Hostile()
+            references.append(weakref.ref(latest))
+            return 'committed', latest
+        validate = retrieval.validate_schema_file
+        def validation(*args, **kwargs):
+            if len(args) > 1 and args[1] == 'retrieval-manifest.schema.json':
+                self.assertIsNone(references[-1]())
+            return validate(*args, **kwargs)
+        with mock.patch.object(retrieval, '_commit_ordinary_receipts', side_effect=returned) as owner, \
+                mock.patch.object(retrieval, 'validate_schema_file', side_effect=validation):
+            out, _ = self.request()
+        self.assertEqual(1, owner.call_count)
+        self.assertEqual(self.child(), json.loads(out)['ordinary_receipt'])
+        self.assertIsNone(references[-1]())
+
+    def test_receipt_and_funnel_reader_validation_is_independent(self):
+        fixture = self.reader_fixture()
+        valid = copy.deepcopy(fixture.data)
+        cases = [(self.child(), None, True, False), ({'query': 'PRIVATE'}, valid['funnel'], False, True),
+                 (None, valid['funnel'], False, True), (self.child(), valid['funnel'], True, True)]
+        for receipt, funnel, receipt_ok, funnel_ok in cases:
+            data = {**valid, 'ordinary_receipt': receipt, 'funnel': funnel}
+            fixture.write(data)
+            sink = {}
+            result = retrieval.diagnose_funnel(fixture.repository, fixture.capsule, fixture.expected, sink)
+            self.assertEqual('observed' if funnel_ok else 'unavailable', result['observation_state'])
+            self.assertEqual(self.child() if receipt_ok else retrieval.unknown_ordinary_receipt(), sink['ordinary_receipt'])
+        data['render']['bytes'] += 1
+        fixture.write(data)
+        sink = {}
+        retrieval.diagnose_funnel(fixture.repository, fixture.capsule, fixture.expected, sink)
+        self.assertEqual(retrieval.unknown_ordinary_receipt(), sink['ordinary_receipt'])
+        for plans, status in ((False, 'committed'), (False, 'deferred'), (None, 'skipped'), (1, 'skipped')):
+            self.assertIsNone(retrieval.normalize_ordinary_receipt(self.child(plans, status)))
+
+    def test_receipt_reader_uses_one_read_and_fresh_empty_exact_sink(self):
+        fixture = self.reader_fixture()
+        fixture.data['ordinary_receipt'] = self.child()
+        fixture.write()
+        sink = {}
+        with mock.patch.object(retrieval.os, 'read', wraps=os.read) as reader:
+            result = retrieval.diagnose_funnel(fixture.repository, fixture.capsule, fixture.expected, sink)
+        self.assertEqual(1, reader.call_count)
+        self.assertEqual(fixture.diagnose(), result)
+        self.assertEqual({'ordinary_receipt': self.child()}, sink)
+        sink['ordinary_receipt']['returned_status'] = 'skipped'
+        fresh = {}
+        retrieval.diagnose_funnel(fixture.repository, fixture.capsule, fixture.expected, fresh)
+        self.assertEqual({'ordinary_receipt': self.child()}, fresh)
+        class Sink(dict):
+            def __len__(self): raise AssertionError('sink length hook')
+            def __setitem__(self, key, value): raise AssertionError('sink write hook')
+        for unsupported in (Sink(), {'stale': 'keep'}, [], None):
+            before = dict(unsupported) if type(unsupported) is dict else None
+            self.assertEqual(result, retrieval.diagnose_funnel(fixture.repository, fixture.capsule, fixture.expected, unsupported))
+            if before is not None:
+                self.assertEqual(before, unsupported)
+
+    def test_receipt_payload_cap_omits_new_child_before_funnel_and_legacy(self):
+        fixture = self.reader_fixture()
+        legacy = copy.deepcopy(fixture.data)
+        legacy['padding'] = ''
+        size = len(retrieval._trace_payload_json(legacy).encode('utf-8'))
+        legacy['padding'] = 'x' * (retrieval.TRACE_FILE_LIMIT - size - 10)
+        child = {**legacy, 'ordinary_receipt': self.child()}
+        before = copy.deepcopy(child)
+        expected = retrieval._trace_payload_json(legacy).encode('utf-8')
+        self.assertEqual(expected, retrieval._trace_payload_json(child).encode('utf-8'))
+        directory = os.open(fixture.directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            retrieval._write_trace(directory, _FUNNEL_DIAGNOSIS_TRACE_ID, child)
+        finally:
+            os.close(directory)
+        self.assertEqual(expected, fixture.trace_file.read_bytes())
+        inode = fixture.trace_file.stat().st_ino
+        retrieval.record_render_trace(fixture.repository, fixture.capsule, fixture.render)
+        self.assertEqual(expected, fixture.trace_file.read_bytes())
+        self.assertEqual(inode, fixture.trace_file.stat().st_ino)
+        self.assertEqual(before, child)
+        for bad in ({'raw': object()}, self.child(False, 'committed')):
+            self.assertEqual(expected, retrieval._trace_payload_json({**legacy, 'ordinary_receipt': bad}).encode())
+        dumps = retrieval.json.dumps
+        def serialize(value, **kwargs):
+            if 'ordinary_receipt' in value:
+                raise TypeError('invented new-child serialization failure')
+            return dumps(value, **kwargs)
+        with mock.patch.object(retrieval.json, 'dumps', side_effect=serialize):
+            self.assertEqual(expected, retrieval._trace_payload_json(child).encode())
+        oversized = {**child, 'padding': 'x' * retrieval.TRACE_FILE_LIMIT}
+        encoded = json.loads(retrieval._trace_payload_json(oversized))
+        self.assertNotIn('ordinary_receipt', encoded)
+        self.assertNotIn('funnel', encoded)
+
+    def test_automatic_receipt_json_plain_health_follow_actual_render(self):
+        self.start('TASK-OBS')
+        with mock.patch.object(retrieval, '_commit_ordinary_receipts', wraps=retrieval._commit_ordinary_receipts) as owner:
+            out, rows = self.request()
+        value = json.loads(out)
+        self.assertEqual(1, owner.call_count)
+        self.assertEqual(self.child(), value['ordinary_receipt'])
+        self.assertEqual(value['ordinary_receipt'], rows[-1]['ordinary_receipt'])
+        self.assertNotIn('ordinary_receipt', value['capsule'])
+        self.assertNotIn('ordinary_receipt', value['capsule_text'])
+        plain, rows = self.request(True)
+        self.assertEqual(self.child(), rows[-1]['ordinary_receipt'])
+        self.assertNotIn('ordinary_receipt', plain)
+        out, rows = self.request(query=False)
+        self.assertEqual(retrieval.unknown_ordinary_receipt(), json.loads(out)['ordinary_receipt'])
+        finalizer = context_cli.record_render_trace
+        def failed_printed(repository, capsule, render):
+            if render['form'] != 'printed_capsule': finalizer(repository, capsule, render)
+        with mock.patch.object(context_cli, 'record_render_trace', side_effect=failed_printed):
+            _, rows = self.request(True)
+        self.assertEqual(retrieval.unknown_ordinary_receipt(), rows[-1]['ordinary_receipt'])
+
+    def test_receipt_health_summary_preserves_legacy_and_unknown_counts(self):
+        records = [{'ordinary_receipt': self.child(False, 'skipped')},
+                   {'ordinary_receipt': self.child(True, 'skipped')},
+                   {'ordinary_receipt': self.child(True, 'deferred')},
+                   {'ordinary_receipt': self.child()}, {},
+                   {'ordinary_receipt': retrieval.unknown_ordinary_receipt()},
+                   {'ordinary_receipt': self.child(False, 'committed')}]
+        summary = context_cli.ordinary_receipt_summary(records)
+        self.assertEqual({'summary_schema_version': 1, 'records_considered': 7, 'observed_records': 4,
+                          'unavailable_records': 3, 'no_plan_skipped_records': 1, 'planned_skipped_records': 1,
+                          'planned_deferred_records': 1, 'planned_committed_records': 1}, summary)
+        selected = context_cli.ordinary_receipt_summary(records + [{}] * 500)
+        self.assertEqual((500, 0, 500), (selected['records_considered'], selected['observed_records'], selected['unavailable_records']))
+        path = context_cli.refresh_health_path(self.repository)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(''.join(json.dumps(item) + '\n' for item in records))
+        before = context_cli.refresh_health(self.repository, 3)
+        self.assertEqual((3, 0, 3), tuple(before['ordinary_receipt'][key] for key in ('records_considered', 'observed_records', 'unavailable_records')))
+        with mock.patch.object(context_cli, 'ordinary_receipt_summary', side_effect=RuntimeError('new metadata failure')):
+            after = context_cli.refresh_health(self.repository, 3)
+        before.pop('ordinary_receipt')
+        self.assertEqual(before, after)
+        for error in (KeyboardInterrupt(), SystemExit(5)):
+            with mock.patch.object(context_cli, 'ordinary_receipt_summary', side_effect=error), self.assertRaises(type(error)) as caught:
+                context_cli.refresh_health(self.repository, None)
+            self.assertIs(error, caught.exception)
+        with mock.patch.object(context_cli, 'normalize_ordinary_receipt', side_effect=RuntimeError('new validation failure')):
+            summary = context_cli.ordinary_receipt_summary(records)
+        self.assertEqual((0, 7), (summary['observed_records'], summary['unavailable_records']))
+
+    def test_receipt_metadata_failure_preserves_response_and_primary_cancellation(self):
+        self.start('TASK-OBS')
+        out, _ = self.request()
+        with mock.patch.object(retrieval, '_observe_ordinary_receipt', side_effect=RuntimeError('new metadata only')):
+            failed, _ = self.request()
+        left, right = json.loads(out), json.loads(failed)
+        self.assertEqual(left['capsule_text'], right['capsule_text'])
+        self.assertEqual(left['capsule']['selected'], right['capsule']['selected'])
+        self.assertEqual(retrieval.unknown_ordinary_receipt(), right['ordinary_receipt'])
+        for plain, error in ((False, KeyboardInterrupt('diagnostic cancel')), (True, SystemExit(23))):
+            previous = len(context_cli.refresh_health_path(self.repository).read_text().splitlines())
+            def cancelled(repository, capsule, render, _ordinary_receipt_sink=None):
+                _ordinary_receipt_sink['ordinary_receipt'] = self.child()
+                raise error
+            args = ['refresh', '--task-id', 'TASK-OBS', '--query', 'cobalt authority canonical', '--ephemeral', '--gate', 'off']
+            if not plain: args.append('--json')
+            with mock.patch.object(context_cli, 'diagnose_funnel', side_effect=cancelled), self.assertRaises(type(error)) as caught:
+                self.run_main(*args)
+            self.assertIs(error, caught.exception)
+            rows = [json.loads(line) for line in context_cli.refresh_health_path(self.repository).read_text().splitlines()]
+            self.assertEqual(previous + 1, len(rows))
+            self.assertNotIn('ordinary_receipt', rows[-1])
+        error = KeyboardInterrupt('capture cancel')
+        with mock.patch.object(retrieval, '_observe_ordinary_receipt', side_effect=error), \
+                mock.patch.object(retrieval, '_commit_ordinary_receipts', wraps=retrieval._commit_ordinary_receipts) as owner, \
+                mock.patch.object(retrieval, '_save_trace') as saver, self.assertRaises(KeyboardInterrupt) as caught:
+            self.request()
+        self.assertIs(error, caught.exception)
+        self.assertEqual(1, owner.call_count)
+        saver.assert_not_called()
+
+    def test_receipt_observation_isolation_and_trace_lifetime(self):
+        self.start('TASK-OBS')
+        first, _ = self.request()
+        second, _ = self.request()
+        values = [json.loads(item) for item in (first, second)]
+        self.assertNotEqual(values[0]['capsule']['manifest'], values[1]['capsule']['manifest'])
+        values[0]['ordinary_receipt']['returned_status'] = 'skipped'
+        self.assertEqual(self.child(), values[1]['ordinary_receipt'])
+        capsule = values[1]['capsule']
+        trace = self.repository / 'memory-bank/local/retrieval-traces' / (Path(capsule['manifest']).stem + '.json')
+        trace.unlink()
+        sink = {}
+        expected = {'form': 'capsule_text', 'bytes': len(values[1]['capsule_text'].encode()),
+                    'sha256': hashlib.sha256(values[1]['capsule_text'].encode()).hexdigest()}
+        retrieval.diagnose_funnel(self.repository, capsule, expected, sink)
+        self.assertEqual(retrieval.unknown_ordinary_receipt(), sink['ordinary_receipt'])
 
 
 if __name__ == "__main__":

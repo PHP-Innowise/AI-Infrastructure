@@ -26,6 +26,217 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Harness knowledge metadata discovers and selects banks without reading unused Markdown previews. Public document browsing, bank order/selection and script/config/Brain checks stay unchanged; metadata no longer inherits incidental preview-scan failures.
+
+- Harness compacts lossless capsule JSON only for actual ordinary, Fleet and
+  Clash delivery when no rendered text is supplied, including reviewed sessions.
+  Review previews and existing helper/API formatting stay compatible; an additive
+  delivery meter keeps displayed estimates aligned with the inserted prompt.
+  This reduces UTF-8 bytes and characters, without claiming provider-token savings.
+
+- Harness uses lossless compact JSON for unattended prompt capsules when the
+  runtime provides no rendered text. Preserve every field and scalar, the
+  whole reference warning, reviewed/default JSON and rendered/native paths;
+  prompt attribution, notices and cost observations measure the same format.
+  Separator-byte reduction does not establish provider-token savings.
+
+- Generated accelerators now carry the same automatic-promotion admission
+  fairness as the ready-made editions: duplicate candidates do not consume
+  new-attempt slots, failed attempts still do, and stalled proposals retry
+  separately. Synchronize the generator runtime and its tool mirrors.
+
+- Project Brain serializes active-alias lookup and record creation under the
+  repository mutation lock, preventing concurrent creators from writing two
+  UUID records with the same alias. Preserve cross-type active uniqueness,
+  archived-alias reuse, source-error precedence and canonical write rollback.
+
+- Harness shares one trusted capsule envelope across prompt insertion, memory
+  attribution and constructed-cost observations. Its leading reference-data and
+  canonical-source warning is 21 ASCII bytes/characters shorter; rendered bodies
+  and compact-JSON capsule statistics are unchanged. This is a constructed-text
+  reduction, not a measurement of provider tokens or model quality.
+
+- Harness full-cost receipts add bounded native boundary diagnostics for main
+  and recovery attempts: observed terminal/error occurrences, fixed stop/read
+  signals, and separate guarded-process codes before and after cleanup. Unknown
+  causes remain unmeasured; stderr and error text are not captured in these
+  diagnostics. Observation failure preserves work and existing cost accounting.
+
+- Automatic durable-memory promotion counts new nonduplicate proposal attempts
+  against its batch limit, so a stable prefix of duplicate records cannot starve
+  later independent facts. Failed attempts still consume admission; duplicate
+  guards, stalled retries, source eligibility and supersession stay in force.
+  `skipped` now counts the uninspected tail. Duplicate scanning can visit the
+  whole candidate set; the limit is a write-admission cap, not a CPU bound.
+
+- Harness records a generation-owned `full_cost` receipt for ordinary native
+  turns: main and recovery provider usage, attributed USD, constructed prompt
+  parts, local runtime byte counts and retries, and elapsed recall/save/checkpoint
+  work. Missing or incomplete observation stays unknown; payload text and raw
+  tool identities are not retained. Observation failures preserve the task,
+  and cancellation/resend cannot attach an old turn's cost or writes to its successor.
+
+- **Keep distinct automatic memory claims and reject conflicting drafts.**
+  Within the parsed, bounded draft, type/title/exact source sets identify a
+  learning. Identical copies deduplicate; conflicting consequences omit the
+  whole group with a count-only notice. Independent claims and progress save
+  normally. Manual submissions and the durable writer retain their own rules.
+
+- **Keep automatic memory corrections across Harness runs.** Session title
+  markers no longer discard changed consequences, new sources or unfinished
+  promotion retries before the durable result writer. The writer retains
+  ownership, attestation, replay and no-op checks; same-draft filtering stays
+  bounded. Older command-chain runtimes still have no cross-run idempotency.
+
+- **Preserve winning excerpt evidence when retaining a qualifier.** A colon
+  introducer may replace only trailing context that leaves the selected
+  window's evidence score intact; tight limits cannot turn a matching answer
+  into an evidence-free introducer. Preserve capsule limits and retrieval defaults.
+
+- **Reject malformed or conflicting passage labels before evaluation.**
+  Validate document objects, string lists and Boolean usefulness, and refuse
+  conflicting normalized skill aliases. Document that literal passage
+  delivery measures supporting coverage rather than final-answer correctness.
+
+- **Close file-link test fixture databases.** Register SQLite cleanup as soon
+  as each fixture connection opens, preserving the original assertions and
+  borrowed helper ownership. Runtime behavior and retrieval defaults are unchanged.
+
+- Automatically retain a separate `ordinary_receipt` status observation in
+  refresh JSON, local trace/health metadata, evaluator refresh metadata and
+  Harness prepared context. Strict scalar validation and an eight-field health
+  summary keep missing evidence unknown; each sibling fails independently.
+  Preserve paired receipt transactions and cleanup, capsule/prompt content,
+  scores, token meters and Python/FTS5/optional ONNX defaults. Status records
+  do not establish refusal causes, durability, emission or host ACK.
+
+- **Close context-usage test databases after their transactions.** Two SQLite
+  fixtures now preserve commit/rollback before closing their connections,
+  eliminating allocation-traced warnings without changing runtime behavior
+  or the tests' behavioral assertions.
+
+- **Unwind interrupted ordinary memory bookkeeping.** Cleanup is armed
+  before transaction or savepoint acquisition and retries once if a
+  cancellation interrupts cleanup. Caller transactions and connection
+  ownership, original exceptions and busy timeouts are preserved.
+  Completed commits remain durable after acknowledgement failure.
+
+- **Keep automatic memory diagnosis through its consumers.** Health JSON
+  aggregates fixed counters over at most 500 selected records, retaining
+  unknowns and lower bounds. The evaluator and Harness retain validated
+  invocation observations outside capsules, prompts, scoring and approval
+  material; invalidated prepared context clears its observation. Missing or
+  failed metadata leaves usable memory and legacy health output intact.
+
+- **Close interrupted memory database initialization.** The context engine
+  now releases its owned SQLite connection on cancellation during acquisition,
+  migration and the successful return boundary. Original errors and completed
+  commits retain their behavior; failed cleanup still attempts both rollback
+  and close. Ordinary successful callers retain connection ownership.
+
+- **Retain memory selection diagnosis without manual flags.** Refresh JSON
+  and existing local health records now carry a fixed metadata summary bound
+  to that turn's complete rendered trace. Missing, unsupported, stale or
+  partially read evidence stays unavailable; source coverage and consumption
+  remain unknown. Capsule text, selection and ordinary bookkeeping are preserved.
+
+- **Diagnose memory selection stages automatically.** Local traces now contain
+  fixed privacy-filtered occurrence counters and observed budget, repeat,
+  gate and pack boundaries. Unseen source coverage and external consumption
+  remain unknown. If the new child exceeds the trace byte cap, the original
+  trace and rendered-window metadata are preserved without it.
+
+- **Keep memory evaluation timings finite.** Invalid ordinary timeouts and
+  measured durations fail before setup or aggregation; optional malformed
+  runtime phases are omitted. Missing legacy timings remain unavailable.
+  Result export validates finite UTF-8 JSON before writing and atomically
+  replaces an owner-only file with cleanup on failure.
+
+- **Preserve memory bookkeeping across concurrent retrievals.** Baseline and
+  conversation receipts now update together from current SQLite maps. Stale
+  target snapshots cannot overwrite a newer turn or undo a compaction reset;
+  other sessions and baseline keys survive. Read-only, busy and failed writes
+  keep ordinary retrieval available, and caller transactions retain ownership.
+
+- **Support a strictly pinned optional Jina worker profile.** Versioned local
+  manifests select the explicit two-input/pad-one adapter; worker-owned asset
+  pins and CPU/runtime/tokenizer/float32 checks reject incompatible profiles.
+  Schema-less MiniLM manifests retain the existing route. Worker timeout
+  overrides are capped at five seconds, with the tighter caller deadline and
+  cleanup reserve preserved. Default FTS5, one-attempt scoring and full lexical
+  capsule/session-receipt fallback remain.
+
+- **Observe suppressed session windows without changing novelty.** Automatic
+  local traces compare a screened pre-novelty proposal with the prior final
+  rendered body under the same delivery identity. Bounded session companions
+  point to existing trace UUIDs; original receipt tuples and four-turn expiry
+  remain. Legacy/pruned/corrupt traces stay unknown, protected records stay
+  unavailable, and diagnostic failures cannot change the capsule or gate.
+  Different fingerprints signal exposure differences, not confirmed fact loss.
+
+- **Admit optional excerpt alternatives before scoring.** Screened windows
+  must fit the existing structured snippet cap and the selected item's unchanged
+  token estimate before consuming worker slots. An oversized alternative cannot
+  displace a feasible quote; the lexical choice and complete fallback remain.
+
+- **Keep optional ONNX quotes and delivery receipts coherent.** The maintainer
+  pilot prepares screened excerpts before session novelty and verifies the
+  existing packer's membership before recording delivery. Structured snippets
+  match the chosen quote, citation-only footers keep the lexical safeguards,
+  and a rejected projection retries the complete lexical selection once
+  without another model call. The late-render callable remains lexical-only.
+  Worker startup, pipe I/O and cleanup share one deadline; POSIX groups are
+  cleaned up even after their leader exits, and Linux workers guard parent
+  death. The evaluator binds the optional invocation to its configured timeout.
+  Default retrieval remains FTS5 and requires no ML dependencies.
+
+- **Reuse citation normalization without caching freshness.** Each retrieval
+  filter keeps a bounded cache of exact freshly read source bytes and their
+  normalized SHA-256 digest. Every citation still performs path validation and
+  a fresh file read; changed, deleted and unreadable sources retain the same
+  handling, and final validation creates a new cache. Source-change warnings,
+  ranking, FTS5 selection and capsule limits remain unchanged.
+
+- **Deliver the rule in source-linked memories.** Linked records quote
+  substantive sections instead of generated citation-only Sources/References
+  footers. Explicit footer requests, annotated references and source-only
+  documents remain readable. Corrected automatic excerpts are delivered
+  immediately in existing sessions; headings receive the same privacy screen
+  as excerpt bodies. Candidate selection and capsule limits are unchanged.
+
+- **Explain memory selection and final delivery without enlarging capsules.**
+  Governed retrieval records bounded metadata in ignored local trace sidecars,
+  including lexical admission, linked-document filters, budgets, layer limits
+  and the final rendered section/body hashes. Optional `--trace-path` watches
+  a document without changing search. Protected metadata stays excluded;
+  diagnostic storage failures leave retrieval and delivery unchanged.
+
+- **Preserve attached Codex policy and hooks with nested CLI overrides.**
+  Direct and Harness overlay launches collect `-c`/`--config` arguments into
+  the root CLI scope so an `exec` or `resume` option cannot silently discard
+  accelerator instructions and hooks. Caller override order, literal `--`
+  arguments and Node launcher prefixes are preserved.
+
+- **Independent evidence for history admission.** Porter variants of the
+  same word no longer satisfy the two-concept coverage rule for Project Brain
+  events or local episodes. A query about one concept remains valid. The raw
+  search window, ranking weights, history slots and capsule limits stay the
+  same. Six regressions cover admission and the preserved window in all four
+  editions; generator seed assets carry the same correction.
+
+- **Opt-in memory miss diagnosis and isolated ONNX excerpt experiment.**
+  The maintainer evaluation stand can trace judged paths through the main
+  FTS window, recorded-history admission/selection, policy, budgets and actual
+  answer delivery, using the same prompt-time clock. Diagnostic reports keep
+  skill routing separate from project knowledge. A separately provisioned,
+  hash-checked CPU worker can rank bounded excerpts of already selected
+  documents; missing dependencies/assets, timeout, busy or invalid output
+  keep the exact lexical excerpts. Worker inputs receive the renderer's
+  privacy screen, and changes that alter packed path selections are refused.
+  Normal installed runtimes and their Python requirements are unchanged;
+  optional ML packages are not installed by CI. Focused stdlib tests cover
+  these diagnostic and fallback contracts.
+
 - **`--phase quality` is accepted.** The Phase Map in `SKILL FLOW.md` names
   the reviewing and testing row "Quality", and `update --phase` /
   `brain-update --phase` rejected that word; it is now an input alias stored

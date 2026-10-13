@@ -1265,6 +1265,56 @@ full totals. Runs recorded before this show tool names only.
 
 ### Context window
 
+Ordinary native launches also retain `full_cost` in the launch receipt for memory
+measurement. This records each executed main/recovery process once, before
+normalization, plus provider-reported usage and USD attributed by the existing
+`RunCost` rules. A complete provider token total requires valid terminal usage for every
+executed process; otherwise the known subtotal and unknown full total remain
+separate. Codex cached input is already included in input. Claude's supported
+profile requires explicit cache counters. Cursor token accounting is unsupported.
+These counters preserve existing budgets and the Context meter.
+
+`native_diagnostics` adds separate bounded evidence for each attempted main or
+recovery phase: observed provider error/terminal occurrences, recognized Claude
+result subtypes and numeric reported HTTP statuses, and fixed runner boundary
+signals. Guard return codes before cleanup and after cleanup have separate
+provenance; translated child signals, guard setup failures and cleanup effects
+can collide, so these codes do not establish a native cause. Empty reads mean
+`ended_or_error`; Windows read errors can appear as empty reads. Native stderr
+is discarded and marked `not_captured`. Root cause stays `unmeasured`.
+Counts describe observed occurrences, not distinct failure incidents or proof
+of a complete clean stream. Unknown fields and arbitrary error/exception text
+are not retained. Diagnostic failure has its own incomplete/unavailable state
+and does not invalidate otherwise valid failed-turn usage. Finalization freezes
+the evidence atomically and ignores late callbacks.
+Successful-terminal counts describe the event's success predicate, not task
+correctness. Allowlisted reported Claude terminal reasons are separate: an
+aborted reason remains visible and `completed` alone never establishes success.
+
+The receipt measures constructed UTF-8 prompt bytes/characters; capsule body,
+envelope and draft instruction are subsets of the full prompt, not extra charges.
+Recovery has its own prompt. Construction and stdin writes do not prove model use.
+Local runtime records contain captured/returned stdout/stderr byte counts, EOF
+flags, request-file and argv argument-content bytes, retries and fixed outcomes.
+Filesystem I/O, preflight helpers and history-folding I/O remain unmeasured;
+their enclosing elapsed work is included. Lifecycle time starts before recall
+and ends after save/checkpoint/history, before cost persistence and terminal status.
+Tool component bytes exclude protocol wrappers, nontext and unseen helper work;
+they are not provider tokens or proof of canonical source reads. Raw bodies,
+commands, paths, tool IDs and observation exception text are not retained in
+`full_cost`; its digests use an ephemeral key and are not exported.
+
+The observation belongs to its worker generation. Review preparation without a
+provider launch has a `cost_observation` event instead of a fictitious launch.
+Cancellation/interruption status can precede cleanup and final cost; absent
+metadata then is not zero cost. Wait for the final receipt or retain it as unmeasured.
+Observation failure marks incomplete/unavailable while the task continues.
+Receipt-persistence failure uses an unavailable event when storage still works;
+if storage itself fails, absent metadata must be treated as unmeasured. Fleet,
+Clash, Creator and System workflows explicitly lack supported full-cost accounting.
+This is local instrumentation; token savings still require a prospective paired
+measurement with complete usage and preserved task correctness.
+
 **Sessions › Usage** opens with **Context**: how full the agent's context window
 is, how much of it is memory the Harness sent, how the turn grew it and when
 compaction cleared it. One bar per turn splits the window into memory parts
@@ -1378,6 +1428,27 @@ Stop hook still checkpoints the task. A line in the conversation says what each
 turn carried: the task, the items by kind and the characters. If memory cannot be
 retrieved, the line says why and the turn runs without it.
 
+A valid fixed `funnel_diagnosis` from automatic refresh is saved beside the
+prepared capsule in the session Brain record and survives server restarts.
+It is the observation from that preparation; freshness checks do not replace
+it. Invalidating the prepared context clears it, while missing or malformed
+diagnosis leaves usable memory intact. Valid unavailable observations retain
+their null counters. The child stays outside the capsule, provider prompt,
+approval material and token meter. It does not select a model or retrieval
+backend and does not measure answer quality.
+
+Automatic refresh also retains the independent four-field `ordinary_receipt`
+sibling in a usable prepared Brain record. It records the paired owner's
+returned status and whether plans were present; missing or rejected metadata
+is unknown. A no-plan observation can be `skipped`, and a planned observation
+can be `skipped`, `deferred` or `committed`; unavailable carries null plans and
+`unknown`. This metadata survives bookkeeping and restart, is cleared with
+prepared-context invalidation, and is historical during freshness checks.
+It stays outside prompts, approval material, hashes and token meters. It does
+not diagnose a refusal cause or prove durable effects, emission or host ACK.
+Older optional helpers without this capability still retain usable capsules
+and funnel metadata.
+
 The prompt asks the agent to close its final reply with a `memory-draft` block
 (825 characters of instruction per launch): where the task stands, up to three
 next steps, and up to three learnings, each a finding or decision with the project
@@ -1386,7 +1457,19 @@ progress, its next steps (replacing the old ones), and each learning as a findin
 (resolved) or decision (accepted). A learning is written as observed and raised to
 verified with the reason "agent-attested, not reviewed by a person", so the
 record's own ledger shows who attested it. Learnings citing no file in the
-workspace, or already saved from this session, are left out. Then the project's
+workspace are left out. Within the parsed, clipped draft, type, normalized title
+and exact source set identify a learning; source fragments remain distinct.
+Identical copies are left out, while different consequences for one identity
+exclude every member of that group with a count-only notice. Independent
+claims and progress still save. This applies to unattended drafts, not manual
+submissions, and cannot detect differences beyond the parsing limits.
+Later runs can revise a learning's consequence or cite
+new sources; a cached title cannot suppress that save. The result writer checks
+existing records, skips exact no-ops and retries unfinished promotion, while
+preserving human attestation and delayed-replay protections. A runtime older
+than `record-result` uses a command chain that can create additional records on
+repetition or correction; it cannot guarantee cross-run idempotency or supersede
+the earlier claim. Then the project's
 automatic promotion runs once (`context.py promote-auto`), under the runtime's own
 rules and its `automatic_promotion` setting; promoted chunks are tagged
 `auto-promoted`. A second line in the conversation says what was saved, promoted

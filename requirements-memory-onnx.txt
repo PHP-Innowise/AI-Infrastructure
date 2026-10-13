@@ -1,0 +1,6 @@
+# Optional maintainer-only worker for scripts/memory_onnx.py.  The normal
+# repository runtime remains standard-library-only and never installs this.
+# Python >=3.12 for these pins (NumPy); ONNX Runtime itself requires >=3.11.
+numpy==2.5.3
+onnxruntime==1.31.0
+tokenizers==0.23.3

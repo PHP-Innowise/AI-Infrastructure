@@ -402,6 +402,26 @@ python3 scripts/memory_eval.py realized --project DIR [--since YYYY-MM-DD] [--js
   refused inside the clone) and `--out`.
 - **CI relationship:** `tests/test_memory_eval.py` in the `installation` job.
 
+`run --diagnose-misses` adds judged-path stage counts and per-path passage
+presence to result JSON and `report`. It uses the actual refresh manifest and
+prompt-time clock, with recorded history searched separately from the main
+FTS query. Skills and project knowledge are reported apart. No flag means no
+new diagnostic fields.
+
+`memory_onnx.py`, `memory_onnx_pilot.py` and `stateful_pilot.py` provide an **off-by-default,
+maintainer-only** excerpt experiment, selected by `run --onnx-excerpts ASSETS
+--onnx-python PYTHON`. The parent stays stdlib-only; the explicit isolated
+worker needs Python 3.12+ with the pinned `requirements-memory-onnx.txt` (NumPy's
+requirement; ONNX Runtime itself needs 3.11+). Assets are local
+and hash-locked, with no automatic installation or download. The separate
+versioned Jina profile requires the retained Python 3.14 and exact package/asset
+pins; schema-less MiniLM assets remain supported. Worker budgets are capped at
+five seconds, and a tighter invocation deadline prevails. Failure retains
+lexical excerpts; the pilot cannot change document eligibility/order or the
+paths retained by the ordinary packer. See the [optional experiment](../docs/MEMORY-EVAL.md#optional-onnx-excerpt-experiment)
+for asset format, limits and evaluation rules. These files are not installed
+into target projects.
+
 ### `collect_context.py`
 
 **Purpose and status.** Optional developer-local `code2prompt` wrapper;

@@ -36,6 +36,50 @@ print(json.dumps({"cwd": os.getcwd(), "state": os.environ["ACCELERATOR_STATE_DIR
 """
 
 
+class CodexConfigurationTests(unittest.TestCase):
+    def test_nested_overrides_share_one_parser_layer_without_requoting(self):
+        command = ['codex', '-c', 'model="first"', 'exec', 'resume', '--json',
+                   '-c', 'model="last"', '--config=features.hooks=true',
+                   'thread-id', '-']
+        result = attach.codex_config_arguments(command)
+        self.assertEqual(['codex', '-c', 'model="first"', '-c', 'model="last"',
+                          '--config=features.hooks=true', 'exec', 'resume', '--json',
+                          'thread-id', '-'], result)
+        self.assertEqual('exec', command[3])  # The caller's argv remains intact.
+
+    def test_literal_terminator_preserves_prompt_that_looks_like_configuration(self):
+        command = ['codex', 'exec', '-c', 'model="last"', '--', '-c', 'literal prompt']
+        self.assertEqual(['codex', '-c', 'model="last"', 'exec', '--', '-c', 'literal prompt'],
+                         attach.codex_config_arguments(command))
+
+    def test_short_and_long_config_spellings_keep_override_order(self):
+        command = ['codex', '--config', 'hooks.SessionStart=[]', 'exec',
+                   '-cmodel="last"', '--config=model_reasoning_effort="ultra"', '-']
+        self.assertEqual(['codex', '--config', 'hooks.SessionStart=[]',
+                          '-cmodel="last"', '--config=model_reasoning_effort="ultra"', 'exec', '-'],
+                         attach.codex_config_arguments(command))
+
+    def test_overlay_survives_a_nested_user_override(self):
+        overlay = attach.Overlay(arguments=['-c', 'developer_instructions="attached"',
+                                           '-c', 'hooks.SessionStart=[]', '--add-dir', '/state'])
+        command = ['codex', 'exec', '--json', '-c', 'model_reasoning_effort="ultra"', '-']
+        result = attach.apply_overlay('codex', command, overlay)
+        self.assertEqual(['codex', '-c', 'developer_instructions="attached"',
+                          '-c', 'hooks.SessionStart=[]', '-c', 'model_reasoning_effort="ultra"',
+                          '--add-dir', '/state', 'exec', '--json', '-'], result)
+
+    def test_missing_config_value_is_refused_before_rearranging_the_command(self):
+        with self.assertRaises(attach.AttachError):
+            attach.codex_config_arguments(['codex', 'exec', '--config'])
+
+    def test_node_launcher_prefix_remains_before_codex_flags(self):
+        command = ['node.exe', 'codex.js', '-c', 'developer_instructions="attached"',
+                   'exec', 'resume', '-c', 'model_reasoning_effort="ultra"', 'thread-id', '-']
+        self.assertEqual(['node.exe', 'codex.js', '-c', 'developer_instructions="attached"',
+                          '-c', 'model_reasoning_effort="ultra"', 'exec', 'resume', 'thread-id', '-'],
+                         attach.codex_config_arguments(command))
+
+
 class DetectEditionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -134,6 +178,24 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("hooks.SessionStart=", printed)
         self.assertTrue(printed.rstrip().endswith("exec --json Review the routes"))
         self.assertEqual(["composer.json"], sorted(path.name for path in self.project.iterdir()))
+
+    @unittest.skipIf(os.name == "nt", "needs a POSIX executable argv probe")
+    def test_run_keeps_attached_policy_and_nested_config_in_one_layer(self):
+        probe = self.root / 'argv-probe'
+        write(probe, '#!' + sys.executable + '\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+        probe.chmod(0o755)
+        result = self.run_script('run', 'codex', '--project', str(self.project),
+                                 '--state-base', str(self.state_base), '--executable', str(probe),
+                                 '--', 'exec', 'resume', '--json', '-c', 'model_reasoning_effort="ultra"',
+                                 '--config=features.hooks=true', 'thread-id', '-')
+        self.assertEqual(0, result.returncode, result.stderr)
+        argv = json.loads(result.stdout)
+        split = argv.index('exec')
+        self.assertTrue(any(value.startswith('developer_instructions=') for value in argv[:split]))
+        self.assertTrue(any(value.startswith('hooks.SessionStart=') for value in argv[:split]))
+        self.assertIn('model_reasoning_effort="ultra"', argv[:split])
+        self.assertIn('--config=features.hooks=true', argv[:split])
+        self.assertEqual(['exec', 'resume', '--json', 'thread-id', '-'], argv[split:])
 
     def assert_names_the_relative_state(self, value):
         """`value` is the state `--state-base state` names, absolutely: the

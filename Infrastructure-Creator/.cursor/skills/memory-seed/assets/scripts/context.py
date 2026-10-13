@@ -15,7 +15,7 @@ import sys
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from brain_runtime import (
     BrainError,
@@ -99,6 +99,7 @@ from context_retrieval import (
     codebase_map_drift,
     evidence_tokens,
     excerpt_weights,
+    excerpt_section,
     excerpt_window,
     is_relevant,
     linked_documents,
@@ -114,6 +115,12 @@ from context_retrieval import (
     query_tokens,
     required_coverage,
     retrieve,
+    record_render_trace,
+    diagnose_funnel,
+    valid_funnel_diagnosis,
+    unknown_funnel_diagnosis,
+    unknown_ordinary_receipt,
+    normalize_ordinary_receipt,
     reusable_source_state,
     token_coverage,
 )
@@ -266,9 +273,10 @@ def default_database(repository: Path) -> Path:
 
 def connect(database: Path) -> sqlite3.Connection:
     database.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database)
-    connection.row_factory = sqlite3.Row
+    connection: Optional[sqlite3.Connection] = None
     try:
+        connection = sqlite3.connect(database)
+        connection.row_factory = sqlite3.Row
         connection.execute("BEGIN IMMEDIATE")
         document_columns = {
             row["name"] for row in connection.execute("PRAGMA table_info(documents)")
@@ -363,13 +371,23 @@ def connect(database: Path) -> sqlite3.Connection:
         )
         ensure_metadata_tables(connection)
         connection.commit()
-    except Exception as error:
-        connection.rollback()
-        connection.close()
+        return connection
+    except BaseException as error:
+        if connection is None:
+            raise
+        # This handle is owned until initialization returns. Cleanup failures
+        # must neither skip the other attempt nor replace the original error.
+        try:
+            connection.rollback()
+        except BaseException:
+            pass
+        try:
+            connection.close()
+        except BaseException:
+            pass
         if isinstance(error, sqlite3.OperationalError) and "fts5" in str(error).lower():
             raise ContextError("SQLite FTS5 support is required") from error
         raise
-    return connection
 
 
 def create_document_table(connection: sqlite3.Connection) -> None:
@@ -2463,6 +2481,7 @@ def assemble_capsule(
     render: bool = False,
     prompt: Optional[str] = None,
     automatic_links: bool = False,
+    trace_paths: Optional[list[str]] = None,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
@@ -2579,6 +2598,8 @@ def assemble_capsule(
         session_id=session_id,
         transcript=transcript,
         pack=pack,
+        trace_paths=trace_paths,
+        describe_windows=describe_excerpt_windows,
     )
 
 
@@ -2909,7 +2930,7 @@ def capsule_excerpts(
                     row = None
                 marked = str(row[0]) if row is not None else None
             section = (
-                quoted_section(marked, str(item.get("title") or ""), weights)
+                excerpt_section(connection, item, marked, weights, query=query)
                 if marked
                 else None
             )
@@ -2988,10 +3009,11 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
 
 
 def render_capsule_lines(
-    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
+    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None,
+    *, trace: Optional[dict[str, object]] = None,
 ) -> list[str]:
     """The capsule as Claude Code, Codex, Cursor and Harness deliver it."""
-    return _render_capsule(capsule, excerpts)[0]
+    return _render_capsule(capsule, excerpts, trace=trace)[0]
 
 
 def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) -> None:
@@ -3022,11 +3044,9 @@ def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) 
     synchronize_capsule_views(capsule)
 
 
-def _render_capsule(
-    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
-) -> tuple[list[str], list[dict[str, object]]]:
-    """The rendered lines, and the items they show."""
-    excerpts = dict(excerpts or {})
+def _screen_capsule_excerpts(capsule: dict[str, object], excerpts: dict[str, str]) -> dict[str, str]:
+    """The renderer privacy screen, shared with metadata-only proposals."""
+    excerpts = dict(excerpts)
     # Excerpts are document text on its way into a prompt: held to the same
     # personal-data and secret screen as the query. capsule_excerpts already
     # chose and sized them; the bound here only keeps text from elsewhere
@@ -3045,8 +3065,42 @@ def _render_capsule(
                 safe = ""
             limit = max(EXCERPT_CHARACTERS) if layer == "semantic" else EPISODIC_EXCERPT_CHARACTERS
             excerpt = Excerpt(_bounded(safe, limit))
-            excerpt.heading = getattr(raw, "heading", "")
+            try:
+                excerpt.heading = sanitize_automatic_query(str(getattr(raw, "heading", "")))
+            except ContextError:
+                excerpt.heading = ""
             excerpts[path] = excerpt
+
+    return excerpts
+
+
+def describe_excerpt_windows(connection: sqlite3.Connection, capsule: dict[str, object]) -> dict[str, object]:
+    """Hash the sanitized pre-novelty windows; never claim final pack fit."""
+    raw = capsule_excerpts(connection, capsule)
+    screened = _screen_capsule_excerpts(capsule, raw)
+    result = {}
+    for layer in ("procedural", "semantic", "episodic"):
+        for item in capsule.get(layer) or []:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                continue
+            doc_ref = item["path"]
+            text = str(screened.get(doc_ref) or "")
+            encoded = text.encode("utf-8")
+            result[doc_ref] = {
+                "sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded),
+                "state": "excerpt" if text else "sanitized-empty" if raw.get(doc_ref) else "no-excerpt",
+            }
+    return result
+
+
+def _render_capsule(
+    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None,
+    *, trace: Optional[dict[str, object]] = None,
+) -> tuple[list[str], list[dict[str, object]]]:
+    """The rendered lines, and the items they show."""
+    excerpts = dict(excerpts or {})
+    excerpt_present = {path: bool(text) for path, text in excerpts.items()} if trace is not None else {}
+    excerpts = _screen_capsule_excerpts(capsule, excerpts)
 
     # The first line is the render marker: the Cursor hooks accept a capsule
     # only if it starts with "working:", which is how a broken render is kept
@@ -3136,6 +3190,7 @@ def _render_capsule(
     section_of = {
         key: getattr(text, "heading", "") for key, text in excerpt_of.items()
     }
+    initial_excerpts = {key: str(text or "") for key, text in excerpt_of.items()} if trace is not None else {}
 
     def assemble() -> list[str]:
         lines = [*head, *([compaction] if compaction else []), *tail]
@@ -3192,13 +3247,53 @@ def _render_capsule(
         else:
             break
         lines = assemble()
+    if trace is not None:
+        encoded = "\n".join(lines).encode("utf-8")
+        records = []
+        for _, item, kind in entries:
+            path = str(item.get("path", f"episode {item.get('id')}"))
+            body = str(excerpt_of.get(id(item)) or "")
+            heading = section_of.get(id(item)) or ""
+            try:
+                snippet = sanitize_automatic_query(str(item.get("snippet") or ""))
+            except ContextError:
+                snippet = ""
+            header = _item_line(item, kind, heading)
+            records.append({"path": path, "header_present": True,
+                            "header_sha256": hashlib.sha256(header.encode("utf-8")).hexdigest(),
+                            "body_bytes": len(body.encode("utf-8")),
+                            "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                            "pointer_only": not bool(body),
+                            "initial_excerpt_bytes": len(initial_excerpts.get(id(item), "").encode("utf-8")),
+                            "body_reason": "excerpt" if body else "render-limit" if initial_excerpts.get(id(item)) else "sanitized-empty" if excerpt_present.get(path) else "no-excerpt",
+                            "section": heading if heading in ("Sources", "Goal", "Progress", "Files", "Next Steps") else "other" if heading else "none",
+                            "section_sha256": hashlib.sha256(heading.encode("utf-8")).hexdigest(),
+                            "snippet_sha256": hashlib.sha256(snippet.encode("utf-8")).hexdigest(),
+                            "snippet_bytes": len(snippet.encode("utf-8")),
+                            "snippet_in_body": bool(snippet) and snippet in body,
+                            "shrunk": body != initial_excerpts.get(id(item), "")})
+        trace.update({"sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded),
+                      "form": "capsule_text", "records": records})
     return lines, [item for _, item, _ in entries]
 
 
 def print_capsule(
-    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
+    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None,
+    *, repository: Optional[Path] = None,
+    _diagnosis_sink: Optional[Callable[[dict[str, object]], None]] = None,
 ) -> None:
-    for line in render_capsule_lines(capsule, excerpts):
+    trace: dict[str, object] = {}
+    lines = render_capsule_lines(capsule, excerpts, trace=trace if repository is not None else None)
+    if repository is not None:
+        emitted = ("\n".join(lines) + "\n").encode("utf-8")
+        trace.update({"sha256": hashlib.sha256(emitted).hexdigest(), "bytes": len(emitted), "form": "printed_capsule"})
+        record_render_trace(repository, capsule, trace)
+        if _diagnosis_sink is not None:
+            try:
+                _diagnosis_sink(trace)
+            except Exception:
+                pass
+    for line in lines:
         print(line)
 
 
@@ -3585,6 +3680,76 @@ def retrieval_report(
     }
 
 
+def funnel_diagnosis_summary(records: list[dict]) -> dict[str, Any]:
+    """Fixed historical occurrence sums over at most 500 selected records."""
+    selected = records[-500:]
+    template = unknown_funnel_diagnosis()
+    def counter():
+        return {"known_records": 0, "unknown_records": 0, "saturated_records": 0,
+                "sum_known_counts": None, "state": "unknown"}
+    summary = {
+        "summary_schema_version": 1, "records_considered": len(selected),
+        "records_omitted_by_cap": max(0, len(records) - len(selected)),
+        "availability": {key: 0 for key in ("observed", "unavailable", "missing", "rejected")},
+        **{key: template[key] for key in ("source_coverage", "quality", "count_scope", "coverage", "emission", "consumer")},
+        "loss_observations": {key: counter() for key in template["loss_observations"]},
+        "boundaries": {key: counter() for key in template["boundaries"]},
+        "render_projection": {"scope": template["render_projection"]["scope"],
+                              "headers": counter(),
+                              "reasons": {key: counter() for key in template["render_projection"]["reasons"]}},
+    }
+    def slots(value):
+        return ([value["loss_observations"][key] for key in template["loss_observations"]]
+                + [value["boundaries"][key] for key in template["boundaries"]]
+                + [value["render_projection"]["headers"]]
+                + [value["render_projection"]["reasons"][key] for key in template["render_projection"]["reasons"]])
+    totals = slots(summary)
+    for record in selected:
+        child = record.get("funnel_diagnosis")
+        if "funnel_diagnosis" not in record:
+            availability = "missing"
+        else:
+            try:
+                accepted = valid_funnel_diagnosis(child)
+            except Exception:
+                accepted = False
+            availability = child["observation_state"] if accepted else "rejected"
+        summary["availability"][availability] += 1
+        observations = slots(child if availability == "observed" else template)
+        for total, observation in zip(totals, observations):
+            if observation["count"] is None:
+                total["unknown_records"] += 1
+            else:
+                total["known_records"] += 1
+                total["sum_known_counts"] = (total["sum_known_counts"] or 0) + observation["count"]
+                total["saturated_records"] += int(observation["state"] == "lower-bound")
+    for total in totals:
+        if total["known_records"]:
+            total["state"] = ("lower-bound" if total["unknown_records"] or total["saturated_records"] else "exact")
+    return summary
+
+
+def ordinary_receipt_summary(records: list[dict]) -> dict[str, int]:
+    """Historical record counts, never attempt, durability or ACK counts."""
+    selected = records[-500:]
+    summary = {"summary_schema_version": 1, "records_considered": len(selected),
+               "observed_records": 0, "unavailable_records": 0,
+               "no_plan_skipped_records": 0, "planned_skipped_records": 0,
+               "planned_deferred_records": 0, "planned_committed_records": 0}
+    for record in selected:
+        try:
+            child = normalize_ordinary_receipt(record.get("ordinary_receipt"))
+        except Exception:
+            child = None
+        if child is None or child["observation_state"] != "observed":
+            summary["unavailable_records"] += 1
+        else:
+            summary["observed_records"] += 1
+            bucket = ("planned_" + child["returned_status"] if child["plans_present"] else "no_plan_skipped")
+            summary[bucket + "_records"] += 1
+    return summary
+
+
 def refresh_health(repository: Path, window: Optional[int]) -> dict[str, object]:
     """Aggregate the per-turn health series the hook and the CLI append.
 
@@ -3638,14 +3803,20 @@ def refresh_health(repository: Path, window: Optional[int]) -> dict[str, object]
             incomplete_layers += 1
     total = len(records)
     ratio = lambda count: round(count / total, 4) if total else None
-    return {
+    result = {
         "turns": total,
         "phase_seconds": {name: _percentiles(values) for name, values in phases.items()},
         "hook_status": dict(sorted(statuses.items())),
         "timeout_rate": ratio(timeouts),
         "lossy_capsule_rate": ratio(omitted_turns),
         "incomplete_layers_rate": ratio(incomplete_layers),
+        "funnel_diagnosis": funnel_diagnosis_summary(records),
     }
+    try:
+        result["ordinary_receipt"] = ordinary_receipt_summary(records)
+    except Exception:
+        pass
+    return result
 
 
 def emit_refresh_telemetry(
@@ -5180,6 +5351,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
     for retrieval_parser in (context, retrieve_command):
+        retrieval_parser.add_argument("--trace-path", action="append", default=[], dest="trace_paths",
+                                      help="observe a document in local diagnostics only; repeatable, max 16")
         retrieval_parser.add_argument(
             "--path",
             action="append",
@@ -5241,6 +5414,8 @@ def build_parser() -> argparse.ArgumentParser:
     refresh.add_argument("--limit", type=int, default=3)
     refresh.add_argument("--path", action="append", default=[], dest="paths",
         help="also deliver documents citing this canonical source path")
+    refresh.add_argument("--trace-path", action="append", default=[], dest="trace_paths",
+                         help="observe a document in local diagnostics only; repeatable, max 16")
     refresh.add_argument(
         "--ephemeral",
         action="store_true",
@@ -6581,6 +6756,7 @@ def main() -> int:
                     ephemeral=arguments.ephemeral,
                     gate_mode=gate_mode,
                     paths=arguments.paths,
+                    trace_paths=arguments.trace_paths,
                     host=arguments.host,
                     entry_point=arguments.command,
                     render=not arguments.json,
@@ -6588,7 +6764,7 @@ def main() -> int:
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    print_capsule(result, capsule_excerpts(connection, result))
+                    print_capsule(result, capsule_excerpts(connection, result), repository=repository)
                 return 0
 
             if arguments.command == "hook-context":
@@ -6633,7 +6809,7 @@ def main() -> int:
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    print_capsule(result, capsule_excerpts(connection, result))
+                    print_capsule(result, capsule_excerpts(connection, result), repository=repository)
                 return 0
 
             if arguments.command == "refresh":
@@ -6674,6 +6850,7 @@ def main() -> int:
                             session_id=arguments.session_id,
                             transcript=arguments.transcript,
                             paths=arguments.paths,
+                            trace_paths=arguments.trace_paths,
                             # Every refresh with a query renders: hosts put
                             # capsule_text in front of the model.
                             render=True,
@@ -6742,9 +6919,11 @@ def main() -> int:
                     # What a host puts in front of the model: Harness inserts
                     # this text instead of the JSON, which repeated every item
                     # three times and carried no answer-bearing text.
+                    render_trace: dict[str, object] = {}
                     result["capsule_text"] = "\n".join(
-                        render_capsule_lines(capsule, excerpts)
+                        render_capsule_lines(capsule, excerpts, trace=render_trace)
                     )
+                    record_render_trace(repository, capsule, render_trace)
                 if arguments.validate:
                     errors = validate_repository(repository, check_freshness=False)
                     result["brain_validation"] = "valid" if not errors else "invalid"
@@ -6754,79 +6933,108 @@ def main() -> int:
                 # not become a second channel for what the manifest already
                 # keeps under privacy rules.
                 emit_refresh_telemetry(repository, capsule, retrieval_seconds)
-                append_refresh_health(
-                    repository,
-                    {
-                        "at": utc_now(),
-                        "mode": mode,
-                        "phase_seconds": phases,
-                        "omitted": (capsule or {}).get("omitted"),
-                        "layers_updated": all(
-                            layers[layer] == "updated" for layer in DOCUMENT_LAYERS
-                        ),
-                        "warnings": len(warnings),
-                        "source": "refresh",
-                    },
-                )
+                health_record = {
+                    "at": utc_now(),
+                    "mode": mode,
+                    "phase_seconds": phases,
+                    "omitted": (capsule or {}).get("omitted"),
+                    "layers_updated": all(layers[layer] == "updated" for layer in DOCUMENT_LAYERS),
+                    "warnings": len(warnings),
+                    "source": "refresh",
+                }
+                def capture_diagnosis(render: Optional[dict[str, object]]) -> None:
+                    receipt_sink = None
+                    try:
+                        receipt_sink = {}
+                    except Exception:
+                        pass
+                    try:
+                        diagnosis = (diagnose_funnel(repository, capsule, render, _ordinary_receipt_sink=receipt_sink)
+                                     if receipt_sink is not None else diagnose_funnel(repository, capsule, render))
+                    except Exception:
+                        return
+                    try:
+                        if valid_funnel_diagnosis(diagnosis):
+                            health_record["funnel_diagnosis"] = diagnosis
+                            result["funnel_diagnosis"] = diagnosis
+                    except Exception:
+                        pass
+                    try:
+                        receipt = normalize_ordinary_receipt(receipt_sink.get("ordinary_receipt")) if receipt_sink is not None else None
+                        if receipt is not None:
+                            health_record["ordinary_receipt"] = receipt
+                            result["ordinary_receipt"] = receipt
+                    except Exception:
+                        pass
                 if arguments.json:
+                    try:
+                        capture_diagnosis(render_trace if capsule is not None else None)
+                    finally:
+                        append_refresh_health(repository, health_record)
                     print(json.dumps(result, ensure_ascii=False))
                 else:
-                    counts = result["counts"]
-                    # With --query this is a turn's delivery, read by a model
-                    # on every prompt: the layer and timing report is only
-                    # worth its characters when something is wrong. Without
-                    # it, it is the operator's /memory report and stays whole.
-                    per_turn = capsule is not None or withheld
-                    healthy = all(
-                        layers[layer] == "updated" for layer in DOCUMENT_LAYERS
-                    )
-                    for layer in DOCUMENT_LAYERS:
-                        if per_turn and healthy:
-                            break
-                        suffix = (
-                            f" ({counts[layer]} documents)" if layer in counts else ""
+                    # Keep the original timestamp/fields and retain one row even
+                    # when stdout fails before the printed-form finalizer runs.
+                    try:
+                        capture_diagnosis(None)
+                        counts = result["counts"]
+                        # With --query this is a turn's delivery, read by a model
+                        # on every prompt: the layer and timing report is only
+                        # worth its characters when something is wrong. Without
+                        # it, it is the operator's /memory report and stays whole.
+                        per_turn = capsule is not None or withheld
+                        healthy = all(
+                            layers[layer] == "updated" for layer in DOCUMENT_LAYERS
                         )
-                        print(f"{layer}: {result[layer]}{suffix}")
-                    if result["overdue_review"]:
-                        print(
-                            f"memory review: {result['overdue_review']} chunk(s) "
-                            "overdue, not served until re-verified (bank-audit)"
-                        )
-                    for item in codebase:
-                        behind = item["commits_behind"]
-                        print(
-                            "codebase map: %s — %s"
-                            % (
-                                item["path"],
-                                "unverifiable"
-                                if behind is None
-                                else f"{behind} commit(s) behind",
+                        for layer in DOCUMENT_LAYERS:
+                            if per_turn and healthy:
+                                break
+                            suffix = (
+                                f" ({counts[layer]} documents)" if layer in counts else ""
                             )
-                        )
-                    # The hook runs under a hard budget and the JSON branch it
-                    # does not take was the only place these numbers appeared,
-                    # so a run creeping toward the ceiling was invisible to
-                    # everyone who could act on it.
-                    elapsed = sum(
-                        float(phases[name])
-                        for name in ("stat", "index", "retrieval")
-                        if isinstance(phases.get(name), (int, float))
-                    )
-                    if not per_turn or elapsed >= SLOW_TURN_SECONDS:
-                        print(
-                            "phases: "
-                            + " ".join(
-                                f"{name} {round(float(phases[name]) * 1000)}ms"
-                                for name in ("stat", "index", "retrieval")
-                                if isinstance(phases.get(name), (int, float))
+                            print(f"{layer}: {result[layer]}{suffix}")
+                        if result["overdue_review"]:
+                            print(
+                                f"memory review: {result['overdue_review']} chunk(s) "
+                                "overdue, not served until re-verified (bank-audit)"
                             )
+                        for item in codebase:
+                            behind = item["commits_behind"]
+                            print(
+                                "codebase map: %s — %s"
+                                % (
+                                    item["path"],
+                                    "unverifiable"
+                                    if behind is None
+                                    else f"{behind} commit(s) behind",
+                                )
+                            )
+                        # The hook runs under a hard budget and the JSON branch it
+                        # does not take was the only place these numbers appeared,
+                        # so a run creeping toward the ceiling was invisible to
+                        # everyone who could act on it.
+                        elapsed = sum(
+                            float(phases[name])
+                            for name in ("stat", "index", "retrieval")
+                            if isinstance(phases.get(name), (int, float))
                         )
-                    if "brain_validation" in result:
-                        print(f"brain-validation: {result['brain_validation']}")
-                    for warning in warnings:
-                        print(f"warning: {warning}")
-                    if capsule is not None:
-                        print_capsule(capsule, excerpts)
+                        if not per_turn or elapsed >= SLOW_TURN_SECONDS:
+                            print(
+                                "phases: "
+                                + " ".join(
+                                    f"{name} {round(float(phases[name]) * 1000)}ms"
+                                    for name in ("stat", "index", "retrieval")
+                                    if isinstance(phases.get(name), (int, float))
+                                )
+                            )
+                        if "brain_validation" in result:
+                            print(f"brain-validation: {result['brain_validation']}")
+                        for warning in warnings:
+                            print(f"warning: {warning}")
+                        if capsule is not None:
+                            print_capsule(capsule, excerpts, repository=repository, _diagnosis_sink=capture_diagnosis)
+                    finally:
+                        append_refresh_health(repository, health_record)
                 return 0 if all(
                     layers[layer] == "updated" for layer in DOCUMENT_LAYERS
                 ) else 1

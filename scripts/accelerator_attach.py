@@ -852,6 +852,45 @@ def cursor_overlay(edition: str, project: Path, state: Path, repository: Path = 
                    prompt_prefix=prefix)
 
 
+def codex_config_arguments(command: list[str]) -> list[str]:
+    """Keep all Codex overrides in one parser scope, preserving their order.
+
+    Some CLI versions discard root -c overrides when exec/resume has its own.
+    Move only config tokens, without interpreting TOML or touching a literal
+    -- remainder. Keep executable prefixes (including node + codex.js) intact.
+    """
+    remaining, configs = [], []
+    first = None
+    index = 0
+    while index < len(command):
+        value = command[index]
+        if value == "--":
+            break
+        width = 0
+        if value in ("-c", "--config"):
+            if index + 1 == len(command) or command[index + 1] == "--":
+                raise AttachError(f"Codex {value} requires a configuration value.")
+            width = 2
+        elif value.startswith("--config=") or (value.startswith("-c") and len(value) > 2):
+            width = 1
+        if width:
+            if first is None:
+                first = len(remaining)
+            configs.extend(command[index:index + width])
+            index += width
+        else:
+            remaining.append(value)
+            index += 1
+    if not configs:
+        return list(command)
+    # Overlay callers supply a root config before exec. For nested-only input,
+    # insert before exec rather than before the executable or its wrapper.
+    if "exec" in remaining:
+        first = min(first, remaining.index("exec"))
+    remaining[first:first] = configs
+    return remaining + command[index:]
+
+
 def apply_overlay(tool: str, command: list[str], overlay: Any, first_turn: bool = True) -> list[str]:
     """Merge an overlay - an Overlay or its dataclasses.asdict form - into argv
     built the Harness way: Claude with one `--settings`, Codex global flags
@@ -868,6 +907,7 @@ def apply_overlay(tool: str, command: list[str], overlay: Any, first_turn: bool 
     elif tool == "codex":
         index = command.index("exec")
         command[index:index] = arguments
+        command = codex_config_arguments(command)
     elif tool == "cursor":
         index = command.index("--")
         command[index:index] = arguments
@@ -960,6 +1000,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             command += [*attached.arguments, "--settings", json.dumps(attached.settings), *extra]
         elif options.tool == "codex":
             command += [*attached.arguments, *extra]
+            command = codex_config_arguments(command)
         else:
             command += [*attached.arguments, *extra]
             if attached.prompt_prefix and not extra:

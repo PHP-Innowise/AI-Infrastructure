@@ -13,10 +13,10 @@ import re
 import time
 import uuid
 
-from . import memory_draft
+from . import cost_observation, memory_draft
 from .automatic_query import AutomaticQueryError, sanitize_automatic_query
 from .knowledge import OLDER_RUNTIME, STALE_RECORD, KnowledgeBusy, _path, _text
-from .sessions import CAPSULE_LIMIT, SessionError, read_context
+from .sessions import CAPSULE_LIMIT, SessionError, read_context, normalize_funnel_diagnosis, normalize_ordinary_receipt
 
 UUID4 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
 TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}')
@@ -57,23 +57,36 @@ def automatic_task_id(goal):
 
 
 class TaskContext:
-    def __init__(self, knowledge, *, wait=0):
+    def __init__(self, knowledge, *, wait=0, observation=None, guard=None):
         """`wait` is how long, in seconds, an operation outlasts another one holding the
         knowledge lock. A person's request is refused at once and can be repeated; the run
         worker's memory has nobody to repeat it, so the worker waits instead."""
         self.knowledge = knowledge
         self.sessions = knowledge.sessions
         self.wait = wait
+        self.observation, self.guard = observation, guard
 
     def _knowledge(self, operation, *arguments, **options):
+        data = arguments[1] if operation == 'run' and len(arguments) > 1 and isinstance(arguments[1], dict) else {}
+        measured = cost_observation.safe(self.observation, 'operation', operation, data.get('action'))
+        if measured is not None and operation in ('run', 'inspect'):
+            options['_io_observer'] = measured
+        if self.guard is not None and operation == 'run':
+            options.setdefault('_guard', self.guard)
         deadline = time.monotonic() + self.wait
-        while True:
-            try:
-                return getattr(self.knowledge, operation)(*arguments, **options)
-            except KnowledgeBusy:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(.2)
+        result = None
+        try:
+            while True:
+                try:
+                    result = getattr(self.knowledge, operation)(*arguments, **options)
+                    return result
+                except KnowledgeBusy:
+                    cost_observation.safe(measured, 'retry')
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(.2)
+        finally:
+            cost_observation.safe(measured, 'finish', result)
 
     @staticmethod
     def validate_options(data, prompt=None):
@@ -226,7 +239,7 @@ class TaskContext:
             raise SessionError('The source manifest does not cover the approved context.')
         return hashes
 
-    def _retrieve(self, session, options, workspace, task, info, ephemeral):
+    def _retrieve(self, session, options, workspace, task, info, ephemeral, diagnosis=None):
         # Every retrieval here is one a person or the session asked for. Bypass only
         # the repeat-skip heuristic; native privacy, lifecycle and freshness filters stay.
         # Unattended memory retrieves through `refresh`, which distills the whole
@@ -256,6 +269,15 @@ class TaskContext:
         layout = self.knowledge.layout(session['project_id'], workspace)
         home = layout['attached']['home'] if layout['attached'] else None
         hashes = self._source_hashes(layout['folder'] / info['root'], capsule, home)
+        if automatic and type(diagnosis) is dict:
+            for key, normalizer in (('funnel_diagnosis', normalize_funnel_diagnosis),
+                                    ('ordinary_receipt', normalize_ordinary_receipt)):
+                try:
+                    child = normalizer(result.get(key))
+                except Exception:
+                    child = None
+                if child is not None:
+                    diagnosis[key] = child
         return capsule, hashes, text
 
     def prepare(self, session):
@@ -287,9 +309,10 @@ class TaskContext:
                                task_id=record_id, task_only=True)['task']
         # An approved snapshot is shared provenance; a turn's own retrieval is not, and
         # one Git-tracked manifest per message would flood the project's history.
-        capsule, hashes, text = self._retrieve(session, options, workspace, task, info, not options.get('review'))
+        diagnosis = {}
+        capsule, hashes, text = self._retrieve(session, options, workspace, task, info, not options.get('review'), diagnosis)
         return {**options, **kept, 'context_id': str(uuid.uuid4()), 'capsule': capsule, 'capsule_text': text,
-                'task': task, 'source_hashes': hashes, 'approved': False}
+                'task': task, 'source_hashes': hashes, 'approved': False, **diagnosis}
 
     def ensure_fresh(self, session):
         brain, options, workspace, info = self._bound(session)
@@ -327,9 +350,11 @@ class TaskContext:
         runtime older than the command gets the previous chain.
 
         `automatic` is the unattended save at the end of a run: the agent's draft
-        as written, with any learning whose sources are not in the workspace, or
-        that this session already saved (`known`), left out rather than failing
-        the rest. Its learnings are attested by the agent and no person
+        as written, with any learning whose sources are not in the workspace
+        left out rather than failing the rest. A prior title cache (`known`,
+        retained as a compatibility argument) cannot reject corrections;
+        record-result decides equality and promotion retries. Its learnings
+        are attested by the agent and no person
         reviewed them, which the records say (`attestation: agent`) and the
         capsule repeats next to them. Promotion still follows the project's
         `automatic_promotion` setting.
@@ -379,6 +404,7 @@ class TaskContext:
                     return self._save_memory_chain(session, original, automatic=automatic, known=known,
                                                    generation=generation)
                 if attempt == 0 and str(error) == STALE_RECORD:
+                    cost_observation.safe(self.observation, 'note', 'stale_revision_retries')
                     # A Stop hook's checkpoint moved the task on between reading
                     # it and saving; the learnings are already saved, and the
                     # replay with the current revision finishes the task update.

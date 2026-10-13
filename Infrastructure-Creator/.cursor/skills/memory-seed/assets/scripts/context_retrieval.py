@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from bisect import bisect_left, bisect_right
 import json
 import math
+import os
 import posixpath
 import re
 import sqlite3
@@ -20,6 +22,7 @@ from typing import Any, Callable, Iterable, Optional
 import workspace_roots
 from brain_runtime import (
     BrainError,
+    _CitationDigestCache,
     LIFECYCLES,
     atomic_json,
     brain_root,
@@ -2408,11 +2411,11 @@ def history_query(connection: sqlite3.Connection, text: str) -> Optional[dict[st
     and the distillation dropped every subject term of all 13 answer-holding
     events on the evaluated prompts.
 
-    An item is admitted when it covers `required_coverage` distinct terms and
-    its matched terms weigh at least that many terms that each occur in a
-    single indexed document - evidence no likelier by chance than as many
-    unique words co-occurring. The weights are those excerpt_weights uses;
-    no constant is tuned. Of the terms that reach any history subject the
+    An item is admitted when it covers `required_coverage` distinct tokenizer
+    concepts and its matched raw terms meet the existing weighted floor.
+    Porter variants count once toward coverage; raw weights and ranking stay
+    unchanged. The weights are those excerpt_weights uses; no constant is
+    tuned. Of the terms that reach any history subject the
     CAPSULE_PROMPT_TERM_LIMIT rarest count, so a long prompt cannot win by
     length. Nothing here is persisted.
     """
@@ -2477,6 +2480,18 @@ def history_query(connection: sqlite3.Connection, text: str) -> Optional[dict[st
     ]
     terms.sort(key=position.__getitem__)
     minimum = required_coverage(pool)
+    # Porter aliases are one concept, even when the query spells it twice.
+    # Keep the raw term window and weights for ranking; only the admission
+    # rule requires independent concepts. Usually two selected families
+    # already prove that the pool has at least two.
+    forms = term_forms(terms)
+    families = {forms[token] or token.casefold() for token in terms}
+    if len(families) < minimum:
+        for token in pool:
+            families.add(term_forms([token])[token] or token.casefold())
+            if len(families) >= minimum:
+                break
+        minimum = required_coverage(list(families))
     return {
         "terms": terms,
         "weights": {
@@ -2490,23 +2505,26 @@ def history_query(connection: sqlite3.Connection, text: str) -> Optional[dict[st
 
 
 def _history_candidates(
-    connection: sqlite3.Connection, history: dict[str, Any]
+    connection: sqlite3.Connection, history: dict[str, Any],
+    *, trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[float, float, dict[str, Any]]]]:
     """Admitted events, ranked like candidates, and admitted episodes as
     (ranked score, matched weight, episode)."""
+    forms = term_forms(history["terms"])
+
     def admitted(members: dict[str, set[Any]]) -> dict[Any, float]:
-        count: dict[Any, int] = {}
+        concepts: dict[Any, set[str]] = {}
         mass: dict[Any, float] = {}
         for token, found in members.items():
             for member in found:
-                count[member] = count.get(member, 0) + 1
+                concepts.setdefault(member, set()).add(forms[token] or token.casefold())
                 mass[member] = mass.get(member, 0.0) + history["weights"][token]
-        # The tolerance keeps a match of exactly `minimum` unique terms on
-        # the right side of float rounding.
+        # The tolerance keeps a matched weight exactly at the floor on the
+        # right side of floating-point rounding.
         return {
             member: mass[member]
-            for member in count
-            if count[member] >= history["minimum"] and mass[member] + 1e-9 >= history["floor"]
+            for member in concepts
+            if len(concepts[member]) >= history["minimum"] and mass[member] + 1e-9 >= history["floor"]
         }
 
     event_mass = admitted(history["events"])
@@ -2536,6 +2554,8 @@ def _history_candidates(
                 item["authority"], item["confidence"], item["updated_at"]
             )
             events.append(item)
+            if trace is not None:
+                trace.observe(item, "history", "admitted", score=item["adjusted_score"])
         events.sort(key=lambda item: (-item["adjusted_score"], item["path"]))
         for rank, item in enumerate(events, start=1):
             item["rank"] = rank
@@ -2558,7 +2578,8 @@ def _history_candidates(
 
 
 def _best_history_event(
-    repository: Path, events: list[dict[str, Any]], config: dict[str, Any]
+    repository: Path, events: list[dict[str, Any]], config: dict[str, Any],
+    *, trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """The best admitted event that passes the runtime filters.
 
@@ -2571,7 +2592,7 @@ def _best_history_event(
     for item in events:
         if best is not None and item["adjusted_score"] <= best["adjusted_score"]:
             break
-        kept, dropped = _runtime_filter(repository, [item], config)
+        kept, dropped = _runtime_filter(repository, [item], config, trace=trace)
         excluded.extend(dropped)
         if kept and (best is None or kept[0]["adjusted_score"] > best["adjusted_score"]):
             best = kept[0]
@@ -2775,7 +2796,9 @@ def section_slug(heading: str) -> str:
 
 
 def quoted_section(
-    text: str, title: str = "", weights: Optional[dict[str, float]] = None
+    text: str, title: str = "", weights: Optional[dict[str, float]] = None,
+    *, citation_sources: Optional[set[str]] = None,
+    requested_headings: Optional[set[str]] = None,
 ) -> Optional[dict[str, Any]]:
     """The section an excerpt quotes: the one carrying most of the query.
 
@@ -2789,8 +2812,12 @@ def quoted_section(
     # Every marked word asked of the tokenizer at once, not per section.
     term_forms(_EXCERPT_MARKED.findall(text))
     best: Optional[tuple[tuple[float, int, float, int], int]] = None
+    requested_best: Optional[tuple[tuple[float, int, float, int], int]] = None
     first_with_body: Optional[int] = None
     for index, (heading, lines) in enumerate(sections):
+        requested = _unmarked(heading).casefold() in (requested_headings or ())
+        if not requested and citation_sources is not None and _citation_only_section(heading, lines, citation_sources):
+            continue
         units = _excerpt_units(lines)
         if not units:
             continue
@@ -2802,9 +2829,11 @@ def quoted_section(
         score = (*_excerpt_score([heading, *units], weights), *_excerpt_score(units, weights))
         if best is None or score > best[0]:
             best = (score, index)
+        if requested and (requested_best is None or score > requested_best[0]):
+            requested_best = (score, index)
     if best is None or first_with_body is None:
         return None
-    index = best[1] if best[0][0] > 0 else first_with_body
+    index = requested_best[1] if requested_best is not None else best[1] if best[0][0] > 0 else first_with_body
     heading, lines = sections[index]
     units = _excerpt_units(lines)
     plain_heading = " ".join(_unmarked(heading).split())
@@ -2818,6 +2847,64 @@ def quoted_section(
         "hash": digest,
         "shown": plain_heading if plain_heading.casefold() != title.casefold() else "",
     }
+
+
+def _citation_only_section(heading: str, lines: list[str], sources: set[str]) -> bool:
+    # Explicit heading requests are handled separately from FTS highlights:
+    # a filename such as src/Sources.py also marks the Sources heading.
+    # Explanatory prose and undeclared paths are not a citation-only footer.
+    if _unmarked(heading).casefold() not in ("sources", "references"):
+        return False
+    entries = [line.strip() for line in lines if line.strip()]
+    if not entries:
+        return False
+    for line in entries:
+        match = re.fullmatch(r"[-*+]\s+(.+)", _unmarked(line))
+        if match is None:
+            return False
+        reference = match.group(1).strip()
+        if reference.startswith("`") and reference.endswith("`"):
+            reference = reference[1:-1]
+        if reference in sources:
+            continue
+        base, separator, fragment = reference.partition("#")
+        if not separator or base not in sources or re.fullmatch(r"[^\s`]+", fragment) is None:
+            return False
+    return True
+
+
+def excerpt_section(
+    connection: sqlite3.Connection, item: dict[str, Any], text: str,
+    weights: Optional[dict[str, float]] = None,
+    *, query: str = "",
+) -> Optional[dict[str, Any]]:
+    """The section delivered and remembered for this selected document.
+
+    Linked records contribute knowledge about the named file: a generated
+    citation footer is not that knowledge. Keep query weights across substantive
+    sections, and retain original behavior for explicit source requests, prose
+    under Sources, source-only records, or unavailable citation metadata.
+    """
+    title = str(item.get("title") or "")
+    if item.get("selection") in ("path-link", "source-link", *AUTOMATIC_LINK_SELECTIONS) and item.get("kind") != "brain-task":
+        requested = {
+            heading for heading in ("sources", "references")
+            if re.search(r"(?<![\w/\\.-])" + heading + r"(?![\w/\\.-])", query, re.IGNORECASE)
+        }
+        if requested:
+            return quoted_section(text, title, weights, requested_headings=requested)
+        try:
+            rows = connection.execute(
+                "SELECT ref_path FROM document_links WHERE path = ? AND ref_kind = 'source' ORDER BY ref_path LIMIT ?",
+                (item["path"], GRAPH_ROW_LIMIT + 1),
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        if rows and len(rows) <= GRAPH_ROW_LIMIT:
+            section = quoted_section(text, title, weights, citation_sources={str(row[0]) for row in rows})
+            if section is not None:
+                return section
+    return quoted_section(text, title, weights)
 
 
 def _excerpt_piece(
@@ -2912,11 +2999,16 @@ def excerpt_window(
     if start > 0 and plain[start - 1].endswith(":"):
         lead = len(plain[start - 1]) + 1
         size = sum(len(part) + 1 for part in plain[start:end]) - 1
-        while end > start and size + lead > budget:
-            end -= 1
-            size -= len(plain[end]) + 1
-        if size + lead <= budget:
+        lead_end = end
+        while lead_end > start and size + lead > budget:
+            lead_end -= 1
+            size -= len(plain[lead_end]) + 1
+        # Carrying a qualifier must not discard the evidence that won the
+        # window. Trim only unmatched context; otherwise keep that window.
+        if (lead_end > start and size + lead <= budget
+                and _excerpt_score(units[start:lead_end], weights) == best[0]):
             start -= 1
+            end = lead_end
     text = " ".join(plain[start:end])
     return ("… " if start else "") + text + (" …" if end < len(units) else "")
 
@@ -2935,17 +3027,24 @@ def delivery_identity(
     revision = str(item.get("source_hash") or "")
     if (
         item.get("layer") == "procedural" or item.get("match") == "distinctive"
-        or item.get("selection") in AUTOMATIC_LINK_SELECTIONS
+        or item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("kind") == "brain-task"
     ):
         return path, revision
     marked = marked_document(connection, path, query)
     section = (
-        quoted_section(marked, str(item.get("title") or ""), excerpt_weights(connection, query))
+        excerpt_section(connection, item, marked, excerpt_weights(connection, query), query=query)
         if marked
         else None
     )
     if section is None:
         return path, revision
+    if item.get("selection") in AUTOMATIC_LINK_SELECTIONS:
+        original = quoted_section(marked, str(item.get("title") or ""), excerpt_weights(connection, query))
+        if original is not None and original["hash"] == section["hash"]:
+            return path, revision
+        # A prior renderer handed only the citation footer. A new section
+        # identity releases that stale delivery immediately, without changing
+        # whole-document suppression for automatic links whose excerpt stayed.
     return f"{path}#{section['slug']}", section["hash"]
 
 
@@ -3047,7 +3146,8 @@ def ranking_weight(
 
 
 def _candidates(
-    connection: sqlite3.Connection, query: str, limit: int = 100
+    connection: sqlite3.Connection, query: str, limit: int = 100,
+    *, trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Ranked candidates, plus what the ranking knew about the query.
 
@@ -3067,6 +3167,12 @@ def _candidates(
         return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None, "coverage": {}}
     coverage, distinctive = token_coverage(connection, evidence)
     minimum = required_coverage(evidence)
+    if trace is not None:
+        trace.evidence_terms = len(evidence)
+        trace.required_terms = minimum
+        for path, record in trace.records.items():
+            if record["state"] != "unavailable":
+                record["evidence_matched_terms"] = coverage.get(path, 0)
     rows = connection.execute(
         """
         SELECT
@@ -3084,11 +3190,18 @@ def _candidates(
         (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), HISTORY_KIND, limit),
     ).fetchall()
     result = []
+    observed_rank = 0
     for row in rows:
+        if trace is not None:
+            observed_rank += int(trace._eligible(dict(row)))
+            trace.observe(dict(row), "search", "fetched", rank=observed_rank,
+                          matched_terms=coverage.get(row["path"], 0), required_terms=minimum)
         if not is_relevant(
             row["path"], coverage, distinctive, minimum, str(row["title"] or ""),
             anchored=row["layer"] != "procedural",
         ):
+            if trace is not None:
+                trace.observe(dict(row), "admission", "term-coverage")
             continue
         item = dict(row)
         item["conflicts"] = json.loads(item["conflicts"])
@@ -3101,24 +3214,34 @@ def _candidates(
             item["authority"], item["confidence"], item["updated_at"]
         )
         result.append(item)
+        if trace is not None:
+            trace.observe(item, "admission", "admitted", score=item["adjusted_score"])
     # Re-rank the BM25 window: the raw score breaks adjusted ties so the
     # ordering stays deterministic even when every weight is neutral.
     result.sort(key=lambda item: (-item["adjusted_score"], item["score"], item["path"]))
     best_by_layer: dict[str, float] = {}
     for item in result:
         best_by_layer.setdefault(item["layer"], item["adjusted_score"])
-    result = [
-        item
-        for item in result
-        if item["adjusted_score"]
-        >= RELATIVE_SCORE_FLOOR * best_by_layer[item["layer"]]
-    ]
+    survivors = []
+    for item in result:
+        threshold = RELATIVE_SCORE_FLOOR * best_by_layer[item["layer"]]
+        admitted = item["adjusted_score"] >= threshold
+        if trace is not None:
+            trace.observe(item, "ranking", "admitted" if admitted else "relative-score-floor",
+                          score=item["adjusted_score"])
+        if admitted:
+            survivors.append(item)
+    result = survivors
     # Rank is stamped here, on the lexically ranked list, rather than after
     # filtering: a position in the post-filter list says where a survivor
     # landed, not how well it answered the query, which is the only reading a
     # retrieval gate can use.
+    observed_rank = 0
     for position, item in enumerate(result, start=1):
         item["rank"] = position
+        if trace is not None:
+            observed_rank += int(trace._eligible(item))
+            trace.observe(item, "ranking", "authorized-window-rank", rank=observed_rank)
     _quote_candidates(connection, result, query, evidence)
     diagnostics = {
         "informative_terms": len(evidence),
@@ -3284,11 +3407,15 @@ def _load_last_retrievals(connection: sqlite3.Connection) -> dict[str, Any]:
         raw = load_index_state(connection).get(LAST_RETRIEVAL_KEY)
     except sqlite3.Error:
         return {}
+    return _decode_last_retrievals(raw)
+
+
+def _decode_last_retrievals(raw: Optional[str]) -> dict[str, Any]:
     if not raw:
         return {}
     try:
         stored = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return {}
     return stored if isinstance(stored, dict) else {}
 
@@ -3302,21 +3429,54 @@ def _remember_retrieval(
     opened read-only must never turn a retrieval into an error. Losing the
     record costs one un-skipped turn, which is the safe direction.
     """
-    stored = _load_last_retrievals(connection)
-    stored.pop(baseline_key, None)
-    stored[baseline_key] = signature
-    if len(stored) > LAST_RETRIEVAL_RETENTION:
-        for stale in list(stored)[: len(stored) - LAST_RETRIEVAL_RETENTION]:
-            stored.pop(stale, None)
-    payload = json.dumps(stored, sort_keys=False, separators=(",", ":"))
+    _commit_ordinary_receipts(connection, baseline={"key": baseline_key, "signature": signature})
+
+
+WINDOW_REFERENCE_LIMIT = 32
+WINDOW_BODY_BYTES_LIMIT = 4096
+
+
+def _window_digest(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _window_key(value: str) -> str:
     try:
-        if connection.in_transaction:
-            store_index_state(connection, {LAST_RETRIEVAL_KEY: payload})
-        else:
-            with connection:
-                store_index_state(connection, {LAST_RETRIEVAL_KEY: payload})
-    except sqlite3.Error:
-        return
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    except UnicodeError:
+        # A malformed legacy key still belongs to the existing receipt
+        # normalizer; it cannot participate in optional hash metadata.
+        return ""
+
+
+def _window_references(entry: Any, items: dict[str, Any]) -> dict[str, Any]:
+    """Normalize observer metadata independently of original novelty receipts."""
+    if not isinstance(entry, dict):
+        return {}
+    observation = entry.get("window_observation")
+    if not isinstance(observation, dict) or type(observation.get("version")) is not int or observation["version"] != 1:
+        return {}
+    refs = observation.get("receipts")
+    if not isinstance(refs, dict):
+        return {}
+    live = {_window_key(key): seen for key, seen in items.items()
+            if isinstance(key, str) and isinstance(seen, list) and len(seen) == 2 and type(seen[1]) is int}
+    result = {}
+    for index, (key, value) in enumerate(refs.items()):
+        if index >= WINDOW_REFERENCE_LIMIT:
+            break
+        if (not _window_digest(key) or not isinstance(value, dict)
+                or set(value) != {"revision", "handed_turn", "manifest_id", "doc_ref"}):
+            continue
+        revision, turn = value["revision"], value["handed_turn"]
+        identifier = value["manifest_id"]
+        if (not isinstance(revision, str) or re.fullmatch(r"(?:[0-9a-f]{16}|[0-9a-f]{64})", revision) is None
+                or type(turn) is not int or turn < 0
+                or not isinstance(identifier, str) or TRACE_ID.fullmatch(identifier) is None
+                or not _window_digest(value["doc_ref"]) or live.get(key) != [revision, turn]):
+            continue
+        result[key] = dict(value)
+    return result
 
 
 def _load_session_deliveries(connection: sqlite3.Connection) -> dict[str, Any]:
@@ -3332,6 +3492,10 @@ def _load_session_deliveries(connection: sqlite3.Connection) -> dict[str, Any]:
         stored = json.loads(raw) if raw else {}
     except (sqlite3.Error, ValueError, RecursionError):
         return {}
+    return _normalize_session_deliveries(stored)
+
+
+def _normalize_session_deliveries(stored: Any) -> dict[str, Any]:
     if not isinstance(stored, dict):
         return {}
     normalized: dict[str, Any] = {}
@@ -3353,6 +3517,9 @@ def _load_session_deliveries(connection: sqlite3.Connection) -> dict[str, Any]:
         }
         if isinstance(entry.get("transcript"), dict):
             clean["transcript"] = entry["transcript"]
+        refs = _window_references(entry, clean["items"])
+        if refs:
+            clean["window_observation"] = {"version": 1, "receipts": refs}
         normalized[session] = clean
     return normalized
 
@@ -3366,6 +3533,7 @@ def _remember_session_deliveries(
     transcript: Optional[dict[str, Any]] = None,
     *,
     reset: bool = False,
+    window_receipts: Optional[dict[str, Any]] = None,
 ) -> None:
     """Record what the session holds: key -> [revision, turn handed].
 
@@ -3374,7 +3542,20 @@ def _remember_session_deliveries(
     host compacted the conversation since. Best-effort, like the repeat
     record: losing it costs one repeated item, the safe direction.
     """
-    entry = stored.pop(session_id, None)
+    status, latest = _commit_ordinary_receipts(connection, session=_ordinary_session_plan(
+        session_id, turn, delivered, stored, transcript,
+        reset=reset, window_receipts=window_receipts))
+    if status in ("committed", "deferred") and latest is not None:
+        # Preserve the helper's successful in-place projection, while the
+        # supplied snapshot is never authority for unrelated live sessions.
+        stored.clear()
+        stored.update(latest)
+
+
+def _session_delivery_projection(
+    entry: Optional[dict[str, Any]], turn: int, delivered: dict[str, Any],
+    transcript: Optional[dict[str, Any]], *, reset: bool, window_receipts: Any,
+) -> dict[str, Any]:
     items = entry.get("items") if isinstance(entry, dict) and not reset else None
     items = {
         path: seen
@@ -3385,20 +3566,179 @@ def _remember_session_deliveries(
         and turn - seen[1] < SESSION_NOVELTY_TURNS
     }
     items.update(delivered)
-    stored[session_id] = {"turn": turn, "items": items}
+    projected: dict[str, Any] = {"turn": turn, "items": items}
+    refs = {} if reset else _window_references(entry, items)
+    if window_receipts:
+        refs.update(_window_references({"window_observation": {"version": 1, "receipts": window_receipts}}, items))
+    if refs:
+        refs = dict(sorted(refs.items(), key=lambda pair: -pair[1]["handed_turn"])[:WINDOW_REFERENCE_LIMIT])
+        projected["window_observation"] = {"version": 1, "receipts": refs}
     if transcript is not None:
-        stored[session_id]["transcript"] = transcript
-    for stale in list(stored)[: max(0, len(stored) - SESSION_DELIVERIES_RETENTION)]:
-        stored.pop(stale, None)
-    payload = json.dumps(stored, separators=(",", ":"))
+        projected["transcript"] = transcript
+    return projected
+
+
+def _receipt_expectation(stored: dict[str, Any], key: str) -> tuple[bool, str]:
+    """Freeze normalized target identity, including JSON number types."""
+    return (key in stored, json.dumps(stored[key], sort_keys=True, separators=(",", ":"))
+            if key in stored else "")
+
+
+def _ordinary_session_plan(
+    session_id: str, turn: int, delivered: dict[str, Any], stored: dict[str, Any],
+    transcript: Optional[dict[str, Any]] = None, *, reset: bool = False,
+    window_receipts: Any = None, exact_next_turn: bool = False,
+) -> dict[str, Any]:
+    return {"id": session_id, "turn": turn,
+            "expected": _receipt_expectation(_normalize_session_deliveries(stored), session_id),
+            "delivered": copy.deepcopy(delivered), "transcript": copy.deepcopy(transcript),
+            "reset": reset, "window_receipts": copy.deepcopy(window_receipts),
+            "exact_next_turn": exact_next_turn}
+
+
+class _OrdinaryReceiptConflict(Exception):
+    """Disposable bookkeeping cannot accept this prepared projection."""
+
+
+ORDINARY_RECEIPT_WAIT_SECONDS = 0.15
+
+
+def _commit_ordinary_receipts(
+    connection: sqlite3.Connection, *, baseline: Optional[dict[str, Any]] = None,
+    session: Optional[dict[str, Any]] = None,
+) -> tuple[str, Optional[dict[str, Any]]]:
+    """Merge participating writers under one short SQLite transaction.
+
+    This records ordinary bookkeeping, not external delivery or a supplement
+    permit. Conflicts/readonly/SQL errors cost one repeated retrieval, rather
+    than damaging the latest state or failing the ordinary response. An
+    ambient transaction retains ownership and receives a deferred projection.
+    """
+    if baseline is None and session is None:
+        return "skipped", None
+    baseline, session = copy.deepcopy(baseline), copy.deepcopy(session)
+    deadline = time.monotonic() + ORDINARY_RECEIPT_WAIT_SECONDS
+    ambient = False
+    savepoint = "ordinary_receipts_" + new_uuid().replace("-", "")
+    begun = False
+    timeout = None
+    primary = None
+    cleaned = False
+
+    def remaining_wait() -> None:
+        remaining = int((deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            raise _OrdinaryReceiptConflict()
+        connection.execute("PRAGMA busy_timeout = " + str(min(timeout, remaining)))
+
+    def undo() -> None:
+        if not begun:
+            return
+        if ambient:
+            connection.execute("ROLLBACK TO SAVEPOINT " + savepoint)
+            connection.execute("RELEASE SAVEPOINT " + savepoint)
+        elif connection.in_transaction:
+            connection.execute("ROLLBACK")
+
+    def finish() -> None:
+        try:
+            try:
+                undo()
+            except sqlite3.Error:
+                pass
+        finally:
+            if timeout is not None:
+                try:
+                    connection.execute("PRAGMA busy_timeout = " + str(timeout))
+                except sqlite3.Error:
+                    pass
+
     try:
-        if connection.in_transaction:
-            store_index_state(connection, {SESSION_DELIVERIES_KEY: payload})
-        else:
-            with connection:
-                store_index_state(connection, {SESSION_DELIVERIES_KEY: payload})
-    except sqlite3.Error:
-        return
+        try:
+            ambient = connection.in_transaction
+            timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+            remaining_wait()
+            # SQL can acquire and then be interrupted before execute returns.
+            # Arm cleanup first; undo targets only our possible owned scope.
+            begun = True
+            connection.execute("SAVEPOINT " + savepoint if ambient else "BEGIN IMMEDIATE")
+            # Read failure must skip the whole pair; the best-effort public loaders
+            # deliberately swallow errors and are not suitable inside this owner.
+            raw = {row[0]: row[1] for row in connection.execute(
+                "SELECT key, value FROM index_state WHERE key IN (?, ?)",
+                (LAST_RETRIEVAL_KEY, SESSION_DELIVERIES_KEY))}
+            baselines = _decode_last_retrievals(raw.get(LAST_RETRIEVAL_KEY))
+            try:
+                sessions = _normalize_session_deliveries(json.loads(raw.get(SESSION_DELIVERIES_KEY, "{}")))
+            except (ValueError, RecursionError):
+                sessions = {}
+            payloads = {}
+            if baseline is not None:
+                key = baseline["key"]
+                if "expected" in baseline and _receipt_expectation(baselines, key) != baseline["expected"]:
+                    raise _OrdinaryReceiptConflict()
+                baselines.pop(key, None)
+                baselines[key] = baseline["signature"]
+                for stale in list(baselines)[:max(0, len(baselines) - LAST_RETRIEVAL_RETENTION)]:
+                    baselines.pop(stale, None)
+                payloads[LAST_RETRIEVAL_KEY] = json.dumps(baselines, separators=(",", ":"))
+            if session is not None:
+                identifier = session["id"]
+                if _receipt_expectation(sessions, identifier) != session["expected"]:
+                    raise _OrdinaryReceiptConflict()
+                entry = sessions.get(identifier)
+                old_turn = entry.get("turn", 0) if entry else 0
+                turn = session["turn"]
+                if (type(turn) is not int or turn <= old_turn
+                        or (session["exact_next_turn"] and turn != old_turn + 1)):
+                    raise _OrdinaryReceiptConflict()
+                sessions.pop(identifier, None)
+                sessions[identifier] = _session_delivery_projection(
+                    entry, turn, session["delivered"], session["transcript"],
+                    reset=session["reset"], window_receipts=session["window_receipts"])
+                for stale in list(sessions)[:max(0, len(sessions) - SESSION_DELIVERIES_RETENTION)]:
+                    sessions.pop(stale, None)
+                payloads[SESSION_DELIVERIES_KEY] = json.dumps(sessions, separators=(",", ":"))
+            for key, payload in sorted(payloads.items()):
+                remaining_wait()
+                if key in raw:
+                    changed = connection.execute(
+                        "UPDATE index_state SET value = ? WHERE key = ? AND value = ?",
+                        (payload, key, raw[key]))
+                else:
+                    changed = connection.execute(
+                        "INSERT INTO index_state(key, value) VALUES (?, ?)", (key, payload))
+                if changed.rowcount != 1:
+                    raise _OrdinaryReceiptConflict()
+            remaining_wait()
+            if ambient:
+                connection.execute("RELEASE SAVEPOINT " + savepoint)
+            else:
+                # Connection.commit()/rollback() are no-ops with the Python3.12+
+                # autocommit=True API, even for an explicitly begun transaction.
+                connection.execute("COMMIT")
+            begun = False
+            return ("deferred" if ambient else "committed"), sessions if session is not None else None
+        except (sqlite3.Error, _OrdinaryReceiptConflict):
+            return "skipped", None
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            finish()
+            cleaned = True
+    except BaseException as error:
+        if not cleaned:
+            # One interruption can happen at cleanup entry or during unwind.
+            # A single retry is idempotent and never owns the caller's outer
+            # transaction. Driver refusal/repeated cancellation is best effort.
+            try:
+                finish()
+            except BaseException:
+                pass
+        if primary is not None and primary is not error:
+            raise primary
+        raise
 
 
 def gate_decision(
@@ -3532,7 +3872,11 @@ def _runtime_filter(
     repository: Path,
     candidates: Iterable[dict[str, Any]],
     config: dict[str, Any],
+    *, trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    # Cache exact freshly read bytes only; path and live-read checks still run.
+    # Each invocation, including the final recheck, owns a new bounded cache.
+    normalization_cache = _CitationDigestCache()
     selected = []
     excluded = []
     owners = set(config.get("owners", ["*"]))
@@ -3579,7 +3923,8 @@ def _runtime_filter(
                 reason = "map-drift"
         if reason is None and candidate["source_fingerprints"]:
             changed, missing = source_changes(
-                repository, candidate["source_fingerprints"]
+                repository, candidate["source_fingerprints"],
+                _normalization_cache=normalization_cache
             )
             if missing:
                 # The cited file is gone: there is nothing left to check the
@@ -3600,6 +3945,9 @@ def _runtime_filter(
             excluded.append({"path": candidate["path"], "reason": reason})
         else:
             selected.append(candidate)
+        if trace is not None:
+            trace.observe(candidate, "runtime", reason or ("source-changed-admitted" if candidate.get("source_changed") else "admitted"),
+                          score=float(candidate.get("adjusted_score") or 0.0))
     return selected, excluded
 
 
@@ -3619,6 +3967,7 @@ def _path_candidates(
     config: dict[str, Any],
     paths: list[str],
     seen: set[str],
+    *, trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Documents that cite one of `paths`, shaped like ranked candidates.
 
@@ -3631,7 +3980,7 @@ def _path_candidates(
     excluded: list[dict[str, str]] = []
     for reference in dict.fromkeys(paths):
         linked, withheld = linked_documents(
-            connection, repository, config, reference
+            connection, repository, config, reference, trace=trace
         )
         excluded.extend(withheld)
         for item in linked:
@@ -3672,6 +4021,7 @@ def linked_documents(
     prefix: bool = False,
     max_rows: Optional[int] = None,
     ref_kinds: tuple[str, ...] = ("source",),
+    trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Every eligible document that declares `reference` among its sources.
 
@@ -3726,7 +4076,9 @@ def linked_documents(
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         candidates.append(item)
-    return _runtime_filter(repository, candidates, config)
+        if trace is not None:
+            trace.observe(item, "source-link", "hydrated")
+    return _runtime_filter(repository, candidates, config, trace=trace)
 
 
 _PROMPT_PATH = re.compile(
@@ -3845,6 +4197,7 @@ def _automatic_link_candidates(
     *,
     own_paths: set[str],
     coverage: dict[str, int],
+    trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """At most FILE_LINK_LIMIT documents linked to a seed path, shaped like
     ranked candidates and marked `prompt-link` or `touch-link`.
@@ -3870,9 +4223,14 @@ def _automatic_link_candidates(
             ]
             others = [path for path in rows if path not in own_paths]
             if len(others) > FILE_LINK_HUB_LIMIT:
+                if trace is not None:
+                    for path in others:
+                        trace.known_event(path, "file-link", "hub-limit")
                 continue
             for path in others:
                 if path in blocked:
+                    if trace is not None:
+                        trace.known_event(path, "file-link", "already-selected-or-own")
                     continue
                 rank = (0 if origin == "prompt" else 1, kind_rank, index)
                 entry = found.setdefault(path, {"rank": rank, "seeds": set(), "via": seed, "prompt": False})
@@ -3883,6 +4241,9 @@ def _automatic_link_candidates(
     if not found:
         return [], []
     pool = sorted(found, key=lambda path: (*found[path]["rank"], -len(found[path]["seeds"]), path))
+    if trace is not None:
+        for path in pool[FILE_LINK_POOL:]:
+            trace.known_event(path, "file-link", "pool-limit")
     pool = pool[:FILE_LINK_POOL]
     marks = ",".join("?" for _ in pool)
     rows = connection.execute(
@@ -3902,18 +4263,26 @@ def _automatic_link_candidates(
     for row in rows:
         item = dict(row)
         content = str(item.pop("content") or "")
+        if trace is not None:
+            trace.observe(item, "file-link", "hydrated")
         if item["layer"] != "semantic" or item["category"] not in ("durable", "dynamic"):
+            if trace is not None:
+                trace.observe(item, "file-link", "category")
             continue
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         if item["conflicts"] or _has_incoming_conflict(connection, item.get("record_id")):
+            if trace is not None:
+                trace.observe(item, "file-link", "conflict")
             continue
         entry = found[item["path"]]
         if not entry["prompt"] and coverage.get(item["path"], 0) < 1:
+            if trace is not None:
+                trace.observe(item, "file-link", "touch-without-query-term")
             continue
         item["_body"] = content
         candidates.append(item)
-    eligible, _ = _runtime_filter(repository, candidates, config)
+    eligible, _ = _runtime_filter(repository, candidates, config, trace=trace)
     eligible.sort(key=lambda item: (
         found[item["path"]]["rank"], bool(item.get("source_changed")),
         "".join(chr(0x10FFFF - ord(char)) for char in str(item.get("updated_at") or "")), item["path"],
@@ -3960,6 +4329,7 @@ def _shared_source_documents(
     anchor: dict[str, Any],
     max_rows: int,
     current_digests: dict[str, Optional[str]],
+    *, trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Indexed neighbours declaring the same current canonical source revision.
 
@@ -4012,6 +4382,8 @@ def _shared_source_documents(
         item = dict(row)
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        if trace is not None:
+            trace.observe(item, "shared-source", "hydrated")
         peer = {entry.get("path"): entry.get("sha256")
                 for entry in item["source_fingerprints"] if isinstance(entry, dict)}
         # The row limit counts distinct neighbours, not duplicate citations.
@@ -4051,7 +4423,10 @@ def _shared_source_documents(
             if current_digests[reference] == expected:
                 candidates.append(item)
                 break
-    eligible, _ = _runtime_filter(repository, candidates, config)
+        else:
+            if trace is not None:
+                trace.observe(item, "shared-source", "no-current-shared-revision")
+    eligible, _ = _runtime_filter(repository, candidates, config, trace=trace)
     return eligible, len(paths)
 
 
@@ -4109,6 +4484,7 @@ def _source_link_candidates(
     config: dict[str, Any],
     anchors: list[dict[str, Any]],
     seen: set[str],
+    *, trace: Optional[RetrievalTrace] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Bounded declared relations; every seed and neighbour is runtime-checked.
 
@@ -4125,9 +4501,11 @@ def _source_link_candidates(
     current_digests: dict[str, Optional[str]] = {}
     for anchor in anchors[:GRAPH_ANCHOR_LIMIT]:
         if anchor.get("conflicts") or _has_incoming_conflict(connection, anchor.get("record_id")):
+            if trace is not None:
+                trace.observe(anchor, "source-link", "anchor-conflict")
             continue
         # Recheck at the traversal boundary, including edits since seed search.
-        eligible, _ = _runtime_filter(repository, [dict(anchor)], config)
+        eligible, _ = _runtime_filter(repository, [dict(anchor)], config, trace=trace)
         if not eligible:
             continue
         remaining = GRAPH_ROW_LIMIT - stats["examined"]
@@ -4139,6 +4517,7 @@ def _source_link_candidates(
         linked, withheld = linked_documents(
             connection, repository, config, anchor["path"], max_rows=remaining,
             ref_kinds=("source",),
+            trace=trace,
         )
         stats["anchors"] += 1
         count = len(linked) + len(withheld)
@@ -4151,23 +4530,31 @@ def _source_link_candidates(
         if remaining > 0:
             shared, shared_rows = _shared_source_documents(
                 connection, repository, config, anchor, remaining, current_digests,
+                trace=trace,
             )
             linked.extend(shared)
             stats["examined"] += shared_rows
             stats["truncated"] |= shared_rows == remaining
         for item in linked:
-            if (item["path"] in seen or item["layer"] != "semantic"
-                    or item["category"] not in ("durable", "dynamic")
-                    or item["conflicts"]
-                    or _has_incoming_conflict(connection, item.get("record_id"))):
+            reason = (
+                "already-seen" if item["path"] in seen
+                else "category" if item["layer"] != "semantic" or item["category"] not in ("durable", "dynamic")
+                else "conflict" if item["conflicts"] or _has_incoming_conflict(connection, item.get("record_id"))
+                else None
+            )
+            if reason is not None:
                 # A graph-only conflict component may need more semantic
                 # slots than remain. Until admission is component-aware, do
                 # not introduce either side through automatic expansion.
+                if trace is not None:
+                    trace.observe(item, "source-link", reason)
                 continue
             seen.add(item["path"])
             stats["eligible"] += 1
             if len(candidates) >= GRAPH_CANDIDATE_LIMIT:
                 stats["truncated"] = True
+                if trace is not None:
+                    trace.observe(item, "source-link", "candidate-limit")
                 continue
             content = connection.execute(
                 "SELECT content FROM documents WHERE path = ?", (item["path"],),
@@ -4274,6 +4661,787 @@ def refresh_health_retention(config: dict[str, Any]) -> int:
         return REFRESH_HEALTH_RETENTION
 
 
+TRACE_RECORD_LIMIT = 128
+TRACE_EVENT_LIMIT = 16
+TRACE_WATCH_LIMIT = 16
+TRACE_FILE_LIMIT = 512 * 1024
+TRACE_ID = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+TRACE_SAFE_DIRECTORY_IO = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
+
+
+def _trace_path_allowed(path: object) -> bool:
+    if not isinstance(path, str) or not path or len(path) > 512:
+        return False
+    if any(ord(char) < 32 or ord(char) == 127 for char in path):
+        return False
+    if posixpath.normpath(path) != path or path in (".", "") or "#" in path:
+        return False
+    problem = source_path_problem(path)
+    # Memory is derived evidence, but is precisely what this observer follows.
+    return problem is None or (
+        problem == "Cite canonical project sources, not private runtime state or derived memory"
+        and path.startswith(("memory-bank/chunks/", "project-brain/dynamic/"))
+        and not source_path_problem("trace/" + path)
+    )
+
+
+def validate_trace_paths(paths: Optional[list[str]]) -> list[str]:
+    if len(paths or []) > TRACE_WATCH_LIMIT:
+        raise RetrievalError("--trace-path accepts at most 16 paths")
+    if any(not _trace_path_allowed(path) for path in paths or []):
+        raise RetrievalError("--trace-path requires a safe project-relative document path (max 512 characters)")
+    return list(dict.fromkeys(paths or []))
+
+
+# The aggregate funnel contains no identifiers, query material or global cap signals.
+# Counters describe authorized observation occurrences, not unique candidates.
+FUNNEL_COUNT_LIMIT = 65535
+FUNNEL_EVENTS = {
+    "search": ("fetched",),
+    "admission": ("term-coverage", "admitted"),
+    "ranking": ("admitted", "relative-score-floor", "authorized-window-rank"),
+    "history": ("admitted",),
+    "runtime": ("admitted", "source-changed-admitted", "authority", "lifecycle",
+                "stale", "map-unverifiable", "map-drift", "source-missing",
+                "promoted-to-chunk", "working-task", "host-loaded", "path-link-limit",
+                "file-link-limit"),
+    "source-link": ("hydrated", "anchor-conflict", "already-seen", "category",
+                    "conflict", "candidate-limit"),
+    "file-link": ("hydrated", "category", "conflict", "touch-without-query-term",
+                  "hub-limit", "already-selected-or-own", "pool-limit"),
+    "shared-source": ("hydrated", "no-current-shared-revision"),
+    "queue": ("lexical", "path-link", "source-link", "prompt-link", "touch-link"),
+    "budget": ("admitted", "budget", "hard-budget"),
+    "layer": ("episodic-layer", "skill-subfile", "host-listed", "layer-limit",
+              "delivered-this-session"),
+    "gate": ("withheld",),
+    "capsule": ("capsule-limit",),
+    "delivery": ("selected",),
+}
+FUNNEL_BOUNDARIES = ("queue_after_runtime", "budget_admitted", "layer_pre_novelty",
+                     "repeat_withheld", "gate_input", "gate_withheld", "pack_input",
+                     "pack_omitted", "selected_post_pack")
+FUNNEL_RENDER_REASONS = ("excerpt", "render-limit", "sanitized-empty", "no-excerpt")
+
+
+def _funnel_counter(count: Optional[int] = None) -> dict[str, Any]:
+    return {"count": count, "state": "unknown" if count is None else "exact"}
+
+
+def _funnel_template(state: str = "active") -> dict[str, Any]:
+    return {
+        "schema_version": 1, "observer_state": state,
+        "scope": "authorized-metadata-observation-occurrences",
+        "absence": "unknown",
+        "coverage": {"bounded_channels": "authorized-observations-only",
+                     "history_pre_admission": "not-instrumented",
+                     "episodes": "not-instrumented", "working_sources": "not-instrumented",
+                     "path_only_events": "authorized-retained-records-only"},
+        "events": {stage: {reason: _funnel_counter(0 if state == "active" else None)
+                           for reason in reasons} for stage, reasons in FUNNEL_EVENTS.items()},
+        "boundaries": {name: _funnel_counter() for name in FUNNEL_BOUNDARIES},
+        "render": {"projection_state": "unknown", "scope": "capsule_projection",
+                   "authorization_scope": "authorized-retained-records",
+                   "emission": "unknown", "consumer": "unknown",
+                   "headers": _funnel_counter(),
+                   "reasons": {reason: _funnel_counter() for reason in FUNNEL_RENDER_REASONS}},
+    }
+
+
+class _PassiveFunnel:
+    """Fixed, content-free diagnostics. Never used by retrieval decisions."""
+    def __init__(self) -> None:
+        self.data = _funnel_template()
+
+    @staticmethod
+    def _increment(counter: dict[str, Any]) -> None:
+        if counter["count"] < FUNNEL_COUNT_LIMIT:
+            counter["count"] += 1
+        else:
+            counter["state"] = "lower-bound"
+
+    def event(self, stage: str, reason: str) -> None:
+        if (not isinstance(stage, str) or not isinstance(reason, str)
+                or reason not in FUNNEL_EVENTS.get(stage, ())):
+            return
+        self._increment(self.data["events"][stage][reason])
+
+    def boundary(self, name: str, items: list[dict[str, Any]], eligible: Callable) -> None:
+        if name not in FUNNEL_BOUNDARIES or not isinstance(items, (list, tuple)):
+            return
+        counter = _funnel_counter(0)
+        for item in items:
+            if eligible(item):
+                self._increment(counter)
+        self.data["boundaries"][name] = counter
+
+    def snapshot(self) -> dict[str, Any]:
+        return copy.deepcopy(self.data)
+
+    @staticmethod
+    def valid(value: Any) -> bool:
+        template = _funnel_template()
+        if (not isinstance(value, dict) or set(value) != set(template)
+                or type(value["schema_version"]) is not int or value["schema_version"] != 1
+                or value["observer_state"] not in ("active", "unavailable")
+                or any(value[key] != template[key] for key in ("scope", "absence", "coverage"))):
+            return False
+        def counter(item: Any) -> bool:
+            return (isinstance(item, dict) and set(item) == {"count", "state"}
+                    and ((item["state"] == "unknown" and item["count"] is None)
+                         or item["state"] in ("exact", "lower-bound")
+                         and type(item["count"]) is int and 0 <= item["count"] <= FUNNEL_COUNT_LIMIT
+                         and (item["state"] != "lower-bound" or item["count"] == FUNNEL_COUNT_LIMIT)))
+        if (not isinstance(value["events"], dict) or set(value["events"]) != set(FUNNEL_EVENTS)
+                or not isinstance(value["boundaries"], dict)
+                or set(value["boundaries"]) != set(FUNNEL_BOUNDARIES)):
+            return False
+        for stage, reasons in FUNNEL_EVENTS.items():
+            group = value["events"][stage]
+            if not isinstance(group, dict) or set(group) != set(reasons) or not all(counter(x) for x in group.values()):
+                return False
+        render = value["render"]
+        return (all(counter(x) for x in value["boundaries"].values())
+                and isinstance(render, dict) and set(render) == set(template["render"])
+                and render["projection_state"] in ("unknown", "observed")
+                and all(render[key] == template["render"][key] for key in
+                        ("scope", "authorization_scope", "emission", "consumer"))
+                and counter(render["headers"]) and isinstance(render["reasons"], dict)
+                and set(render["reasons"]) == set(FUNNEL_RENDER_REASONS)
+                and all(counter(x) for x in render["reasons"].values()))
+
+    @staticmethod
+    def with_render(value: Any, records: list[dict[str, Any]]) -> dict[str, Any]:
+        if not _PassiveFunnel.valid(value):
+            return _funnel_template("unavailable")
+        result = copy.deepcopy(value)
+        # An invalid re-finalization must not retain an earlier projection claim.
+        result["render"] = _funnel_template()["render"]
+        # Existing finalization already restricts these to retained authorized records.
+        # This deliberately does not claim coverage of records lost to trace caps.
+        counts = {reason: _funnel_counter(0) for reason in FUNNEL_RENDER_REASONS}
+        headers = _funnel_counter(0)
+        for record in records:
+            reason, length = record.get("body_reason"), record.get("body_bytes")
+            if (reason not in FUNNEL_RENDER_REASONS or record.get("header_present") is not True
+                    or type(length) is not int or length < 0
+                    or type(record.get("pointer_only")) is not bool
+                    or record["pointer_only"] != (length == 0)
+                    or (reason == "excerpt") != (length > 0)):
+                return result
+            _PassiveFunnel._increment(headers)
+            _PassiveFunnel._increment(counts[reason])
+        result["render"].update(projection_state="observed", headers=headers, reasons=counts)
+        return result
+
+
+def unknown_ordinary_receipt() -> dict[str, Any]:
+    """Unavailable metadata says nothing about an attempt or its effects."""
+    return {"schema_version": 1, "observation_state": "unavailable",
+            "plans_present": None, "returned_status": "unknown"}
+
+
+def normalize_ordinary_receipt(value: Any) -> Optional[dict[str, Any]]:
+    """Rebuild the fixed scalar sibling without touching arbitrary value hooks."""
+    keys = ("schema_version", "observation_state", "plans_present", "returned_status")
+    if (type(value) is not dict or any(type(key) is not str for key in value)
+            or set(value) != set(keys) or type(value["schema_version"]) is not int
+            or value["schema_version"] != 1 or type(value["observation_state"]) is not str
+            or type(value["returned_status"]) is not str):
+        return None
+    state, plans, status = value["observation_state"], value["plans_present"], value["returned_status"]
+    if state == "unavailable":
+        if plans is not None or status != "unknown":
+            return None
+    elif state == "observed":
+        if (type(plans) is not bool or status not in ("skipped", "deferred", "committed")
+                or (plans is False and status != "skipped")):
+            return None
+    else:
+        return None
+    return {"schema_version": 1, "observation_state": state,
+            "plans_present": plans, "returned_status": status}
+
+
+def _observe_ordinary_receipt(value: Any, plans_present: bool) -> dict[str, Any]:
+    if (type(value) is tuple and len(value) == 2 and type(value[0]) is str
+            and type(plans_present) is bool):
+        child = normalize_ordinary_receipt({"schema_version": 1, "observation_state": "observed",
+                                            "plans_present": plans_present, "returned_status": value[0]})
+        if child is not None:
+            return child
+    return unknown_ordinary_receipt()
+
+
+class RetrievalTrace:
+    """Bounded observer of existing decisions; never part of a capsule.
+
+    Absence from the observed search window is unknown, not a rank rejection.
+    Protected and missing watched documents share the same unavailable state.
+    Only metadata already authorized by privacy/owner policy is collected.
+    """
+    def __init__(self, config: dict[str, Any], paths: Optional[list[str]] = None):
+        self.config = config
+        self.records = {path: {"path": path, "state": "unavailable", "events": []}
+                        for path in validate_trace_paths(paths)}
+        self.truncated = False
+        self.search_limit: Optional[int] = None
+        self.evidence_terms = 0
+        self.required_terms: Optional[int] = None
+        self.ordinary_receipt = None
+        try:
+            self.funnel = _PassiveFunnel()
+        except Exception:
+            self.funnel = None
+
+    def _eligible(self, item: dict[str, Any]) -> bool:
+        owners = self.config.get("owners", ["*"])
+        return (
+            _trace_path_allowed(item.get("path"))
+            and item.get("privacy") in self.config["allowed_privacy"]
+            and (item.get("privacy") != "restricted" or "*" in owners or item.get("owner") in owners)
+        )
+
+    def _record(self, item: dict[str, Any]) -> Optional[dict[str, Any]]:
+        if not self._eligible(item):
+            return None
+        path = item["path"]
+        if path not in self.records:
+            if len(self.records) >= TRACE_RECORD_LIMIT:
+                self.truncated = True
+                return None
+            self.records[path] = {"path": path, "state": "not_observed_in_bounded_search", "events": []}
+        record = self.records[path]
+        if record["state"] == "unavailable":
+            record["state"] = "not_observed_in_bounded_search"
+        digest = item.get("source_hash")
+        if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+            record["source_sha256"] = digest
+        return record
+
+    def watch(self, connection: sqlite3.Connection) -> None:
+        for path in list(self.records):
+            row = connection.execute("SELECT * FROM document_metadata WHERE path = ?", (path,)).fetchone()
+            if row is not None:
+                self._record(dict(row))
+
+    def observe(self, item: dict[str, Any], stage: str, reason: str, **numbers: Any) -> None:
+        self._funnel_event(item, stage, reason)
+        record = self._record(item)
+        if record is None:
+            return
+        record["state"] = "observed"
+        event = {"stage": stage, "reason": reason}
+        for key in ("rank", "matched_terms", "required_terms", "score", "threshold", "estimated_tokens"):
+            value = numbers.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                event[key] = round(value, 6)
+        if len(record["events"]) < TRACE_EVENT_LIMIT:
+            record["events"].append(event)
+        else:
+            record["events_truncated"] = True
+            if stage == "delivery":
+                record["events"][-1] = event
+
+    def exclusions(self, entries: Iterable[dict[str, Any]], stage: str) -> None:
+        for item in entries:
+            record = self.records.get(item.get("path"))
+            if record is not None and record["state"] != "unavailable":
+                # Already checked metadata; a path-only exclusion cannot admit
+                # a previously unseen protected record.
+                previous = record["events"][-1] if record["events"] else None
+                event = {"stage": stage, "reason": item["reason"]}
+                if previous is not None and all(previous.get(key) == value for key, value in event.items()):
+                    continue
+                try:
+                    if self.funnel is not None:
+                        self.funnel.event(stage, item["reason"])
+                except Exception:
+                    self.funnel = None
+                if len(record["events"]) < TRACE_EVENT_LIMIT:
+                    record["events"].append(event)
+                else:
+                    record["events_truncated"] = True
+
+    def known_event(self, path: str, stage: str, reason: str) -> None:
+        record = self.records.get(path)
+        if record is not None and record["state"] != "unavailable":
+            record["state"] = "observed"
+            self.exclusions([{"path": path, "reason": reason}], stage)
+
+    def _funnel_event(self, item: dict[str, Any], stage: str, reason: str) -> None:
+        try:
+            if self.funnel is not None and self._eligible(item):
+                self.funnel.event(stage, reason)
+        except Exception:
+            self.funnel = None
+
+    def funnel_boundary(self, name: str, items: list[dict[str, Any]]) -> None:
+        try:
+            if self.funnel is not None:
+                self.funnel.boundary(name, items, self._eligible)
+        except Exception:
+            self.funnel = None
+
+    def _funnel_snapshot(self) -> Optional[dict[str, Any]]:
+        try:
+            if self.funnel is not None:
+                result = self.funnel.snapshot()
+                if _PassiveFunnel.valid(result):
+                    return result
+        except Exception:
+            pass
+        try:
+            return _funnel_template("unavailable")
+        except Exception:
+            # Missing additive diagnostics mean unknown; preserve the legacy trace.
+            return None
+
+    def snapshot(self) -> dict[str, Any]:
+        value = self._funnel_snapshot()
+        try:
+            receipt = normalize_ordinary_receipt(self.ordinary_receipt)
+        except Exception:
+            receipt = None
+        return {"schema_version": 1, **({"ordinary_receipt": receipt} if receipt is not None else {}), **({"funnel": value} if value is not None else {}),
+                "records": list(self.records.values()), "truncated": self.truncated,
+                "search_limit": self.search_limit,
+                "evidence_terms": self.evidence_terms, "required_terms": self.required_terms,
+                "rank_scope": "authorized records in observed window; protected positions are omitted",
+                "bounds": {"records": TRACE_RECORD_LIMIT, "events_per_record": TRACE_EVENT_LIMIT,
+                           "watched_paths": TRACE_WATCH_LIMIT},
+                "coverage": "existing bounded candidate windows only; unobserved causes are unknown"}
+
+
+def _trace_directory(repository: Path, *, create: bool = False) -> Optional[int]:
+    """Anchor every operation to directory handles; never follow replaced parents.
+
+    Hosts lacking safe descriptor-relative opens skip optional diagnostics.
+    """
+    if not TRACE_SAFE_DIRECTORY_IO:
+        return None
+    descriptor = None
+    try:
+        descriptor = os.open(repository, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        for part in ("memory-bank", "local", "retrieval-traces"):
+            if create:
+                try:
+                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
+                except FileExistsError:
+                    pass
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except (OSError, ValueError):
+        if descriptor is not None:
+            os.close(descriptor)
+        return None
+
+
+def _trace_payload_json(payload: dict[str, Any]) -> str:
+    candidate = payload
+    if "ordinary_receipt" in payload:
+        try:
+            receipt = normalize_ordinary_receipt(payload["ordinary_receipt"])
+        except Exception:
+            receipt = None
+        candidate = {key: value for key, value in payload.items() if key != "ordinary_receipt"}
+        if receipt is not None:
+            candidate["ordinary_receipt"] = receipt
+    try:
+        encoded = json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    except Exception:
+        if "ordinary_receipt" not in candidate:
+            raise
+        candidate = {key: value for key, value in candidate.items() if key != "ordinary_receipt"}
+        encoded = json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if "ordinary_receipt" in candidate and len(encoded.encode("utf-8")) > TRACE_FILE_LIMIT:
+        candidate = {key: value for key, value in candidate.items() if key != "ordinary_receipt"}
+        encoded = json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if "funnel" in candidate and len(encoded.encode("utf-8")) > TRACE_FILE_LIMIT:
+        # Additive diagnostics cannot displace a legacy trace or final render.
+        legacy = {key: value for key, value in candidate.items() if key != "funnel"}
+        encoded = json.dumps(legacy, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return encoded
+
+
+def _write_trace(directory: int, identifier: str, payload: dict[str, Any]) -> None:
+    encoded = _trace_payload_json(payload).encode("utf-8")
+    if len(encoded) > TRACE_FILE_LIMIT:
+        return
+    temporary = "." + identifier + ".tmp"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+    try:
+        handle = os.fdopen(descriptor, "wb")
+        descriptor = None
+        with handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, identifier + ".json", src_dir_fd=directory, dst_dir_fd=directory)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+
+
+def _save_trace(repository: Path, identifier: str, trace: RetrievalTrace, config: dict[str, Any]) -> None:
+    # A diagnostics failure cannot withhold the capsule or change delivery state.
+    directory = None
+    try:
+        if not TRACE_ID.fullmatch(identifier):
+            return
+        directory = _trace_directory(repository, create=True)
+        if directory is None:
+            return
+        payload = {**trace.snapshot(), "id": identifier, "created_at": utc_now()}
+        _write_trace(directory, identifier, payload)
+        files = []
+        for name in os.listdir(directory):
+            if name.endswith(".json") and TRACE_ID.fullmatch(name[:-5]):
+                try:
+                    info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    if stat.S_ISREG(info.st_mode):
+                        files.append((info.st_mtime_ns, name))
+                except OSError:
+                    continue
+        current_name = identifier + ".json"
+        if not any(name == current_name for _, name in files):
+            # Some filesystems enumerate the directory handle's opening
+            # snapshot. The new file is still reachable through anchored stat.
+            info = os.stat(current_name, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISREG(info.st_mode):
+                files.append((info.st_mtime_ns, current_name))
+        files.sort()
+        victims = [entry for entry in files if entry[1] != identifier + ".json"]
+        for _, name in victims[:max(0, len(files) - local_manifest_retention(config))]:
+            try:
+                os.unlink(name, dir_fd=directory)
+            except OSError:
+                pass
+    except (OSError, ValueError, TypeError):
+        pass
+    finally:
+        if directory is not None:
+            os.close(directory)
+
+
+def record_render_trace(repository: Path, capsule: dict[str, Any], render: dict[str, Any]) -> None:
+    """Finalize an existing sidecar from the actual emitter, never a preview.
+
+    Open the existing inode: a concurrent retention prune must not resurrect it.
+    Preserve creation mtime so rendering does not extend the retention window.
+    """
+    descriptor = None
+    directory = None
+    try:
+        identifier = Path(str(capsule.get("manifest", ""))).stem
+        if not TRACE_ID.fullmatch(identifier):
+            return
+        directory = _trace_directory(repository)
+        if directory is None:
+            return
+        descriptor = os.open(identifier + ".json", os.O_RDWR | os.O_NOFOLLOW, dir_fd=directory)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > TRACE_FILE_LIMIT:
+            return
+        with os.fdopen(descriptor, "r+", encoding="utf-8", newline="") as handle:
+            descriptor = None
+            data = json.load(handle)
+            allowed = {item["path"] for item in data["records"] if item["state"] != "unavailable"}
+            data["render"] = {"sha256": render["sha256"], "bytes": render["bytes"], "form": render.get("form", "capsule_text"),
+                              "records": [item for item in render["records"] if item["path"] in allowed]}
+            if "funnel" in data:
+                try:
+                    data["funnel"] = _PassiveFunnel.with_render(data["funnel"], data["render"]["records"])
+                except Exception:
+                    try:
+                        data["funnel"] = _funnel_template("unavailable")
+                    except Exception:
+                        data.pop("funnel", None)
+            encoded = _trace_payload_json(data)
+            if len(encoded.encode("utf-8")) > TRACE_FILE_LIMIT:
+                return
+            handle.seek(0)
+            handle.write(encoded)
+            handle.truncate()
+            handle.flush()
+            os.utime(handle.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
+
+
+def _window_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Ambiguous observation object")
+        result[key] = value
+    return result
+
+
+# Diagnosis consumes only this invocation's approved, bounded metadata sidecar.
+# It never certifies source absence or requests a retrieval/scoring experiment.
+FUNNEL_DIAGNOSIS_LOSSES = {
+    "term_coverage": ("admission", "term-coverage"),
+    "relative_score_floor": ("ranking", "relative-score-floor"),
+    "budget": ("budget", "budget"), "hard_budget": ("budget", "hard-budget"),
+    "layer": ("layer", "layer-limit"), "repeat": ("layer", "delivered-this-session"),
+    "gate": ("gate", "withheld"), "pack": ("capsule", "capsule-limit"),
+    "authority": ("runtime", "authority"), "lifecycle": ("runtime", "lifecycle"),
+    "stale": ("runtime", "stale"), "source_missing": ("runtime", "source-missing"),
+    "map_unverifiable": ("runtime", "map-unverifiable"), "map_drift": ("runtime", "map-drift"),
+}
+
+
+def unknown_funnel_diagnosis() -> dict[str, Any]:
+    return {
+        "schema_version": 1, "observation_state": "unavailable",
+        "source_coverage": "unknown", "quality": "unmeasured",
+        "count_scope": "authorized-observation-occurrences",
+        "coverage": {"history_pre_admission": "not-instrumented", "episodes": "not-instrumented",
+                     "working_sources": "not-instrumented", "path_only_events": "authorized-retained-records-only"},
+        "loss_observations": {key: _funnel_counter() for key in FUNNEL_DIAGNOSIS_LOSSES},
+        "boundaries": {key: _funnel_counter() for key in FUNNEL_BOUNDARIES},
+        "render_projection": {"scope": "authorized-retained-records",
+                              "headers": _funnel_counter(),
+                              "reasons": {key: _funnel_counter() for key in FUNNEL_RENDER_REASONS}},
+        "emission": "unknown", "consumer": "unknown", "next_action": "unknown",
+    }
+
+
+def valid_funnel_diagnosis(value: Any) -> bool:
+    template = unknown_funnel_diagnosis()
+    if (not isinstance(value, dict) or set(value) != set(template)
+            or type(value["schema_version"]) is not int or value["schema_version"] != 1
+            or value["observation_state"] not in ("observed", "unavailable")
+            or value["next_action"] not in ("unknown", "inspect-observed-loss")
+            or any(value[key] != template[key] for key in
+                   ("source_coverage", "quality", "count_scope", "coverage", "emission", "consumer"))):
+        return False
+    def counter(item: Any) -> bool:
+        return (isinstance(item, dict) and set(item) == {"count", "state"}
+                and (item == {"count": None, "state": "unknown"}
+                     or item["state"] in ("exact", "lower-bound") and type(item["count"]) is int
+                     and 0 <= item["count"] <= FUNNEL_COUNT_LIMIT
+                     and (item["state"] != "lower-bound" or item["count"] == FUNNEL_COUNT_LIMIT)))
+    for key in ("loss_observations", "boundaries"):
+        if (not isinstance(value[key], dict) or set(value[key]) != set(template[key])
+                or not all(counter(item) for item in value[key].values())):
+            return False
+    render = value["render_projection"]
+    if (not isinstance(render, dict) or set(render) != set(template["render_projection"])
+            or render["scope"] != template["render_projection"]["scope"] or not counter(render["headers"])
+            or not isinstance(render["reasons"], dict) or set(render["reasons"]) != set(FUNNEL_RENDER_REASONS)
+            or not all(counter(item) for item in render["reasons"].values())):
+        return False
+    if value["observation_state"] == "unavailable":
+        return value == template
+    action = ("inspect-observed-loss" if any(type(item["count"]) is int and item["count"] > 0
+              for item in value["loss_observations"].values()) else "unknown")
+    return value["next_action"] == action
+
+
+def diagnose_funnel(repository: Path, capsule: Any, expected_render: Any, _ordinary_receipt_sink: Any = None) -> dict[str, Any]:
+    """One anchored metadata read; every unavailable/rejected state is identical."""
+    directory = descriptor = None
+    receipt = None
+    sink = _ordinary_receipt_sink if type(_ordinary_receipt_sink) is dict and len(_ordinary_receipt_sink) == 0 else None
+    def finish(result):
+        if sink is not None:
+            try:
+                child = normalize_ordinary_receipt(receipt) if receipt is not None else unknown_ordinary_receipt()
+                if child is not None:
+                    sink["ordinary_receipt"] = child
+            except Exception:
+                pass
+        return result
+    try:
+        if not isinstance(capsule, dict) or not isinstance(expected_render, dict):
+            return finish(unknown_funnel_diagnosis())
+        reference = capsule.get("manifest")
+        if (not isinstance(reference, str) or re.fullmatch(
+                r"(?:project-brain/control|memory-bank/local)/retrieval-manifests/[0-9a-f-]{36}\.json",
+                reference) is None):
+            return finish(unknown_funnel_diagnosis())
+        identifier = reference.rsplit("/", 1)[1][:-5]
+        form, length, digest = (expected_render.get(key) for key in ("form", "bytes", "sha256"))
+        if (TRACE_ID.fullmatch(identifier) is None or form not in ("capsule_text", "printed_capsule")
+                or type(length) is not int or not 0 <= length <= TRACE_FILE_LIMIT or not _window_digest(digest)):
+            return finish(unknown_funnel_diagnosis())
+        if not callable(getattr(os, "getuid", None)):
+            return finish(unknown_funnel_diagnosis())
+        directory = _trace_directory(repository)
+        if directory is None:
+            return finish(unknown_funnel_diagnosis())
+        filename = identifier + ".json"
+        descriptor = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        before = os.fstat(descriptor)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > TRACE_FILE_LIMIT
+                or before.st_uid != os.getuid()):
+            return finish(unknown_funnel_diagnosis())
+        encoded = os.read(descriptor, TRACE_FILE_LIMIT + 1)
+        after = os.fstat(descriptor)
+        current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        attributes = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink", "st_uid")
+        if (len(encoded) > TRACE_FILE_LIMIT or len(encoded) != before.st_size or after.st_nlink != 1
+                or any(getattr(before, key) != getattr(after, key) or getattr(after, key) != getattr(current, key)
+                       for key in attributes)):
+            return finish(unknown_funnel_diagnosis())
+        data = json.loads(encoded, object_pairs_hook=_window_json_object)
+        if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
+                or data["schema_version"] != 1 or data.get("id") != identifier):
+            return finish(unknown_funnel_diagnosis())
+        render, funnel = data.get("render"), data.get("funnel")
+        if (not isinstance(render, dict) or render.get("form") != form or type(render.get("bytes")) is not int
+                or render["bytes"] != length or render.get("sha256") != digest):
+            return finish(unknown_funnel_diagnosis())
+        try:
+            receipt = normalize_ordinary_receipt(data.get("ordinary_receipt"))
+        except Exception:
+            receipt = None
+        if (not _PassiveFunnel.valid(funnel) or funnel["observer_state"] != "active"
+                or funnel["render"]["projection_state"] != "observed"):
+            return finish(unknown_funnel_diagnosis())
+        result = unknown_funnel_diagnosis()
+        result["observation_state"] = "observed"
+        result["loss_observations"] = {key: copy.deepcopy(funnel["events"][stage][reason])
+                                      for key, (stage, reason) in FUNNEL_DIAGNOSIS_LOSSES.items()}
+        result["boundaries"] = copy.deepcopy(funnel["boundaries"])
+        result["render_projection"].update(headers=copy.deepcopy(funnel["render"]["headers"]),
+                                          reasons=copy.deepcopy(funnel["render"]["reasons"]))
+        if any(type(item["count"]) is int and item["count"] > 0 for item in result["loss_observations"].values()):
+            result["next_action"] = "inspect-observed-loss"
+        return finish(result if valid_funnel_diagnosis(result) else unknown_funnel_diagnosis())
+    except Exception:
+        return finish(unknown_funnel_diagnosis())
+    finally:
+        for handle in (descriptor, directory):
+            if handle is not None:
+                try:
+                    os.close(handle)
+                except Exception:
+                    pass
+
+
+def _read_window_render(repository: Path, reference: dict[str, Any], doc_ref: str) -> Optional[dict[str, Any]]:
+    """Read bounded final-render metadata through existing secured handles."""
+    descriptor = directory = None
+    try:
+        identifier = reference.get("manifest_id")
+        if (not isinstance(identifier, str) or TRACE_ID.fullmatch(identifier) is None
+                or reference.get("doc_ref") != _window_key(doc_ref)):
+            return None
+        directory = _trace_directory(repository)
+        if directory is None:
+            return None
+        descriptor = os.open(identifier + ".json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > TRACE_FILE_LIMIT:
+            return None
+        encoded = os.read(descriptor, TRACE_FILE_LIMIT + 1)
+        if len(encoded) > TRACE_FILE_LIMIT:
+            return None
+        data = json.loads(encoded, object_pairs_hook=_window_json_object)
+        if not isinstance(data, dict) or data.get("id") != identifier:
+            return None
+        records = data.get("records")
+        render = data.get("render")
+        if (not isinstance(records, list) or len(records) > TRACE_RECORD_LIMIT
+                or not isinstance(render, dict) or render.get("form") not in ("capsule_text", "printed_capsule")):
+            return None
+        sources = [item for item in records if isinstance(item, dict) and item.get("path") == doc_ref]
+        if len(sources) != 1 or sources[0].get("state") != "observed":
+            return None
+        events = sources[0].get("events")
+        if (not isinstance(events, list) or len(events) > TRACE_EVENT_LIMIT
+                or not any(isinstance(event, dict) and event.get("stage") == "delivery"
+                           and event.get("reason") == "selected" for event in events)):
+            return None
+        bodies = render.get("records")
+        if not isinstance(bodies, list) or len(bodies) > TRACE_RECORD_LIMIT:
+            return None
+        bodies = [item for item in bodies if isinstance(item, dict) and item.get("path") == doc_ref]
+        if len(bodies) != 1:
+            return None
+        body = bodies[0]
+        length, digest, reason = body.get("body_bytes"), body.get("body_sha256"), body.get("body_reason")
+        if (body.get("header_present") is not True or not _window_digest(digest)
+                or type(length) is not int or not 0 <= length <= WINDOW_BODY_BYTES_LIMIT
+                or type(body.get("pointer_only")) is not bool or body["pointer_only"] != (length == 0)
+                or type(body.get("shrunk")) is not bool
+                or reason not in ("excerpt", "render-limit", "sanitized-empty", "no-excerpt")
+                or (length > 0) != (reason == "excerpt")
+                or length == 0 and digest != hashlib.sha256(b"").hexdigest()):
+            return None
+        result = {key: body[key] for key in ("body_bytes", "body_sha256", "body_reason", "pointer_only", "shrunk")}
+        initial = body.get("initial_excerpt_bytes")
+        if type(initial) is int and length <= initial <= WINDOW_BODY_BYTES_LIMIT:
+            result["initial_excerpt_bytes"] = initial
+        source_hash = sources[0].get("source_sha256")
+        if _window_digest(source_hash):
+            result["source_sha256"] = source_hash
+        return result
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
+
+
+def _observe_repeat_window(
+    trace: RetrievalTrace, repository: Path, item: dict[str, Any],
+    key: str, revision: str, seen: list[Any], turn: int,
+    previous: dict[str, Any], proposals: dict[str, Any],
+) -> None:
+    """Add exposure metadata only; existing handed decisions remain authority."""
+    record = trace._record(item)
+    if record is None:
+        return
+    observation: dict[str, Any] = {"classification": "unknown-proposal", "scope": "document-pre-novelty-pre-pack"}
+    record["window_observation"] = observation
+    proposal = proposals.get(item["path"])
+    if not isinstance(proposal, dict) or set(proposal) != {"sha256", "bytes", "state"}:
+        return
+    digest, length, state = proposal["sha256"], proposal["bytes"], proposal["state"]
+    if (not _window_digest(digest) or type(length) is not int or not 0 <= length <= WINDOW_BODY_BYTES_LIMIT
+            or state not in ("excerpt", "sanitized-empty", "no-excerpt")
+            or (length > 0) != (state == "excerpt")
+            or length == 0 and digest != hashlib.sha256(b"").hexdigest()):
+        return
+    observation.update(proposal_sha256=digest, proposal_bytes=length, proposal_state=state,
+                       receipt_age=turn - seen[1], classification="empty-proposal" if not length else "unknown-prior-render")
+    if not length:
+        return
+    refs = _window_references(previous, previous.get("items", {}))
+    reference = refs.get(_window_key(key))
+    if (reference is None or reference["revision"] != revision or reference["handed_turn"] != seen[1]):
+        return
+    prior = _read_window_render(repository, reference, item["path"])
+    if prior is None:
+        return
+    source = prior.pop("source_sha256", None)
+    observation["prior"] = prior
+    current = item.get("source_hash")
+    observation["source_relation"] = (
+        "unknown-source" if not _window_digest(source) or not _window_digest(current)
+        else "same-source" if source == current else "changed-source")
+    observation["classification"] = (
+        "same-window" if digest == prior["body_sha256"] and length == prior["body_bytes"]
+        else "different-exposure-window")
+
+
 def _prune_local_manifests(directory: Path, retention: int) -> None:
     """Bound ignored local manifests; the governed store has its own policy."""
     manifests = [path for path in directory.glob("*.json") if path.is_file()]
@@ -4373,6 +5541,40 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
+def _capsule_projection(selected: list[dict[str, Any]], local_episode_selected: list[dict[str, Any]]) -> dict[str, Any]:
+    """Preserve the exact category/history/related ordering of capsule layers."""
+    groups = {category: [] for category in BUDGETS}
+    for item in selected:
+        public = _public_item(item)
+        groups[item["category"]].append(public)
+    procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
+    history_items = [
+        item for group in groups.values() for item in group if item["layer"] == "episodic"
+    ]
+    # Recorded history (an event, or a local episode) first, then the
+    # changelog: the text ceiling shrinks from the tail, and the changelog's
+    # long sections are what gives way.
+    recorded = [item for item in history_items if item["kind"] == HISTORY_KIND][:CAPSULE_EVENT_LIMIT]
+    recorded.extend(local_episode_selected[: CAPSULE_EVENT_LIMIT - len(recorded)])
+    episodic = [
+        *recorded,
+        *[item for item in history_items if item["kind"] != HISTORY_KIND][:CAPSULE_EPISODIC_LIMIT],
+    ]
+    # Episodic items are history, not knowledge slots: a delivered event used
+    # to be counted here too (category `dynamic`), then removed as a
+    # duplicate, and the third semantic item was lost with it.
+    semantic = [
+        item
+        for category in ("handoff", "durable", "dynamic", "evidence")
+        for item in groups[category]
+        if item["layer"] != "episodic"
+    ][:CAPSULE_SEMANTIC_LIMIT]
+    # Category grouping must not move related knowledge ahead of direct
+    # hits when the renderer spends its character allowance.
+    semantic.sort(key=lambda item: item.get("selection") in ("source-link", *AUTOMATIC_LINK_SELECTIONS))
+    return {"categories": groups, "procedural": procedural, "semantic": semantic, "episodic": episodic}
+
+
 def retrieve(
     connection: sqlite3.Connection,
     repository: Path,
@@ -4393,6 +5595,9 @@ def retrieve(
     session_id: Optional[str] = None,
     transcript: Optional[str] = None,
     pack: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
+    trace_paths: Optional[list[str]] = None,
+    prepare_excerpts: Optional[Callable[[sqlite3.Connection, list[dict[str, Any]], str], None]] = None,
+    describe_windows: Optional[Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Assemble governed context and record the manifest that justifies it.
 
@@ -4456,12 +5661,20 @@ def retrieve(
         task_path, task, _ = find_task(repository, task_identifier)
         validate_record(task)
     config = load_config(repository)
-    candidates, diagnostics = _candidates(connection, query, max(20, limit * 10))
+    trace = RetrievalTrace(config, trace_paths)
+    ensure_metadata_tables(connection)
+    try:
+        trace.watch(connection)
+    except sqlite3.Error:
+        # A failed observational lookup must not prevent the existing search.
+        pass
+    trace.search_limit = max(20, limit * 10)
+    candidates, diagnostics = _candidates(connection, query, max(20, limit * 10), trace=trace)
     # Recorded history has its own search over the whole request: events and
     # local episodes share one slot beside the changelog's.
     history = history_query(connection, query if history_text is None else history_text)
     event_candidates, episode_candidates = (
-        _history_candidates(connection, history) if history else ([], [])
+        _history_candidates(connection, history, trace=trace) if history else ([], [])
     )
     # Taken before any filter runs, so "nothing matched" cannot be confused
     # with "everything that matched was withheld".
@@ -4473,12 +5686,12 @@ def retrieve(
         for layer in ("procedural", "semantic", "episodic")
         if layer not in matched_layers
     ]
-    filtered, filter_excluded = _runtime_filter(repository, candidates, config)
+    filtered, filter_excluded = _runtime_filter(repository, candidates, config, trace=trace)
     # A candidate whose cited file changed kept a reduced score; ranking it
     # again keeps fresh knowledge of equal fit ahead of it. Stable, so
     # nothing else moves.
     filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
-    chosen_event, history_excluded = _best_history_event(repository, event_candidates, config)
+    chosen_event, history_excluded = _best_history_event(repository, event_candidates, config, trace=trace)
     filter_excluded.extend(history_excluded)
     history_episode: list[dict[str, Any]] = []
     if episode_candidates and (
@@ -4508,6 +5721,7 @@ def retrieve(
             config,
             paths,
             {item["path"] for item in filtered} | history_paths,
+            trace=trace,
         )
         path_matched_count = len(linked) + len(link_excluded)
         filter_excluded.extend(link_excluded)
@@ -4534,12 +5748,14 @@ def retrieve(
         automatic_linked, automatic_excluded = _automatic_link_candidates(
             connection, repository, config, list(unique.values()), filtered,
             own_paths=own_paths | history_paths, coverage=diagnostics.get("coverage") or {},
+            trace=trace,
         )
         filter_excluded.extend(automatic_excluded)
         filtered = _insert_automatic_links(filtered, automatic_linked)
     graph_candidates, graph_stats = _source_link_candidates(
         connection, repository, config, graph_anchors,
         {item["path"] for item in filtered} | history_paths,
+        trace=trace,
     )
     # Related knowledge fills remaining capacity after direct matches and
     # explicit paths; provenance alone never gives it priority over them.
@@ -4578,7 +5794,7 @@ def retrieve(
         requested = set(pending)
         conflict_candidates = _conflict_candidates(connection, requested)
         eligible_conflicts, conflict_excluded = _runtime_filter(
-            repository, conflict_candidates, config
+            repository, conflict_candidates, config, trace=trace
         )
         filter_excluded.extend(conflict_excluded)
         found_ids = {
@@ -4627,7 +5843,17 @@ def retrieve(
         else:
             kept.append(item)
     filtered = kept
+    for position, item in enumerate(filtered, start=1):
+        trace.observe(item, "queue", item.get("selection") or "lexical",
+                      rank=position, estimated_tokens=item.get("estimated_tokens"),
+                      score=float(item.get("adjusted_score") or 0.0))
+    trace.exclusions(filter_excluded, "runtime")
+    trace.funnel_boundary("queue_after_runtime", filtered)
     selected, budget_excluded, usage, escalation_reason = _apply_budgets(filtered)
+    trace.funnel_boundary("budget_admitted", selected)
+    trace.exclusions(budget_excluded, "budget")
+    for item in selected:
+        trace.observe(item, "budget", "admitted", estimated_tokens=item.get("estimated_tokens"))
     # Skills and policy, strong matches only: every host loads its own skill
     # catalogue and picks from it, agents opened none of 148 skill pointers
     # they were handed on real installations, and on 61 graded real prompts a
@@ -4704,6 +5930,11 @@ def retrieve(
     if local_episode_selected and selected_tokens + local_episode_tokens > TARGET_BUDGET:
         local_episode_selected = []
         budget_excluded.append({"path": "local-episode", "reason": "budget"})
+    trace.funnel_boundary("layer_pre_novelty", capsule_selected)
+    # Optional maintainer experiment: eligibility and episode admission are
+    # already fixed; prepare the quote before session novelty is decided.
+    if prepare_excerpts is not None:
+        prepare_excerpts(connection, capsule_selected, query)
     # The conversation already holds what it was handed in its last few turns:
     # the same item at the same revision is not handed again. Its slot is not
     # refilled - the next candidate down is weaker, and promoting it to fill
@@ -4715,6 +5946,16 @@ def retrieve(
         else None
     )
     session_deliveries = _load_session_deliveries(connection) if session else {}
+    session_expected = _receipt_expectation(session_deliveries, session) if session else None
+    window_proposals: dict[str, Any] = {}
+    if session and describe_windows is not None:
+        try:
+            proposed = describe_windows(connection, copy.deepcopy({
+                "query": query, **_capsule_projection(capsule_selected, local_episode_selected)}))
+            if isinstance(proposed, dict):
+                window_proposals = proposed
+        except Exception:
+            pass
     session_turn = 0
     repeated: list[dict[str, Any]] = []
     repeated_episodes: list[dict[str, Any]] = []
@@ -4753,6 +5994,12 @@ def retrieve(
             delivery_keys[item["path"]] = (key, revision)
             if handed(key, revision):
                 repeated.append(item)
+                if describe_windows is not None:
+                    try:
+                        _observe_repeat_window(trace, repository, item, key, revision, recent[key],
+                                               session_turn, previous_entry, window_proposals)
+                    except Exception:
+                        pass
             else:
                 fresh_selection.append(item)
         capsule_selected = fresh_selection
@@ -4765,6 +6012,8 @@ def retrieve(
             else:
                 fresh_episodes.append(episode)
         local_episode_selected = fresh_episodes
+    if session:
+        trace.funnel_boundary("repeat_withheld", repeated)
     capsule_paths = {item["path"] for item in capsule_selected}
     layer_excluded = [
         {
@@ -4797,7 +6046,7 @@ def retrieve(
     signature = _retrieval_signature(
         query,
         [
-            *((item["path"], item["source_hash"]) for item in selected),
+            *(item.get("_excerpt_identity", (item["path"], item["source_hash"])) for item in selected),
             *(_episode_signature(episode) for episode in local_episode_selected),
         ],
         task["revision"] if task is not None else 0,
@@ -4805,7 +6054,9 @@ def retrieve(
     baseline_key = _retrieval_baseline_key(
         own_id if own_id is not None else "no-task", host, entry_point
     )
-    previous = _load_last_retrievals(connection).get(baseline_key)
+    baseline_snapshot = _load_last_retrievals(connection)
+    baseline_expected = _receipt_expectation(baseline_snapshot, baseline_key)
+    previous = baseline_snapshot.get(baseline_key)
     gate = gate_decision(
         gate_mode,
         signature=signature,
@@ -4819,8 +6070,13 @@ def retrieve(
         # The selection above already left out what this conversation holds.
         conversation=session is not None,
     )
+    trace.funnel_boundary("gate_input", selected)
     withheld = gate["mode"] == "enforce" and gate["decision"] == "skip"
+    trace.funnel_boundary("gate_withheld", selected if withheld else [])
+    trace.exclusions(layer_excluded, "layer")
     if withheld:
+        for item in selected:
+            trace.observe(item, "gate", "withheld")
         # The gate saves the turn from a pointer, not the database from a
         # query: the work is already done and cost nothing extra. What is
         # withheld is the claim "this is relevant right now".
@@ -4833,35 +6089,8 @@ def retrieve(
     else:
         manifest_directory = repository / "memory-bank" / "local" / "retrieval-manifests"
     manifest_path = manifest_directory / f"{manifest_id}.json"
-    groups = {category: [] for category in BUDGETS}
-    for item in selected:
-        public = _public_item(item)
-        groups[item["category"]].append(public)
-    procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
-    history_items = [
-        item for group in groups.values() for item in group if item["layer"] == "episodic"
-    ]
-    # Recorded history (an event, or a local episode) first, then the
-    # changelog: the text ceiling shrinks from the tail, and the changelog's
-    # long sections are what gives way.
-    recorded = [item for item in history_items if item["kind"] == HISTORY_KIND][:CAPSULE_EVENT_LIMIT]
-    recorded.extend(local_episode_selected[: CAPSULE_EVENT_LIMIT - len(recorded)])
-    episodic = [
-        *recorded,
-        *[item for item in history_items if item["kind"] != HISTORY_KIND][:CAPSULE_EPISODIC_LIMIT],
-    ]
-    # Episodic items are history, not knowledge slots: a delivered event used
-    # to be counted here too (category `dynamic`), then removed as a
-    # duplicate, and the third semantic item was lost with it.
-    semantic = [
-        item
-        for category in ("handoff", "durable", "dynamic", "evidence")
-        for item in groups[category]
-        if item["layer"] != "episodic"
-    ][:CAPSULE_SEMANTIC_LIMIT]
-    # Category grouping must not move related knowledge ahead of direct
-    # hits when the renderer spends its character allowance.
-    semantic.sort(key=lambda item: item.get("selection") in ("source-link", *AUTOMATIC_LINK_SELECTIONS))
+    projection = _capsule_projection(selected, local_episode_selected)
+    groups, procedural, semantic, episodic = (projection[key] for key in ("categories", "procedural", "semantic", "episodic"))
     result: dict[str, Any] = {
         "query": query,
         "task_id": task["external_id"] if task is not None else None,
@@ -4912,6 +6141,7 @@ def retrieve(
         # turns as an item that "still applies" although the conversation
         # never saw it; so the conversation's record, the manifest and its
         # token estimates are written from what the capsule shows.
+        trace.funnel_boundary("pack_input", selected)
         pack_started = time.monotonic()
         result = pack(result)
         pack_seconds = time.monotonic() - pack_started
@@ -4922,6 +6152,7 @@ def retrieve(
             for episode in local_episode_selected
             if episode.get("id") not in shown_episodes
         ]
+        trace.funnel_boundary("pack_omitted", left_out)
         selected = [item for item in selected if item["path"] in shown_paths]
         local_episode_selected = [
             episode
@@ -4936,11 +6167,14 @@ def retrieve(
             for episode in left_out_episodes
         )
     usage = _token_usage(selected, local_episode_selected)
+    trace.funnel_boundary("selected_post_pack", selected)
+    trace.exclusions((item for item in layer_excluded if item["reason"] == "capsule-limit"), "capsule")
+    for item in selected:
+        trace.observe(item, "delivery", "selected")
     result["token_estimates"] = usage
-    if not withheld:
-        # Remembered only for a turn that actually delivered, so the next turn
-        # compares against the last real retrieval rather than against a skip.
-        _remember_retrieval(connection, baseline_key, signature)
+    baseline_plan = None if withheld else {
+        "key": baseline_key, "signature": signature, "expected": baseline_expected}
+    session_plan = None
     if session:
         # A repeat keeps the turn it was first handed in: once that is
         # SESSION_NOVELTY_TURNS behind, it is handed again, which is what a
@@ -4953,15 +6187,36 @@ def retrieve(
         for episode in local_episode_selected:
             key, revision = _episode_signature(episode)
             handed_now[key] = [revision, session_turn]
-        _remember_session_deliveries(
-            connection,
+        window_receipts = {}
+        for item in selected:
+            if item["path"] not in delivery_keys or not trace._eligible(item):
+                continue
+            key, revision = delivery_keys[item["path"]]
+            window_receipts[_window_key(key)] = {
+                "revision": revision, "handed_turn": session_turn,
+                "manifest_id": manifest_id, "doc_ref": _window_key(item["path"])}
+        session_plan = _ordinary_session_plan(
             session,
             session_turn,
             {**still_handed, **handed_now},
             session_deliveries,
             transcript_position,
             reset=compacted,
+            window_receipts=window_receipts,
+            exact_next_turn=True,
         )
+        # The expectation predates callbacks/packing, not the later projection.
+        session_plan["expected"] = session_expected
+    receipt_return = _commit_ordinary_receipts(connection, baseline=baseline_plan, session=session_plan)
+    try:
+        try:
+            trace.ordinary_receipt = _observe_ordinary_receipt(
+                receipt_return, baseline_plan is not None or session_plan is not None)
+        except Exception:
+            pass
+    finally:
+        # Drop the owner's sensitive latest-session projection immediately.
+        del receipt_return
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "id": manifest_id,
@@ -5040,4 +6295,5 @@ def retrieve(
         _prune_local_manifests(
             manifest_directory, local_manifest_retention(config)
         )
+    _save_trace(repository, manifest_id, trace, config)
     return result

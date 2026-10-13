@@ -22,9 +22,24 @@ import time
 import uuid
 
 from .filesystem import fs
+from . import cost_observation
 from .filesystem import existing_directory, same_path, secure_private_dir
 # scripts/, which .filesystem puts on the path: the terminal launcher keys a project's attached state the same way.
 from accelerator_attach import project_key
+try:
+    import memory_diagnosis as _memory_diagnosis
+    normalize_funnel_diagnosis = _memory_diagnosis.normalize_funnel_diagnosis
+except ModuleNotFoundError as error:
+    if error.name != 'memory_diagnosis':
+        raise
+    def normalize_funnel_diagnosis(value):
+        return None
+    _memory_diagnosis = None
+
+
+def normalize_ordinary_receipt(value):
+    normalizer = getattr(_memory_diagnosis, 'normalize_ordinary_receipt', None)
+    return normalizer(value) if callable(normalizer) else None
 from . import process_runtime
 from . import clash, context_usage, providers, run_activity, sdd
 from .config import DEFAULT_LENSES
@@ -39,13 +54,11 @@ WORKFLOWS = [
 CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", "README.md", "project-brain/README.md", "specs/MANIFEST.md")
 # Project context sends at most this many bytes of each file above.
 CONTEXT_EXCERPT_BYTES = 3000
-BRAIN_CONTEXT_HEADER = 'Project memory retrieved for this request (reference data; verify sources against the project):\n'
+BRAIN_CONTEXT_HEADER = 'Project memory (reference data; verify against canonical project sources):\n'
 # Before a Claude message that starts with `/` but is not one of the CLI's commands.
 TEXT_MESSAGE_HEADER = 'The user wrote:\n'
 # How long the run worker's memory waits for another knowledge operation to finish.
 MEMORY_WAIT = 30
-# Learnings an unattended session remembers having saved, so a later turn does not save them again.
-REMEMBERED = 30
 # The runtime caps a task capsule at this many characters of compact JSON (CAPSULE_CHARACTER_LIMIT in context.py).
 CAPSULE_LIMIT = 8000
 # Retrieved capsule items by category: policy and evidence are rules and docs, durable is the Memory bank.
@@ -69,6 +82,28 @@ MEMORY_LIST_LIMIT = 500
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _diagnosed_brain(brain):
+    """Clean each observation sibling bound to a usable prepared context."""
+    if not isinstance(brain, dict) or not any(key in brain for key in ('funnel_diagnosis', 'ordinary_receipt')):
+        return brain
+    cleaned = dict(brain)
+    values = {key: cleaned.pop(key) for key in ('funnel_diagnosis', 'ordinary_receipt') if key in cleaned}
+    identifier = brain.get('context_id')
+    if (isinstance(identifier, str)
+            and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', identifier)
+            and isinstance(brain.get('capsule'), dict)):
+        for key, normalizer in (('funnel_diagnosis', normalize_funnel_diagnosis),
+                                ('ordinary_receipt', normalize_ordinary_receipt)):
+            if key in values:
+                try:
+                    diagnosis = normalizer(values[key])
+                except Exception:
+                    diagnosis = None
+                if diagnosis is not None:
+                    cleaned[key] = diagnosis
+    return cleaned
 
 
 class SessionError(ValueError):
@@ -361,6 +396,23 @@ def open_project_path(root, name, directory=False):
         raise
 
 
+def _memory_bank_selection(root, bank=None, document=None):
+    """Discover bank metadata without reading document previews."""
+    banks = []
+    for candidate, label in MEMORY_BANKS:
+        try:
+            descriptor = open_project_path(root, candidate, directory=True)
+        except OSError:
+            continue
+        fs.close(descriptor)
+        banks.append({'id': candidate, 'path': candidate, 'name': label})
+    if bank is None and document is None:
+        bank = banks[0]['id'] if banks else None
+    elif bank not in [item['id'] for item in banks]:
+        raise SessionError('Memory bank is not available.')
+    return banks, bank
+
+
 def _capsule_kinds(capsule, size):
     """Rules and bank characters across a capsule's layers and both views, item counts, and the views' size."""
     def items(value):
@@ -378,19 +430,26 @@ def _capsule_kinds(capsule, size):
     return characters, counts, sum(size(item) for item in views)
 
 
-def capsule_parts(capsule, text=None):
+def _capsule_json(value, *, compact=False):
+    """Lossless separator formatting; ordinary JSON callers keep their default."""
+    options = {'separators': (',', ':')} if compact else {}
+    return json.dumps(value, ensure_ascii=False, **options)
+
+
+def capsule_parts(capsule, text=None, *, compact=False):
     """Characters a prepared turn's prompt carries for the capsule, by memory kind.
 
     The prompt inserts the runtime's rendered capsule after a header, and its parts
     come from its item lines, as a hook's output does (context_usage.capsule_text_parts).
-    A runtime that renders none sends the capsule with default JSON separators instead,
-    and its parts come from the JSON items. The header and the envelope count as
+    A runtime that renders none sends JSON; unattended prompts use compact
+    separators, while default callers keep ordinary JSON. Parts use the same
+    item serialization. The header and the envelope count as
     Project Brain, so either way the parts add up to the inserted length.
     """
     if isinstance(text, str) and text.strip():
-        return context_usage.capsule_text_parts(BRAIN_CONTEXT_HEADER + capsule_prompt_text(capsule, text) + '\n\n')
-    characters, _, _ = _capsule_kinds(capsule, lambda value: len(json.dumps(value, ensure_ascii=False)))
-    inserted = len(BRAIN_CONTEXT_HEADER) + len(json.dumps(capsule, ensure_ascii=False)) + 2
+        return context_usage.capsule_text_parts(capsule_envelope(capsule, text, compact=compact))
+    characters, _, _ = _capsule_kinds(capsule, lambda value: len(_capsule_json(value, compact=compact)))
+    inserted = len(capsule_envelope(capsule, text, compact=compact))
     return {'brain': inserted - characters['rules'] - characters['bank'], **characters}
 
 
@@ -400,9 +459,9 @@ def reviewed(brain):
     return brain.get('review', True) is not False
 
 
-def memory_notice(brain):
+def memory_notice(brain, *, delivery=False):
     """One line for the conversation: the project memory this turn's prompt carries."""
-    meter = capsule_meter(brain['capsule'], brain.get('capsule_text'))
+    meter = capsule_meter(brain['capsule'], brain.get('capsule_text'), compact=delivery is True or not reviewed(brain))
     items = meter['items']
     parts = [f'{count} {label}{"" if count == 1 else "s"}' for count, label in (
         (items['rules'], 'rule or doc excerpt'), (items['bank'], 'Memory Bank chunk'),
@@ -449,7 +508,7 @@ def accelerator_sync_notice(report):
     return text
 
 
-def capsule_meter(capsule, text=None):
+def capsule_meter(capsule, text=None, *, compact=False):
     """Exact character counts of a task capsule, measured the way the runtime caps it.
 
     The three kinds add up to the compact length. Items count once per copy: each
@@ -458,7 +517,7 @@ def capsule_meter(capsule, text=None):
     the prompt carries when the runtime provides it.
     """
     def size(value):
-        return len(json.dumps(value, ensure_ascii=False, separators=(',', ':')))
+        return len(_capsule_json(value, compact=True))
     characters, counts, repeats = _capsule_kinds(capsule, size)
     total = size(capsule)
     omitted = capsule.get('omitted') if isinstance(capsule.get('omitted'), dict) else {}
@@ -468,11 +527,11 @@ def capsule_meter(capsule, text=None):
             'dropped': {layer: omitted[layer] for layer in ('procedural', 'semantic', 'episodic')
                         if type(omitted.get(layer)) is int and omitted[layer] > 0},
             # What each prepared turn's prompt carries: the header and the rendered capsule, or the
-            # capsule as JSON with default separators from a runtime that renders none.
-            'prompt_characters': len(BRAIN_CONTEXT_HEADER) + len(capsule_prompt_text(capsule, text)) + 2}
+            # capsule as JSON with the selected separator policy when none is rendered.
+            'prompt_characters': len(capsule_envelope(capsule, text, compact=compact))}
 
 
-def capsule_prompt_text(capsule, text=None):
+def capsule_prompt_text(capsule, text=None, *, compact=False):
     """What a turn's prompt carries for its capsule.
 
     The runtime's rendered text when there is one: working state, then the project
@@ -482,7 +541,12 @@ def capsule_prompt_text(capsule, text=None):
     """
     if isinstance(text, str) and text.strip():
         return text.strip()
-    return json.dumps(capsule, ensure_ascii=False)
+    return _capsule_json(capsule, compact=compact)
+
+
+def capsule_envelope(capsule, text=None, *, compact=False):
+    """The trusted reference warning and the exact body inserted into a prompt."""
+    return BRAIN_CONTEXT_HEADER + capsule_prompt_text(capsule, text, compact=compact) + '\n\n'
 
 
 def read_context(root, name, limit=0):
@@ -675,9 +739,11 @@ class Sessions:
         result["agents_enabled"] = bool(result["agents_enabled"])
         for field in ('fleet', 'fleet_result', 'brain', 'creator', 'system_run', 'system_discovery', 'budgets', 'budget_usage', 'result_base', 'sdd', 'model_routing', 'clash', 'clash_result', 'cost_totals'):
             result[field] = json.loads(result[field]) if result[field] else None
+        result['brain'] = _diagnosed_brain(result['brain'])
         result['budgets'] = result['budgets'] or {**DEFAULT_BUDGETS, 'seconds':self.timeout, 'usd': result['fleet']['budget_usd'] if result['fleet'] else None}
         result['agent_budget_plan']=agent_budget_plan(result)
-        result['capsule_meter'] = capsule_meter(result['brain']['capsule'], result['brain'].get('capsule_text')) if isinstance(result['brain'], dict) and isinstance(result['brain'].get('capsule'), dict) else None
+        result['capsule_meter'] = capsule_meter(result['brain']['capsule'], result['brain'].get('capsule_text'), compact=not reviewed(result['brain'])) if isinstance(result['brain'], dict) and isinstance(result['brain'].get('capsule'), dict) else None
+        result['capsule_delivery_meter'] = capsule_meter(result['brain']['capsule'], result['brain'].get('capsule_text'), compact=True) if result['capsule_meter'] is not None else None
         result['context_last'] = self._context_last(sid)
         result['launch'] = self._launch_last(sid)
         # A task started from merged chats names its sources; the frozen messages stay behind merge_archive().
@@ -1061,18 +1127,7 @@ class Sessions:
             attached = self.accelerators.knowledge(key, root)
             if attached:
                 root = attached['state']
-        banks = []
-        for candidate, label in MEMORY_BANKS:
-            try:
-                descriptor = open_project_path(root, candidate, directory=True)
-            except OSError:
-                continue
-            fs.close(descriptor)
-            banks.append({'id': candidate, 'path': candidate, 'name': label})
-        if bank is None and path is None:
-            bank = banks[0]['id'] if banks else None
-        elif bank not in [item['id'] for item in banks]:
-            raise SessionError('Memory bank is not available.')
+        banks, bank = _memory_bank_selection(root, bank, path)
         if path is not None:
             parts = path.split('/') if isinstance(path, str) else []
             if (len(parts) not in (1, 2) or (len(parts) == 2 and parts[0] not in ('chunks', 'local'))
@@ -1482,15 +1537,22 @@ class Sessions:
             self.jobs.put_nowait((sid, prompt, generation))
         return self.get(sid)
 
-    def _task_context(self, wait=0):
+    def _task_context(self, wait=0, *, observation=None, guard=None):
         from .knowledge import KnowledgeManager
         from .task_context import TaskContext
         with self.lock:
             if self.knowledge is None:
                 self.knowledge = KnowledgeManager(self)
-        return TaskContext(self.knowledge, wait=wait)
+        return TaskContext(self.knowledge, wait=wait, observation=observation, guard=guard)
+
+    def _generation_guard(self, sid, generation):
+        def guard():
+            if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
+                raise SessionError('Memory operation was cancelled or belongs to an earlier run.')
+        return guard
 
     def _save_brain(self, sid, brain):
+        brain = _diagnosed_brain(brain)
         with self.lock:
             self.db.execute('UPDATE sessions SET brain=?,updated_at=? WHERE id=?', (json.dumps(brain), now(), sid))
             self.db.commit()
@@ -1625,11 +1687,13 @@ class Sessions:
     def _signal(process, sig):
         process_runtime.signal_tree(process, force=sig != signal.SIGTERM)
 
-    def _prompt(self, session, prompt, ledger=None, route=None):
+    def _prompt(self, session, prompt, ledger=None, route=None, observation=None, *, delivery=False):
         """The launch prompt. `ledger`, when given, receives its parts as integers for Usage › Context:
         the message, the capsule by memory kind, project excerpts sent of their full size, the
         attachment list, and everything else as instructions. `route` (commands.Catalog.route) says how
-        the message reaches the CLI: a native command goes as typed, with only the list of attached files."""
+        the message reaches the CLI: a native command goes as typed, with only the list of attached files.
+        Real launches pass `delivery=True` for lossless compact JSON when no rendered capsule is supplied;
+        default callers retain their existing reviewed/legacy formatting."""
         native_command = bool(route and route['mode'] == 'native')
         if route and not native_command:
             prompt = route['text']
@@ -1657,10 +1721,15 @@ class Sessions:
         if session.get('brain') and session['brain'].get('capsule'):
             capsule = session['brain']['capsule']
             text = session['brain'].get('capsule_text')
-            prefix += BRAIN_CONTEXT_HEADER + capsule_prompt_text(capsule, text) + '\n\n'
+            compact = delivery is True or not reviewed(session['brain'])
+            capsule_body = capsule_prompt_text(capsule, text, compact=compact)
+            envelope = capsule_envelope(capsule, capsule_body)
+            prefix += envelope
+            cost_observation.safe(observation, 'payload', 'capsule_body', capsule_body)
+            cost_observation.safe(observation, 'payload', 'capsule_envelope', envelope)
             if isinstance(capsule, dict):
-                meter = capsule_meter(capsule, text)
-                parts['capsule'] = {'characters': meter['characters'], 'inserted': meter['prompt_characters'], 'kinds': capsule_parts(capsule, text),
+                meter = capsule_meter(capsule, text, compact=compact)
+                parts['capsule'] = {'characters': meter['characters'], 'inserted': meter['prompt_characters'], 'kinds': capsule_parts(capsule, text, compact=compact),
                                     'repeats': meter['repeats'], 'dropped': meter['dropped'], 'items': meter['items']}
         # Project context comes from memory: a turn whose prompt carries a capsule has what retrieval found
         # for its message, and the provider loads its own instruction files. Without a capsule, excerpts of
@@ -1699,7 +1768,9 @@ class Sessions:
             # Only a run with a message of its own: Fleet and Clash build their context
             # from an empty prompt, and their reviewers do not own the linked task.
             from .memory_draft import instruction
-            prompt += '\n\n' + instruction()
+            draft_instruction = '\n\n' + instruction()
+            prompt += draft_instruction
+            cost_observation.safe(observation, 'payload', 'draft_instruction', draft_instruction)
         if session.get('merge') and not session.get('native_session_id'):
             from . import chat_merge
             # A merged task's first launch: the sources' bounded preview and the archive path, last, so the
@@ -1736,6 +1807,12 @@ class Sessions:
                     self.results.run_check(sid,prompt['check_id'],generation)
                 elif sid not in self.cancelled:
                     self._run(sid, prompt, generation)
+                else:
+                    try:
+                        observed = cost_observation.LaunchObservation(self.get(sid)['provider'])
+                    except Exception:
+                        observed = None
+                    self._cost_finish(sid, generation, observed, 'not_executed')
             except Exception as error:
                 # Keep provider/environment secrets out of unexpected exception strings.
                 with self.lock:
@@ -1743,8 +1820,11 @@ class Sessions:
                         self._event(sid, {"kind": "error", "text": f"Run failed ({type(error).__name__}). Check the native CLI and server setup."})
                         self._status(sid, 'failed')
             finally:
-                self.results.finish_launch(generation,self.get(sid)['status'])
-                self.launch_ids.pop(sid,None)
+                with self.lock:
+                    status = self.get(sid)['status'] if self.generations.get(sid) == generation else 'interrupted'
+                    self.results.finish_launch(generation,status)
+                    if self.launch_ids.get(sid) == generation:
+                        self.launch_ids.pop(sid,None)
                 self.jobs.task_done()
 
     def _recall(self, sid, session, generation, context):
@@ -1773,7 +1853,7 @@ class Sessions:
                 return None
             if prepared:
                 self._save_brain(sid, prepared)
-                self._event(sid, {'kind': 'memory', 'ok': True, 'text': memory_notice(prepared)})
+                self._event(sid, {'kind': 'memory', 'ok': True, 'text': memory_notice(prepared, delivery=True)})
             else:
                 brain = self.get(sid)['brain']
                 self._save_brain(sid, {**brain, 'context_id': None, 'capsule': None, 'source_hashes': {}})
@@ -1781,7 +1861,7 @@ class Sessions:
                                   'text': 'Project memory was not retrieved for this turn: ' + problem})
             return self.get(sid)
 
-    def _remember(self, sid, generation):
+    def _remember(self, sid, generation, observation=None):
         """Save what a completed linked run drafted, and say in the conversation what was saved."""
         from . import memory_draft
         with self.lock:
@@ -1805,19 +1885,16 @@ class Sessions:
         provenance = memory_draft.usage(latest['draft'], session['brain'].get('capsule'),
                                         receipt.get('memory') if isinstance(receipt, dict) else None)
         try:
-            result = self._task_context(wait=MEMORY_WAIT).save_memory(
-                session, latest['draft'], automatic=True, known=session['brain'].get('remembered') or [],
+            result = self._task_context(wait=MEMORY_WAIT, observation=observation,
+                guard=self._generation_guard(sid, generation)).save_memory(
+                session, latest['draft'], automatic=True,
                 generation=generation)
         except Exception as error:
             result = {'ok': False, 'saved': {}, 'skipped': [],
                       'error': str(error) if isinstance(error, SessionError) else f'the runtime call failed ({type(error).__name__}).'}
-        saved = [memory_draft.remembered(record) for record in result['saved'].get('records') or []
-                 if record.get('type') in memory_draft.KINDS and isinstance(record.get('title'), str)]
         with self.lock:
-            if saved:
-                # Later turns restate what they found; the next save skips what this one recorded.
-                brain = self.get(sid)['brain']
-                self._save_brain(sid, {**brain, 'remembered': ((brain.get('remembered') or []) + saved)[-REMEMBERED:]})
+            if self.generations.get(sid) != generation:
+                return
             notice = memory_draft.summary('drafted', result)
             if provenance['delivered']:
                 # Opened is what the run's tools returned, or unknown where they read unseen; reported is the agent's word.
@@ -1830,6 +1907,64 @@ class Sessions:
 
     def _run(self, sid, prompt, generation):
         session = self.get(sid)
+        supported = not any(session.get(name) for name in ('fleet', 'clash', 'creator', 'system_run', 'system_discovery'))
+        try:
+            observation = cost_observation.LaunchObservation(session['provider'], supported)
+        except Exception:
+            observation = cost_observation.UnavailableObservation()
+        try:
+            return self._run_body(sid, prompt, generation, observation)
+        except Exception:
+            cost_observation.safe(observation, 'diagnostic', 'main', 'lifecycle_exception')
+            with self.lock:
+                self._cost_finish(sid, generation, observation,
+                    'superseded' if self.generations.get(sid) != generation else 'cancelled' if sid in self.cancelled else 'interrupted' if self.stopping.is_set() else 'failed')
+            raise
+        finally:
+            with self.lock:
+                outcome = 'superseded' if self.generations.get(sid) != generation else 'cancelled' if sid in self.cancelled else 'interrupted' if self.stopping.is_set() else None
+                self._cost_finish(sid, generation, observation, outcome)
+
+    def _cost_finish(self, sid, generation, observation, outcome=None):
+        """Generation-owned metadata; preserve the provider receipt used by memory provenance."""
+        try:
+            if observation is not None and observation.persisted:
+                return
+            snapshot = cost_observation.safe(observation, 'finish', outcome)
+            if not isinstance(snapshot, dict):
+                snapshot = {'schema': 'harness-full-cost-v1', 'state': 'unavailable', 'observer_incomplete': True}
+            json.dumps(snapshot, allow_nan=False)
+            with self.lock:
+                row = self.db.execute('SELECT session_id,receipt FROM launches WHERE id=?', (generation,)).fetchone()
+                if row and row['session_id'] == sid:
+                    receipt = json.loads(row['receipt']) if row['receipt'] else {}
+                    self.results.save_receipt(generation, {**receipt, 'full_cost': snapshot})
+                elif row is None:
+                    # No fictitious launch; do not inherit the current launch's tag after a requeue.
+                    event = {'kind': 'cost_observation', 'cost_generation': generation, 'full_cost': snapshot, 'at': now()}
+                    self.db.execute('INSERT INTO events(session_id,data) VALUES (?,?)', (sid, json.dumps(event)))
+                    self.db.commit()
+            if observation is not None:
+                observation.persisted = True
+        except Exception:
+            # Telemetry is optional; never mask the original work/exception with its own failure.
+            try:
+                if observation is not None:
+                    observation.incomplete = True
+                with self.lock:
+                    event = {'kind': 'cost_observation', 'cost_generation': generation,
+                        'full_cost': {'schema': 'harness-full-cost-v1', 'state': 'unavailable',
+                            'observer_incomplete': True, 'reason': 'persistence_failure'}, 'at': now()}
+                    self.db.execute('INSERT INTO events(session_id,data) VALUES (?,?)', (sid, json.dumps(event)))
+                    self.db.commit()
+                if observation is not None:
+                    observation.persisted = True
+            except Exception:
+                # If storage itself is unavailable, an absent receipt remains unmeasured.
+                pass
+
+    def _run_body(self, sid, prompt, generation, observation):
+        session = self.get(sid)
         project = self._workspace(session)
         if session.get('sdd'):
             try:
@@ -1838,6 +1973,7 @@ class Sessions:
                 with self.lock:
                     if sid not in self.cancelled and not self.stopping.is_set() and self.generations.get(sid) == generation:
                         self._event(sid, {'kind': 'error', 'text': str(error)})
+                        self._cost_finish(sid, generation, observation, 'failed')
                         self._status(sid, 'failed')
                 return
         provider = session['provider']
@@ -1857,6 +1993,7 @@ class Sessions:
                 with self.lock:
                     if sid not in self.cancelled and not self.stopping.is_set() and self.generations.get(sid) == generation:
                         self._event(sid, {'kind': 'error', 'text': str(error)})
+                        self._cost_finish(sid, generation, observation, 'failed')
                         self._status(sid, 'failed')
                 return
         # The event loop below reuses `native` for the provider's session ID; this flag keeps its own name.
@@ -1867,6 +2004,7 @@ class Sessions:
                 if sid not in self.cancelled and not self.stopping.is_set() and self.generations.get(sid) == generation:
                     self._event(sid, {'kind': 'error', 'text': 'This session reviews project memory before each run, and a Claude Code '
                                       'command goes to the CLI without it. Run commands in a session with automatic memory.'})
+                    self._cost_finish(sid, generation, observation, 'failed')
                     self._status(sid, 'failed')
             return
         if fleet:
@@ -1877,19 +2015,23 @@ class Sessions:
                 if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
                     return
                 self._status(sid, 'running')
-            context = self._task_context(wait=MEMORY_WAIT)
+            context = self._task_context(wait=MEMORY_WAIT, observation=observation,
+                                         guard=self._generation_guard(sid, generation))
             if not reviewed(session['brain']):
-                session = self._recall(sid, session, generation, context)
+                with cost_observation.span(observation, 'recall'):
+                    session = self._recall(sid, session, generation, context)
                 if session is None:
                     return
             else:
                 try:
                     if not session['brain'].get('approved'):
-                        prepared = context.prepare(session)
+                        with cost_observation.span(observation, 'prepare'):
+                            prepared = context.prepare(session)
                         with self.lock:
                             if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
                                 return
                             self._save_brain(sid, prepared)
+                            self._cost_finish(sid, generation, observation, 'awaiting_context')
                             self._status(sid, 'awaiting_context')
                             self._event(sid, {'kind': 'status', 'text': 'Context prepared. Review it before starting the provider.'})
                         return
@@ -1902,6 +2044,7 @@ class Sessions:
                         brain = self.get(sid)['brain']
                         self._save_brain(sid, {**brain, 'approved': False, 'context_id': None})
                         if sid not in self.cancelled and not self.stopping.is_set():
+                            self._cost_finish(sid, generation, observation, 'awaiting_context')
                             self._status(sid, 'awaiting_context')
                             self._event(sid, {'kind': 'error', 'text': str(error)})
                     return
@@ -1923,7 +2066,7 @@ class Sessions:
                                  'executable': self.providers[provider]['executable'],
                                  'attachment_dirs': self.attachments.directories(sid),
                                  'accelerators': self.accelerators.overlays(session['project_id'], [provider], project),
-                                 'context': self._prompt({**session, 'agents_enabled': False}, '', ledger := {})}, ensure_ascii=False)
+                                 'context': self._prompt({**session, 'agents_enabled': False}, '', ledger := {}, delivery=True)}, ensure_ascii=False)
             agents = len(session['fleet']['lenses'])
             command = [fleet_runtime()['executable'], str(Path(__file__).with_name('fleet_runner.py')),
                        '--runner-lock', str(self.runner_lock)]
@@ -1940,7 +2083,7 @@ class Sessions:
                                  'executables': {name: self.providers.get(name, {}).get('executable') for name in (provider, challenger)},
                                  'attachment_dirs': self.attachments.directories(sid), 'baseline': base.get('head'),
                                  'accelerators': self.accelerators.overlays(session['project_id'], [provider, challenger], project),
-                                 'context': self._prompt({**session, 'agents_enabled': False, 'workflow': 'native', 'sdd': None}, '', ledger := {})}, ensure_ascii=False)
+                                 'context': self._prompt({**session, 'agents_enabled': False, 'workflow': 'native', 'sdd': None}, '', ledger := {}, delivery=True)}, ensure_ascii=False)
             agents = 2
             command = [sys.executable, str(Path(__file__).with_name('clash_runner.py'))]
         elif discovery:
@@ -1954,12 +2097,14 @@ class Sessions:
             command = [sys.executable, str(Path(__file__).with_name('creator_runner.py')), '--request', str(request)]
         else:
             try:
-                prompt = self._prompt(session, prompt, ledger := {}, route)
+                prompt = self._prompt(session, prompt, ledger := {}, route, observation=observation, delivery=True)
+                cost_observation.safe(observation, 'payload', 'main_prompt', prompt)
             except SessionError as error:
                 # Say why, as for an SDD check: a changed merge archive or attachment, or a missing workspace.
                 with self.lock:
                     if sid not in self.cancelled and not self.stopping.is_set() and self.generations.get(sid) == generation:
                         self._event(sid, {'kind': 'error', 'text': str(error)})
+                        self._cost_finish(sid, generation, observation, 'failed')
                         self._status(sid, 'failed')
                 return
             command = providers.build_command(provider, self.providers[provider]['executable'], project, prompt,
@@ -1985,6 +2130,8 @@ class Sessions:
         self.results.baseline(session)
         context_record = {'version': 1, 'provider': provider, 'agents': agents, 'ledger': ledger, 'fill': None} if ledger is not None else None
         native_launch = context_record is not None and not fleet and not clash_settings
+        if native_launch:
+            cost_observation.safe(observation, 'new_phase', 'main', session.get('native_session_id'))
         if native_launch:
             context_record.update(context_usage.launch_files(project, provider))
         tracker = context_usage.ContextTracker(provider) if native_launch else None
@@ -2057,7 +2204,9 @@ class Sessions:
             try:
                 process = process_runtime.launch_guarded(command, watchdog_read, lock_fd=self.runner_lock,
                     cwd=project, env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                cost_observation.safe(observation, 'process', 'main', 'started')
             except Exception:
+                cost_observation.safe(observation, 'diagnostic', 'main', 'launch_exception')
                 fs.close(watchdog_write)
                 save_receipt()  # The launch row exists; its receipt says nothing ran.
                 raise
@@ -2081,6 +2230,8 @@ class Sessions:
         budget_usage = {'tokens':None,'cost_usd':None,'seconds':0,'limit_reached':None}
         def remember_total(native, total):
             with self.lock:
+                if self.generations.get(sid) != generation:
+                    return
                 row = self.db.execute('SELECT cost_totals FROM sessions WHERE id=?', (sid,)).fetchone()
                 totals = json.loads(row['cost_totals']) if row and row['cost_totals'] else {}
                 totals[native] = total
@@ -2091,7 +2242,8 @@ class Sessions:
         def save_usage():
             budget_usage['seconds'] = round(time.monotonic()-started,3)
             with self.lock:
-                self.db.execute('UPDATE sessions SET budget_usage=? WHERE id=?',(json.dumps(budget_usage),sid))
+                if self.generations.get(sid) == generation:
+                    self.db.execute('UPDATE sessions SET budget_usage=? WHERE id=?',(json.dumps(budget_usage),sid))
                 self.db.execute('UPDATE launches SET usage=? WHERE id=?',(json.dumps(budget_usage),generation)); self.db.commit()
         def note_compactions():
             # Each compaction the tracker finds becomes one divider in the conversation.
@@ -2102,10 +2254,14 @@ class Sessions:
                 try:
                     stdin = None if creator or system_run or discovery else prompt if fleet or clash_settings else providers.input_text(provider, prompt)
                     if stdin is not None:
-                        process.stdin.write(stdin.encode('utf-8'))
+                        written = process.stdin.write(stdin.encode('utf-8'))
                         process.stdin.flush()
+                        cost_observation.safe(observation, 'transport', 'main', written, 'written')
+                    else:
+                        cost_observation.safe(observation, 'transport', 'main', None, 'not_used')
                 except (OSError, ValueError):
-                    pass
+                    cost_observation.safe(observation, 'transport', 'main', None, 'failed')
+                    cost_observation.safe(observation, 'diagnostic', 'main', 'stdin_write_failed')
                 finally:
                     try:
                         process.stdin.close()
@@ -2114,8 +2270,10 @@ class Sessions:
             writer = threading.Thread(target=write_input, daemon=True)
             writer.start()
             while True:
-                if sid in self.cancelled or self.stopping.is_set():
+                if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
                     outcome = 'cancelled' if sid in self.cancelled else 'interrupted'
+                    if sid not in self.cancelled and not self.stopping.is_set():
+                        cost_observation.safe(observation, 'diagnostic', 'main', 'generation_changed')
                     break
                 if live and time.monotonic() - live_polled >= context_usage.WRITE_SECONDS:
                     live_polled = time.monotonic()
@@ -2134,10 +2292,13 @@ class Sessions:
                     continue
                 chunk = selector.read(process.stdout, 65536)
                 eof = not chunk
+                if eof:
+                    cost_observation.safe(observation, 'diagnostic', 'main', 'empty_read_ended_or_error')
                 if eof and not buffer:
                     break
                 buffer += chunk if not eof else b'\n'
                 if len(buffer) > 2 * 1024 * 1024:
+                    cost_observation.safe(observation, 'diagnostic', 'main', 'output_line_limit')
                     raise SessionError("Provider event exceeds the size limit.")
                 lines = buffer.split(b'\n')
                 buffer = lines.pop()
@@ -2145,13 +2306,17 @@ class Sessions:
                     try:
                         event = json.loads(line)
                     except (json.JSONDecodeError, UnicodeError):
+                        if line.strip():
+                            cost_observation.safe(observation, 'diagnostic', 'main', 'malformed_line')
                         continue
                     if not isinstance(event, dict):
+                        cost_observation.safe(observation, 'diagnostic', 'main', 'non_object_line')
                         continue
                     if delegation:
                         delegation.observe(event)
                     if run_cost:
                         run_cost.observe(event)
+                    cost_observation.safe(observation, 'raw', 'main', event)
                     if tracker and tracker.observe(event) and tracker.due():
                         save_context()
                     if tracker:
@@ -2178,6 +2343,7 @@ class Sessions:
                         output_bytes += len(json.dumps(clean))
                         count += 1
                         if output_bytes > 4 * 1024 * 1024 or count > 5000:
+                            cost_observation.safe(observation, 'diagnostic', 'main', 'output_total_limit')
                             raise SessionError("Provider output limit reached.")
                         if fleet and clean['kind'] == 'fleet_state':
                             if clean.get('status') not in ('awaiting_approval', 'completed', 'rejected'):
@@ -2202,6 +2368,7 @@ class Sessions:
                             valid_cost = type(cost) in (int,float) and math.isfinite(cost) and cost >= 0
                             if run_cost and valid_cost:
                                 cost, budget_usage['cost_usd_reported'] = run_cost.own(cost), cost
+                                cost_observation.safe(observation, 'usd', 'main', cost, budget_usage['cost_usd_reported'], run_cost)
                                 session_total = run_cost.total(budget_usage['cost_usd_reported'])
                                 if run_cost.session: remember_total(run_cost.session, session_total)
                                 clean = {key: value for key, value in clean.items() if key != 'cost_usd'}
@@ -2220,6 +2387,7 @@ class Sessions:
                         native = clean.get('native_session_id')
                         if native:
                             if native_id and native != native_id:
+                                cost_observation.safe(observation, 'diagnostic', 'main', 'identity_changed')
                                 raise SessionError("Provider changed the original session identity.")
                             native_id = native
                             with self.lock:
@@ -2240,7 +2408,13 @@ class Sessions:
                     break
             if sid in self.cancelled or self.stopping.is_set():
                 outcome = 'cancelled' if sid in self.cancelled else 'interrupted'
+                cost_observation.safe(observation, 'diagnostic', 'main',
+                    'cancelled' if sid in self.cancelled else 'shutdown')
             if budget_usage['limit_reached']:
+                # EOF can deliver a final unterminated usage line after the
+                # loop's top budget check; observe where the cap is enforced.
+                cost_observation.safe(observation, 'diagnostic', 'main',
+                    {'time': 'time_budget', 'token': 'token_budget', 'USD': 'usd_budget'}.get(budget_usage['limit_reached'], 'shared_budget'))
                 message = (f'The run reached its time limit ({run_timeout}s). Change or clear Time (seconds) in Budgets and save before continuing.'
                            if budget_usage['limit_reached'] == 'time' else
                            'The run reached its '+budget_usage['limit_reached']+' limit (budget). Increase the budget before another launch if needed.')
@@ -2250,7 +2424,11 @@ class Sessions:
                 try:
                     code = process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
+                    cost_observation.safe(observation, 'diagnostic', 'main', 'wait_timeout')
                     code = None
+                cost_observation.safe(observation, 'diagnostic', 'main', 'guard_exit_before_cleanup', code)
+                if not terminal:
+                    cost_observation.safe(observation, 'diagnostic', 'main', 'missing_terminal')
                 outcome = 'completed' if code == 0 and terminal and not saw_error else 'failed'
                 if fleet and outcome == 'completed':
                     outcome = fleet_outcome or 'failed'
@@ -2263,6 +2441,9 @@ class Sessions:
         finally:
             fs.close(watchdog_write)
             reaped = process_runtime.reap_tree(process)
+            cost_observation.safe(observation, 'diagnostic', 'main',
+                'cleanup_confirmed' if reaped else 'cleanup_unconfirmed')
+            cost_observation.safe(observation, 'diagnostic', 'main', 'guard_exit_after_cleanup', process.returncode)
             if not reaped:
                 self.stopping.set()
                 outcome = 'failed'
@@ -2275,6 +2456,8 @@ class Sessions:
                     self.active.pop(sid, None)
             save_usage()
             save_receipt()
+            cost_observation.safe(observation, 'process', 'main', 'finished')
+            cost_observation.safe(observation, 'duration', 'provider', time.monotonic() - started)
         if delegation:
             for receipt in delegation.reconcile(native_id, project, launch_started_at, time.time()):
                 self._event(sid, receipt)
@@ -2299,6 +2482,7 @@ class Sessions:
                     'text': 'The completed run left no usable memory draft. Trying one read-only follow-up in the same native session.'})
                 current = self.get(sid)
                 recovery_cost = providers.RunCost(provider, native_id, (current['cost_totals'] or {}).get(native_id))
+                cost_observation.safe(observation, 'new_phase', 'recovery', native_id)
                 def observe_recovery(raw, clean):
                     recovery_cost.observe(raw)
                     if tracker:
@@ -2311,6 +2495,7 @@ class Sessions:
                         reported = clean.get('cost_usd')
                         if type(reported) in (int, float) and math.isfinite(reported) and reported >= 0:
                             own = recovery_cost.own(reported)
+                            cost_observation.safe(observation, 'usd', 'recovery', own, reported, recovery_cost)
                             remember_total(native_id, recovery_cost.total(reported))
                             clean.pop('cost_usd', None)
                             if own is not None:
@@ -2327,8 +2512,17 @@ class Sessions:
                         save_usage()
                     return bool(budget_usage['limit_reached'])
                 remaining = run_timeout - (time.monotonic() - started) if run_timeout is not None else None
-                recovery = memory_recovery.recover(self, sid, current, generation, project, environment,
-                    remaining_seconds=remaining, exhausted=bool(budget_usage['limit_reached']), observe=observe_recovery)
+                def recovery_launched():
+                    cost_observation.safe(observation, 'process', 'recovery', 'started')
+                    cost_observation.safe(observation, 'payload', 'recovery_prompt', memory_recovery.PROMPT)
+                with cost_observation.span(observation, 'recovery'):
+                    recovery = memory_recovery.recover(self, sid, current, generation, project, environment,
+                        remaining_seconds=remaining, exhausted=bool(budget_usage['limit_reached']), observe=observe_recovery,
+                        observe_raw=lambda raw: cost_observation.safe(observation, 'raw', 'recovery', raw),
+                        observe_boundary=lambda signal, code=None: cost_observation.safe(observation, 'diagnostic', 'recovery', signal, code),
+                        on_launch=recovery_launched,
+                        observe_transport=lambda count, state: cost_observation.safe(observation, 'transport', 'recovery', count, state))
+                cost_observation.safe(observation, 'process', 'recovery', 'finished' if recovery.get('launched') else 'skipped')
                 if sid in self.cancelled or self.stopping.is_set() or self.generations.get(sid) != generation:
                     recovery.update(state='cancelled', reason='Memory recovery was cancelled; no draft was saved.')
                 if recovery.get('launched') and context_record is not None:
@@ -2352,15 +2546,26 @@ class Sessions:
                 if tracker:
                     save_context()
             if sid not in self.cancelled and not self.stopping.is_set() and self.generations.get(sid) == generation:
-                self._remember(sid, generation)
+                with cost_observation.span(observation, 'save'):
+                    self._remember(sid, generation, observation)
             if provider == 'cursor':
                 # Cursor's headless mode fires no stop hook, so the checkpoint its
                 # own hook would run - files touched, commits, the turn boundary
                 # that promotion and compaction ride on - runs here, unless the
                 # hook did fire this run.
                 try:
-                    self._task_context(wait=MEMORY_WAIT).checkpoint(self.get(sid), since=launch_started_at)
+                    with cost_observation.span(observation, 'checkpoint'):
+                        self._task_context(wait=MEMORY_WAIT, observation=observation,
+                            guard=self._generation_guard(sid, generation)).checkpoint(self.get(sid), since=launch_started_at)
                 except Exception:
+                    pass
+        # History folding is local memory work too; keep it inside the observed lifecycle.
+        if self.knowledge is not None and not (creator or system_run or discovery):
+            from . import memory_use
+            with cost_observation.span(observation, 'history'):
+                try:
+                    memory_use.fold_project(self.knowledge, session['project_id'])
+                except (SessionError, OSError, ValueError, sqlite3.Error):
                     pass
         # Record the closing event before the terminal status: readers that wait for
         # the status to settle must see the complete event history.
@@ -2370,16 +2575,12 @@ class Sessions:
                     outcome = 'cancelled'
                 elif self.stopping.is_set():
                     outcome = 'interrupted'
+                self._cost_finish(sid, generation, observation, outcome)
                 self._event(sid, {"kind": "status", "outcome": outcome,
                     "text": f"Run {outcome}. Process completion is not an independent verification of the task."})
                 self._status(sid, outcome or 'failed')
-        # A project keeps only its newest retrieval manifests; fold this launch's into the daily history now.
-        if self.knowledge is not None and not (creator or system_run or discovery):
-            from . import memory_use
-            try:
-                memory_use.fold_project(self.knowledge, session['project_id'])
-            except (SessionError, OSError, ValueError, sqlite3.Error):
-                pass
+            else:
+                self._cost_finish(sid, generation, observation, 'superseded')
 
     def close(self):
         self.stopping.set()

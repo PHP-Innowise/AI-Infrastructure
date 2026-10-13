@@ -187,6 +187,43 @@ class SessionTests(unittest.TestCase):
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
 
+    def test_full_cost_persistence_failure_is_explicit_and_run_still_completes(self):
+        manager = self.manager()
+        original = manager.results.save_receipt
+        def reject_cost(generation, receipt):
+            if 'full_cost' in receipt:
+                raise RuntimeError('PRIVATE_PERSISTENCE_ERROR')
+            return original(generation, receipt)
+        with patch.object(manager.results, 'save_receipt', reject_cost):
+            sid = self.create(manager)
+            final = self.settled(manager, sid)
+        self.assertEqual('completed', final['status'])
+        with manager.lock:
+            row = manager.db.execute('SELECT id,receipt FROM launches WHERE session_id=?', (sid,)).fetchone()
+        self.assertNotIn('full_cost', json.loads(row['receipt']))
+        fallback = [event for event in manager.events(sid) if event['kind'] == 'cost_observation']
+        self.assertEqual(1, len(fallback))
+        self.assertEqual(row['id'], fallback[0]['cost_generation'])
+        self.assertEqual('persistence_failure', fallback[0]['full_cost']['reason'])
+        self.assertEqual('unavailable', fallback[0]['full_cost']['state'])
+        self.assertNotIn('PRIVATE_PERSISTENCE_ERROR', json.dumps(manager.events(sid)))
+        self.assertEqual('status', manager.events(sid)[-1]['kind'])
+
+    def test_full_cost_missing_terminal_keeps_incomplete_provider_usage(self):
+        manager = self.manager()
+        sid = self.create(manager, 'no_terminal')
+        final = self.settled(manager, sid)
+        self.assertEqual('failed', final['status'])
+        with manager.lock:
+            row = manager.db.execute('SELECT receipt FROM launches WHERE session_id=?', (sid,)).fetchone()
+        cost = json.loads(row['receipt'])['full_cost']
+        self.assertEqual('failed', cost['outcome'])
+        self.assertIsNone(cost['provider']['provider_tokens'])
+        self.assertEqual(1, len(cost['provider']['executions']))
+        self.assertEqual(0, cost['provider']['executions'][0]['terminal_count'])
+        self.assertTrue(cost['processes']['main']['started'])
+        self.assertEqual(1, len(self.calls))
+
     def test_merged_launches_read_frozen_sources_and_preserve_capture_for_all_providers(self):
         from harness import chat_merge
         manager=self.manager()

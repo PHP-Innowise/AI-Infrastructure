@@ -191,6 +191,10 @@ jobs:
         run: python3 -m unittest tests.test_installation
       - name: Preserve framework-specific skill semantics
         run: python3 -m unittest tests.test_framework_semantics
+      - name: Project Brain active-alias creation is atomic
+        run: python3 -m unittest tests.test_brain_create_atomic_alias
+      - name: Generated memory promotion preserves admission fairness
+        run: python3 -m unittest tests.test_generator_promotion_admission
       - name: Hook wiring runs from any working directory
         # A bare relative hook path exits 127 from a subdirectory, which
         # Claude Code and Codex treat as non-blocking: the guard fails open.
@@ -201,7 +205,7 @@ jobs:
         # The stand runs on client prompts and stays out of CI; its as-of
         # reconstruction, edition overlay, scoring, report and transcript
         # parsing run here on a synthetic project, with one real refresh.
-        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot
+        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot tests.test_memory_miss_audit tests.test_memory_onnx tests.test_memory_onnx_pilot
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.

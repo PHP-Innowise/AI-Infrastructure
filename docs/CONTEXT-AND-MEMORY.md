@@ -223,11 +223,12 @@ and the task documents and are never among the corpus-rarest.
   take none of its rows and do not set the episodic floor the changelog is held
   to.
 - **The bar.** An item is admitted when it covers `required_coverage` distinct
-  terms and its matched terms weigh at least that many terms that each occur in
-  a single indexed document, `k * ln((N + 1) / 1.5)` with the weights
-  `excerpt_weights` uses: evidence no likelier by chance than as many unique
-  words co-occurring. Nothing is tuned to the evaluation prompts, and the bar
-  is absolute: it never admits the best item of a bad list.
+  tokenizer concepts. Porter variants such as `session` and `sessions` count
+  once toward coverage; a query offering just one concept needs one. The
+  existing raw matched-term weights still determine the floor,
+  `k * ln((N + 1) / 1.5)`, and ranking. Normalization does not refill the raw
+  24-term window or change those weights. Nothing is tuned to the evaluation
+  prompts, and the bar is absolute: it never admits the best item of a bad list.
 - **One slot.** The best admitted event that passes the runtime filters, or
   the best local episode if it ranks higher (ties go to the event: `complete`
   writes both). An episode adds to a term's frequency only where no document
@@ -808,6 +809,17 @@ only for a caller without a session ID; within a conversation the conversation's
 record of what it was handed is the one notion of "seen", and a turn whose
 every item it holds skips as `empty-after-filter`.
 
+Participating retrieval writers update the baseline and conversation receipts
+in one short SQLite transaction after packing. They merge unrelated entries
+from the current maps and reject an outdated snapshot of their own target,
+including a turn prepared before a compaction reset. Read-only, busy or failed
+bookkeeping leaves ordinary retrieval available; a later turn may repeat an
+item. A programmatic caller's existing transaction remains theirs to commit or
+roll back. This disposable record is not an acknowledgment that an outer hook,
+MCP client or model consumed the response, and it does not authorize extra
+excerpt delivery. Old running versions and generic index-state writes do not
+participate in this transaction contract.
+
 The mode comes from `--gate`, then `CONTEXT_RETRIEVAL_GATE`, then
 `retrieval_gate` in `runtime.json`, and defaults to `shadow`. In `shadow` the
 decision is computed, recorded and ignored: the turn is served either way. That
@@ -880,6 +892,11 @@ text is chosen to hold the answer:
   sentences that starts where the matches are - a changelog entry runs to a
   kilobyte, and its answer is usually the sentence after the one that matched.
   A list item keeps the line that introduces it. Elided text shows as `…`.
+- Linked knowledge skips generated `Sources`/`References` sections made only
+  of declared citation paths when another section contains prose. Explicit
+  requests for those headings, annotated references and source-only records
+  retain their content. The remaining sections keep the same weighted window
+  selection. Headings receive the excerpt body's privacy screen.
 - Windows are 800, 600 and 400 characters by rank, 600 for a history item; the
   rendered capsule stays under 3,600.
 - The item line names the section: `- memory specs/auth.md § Sessions — Auth`.
@@ -899,6 +916,33 @@ counts as handed any more, because the conversation holds a summary of it.
 Only what the capsule shows counts as handed: an item its rendered text had no
 room for is excluded from the manifest as `capsule-limit` and is handed on a
 later turn.
+
+Automatic linked tasks still quote their goal and files. Other automatic
+links retain whole-document suppression unless the citation-footer correction
+changes their quoted section; those corrected excerpts use the new section
+identity so an existing session receives the substantive rule immediately.
+
+Session retrieval also records a bounded, metadata-only observation in the
+ignored local retrieval trace. It compares the sanitized window proposed
+before novelty and packing with the previous final renderer body for the exact
+same section/document identity and revision. `same-window` and
+`different-exposure-window` describe bytes, while `unknown-prior-render`
+preserves uncertainty for legacy, missing, pruned or unfinished traces.
+Empty proposals, prior pointer-only bodies, prior shrinking and whole-source
+changes remain distinguishable. No raw quote, query or new heading is stored
+in the session companion: it points to an existing trace UUID using bounded
+hashes and the original first-delivery turn. Repeats keep that pointer;
+expiry, compaction and session eviction prune it with the existing receipt.
+Diagnostic failures cannot release a repeat or change a capsule or gate.
+
+A differing fingerprint is an exposure signal, not evidence that an answer
+was lost. Rank allowances or previous render shrinking can also change it.
+The prior trace records final renderer bytes at the local emitter boundary;
+it does not certify stdout completion, host acceptance or model use. Existing
+privacy/owner gates and secure trace retention apply, and local episode
+windows are outside this document observation denominator. Hosts without
+secure descriptor-relative trace I/O retain normal retrieval without a prior
+render baseline. The four-turn novelty rule itself is unchanged.
 
 Both admissions used to arrive looking identical, so the capsule names which
 one applied. A document that carried the required number of distinct query
@@ -1113,8 +1157,8 @@ normal category/target budgets, never the hard ceiling.
 
 Every successful governed retrieval writes a manifest. By default it lands in
 the Git-tracked `project-brain/control/retrieval-manifests/<uuid>.json`.
-The writer emits strict schema version 3; validators continue to accept valid
-version 1 and version 2 manifests already present in a consuming repository.
+The writer emits strict schema version 4; validators continue to accept valid
+version 1, 2 and 3 manifests already present in a consuming repository.
 
 `--ephemeral` writes the same validated record to
 `memory-bank/local/retrieval-manifests/<uuid>.json` instead. Automated
@@ -1150,7 +1194,106 @@ Governed manifests are Git-trackable and validated, but the current compactor
 does not archive or prune them. Retention for those requires an explicit
 repository policy. Only the local `--ephemeral` store prunes itself.
 
+### Local delivery diagnostics
+
+Governed retrieval also writes an ignored metadata-only sidecar at
+`memory-bank/local/retrieval-traces/<manifest-uuid>.json`. It observes the
+existing candidate windows, admission, ranking, runtime filters, linked
+records, budget/layer limits, gate and capsule packing. A watched indexed
+record absent from those windows stays `not_observed_in_bounded_search`:
+its exclusion cause is unknown. The existing evidence-term coverage helps
+distinguish a lexical miss from an unobserved bounded search. Trace ranks
+count authorized records within the observed window; they omit protected
+positions and are not the manifest's lexical ranks.
+
+The trace's additive `funnel` child has its own version 1 schema. It records
+fixed authorized observation counts before the per-record cap, plus observed
+queue, budget, layer, repeat, gate and pack boundaries. Counts describe
+occurrences, not distinct answering documents; saturation is a lower bound.
+Path-only exclusions and render counts cover retained authorized records.
+Uninstrumented channels and source absence remain unknown, so zero counts
+cannot justify hybrid search or prove an answer is missing. Render projection
+is separate from unknown emission and consumer states. Collection is automatic
+and needs no watch list. If this child alone exceeds the file cap, it is omitted
+while the original trace and rendered-window metadata remain available.
+
+`refresh` automatically retains a fixed `funnel_diagnosis` child in its
+existing local health record and additive JSON result, outside the capsule.
+The reader binds only the current manifest and exact render form, byte count
+and hash, through anchored same-owner metadata handles and one complete bounded
+read. Missing, pruned, old, malformed, unsupported, mismatched or omitted
+evidence has the same unavailable state with null counters. Plain output uses
+its final printed form; a failed finalizer cannot reuse the earlier JSON form.
+Counts remain occurrences or lower bounds, with retained-record render scope;
+quality is unmeasured and source coverage, emission and consumer use stay
+unknown. Positive observed loss means only `inspect-observed-loss`; it does
+not establish loss of a needed fact or recommend a model.
+
+`health --json` adds a fixed diagnosis summary over the last 500 records after
+the existing `--window` selection. It partitions observed, unavailable, missing
+and rejected metadata. Each counter reports known, unknown and saturated
+contributors plus the sum of known counts. A sum with unknown or saturated
+contributors is a lower bound; an entirely unknown sum is null. This cap
+limits the new aggregation, not the existing health-file reader. Legacy JSON
+fields and plain health output retain their behavior.
+
+The evaluator keeps valid diagnosis under each item's `refresh` metadata.
+Harness keeps it beside a usable prepared capsule in the session Brain record,
+including across restarts, and clears it when that prepared context is
+invalidated. Freshness checks do not replace the saved invocation observation.
+Missing or rejected metadata is omitted; valid unavailable metadata remains
+explicit. Unexpected metadata-validator errors do not discard usable context
+or change evaluation scores. These observations are outside capsules, model
+prompts, approval material, token meters and score/report calculations.
+
+The same automatic refresh observation carries a separate `ordinary_receipt`
+child with exactly `schema_version`, `observation_state`, `plans_present` and
+`returned_status`. Observed records report the paired owner's returned status:
+no plans can report only `skipped`; planned calls can report `skipped`,
+`deferred` or `committed`. Unavailable observations use null plans and
+`unknown` status. Missing or invalid evidence is unknown, not a no-plan call.
+The status does not identify a refusal cause, confirm durable effects, or
+acknowledge stdout or host consumption. Standalone legacy remember helpers
+are outside this observation.
+
+The child uses the same anchored current-render read, independently of funnel
+validation. At the trace size cap it is omitted first, before the existing
+funnel fallback. `health --json` summarizes the selected window's last 500
+records in eight fields: `summary_schema_version`, `records_considered`,
+`observed_records`, `unavailable_records`, `no_plan_skipped_records`,
+`planned_skipped_records`, `planned_deferred_records` and
+`planned_committed_records`. The four buckets sum to observed records;
+observed plus unavailable equals considered records. These count historical
+records, not attempts or unique deliveries. Missing, malformed and unavailable
+children contribute only to unavailable records. Plain health and capsule
+output remain unchanged. The evaluator and Harness retain this sibling
+independently, with the same content exclusions and prepared-context lifetime.
+
+`retrieve`, `context` and `refresh` accept repeatable `--trace-path PATH`
+(at most 16 safe project-relative document paths). This observes a record;
+it does not seed search or bypass privacy/owner filters. Missing and protected
+watched records have the same `unavailable` state. Trace files retain no
+prompt, title, body, snippet, citation lists or owner identities.
+
+After an actual render, the sidecar records section kinds, body presence,
+sanitized excerpt sizes, omission reasons and hashes. `render.form` identifies
+`capsule_text` (the JSON field, with no added newline) or `printed_capsule`
+(the text capsule, including its final newline). These hashes cover the
+capsule; separate refresh status lines are outside it. Structured-only JSON
+retrieval has no render claim. Delivery metadata does not prove model attention
+or answer use.
+
+Each trace is capped at 128 records, 16 events per record, 512 characters per
+path and 512 KiB. Truncation is explicit. Trace-file retention independently
+uses `local_manifest_retention`, keeping the current trace even after clock
+rollback. Finalization does not revive pruned files. Diagnostics fail open:
+missing/corrupt trace storage leaves ordinary retrieval, capsule text, exit
+status and repetition state unchanged. Hosts without secure descriptor-relative
+filesystem operations skip these optional sidecars; the memory runtime still
+works. Capsule and manifest schemas are unchanged.
+
 ## Handoffs
+
 
 A governed task handoff is a compact continuation record containing objective,
 current state, next actions, files, sources, owner/privacy, task revision, and

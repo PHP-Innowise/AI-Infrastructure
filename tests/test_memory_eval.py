@@ -37,6 +37,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import memory_eval  # noqa: E402
+import memory_diagnosis  # noqa: E402
 
 SCRIPT = ROOT / "scripts" / "memory_eval.py"
 
@@ -544,6 +545,65 @@ def passage(*texts: str, useful: bool = True) -> Dict[str, Dict[str, Any]]:
     return {"docs/a.md": {"useful": useful, "passages": list(texts)}}
 
 
+class PassageInputTest(unittest.TestCase):
+    def load(self, value: object) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "passages.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            return memory_eval.load_passages(path)
+
+    def test_valid_labels_and_identical_skill_aliases_are_preserved(self) -> None:
+        entry = {"useful": True, "passages": ["Exact source text."]}
+        self.assertEqual({"p": {".agents/skills/x/SKILL.md": entry}}, self.load({"p": {
+            ".claude/skills/x/SKILL.md": entry, ".agents/skills/x/SKILL.md": entry,
+        }}))
+        for label in ({"passages": []}, {"passages": ["Exact source text."]}, {"useful": False}):
+            with self.subTest(label=label):
+                self.assertEqual({"p": {"docs/a.md": label}}, self.load({"p": {"docs/a.md": label}}))
+        self.assertEqual({}, memory_eval.load_passages(None))
+
+    def test_malformed_labels_are_rejected_without_printing_their_text(self) -> None:
+        private_text = "private-label-content"
+        values = [None, [], True,
+            {"p": []}, {"p": {"docs/a.md": []}},
+            *({"p": {"docs/a.md": {"passages": value}}}
+              for value in (private_text, None, 7, {private_text: True}, [private_text, 7])),
+            *({"p": {"docs/a.md": {"useful": value, "passages": [private_text]}}}
+              for value in ("false", 0, 1, None, [])),
+        ]
+        for value in values:
+            with self.subTest(value=value):
+                with self.assertRaises(memory_eval.EvalError) as caught:
+                    self.load(value)
+                self.assertNotIn(private_text, str(caught.exception))
+
+    def test_conflicting_aliases_are_rejected_in_either_order(self) -> None:
+        entries = [(".claude/skills/x/SKILL.md", {"useful": True, "passages": ["First."]}),
+                   (".agents/skills/x/SKILL.md", {"useful": False, "passages": ["Second."]})]
+        for ordered in (entries, list(reversed(entries))):
+            with self.subTest(order=[key for key, _ in ordered]):
+                with self.assertRaisesRegex(memory_eval.EvalError, "conflicting.*aliases"):
+                    self.load({"p": dict(ordered)})
+
+    def test_run_refuses_passage_string_before_creating_a_corpus(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            base = Path(name)
+            (base / "set.json").write_text(json.dumps(SET[:1]), encoding="utf-8")
+            (base / "judgments.json").write_text(json.dumps({"p1": {"docs/billing.md": 2}}), encoding="utf-8")
+            (base / "passages.json").write_text(json.dumps({"p1": {"docs/billing.md": {
+                "useful": True, "passages": "private-label-content",
+            }}}), encoding="utf-8")
+            process = run_cli(
+                "run", "--set", str(base / "set.json"), "--judgments", str(base / "judgments.json"),
+                "--passages", str(base / "passages.json"), "--projects-root", str(base),
+                "--edition", "PHP Core", "--cache", str(base / "cache"), "--out", str(base / "result.json"),
+            )
+            self.assertEqual(2, process.returncode)
+            self.assertNotIn("private-label-content", process.stderr)
+            self.assertFalse((base / "cache").exists())
+            self.assertFalse((base / "result.json").exists())
+
+
 class ScoringTest(unittest.TestCase):
     GRADES = {"docs/a.md": 2, "docs/b.md": 0, ".agents/skills/coder/SKILL.md": 1}
 
@@ -949,6 +1009,306 @@ class MechanismCounterTest(unittest.TestCase):
             self.assertEqual([target], list(Path(temporary).iterdir()))
 
 
+class NumericIntegrityTest(unittest.TestCase):
+    def arguments(self, *extra):
+        return memory_eval.build_parser().parse_args([
+            'run', '--set', 'unused-set.json', '--judgments', 'unused-judgments.json',
+            '--out', 'unused-result.json', *extra,
+        ])
+
+    @staticmethod
+    def item(**refresh):
+        return {'status': 'ok', 'class': 'silent', 'refresh': refresh}
+
+    def test_invalid_cli_timeouts_reject_before_run_or_cache(self):
+        for value in ('nan', 'inf', '-inf', '1e309', '0', '-1'):
+            with self.subTest(value=value), mock.patch.object(memory_eval, 'Run') as run:
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    result = memory_eval.main([
+                        'run', '--set', 'unused-set.json', '--judgments', 'unused-judgments.json',
+                        '--out', 'unused-result.json', '--timeout=' + value,
+                    ])
+                self.assertEqual(2, result)
+                self.assertIn('--timeout must be finite and positive', errors.getvalue())
+                run.assert_not_called()
+
+    def test_finite_positive_timeouts_and_defaults_dispatch(self):
+        for extra in ((), ('--timeout', '0.001'), ('--timeout', '1e2')):
+            with self.subTest(extra=extra), mock.patch.object(memory_eval, 'Run') as run, \
+                    mock.patch.object(memory_eval, 'warn_if_inside_clone'):
+                run.return_value.execute.return_value = 7
+                self.assertEqual(7, memory_eval.command_run(self.arguments(*extra)))
+                run.assert_called_once()
+
+    def test_direct_bool_overflow_and_onnx_timeouts_reject(self):
+        for field in ('timeout', 'onnx_timeout'):
+            for value in (True, False, 10 ** 400, float('nan'), float('inf'), -1, 0):
+                arguments = self.arguments()
+                setattr(arguments, field, value)
+                with self.subTest(field=field, value_type=type(value)), \
+                        mock.patch.object(memory_eval, 'Run') as run:
+                    with self.assertRaises(memory_eval.EvalError):
+                        memory_eval.command_run(arguments)
+                    run.assert_not_called()
+
+    def test_invalid_durations_reject_at_both_direct_aggregators(self):
+        bad = (True, False, -0.1, float('nan'), float('inf'), -float('inf'), 10 ** 400, '0.2')
+        for value in bad:
+            with self.subTest(value_type=type(value)):
+                with self.assertRaisesRegex(memory_eval.EvalError, 'refresh.seconds'):
+                    memory_eval.summarize({'x': self.item(seconds=value)})
+                with self.assertRaisesRegex(memory_eval.EvalError, 'refresh.index_seconds'):
+                    memory_eval.mechanism_totals([self.item(index_seconds=value)])
+
+    def test_missing_null_and_finite_zero_durations_keep_legacy_meaning(self):
+        for refresh in ({}, {'seconds': None, 'index_seconds': None}):
+            summary = memory_eval.summarize({'x': self.item(**refresh)})
+            self.assertIsNone(summary['latency_p50'])
+            self.assertIsNone(summary['index_latency_p95'])
+        summary = memory_eval.summarize({
+            'zero': self.item(seconds=0, index_seconds=-0.0),
+            'positive': self.item(seconds=0.25, index_seconds=1),
+            'legacy': {'status': 'ok', 'class': 'silent'},
+        })
+        self.assertEqual((0.0, 0.25), (summary['latency_p50'], summary['latency_p95']))
+        self.assertEqual((0.0, 1.0), (summary['index_latency_p50'], summary['index_latency_p95']))
+
+    def test_malformed_refresh_containers_raise_clean_errors_at_all_entry_points(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'invented.json'
+            for value in ([1], 'invented metadata', True, 1, []):
+                item = {'status': 'ok', 'class': 'silent', 'refresh': value}
+                with self.subTest(value_type=type(value)):
+                    with self.assertRaises(memory_eval.EvalError):
+                        memory_eval.summarize({'x': item})
+                    with self.assertRaises(memory_eval.EvalError):
+                        memory_eval.mechanism_totals([item])
+                    target.write_text(json.dumps({'items': {'x': item}}))
+                    with self.assertRaises(memory_eval.EvalError):
+                        memory_eval.load_result(target)
+
+    def test_loaded_result_rejects_bad_json_timing_even_for_skipped_items(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'invented.json'
+            for token in ('NaN', 'Infinity', '-Infinity', '1e309', 'true', '-0.1', str(10 ** 400)):
+                for field in ('seconds', 'index_seconds'):
+                    target.write_text('{"items":{"x":{"status":"skipped","refresh":{"' + field + '":' + token + '}}}}')
+                    with self.subTest(token=token[:12], field=field), self.assertRaises(memory_eval.EvalError):
+                        memory_eval.load_result(target)
+                target.write_text('{"items":{"x":{"refresh":{"phases":{"index":' + token + '}}}}}')
+                with self.subTest(token=token[:12], field='phases'), self.assertRaises(memory_eval.EvalError):
+                    memory_eval.load_result(target)
+
+    def test_known_persisted_budgets_reject_but_opaque_metadata_stays_compatible(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'invented.json'
+            for meta in ({'timeout': float('inf')}, {'timeout': True}, {'timeout': 0},
+                         {'onnx_excerpts': {'worker_timeout': float('nan')}}):
+                target.write_text(json.dumps({'meta': meta, 'items': {}}))
+                with self.subTest(meta_keys=list(meta)), self.assertRaises(memory_eval.EvalError):
+                    memory_eval.load_result(target)
+            document = {'meta': {'timeout': None, 'extra': float('nan'), 'integer': 10 ** 400,
+                                 'timestamp': P1_TS, 'string': 'NaN'},
+                        'items': {'x': self.item(seconds=0, index_seconds=None)}}
+            target.write_text(json.dumps(document))
+            loaded = memory_eval.load_result(target)
+            self.assertEqual(10 ** 400, loaded['meta']['integer'])
+            self.assertEqual(P1_TS, loaded['meta']['timestamp'])
+            self.assertEqual('NaN', loaded['meta']['string'])
+            self.assertEqual(0, memory_eval.summarize(loaded['items'])['latency_p50'])
+
+    def test_optional_phases_keep_only_finite_nonnegative_numbers(self):
+        phases = {'zero': 0, 'positive': 0.2, 'negative-zero': -0.0, 'bool': True,
+                  'negative': -1, 'nan': float('nan'), 'inf': float('inf'),
+                  'overflow': 10 ** 400, 'text': '0.3', 'missing': None}
+        self.assertEqual({'zero': 0, 'positive': 0.2, 'negative-zero': -0.0},
+                         memory_eval._phase_durations(phases))
+        for value in (None, [], 'client sentinel', True, 1):
+            self.assertEqual({}, memory_eval._phase_durations(value))
+
+    def test_row_rendering_preserves_exact_integer_counts(self):
+        number = 10 ** 400 + 7
+        self.assertEqual(number, memory_eval.row_value({'prompts': number}, 'prompts'))
+        self.assertEqual(str(number), memory_eval.row_cell({'prompts': number}, 'prompts'))
+        self.assertEqual(number, memory_eval.row_value({'skipped': {'reason': number}}, 'skipped_total'))
+        for value in (True, float('nan'), float('inf')):
+            self.assertIsNone(memory_eval.row_value({'latency_p50': value}, 'latency_p50'))
+
+    def test_invalid_export_is_rejected_before_creating_directories_or_files(self):
+        cyclic = []
+        cyclic.append(cyclic)
+        invalid = (float('nan'), {'nested': float('inf')}, -float('inf'), cyclic,
+                   {'unsupported': object()}, {'text': '\ud800'})
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary) / 'new-directory'
+            target = parent / 'result.json'
+            for document in invalid:
+                with self.subTest(document_type=type(document)), self.assertRaisesRegex(
+                        memory_eval.EvalError, 'finite UTF-8 JSON'):
+                    memory_eval.write_json(target, document)
+                self.assertFalse(parent.exists())
+
+    def test_serialization_recursion_failure_is_a_clean_error_before_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary) / 'new-directory'
+            with mock.patch.object(memory_eval.json, 'dumps', side_effect=RecursionError):
+                with self.assertRaisesRegex(memory_eval.EvalError, 'finite UTF-8 JSON'):
+                    memory_eval.write_json(parent / 'result.json', {})
+            self.assertFalse(parent.exists())
+
+    def test_invalid_export_preserves_existing_target_and_stale_temp(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            target = parent / 'result.json'
+            target.write_bytes(b'original')
+            stale = parent / ('.result.json.tmp-' + str(os.getpid()))
+            stale.write_bytes(b'unrelated stale sentinel')
+            with self.assertRaises(memory_eval.EvalError):
+                memory_eval.write_json(target, {'duration': float('nan')})
+            self.assertEqual(b'original', target.read_bytes())
+            self.assertEqual(b'unrelated stale sentinel', stale.read_bytes())
+            self.assertEqual({target, stale}, set(parent.iterdir()))
+
+    def test_replace_failure_cleans_owned_temp_and_preserves_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            target = parent / 'result.json'
+            target.write_bytes(b'original')
+            with mock.patch.object(memory_eval.os, 'replace', side_effect=OSError('synthetic replace fault')):
+                with self.assertRaisesRegex(memory_eval.EvalError, 'could not write result JSON'):
+                    memory_eval.write_json(target, {'seconds': 0.5})
+            self.assertEqual(b'original', target.read_bytes())
+            self.assertEqual([target], list(parent.iterdir()))
+
+    def test_successful_replace_releases_former_temp_path_ownership(self):
+        replace = os.replace
+        recreated = []
+
+        def replace_and_recreate(source, target):
+            replace(source, target)
+            former = Path(source)
+            former.write_bytes(b'unrelated pathname reuse sentinel')
+            recreated.append(former)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'result.json'
+            with mock.patch.object(memory_eval.os, 'replace', replace_and_recreate):
+                memory_eval.write_json(target, {'seconds': 0.5})
+            self.assertEqual({'seconds': 0.5}, json.loads(target.read_text()))
+            self.assertEqual(1, len(recreated))
+            self.assertEqual(b'unrelated pathname reuse sentinel', recreated[0].read_bytes())
+            self.assertEqual({target, recreated[0]}, set(Path(temporary).iterdir()))
+
+    def test_write_failure_closes_descriptor_and_cleans_temp(self):
+        original = os.fdopen
+        descriptors = []
+
+        def failed_writer(descriptor, mode):
+            descriptors.append(descriptor)
+            real = original(descriptor, mode)
+
+            class FailedWrite:
+                def __enter__(self):
+                    return self
+
+                def write(self, _data):
+                    raise OSError('synthetic write fault')
+
+                def __exit__(self, *_args):
+                    real.close()
+
+            return FailedWrite()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'result.json'
+            target.write_bytes(b'original')
+            with mock.patch.object(memory_eval.os, 'fdopen', failed_writer):
+                with self.assertRaisesRegex(memory_eval.EvalError, 'could not write result JSON'):
+                    memory_eval.write_json(target, {'seconds': 0.5})
+            self.assertEqual(b'original', target.read_bytes())
+            self.assertEqual([target], list(Path(temporary).iterdir()))
+            for descriptor in descriptors:
+                with self.assertRaises(OSError):
+                    os.fstat(descriptor)
+
+    @unittest.skipIf(os.name == 'nt', 'POSIX modes')
+    def test_finite_export_replaces_broad_mode_target_owner_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'result.json'
+            target.write_text('old')
+            target.chmod(0o666)
+            old = os.umask(0)
+            try:
+                memory_eval.write_json(target, {'seconds': 0, 'text': 'Пример'})
+            finally:
+                os.umask(old)
+            self.assertEqual(0o600, stat.S_IMODE(target.stat().st_mode))
+            self.assertEqual({'seconds': 0, 'text': 'Пример'},
+                             json.loads(target.read_text(), parse_constant=lambda value: self.fail(value)))
+            self.assertTrue(target.read_bytes().endswith(b'\n'))
+            self.assertEqual([target], list(Path(temporary).iterdir()))
+
+
+class FunnelDiagnosisMetadataTest(unittest.TestCase):
+    @staticmethod
+    def observed(count=2):
+        value = memory_diagnosis.unavailable_funnel_diagnosis()
+        value['observation_state'] = 'observed'
+        value['loss_observations']['pack'] = {'count': count, 'state': 'exact'}
+        value['next_action'] = 'inspect-observed-loss' if count else 'unknown'
+        return value
+
+    def test_fixed_schema_agrees_with_checkout_canonical_producer(self):
+        import ast
+        selected_names = {'FUNNEL_COUNT_LIMIT', 'FUNNEL_BOUNDARIES', 'FUNNEL_RENDER_REASONS',
+                          'FUNNEL_DIAGNOSIS_LOSSES', '_funnel_counter',
+                          'unknown_funnel_diagnosis', 'valid_funnel_diagnosis'}
+        tree = ast.parse((ROOT / 'PHP Core/memory-bank/scripts/context_retrieval.py').read_text())
+        selected = []
+        for node in tree.body:
+            names = ({node.name} if isinstance(node, ast.FunctionDef) else
+                     {item.id for item in node.targets if isinstance(item, ast.Name)}
+                     if isinstance(node, ast.Assign) else set())
+            if names & selected_names:
+                selected.append(node)
+        self.assertEqual(7, len(selected))
+        namespace = {'Any': Any}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), '<canonical-fixed-schema>', 'exec'), namespace)
+        self.assertEqual(namespace['unknown_funnel_diagnosis'](), memory_diagnosis.unavailable_funnel_diagnosis())
+        for child in (self.observed(), self.observed(0), memory_diagnosis.unavailable_funnel_diagnosis()):
+            self.assertTrue(namespace['valid_funnel_diagnosis'](child))
+            self.assertEqual(child, memory_diagnosis.normalize_funnel_diagnosis(child))
+
+    def test_rejected_shapes_do_not_retain_arbitrary_metadata(self):
+        for count in (True, False, -1, 65536, 2.0, float('nan'), float('inf'), 'PRIVATE-SENTINEL'):
+            child = self.observed()
+            child['loss_observations']['pack']['count'] = count
+            with self.subTest(kind=type(count).__name__):
+                self.assertIsNone(memory_diagnosis.normalize_funnel_diagnosis(child))
+        changes = ({'schema_version': True}, {'schema_version': 2}, {'query': 'PRIVATE-SENTINEL'},
+                   {'next_action': 'unknown'}, {'coverage': {}}, {'emission': 'observed'})
+        for change in changes:
+            self.assertIsNone(memory_diagnosis.normalize_funnel_diagnosis({**self.observed(), **change}))
+        for value in (None, [], {}, 'PRIVATE-SENTINEL'):
+            self.assertIsNone(memory_diagnosis.normalize_funnel_diagnosis(value))
+
+    def test_known_limits_unknowns_and_fresh_copy_are_preserved(self):
+        value = self.observed(65535)
+        clean = memory_diagnosis.normalize_funnel_diagnosis(value)
+        self.assertEqual('exact', clean['loss_observations']['pack']['state'])
+        self.assertEqual({'count': None, 'state': 'unknown'}, clean['boundaries']['pack_input'])
+        clean['loss_observations']['pack']['count'] = 1
+        self.assertEqual(65535, value['loss_observations']['pack']['count'])
+        value['loss_observations']['pack']['state'] = 'lower-bound'
+        self.assertEqual(value, memory_diagnosis.normalize_funnel_diagnosis(value))
+        value['loss_observations']['pack']['count'] = 65534
+        self.assertIsNone(memory_diagnosis.normalize_funnel_diagnosis(value))
+        unavailable = memory_diagnosis.unavailable_funnel_diagnosis()
+        unavailable['boundaries']['pack_input'] = {'count': 0, 'state': 'exact'}
+        self.assertIsNone(memory_diagnosis.normalize_funnel_diagnosis(unavailable))
+
+
 class RefreshOutcomeTest(unittest.TestCase):
     """A prompt is scored only on a refresh that succeeded; the runtime itself is replaced."""
 
@@ -1025,6 +1385,132 @@ class RefreshOutcomeTest(unittest.TestCase):
         stdout.update(procedural="How are orders confirmed?", semantic=["x"], episodic="failed")
         item = self.evaluate({"exit": 1, "stdout": json.dumps(stdout).encode("utf-8")})
         self.assertEqual({"procedural": "other", "semantic": "other", "episodic": "failed"}, item["refresh"]["layers"])
+
+    def test_successful_runtime_bad_optional_phases_do_not_change_quality(self):
+        output = json.loads(self.printed({'semantic': [{'path': 'docs/orders.md'}]}))
+        output['phases'] = {'zero': 0, 'index': 0.1, 'bool': True, 'negative': -1,
+                            'nan': float('nan'), 'inf': float('inf'), 'huge': 10 ** 400}
+        item = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+        self.assertEqual(('ok', 'useful'), (item['status'], item['class']))
+        self.assertEqual({'zero': 0, 'index': 0.1}, item['refresh']['phases'])
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / 'invented.json'
+            memory_eval.write_json(target, {'items': {'x': item}})
+            json.loads(target.read_text(), parse_constant=lambda value: self.fail(value))
+
+    def test_malformed_optional_phase_container_is_ignored(self):
+        output = json.loads(self.printed({'semantic': [{'path': 'docs/orders.md'}]}))
+        output['phases'] = ['invented metadata']
+        item = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+        self.assertEqual(('ok', 'useful', {}), (item['status'], item['class'], item['refresh']['phases']))
+
+    def test_valid_diagnosis_is_json_metadata_without_scoring_or_report_change(self):
+        output = json.loads(self.printed({'semantic': [{'path': 'docs/orders.md'}]}))
+        with mock.patch.object(memory_eval, 'miss_audit', side_effect=AssertionError('unexpected audit')):
+            baseline = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+            output['funnel_diagnosis'] = FunnelDiagnosisMetadataTest.observed()
+            observed = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+        self.assertEqual(output['funnel_diagnosis'], observed['refresh']['funnel_diagnosis'])
+        self.assertEqual(memory_eval.summarize({'s1': baseline}), memory_eval.summarize({'s1': observed}))
+        def report(item):
+            return memory_eval.format_report([('fixture', Path('result.json'), {'items': {'s1': item}, 'meta': {}})])
+        self.assertEqual(report(baseline), report(observed))
+        observed['refresh'].pop('funnel_diagnosis')
+        self.assertEqual(baseline, observed)
+
+    def test_missing_bad_and_unavailable_diagnosis_preserve_usable_refresh(self):
+        output = json.loads(self.printed({'semantic': [{'path': 'docs/orders.md'}]}))
+        for value in (None, {'query': 'PRIVATE-SENTINEL'}, memory_diagnosis.unavailable_funnel_diagnosis()):
+            with self.subTest(kind=type(value).__name__):
+                output['funnel_diagnosis'] = value
+                item = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+                self.assertEqual(('ok', 'useful'), (item['status'], item['class']))
+                self.assertEqual(value is not None and 'schema_version' in value,
+                                 'funnel_diagnosis' in item['refresh'])
+                self.assertNotIn('PRIVATE-SENTINEL', json.dumps(item))
+
+    def test_diagnosis_failure_preserves_evaluation_and_cancellation_propagates(self):
+        output = json.loads(self.printed({'semantic': [{'path': 'docs/orders.md'}]}))
+        baseline = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+        output['funnel_diagnosis'] = FunnelDiagnosisMetadataTest.observed()
+        with mock.patch.object(memory_eval, 'normalize_funnel_diagnosis', side_effect=RuntimeError('metadata-only failure')):
+            item = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+        self.assertEqual(baseline, item)
+        for error in (KeyboardInterrupt('cancelled'), SystemExit(7)):
+            with mock.patch.object(memory_eval, 'normalize_funnel_diagnosis', side_effect=error):
+                with self.assertRaises(type(error)) as caught:
+                    self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+            self.assertIs(error, caught.exception)
+
+
+    def test_receipt_normalizer_matches_core_schema_and_rebuilds_without_aliases(self):
+        import ast
+        names = {'normalize_ordinary_receipt', 'unknown_ordinary_receipt'}
+        tree = ast.parse((ROOT / 'PHP Core/memory-bank/scripts/context_retrieval.py').read_text())
+        selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
+        namespace = {'Any': Any, 'Optional': Optional}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), '<canonical-receipt-schema>', 'exec'), namespace)
+        unavailable = memory_diagnosis.unavailable_ordinary_receipt()
+        self.assertEqual(namespace['unknown_ordinary_receipt'](), unavailable)
+        valid = [unavailable] + [{'schema_version': 1, 'observation_state': 'observed',
+                                  'plans_present': plans, 'returned_status': status}
+                                 for plans, status in ((False, 'skipped'), (True, 'skipped'), (True, 'deferred'), (True, 'committed'))]
+        class String(str): pass
+        class Integer(int): pass
+        class Mapping(dict): pass
+        class Hostile:
+            def __eq__(self, other): raise AssertionError('equality hook')
+            def __hash__(self): raise AssertionError('hash hook')
+            def __bool__(self): raise AssertionError('truth hook')
+        bad = [None, [], Mapping(valid[-1]), {**valid[-1], 'body': 'PRIVATE-SENTINEL'},
+               {**valid[-1], 'schema_version': True}, {**valid[-1], 'schema_version': Integer(1)},
+               {**valid[-1], 'returned_status': String('committed')},
+               {**valid[-1], 'observation_state': Hostile()}, {**valid[-1], 'plans_present': Hostile()},
+               {**valid[-1], 'plans_present': False}, {**unavailable, 'plans_present': False},
+               {String('schema_version'): 1, **{key: value for key, value in valid[-1].items() if key != 'schema_version'}}]
+        for value in valid + bad:
+            # Do not compare hostile input to a reference table.
+            expected = value if any(value is item for item in valid) else None
+            self.assertEqual(expected, namespace['normalize_ordinary_receipt'](value))
+            self.assertEqual(expected, memory_diagnosis.normalize_ordinary_receipt(value))
+            if expected is not None:
+                self.assertIsNot(value, memory_diagnosis.normalize_ordinary_receipt(value))
+        self.assertLessEqual(len(json.dumps(valid[-1], separators=(',', ':')).encode()), 128)
+
+    def test_receipt_refresh_metadata_does_not_change_evaluation(self):
+        output = json.loads(self.printed({'semantic': [{'path': 'docs/orders.md'}]}))
+        baseline = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+        receipt = {'schema_version': 1, 'observation_state': 'observed', 'plans_present': True, 'returned_status': 'committed'}
+        with mock.patch.object(memory_eval, 'miss_audit', side_effect=AssertionError('unexpected audit')):
+            for funnel in (None, {'body': 'PRIVATE'}, FunnelDiagnosisMetadataTest.observed()):
+                output.update(ordinary_receipt=receipt, funnel_diagnosis=funnel)
+                item = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+                self.assertEqual(receipt, item['refresh']['ordinary_receipt'])
+                self.assertEqual(memory_eval.summarize({'s1': baseline}), memory_eval.summarize({'s1': item}))
+                report = lambda value: memory_eval.format_report([('fixture', Path('result.json'), {'items': {'s1': value}, 'meta': {}})])
+                self.assertEqual(report(baseline), report(item))
+                item['refresh'].pop('ordinary_receipt')
+                item['refresh'].pop('funnel_diagnosis', None)
+                self.assertEqual(baseline, item)
+        failed = self.evaluate({'exit': 1, 'stdout': json.dumps(output).encode()})
+        self.assertEqual(('skipped', 'refresh-error'), (failed['status'], failed['reason']))
+        self.assertNotIn('class', failed)
+        self.assertEqual(receipt, failed['refresh']['ordinary_receipt'])
+
+    def test_receipt_normalizer_failure_and_cancellation_are_metadata_only(self):
+        output = json.loads(self.printed({'semantic': [{'path': 'docs/orders.md'}]}))
+        output.update(ordinary_receipt=memory_diagnosis.unavailable_ordinary_receipt(),
+                      funnel_diagnosis=FunnelDiagnosisMetadataTest.observed())
+        for broken, retained in (('normalize_ordinary_receipt', 'funnel_diagnosis'),
+                                 ('normalize_funnel_diagnosis', 'ordinary_receipt')):
+            with mock.patch.object(memory_eval, broken, side_effect=RuntimeError('metadata-only failure')):
+                item = self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+            self.assertIn(retained, item['refresh'])
+            self.assertEqual(('ok', 'useful'), (item['status'], item['class']))
+        for error in (KeyboardInterrupt('cancelled'), SystemExit(7)):
+            with mock.patch.object(memory_eval, 'normalize_ordinary_receipt', side_effect=error), self.assertRaises(type(error)) as caught:
+                self.evaluate({'exit': 0, 'stdout': json.dumps(output).encode()})
+            self.assertIs(error, caught.exception)
 
 
 class ReconstructionTest(unittest.TestCase):
@@ -1403,6 +1889,59 @@ class RealizedUseTest(unittest.TestCase):
         self.assertIn("docs/billing.md", with_paths["paths"])
         self.assertNotIn(self.PROMPT, json.dumps(with_paths))
 
+
+
+class OptionalRuntimeDeadlineTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="optional-runtime-deadline-")
+        self.addCleanup(self.temporary.cleanup)
+        self.folder = Path(self.temporary.name)
+        self.corpus = self.folder / "corpus"
+        self.corpus.mkdir()
+        self.driver = self.folder / "driver"
+        (self.driver / "scripts").mkdir(parents=True)
+        self.pilot_ref = self.driver / "scripts/memory_onnx_pilot.py"
+        self.env = {name: os.environ[name] for name in memory_eval.ENV_PASSTHROUGH if name in os.environ}
+
+    def invoke(self, source, budget=.5):
+        self.pilot_ref.write_text(source, encoding="utf-8")
+        with mock.patch.object(memory_eval, "ROOT", self.driver):
+            return memory_eval.run_runtime(self.corpus, ["refresh", "--json"], self.env, budget, ["--stats", "unused.json"])
+
+    def test_parent_deadline_and_configured_timeout_reach_optional_main(self):
+        import time
+        started = time.monotonic()
+        result = self.invoke("import json,sys\nprint(json.dumps({'args':sys.argv[1:]}))\n", budget=3)
+        self.assertEqual(0, result["exit"])
+        arguments = json.loads(result["stdout"])["args"]
+        deadline = float(arguments[arguments.index("--invocation-deadline") + 1])
+        self.assertGreaterEqual(deadline, started + 2.8)
+        self.assertLess(deadline, time.monotonic() + 2.8)
+        self.assertEqual("3", arguments[arguments.index("--invocation-timeout") + 1])
+        self.assertEqual(["refresh", "--json"], arguments[arguments.index("--") + 1:])
+
+    def test_cooperative_timeout_is_not_a_successful_partial_json(self):
+        source = "import json,signal,time\nsignal.signal(signal.SIGTERM, lambda *_: exit(143))\nprint(json.dumps({'partial':True}),flush=True)\ntime.sleep(30)\n"
+        result = self.invoke(source)
+        self.assertIsNone(result["exit"])
+        self.assertLess(result["seconds"], .8)
+        self.assertTrue(json.loads(result["stdout"])["partial"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX TERM escalation")
+    def test_ignored_term_escalates_within_remaining_parent_budget(self):
+        source = "import json,signal,time\nsignal.signal(signal.SIGTERM,signal.SIG_IGN)\nprint(json.dumps({'partial':True}),flush=True)\ntime.sleep(30)\n"
+        result = self.invoke(source)
+        self.assertIsNone(result["exit"])
+        self.assertLess(result["seconds"], .8)
+        self.assertTrue(json.loads(result["stdout"])["partial"])
+
+    def test_nonpilot_command_remains_direct(self):
+        folder = self.corpus / "memory-bank/scripts"
+        folder.mkdir(parents=True)
+        (folder / "context.py").write_text("import json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+        result = memory_eval.run_runtime(self.corpus, ["refresh", "--json"], self.env, 1)
+        self.assertEqual(0, result["exit"])
+        self.assertEqual(["refresh", "--json"], json.loads(result["stdout"]))
 
 if __name__ == "__main__":
     unittest.main()

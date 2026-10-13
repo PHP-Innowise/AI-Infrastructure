@@ -3,7 +3,7 @@
 `scripts/memory_eval.py` measures what the prompt-time memory hook delivers,
 on each project **as it was when the prompt was written**. It is a
 repository-level maintainer tool: it is never installed into a project, it
-calls no model and no network, and CI runs only its tests
+calls no model by default and no network, and CI runs only its tests
 (`tests/test_memory_eval.py`), never the stand itself.
 
 Source-linked expansion runs automatically without a runtime flag. Each
@@ -18,6 +18,15 @@ all distinct normalized answers that existed in the prompt-time source bytes
 and were actually delivered. The summary's `answer_passage_recall` is their
 micro ratio; a legacy result without these counts reports them unavailable.
 No answer text is added to result JSON.
+
+Runtime timeouts must be finite and positive. Measured refresh/index durations
+must be finite nonnegative numbers; booleans, strings and overflowing numbers
+are rejected. Missing or null legacy timings remain unavailable, while zero is
+a valid measurement. Invalid optional runtime phase values are omitted; malformed
+known timing fields in a saved result are rejected when reporting. Opaque legacy
+metadata keeps its existing decoding rules. New results are serialized as finite
+UTF-8 JSON before any output file is created, then replace an owner-only file
+atomically; a failed serialization or write preserves the previous result.
 
 ## Why it exists
 
@@ -168,6 +177,9 @@ python3 scripts/memory_eval.py realized --project ~/Desktop/next --since 2026-09
 | `--clock as-of\|real` | Pin the runtime's clock to the prompt (default) or leave it alone. |
 | `--updated-after drop\|keep` | A working-tree memory document created before the prompt but edited after it: leave it out (default, the strict as-of corpus) or copy today's body and mark the turn contaminated. |
 | `--cache DIR` | Work and cache directory; refused inside this clone. |
+| `--diagnose-misses` | Add opt-in judged-path stage and answer-presence counters; default JSON stays unchanged. |
+| `--onnx-excerpts DIR` / `--onnx-python FILE` | Maintainer-only excerpt pilot with local assets and an explicit isolated worker. Supply both; default is off. |
+| `--onnx-timeout SECONDS` | Worker budget including startup and cleanup (default and maximum 5); larger requests are capped and the remaining evaluator timeout can tighten it; failure retains lexical excerpts. |
 | `--timeout SECONDS` | Per runtime call (default 30). A refresh past it skips the prompt as `refresh-timeout`. |
 | `--keep` | Keep each prompt's corpus and record its path in the item, for debugging. |
 
@@ -222,7 +234,23 @@ Skill paths in any tool tree (`.claude/skills/`, `.cursor/skills/`,
 the higher grade.
 
 **Passages** - `{prompt id: {path: {"useful": true, "passages": ["..."]}}}`:
-the sentences that make a document useful for that prompt.
+the labelled text that supports a document's usefulness for that prompt.
+
+Each prompt must map to document objects. `passages`, when present, must be a
+list of strings; an omitted or empty list has no passage labels. `useful`,
+when present, must be a JSON Boolean. Invalid entries fail before creating
+the evaluation corpus. Skill-path aliases must have identical entries after
+path normalization; conflicting labels are rejected rather than choosing
+whichever alias appears last. Validation errors do not print passage text.
+
+Before annotating a request, distinguish facts necessary for its answer from
+supporting execution guidance and related examples. Preserve the canonical
+source and explain that distinction in the judgment note. For example, an
+admin-test namespace review needs the test namespace, Composer mappings and
+the admin suite configuration. A README's application test command supports
+verification; a separate Rector suite does not establish the namespace fix.
+The legacy `answer_*` counters measure literal labelled-text presence, not
+necessity, model use or final-answer correctness.
 
 **Result** - `{"meta": ..., "items": {id: ...}, "summary": ...}`. `meta` names
 the edition(s) with their release, a digest of the edition files the overlay
@@ -252,6 +280,23 @@ are written owner-only (0600). The stand runs no hook and binds no task
 (`--task-id eval/<id>`), so file links seeded by touched files never fire
 there; links seeded by paths named in the prompt do, and count under
 `selections`.
+
+When the runtime supplies a valid fixed `funnel_diagnosis`, the item retains it
+under `refresh.funnel_diagnosis`. Missing or malformed metadata and unexpected
+validator errors omit only that child; a valid unavailable observation retains
+its null counters. This historical observation does not change eligibility,
+scoring, summaries, text reports or the default miss-audit behavior. Counts are
+authorized occurrences or lower bounds; source coverage and consumer use remain
+unknown and answer quality remains unmeasured.
+
+A valid automatic `ordinary_receipt` sibling is retained independently under
+`refresh.ordinary_receipt`. Its four scalar fields report only availability,
+plan presence and the paired owner's returned `skipped`, `deferred` or
+`committed` status. No-plan observations allow only `skipped`; unavailable
+observations carry null plans and `unknown`. Missing or invalid metadata stays
+unknown and is omitted. Ordinary validation failure omits only this child;
+cancellation still propagates. It adds no score, gate, miss audit, timing or
+text-report input, and does not prove durability or delivery acknowledgement.
 
 ## What the numbers mean
 
@@ -349,3 +394,162 @@ aggregates; document paths only with `--paths`. The cache holds full copies
 of client projects: per-prompt corpora are removed as soon as the prompt is
 scored (unless `--keep`), the tree cache and history clones stay until the
 cache is deleted.
+
+
+## Diagnosing misses
+
+First keep Python and the runtime unchanged and run the same frozen set with
+`--diagnose-misses`. The helper receives private input over stdin, reads the
+actual refresh manifest and a read-only index, and runs under the refresh's
+pinned clock. It emits only supplied judged paths, fixed stage labels and
+counts. Main FTS uses the explicitly pinned refresh limit of 3 (window 30).
+History uses the whole screened prompt, matching the runtime's separate
+history query, rather than substituting the distilled main query.
+
+Interpret stages as a funnel: `absent-source` and `not-indexed` precede
+retrieval; `no-fts-candidate`, `window-limit`, `relevance-drop` and `floor-drop`
+precede selection. Manifest policy exclusions, layer/rank limits, budget and
+capsule drops remain distinct. `history-admission-drop` means the recorded
+subject did not pass coverage/weighted-floor admission; `history-event-limit`
+means another admitted event/episode won the shared slot. `automatic-link-limit`
+is the manifest's explicit file-link cap. `selected-answer-not-in-text`
+includes partial delivery of a source's labelled answers. Unsupported evidence
+remains `unknown` or `unknown-history`; it is never converted into a search miss.
+
+The report separates knowledge and skills. An absent labelled path is not an
+eligible prompt-time recall denominator. Per-path `eligible/indexed/delivered`
+passage counts are normalized independently and can count a duplicated passage
+in two paths. They do not replace the scorer's globally deduplicated per-prompt
+answer denominator. Reconstructed `eval/<id>` branches lack the original
+session's task, touched files and repeat-delivery state; do not infer native
+session causality from a reconstructed refresh.
+
+A labelled history path can be supporting or an alternative to the selected
+event. `history-event-limit` therefore measures labelled coverage, not a proven
+missing answer. Check the request's active subject and distinguish necessary
+evidence, supporting alternatives and related examples before changing a
+selector. Literal fragment delivery does not establish final-answer quality.
+
+For latency comparisons, alternate baseline and candidate runs of the same
+requests with the same clock and cache warmth. Host contention can affect even
+the unchanged baseline; p95 values from separate batches do not by themselves
+identify the CPU cost of a selector change.
+
+## Optional ONNX excerpt experiment
+
+Use a reranker when an eligible document is already found but its ranking or
+quoted window loses the answer. If it is absent from the candidate set, measure
+candidate expansion with a hybrid search separately. An excerpt reranker cannot
+recover an absent document, widen the history slot or enlarge the link cap.
+
+For a session repeat, inspect the local trace's `window_observation` before
+attributing the missing answer to ranking. A `different-exposure-window`
+compares the current sanitized pre-novelty proposal with the exact prior final
+render body for the same novelty identity. Count comparable, identical,
+different, empty-proposal and unknown-prior cases separately. Retain prior
+pointer-only/shrunk state and source relation. This diagnostic is automatic,
+contains no raw passages, and does not change selection or session expiry.
+It measures rendered exposure, not answer presence, host receipt or model use.
+
+The current pilot tests **excerpt selection only**. The ordinary runtime first
+selects and policy-filters documents. The pilot reads only those documents'
+masked indexed text, creates at most eight deterministic alternate windows per
+document and 32 passages per worker call, and uses the renderer's privacy screen
+before sending query/text to the worker. Automatic linked-task excerpts keep
+their specialized selection. Exact ties preserve the lexical excerpt. Quotes
+are prepared before session novelty, so the rendered section and its delivery
+receipt agree. A chosen quote also supplies the structured snippet and token
+estimate. Pure citation-only footers retain the lexical renderer's safeguards.
+Alternate windows use the existing 320-character structured snippet cap.
+After privacy screening, alternatives that cannot fit the item's unchanged
+token estimate are excluded before counting the 32 worker passages; the lexical
+option remains first. The ordinary budgets, quotas and renderer remain active;
+a longer structured snippet is still defensively rejected, and if an alternate changes which paths
+the renderer would retain, the complete lexical selection is recomputed once
+without another worker call. A failed score attempt is not retried at rendering.
+The former late-render `ExcerptPilot(context, runtime, scorer)` callable remains
+available as a lexical-only compatibility shim; the CLI uses `StatefulExcerptPilot`.
+This is a maintainer experiment and is never included in installer inventories.
+
+Provision the worker in a separate environment outside the checkout, using
+Python 3.12+ for these pinned packages (NumPy 2.5.3 requires it; ONNX Runtime
+1.31 itself needs 3.11+). Python 3.14 works without an interpreter downgrade:
+
+```bash
+python3 -m venv ~/memory-eval/onnx-venv
+~/memory-eval/onnx-venv/bin/python -m pip install -r requirements-memory-onnx.txt
+python3 scripts/memory_eval.py run ... --diagnose-misses \
+  --onnx-excerpts ~/memory-eval/models/minilm-l6 \
+  --onnx-python ~/memory-eval/onnx-venv/bin/python \
+  --onnx-timeout 5 --out ~/memory-eval/results/onnx.json
+```
+
+Neither the evaluator nor the worker downloads models or installs dependencies.
+Keep existing system/Harness interpreters and environments intact. The worker
+alone imports NumPy, ONNX Runtime and tokenizers; CPU inference and tokenizer
+parallelism are limited to one thread. Its budget includes startup, blocked stdin,
+asset verification, import, model loading, inference and bounded cleanup, using
+one absolute deadline without pipe-reader threads. Cleanup terminates the owned
+POSIX process group even if its leader has exited; real Linux workers also guard
+against parent death. Detached descendants outside that group and Windows
+process-tree cleanup are not guaranteed. The evaluator's `--timeout` supplies
+the whole invocation limit, with cooperative termination before forced kill;
+the direct pilot defaults to a 30-second invocation and a 5-second worker.
+Synchronous OS delays are not a universal hard deadline guarantee. Busy, missing assets/dependencies, mismatched hashes,
+malformed/non-finite logits and worker errors return no scores and leave lexical
+excerpts intact. Optional stats-file errors cannot fail a successful refresh.
+
+The legacy schema-less local asset directory needs `manifest.json` and these five files:
+`model_O3.onnx`, `tokenizer.json`, `config.json`, `tokenizer_config.json`,
+`special_tokens_map.json`. The manifest's `files` maps each basename to its
+lowercase SHA-256 and positive byte `size`; the worker verifies every file before
+importing optional packages. Record the model ID, exact upstream revision,
+license and official source URLs as provenance. The model must accept BERT
+`input_ids/attention_mask/token_type_ids` and return finite `[batch, 1]` logits;
+other models require an explicit separate adapter. For example, use the pinned
+[MiniLM model tree](https://huggingface.co/cross-encoder/ms-marco-MiniLM-L6-v2/tree/ce0834f22110de6d9222af7a7a03628121708969)
+with CPU-portable O3 FP32, rather than silently substituting a GPU-oriented
+optimization. Query is bounded to 1,024 characters, passages to 1,200 characters
+and pair tokenization to 384 tokens.
+
+An explicitly selected `jina-tiny-fp32` profile uses `schema_version: 1` and
+`profile: "jina-tiny-fp32"` in its local manifest. Both keys are required;
+unknown profiles, future versions and partial discriminators fail closed.
+The profile pins `jinaai/jina-reranker-v1-tiny-en` at revision
+`aca45de6945b5dc6399abcd2a9c55ded5dc9111f`, variant `onnx/model.onnx`,
+`pad_token: "<pad>"`, and integer `pad_id: 1`. Its five basenames are
+`model.onnx` and the same four JSON files. Each manifest hash and size must
+match the worker-owned `JINA_FILES` pins in
+[`memory_onnx.py`](../scripts/memory_onnx.py), as well as the actual local bytes.
+Inert provenance fields may remain; the worker never fetches their URLs.
+The [publisher model tree](https://huggingface.co/jinaai/jina-reranker-v1-tiny-en/tree/aca45de6945b5dc6399abcd2a9c55ded5dc9111f)
+provides the pinned ONNX and tokenizer assets; publisher Python is not executed.
+
+This separate profile requires the retained Python 3.14 worker and exact
+NumPy 2.5.3, ONNX Runtime 1.31.0 and tokenizers 0.23.3 versions. A version
+mismatch returns the ordinary dependency fallback. Its tokenizer is
+`RobertaTokenizer`: the pinned config declares pad ID zero, while the actual
+`<pad>` token maps to ID one. The worker validates both declarations without
+rewriting metadata and pads on the right with ID one. It supplies only
+`input_ids` and `attention_mask` as int64 rank-two arrays, checks CPU-only
+node metadata before inference, caps pairs at 384 tokens with longest-first
+right truncation, and requires finite float32 `[batch, 1]` raw logits in
+passage order. Legacy manifests retain their BERT three-input/pad-zero route.
+Profile support alone does not establish retrieval quality or multilingual
+reliability; Jina remains an optional maintainer experiment.
+
+Every valid requested worker timeout is capped at five seconds before applying
+the tighter remaining invocation deadline. Startup, pipe I/O and cleanup share
+that one budget. Requests above five are accepted but shortened; shorter
+requests remain shorter. The existing OS scheduling and process-tree limits
+still apply. Any failed profile, metadata, shape, dependency or score check
+keeps the complete lexical capsule and session delivery receipts.
+
+Freeze model/assets, settings, labels, prompt-time snapshots and the scorer
+before measuring. Use development queries first; only a passing configuration
+may run the separate fixed replay. A reused replay is not a fresh blind holdout.
+Report paired passage delivery, useful/noise paths, unexpected fallbacks and
+complete refresh latency (including cold model startup); a model smoke test is
+not evidence of retrieval improvement. Keep models, queries, client corpora and
+result JSON outside Git. CI exercises stdlib fixtures and fake workers, without
+ML downloads or dependencies.

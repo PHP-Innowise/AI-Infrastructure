@@ -311,19 +311,17 @@ def check_sources(root, draft):
                 raise SessionError(problem)
 
 
-def remembered(learning):
-    """What makes two learnings the same one: their kind and their title, ignoring case."""
-    return [learning["type"], " ".join(learning["title"].split()).casefold()]
-
-
 def usable(root, draft, known=()):
     """What an unattended save keeps of a parsed draft, and the learnings it leaves out.
 
     Nobody is there to correct a field, so a source the workspace cannot back is
     dropped, a learning left with none is skipped rather than failing the whole
-    save, and stray control characters become spaces. A learning already saved
-    from this session (`known`, as `remembered` names them) is skipped too: an
-    agent restates what it found in later turns. The kept draft still goes
+    save, and stray control characters become spaces. Within the parsed, clipped
+    draft, identical kind/title/source sets deduplicate; different consequences
+    for one such identity omit every member. The legacy `known` title cache is ignored: it cannot
+    establish that a consequence, its sources or its persisted record are
+    unchanged. The runtime decides cross-run no-ops and promotion retries.
+    The kept draft still goes
     through `submission`, under the same limits as a reviewed one.
     """
     def plain(value, limit):
@@ -331,8 +329,7 @@ def usable(root, draft, known=()):
             return ""
         return " ".join("".join(char if 31 < ord(char) != 127 else " " for char in value).split())[:limit]
 
-    known = [list(item) for item in known]
-    kept, skipped = [], []
+    prepared, consequences = [], {}
     for item in draft.get("learnings") or []:
         sources = []
         for source in item.get("sources") or []:
@@ -345,11 +342,25 @@ def usable(root, draft, known=()):
         learning = {"type": item.get("type"), "title": plain(item.get("title"), TITLE_LIMIT),
                     "consequence": plain(item.get("consequence"), CONSEQUENCE_LIMIT), "sources": sources}
         if not (learning["type"] in KINDS and learning["title"] and learning["consequence"] and sources):
-            skipped.append({"title": learning["title"] or "an untitled learning", "reason": "unsourced"})
-        elif remembered(learning) in known + [remembered(other) for other in kept]:
-            skipped.append({"title": learning["title"], "reason": "repeated"})
+            identity = None
+        else:
+            identity = (learning["type"], learning["title"].casefold(), tuple(sorted(sources)))
+            consequences.setdefault(identity, set()).add(learning["consequence"])
+        prepared.append((learning, identity))
+    kept, skipped, seen = [], [], set()
+    for learning, identity in prepared:
+        if identity is None:
+            reason = "unsourced"
+        elif len(consequences[identity]) > 1:
+            # Classify the whole group before retaining anything: A,A,B all conflict.
+            reason = "conflict"
+        elif identity in seen:
+            reason = "repeated"
         else:
             kept.append(learning)
+            seen.add(identity)
+            continue
+        skipped.append({"title": learning["title"] or "an untitled learning", "reason": reason})
     steps = [step for step in (plain(step, STEP_LIMIT) for step in draft.get("next_steps") or []) if step]
     # The agent attests its own learnings here; the records' ledger says no person did.
     return {"progress": plain(draft.get("progress"), PROGRESS_LIMIT), "next_steps": steps[:STEP_COUNT],
@@ -385,7 +396,9 @@ def summary(state, result=None):
         text += " Removed from project memory since this run saved it: " + "; ".join(named(r) for r in removed) + "."
     skipped =[item.get("reason") for item in result.get("skipped") or [] if isinstance(item, dict)]
     if skipped.count("repeated"):
-        text += f" {skipped.count('repeated')} learning(s) were already saved from this session."
+        text += f" Left out {skipped.count('repeated')} duplicate learning(s) within this draft."
+    if skipped.count("conflict"):
+        text += f" Left out {skipped.count('conflict')} conflicting learning(s); no claim from those groups was saved."
     if skipped.count("unsourced"):
         text += f" Left out {skipped.count('unsourced')} learning(s) citing no file in the workspace."
     promotion = saved.get("promotion")

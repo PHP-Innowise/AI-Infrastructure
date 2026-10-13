@@ -510,7 +510,7 @@ class ContextLaunchTests(unittest.TestCase):
         live = context_usage.CodexLive(self.project, now.timestamp() - 1)
         self.assertFalse(live.poll(None))
         self.assertFalse(live.poll("native-live"))
-        with sqlite3.connect(home / "state_5.sqlite") as db:
+        with closing(sqlite3.connect(home / "state_5.sqlite")) as db, db:
             db.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT)")
             db.execute("INSERT INTO threads VALUES (?,?,?)", ("native-live", str(rollout), str(self.project)))
         live.retry_at = 0
@@ -530,7 +530,7 @@ class ContextLaunchTests(unittest.TestCase):
         self.events.unlink()
         state = self.root / "old-state"
         state.mkdir()
-        with sqlite3.connect(state / "sessions.sqlite3") as db:
+        with closing(sqlite3.connect(state / "sessions.sqlite3")) as db, db:
             db.execute("CREATE TABLE launches (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL, "
                        "started_at TEXT NOT NULL, finished_at TEXT, settings TEXT NOT NULL, usage TEXT)")
             db.execute("INSERT INTO launches VALUES ('old','s-old','native','completed','2026-01-01T00:00:00+00:00',NULL,'{}',NULL)")

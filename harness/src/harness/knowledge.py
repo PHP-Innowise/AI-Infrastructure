@@ -21,7 +21,7 @@ import zipfile
 
 from .filesystem import fs
 from . import process_runtime
-from .sessions import SessionError, open_project_path, read_context
+from .sessions import SessionError, _memory_bank_selection, open_project_path, read_context
 
 RECORD_TYPES = ('task', 'finding', 'bug', 'incident', 'decision', 'event')
 FOLDERS = tuple('dynamic/' + name for name in ('tasks', 'findings', 'bugs', 'incidents', 'decisions', 'events')) + (
@@ -232,8 +232,7 @@ class KnowledgeManager:
     def info(self, project_id, bank=None, *, _root=None):
         layout = self.layout(project_id, _root)
         project = layout['folder']
-        listing = self.sessions.memory(project_id, bank=bank, _root=project)
-        selected = listing['bank_id']
+        banks, selected = _memory_bank_selection(project, bank)
         root = str(PurePosixPath(selected).parent) if selected else ''
         root = '' if root == '.' else root
         prefix = root + '/' if root else ''
@@ -262,7 +261,7 @@ class KnowledgeManager:
             override = os.environ.get('PROJECT_BRAIN_MODE')
             if override:
                 mode = override if override in ('governed', 'lightweight') else None
-        return {'project_id': project_id, 'banks': listing['banks'], 'bank_id': selected,
+        return {'project_id': project_id, 'banks': banks, 'bank_id': selected,
                 'runtime_available': available, 'brain_available': brain_available, 'root': root, 'mode': mode,
                 'attached': layout['attached']}
 
@@ -437,7 +436,16 @@ class KnowledgeManager:
             return arguments + ['--limit', '20' if action == 'search' else '3', '--json', '--', query]
         return arguments + ['--json']
 
-    def _execute(self, command, root, extra=None, *, _guard=None):
+    def _execute(self, command, root, extra=None, *, _guard=None, _io_observer=None, _request_bytes=None):
+        from . import cost_observation
+        measured_start = time.monotonic()
+        returned = False
+        eof = [False, False]
+        argument_bytes = None
+        try:
+            argument_bytes = sum(len(value.encode('utf-8')) for value in command)
+        except (TypeError, UnicodeError):
+            pass
         read_fd, write_fd = os.pipe()
         process = None
         selector = process_runtime.PipeSelector()
@@ -474,12 +482,15 @@ class KnowledgeManager:
                 for key, _ in ready:
                     chunk = selector.read(key.fileobj, 65536)
                     if not chunk:
+                        eof[key.data] = True
                         selector.unregister(key.fileobj)
                         continue
                     output[key.data].extend(chunk)
                     if len(output[0]) > OUTPUT_LIMIT or len(output[1]) > 65536:
                         raise SessionError('Knowledge runtime output exceeded its limit. Refresh the records before retrying; changes may have been applied.')
-            return process.wait(timeout=3), bytes(output[0]), bytes(output[1])
+            response = process.wait(timeout=3), bytes(output[0]), bytes(output[1])
+            returned = True
+            return response
         finally:
             if read_fd is not None:
                 fs.close(read_fd)
@@ -494,6 +505,14 @@ class KnowledgeManager:
                 process.stderr.close()
             self.process = None
             selector.close()
+            cost_observation.safe(_io_observer, 'io', {
+                'argv_argument_bytes': argument_bytes, 'request_file_bytes': _request_bytes,
+                'stdout_known_bytes': len(output[0]), 'stderr_known_bytes': len(output[1]),
+                'returned_stdout_bytes': len(output[0]) if returned else None,
+                'returned_stderr_bytes': len(output[1]) if returned else None,
+                'returned': returned, 'started': process is not None,
+                'stdout_eof': eof[0], 'stderr_eof': eof[1],
+                'seconds': time.monotonic() - measured_start})
 
     def _zip(self, destination):
         stream, total, count = io.BytesIO(), 0, 0
@@ -526,12 +545,13 @@ class KnowledgeManager:
                         fs.close(descriptor)
         return stream.getvalue()
 
-    def _inspect_runtime(self, root, request, layout=None):
+    def _inspect_runtime(self, root, request, layout=None, *, _io_observer=None):
         attached = layout and layout['scripts'] is not None
         command = [sys.executable, '-c', BRAIN_INSPECT, str(root), json.dumps(request)]
         if attached:
             command.append(str(layout['scripts']))
-        code, stdout, _ = self._execute(command, root, layout['environment'] if attached else None)
+        code, stdout, _ = self._execute(command, root, layout['environment'] if attached else None,
+                                      **({'_io_observer': _io_observer} if _io_observer is not None else {}))
         try:
             result = json.loads(stdout)
             json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')
@@ -541,7 +561,7 @@ class KnowledgeManager:
             raise SessionError('The installed Brain runtime could not inspect its records. Check record validity and source paths.')
         return result
 
-    def inspect(self, project_id, bank=None, *, _root=None, task_id=None, task_only=False):
+    def inspect(self, project_id, bank=None, *, _root=None, task_id=None, task_only=False, _io_observer=None):
         with self._operation():
             if self.closed.is_set() or self.sessions.stopping.is_set():
                 raise SessionError('The knowledge manager is stopping.')
@@ -551,7 +571,8 @@ class KnowledgeManager:
             layout = self.layout(project_id, _root)
             root = layout['folder'] / info['root']
             self._preflight(root)
-            return {**info, **self._inspect_runtime(root, {'task_id': task_id, 'task_only': task_only}, layout)}
+            return {**info, **self._inspect_runtime(root, {'task_id': task_id, 'task_only': task_only}, layout,
+                    **({'_io_observer': _io_observer} if _io_observer is not None else {}))}
 
     def memory_use_check(self, project_id, bank=None):
         """Run the runtime's eligibility rules for Memory use, under the non-blocking knowledge lock."""
@@ -577,7 +598,7 @@ class KnowledgeManager:
                 raise SessionError('The installed runtime could not check eligibility. Check record validity and source paths.')
             return {**info, **result}
 
-    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None, _guard=None):
+    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None, _guard=None, _io_observer=None):
         if not isinstance(data, dict) or not isinstance(data.get('action'), str) or data['action'] not in ACTION_FIELDS:
             raise SessionError('Select a supported knowledge operation.')
         action = data['action']
@@ -639,10 +660,15 @@ class KnowledgeManager:
             try:
                 if action in ('promote-propose', 'promote-apply'):
                     eligibility = self._inspect_runtime(root, {'check': True, **{
-                        field: data[field] for field in ('source_ids', 'promotion_id') if field in data}}, layout)
+                        field: data[field] for field in ('source_ids', 'promotion_id') if field in data}}, layout,
+                        **({'_io_observer': _io_observer} if _io_observer is not None else {}))
                     if eligibility.get('eligible') is not True:
                         raise SessionError('Promote only verified resolved findings or bugs, closed incidents, or accepted decisions with allowed privacy, reusable progress and unchanged sources. Tasks and session transcripts are not durable knowledge.')
-                code, stdout, stderr = self._execute(command, root, layout['environment'], **({'_guard': _guard} if _guard is not None else {}))
+                code, stdout, stderr = self._execute(command, root, layout['environment'],
+                    **({'_guard': _guard} if _guard is not None else {}),
+                    **({'_io_observer': _io_observer,
+                        '_request_bytes': len(encoded.encode('utf-8')) if request_file is not None else None}
+                       if _io_observer is not None else {}))
                 result = json.loads(stdout) if stdout.strip() else None
                 if not isinstance(result, (dict, list)):
                     result = None

@@ -89,6 +89,7 @@ if str(ROOT / "scripts") not in sys.path:
 
 import accelerator_attach  # noqa: E402  - edition detection from framework markers
 import install_accelerator as installer  # noqa: E402  - inventories and install rules
+from memory_diagnosis import normalize_funnel_diagnosis, normalize_ordinary_receipt  # noqa: E402
 
 UTC = timezone.utc
 HOSTS = ("claude", "codex", "cursor")
@@ -128,6 +129,7 @@ CHUNK_NAME = re.compile(r"^(MEM-(\d{8})-[0-9a-f]{8})-")
 INSTALL_MANIFEST = installer.SYNC_MANIFEST
 POLICY_LOCK = ".accelerator-policy-lock.json"
 DEFAULT_TIMEOUT = 30.0
+REFRESH_RETRIEVAL_LIMIT = 3
 IDENTITY = ("memory-eval", "memory-eval@localhost")
 # The refresh runs with these variables of the caller's environment and no
 # others, so neither an attached-mode session, a task override nor a Git
@@ -139,6 +141,17 @@ ENV_PASSTHROUGH = (
 STDERR_LINES = 6
 STDERR_CHARACTERS = 600
 PROMPT_WINDOW = 20
+MISS_AUDIT_STAGES = frozenset({
+    "absent-source", "not-indexed", "no-fts-candidate", "window-limit",
+    "relevance-drop", "floor-drop", "runtime-exclusion", "rank-loss",
+    "budget-loss", "capsule-loss", "selected", "selected-answer-not-in-text",
+    "unknown", "unknown-history", "unknown-query-withheld",
+    "history-event-limit", "history-admission-drop", "automatic-link-limit",
+})
+MISS_AUDIT_ANSWERS = frozenset({
+    "not-applicable", "unknown", "not-in-source", "not-in-index", "not-in-delivery",
+    "partial-index", "partial-delivery", "delivered",
+})
 
 # Pins the clock of the memory runtime the stand starts: `date.today()` and
 # `datetime.now()` read the prompt's instant, plus the time since start-up.
@@ -253,14 +266,83 @@ def read_json(path: Path) -> Any:
         return None
 
 
+def _finite_duration(value: Any, *, positive: bool = False) -> bool:
+    """Duration fields exclude bool and conversions that overflow float."""
+    if type(value) not in (int, float):
+        return False
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return math.isfinite(number) and (number > 0 if positive else number >= 0)
+
+
+def _duration(value: Any, label: str) -> Optional[float]:
+    if value is None:
+        return None  # Missing legacy measurements do not become zero.
+    if not _finite_duration(value):
+        raise EvalError(f"{label} must be a finite nonnegative number")
+    return float(value)
+
+
+def _refresh_timing(item: Dict[str, Any]) -> Dict[str, Any]:
+    refresh = item.get("refresh")
+    if refresh is None:
+        return {}
+    if not isinstance(refresh, dict):
+        raise EvalError("refresh timing metadata must be an object")
+    return refresh
+
+
+def _duration_samples(items: Sequence[Dict[str, Any]], field: str) -> List[float]:
+    samples = []
+    for item in items:
+        number = _duration(_refresh_timing(item).get(field), "refresh." + field)
+        if number is not None:
+            samples.append(number)
+    return samples
+
+
+def _phase_durations(value: Any) -> Dict[str, Any]:
+    # Runtime phases are optional diagnostics, not authority for success.
+    if not isinstance(value, dict):
+        return {}
+    return {key: number for key, number in value.items() if _finite_duration(number)}
+
+
 def write_json(path: Path, document: Any) -> None:
     """Results name client paths and prompt ids: owner-only, whatever the umask."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
-    os.replace(temporary, path)
+    try:
+        encoded = (json.dumps(document, indent=1, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    except (ValueError, TypeError, OverflowError, RecursionError, UnicodeError) as error:
+        raise EvalError("result is not serializable as finite UTF-8 JSON") from error
+    descriptor = None
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix="." + path.name + ".tmp-", dir=path.parent)
+        temporary = Path(name)
+        handle = os.fdopen(descriptor, "wb")
+        descriptor = None
+        with handle:
+            handle.write(encoded)
+        os.replace(temporary, path)
+        temporary = None  # The renamed pathname is no longer ours to clean up.
+    except OSError as error:
+        raise EvalError("could not write result JSON") from error
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise EvalError("could not clean up result temporary") from error
 
 
 def remove_tree(path: Path) -> None:
@@ -1145,9 +1227,55 @@ def commit_corpus(
     git("symbolic-ref", "HEAD", f"refs/heads/{branch}")
 
 
-def run_runtime(corpus: Path, arguments: Sequence[str], env: Dict[str, str], timeout: float) -> Dict[str, Any]:
+def run_runtime(corpus: Path, arguments: Sequence[str], env: Dict[str, str], timeout: float,
+                pilot: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     command = [sys.executable, str(corpus / "memory-bank" / "scripts" / "context.py"), *arguments]
+    if pilot:
+        command = [sys.executable, str(ROOT / "scripts" / "memory_onnx_pilot.py"),
+                   "--context", str(corpus / "memory-bank" / "scripts" / "context.py"),
+                   *pilot, "--", *arguments]
     started = time.monotonic()
+    if pilot:
+        # Both pilot preparation and scoring share the parent's remaining
+        # budget. Leave bounded cooperative cleanup time before escalation.
+        deadline = started + timeout
+        grace = min(0.2, timeout * 0.2)
+        command[4:4] = ["--invocation-deadline", str(deadline - grace),
+                        "--invocation-timeout", str(timeout)]
+        process = subprocess.Popen(command, cwd=str(corpus), env=env,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        timed_out = False
+        try:
+            try:
+                stdout, stderr = process.communicate(timeout=max(0.0, deadline - grace - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                process.terminate()
+                try:
+                    stdout, stderr = process.communicate(timeout=max(0.0, deadline - grace / 4 - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        stdout, stderr = process.communicate(timeout=max(0.0, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired as error:
+                        stdout, stderr = error.stdout or b"", error.stderr or b""
+            return {"exit": None if timed_out else process.returncode,
+                    "seconds": round(time.monotonic() - started, 4),
+                    "stdout": stdout, "stderr": stderr}
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    except subprocess.TimeoutExpired:
+                        pass
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
     try:
         result = subprocess.run(command, cwd=str(corpus), env=env, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as error:
@@ -1256,12 +1384,21 @@ def load_passages(path: Optional[Path]) -> Dict[str, Dict[str, Dict[str, Any]]]:
     passages: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for prompt_id, documents in raw.items():
         if not isinstance(documents, dict):
-            continue
-        passages[str(prompt_id)] = {
-            normalise_path(document): entry
-            for document, entry in documents.items()
-            if isinstance(document, str) and isinstance(entry, dict)
-        }
+            raise EvalError(f"{path}: prompt {prompt_id!r}: passage documents must be a JSON object")
+        clean: Dict[str, Dict[str, Any]] = {}
+        for document, entry in documents.items():
+            if not isinstance(document, str) or not isinstance(entry, dict):
+                raise EvalError(f"{path}: prompt {prompt_id!r}: each passage document must have an object entry")
+            values = entry.get("passages", [])
+            if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+                raise EvalError(f"{path}: prompt {prompt_id!r}, {document!r}: passages must be a list of strings")
+            if "useful" in entry and not isinstance(entry["useful"], bool):
+                raise EvalError(f"{path}: prompt {prompt_id!r}, {document!r}: useful must be a JSON Boolean")
+            key = normalise_path(document)
+            if key in clean and clean[key] != entry:
+                raise EvalError(f"{path}: prompt {prompt_id!r}, {key!r}: conflicting passage aliases")
+            clean[key] = entry
+        passages[str(prompt_id)] = clean
     return passages
 
 
@@ -1493,6 +1630,72 @@ def source_link_stats(corpus: Path, result: Dict[str, Any]) -> Optional[Dict[str
     return clean
 
 
+def miss_audit(
+    corpus: Path, result: Dict[str, Any], paths: Sequence[str], answer_passages: Dict[str, List[str]],
+    env: Dict[str, str], timeout: float, history_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Trace known judged paths in a pinned-clock subprocess, never exposing query/text.
+
+    The helper reads the manifest written by the exact refresh. Its subprocess
+    is necessary because importing the runtime here would calculate freshness
+    against this evaluator's real clock instead of the clock the refresh used.
+    """
+    capsule = result.get("capsule") if isinstance(result, dict) else None
+    manifest = capsule.get("manifest") if isinstance(capsule, dict) else None
+    payload = json.dumps({
+        "answer_passages": answer_passages,
+        "capsule_text": result.get("capsule_text") if isinstance(result.get("capsule_text"), str) else "",
+        "history_text": history_text,
+    }).encode("utf-8")
+    command = [
+        sys.executable, str(ROOT / "scripts" / "memory_miss_audit.py"),
+        "--corpus", str(corpus), "--manifest", str(manifest or ""),
+        "--paths-json", json.dumps(list(paths)),
+    ]
+    if result.get("query_withheld"):
+        command.append("--query-withheld")
+    try:
+        completed = subprocess.run(
+            command, cwd=str(corpus), env=env, input=payload, capture_output=True, timeout=timeout,
+        )
+        decoded = json.loads(completed.stdout.decode("utf-8", "replace")) if completed.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        decoded = None
+    expected = set(paths)
+    entries = decoded.get("items") if isinstance(decoded, dict) else None
+    clean: List[Dict[str, str]] = []
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            path, stage, answer, counts = (
+                entry.get("path"), entry.get("stage"), entry.get("answer"), entry.get("answer_counts")
+            )
+            valid_counts = (
+                isinstance(counts, dict)
+                and all(type(counts.get(key)) is int and counts[key] >= 0 for key in ("eligible", "indexed", "delivered"))
+            )
+            if path in expected and stage in MISS_AUDIT_STAGES and answer in MISS_AUDIT_ANSWERS and valid_counts:
+                clean.append({"path": path, "stage": stage, "answer": answer, "answer_counts": counts})
+    found = {entry["path"] for entry in clean}
+    clean.extend(
+        {"path": path, "stage": "unknown", "answer": "unknown", "answer_counts": {"eligible": 0, "indexed": 0, "delivered": 0}}
+        for path in paths if path not in found
+    )
+    return {"status": "ok" if isinstance(decoded, dict) and decoded.get("status") == "ok" else "unknown", "items": clean}
+
+
+def audit_answer_passages(grades: Dict[str, int], passages: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
+    """Explicit labels used by both score() and the miss audit, for grades 1 and 2."""
+    return {
+        path: [value for value in entry.get("passages") or [] if isinstance(value, str)]
+        for path, grade in grades.items()
+        if grade >= 1
+        for entry in [passages.get(path)]
+        if isinstance(entry, dict) and entry.get("useful") is not False
+    }
+
+
 def index_stats(corpus: Path) -> Optional[Dict[str, Any]]:
     """Counters of the corpus's index, read-only: documents, link rows by kind,
     and documents whose stored text still matches a secret pattern."""
@@ -1553,12 +1756,8 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     def mean(key: str) -> Optional[float]:
         return round(sum(len(item.get(key) or []) for item in evaluated) / count, 3) if count else None
 
-    seconds = [
-        float(item["refresh"]["seconds"])
-        for item in evaluated
-        if isinstance((item.get("refresh") or {}).get("seconds"), (int, float))
-    ]
-    return {
+    seconds = _duration_samples(evaluated, "seconds")
+    result = {
         "prompts": len(items),
         "evaluated": count,
         "skipped": dict(sorted(skipped.items())),
@@ -1588,6 +1787,34 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         **mechanism_totals(evaluated),
         **knowledge_and_skill_totals(evaluated),
     }
+    audits = [item.get("miss_audit") for item in evaluated if isinstance(item.get("miss_audit"), dict)]
+    if audits:
+        entries = [
+            entry for audit in audits for entry in audit.get("items") or []
+            if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+        ]
+        stages = Counter(str(entry.get("stage")) for entry in entries)
+        answers = Counter(str(entry.get("answer")) for entry in entries)
+        answer_counts = {key: sum(
+            entry.get("answer_counts", {}).get(key, 0)
+            for entry in entries if isinstance(entry.get("answer_counts"), dict)
+        ) for key in ("eligible", "indexed", "delivered")}
+        result["miss_audit"] = {
+            "prompts": len(audits),
+            "known_paths": len(entries),
+            "unknown_paths": sum(stages.get(name, 0) for name in ("unknown", "unknown-history", "unknown-query-withheld")),
+            "stages": dict(sorted(stages.items())),
+            "answer_states": dict(sorted(answers.items())),
+            # Per-path normalized passages intentionally do not replace the
+            # scorer's prompt-level de-duplicated answer denominator.
+            "per_path_answer_passages": answer_counts,
+        }
+        for group, skill in (("knowledge", False), ("skills", True)):
+            result["miss_audit"][group] = dict(sorted(Counter(
+                str(entry.get("stage")) for entry in entries
+                if is_skill(normalise_path(entry["path"])) == skill
+            ).items()))
+    return result
 
 
 def knowledge_class(item: Dict[str, Any]) -> str:
@@ -1682,7 +1909,7 @@ def mechanism_totals(evaluated: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             for name, number in (item.get("selections") or {}).items():
                 if name in selections:
                     selections[name] += number
-    indexes = [((item.get("refresh") or {}).get("index")) for item in evaluated]
+    indexes = [_refresh_timing(item).get("index") for item in evaluated]
     indexed = bool(evaluated) and all(isinstance(entry, dict) for entry in indexes)
     link_rows: Optional[Dict[str, int]] = None
     if indexed:
@@ -1690,11 +1917,7 @@ def mechanism_totals(evaluated: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         for entry in indexes:
             for kind, number in (entry.get("links") or {}).items():
                 link_rows[kind] = link_rows.get(kind, 0) + number
-    index_seconds = [
-        float(item["refresh"]["index_seconds"])
-        for item in evaluated
-        if isinstance((item.get("refresh") or {}).get("index_seconds"), (int, float))
-    ]
+    index_seconds = _duration_samples(evaluated, "index_seconds")
     return {
         "useful_paths_delivered": total("useful_delivered"),
         "useful_paths_existed": total("existed_useful"),
@@ -1818,6 +2041,16 @@ class Run:
             "started": now_iso(),
             "finished": None,
         }
+        if arguments.diagnose_misses:
+            self.meta["diagnose_misses"] = True
+        if arguments.onnx_excerpts:
+            manifest = arguments.onnx_excerpts / "manifest.json"
+            self.meta["onnx_excerpts"] = {
+                "assets_manifest_sha256": sha256_file(manifest) if manifest.is_file() else None,
+                "worker_python": str(arguments.onnx_python),
+                "worker_timeout": arguments.onnx_timeout,
+                "scope": "selected-document-excerpts-only",
+            }
 
     @property
     def pinned(self) -> bool:
@@ -1912,31 +2145,60 @@ class Run:
             # A fresh corpus starts with no index; the hook's index is warm.
             # Building it first keeps the timed refresh the per-turn cost.
             warm = run_runtime(corpus, ["index"], env, self.arguments.timeout)
+            pilot = None
+            pilot_stats = corpus / ".memory-onnx-stats.json"
+            if self.arguments.onnx_excerpts:
+                pilot = ["--assets", str(self.arguments.onnx_excerpts.resolve()),
+                         # Resolving a venv's python symlink selects the base
+                         # interpreter and loses its optional dependencies.
+                         "--python", str(self.arguments.onnx_python.expanduser().absolute()),
+                         "--worker-timeout", str(self.arguments.onnx_timeout),
+                         "--stats", str(pilot_stats)]
             refresh = run_runtime(
                 corpus,
                 [
                     "refresh", "--host", self.arguments.host, "--query", prompt["prompt"],
-                    "--task-id", branch, "--ephemeral", "--sanitize", "--json",
+                    "--task-id", branch, "--limit", str(REFRESH_RETRIEVAL_LIMIT),
+                    "--ephemeral", "--sanitize", "--json",
                 ],
                 env,
                 self.arguments.timeout,
+                **({"pilot": pilot} if pilot else {}),
             )
             result = refresh_json(refresh["stdout"])
             item["refresh"] = {
                 "exit": refresh["exit"],
-                "seconds": refresh["seconds"],
-                "index_seconds": warm["seconds"],
+                "seconds": _duration(refresh["seconds"], "refresh.seconds"),
+                "index_seconds": _duration(warm["seconds"], "refresh.index_seconds"),
                 "index_exit": warm["exit"],
-                "phases": {
-                    key: value
-                    for key, value in ((result or {}).get("phases") or {}).items()
-                    if isinstance(value, (int, float))
-                },
+                "phases": _phase_durations((result or {}).get("phases")),
                 "warnings": len((result or {}).get("warnings") or []),
                 "layers": layer_states(result),
                 "capsule_missing": bool(result) and result.get("capsule") is None and not result.get("query_withheld"),
                 "stderr_tail": stderr_tail(refresh["stderr"], prompt["prompt"]),
             }
+            try:
+                diagnosis = normalize_funnel_diagnosis((result or {}).get("funnel_diagnosis"))
+            except Exception:
+                diagnosis = None
+            if diagnosis is not None:
+                item["refresh"]["funnel_diagnosis"] = diagnosis
+            try:
+                receipt = normalize_ordinary_receipt((result or {}).get("ordinary_receipt"))
+            except Exception:
+                receipt = None
+            if receipt is not None:
+                item["refresh"]["ordinary_receipt"] = receipt
+            if pilot:
+                try:
+                    counters = json.loads(pilot_stats.read_text(encoding="utf-8"))
+                    item["refresh"]["onnx_excerpts"] = {
+                        key: value for key, value in counters.items()
+                        if re.fullmatch(r"[a-z-]+(?::[a-z-]+)?", key)
+                        and type(value) is int and 0 <= value <= 10_000
+                    }
+                except (OSError, ValueError, AttributeError):
+                    item["refresh"]["onnx_excerpts"] = {"stats-unavailable": 1}
             # Only a refresh that exited 0 is scored. The runtime prints its
             # JSON and exits 1 when a memory layer failed to update: scored,
             # that turn read as a silent one, or one served from a stale
@@ -1957,6 +2219,13 @@ class Run:
                 expected_passages=existing_answer_passages(corpus, answered, prompt_passages),
                 secret_patterns=runtime_policy().SECRET_PATTERNS,
             ))
+            if self.arguments.diagnose_misses:
+                known_paths = sorted(path for path, grade in grades.items() if grade >= 1)
+                answer_passages = audit_answer_passages(grades, prompt_passages)
+                item["miss_audit"] = miss_audit(
+                    corpus, result, known_paths, answer_passages, env, self.arguments.timeout,
+                    history_text=prompt["prompt"],
+                )
             item["status"] = "ok"
         except Skip as skip:
             item["reason"] = skip.reason
@@ -2001,8 +2270,12 @@ class Run:
 
 
 def command_run(arguments: argparse.Namespace) -> int:
-    if arguments.timeout <= 0:
-        raise EvalError("--timeout must be positive")
+    if not _finite_duration(arguments.timeout, positive=True):
+        raise EvalError("--timeout must be finite and positive")
+    if bool(arguments.onnx_excerpts) != bool(arguments.onnx_python):
+        raise EvalError("--onnx-excerpts and --onnx-python must be supplied together")
+    if not _finite_duration(arguments.onnx_timeout, positive=True):
+        raise EvalError("--onnx-timeout must be finite and positive")
     for label, path in (("--set", arguments.set), ("--judgments", arguments.judgments),
                         ("--passages", arguments.passages), ("--out", arguments.out)):
         warn_if_inside_clone(label, path)
@@ -2018,6 +2291,27 @@ def load_result(path: Path) -> Dict[str, Any]:
     document = read_json(path)
     if not isinstance(document, dict) or not isinstance(document.get("items"), dict):
         raise EvalError(f"{path}: not a memory_eval result (no items)")
+    for item in document["items"].values():
+        if not isinstance(item, dict):
+            raise EvalError("result items must be objects")
+        refresh = _refresh_timing(item)
+        for field in ("seconds", "index_seconds"):
+            _duration(refresh.get(field), "refresh." + field)
+        phases = refresh.get("phases")
+        if phases is not None:
+            if not isinstance(phases, dict):
+                raise EvalError("refresh.phases must be an object")
+            for value in phases.values():
+                _duration(value, "refresh.phases")
+    meta = document.get("meta")
+    if isinstance(meta, dict):
+        budgets = [("meta.timeout", meta.get("timeout"))]
+        onnx = meta.get("onnx_excerpts")
+        if isinstance(onnx, dict):
+            budgets.append(("meta.onnx_excerpts.worker_timeout", onnx.get("worker_timeout")))
+        for label, value in budgets:
+            if value is not None and not _finite_duration(value, positive=True):
+                raise EvalError(f"{label} must be finite and positive")
     return document
 
 
@@ -2081,9 +2375,13 @@ COVERAGE_ROWS = {"prompts", "evaluated", "skipped_total"}
 
 def row_value(summary: Dict[str, Any], key: str) -> Optional[float]:
     if key == "skipped_total":
-        return float(sum(summary.get("skipped", {}).values()))
-    value = summary.get(key)
-    return float(value) if isinstance(value, (int, float)) else None
+        return sum(summary.get("skipped", {}).values())
+    value: Any = summary
+    for part in key.split("/"):
+        value = value.get(part) if isinstance(value, dict) else None
+    if type(value) is int or (type(value) is float and math.isfinite(value)):
+        return value
+    return None
 
 
 def row_cell(summary: Dict[str, Any], key: str) -> str:
@@ -2151,13 +2449,21 @@ def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
                 f"note: {len(both)} evaluated in both, {only[0]} only in A, {only[1]} only in B: each measure's "
                 "delta is over the prompts evaluated in both; prompts, evaluated and skipped compare the whole runs"
             )
-    width = max(len(title) for title, _ in ROWS) + 2
+    rows = list(ROWS)
+    if any("miss_audit" in summary for summary in summaries):
+        rows += [("audit: prompts", "miss_audit/prompts"),
+                 ("audit: unknown judged paths", "miss_audit/unknown_paths")]
+        for group in ("knowledge", "skills"):
+            stages = sorted(set().union(*(set((summary.get("miss_audit") or {}).get(group, {}))
+                                          for summary in summaries)))
+            rows += [(f"audit {group}: {stage}", f"miss_audit/{group}/{stage}") for stage in stages]
+    width = max(len(title) for title, _ in rows) + 2
     cell = 18
     header = " " * width + "".join(label.rjust(cell) for label, _, _ in results)
     if len(results) == 2:
         header += delta_title.rjust(cell)
     lines += ["", header]
-    for title, key in ROWS:
+    for title, key in rows:
         row = title.ljust(width) + "".join(row_cell(summary, key).rjust(cell) for summary in summaries)
         if len(results) == 2:
             values = [row_value(summary, key) for summary in (summaries if key in COVERAGE_ROWS else paired)]
@@ -2696,6 +3002,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--cache", type=Path, help=f"work and cache directory (default {default_cache()})")
     run.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds per runtime call")
     run.add_argument("--keep", action="store_true", help="keep each prompt's corpus for debugging")
+    run.add_argument(
+        "--diagnose-misses", action="store_true",
+        help="opt in to pinned-clock, judged-path retrieval-stage diagnostics",
+    )
+    run.add_argument("--onnx-excerpts", type=Path,
+                     help="maintainer-only pilot: local hash-locked asset directory; off by default")
+    run.add_argument("--onnx-python", type=Path, help="explicit isolated Python for the optional ONNX worker")
+    run.add_argument("--onnx-timeout", type=float, default=5.0, help="hard worker timeout; failure keeps lexical excerpts")
     run.set_defaults(handler=command_run)
 
     report = commands.add_parser("report", help="aggregate a result, optionally against another")

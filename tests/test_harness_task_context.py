@@ -1,20 +1,24 @@
 """Offline session-to-Brain context binding with the copied project runtime."""
 
+import copy
 import json
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "harness/src"))
 from harness import context_usage, sessions
 from harness.knowledge import KnowledgeManager
 from harness.task_context import TaskContext
+from memory_diagnosis import unavailable_funnel_diagnosis
 from tests.test_harness_knowledge import install_knowledge_fixture, metadata, source_link_fixture
 
 
@@ -138,6 +142,14 @@ for event in ({"type": "thread.started", "thread_id": "native-context-fixture"},
               {"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 50, "output_tokens": 10}}):
     print(json.dumps(event), flush=True)
 '''
+
+
+def diagnosis_example(count=1):
+    value = unavailable_funnel_diagnosis()
+    value['observation_state'] = 'observed'
+    value['loss_observations']['budget'] = {'count': count, 'state': 'exact'}
+    value['next_action'] = 'inspect-observed-loss' if count else 'unknown'
+    return value
 
 
 class TaskContextTests(unittest.TestCase):
@@ -319,6 +331,273 @@ class TaskContextTests(unittest.TestCase):
         return [record for record in store.brain_info(sid)["records"]
                 if record["type"] == "finding" and record["title"] == self.LEARNING["title"]]
 
+    def cost_receipt(self, store, sid):
+        with store.lock:
+            row = store.db.execute('SELECT receipt FROM launches WHERE session_id=? ORDER BY rowid DESC LIMIT 1', (sid,)).fetchone()
+        return json.loads(row['receipt'])
+
+    def test_full_cost_final_receipt_covers_prompt_runtime_save_and_raw_tool_body(self):
+        script = FAKE_DRAFT.replace('{"type": "turn.completed"}',
+            '{"type": "turn.completed", "usage": {"input_tokens": 123, "output_tokens": 17, "cached_input_tokens": 21}}')
+        script = script.replace('draft = {', 'print(json.dumps({"type": "item.completed", "item": {"id": "countable1", "type": "command_execution", "status": "completed", "exit_code": 0, "aggregated_output": "é\\n🐍"}}), flush=True)\ndraft = {')
+        self.fake.write_text(script)
+        store = self.manager(); sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, 'completed')
+        receipt = self.cost_receipt(store, sid); observed = receipt['full_cost']
+        self.assertIn('memory', receipt)
+        self.assertEqual(('final', 'completed'), (observed['state'], observed['outcome']))
+        self.assertEqual(140, observed['provider']['provider_tokens'])
+        self.assertEqual(7, observed['provider']['executions'][0]['tool_component_bytes'])
+        self.assertNotIn('é\n🐍', json.dumps(observed, ensure_ascii=False))
+        prompt = json.loads(self.calls[-1]['receipt'].read_text())['prompt']
+        self.assertEqual(len(prompt), observed['constructed_payloads']['main_prompt']['characters'])
+        self.assertEqual(len(prompt.encode()), observed['constructed_payloads']['main_prompt']['bytes'])
+        self.assertLess(observed['constructed_payloads']['capsule_body']['bytes'], observed['constructed_payloads']['capsule_envelope']['bytes'])
+        self.assertGreater(observed['stage_seconds']['recall'], 0)
+        self.assertGreater(observed['stage_seconds']['save'], 0)
+        self.assertGreaterEqual(observed['lifecycle_seconds'], sum(observed['stage_seconds'].values()))
+        writes = [item for item in observed['local_operations'] if item['operation'] == 'record-result']
+        self.assertEqual(1, len(writes))
+        self.assertEqual({'created': 1}, writes[0]['record_states'])
+        self.assertGreater(writes[0]['runtime_io'][0]['request_file_bytes'], 0)
+        self.assertGreater(writes[0]['runtime_io'][0]['returned_stdout_bytes'], 0)
+        self.assertTrue(writes[0]['runtime_io'][0]['stdout_eof'])
+        self.assertEqual(1, len(self.findings(store, sid)))
+        self.assertEqual('status', store.events(sid)[-1]['kind'])
+        self.assertEqual('completed', store.events(sid)[-1]['outcome'])
+
+    def test_full_cost_recovery_observes_one_terminal_per_actual_fake_process(self):
+        script = FAKE_DRAFT.replace('text = "Checked the rule.', 'recovering = bool(os.environ.get("CONTEXT_MEMORY_RECOVERY"))\ntext = "Checked the rule.')
+        script = script.replace('print(json.dumps({"type": "thread.started"', 'if not recovering: text = "Checked without a draft."\nprint(json.dumps({"type": "thread.started"')
+        script = script.replace('{"type": "turn.completed"}', '{"type": "turn.completed", "usage": {"input_tokens": 3 if recovering else 10, "output_tokens": 1 if recovering else 2, "cached_input_tokens": 0}}')
+        self.fake.write_text(script)
+        store = self.manager(); sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, 'completed')
+        observed = self.cost_receipt(store, sid)['full_cost']
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual(16, observed['provider']['provider_tokens'])
+        self.assertEqual([1, 1], [row['terminal_count'] for row in observed['provider']['executions']])
+        self.assertEqual(['main', 'recovery'], [row['phase'] for row in observed['provider']['executions']])
+        self.assertTrue(observed['processes']['recovery']['started'])
+        self.assertGreater(observed['constructed_payloads']['recovery_prompt']['bytes'], 0)
+        self.assertEqual(1, len(self.findings(store, sid)))
+        self.assertEqual(16, store.get(sid)['budget_usage']['tokens'])
+
+    def test_full_cost_factory_failure_preserves_automatic_memory_work(self):
+        from harness import cost_observation
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        with patch.object(cost_observation, 'LaunchObservation', side_effect=RuntimeError('PRIVATE_FACTORY_SENTINEL')):
+            sid = store.create(self.automatic(store))['id']
+            self.wait_status(store, sid, 'completed')
+        observed = self.cost_receipt(store, sid)['full_cost']
+        self.assertEqual('unavailable', observed['state'])
+        self.assertEqual(1, len(self.findings(store, sid)))
+        self.assertNotIn('PRIVATE_FACTORY_SENTINEL', json.dumps(store.events(sid)))
+
+    def test_full_cost_raw_callback_failure_preserves_work_and_marks_unknown(self):
+        from harness import cost_observation
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        with patch.object(cost_observation.LaunchObservation, 'raw', side_effect=RuntimeError('PRIVATE_RAW_SENTINEL')):
+            sid = store.create(self.automatic(store))['id']
+            self.wait_status(store, sid, 'completed')
+        observed = self.cost_receipt(store, sid)['full_cost']
+        self.assertTrue(observed['observer_incomplete'])
+        self.assertIsNone(observed['provider']['provider_tokens'])
+        self.assertEqual(1, len(self.findings(store, sid)))
+        self.assertNotIn('PRIVATE_RAW_SENTINEL', json.dumps(observed))
+
+    def test_full_cost_review_preparation_has_nonlaunch_receipt_without_provider(self):
+        store = self.manager(); sid = store.create(self.options(store))['id']
+        self.wait_status(store, sid, 'awaiting_context')
+        self.assertEqual([], self.calls)
+        with store.lock:
+            self.assertEqual(0, store.db.execute('SELECT count(*) FROM launches WHERE session_id=?', (sid,)).fetchone()[0])
+        records = [event for event in store.events(sid) if event['kind'] == 'cost_observation']
+        self.assertEqual(1, len(records))
+        self.assertEqual('awaiting_context', records[0]['full_cost']['outcome'])
+        self.assertEqual([], records[0]['full_cost']['provider']['executions'])
+
+    def test_full_cost_lock_retry_is_counted_with_one_returned_runtime_call(self):
+        from harness import cost_observation
+        from harness.knowledge import KnowledgeBusy
+        store = self.manager()
+        manager = self.knowledge(store)
+        observed = cost_observation.LaunchObservation('codex')
+        context = TaskContext(manager, wait=1, observation=observed)
+        original = manager.run
+        attempts = []
+        def busy_once(*args, **kwargs):
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise KnowledgeBusy()
+            return original(*args, **kwargs)
+        with patch.object(manager, 'run', busy_once):
+            response = context._knowledge('run', next(iter(store.projects)), {'action': 'index'})
+        self.assertTrue(response['ok'])
+        final = observed.finish('completed')
+        self.assertEqual(2, len(attempts))
+        self.assertEqual(1, len(final['local_operations']))
+        operation = final['local_operations'][0]
+        self.assertEqual(1, operation['lock_retries'])
+        self.assertEqual(1, len(operation['runtime_io']))
+        self.assertTrue(operation['runtime_io'][0]['returned'])
+        self.assertNotIn('stale_revision_retries', final['notes'])
+
+    def test_full_cost_cursor_checkpoint_is_timed_and_runtime_observed(self):
+        self.fake.write_text(FAKE_CURSOR)
+        store = self.manager()
+        store.providers['cursor'] = {**store.providers['codex'], 'id': 'cursor'}
+        sid = store.create(self.automatic(store, provider='cursor'))['id']
+        self.wait_status(store, sid, 'completed')
+        observed = self.cost_receipt(store, sid)['full_cost']
+        self.assertIsNone(observed['provider']['provider_tokens'])
+        self.assertGreater(observed['stage_seconds']['checkpoint'], 0)
+        checkpoints = [row for row in observed['local_operations'] if row['operation'] == 'checkpoint']
+        self.assertEqual(1, len(checkpoints))
+        self.assertEqual('returned', checkpoints[0]['outcome'])
+        self.assertTrue(checkpoints[0]['runtime_io'][0]['returned'])
+        self.assertTrue((self.project / 'memory-bank/local/last-turn-report.json').exists())
+
+    def test_full_cost_stopping_during_history_matches_terminal_status(self):
+        from harness import memory_use
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        def stop_after_memory(*args):
+            store.stopping.set()
+        with patch.object(memory_use, 'fold_project', stop_after_memory):
+            sid = store.create(self.automatic(store))['id']
+            self.wait_status(store, sid, 'interrupted')
+        observed = self.cost_receipt(store, sid)['full_cost']
+        self.assertEqual('interrupted', observed['outcome'])
+        self.assertGreater(observed['stage_seconds']['history'], 0)
+        self.assertEqual('interrupted', store.events(sid)[-1]['outcome'])
+        findings = list((self.project / 'project-brain/dynamic/findings').glob('*.md'))
+        self.assertEqual(1, len(findings))
+        self.assertEqual(self.LEARNING['title'], metadata(findings[0])['title'])
+
+    def test_full_cost_cancel_resend_keeps_old_receipt_and_blocks_old_memory_write(self):
+        script = FAKE_DRAFT.replace('text = "Checked the rule.',
+            'new = "NEW_BOUNDARY" in json.loads(receipt.read_text())["prompt"]\n'
+            'draft["progress"] = "NEW progress" if new else "OLD progress"\n'
+            'draft["learnings"][0]["title"] = "NEW claim" if new else "OLD claim"\n'
+            'text = "Checked the rule.')
+        script = script.replace('{"type": "turn.completed"}',
+            '{"type": "turn.completed", "usage": {"input_tokens": 28 if new else 12, "output_tokens": 2, "cached_input_tokens": 0}}')
+        self.fake.write_text(script)
+        store = self.manager()
+        entered, release = threading.Event(), threading.Event()
+        original = TaskContext.save_memory
+        calls = []
+        def hold_first_save(context, *args, **kwargs):
+            calls.append(kwargs.get('generation'))
+            if len(calls) == 1:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError('Save barrier not released')
+            return original(context, *args, **kwargs)
+        with patch.object(TaskContext, 'save_memory', hold_first_save):
+            sid = store.create(self.automatic(store))['id']
+            try:
+                self.assertTrue(entered.wait(5))
+                with store.lock:
+                    old_generation = store.generations[sid]
+                    self.assertNotIn(sid, store.active)
+                    before = store.db.execute('SELECT receipt FROM launches WHERE id=?', (old_generation,)).fetchone()
+                    self.assertNotIn('full_cost', json.loads(before['receipt']))
+                self.assertEqual('cancelled', store.cancel(sid)['status'])
+                queued = store.send(sid, 'NEW_BOUNDARY Check the cobalt release path')
+                self.assertEqual('queued', queued['status'])
+                with store.lock:
+                    new_generation = store.generations[sid]
+                    self.assertNotIn(sid, store.cancelled)
+                self.assertNotEqual(old_generation, new_generation)
+            finally:
+                release.set()
+            completed = self.wait_status(store, sid, 'completed')
+        with store.lock:
+            rows = {row['id']: row for row in store.db.execute('SELECT id,status,receipt FROM launches WHERE session_id=?', (sid,))}
+        self.assertEqual({old_generation, new_generation}, set(rows))
+        old_receipt = json.loads(rows[old_generation]['receipt'])
+        old = old_receipt['full_cost']
+        new = json.loads(rows[new_generation]['receipt'])['full_cost']
+        self.assertIn('memory', old_receipt)
+        self.assertEqual(json.loads(before['receipt']), {key: value for key, value in old_receipt.items() if key != 'full_cost'})
+        self.assertEqual('superseded', old['outcome'])
+        self.assertEqual('interrupted', rows[old_generation]['status'])
+        self.assertEqual(14, old['provider']['provider_tokens'])
+        self.assertEqual('completed', new['outcome'])
+        self.assertEqual(30, new['provider']['provider_tokens'])
+        self.assertEqual(30, completed['budget_usage']['tokens'])
+        self.assertEqual('NEW_BOUNDARY Check the cobalt release path', completed['brain']['query'])
+        self.assertEqual('completed', rows[new_generation]['status'])
+        self.assertEqual(2, len(self.calls))
+        self.assertEqual('NEW progress', store.brain_info(sid)['task']['progress'])
+        self.assertEqual(['NEW claim'], [item['title'] for item in store.brain_info(sid)['records'] if item['type'] == 'finding'])
+        old_writes = [row for row in old['local_operations'] if row['operation'] == 'record-result']
+        self.assertEqual(1, len(old_writes))
+        self.assertFalse(old_writes[0]['runtime_io'][0]['started'])
+        self.assertGreater(old['stage_seconds']['save'], 0)
+
+    def test_one_automatic_draft_preserves_distinct_source_identities(self):
+        store = self.manager(); sid = self.linked_run(store)
+        (self.project / "specs/other.md").write_text("# Other cobalt authority\n")
+        learnings = [self.LEARNING, {**self.LEARNING, "sources": ["specs/other.md"]},
+                     {**self.LEARNING, "sources": ["specs/authority.md#L1"]}]
+        result = store._task_context().save_memory(store.get(sid), {"learnings": learnings}, automatic=True)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual([], result["skipped"])
+        self.assertEqual(3, len(result["saved"]["records"]))
+        self.assertEqual(3, len({record["id"] for record in result["saved"]["records"]}))
+        self.assertEqual(3, len(self.findings(store, sid)))
+
+    def test_all_conflicting_automatic_learnings_write_and_promote_nothing(self):
+        from harness import memory_draft
+        store = self.manager(); sid = self.linked_run(store)
+        context = store._task_context()
+        before_task = store.brain_info(sid)["task"]
+        before_chunks = sorted((self.project / "memory-bank/chunks").glob("*.md"))
+        draft = {"learnings": [self.LEARNING, self.LEARNING,
+                               {**self.LEARNING, "consequence": "Every cobalt allocation names two owners."}]}
+        for save in (context.save_memory, context._save_memory_chain):
+            with self.subTest(save=save.__name__):
+                with patch.object(context, "_call", wraps=context._call) as writer:
+                    result = save(store.get(sid), draft, automatic=True)
+                writer.assert_not_called()
+                self.assertTrue(result["ok"], result)
+                self.assertEqual({"task": None, "records": [], "promotion": None}, result["saved"])
+                self.assertEqual(["conflict"] * 3, [item["reason"] for item in result["skipped"]])
+        self.assertEqual(before_task["revision"], store.brain_info(sid)["task"]["revision"])
+        self.assertEqual([], self.findings(store, sid))
+        self.assertEqual(before_chunks, sorted((self.project / "memory-bank/chunks").glob("*.md")))
+        self.assertIn("Left out 3 conflicting learning(s)", memory_draft.summary("drafted", result))
+
+    def test_completed_automatic_run_saves_progress_and_independent_claim_only(self):
+        independent = {**self.LEARNING, "title": "Amber boundary is explicit",
+                       "consequence": "Amber stays within the checked boundary."}
+        draft = {"progress": "Conflicting cobalt claims need verification.", "next_steps": ["Check cobalt authority"],
+                 "learnings": [self.LEARNING, {**self.LEARNING, "consequence": "Cobalt has two owners."}, independent]}
+        self.fake.write_text(FAKE_DRAFT.replace('text = "Checked the rule.',
+            'draft = json.loads(' + repr(json.dumps(draft)) + ')\ntext = "Checked the rule.'))
+        store = self.manager(); sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, "completed")
+        info = store.brain_info(sid)
+        self.assertEqual(draft["progress"], info["task"]["progress"])
+        self.assertEqual(draft["next_steps"], info["task"]["next_steps"])
+        self.assertEqual([], self.findings(store, sid))
+        findings = [record for record in info["records"] if record["type"] == "finding"]
+        self.assertEqual([independent["title"]], [record["title"] for record in findings])
+        self.assertEqual(independent["consequence"], findings[0]["progress"])
+        notice = self.memory_events(store, sid)[-1]["text"]
+        self.assertIn("Left out 2 conflicting learning(s)", notice)
+        self.assertNotIn(self.LEARNING["consequence"], notice)
+        self.assertNotIn("Cobalt has two owners.", notice)
+        chunks = list((self.project / "memory-bank/chunks").glob("*.md"))
+        self.assertEqual(1, len(chunks))
+        self.assertIn(independent["consequence"], chunks[0].read_text())
+        self.assertNotIn("Cobalt has two owners.", chunks[0].read_text())
+
     def test_a_repeated_save_of_one_run_writes_each_learning_once(self):
         # The same run's save again - a retry, or a replay after a crash
         # between its writes - finds what the first attempt wrote.
@@ -338,6 +617,116 @@ class TaskContextTests(unittest.TestCase):
         self.assertTrue(third["ok"], third)
         self.assertEqual(1, len(self.findings(store, sid)))
         self.assertEqual("Release path covered.", store.brain_info(sid)["task"]["progress"])
+
+    def test_automatic_followup_corrects_a_remembered_learning_and_repeat_is_a_noop(self):
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, "completed")
+        initial = self.findings(store, sid)[0]
+        brain = store.get(sid)["brain"]
+        store._save_brain(sid, {**brain, "remembered": [["finding", "cobalt allocation needs one owner"]]})
+        consequence = "Every cobalt allocation names two accountable owners."
+        (self.project / "specs/authority.md").write_text("# Cobalt authority\n\n" + consequence + "\n")
+        self.fake.write_text(FAKE_DRAFT.replace(self.LEARNING["consequence"], consequence))
+        store.send(sid, "Check the updated cobalt authority")
+        self.wait_status(store, sid, "completed")
+        findings = self.findings(store, sid)
+        self.assertEqual(1, len(findings))
+        corrected = findings[0]
+        self.assertEqual(initial["id"], corrected["id"])
+        self.assertEqual(consequence, corrected["progress"])
+        self.assertGreater(corrected["revision"], initial["revision"])
+        chunks = list((self.project / "memory-bank/chunks").glob("*.md"))
+        active = [path for path in chunks if metadata(path)["status"] == "active"]
+        self.assertEqual(1, len(active))
+        self.assertIn(consequence, active[0].read_text())
+        self.assertTrue(any(metadata(path)["status"] == "superseded" for path in chunks))
+        task_revision = store.brain_info(sid)["task"]["revision"]
+        store.send(sid, "Recheck the unchanged cobalt authority")
+        self.wait_status(store, sid, "completed")
+        self.assertEqual(corrected["revision"], self.findings(store, sid)[0]["revision"])
+        self.assertEqual(task_revision, store.brain_info(sid)["task"]["revision"])
+        self.assertEqual(len(chunks), len(list((self.project / "memory-bank/chunks").glob("*.md"))))
+        self.assertNotIn("already saved from this session", self.memory_events(store, sid)[-1]["text"])
+        self.assertIn(consequence, self.calls[-1]["prompt"])
+        self.assertNotIn(self.LEARNING["consequence"], self.calls[-1]["prompt"])
+
+    def test_automatic_followup_same_title_with_new_sources_reaches_the_writer(self):
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, "completed")
+        initial = self.findings(store, sid)[0]
+        (self.project / "specs/new-authority.md").write_text("# Cobalt authority\n\n" + self.LEARNING["consequence"] + "\n")
+        self.fake.write_text(FAKE_DRAFT.replace("specs/authority.md", "specs/new-authority.md"))
+        store.send(sid, "Check cobalt authority in specs/new-authority.md")
+        self.wait_status(store, sid, "completed")
+        findings = self.findings(store, sid)
+        self.assertEqual(2, len(findings))
+        self.assertEqual(2, len({record["id"] for record in findings}))
+        self.assertEqual({("specs/authority.md",), ("specs/new-authority.md",)},
+                         {tuple(record["sources"]) for record in findings})
+        self.assertIn(initial["id"], {record["id"] for record in findings})
+
+    def test_automatic_repeat_finishes_promotion_after_it_was_deferred(self):
+        configuration = self.project / "project-brain/config/runtime.json"
+        config = json.loads(configuration.read_text())
+        config["automatic_promotion"] = False
+        configuration.write_text(json.dumps(config))
+        self.fake.write_text(FAKE_DRAFT)
+        store = self.manager()
+        sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, "completed")
+        finding = self.findings(store, sid)[0]
+        self.assertEqual([], list((self.project / "memory-bank/chunks").glob("*.md")))
+        config["automatic_promotion"] = True
+        configuration.write_text(json.dumps(config))
+        store.send(sid, "Recheck cobalt allocation after promotion resumes")
+        self.wait_status(store, sid, "completed")
+        self.assertEqual(finding["revision"], self.findings(store, sid)[0]["revision"])
+        chunks = list((self.project / "memory-bank/chunks").glob("*.md"))
+        self.assertEqual(1, len(chunks))
+        self.assertIn(self.LEARNING["consequence"], chunks[0].read_text())
+        self.assertIn("Promoted to the Memory Bank", self.memory_events(store, sid)[-1]["text"])
+
+    def test_automatic_correction_preserves_a_person_attested_claim(self):
+        store = self.manager()
+        sid = store.create(self.automatic(store))["id"]
+        self.wait_status(store, sid, "completed")
+        saved = store.save_memory(sid, {"learnings": [self.LEARNING], "verified": True})
+        self.assertTrue(saved["ok"], saved)
+        finding = self.findings(store, sid)[0]
+        self.fake.write_text(FAKE_DRAFT.replace(self.LEARNING["consequence"], "Every cobalt allocation needs two owners."))
+        store.send(sid, "Check a revised cobalt allocation claim")
+        self.wait_status(store, sid, "completed")
+        current = self.findings(store, sid)[0]
+        self.assertEqual((finding["id"], finding["revision"], finding["progress"]),
+                         (current["id"], current["revision"], current["progress"]))
+        notice = self.memory_events(store, sid)[-1]
+        self.assertTrue(notice["ok"], notice)
+        self.assertIn("different consequence than this run", notice["text"])
+
+    def test_legacy_chain_keeps_corrections_without_claiming_idempotence(self):
+        from harness import knowledge
+        store = self.manager()
+        sid = self.linked_run(store)
+        context = store._task_context()
+        original = context._call
+        def older_runtime(session, options, workspace, action, **fields):
+            if action == "record-result":
+                raise sessions.SessionError(knowledge.OLDER_RUNTIME)
+            return original(session, options, workspace, action, **fields)
+        changed = {**self.LEARNING, "consequence": "Every cobalt allocation names two accountable owners."}
+        with patch.object(context, "_call", side_effect=older_runtime):
+            first = context.save_memory(store.get(sid), {"learnings": [self.LEARNING]}, automatic=True)
+            second = context.save_memory(store.get(sid), {"learnings": [changed]}, automatic=True,
+                                         known=[["finding", "cobalt allocation needs one owner"]])
+        self.assertTrue(first["ok"] and second["ok"], (first, second))
+        findings = self.findings(store, sid)
+        self.assertEqual(2, len(findings))
+        self.assertEqual({self.LEARNING["consequence"], changed["consequence"]},
+                         {record["progress"] for record in findings})
 
     def test_a_task_moved_on_since_it_was_read_is_saved_on_the_second_try(self):
         # A Stop hook's checkpoint can land between reading the task and saving.
@@ -1120,6 +1509,484 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
         self.assertEqual(prepared['brain']['capsule']['task_uuid'], committed[0])
         self.assertEqual(len(list(record.parent.glob('*.md'))), 1)
         self.assertEqual(self.calls, [])
+
+    def test_funnel_diagnosis_automatic_prepare_is_metadata_and_survives_restart(self):
+        expected = diagnosis_example()
+        original = KnowledgeManager.run
+
+        def diagnosed(manager, key, data, **options):
+            response = original(manager, key, data, **options)
+            if data.get('action') == 'refresh' and response.get('ok'):
+                response = {**response, 'result': {**response['result'], 'funnel_diagnosis': expected}}
+            return response
+
+        store = self.manager()
+        with patch.object(KnowledgeManager, 'run', diagnosed):
+            sid = store.create(self.automatic(store))['id']
+            completed = self.wait_status(store, sid, 'completed')
+        brain = completed['brain']
+        self.assertEqual(brain['funnel_diagnosis'], expected)
+        self.assertNotIn('funnel_diagnosis', brain['capsule'])
+        self.assertNotIn('funnel_diagnosis', brain['capsule_text'])
+        self.assertNotIn('funnel_diagnosis', brain['source_hashes'])
+        ordinary = copy.deepcopy(completed)
+        ordinary['brain'].pop('funnel_diagnosis')
+        self.assertEqual(store._prompt(completed, 'Check the latch'), store._prompt(ordinary, 'Check the latch'))
+        self.assertEqual(TaskContext._material(brain['capsule']), TaskContext._material(ordinary['brain']['capsule']))
+        self.assertEqual(sessions.memory_notice(brain), sessions.memory_notice(ordinary['brain']))
+        self.assertEqual(completed['capsule_meter'], sessions.capsule_meter(brain['capsule'], brain['capsule_text']))
+        received = json.loads(self.calls[0]['receipt'].read_text())
+        self.assertNotIn('funnel_diagnosis', received['prompt'])
+        returned = store.get(sid)['brain']
+        returned['funnel_diagnosis']['loss_observations']['budget']['count'] = 99
+        self.assertEqual(store.get(sid)['brain']['funnel_diagnosis'], expected)
+        store._save_brain(sid, brain)
+        stored = json.loads(store.db.execute('SELECT brain FROM sessions WHERE id=?', (sid,)).fetchone()[0])
+        self.assertEqual(stored['funnel_diagnosis'], expected)
+        store.close()
+        self.managers.remove(store)
+        restarted = self.manager()
+        self.assertEqual(restarted.get(sid)['brain'], brain)
+
+    def test_funnel_diagnosis_get_rejects_only_child_without_rewriting_record(self):
+        store = self.manager()
+        sid = store.create(self.options(store))['id']
+        waiting = self.wait_status(store, sid, 'awaiting_context')
+        brain = waiting['brain']
+        forged = {**brain, 'funnel_diagnosis': {'private_body': 'invented rejected metadata'}}
+        encoded = json.dumps(forged)
+        with store.lock:
+            store.db.execute('UPDATE sessions SET brain=? WHERE id=?', (encoded, sid))
+            store.db.commit()
+        self.assertEqual(store.get(sid)['brain'], brain)
+        self.assertEqual(store.db.execute('SELECT brain FROM sessions WHERE id=?', (sid,)).fetchone()[0], encoded)
+        store._save_brain(sid, {**brain, 'funnel_diagnosis': diagnosis_example()})
+        with patch.object(sessions, 'normalize_funnel_diagnosis', side_effect=RuntimeError('metadata-only fixture failure')):
+            self.assertEqual(store.get(sid)['brain'], brain)
+            store._save_brain(sid, {**brain, 'funnel_diagnosis': diagnosis_example()})
+        self.assertEqual(store.get(sid)['brain'], brain)
+        self.assertEqual(self.calls, [])
+
+    def test_funnel_diagnosis_prepare_replaces_previous_child_with_current_metadata_only(self):
+        store = self.manager()
+        sid = store.create(self.options(store))['id']
+        waiting = self.wait_status(store, sid, 'awaiting_context')
+        brain = {**waiting['brain'], 'review': False}
+        original = KnowledgeManager.run
+        for child, failed in ((None, False), ({'schema_version': 2}, False),
+                              (unavailable_funnel_diagnosis(), False), (diagnosis_example(), True)):
+            with self.subTest(child=child, normalizer_failure=failed):
+                store._save_brain(sid, {**brain, 'funnel_diagnosis': diagnosis_example(5)})
+                def refresh(manager, key, data, **options):
+                    response = original(manager, key, data, **options)
+                    if data.get('action') == 'refresh' and response.get('ok'):
+                        result = dict(response['result'])
+                        result.pop('funnel_diagnosis', None)
+                        if child is not None:
+                            result['funnel_diagnosis'] = child
+                        response = {**response, 'result': result}
+                    return response
+                context = store._task_context()
+                with patch.object(KnowledgeManager, 'run', refresh):
+                    if failed:
+                        with patch('harness.task_context.normalize_funnel_diagnosis', side_effect=RuntimeError('metadata-only failure')):
+                            prepared = context.prepare(store.get(sid))
+                    else:
+                        prepared = context.prepare(store.get(sid))
+                store._save_brain(sid, prepared)
+                saved = store.get(sid)['brain']
+                self.assertIsInstance(saved['capsule'], dict)
+                self.assertEqual(saved['record_id'], brain['record_id'])
+                self.assertEqual(saved['source_hashes'], brain['source_hashes'])
+                self.assertNotIn('funnel_diagnosis', saved['capsule'])
+                if child == unavailable_funnel_diagnosis():
+                    self.assertEqual(saved['funnel_diagnosis'], child)
+                else:
+                    self.assertNotIn('funnel_diagnosis', saved)
+        self.assertEqual(self.calls, [])
+
+    def test_funnel_diagnosis_query_send_rebind_and_freshness_invalidate(self):
+        store = self.manager()
+        sid = store.create(self.options(store))['id']
+        waiting = self.wait_status(store, sid, 'awaiting_context')
+        brain = waiting['brain']
+        child = diagnosis_example()
+        store._save_brain(sid, {**brain, 'funnel_diagnosis': child})
+        with patch.object(store, '_queue_context'):
+            queued = store.prepare_context(sid, 'cobalt latch revised query')
+        self.assertNotIn('funnel_diagnosis', queued['brain'])
+        self.assertEqual(queued['brain']['query'], 'cobalt latch revised query')
+        store._save_brain(sid, {**brain, 'funnel_diagnosis': child})
+        rebound = store.brain_action(sid, {'action': 'rebind', 'record_id': brain['record_id']})
+        self.assertTrue(rebound['ok'], rebound)
+        recovered = store.get(sid)['brain']
+        self.assertNotIn('funnel_diagnosis', recovered)
+        self.assertEqual(recovered['record_id'], brain['record_id'])
+        self.assertEqual(recovered['query'], brain['query'])
+        store._save_brain(sid, {**brain, 'funnel_diagnosis': child})
+        with patch.object(TaskContext, 'ensure_fresh', side_effect=sessions.SessionError('invented freshness change')):
+            store.run_context(sid, brain['context_id'])
+            invalidated = self.wait_status(store, sid, 'awaiting_context')
+        self.assertNotIn('funnel_diagnosis', invalidated['brain'])
+        self.assertIsNone(invalidated['brain']['context_id'])
+        self.assertEqual(self.calls, [])
+        with patch.object(store.jobs, 'put_nowait'):
+            store._status(sid, 'completed')
+            store.db.execute('UPDATE sessions SET native_session_id=? WHERE id=?', ('offline-resume-id', sid))
+            store.db.commit()
+            store._save_brain(sid, {**brain, 'review': False, 'funnel_diagnosis': child})
+            sent = store.send(sid, 'cobalt latch next safe query')
+        self.assertNotIn('funnel_diagnosis', sent['brain'])
+        self.assertEqual(sent['brain']['query'], 'cobalt latch next safe query')
+        self.assertIsNone(sent['brain']['context_id'])
+
+
+    def test_ordinary_receipt_prepare_get_save_restart_and_content_exclusion(self):
+        store = self.manager()
+        sid = store.create(self.automatic(store))['id']
+        completed = self.wait_status(store, sid, 'completed')
+        brain = completed['brain']
+        expected = {'schema_version': 1, 'observation_state': 'observed', 'plans_present': True, 'returned_status': 'committed'}
+        self.assertEqual(expected, brain['ordinary_receipt'])
+        ordinary = copy.deepcopy(completed)
+        ordinary['brain'].pop('ordinary_receipt')
+        self.assertEqual(store._prompt(completed, 'Check the latch'), store._prompt(ordinary, 'Check the latch'))
+        self.assertEqual(TaskContext._material(brain['capsule']), TaskContext._material(ordinary['brain']['capsule']))
+        self.assertEqual(sessions.memory_notice(brain), sessions.memory_notice(ordinary['brain']))
+        self.assertEqual(completed['capsule_meter'], sessions.capsule_meter(brain['capsule'], brain['capsule_text']))
+        for value in (brain['capsule'], brain['capsule_text'], brain['source_hashes'], json.loads(self.calls[0]['receipt'].read_text())['prompt']):
+            self.assertNotIn('ordinary_receipt', value)
+        returned = store.get(sid)['brain']
+        returned['ordinary_receipt']['returned_status'] = 'skipped'
+        self.assertEqual(expected, store.get(sid)['brain']['ordinary_receipt'])
+        store._save_brain(sid, brain)
+        store.close()
+        self.managers.remove(store)
+        restarted = self.manager()
+        self.assertEqual(brain, restarted.get(sid)['brain'])
+
+
+class BrainDiagnosisTests(unittest.TestCase):
+    def setUp(self):
+        self.store = sessions.Sessions.__new__(sessions.Sessions)
+        self.store.lock = threading.RLock()
+        self.store.db = sqlite3.connect(':memory:')
+        self.addCleanup(self.store.db.close)
+        self.store.db.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY, brain TEXT, updated_at TEXT, fleet_action TEXT)')
+        self.store.db.execute("INSERT INTO sessions(id,brain) VALUES ('fixture','{}')")
+        self.brain = {'bank': 'memory-bank', 'task_id': 'TASK-JUNIPER', 'query': 'Juniper cable latch',
+                      'create': False, 'record_id': 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                      'context_id': 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'capsule': {'working': {}},
+                      'capsule_text': 'working: Juniper', 'source_hashes': {'specs/latch.md': 'f' * 64},
+                      'approved': False, 'remembered': [{'title': 'Preserved bookkeeping'}]}
+
+    def saved(self):
+        return json.loads(self.store.db.execute("SELECT brain FROM sessions WHERE id='fixture'").fetchone()[0])
+
+    def test_funnel_diagnosis_save_rebuilds_and_keeps_unavailable_without_mutating_input(self):
+        for child in (diagnosis_example(), unavailable_funnel_diagnosis()):
+            with self.subTest(state=child['observation_state']):
+                value = {**self.brain, 'funnel_diagnosis': child}
+                original = copy.deepcopy(value)
+                self.store._save_brain('fixture', value)
+                self.assertEqual(value, original)
+                self.assertEqual(self.saved(), original)
+                child['loss_observations']['budget']['count'] = 77
+                self.assertEqual(self.saved(), original)
+
+    def test_funnel_diagnosis_save_invalidates_only_child_at_all_unusable_context_shapes(self):
+        for change in ({'context_id': None}, {'context_id': ''}, {'context_id': True},
+                       {'context_id': 'unsupported'}, {'capsule': None}, {'capsule': []}):
+            with self.subTest(change=change):
+                ordinary = {**self.brain, **change}
+                value = {**ordinary, 'funnel_diagnosis': diagnosis_example()}
+                self.store._save_brain('fixture', value)
+                self.assertEqual(self.saved(), ordinary)
+                self.assertIn('funnel_diagnosis', value)
+        missing = {key: value for key, value in self.brain.items() if key != 'context_id'}
+        self.store._save_brain('fixture', {**missing, 'funnel_diagnosis': diagnosis_example()})
+        self.assertEqual(self.saved(), missing)
+
+    def test_funnel_diagnosis_save_rejection_and_regular_failure_preserve_ordinary_write(self):
+        for child in (None, {'schema_version': 2}, {**diagnosis_example(), 'raw_body': 'invented rejected text'}):
+            self.store._save_brain('fixture', {**self.brain, 'funnel_diagnosis': child})
+            self.assertEqual(self.saved(), self.brain)
+        with patch.object(sessions, 'normalize_funnel_diagnosis', side_effect=RuntimeError('metadata-only fixture failure')):
+            self.store._save_brain('fixture', {**self.brain, 'funnel_diagnosis': diagnosis_example()})
+        self.assertEqual(self.saved(), self.brain)
+        self.store._save_brain('fixture', None)
+        self.assertIsNone(self.saved())
+
+    def test_funnel_diagnosis_normalizer_cancellation_propagates_before_store_write(self):
+        self.store._save_brain('fixture', self.brain)
+        for error in (KeyboardInterrupt(), SystemExit(23)):
+            with patch.object(sessions, 'normalize_funnel_diagnosis', side_effect=error):
+                with self.assertRaises(type(error)):
+                    self.store._save_brain('fixture', {**self.brain, 'funnel_diagnosis': diagnosis_example()})
+            self.assertEqual(self.saved(), self.brain)
+
+    def retrieve_context(self):
+        knowledge = SimpleNamespace(sessions=self.store, layout=lambda *_: {'attached': None, 'folder': Path('.')})
+        context = TaskContext(knowledge)
+        task = {'id': self.brain['record_id'], 'external_id': 'TASK-JUNIPER', 'revision': 1, 'status': 'in-progress'}
+        capsule = {'task_id': task['external_id'], 'task_uuid': task['id'], 'task_revision': 1,
+                   'working': {'task_id': task['external_id']}, 'procedural': [], 'semantic': [], 'episodic': []}
+        return context, task, capsule
+
+    def test_funnel_diagnosis_retrieve_keeps_three_tuple_and_best_effort_optional_sink(self):
+        context, task, capsule = self.retrieve_context()
+        options = {'bank': 'memory-bank', 'task_id': task['external_id'], 'query': 'Juniper cable', 'review': False}
+        session = {'project_id': 'project', 'provider': 'codex'}
+        for child, retained in ((None, False), ({'schema_version': 2}, False),
+                                (diagnosis_example(), True), (unavailable_funnel_diagnosis(), True)):
+            with self.subTest(child=child):
+                result = {'capsule': capsule, 'capsule_text': 'working: Juniper'}
+                if child is not None:
+                    result['funnel_diagnosis'] = child
+                sink = {}
+                with patch.object(context, '_knowledge', return_value={'ok': True, 'result': result}), \
+                        patch.object(context, '_source_hashes', return_value={}):
+                    returned = context._retrieve(session, options, Path('.'), task, {'root': '.'}, True, sink)
+                    legacy = context._retrieve(session, options, Path('.'), task, {'root': '.'}, True)
+                self.assertEqual(returned, (capsule, {}, 'working: Juniper'))
+                self.assertEqual(legacy, returned)
+                self.assertEqual(sink, {'funnel_diagnosis': child} if retained else {})
+        with patch.object(context, '_knowledge', return_value={'ok': True, 'result': {'capsule': capsule,
+                          'capsule_text': 'working: Juniper', 'funnel_diagnosis': diagnosis_example()}}), \
+                patch.object(context, '_source_hashes', return_value={}), \
+                patch('harness.task_context.normalize_funnel_diagnosis', side_effect=RuntimeError('metadata-only failure')):
+            sink = {}
+            self.assertEqual(context._retrieve(session, options, Path('.'), task, {'root': '.'}, True, sink),
+                             (capsule, {}, 'working: Juniper'))
+            self.assertEqual(sink, {})
+
+    def test_funnel_diagnosis_reviewed_retrieve_and_freshness_do_not_replace_metadata(self):
+        context, task, capsule = self.retrieve_context()
+        session = {'project_id': 'project', 'provider': 'codex', 'brain': {**self.brain, 'task': task,
+                   'capsule': capsule, 'source_hashes': {}, 'funnel_diagnosis': diagnosis_example(3)}}
+        options = {'bank': 'memory-bank', 'task_id': task['external_id'], 'query': 'Juniper cable', 'review': True}
+        with patch.object(context, '_knowledge', return_value={'ok': True, 'result': capsule}), \
+                patch.object(context, '_source_hashes', return_value={}):
+            sink = {}
+            returned = context._retrieve(session, options, Path('.'), task, {'root': '.'}, False, sink)
+        self.assertEqual(returned, (capsule, {}, None))
+        self.assertEqual(sink, {})
+        original = copy.deepcopy(session['brain'])
+        automatic = {**options, 'review': False}
+        def response(operation, *args, **kwargs):
+            if operation == 'inspect':
+                return {'task': task}
+            return {'ok': True, 'result': {'capsule': capsule, 'capsule_text': 'working: Juniper',
+                    'funnel_diagnosis': diagnosis_example(9)}}
+        with patch.object(context, '_bound', return_value=(session['brain'], automatic, Path('.'), {'root': '.'})), \
+                patch.object(context, '_knowledge', side_effect=response), patch.object(context, '_source_hashes', return_value={}):
+            self.assertTrue(context.ensure_fresh(session))
+        self.assertEqual(session['brain'], original)
+        self.assertNotIn('funnel_diagnosis', TaskContext._material(capsule))
+        from harness.task_context import FIELDS, KEPT
+        self.assertNotIn('funnel_diagnosis', FIELDS)
+        self.assertNotIn('funnel_diagnosis', KEPT)
+        with self.assertRaises(sessions.SessionError):
+            TaskContext.validate_options({**options, 'funnel_diagnosis': diagnosis_example()})
+
+    def test_funnel_diagnosis_obsolete_recall_success_or_failure_preserves_newer_brain(self):
+        # Challenge the completed-result guard, not an unsupported parallel native preparation.
+        self.store.accelerators = SimpleNamespace(keep_current=lambda *_: None)
+        self.store.cancelled = set()
+        self.store.stopping = threading.Event()
+        self.store.generations = {'fixture': 'old-generation'}
+        self.store.get = lambda *_: {'id': 'fixture', 'brain': self.saved()}
+        self.store._event = lambda *_: self.fail('An obsolete recall emitted an event.')
+        old = {'id': 'fixture', 'project_id': 'project', 'brain': self.brain}
+        newer = {**self.brain, 'context_id': 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+                 'query': 'Juniper newer query', 'funnel_diagnosis': diagnosis_example(8)}
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                self.store.generations['fixture'] = 'old-generation'
+                def prepare(_):
+                    self.store._save_brain('fixture', newer)
+                    self.store.generations['fixture'] = 'new-generation'
+                    if fail:
+                        raise sessions.SessionError('obsolete fixture failure')
+                    return {**self.brain, 'funnel_diagnosis': diagnosis_example(2)}
+                returned = self.store._recall('fixture', old, 'old-generation', SimpleNamespace(prepare=prepare))
+                self.assertIsNone(returned)
+                self.assertEqual(self.saved(), newer)
+
+    def test_funnel_diagnosis_empty_query_and_fleet_resume_invalidate_centrally(self):
+        self.store.accelerators = SimpleNamespace(keep_current=lambda *_: None)
+        self.store.cancelled = set()
+        self.store.stopping = threading.Event()
+        self.store.generations = {'fixture': 'generation'}
+        self.store._event = lambda *_: None
+        self.store.get = lambda *_: {'id': 'fixture', 'brain': self.saved(), 'status': 'cancelled',
+                                    'fleet': {'dry_run': True}, 'project_id': 'project'}
+        self.store._save_brain('fixture', {**self.brain, 'query': '', 'funnel_diagnosis': diagnosis_example()})
+        recalled = self.store._recall('fixture', self.store.get('fixture'), 'generation', None)
+        self.assertNotIn('funnel_diagnosis', recalled['brain'])
+        self.assertIsNone(recalled['brain']['capsule'])
+        self.store._save_brain('fixture', {**self.brain, 'funnel_diagnosis': diagnosis_example()})
+        self.store._workspace = lambda *_: Path('.')
+        self.store.admit = lambda: None
+        self.store.jobs = SimpleNamespace(full=lambda: False, put_nowait=lambda *_: None)
+        self.store._status = lambda *_: None
+        with patch.object(sessions, 'fleet_runtime', return_value={'available': True}):
+            resumed = self.store._continue_fleet('fixture', 'resume')
+        self.assertNotIn('funnel_diagnosis', resumed['brain'])
+        self.assertIsNone(resumed['brain']['context_id'])
+
+
+    @staticmethod
+    def receipt():
+        return {'schema_version': 1, 'observation_state': 'observed', 'plans_present': True, 'returned_status': 'committed'}
+
+    def test_brain_receipt_only_and_two_siblings_are_independently_owned(self):
+        for values in ({'ordinary_receipt': self.receipt()},
+                       {'ordinary_receipt': self.receipt(), 'funnel_diagnosis': {'raw': 'PRIVATE'}},
+                       {'ordinary_receipt': {'raw': 'PRIVATE'}, 'funnel_diagnosis': diagnosis_example()},
+                       {'ordinary_receipt': self.receipt(), 'funnel_diagnosis': diagnosis_example()}):
+            original = {**self.brain, **values}
+            before = copy.deepcopy(original)
+            self.store._save_brain('fixture', original)
+            saved = self.saved()
+            self.assertEqual(before, original)
+            self.assertEqual('schema_version' in values['ordinary_receipt'], 'ordinary_receipt' in saved)
+            if 'funnel_diagnosis' in values:
+                self.assertEqual('schema_version' in values['funnel_diagnosis'], 'funnel_diagnosis' in saved)
+            for change in ({'context_id': None}, {'capsule': None}):
+                self.store._save_brain('fixture', {**original, **change})
+                self.assertNotIn('ordinary_receipt', self.saved())
+                self.assertNotIn('funnel_diagnosis', self.saved())
+        value = {**self.brain, 'ordinary_receipt': self.receipt(), 'funnel_diagnosis': diagnosis_example()}
+        for normalizer, retained in (('normalize_ordinary_receipt', 'funnel_diagnosis'), ('normalize_funnel_diagnosis', 'ordinary_receipt')):
+            with patch.object(sessions, normalizer, side_effect=RuntimeError('metadata-only failure')):
+                self.store._save_brain('fixture', value)
+            self.assertIn(retained, self.saved())
+        self.store._save_brain('fixture', self.brain)
+        for error in (KeyboardInterrupt(), SystemExit(4)):
+            with patch.object(sessions, 'normalize_ordinary_receipt', side_effect=error), self.assertRaises(type(error)) as caught:
+                self.store._save_brain('fixture', value)
+            self.assertIs(error, caught.exception)
+            self.assertEqual(self.brain, self.saved())
+
+    def test_receipt_retrieve_keeps_tuple_and_historical_freshness(self):
+        context, task, capsule = self.retrieve_context()
+        options = {'bank': 'memory-bank', 'task_id': task['external_id'], 'query': 'Juniper cable', 'review': False}
+        session = {'project_id': 'project', 'provider': 'codex'}
+        result = {'capsule': capsule, 'capsule_text': 'working: Juniper',
+                  'ordinary_receipt': self.receipt(), 'funnel_diagnosis': diagnosis_example()}
+        class Sink(dict):
+            def __setitem__(self, key, value): raise AssertionError('sink hook')
+        with patch.object(context, '_knowledge', return_value={'ok': True, 'result': result}), patch.object(context, '_source_hashes', return_value={}):
+            sink = {}
+            returned = context._retrieve(session, options, Path('.'), task, {'root': '.'}, True, sink)
+            self.assertEqual((capsule, {}, 'working: Juniper'), returned)
+            self.assertEqual({key: result[key] for key in ('ordinary_receipt', 'funnel_diagnosis')}, sink)
+            self.assertEqual(returned, context._retrieve(session, options, Path('.'), task, {'root': '.'}, True, Sink()))
+            self.assertEqual(returned, context._retrieve(session, options, Path('.'), task, {'root': '.'}, True))
+        session['brain'] = {**self.brain, 'task': task, 'capsule': capsule, 'source_hashes': {},
+                            'ordinary_receipt': self.receipt()}
+        before = copy.deepcopy(session['brain'])
+        def response(operation, *args, **kwargs):
+            return {'task': task} if operation == 'inspect' else {'ok': True, 'result': result}
+        with patch.object(context, '_bound', return_value=(session['brain'], options, Path('.'), {'root': '.'})), \
+                patch.object(context, '_knowledge', side_effect=response), patch.object(context, '_source_hashes', return_value={}):
+            self.assertTrue(context.ensure_fresh(session))
+        self.assertEqual(before, session['brain'])
+        from harness.task_context import FIELDS, KEPT
+        self.assertNotIn('ordinary_receipt', FIELDS)
+        self.assertNotIn('ordinary_receipt', KEPT)
+        with self.assertRaises(sessions.SessionError):
+            TaskContext.validate_options({**options, 'ordinary_receipt': self.receipt()})
+        with patch.object(context, '_knowledge', return_value={'ok': True, 'result': capsule}), patch.object(context, '_source_hashes', return_value={}):
+            sink = {}
+            self.assertEqual((capsule, {}, None), context._retrieve(session, {**options, 'review': True}, Path('.'), task, {'root': '.'}, False, sink))
+        self.assertEqual({}, sink)
+
+    def test_receipt_lifecycle_invalidation_retention_and_generation_rules(self):
+        value = {**self.brain, 'ordinary_receipt': self.receipt(), 'funnel_diagnosis': diagnosis_example()}
+        for change in ({'approved': True}, {'remembered': [{'title': 'new bookkeeping'}]}, {'approved': False}):
+            self.store._save_brain('fixture', {**value, **change})
+            self.assertEqual(self.receipt(), self.saved()['ordinary_receipt'])
+        self.store.accelerators = SimpleNamespace(keep_current=lambda *_: None)
+        self.store.cancelled = set()
+        self.store.stopping = threading.Event()
+        self.store.generations = {'fixture': 'old-generation'}
+        self.store.get = lambda *_: {'id': 'fixture', 'brain': self.saved()}
+        self.store._event = lambda *_: self.fail('obsolete recall emitted')
+        newer = {**value, 'context_id': 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'query': 'new query',
+                 'ordinary_receipt': {**self.receipt(), 'returned_status': 'deferred'}}
+        for failed in (False, True):
+            self.store.generations['fixture'] = 'old-generation'
+            def prepare(_):
+                self.store._save_brain('fixture', newer)
+                self.store.generations['fixture'] = 'new-generation'
+                if failed: raise sessions.SessionError('obsolete failure')
+                return value
+            self.assertIsNone(self.store._recall('fixture', {'brain': value}, 'old-generation', SimpleNamespace(prepare=prepare)))
+            self.assertEqual(newer, self.saved())
+        self.store._event = lambda *_: None
+        self.store.generations['fixture'] = 'generation'
+        self.store._save_brain('fixture', {**value, 'query': ''})
+        recalled = self.store._recall('fixture', self.store.get('fixture'), 'generation', None)
+        self.assertNotIn('ordinary_receipt', recalled['brain'])
+        self.assertNotIn('funnel_diagnosis', recalled['brain'])
+        self.assertIsNone(recalled['brain']['capsule'])
+        self.store._save_brain('fixture', self.brain)
+        self.assertNotIn('ordinary_receipt', self.saved())
+
+    def test_optional_receipt_normalizer_capability_and_cancellation(self):
+        # Fresh-process import controls distinguish absent capability from broken dependencies.
+        script = """
+import builtins, sys
+from types import SimpleNamespace
+original = builtins.__import__
+mode = sys.argv[1]
+def imported(name, *args, **kwargs):
+    if name == 'memory_diagnosis':
+        if mode == 'older':
+            return SimpleNamespace(normalize_funnel_diagnosis=lambda value: value)
+        missing = 'memory_diagnosis' if mode == 'absent' else 'invented_dependency'
+        raise ModuleNotFoundError('invented import failure', name=missing)
+    return original(name, *args, **kwargs)
+builtins.__import__ = imported
+try:
+    from harness import sessions
+except ModuleNotFoundError as error:
+    assert mode == 'dependency' and error.name == 'invented_dependency'
+else:
+    assert mode != 'dependency'
+    value = {'fixture': 1}
+    assert sessions.normalize_funnel_diagnosis(value) == (value if mode == 'older' else None)
+    assert sessions.normalize_ordinary_receipt(value) is None
+"""
+        for mode in ('absent', 'older', 'dependency'):
+            environment = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'harness/src')}
+            imported = subprocess.run([sys.executable, '-c', script, mode], env=environment,
+                                      text=True, capture_output=True, timeout=15)
+            self.assertEqual(0, imported.returncode, imported.stderr)
+        with patch.object(sessions, '_memory_diagnosis', None):
+            self.assertIsNone(sessions.normalize_ordinary_receipt(self.receipt()))
+        with patch.object(sessions, '_memory_diagnosis', SimpleNamespace(normalize_funnel_diagnosis=lambda value: value)):
+            self.assertIsNone(sessions.normalize_ordinary_receipt(self.receipt()))
+            self.assertEqual(diagnosis_example(), sessions.normalize_funnel_diagnosis(diagnosis_example()))
+        context, task, capsule = self.retrieve_context()
+        options = {'bank': 'memory-bank', 'task_id': task['external_id'], 'query': 'Juniper cable', 'review': False}
+        result = {'capsule': capsule, 'capsule_text': 'working: Juniper',
+                  'ordinary_receipt': self.receipt(), 'funnel_diagnosis': diagnosis_example()}
+        for normalizer, retained in (('normalize_ordinary_receipt', 'funnel_diagnosis'), ('normalize_funnel_diagnosis', 'ordinary_receipt')):
+            sink = {}
+            with patch.object(context, '_knowledge', return_value={'ok': True, 'result': result}), \
+                    patch.object(context, '_source_hashes', return_value={}), \
+                    patch('harness.task_context.' + normalizer, side_effect=RuntimeError('metadata-only')):
+                context._retrieve({'project_id': 'project'}, options, Path('.'), task, {'root': '.'}, True, sink)
+            self.assertIn(retained, sink)
+        for error in (KeyboardInterrupt(), SystemExit(8)):
+            with patch.object(context, '_knowledge', return_value={'ok': True, 'result': result}), \
+                    patch.object(context, '_source_hashes', return_value={}), \
+                    patch('harness.task_context.normalize_ordinary_receipt', side_effect=error), self.assertRaises(type(error)) as caught:
+                context._retrieve({'project_id': 'project'}, options, Path('.'), task, {'root': '.'}, True, {})
+            self.assertIs(error, caught.exception)
 
 
 

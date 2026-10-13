@@ -2888,5 +2888,272 @@ class ContextEngineTest(unittest.TestCase):
         self.assertFalse(missing.exists())
 
 
+
+
+_CLEANUP_REAL_CONNECT = sqlite3.connect
+
+
+class _ConnectCleanupConnection(sqlite3.Connection):
+    cancellation = None
+    commit_window = None
+    row_error = None
+    rollback_error = None
+    close_error = None
+    refuse_close = False
+    events = None
+
+    def __setattr__(self, key, value):
+        if key == 'row_factory' and self.row_error is not None:
+            raise self.row_error
+        super().__setattr__(key, value)
+
+    def execute(self, statement, parameters=()):
+        cursor = super().execute(statement, parameters)
+        if statement == 'BEGIN IMMEDIATE' and self.cancellation is not None and self.commit_window is None:
+            raise self.cancellation
+        return cursor
+
+    def commit(self):
+        self.events.append('commit')
+        if self.commit_window == 'before':
+            raise self.cancellation
+        super().commit()
+        if self.commit_window == 'after':
+            raise self.cancellation
+
+    def rollback(self):
+        self.events.append('rollback')
+        if self.rollback_error is not None:
+            raise self.rollback_error
+        return super().rollback()
+
+    def close(self):
+        self.events.append('close')
+        if self.close_error is not None and self.refuse_close:
+            raise self.close_error
+        super().close()
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class ConnectCleanupTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='owned-connect-cleanup-')
+        self.addCleanup(self.temp.cleanup)
+        self.database = Path(self.temp.name) / 'invented.db'
+        self.owned = []
+        self.addCleanup(self.cleanup_handles)
+
+    def cleanup_handles(self):
+        for connection in self.owned:
+            sqlite3.Connection.close(connection)
+
+    def factory(self, **options):
+        def acquire(database, *args, **kwargs):
+            connection = _CLEANUP_REAL_CONNECT(database, *args, factory=_ConnectCleanupConnection, **kwargs)
+            connection.events = []
+            for key, value in options.items():
+                setattr(connection, key, value)
+            self.owned.append(connection)
+            return connection
+        return acquire
+
+    def assert_writer_available(self, database=None):
+        connection = _CLEANUP_REAL_CONNECT(database or self.database, timeout=0)
+        try:
+            connection.execute('BEGIN IMMEDIATE')
+            connection.rollback()
+        finally:
+            connection.close()
+
+    def assert_closed(self, connection):
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute('SELECT 1')
+
+    def fail_connect(self, original, **options):
+        with mock.patch.object(CONTEXT.sqlite3, 'connect', self.factory(cancellation=original, **options)):
+            with self.assertRaises(type(original)) as raised:
+                CONTEXT.connect(self.database)
+        self.assertIs(original, raised.exception)
+        return self.owned[-1]
+
+    def test_cancellation_after_real_begin_closes_and_releases_writer(self):
+        for original in (KeyboardInterrupt('invented cancellation'), SystemExit(31)):
+            with self.subTest(cancellation=type(original).__name__):
+                connection = self.fail_connect(original)
+                self.assertEqual(['rollback', 'close'], connection.events)
+                self.assert_closed(connection)
+                self.assert_writer_available()
+
+    def test_row_factory_failure_is_inside_owned_cleanup_boundary(self):
+        original = RuntimeError('invented row factory failure')
+        with mock.patch.object(CONTEXT.sqlite3, 'connect', self.factory(row_error=original)):
+            with self.assertRaises(RuntimeError) as raised:
+                CONTEXT.connect(self.database)
+        self.assertIs(original, raised.exception)
+        connection = self.owned[-1]
+        self.assertEqual(['rollback', 'close'], connection.events)
+        self.assert_closed(connection)
+        self.assert_writer_available()
+
+    def test_cancelled_episode_migration_restores_schema_and_rows_without_gc(self):
+        connection = _CLEANUP_REAL_CONNECT(self.database)
+        connection.execute('CREATE VIRTUAL TABLE episodes USING fts5(summary, outcome, files UNINDEXED, verification UNINDEXED, sources UNINDEXED, created_at UNINDEXED)')
+        connection.execute("INSERT INTO episodes(rowid,summary,outcome,files,verification,sources,created_at) VALUES(7,'invented','preserved','[]','[]','[]','2026-10-12')")
+        connection.commit()
+        old_schema = connection.execute("SELECT sql FROM sqlite_master WHERE name='episodes'").fetchone()[0]
+        old_rows = connection.execute('SELECT rowid,* FROM episodes').fetchall()
+        connection.close()
+        original = KeyboardInterrupt('invented migration cancellation')
+        create = CONTEXT.create_episode_table
+        def cancel_after_create(connection):
+            create(connection)
+            raise original
+        with mock.patch.object(CONTEXT.sqlite3, 'connect', self.factory()), \
+             mock.patch.object(CONTEXT, 'create_episode_table', side_effect=cancel_after_create):
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                CONTEXT.connect(self.database)
+        self.assertIs(original, raised.exception)
+        self.assertEqual(['rollback', 'close'], self.owned[-1].events)
+        self.assert_closed(self.owned[-1])
+        self.assert_writer_available()
+        check = _CLEANUP_REAL_CONNECT(self.database)
+        try:
+            self.assertEqual(old_schema, check.execute("SELECT sql FROM sqlite_master WHERE name='episodes'").fetchone()[0])
+            self.assertEqual(old_rows, check.execute('SELECT rowid,* FROM episodes').fetchall())
+        finally:
+            check.close()
+
+    def test_commit_cancellation_closes_without_undoing_completed_commit(self):
+        for window in ('before', 'after'):
+            with self.subTest(commit_window=window):
+                database = Path(self.temp.name) / (window + '.db')
+                original = KeyboardInterrupt('invented commit cancellation')
+                with mock.patch.object(CONTEXT.sqlite3, 'connect', self.factory(cancellation=original, commit_window=window)), \
+                     self.assertRaises(KeyboardInterrupt) as raised:
+                    CONTEXT.connect(database)
+                self.assertIs(original, raised.exception)
+                connection = self.owned[-1]
+                self.assertEqual(['commit', 'rollback', 'close'], connection.events)
+                self.assert_closed(connection)
+                self.assert_writer_available(database)
+                check = _CLEANUP_REAL_CONNECT(database)
+                try:
+                    observed = check.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='working_tasks'").fetchone()[0]
+                    self.assertEqual(0 if window == 'before' else 1, observed)
+                finally:
+                    check.close()
+
+    def test_cleanup_errors_attempt_both_and_preserve_original_cancellation(self):
+        options = [
+            {'rollback_error': OSError('rollback refused')},
+            {'close_error': OSError('close reported failure')},
+            {'rollback_error': KeyboardInterrupt('cleanup interrupted')},
+            {'close_error': SystemExit(32)},
+            {'rollback_error': OSError('rollback refused'), 'close_error': SystemExit(33)},
+        ]
+        for configuration in options:
+            with self.subTest(fields=tuple(configuration)):
+                original = KeyboardInterrupt('original cancellation')
+                connection = self.fail_connect(original, **configuration)
+                self.assertEqual(['rollback', 'close'], connection.events)
+                self.assert_closed(connection)
+                self.assert_writer_available()
+
+    def test_driver_refusing_both_cleanup_attempts_preserves_original_with_explicit_limit(self):
+        original = RuntimeError('original failure')
+        connection = self.fail_connect(original, rollback_error=OSError('rollback refused'),
+                                       close_error=OSError('close refused'), refuse_close=True)
+        self.assertEqual(['rollback', 'close'], connection.events)
+        self.assertTrue(connection.in_transaction)
+        # The API cannot force a driver to close; the invented test owns cleanup.
+        sqlite3.Connection.close(connection)
+        self.assert_writer_available()
+
+    def test_ordinary_failure_and_primary_fts_translation_keep_their_contract(self):
+        original = RuntimeError('ordinary failure')
+        connection = self.fail_connect(original, rollback_error=OSError('cleanup failure'))
+        self.assertEqual(['rollback', 'close'], connection.events)
+        error = sqlite3.OperationalError('SQLite FTS5 unavailable')
+        with mock.patch.object(CONTEXT.sqlite3, 'connect', self.factory(cancellation=error, close_error=OSError('cleanup failure'))):
+            with self.assertRaises(CONTEXT.ContextError) as raised:
+                CONTEXT.connect(self.database)
+        self.assertIs(error, raised.exception.__cause__)
+        self.assertEqual('SQLite FTS5 support is required', str(raised.exception))
+        self.assertEqual(['rollback', 'close'], self.owned[-1].events)
+        self.assert_closed(self.owned[-1])
+
+    def test_cancellation_on_successful_pre_return_line_closes_committed_handle(self):
+        import ast
+        import inspect
+        import sys
+        body, first_line = inspect.getsourcelines(CONTEXT.connect)
+        parsed = ast.parse(''.join(body))
+        returns = [node for node in ast.walk(parsed) if isinstance(node, ast.Return)]
+        self.assertEqual(1, len(returns))
+        return_line = first_line + returns[0].lineno - 1
+        original = KeyboardInterrupt('invented pre-return cancellation')
+        previous_trace = sys.gettrace()
+        def cancel_on_return(frame, event, argument):
+            if frame.f_code is CONTEXT.connect.__code__ and event == 'line' and frame.f_lineno == return_line:
+                raise original
+            return cancel_on_return
+        try:
+            with mock.patch.object(CONTEXT.sqlite3, 'connect', self.factory()):
+                sys.settrace(cancel_on_return)
+                with self.assertRaises(KeyboardInterrupt) as raised:
+                    CONTEXT.connect(self.database)
+        finally:
+            sys.settrace(previous_trace)
+        self.assertIs(original, raised.exception)
+        connection = self.owned[-1]
+        self.assertEqual(['commit', 'rollback', 'close'], connection.events)
+        self.assert_closed(connection)
+        self.assert_writer_available()
+        check = _CLEANUP_REAL_CONNECT(self.database)
+        try:
+            self.assertEqual(1, check.execute("SELECT COUNT(*) FROM sqlite_master WHERE name='working_tasks'").fetchone()[0])
+        finally:
+            check.close()
+
+    def test_cancellation_immediately_after_acquisition_closes_owned_handle(self):
+        import sys
+        original = KeyboardInterrupt('invented acquisition-boundary cancellation')
+        previous_trace = sys.gettrace()
+        def interrupt_after_acquire(frame, event, argument):
+            if frame.f_code is CONTEXT.connect.__code__ and event == 'line' and self.owned:
+                raise original
+            return interrupt_after_acquire
+        try:
+            with mock.patch.object(CONTEXT.sqlite3, 'connect', self.factory()):
+                sys.settrace(interrupt_after_acquire)
+                with self.assertRaises(KeyboardInterrupt) as raised:
+                    CONTEXT.connect(self.database)
+        finally:
+            sys.settrace(previous_trace)
+        self.assertIs(original, raised.exception)
+        self.assertEqual(['rollback', 'close'], self.owned[-1].events)
+        self.assert_closed(self.owned[-1])
+        self.assert_writer_available()
+
+    def test_factory_failure_preserves_original_without_fts_translation(self):
+        for original in (KeyboardInterrupt('factory cancellation'), SystemExit(34),
+                         OSError('factory failure'), sqlite3.OperationalError('factory FTS5 failure')):
+            with self.subTest(error=type(original).__name__):
+                with mock.patch.object(CONTEXT.sqlite3, 'connect', side_effect=original), \
+                     self.assertRaises(type(original)) as raised:
+                    CONTEXT.connect(self.database)
+                self.assertIs(original, raised.exception)
+                self.assertEqual([], self.owned)
+
+    def test_success_returns_open_configured_committed_connection(self):
+        with mock.patch.object(CONTEXT.sqlite3, 'connect', self.factory()):
+            connection = CONTEXT.connect(self.database)
+        self.assertEqual(['commit'], connection.events)
+        self.assertIs(sqlite3.Row, connection.row_factory)
+        self.assertFalse(connection.in_transaction)
+        self.assertEqual(1, connection.execute('SELECT 1').fetchone()[0])
+        self.assert_writer_available()
+
 if __name__ == "__main__":
     unittest.main()

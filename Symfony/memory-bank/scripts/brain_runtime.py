@@ -678,9 +678,35 @@ def _cited_file(repository: Path, source: str) -> Path:
     return path
 
 
-def fingerprint(repository: Path, source: str) -> dict[str, str]:
+class _CitationDigestCache:
+    """One-call CPU cache; every fingerprint still checks and reads its source."""
+    def __init__(self):
+        self._digests: dict[bytes, str] = {}
+        self._retained_bytes = 0
+        self.hits = self.misses = self.bypasses = 0
+
+    def digest(self, data: bytes) -> str:
+        cached = self._digests.get(data)
+        if cached is not None:
+            self.hits += 1
+            return cached
+        self.misses += 1
+        digest = hashlib.sha256(_line_ending_neutral(data)).hexdigest()
+        if (len(data) <= 1048576 and len(self._digests) < 64
+                and self._retained_bytes + len(data) <= 8388608):
+            self._digests[data] = digest
+            self._retained_bytes += len(data)
+        else:
+            self.bypasses += 1
+        return digest
+
+
+def fingerprint(repository: Path, source: str, *,
+                _normalization_cache: Optional[_CitationDigestCache] = None) -> dict[str, str]:
     path = _cited_file(repository, source)
-    digest = hashlib.sha256(_line_ending_neutral(path.read_bytes())).hexdigest()
+    data = path.read_bytes()
+    digest = (_normalization_cache.digest(data) if _normalization_cache is not None
+              else hashlib.sha256(_line_ending_neutral(data)).hexdigest())
     return {"path": source.split("#", 1)[0], "sha256": digest}
 
 
@@ -770,7 +796,8 @@ def sources_are_fresh(repository: Path, record: dict[str, Any]) -> bool:
 
 
 def source_changes(
-    repository: Path, fingerprints: Any
+    repository: Path, fingerprints: Any, *,
+    _normalization_cache: Optional[_CitationDigestCache] = None
 ) -> tuple[list[str], list[str]]:
     """Cited paths whose digest moved on, and cited paths that are gone.
 
@@ -787,7 +814,8 @@ def source_changes(
             missing.append(str(path))
             continue
         try:
-            current = fingerprint(repository, path)["sha256"]
+            current = (fingerprint(repository, path) if _normalization_cache is None
+                       else fingerprint(repository, path, _normalization_cache=_normalization_cache))["sha256"]
         except BrainError:
             missing.append(path)
             continue
@@ -1212,50 +1240,51 @@ def create_record(
     guard_shared_text(
         f"{record_type.capitalize()} record", [title, goal, *(conflicts or [])]
     )
-    try:
-        find_record(repository, external_id)
-    except BrainError as error:
-        if "not found" not in str(error):
-            raise
-    else:
-        raise BrainError(f"Project Brain record already exists: {external_id}")
-    timestamp = utc_now()
-    initial = LIFECYCLES[record_type]["initial"]
-    record: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "id": new_uuid(),
-        "type": record_type,
-        "external_id": external_id,
-        "title": title,
-        "status": initial,
-        "revision": 1,
-        "owner": owner,
-        "authorized_owners": sorted(set([owner])),
-        "privacy": privacy,
-        "authority": authority,
-        "confidence": confidence,
-        "created_at": timestamp,
-        "updated_at": timestamp,
-        "transitions": [
-            {
-                "from": None,
-                "to": initial,
-                "at": timestamp,
-                "actor": owner,
-                "reason": f"{record_type.capitalize()} created",
-            }
-        ],
-        "source_fingerprints": source_fingerprints(repository, sources),
-        "conflicts": sorted(set(conflicts or [])),
-        "supersedes": [],
-        "superseded_by": None,
-        "goal": goal or title,
-        "progress": "",
-        "next_steps": [],
-        "files": sorted(set(files)),
-        "sources": sorted(set(sources)),
-    }
     with mutation_lock(repository):
+        # Alias lookup and creation must share the same repository lock.
+        try:
+            find_record(repository, external_id)
+        except BrainError as error:
+            if "not found" not in str(error):
+                raise
+        else:
+            raise BrainError(f"Project Brain record already exists: {external_id}")
+        timestamp = utc_now()
+        initial = LIFECYCLES[record_type]["initial"]
+        record: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "id": new_uuid(),
+            "type": record_type,
+            "external_id": external_id,
+            "title": title,
+            "status": initial,
+            "revision": 1,
+            "owner": owner,
+            "authorized_owners": sorted(set([owner])),
+            "privacy": privacy,
+            "authority": authority,
+            "confidence": confidence,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "transitions": [
+                {
+                    "from": None,
+                    "to": initial,
+                    "at": timestamp,
+                    "actor": owner,
+                    "reason": f"{record_type.capitalize()} created",
+                }
+            ],
+            "source_fingerprints": source_fingerprints(repository, sources),
+            "conflicts": sorted(set(conflicts or [])),
+            "supersedes": [],
+            "superseded_by": None,
+            "goal": goal or title,
+            "progress": "",
+            "next_steps": [],
+            "files": sorted(set(files)),
+            "sources": sorted(set(sources)),
+        }
         path = dynamic_path(repository, record)
         if path.exists():
             raise BrainError(f"Project Brain UUID collision: {record['id']}")
@@ -2786,7 +2815,9 @@ def auto_promote(
     promotes its own record at once instead of waiting for a turn boundary.
     A record revised since its promotion is promoted again, and the new
     chunk supersedes the old one. A stalled promotion that can never apply
-    is withdrawn (`closed`) rather than retried for good.
+    is withdrawn (`closed`) rather than retried for good. `limit` caps new
+    nonduplicate proposal attempts (including failures), not duplicate scans
+    or the separate stalled-promotion retries.
     """
     config = load_config(repository)
     if not config.get("automatic_promotion"):
@@ -2851,7 +2882,15 @@ def auto_promote(
         # exactly the one a pre-loop snapshot would miss.
         threshold = bank_duplicate_ratio(config)
         existing = active_chunk_texts(repository)
-        for candidate in candidates[:limit]:
+        # Duplicate rejections must not consume all admission slots forever.
+        # Preserve the existing slice's argument semantics, but use its length
+        # to cap new proposal attempts, not the duplicate-bearing prefix.
+        admission_limit = len(candidates[:limit])
+        admitted = considered = 0
+        for candidate in candidates:
+            if admitted >= admission_limit:
+                break
+            considered += 1
             record = candidate["record"]
             # A revision is measured against everything but the chunk it
             # replaces, which it resembles by design.
@@ -2874,6 +2913,9 @@ def auto_promote(
                     }
                 )
                 continue
+            # Failed attempts also spend admission: systematic errors must
+            # not create an unbounded batch of proposals or writes.
+            admitted += 1
             try:
                 proposal = create_promotion(
                     repository,
@@ -2913,7 +2955,7 @@ def auto_promote(
         "failed": failed,
         "blocked": blocked,
         "closed": closed,
-        "skipped": max(0, len(candidates) - limit),
+        "skipped": len(candidates) - considered,
     }
 
 

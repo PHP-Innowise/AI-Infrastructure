@@ -117,6 +117,54 @@ class KnowledgeTests(unittest.TestCase):
                         encoding="utf-8")
         return path
 
+
+    def test_cost_io_observes_real_stdout_stderr_and_guarded_nonlaunch(self):
+        from harness import cost_observation as c
+        observed = c.LaunchObservation('codex')
+        operation = observed.operation('run', 'refresh')
+        command = [sys.executable, '-c', "import sys; sys.stdout.buffer.write('é'.encode()); sys.stderr.buffer.write(b'warn')"]
+        response = self.manager._execute(command, self.project, _io_observer=operation)
+        operation.finish({'ok': True})
+        row = observed.finish('completed')['local_operations'][0]['runtime_io'][0]
+        self.assertEqual((0, b'\xc3\xa9', b'warn'), response)
+        self.assertEqual((2, 4, 2, 4), tuple(row[key] for key in ('stdout_known_bytes', 'stderr_known_bytes', 'returned_stdout_bytes', 'returned_stderr_bytes')))
+        self.assertTrue(row['stdout_eof']); self.assertTrue(row['stderr_eof'])
+        self.assertTrue(row['started']); self.assertTrue(row['returned'])
+        self.assertEqual(sum(len(arg.encode()) for arg in command), row['argv_argument_bytes'])
+        observed = c.LaunchObservation('codex'); operation = observed.operation('run', 'refresh')
+        def reject():
+            raise sessions.SessionError('generation stopped')
+        with self.assertRaises(sessions.SessionError):
+            self.manager._execute(command, self.project, _guard=reject, _io_observer=operation)
+        operation.finish()
+        row = observed.finish('cancelled')['local_operations'][0]['runtime_io'][0]
+        self.assertFalse(row['started']); self.assertFalse(row['returned'])
+        self.assertIsNone(row['returned_stdout_bytes'])
+        self.assertEqual(0, row['stdout_known_bytes'])
+
+    def test_cost_io_output_cap_reports_prefix_without_full_return(self):
+        from harness import cost_observation as c
+        observed = c.LaunchObservation('codex'); operation = observed.operation('run', 'refresh')
+        with patch.object(knowledge, 'OUTPUT_LIMIT', 8), self.assertRaises(sessions.SessionError):
+            self.manager._execute([sys.executable, '-c', "import sys; sys.stdout.write('x'*40); sys.stdout.flush()"], self.project, _io_observer=operation)
+        operation.finish()
+        row = observed.finish('failed')['local_operations'][0]['runtime_io'][0]
+        self.assertTrue(row['started']); self.assertFalse(row['returned'])
+        self.assertEqual(40, row['stdout_known_bytes'])
+        self.assertIsNone(row['returned_stdout_bytes'])
+        self.assertFalse(row['stdout_eof'])
+
+    def test_cost_io_callback_failure_preserves_runtime_response(self):
+        from harness import cost_observation as c
+        observed = c.LaunchObservation('codex'); operation = observed.operation('run', 'refresh')
+        with patch.object(operation, 'io', side_effect=RuntimeError('PRIVATE_OBSERVER_IO')):
+            result = self.manager._execute([sys.executable, '-c', "print('ok')"], self.project, _io_observer=operation)
+        operation.finish({'ok': True})
+        final = observed.finish('completed')
+        self.assertEqual((0, b'ok\n', b''), result)
+        self.assertTrue(final['observer_incomplete'])
+        self.assertNotIn('PRIVATE_OBSERVER_IO', json.dumps(final))
+
     def test_absent_and_installed_roots_browse_without_mutation(self):
         empty = self.manager.info(self.project_id)
         self.assertEqual(empty["banks"], [])

@@ -6,6 +6,18 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`memory-seed` asset: automatic session-window observation.** Generated
+  projects retain their four-turn novelty and ordinary FTS5 behavior. Bounded
+  ignored metadata links original receipts to final renderer traces and records
+  same/different/unknown proposed exposure without raw quotes or new queries.
+  Diagnostic errors cannot alter delivery; mirrors and policy lock regenerated.
+
+- **`memory-seed` asset: optional pre-session excerpt preparation.** The shared
+  runtime exposes a default-`None` callback before delivery identity and can
+  include a prepared section in its retrieval signature. Generated projects
+  keep ordinary FTS5 retrieval; optional maintainer ONNX tooling is excluded
+  from their payload. Mirrors and the generator policy lock regenerated.
+
 - **`memory-seed` asset: the `compaction:` line counts what the rendered
   capsule cuts and survives the ceiling.** A generated project's runtime adds
   the rendered text's own cuts (goal, progress and next-step characters, files

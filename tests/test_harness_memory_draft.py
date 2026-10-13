@@ -202,6 +202,95 @@ class SubmissionTests(unittest.TestCase):
 
 
 
+class SameDraftIdentityTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        (self.root / "specs").mkdir()
+        for name in ("authority.md", "other.md"):
+            (self.root / "specs" / name).write_text("# Canonical authority\n")
+
+    def keep(self, learnings):
+        return memory_draft.usable(self.root, {"learnings": learnings})
+
+    def test_distinct_exact_source_sets_and_fragments_keep_separate_claims(self):
+        learnings = [LEARNING, {**LEARNING, "sources": ["specs/other.md"]},
+                     {**LEARNING, "sources": ["specs/authority.md#L1"]}]
+        kept, skipped = self.keep(learnings)
+        self.assertEqual(learnings, kept["learnings"])
+        self.assertEqual([], skipped)
+
+    def test_normalized_copies_deduplicate_after_source_set_validation(self):
+        first = {**LEARNING, "sources": ["specs/authority.md", "specs/other.md"]}
+        second = {**first, "title": "cobalt  ALLOCATION needs one owner",
+                  "consequence": "Every cobalt\nallocation names exactly one owner.",
+                  "sources": ["specs/other.md", "specs/authority.md", "specs/other.md"]}
+        kept, skipped = self.keep([first, second])
+        self.assertEqual([first], kept["learnings"])
+        self.assertEqual([{"title": "cobalt ALLOCATION needs one owner", "reason": "repeated"}], skipped)
+
+    def test_every_conflicting_member_is_omitted_in_either_order_including_aab(self):
+        different = {**LEARNING, "consequence": "Every cobalt allocation names two owners."}
+        for learnings in ([LEARNING, different], [different, LEARNING], [LEARNING, LEARNING, different],
+                          [LEARNING, different, LEARNING]):
+            with self.subTest(learnings=learnings):
+                kept, skipped = self.keep(learnings)
+                self.assertEqual([], kept["learnings"])
+                self.assertFalse(kept["verified"])
+                self.assertEqual(["conflict"] * len(learnings), [item["reason"] for item in skipped])
+                self.assertTrue(all(set(item) == {"title", "reason"} for item in skipped))
+                notice = memory_draft.summary("drafted", {"ok": True, "saved": {}, "skipped": skipped})
+                self.assertIn(f"Left out {len(learnings)} conflicting learning(s)", notice)
+                self.assertNotIn(LEARNING["title"], notice)
+                self.assertNotIn(LEARNING["consequence"], notice)
+                self.assertNotIn("specs/authority.md", notice)
+
+    def test_ineligible_sources_do_not_create_false_independent_groups(self):
+        (self.root / ".env.local").write_text("fixture")
+        (self.root / "specs/link.md").symlink_to(self.root / "specs/authority.md")
+        second = {**LEARNING, "consequence": "Every cobalt allocation names two owners.",
+                  "sources": ["specs/authority.md", ".env.local", "specs/missing.md", "specs/link.md"]}
+        kept, skipped = self.keep([LEARNING, second])
+        self.assertEqual([], kept["learnings"])
+        self.assertEqual(["conflict", "conflict"], [item["reason"] for item in skipped])
+        for source in (".env.local", "specs/missing.md", "specs/link.md"):
+            with self.subTest(source=source):
+                kept, skipped = self.keep([{**LEARNING, "sources": [source]}])
+                self.assertEqual([], kept["learnings"])
+                self.assertEqual("unsourced", skipped[0]["reason"])
+
+    def test_conflict_detection_is_bounded_to_parsed_clipped_values(self):
+        # A fourth learning and suffixes past the existing limits are not observed.
+        different = {**LEARNING, "consequence": "A different rule."}
+        parsed = memory_draft.parse(reply({"learnings": [LEARNING, LEARNING, LEARNING, different]}))
+        kept, skipped = memory_draft.usable(self.root, parsed)
+        self.assertEqual([LEARNING], kept["learnings"])
+        self.assertEqual(["repeated", "repeated"], [item["reason"] for item in skipped])
+        parsed = memory_draft.parse(reply({"learnings": [
+            {**LEARNING, "consequence": "x" * memory_draft.CONSEQUENCE_LIMIT + suffix}
+            for suffix in ("A", "B")]}))
+        kept, skipped = memory_draft.usable(self.root, parsed)
+        self.assertEqual(1, len(kept["learnings"]))
+        self.assertEqual("x" * memory_draft.CONSEQUENCE_LIMIT, kept["learnings"][0]["consequence"])
+        self.assertEqual("repeated", skipped[0]["reason"])
+        for field, values in (
+                ("title", ["x" * memory_draft.TITLE_LIMIT + suffix for suffix in ("A", "B")]),
+                ("sources", [["specs/authority.md"] * memory_draft.SOURCE_COUNT + [tail]
+                             for tail in ("specs/other.md", "specs/authority.md#L1")])):
+            with self.subTest(field=field):
+                parsed = memory_draft.parse(reply({"learnings": [{**LEARNING, field: value} for value in values]}))
+                kept, skipped = memory_draft.usable(self.root, parsed)
+                self.assertEqual(1, len(kept["learnings"]))
+                self.assertEqual("repeated", skipped[0]["reason"])
+
+    def test_an_unsourced_claim_does_not_poison_a_valid_same_title_claim(self):
+        invalid = {**LEARNING, "consequence": "A contradictory rule.", "sources": ["specs/missing.md"]}
+        kept, skipped = self.keep([invalid, LEARNING])
+        self.assertEqual([LEARNING], kept["learnings"])
+        self.assertEqual([{"title": LEARNING["title"], "reason": "unsourced"}], skipped)
+
+
 class UnattendedSaveTests(unittest.TestCase):
     """What a run's draft keeps when nobody reviews it, and what the conversation says."""
 
@@ -210,6 +299,20 @@ class UnattendedSaveTests(unittest.TestCase):
         self.assertTrue(memory_draft.instruction().endswith("with no review, so leave out anything you did not verify."))
         self.assertTrue(memory_draft.instruction().startswith(memory_draft.REQUEST))
         self.assertNotIn("A person reviews the draft", memory_draft.instruction())
+
+    def test_session_title_markers_do_not_discard_corrections_or_promotion_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "specs").mkdir()
+            for name in ("authority.md", "new-authority.md"):
+                (root / "specs" / name).write_text("# Canonical authority\n", encoding="utf-8")
+            for learning in (LEARNING, {**LEARNING, "consequence": "Every cobalt allocation names two owners."},
+                             {**LEARNING, "sources": ["specs/new-authority.md"]}):
+                for known in ([["finding", "cobalt allocation needs one owner"]], [42], None):
+                    with self.subTest(learning=learning, known=known):
+                        kept, skipped = memory_draft.usable(root, {"learnings": [learning]}, known=known)
+                        self.assertEqual([learning], kept["learnings"])
+                        self.assertEqual([], skipped)
 
     def test_a_learning_the_workspace_cannot_back_is_left_out_rather_than_failing_the_save(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -224,10 +327,10 @@ class UnattendedSaveTests(unittest.TestCase):
                                    {**LEARNING, "type": "decision", "title": "Owners are explicit"}]}
             kept, skipped = memory_draft.usable(root, draft, known=[["decision", "owners are explicit"]])
             self.assertEqual(("Checked at allocation.", ["Ship it", "b", "c"]), (kept["progress"], kept["next_steps"]))
-            self.assertEqual([["specs/authority.md#L1"]], [learning["sources"] for learning in kept["learnings"]])
+            self.assertEqual([["specs/authority.md#L1"], ["specs/authority.md"], ["specs/authority.md"]],
+                             [learning["sources"] for learning in kept["learnings"]])
             self.assertTrue(kept["verified"])
-            self.assertEqual([("Unsourced", "unsourced"), ("cobalt ALLOCATION needs one owner", "repeated"),
-                              ("Owners are explicit", "repeated")],
+            self.assertEqual([("Unsourced", "unsourced")],
                              [(item["title"], item["reason"]) for item in skipped])
             # The kept draft passes the same checks as a reviewed one.
             memory_draft.check_sources(root, memory_draft.submission(kept))
@@ -244,7 +347,7 @@ class UnattendedSaveTests(unittest.TestCase):
                                           "blocked": [{"reason": "near-duplicate"}], "failed": []}},
                   "skipped": [{"title": "x", "reason": "unsourced"}, {"title": "y", "reason": "repeated"}]}
         self.assertEqual("Saved to project memory: the task's progress and next steps; finding \u201cOne owner\u201d. "
-                         "1 learning(s) were already saved from this session. "
+                         "Left out 1 duplicate learning(s) within this draft. "
                          "Left out 1 learning(s) citing no file in the workspace. "
                          "Promoted to the Memory Bank as MEM-20261004-aaaaaaaa. "
                          "1 held back from the Memory Bank; they stay in Project Brain.",
