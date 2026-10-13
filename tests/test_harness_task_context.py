@@ -922,11 +922,14 @@ class TaskContextTests(unittest.TestCase):
         self.assertEqual(2, len(self.calls))
         self.assertEqual("native-context-fixture", self.calls[1]["session_id"])
         self.assertIn(brain["capsule_text"], self.calls[1]["prompt"])
-        # The agent restated its learning; this session already saved it.
+        # The runtime recognizes the saved learning, rather than a title cache suppressing it.
         again = self.memory_events(store, sid)[-1]
         self.assertTrue(again["ok"], again)
-        self.assertIn("1 learning(s) were already saved from this session.", again["text"])
-        self.assertEqual(1, len([record for record in store.brain_info(sid)["records"] if record["type"] == "finding"]))
+        self.assertIn("Already in project memory: finding “Cobalt allocation needs one owner”.", again["text"])
+        repeated = [record for record in store.brain_info(sid)["records"] if record["type"] == "finding"]
+        self.assertEqual(1, len(repeated))
+        self.assertEqual([(record["id"], record["title"], record["status"], record["authority"]) for record in findings],
+                         [(record["id"], record["title"], record["status"], record["authority"]) for record in repeated])
 
     def test_opened_memory_is_the_runs_successful_reads_or_says_it_cannot_see_them(self):
         def run(provider, fake, environment=None):
@@ -1242,9 +1245,17 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
                          sum(meter["items"].values()))
         store.run_context(sid, waiting["brain"]["context_id"])
         self.wait_status(store, sid, "completed")
-        inserted = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False) + "\n\n"
+        preview = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False) + "\n\n"
+        self.assertEqual(len(preview), meter["prompt_characters"])
+        inserted = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False, separators=(",", ":")) + "\n\n"
         self.assertIn(inserted, self.calls[0]["prompt"])
-        self.assertEqual(len(inserted), meter["prompt_characters"])
+        self.assertEqual(capsule, json.JSONDecoder().raw_decode(
+            self.calls[0]["prompt"].split(sessions.BRAIN_CONTEXT_HEADER, 1)[1])[0])
+        self.assertEqual(len(inserted), waiting["capsule_delivery_meter"]["prompt_characters"])
+        ledger = store.results.history(sid)["launches"][-1]["context"]["ledger"]
+        self.assertEqual(len(inserted), ledger["capsule"]["inserted"])
+        self.assertEqual(len(inserted), sum(ledger["capsule"]["kinds"].values()))
+        self.assertEqual(len(self.calls[0]["prompt"]), ledger["total"])
 
     def test_reviewed_context_survives_restart_and_each_followup_requires_a_new_receipt(self):
         store = self.manager()
@@ -1268,7 +1279,10 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
         self.assertEqual(len(self.calls), 1)
         received = json.loads(self.calls[0]["receipt"].read_text())
         self.assertEqual(received["prompt"], self.calls[0]["prompt"])
-        self.assertIn(json.dumps(brain["capsule"], ensure_ascii=False), received["prompt"])
+        envelope = sessions.BRAIN_CONTEXT_HEADER + json.dumps(brain["capsule"], ensure_ascii=False, separators=(",", ":")) + "\n\n"
+        self.assertIn(envelope, received["prompt"])
+        self.assertEqual(brain["capsule"], json.JSONDecoder().raw_decode(
+            received["prompt"].split(sessions.BRAIN_CONTEXT_HEADER, 1)[1])[0])
         self.assertIn("rule requires one owner.", received["prompt"])
         self.assertIn("Check the cobalt allocation rule", received["prompt"])
         task_path = self.project / "project-brain/dynamic/tasks" / (brain["task"]["id"] + ".md")

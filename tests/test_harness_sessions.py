@@ -942,7 +942,10 @@ class SessionTests(unittest.TestCase):
         manager.send(sid, "/php-review src")
         session = self.settled(manager, sid)
         self.assertEqual((session["status"], len(self.calls)), ("failed", before))
-        self.assertIn("reviews project memory before each run", manager.events(sid)[-1]["text"])
+        # Cost metadata can follow the refusal and has no conversation text.
+        errors = [event for event in manager.events(sid) if event["kind"] == "error"]
+        self.assertEqual(1, len(errors))
+        self.assertIn("reviews project memory before each run", errors[0]["text"])
 
     def test_codex_skills_mentioned_with_a_dollar_and_its_prompts_reach_codex_as_the_codex_app_sends_them(self):
         skills = [{"name": "php-review", "description": "Review PHP.", "path": str(self.project / ".agents/skills/php-review/SKILL.md"), "scope": "repo"}]

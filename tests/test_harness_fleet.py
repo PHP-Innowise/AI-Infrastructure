@@ -326,7 +326,11 @@ class FleetRuntimeTests(_FleetFixture, unittest.TestCase):
             calls = self.native_calls(log)
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0]["cwd"], str(self.project))
-            self.assertIn(json.dumps(prepared["brain"]["capsule"], ensure_ascii=False), calls[0]["prompt"])
+            capsule = prepared["brain"]["capsule"]
+            envelope = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+            self.assertIn(envelope, calls[0]["prompt"])
+            self.assertEqual(capsule, json.JSONDecoder().raw_decode(
+                calls[0]["prompt"].split(sessions.BRAIN_CONTEXT_HEADER, 1)[1])[0])
             self.assertNotEqual(metadata(tasks[0])["status"], "completed")
             manager.decide(sid, True)
             completed = self.wait_for_status(manager, sid, {"completed"})

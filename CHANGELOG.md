@@ -26,6 +26,11 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Align Harness integration assertions with lossless compact capsule delivery,
+  independent cost receipts and runtime-confirmed repeat saves. Preserve full
+  capsule and warning checks, preview/delivery meter separation, refusal before
+  provider launch, and persisted learning identity across follow-ups.
+
 - Harness knowledge metadata discovers and selects banks without reading unused Markdown previews. Public document browsing, bank order/selection and script/config/Brain checks stay unchanged; metadata no longer inherits incidental preview-scan failures.
 
 - Harness compacts lossless capsule JSON only for actual ordinary, Fleet and

@@ -585,7 +585,13 @@ class LaunchTests(unittest.TestCase):
         self.assertNotIn(str(self.project), json.dumps(tools, ensure_ascii=False))
         receipt = self.receipt(sid)
         self.assertEqual((5000, 5000, True), (receipt['steps'], receipt['opened'], receipt['limited']))
-        self.assertIsNone(self.receipt(plain_sid))
+        # Disabling target enrichment leaves the independent cost observer intact.
+        plain_receipt = self.receipt(plain_sid)
+        self.assertEqual({'full_cost'}, set(plain_receipt))
+        cost = plain_receipt['full_cost']
+        self.assertEqual(('harness-full-cost-v1', 'final', 'failed'),
+                         (cost['schema'], cost['state'], cost['outcome']))
+        self.assertTrue(cost['supported_workflow'])
 
     def test_extras_stay_capped_and_recent_events_still_see_the_whole_launch(self):
         script = [{'type': 'system', 'subtype': 'init', 'session_id': 'native-long'},
