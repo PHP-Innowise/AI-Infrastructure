@@ -9,7 +9,7 @@ Codex uses the shared root policy, repository skills discovered under `.agents/s
 | Skills | `.agents/skills/<name>/SKILL.md` | Codex-discovered Symfony workflows |
 | Policy | `AGENTS.md` | Shared enforceable architecture and safety rules |
 | Config | `.codex/config.toml` | Trusted project configuration and feature flags |
-| Hooks | `.codex/hooks.json`, `.codex/hooks/*.sh` | Context, command safety, naming, and loop checks |
+| Hooks | `.codex/hooks.json`, `.codex/hooks/*.sh` | Context, command safety, naming, and loop checks, wired through a launcher that finds `.codex/hooks/` from any subdirectory |
 | References | `.codex/DOD.md`, `.codex/GOLDEN-PRINCIPLES.md`, `.codex/STABILIZATION.md` | Completion, quality, and learning guidance |
 
 Codex does not use duplicate `.codex/skills`, `.codex/commands`, or `.codex/agents` trees. Skills replace the deprecated project custom-prompt pattern, and ordinary collaboration/subagent support does not require Markdown wrapper files.
@@ -20,6 +20,7 @@ Codex does not use duplicate `.codex/skills`, `.codex/commands`, or `.codex/agen
 2. Confirm repository skills are visible from `.agents/skills`.
 3. Invoke a skill by name or describe work that matches its trigger description.
 4. Follow root `AGENTS.md`; run `.codex/DOD.md` before claiming completion.
+5. Review and trust the hooks in `/hooks`. Codex records trust per hook definition, so a hook whose command changed in an update is skipped until it is trusted again.
 
 Use the discovered `project-brain` skill for governed shared task lifecycle, handoffs, findings/bugs/incidents/decisions, compaction, promotion proposals, and the one public task-aware retrieval command: `python3 memory-bank/scripts/context.py retrieve QUERY --task-id ID`. Governed mode is the default; `--mode lightweight` is an explicit machine-local fallback.
 

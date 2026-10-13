@@ -1,0 +1,20 @@
+# Line endings. The repository and every checkout keep LF: the hooks run under
+# bash, which fails on a carriage return (`syntax error near unexpected token
+# $'in\r'`), and the mirror, parity and policy-lock gates compare bytes, so a
+# `core.autocrlf=true` clone reported hundreds of false drifts.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary
+
+# Client-supplied task material keeps the bytes it was delivered with.
+*/Task/** -text

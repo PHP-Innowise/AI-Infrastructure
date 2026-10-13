@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "notifications",
+  "description": "Owns notification delivery",
+  "owner": "communications-team",
+  "relationships_complete": true,
+  "capabilities": [{"id": "refund-notification", "description": "Send a refund confirmation", "keywords": ["refund-notification"], "status": "planned", "sources": ["specs/confirmation.md"]}],
+  "provides": [],
+  "consumes": [{"service": "payments", "contract": "refund.completed", "version": "1"}],
+  "sources": [{"path": "specs/confirmation.md", "kind": "spec"}]
+}

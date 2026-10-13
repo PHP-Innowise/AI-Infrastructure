@@ -1,0 +1,4 @@
+# Latest releases installed from PyPI on 2026-08-06. Pinning keeps workbook
+# generation and Draft 2020-12 validation reproducible.
+openpyxl==3.1.5
+jsonschema==4.25.1

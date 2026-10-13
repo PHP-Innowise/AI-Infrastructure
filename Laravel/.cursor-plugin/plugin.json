@@ -1,0 +1,10 @@
+{
+  "name": "laravel-accelerator",
+  "displayName": "Laravel Accelerator",
+  "description": "The Laravel edition of the PHP AI accelerator, loaded in place from its clone (scripts/accelerator_attach.py run cursor, or the Harness). Nothing is copied into the project.",
+  "rules": "./.cursor/rules/",
+  "skills": "./.cursor/skills/",
+  "agents": "./.cursor/agents/",
+  "commands": "./.cursor/commands/",
+  "hooks": "./.cursor/hooks.json"
+}

@@ -82,8 +82,9 @@ undocumented inventory field name.
 
 The production payload retains runtime scripts, policies, workflow
 documentation, templates, Memory Bank, Project Brain, living-spec scaffolding,
-and lowercase `tasks/`. Repository research, test suites, worked examples, and
-bundled uppercase `Task/` material are source-only and are not installed.
+and lowercase `tasks/`. Repository research, test suites and worked examples
+are source-only and are not installed. Uppercase `Task/` contents remain local
+client inputs: this repository ignores them and does not bundle them.
 Uppercase `Task/` may be created and populated later when real client
 requirements or design assets exist; lowercase `tasks/` remains the operational
 temporary-work scaffold.
@@ -116,7 +117,8 @@ select more than one, or omit it to install all three integrations. Codex
 selects both `.agents/` and `.codex/`. Shared cross-tool layout READMEs are
 included as distribution documentation and do not activate an unselected tool.
 
-With `--merge-existing`, identical files are `UNCHANGED`; `.gitignore`,
+With `--merge-existing`, identical files are `UNCHANGED` (`WOULD_FIX_MODE`
+when only a required executable bit is missing); `.gitignore`,
 `.gitattributes`, and `AGENTS.md` use marked conservative merges; and an
 existing root `README.md` is preserved while accelerator documentation is
 written as `ACCELERATOR.md`. Review every `WOULD_COPY`, `WOULD_MERGE`, and
@@ -185,7 +187,7 @@ used by the chosen edition. Preserve the selected production payload's
 non-tool directories and files, including `AGENTS.md`, `memory-bank/`,
 `project-brain/`, lowercase `tasks/`, `specs/`, and installed runtime
 documentation and templates. Do not manually copy source-only tests, research,
-worked examples, or bundled uppercase `Task/` material around the inventory.
+worked examples, or local uppercase `Task/` client material around the inventory.
 
 Then install only the native integration trees the team uses:
 
@@ -226,6 +228,7 @@ python3 project-brain/scripts/validate.py --root .
 python3 memory-bank/scripts/context.py status --json
 python3 memory-bank/scripts/context.py validate --json
 python3 memory-bank/scripts/context.py index
+python3 memory-bank/scripts/context.py parity
 git status --short
 ```
 
@@ -234,7 +237,10 @@ Then:
 1. Confirm `memory-bank/local/context.db` exists but remains ignored.
 2. Inspect `project-brain/config/runtime.json`; ready-made editions should
    declare the selected framework, governed mode, `sqlite-fts5`, and
-   `"canonical_edition": ".agents"`.
+   `"canonical_edition": ".agents"`. Keep that value after a single-tool
+   install: `--tool claude` or `--tool cursor` ships no `.agents/skills/`, and
+   `parity` then compares against the tree that is installed and says so
+   (`.claude canonical; configured .agents is not installed here`).
 3. Validate the installed tool using the activation checks in
    [Tool Integrations](TOOL-INTEGRATIONS.md).
 4. Run the consuming project's normal Composer validation, tests, formatter,
@@ -284,6 +290,16 @@ Treat an edition update as a new adoption:
 5. Keep native wrappers aligned with the canonical `.agents/skills` behavior
    while retaining each tool's required frontmatter and event schema.
 6. Re-run structural, context, tool activation, and project verification.
+
+For a project installed with `scripts/install_accelerator.py` whose Git tracks
+the accelerator, `install_accelerator.py --sync --update-tracked --target DIR`
+(after the same command with `--dry-run`) does the mechanical part of steps 3
+and 4: it writes only files that still hold a released version, the runtime
+and the managed policy blocks, and lists every edited file it leaves for you
+under `kept`. Review that report and `git diff`, then commit. A reinstall with
+`--overwrite` is not an upgrade path: it replaces the project's own
+`AGENTS.md`, `README.md`, `.gitignore` and edited skills. See
+[`scripts/README.md`](../scripts/README.md).
 
 For heavily adapted or drifting installations, regenerate from current
 project evidence with Infrastructure-Creator rather than repeatedly layering

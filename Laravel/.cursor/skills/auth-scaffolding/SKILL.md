@@ -46,17 +46,19 @@ composer require laravel/fortify   # headless-only, when building a fully custom
 Add a guard in `config/auth.php` when the app has more than one authenticatable "type" — e.g. a `User` web guard alongside a separate `Admin` guard, or a `sanctum` API guard alongside the `web` session guard:
 
 ```php
-// config/auth.php
-'guards' => [
-    'web' => ['driver' => 'session', 'provider' => 'users'],
-    'admin' => ['driver' => 'session', 'provider' => 'admins'],
-    'sanctum' => ['driver' => 'sanctum', 'provider' => 'users'],
-],
+// config/auth.php (the keys that change; the rest of the file stays)
+return [
+    'guards' => [
+        'web' => ['driver' => 'session', 'provider' => 'users'],
+        'admin' => ['driver' => 'session', 'provider' => 'admins'],
+        'sanctum' => ['driver' => 'sanctum', 'provider' => 'users'],
+    ],
 
-'providers' => [
-    'users' => ['driver' => 'eloquent', 'model' => App\Models\User::class],
-    'admins' => ['driver' => 'eloquent', 'model' => App\Models\Admin::class],
-],
+    'providers' => [
+        'users' => ['driver' => 'eloquent', 'model' => App\Models\User::class],
+        'admins' => ['driver' => 'eloquent', 'model' => App\Models\Admin::class],
+    ],
+];
 ```
 
 ```php
@@ -70,7 +72,7 @@ The common mistake: forgetting to pass the guard name to `auth:` middleware, `Au
 
 ## Policy/Gate Deep Patterns
 
-Beyond the one-line `$this->authorize()` pattern already in `AGENTS.md`/`architect`:
+Beyond the one-line `Gate::authorize()` pattern already in `AGENTS.md`/`architect` (`$this->authorize()` works only where the base `Controller` still uses `AuthorizesRequests`, which the Laravel 11+ skeleton removed):
 
 - **`Policy::before()` for a super-admin bypass** — runs before any other policy method; return `true`/`false` to short-circuit, or `null` to fall through to the specific method:
 

@@ -54,7 +54,7 @@ class MemoryIntegrationTest(unittest.TestCase):
             "Project Brain as the only authority",
             "context.py validate",
             "working: governed",
-            ".agents/skills/checkpoint/SKILL.md",
+            "../checkpoint/SKILL.md",
             "explicitly configured lightweight mode",
             "does not invoke or chain another skill",
             "context.py refresh --json",
@@ -150,10 +150,10 @@ class MemoryIntegrationTest(unittest.TestCase):
         policy = REPOSITORY_ROOT.joinpath("AGENTS.md").read_text(encoding="utf-8")
         required_policy = (
             "Task Capsule",
-            "8,000 Unicode characters",
-            "two Procedural",
+            "3,600 characters",
+            "left to the host's own list",
             "three Semantic",
-            "one Episodic",
+            "two Episodic",
             "MUST NOT pass the parent conversation",
             "start of a complex request",
             "research to planning",

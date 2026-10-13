@@ -101,6 +101,9 @@ class WorkflowSmokeTests(unittest.TestCase):
             "brain_runtime.py",
             "context_retrieval.py",
             "validate.py",
+            "workspace_roots.py",
+            "automatic_query.py",
+            "memory_results.py",
         ):
             shutil.copy2(RUNTIME_ASSETS / name, scripts / name)
 

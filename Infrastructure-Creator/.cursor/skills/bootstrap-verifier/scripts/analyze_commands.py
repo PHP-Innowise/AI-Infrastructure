@@ -88,7 +88,55 @@ _MUTATING_FLAGS = {
     "-w",
     "--apply",
     "--update",
+    # Analyzers that rewrite code or baseline files when asked to.
+    "--alter",
+    "--generate-baseline",
+    "--set-baseline",
+    "--update-baseline",
+    "--migrate-configuration",
 }
+# `find` actions that act on what it finds instead of printing it.
+_FIND_ACTIONS = frozenset(
+    {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
+)
+# Console commands (artisan, bin/console, symfony console) a verification may
+# run: listing, inspecting, linting and testing. Any other action - a fixture
+# load, a queue flush, tinker, a cache clear, a generator - can write state,
+# and nothing in its name says whether it does, so it is refused until the
+# plan names a read-only alternative (CONSOLE_ACTION_UNATTESTED).
+_READ_ONLY_CONSOLE_ACTIONS = frozenset(
+    {
+        "about",
+        "help",
+        "list",
+        "test",
+        "route:list",
+        "event:list",
+        "schedule:list",
+        "model:show",
+        "db:show",
+        "db:table",
+        "queue:failed",
+        "queue:monitor",
+        "doctrine:schema:validate",
+        "doctrine:mapping:info",
+        "doctrine:migrations:list",
+        "doctrine:migrations:up-to-date",
+        "router:match",
+        "config:dump-reference",
+        "importmap:audit",
+        "importmap:outdated",
+        "messenger:stats",
+        "messenger:failed:show",
+        "cache:pool:list",
+    }
+)
+_READ_ONLY_CONSOLE_PREFIXES = ("debug:", "lint:")
+_READ_ONLY_CONSOLE_REPORT_FLAGS = frozenset({"--help", "--version", "-V", "-h"})
+# Read-only, but they print secret values; a verification never needs them.
+_SECRET_PRINTING_CONSOLE_ACTIONS = frozenset(
+    {"debug:dotenv", "config:show", "env:decrypt", "secrets:reveal", "secrets:decrypt-to-local"}
+)
 _SAFE_FORMAT_FLAGS = {"--check", "--dry-run", "--test", "--diff"}
 _PACKAGE_MANAGERS = {"npm", "pnpm", "yarn", "bun", "composer"}
 _PACKAGE_RUNNERS = {"bunx", "npx"}
@@ -925,6 +973,17 @@ class CommandAnalyzer:
                 and action != "migrations:status"
             )
         )
+        if console_action and not _console_action_is_read_only(
+            console_action, lowered
+        ):
+            self._add_blocker(
+                accumulator,
+                "CONSOLE_ACTION_UNATTESTED",
+                f"console action {console_action!r} is not a listed read-only "
+                "action (list, about, test, route:list, debug:*, lint:*, "
+                "*:status, doctrine:schema:validate, ...); it may write "
+                "application state, so name a read-only alternative",
+            )
         console_database_action = (
             any(term in console_action for term in database_actions)
             or (
@@ -1032,6 +1091,15 @@ class CommandAnalyzer:
                 f"{executable} can access a package registry",
             )
 
+        if executable == "find" and token_set & _FIND_ACTIONS:
+            self._add(
+                accumulator,
+                "FIND_ACTION",
+                Risk.WORKSPACE_MUTATION,
+                f"{command!r} acts on what it finds "
+                f"({', '.join(sorted(token_set & _FIND_ACTIONS))})",
+            )
+
         if executable in _DESTRUCTIVE_FILESYSTEM_COMMANDS:
             self._add(
                 accumulator,
@@ -1135,6 +1203,23 @@ class CommandAnalyzer:
         finding = Finding(code, "verification_blocker", message)
         if finding not in accumulator.findings:
             accumulator.findings.append(finding)
+
+
+def _console_action_is_read_only(action: str, arguments: list) -> bool:
+    """Whether a console action is one a verification may run."""
+    if action in _READ_ONLY_CONSOLE_REPORT_FLAGS:
+        return True
+    if action in _SECRET_PRINTING_CONSOLE_ACTIONS:
+        return False
+    if action == "debug:container" and any(
+        token.startswith(("--env-var", "--env-vars")) for token in arguments
+    ):
+        return False
+    return (
+        action in _READ_ONLY_CONSOLE_ACTIONS
+        or action.startswith(_READ_ONLY_CONSOLE_PREFIXES)
+        or action.endswith(":status")
+    )
 
 
 def analyze_command(

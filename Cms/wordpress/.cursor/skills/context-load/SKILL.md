@@ -14,15 +14,16 @@ portable handoff workflow below. Historical context never authorizes new work.
 
 ## Merge chats into a new task
 
-Installed trusted hooks already capture visible context and automatically merge
-up to eight recent chats from the same checkout and Git branch when a new task
-starts. No manual save/load step is needed. Existing tasks retain their original
-source set. Use this workflow when the user requests particular source chats:
+The installed `context-continuity` hook keeps each chat's visible prompts and
+final answers for this checkout and Git branch. Nothing is merged on its own:
+the next session on a branch already receives the Task Capsule with the
+task's working state. Use this workflow when the user asks to combine
+particular chats into a new task:
 
 1. List available captured chats; use the exact returned `host:session` values:
 
    ```bash
-   python3 memory-bank/scripts/context_continuity.py --root . --host codex --event list
+   python3 memory-bank/scripts/context_continuity.py --host codex --event list
    ```
 
    Set `--host` to the destination client: `codex`, `claude`, or `cursor`.
@@ -32,7 +33,7 @@ source set. Use this workflow when the user requests particular source chats:
 2. Freeze all selected sources in one local archive for the next new task:
 
    ```bash
-   python3 memory-bank/scripts/context_continuity.py --root . --host codex --event merge --source-session codex:CHAT_A --source-session claude:CHAT_B
+   python3 memory-bank/scripts/context_continuity.py --host codex --event merge --source-session codex:CHAT_A --source-session claude:CHAT_B
    ```
 
    Check success before proceeding. A missing/invalid source or an already

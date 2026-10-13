@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Install the accelerator as a desktop application, or open it: see harness/src/harness/desktop_app.py.
+#   ./accelerator-app install | open | status | stop | uninstall
+# The installed application sets ACCELERATOR_APP_PYTHON to the Python that ran `install`: a desktop launch
+# has none of the shell's PATH, where that Python may live (Homebrew, pyenv), and the system one may be older.
+set -euo pipefail
+APP_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+for interpreter in ${ACCELERATOR_APP_PYTHON:+"$ACCELERATOR_APP_PYTHON"} python3 python; do
+    if "$interpreter" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1; then
+        exec "$interpreter" "$APP_ROOT/harness/src/harness/desktop_app.py" "$@"
+    fi
+done
+message='Python 3.10+ is required; install Python and make python3 or python available in PATH.'
+echo "accelerator-app: $message" >&2
+# Started from the application list, there is no terminal to show that line.
+if [ ! -t 2 ]; then
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send --app-name='AI Accelerator' 'AI Accelerator' "$message" || true
+    elif command -v osascript >/dev/null 2>&1; then
+        osascript -e "display notification \"$message\" with title \"AI Accelerator\"" || true
+    fi
+fi
+exit 127

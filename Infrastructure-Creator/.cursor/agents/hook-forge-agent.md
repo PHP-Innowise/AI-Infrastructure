@@ -1,6 +1,6 @@
 ---
 name: hook-forge
-description: "Use this agent to generate the target PHP project's hooks - four enforcement hooks (local-context.sh, bash-validator.sh, file-naming-validator.sh, loop-detection.sh) plus the working-memory pair (working-memory-read.sh, working-memory-write.sh) that automates the seeded context-brain layer - and per-edition wiring from an approved Project Profile, tuned to the target's real detected stack and risk surface. It blocks only dangerous commands whose underlying tools were actually detected and wires the scripts through each selected edition's own mechanism (Cursor gets only the write half of the memory pair - it has no prompt-time hook event). Runs exactly one skill and stops."
+description: "Use this agent to generate the target PHP project's hooks - four enforcement hooks (local-context.sh, bash-validator.sh, file-naming-validator.sh, loop-detection.sh) plus the working-memory pair (working-memory-read.sh, working-memory-write.sh) that automates the seeded context-brain layer - and per-edition wiring from an approved Project Profile, tuned to the target's real detected stack and risk surface. It blocks only dangerous commands whose underlying tools were actually detected and wires the scripts through each selected edition's own mechanism (Cursor's read half renders the capsule into an alwaysApply rule on beforeSubmitPrompt, which cannot add context to a prompt). Runs exactly one skill and stops."
 ---
 
 # Hook Forge Agent

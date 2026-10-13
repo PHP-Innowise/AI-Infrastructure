@@ -310,7 +310,7 @@ class FleetRuntimeTests(_FleetFixture, unittest.TestCase):
         log = self.fake_native(manager, "codex", capture_prompt=True)
         settings = {"lenses": [LENSES[0]], "dry_run": False, "budget_usd": None, "worker_timeout": 10}
         linked = {"bank": "PHP Core/memory-bank", "task_id": "TASK-LINKED-FLEET", "query": "cobalt allocation",
-                  "create": True, "goal": "Review the cobalt allocation rule"}
+                  "create": True, "goal": "Review the cobalt allocation rule", "review": True}
         with patch.object(sessions, "fleet_runtime", return_value=self.fixture_runtime()):
             sid = manager.create(self.options(manager, fleet=settings, agents_enabled=True, brain=linked))["id"]
             prepared = self.wait_for_status(manager, sid, {"awaiting_context"})
@@ -326,7 +326,11 @@ class FleetRuntimeTests(_FleetFixture, unittest.TestCase):
             calls = self.native_calls(log)
             self.assertEqual(len(calls), 1)
             self.assertEqual(calls[0]["cwd"], str(self.project))
-            self.assertIn(json.dumps(prepared["brain"]["capsule"], ensure_ascii=False), calls[0]["prompt"])
+            capsule = prepared["brain"]["capsule"]
+            envelope = sessions.BRAIN_CONTEXT_HEADER + json.dumps(capsule, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+            self.assertIn(envelope, calls[0]["prompt"])
+            self.assertEqual(capsule, json.JSONDecoder().raw_decode(
+                calls[0]["prompt"].split(sessions.BRAIN_CONTEXT_HEADER, 1)[1])[0])
             self.assertNotEqual(metadata(tasks[0])["status"], "completed")
             manager.decide(sid, True)
             completed = self.wait_for_status(manager, sid, {"completed"})
@@ -588,6 +592,8 @@ class FleetRuntimeTests(_FleetFixture, unittest.TestCase):
             manager.decide(sid, False)
             self.wait_for_status(manager, sid, {"rejected"})
         self.assertEqual(cwd_log.read_text().splitlines(), [str(worktree), str(worktree)])
+        # Every reviewer receives the context prefix, so each launch records how many did.
+        self.assertEqual([len(waiting["fleet"]["lenses"])] * 2, [launch["context"]["agents"] for launch in manager.results.history(sid)["launches"]])
         self.assertEqual((self.project / "README.md").read_text(), "Dirty primary Fleet fixture\n")
         self.assertEqual([path.name for path in worktree.iterdir() if path.name != ".git"], ["README.md"])
         self.native.assert_not_called()

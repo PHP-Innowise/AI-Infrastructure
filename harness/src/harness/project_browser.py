@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import time
 
+from harness.filesystem import fs
 from harness.sessions import Sessions, SessionError, open_project_path
 
 MAX_ENTRIES = 20000
@@ -36,7 +37,7 @@ def browse_projects(data):
         try:
             descriptor = open_project_path(folder, '.', directory=True)
             try:
-                with os.scandir(descriptor) as children:
+                with fs.scandir(descriptor) as children:
                     for child in children:
                         if examined >= MAX_ENTRIES or len(entries) >= MAX_RESULTS or time.monotonic() >= deadline:
                             truncated = True
@@ -62,7 +63,7 @@ def browse_projects(data):
                             else:
                                 truncated = True
             finally:
-                os.close(descriptor)
+                fs.close(descriptor)
         except OSError:
             if folder == root:
                 raise SessionError('This folder is no longer accessible. Choose another folder.') from None

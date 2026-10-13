@@ -91,8 +91,13 @@ Follow `references/project-profile-schema.md` exactly. The JSON is generator run
    `load-evidence`/`execute`/`verify` trio - and wire each role to the evidence
    that grounds it and the procedure step that discharges it. Three or more
    obligations pointing at one step is a template and is rejected.
-   Run every executable verification command against the unmodified target once
-   and record what it did in that check's `baseline`; then state
+   Run every executable verification command once - only after
+   `bootstrap-verifier/scripts/analyze_commands.py --verification` reports it
+   `verification_safe`, and only in a throwaway copy of the target
+   (`cp -a <target> "$(mktemp -d)"`), never in the target itself: Phase 1 is
+   read-only there, and a test run can still write caches and reports. Compare
+   `git status --porcelain` in the copy before and after, report any change,
+   and record what the command did in that check's `baseline`; then state
    `expected_result` against that baseline rather than promising the command
    succeeds outright. Record what the target does **not** do as `absence`
    evidence when it matters - a configured analyser nobody invokes is a fact a

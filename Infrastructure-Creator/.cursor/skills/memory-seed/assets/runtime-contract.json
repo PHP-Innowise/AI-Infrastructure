@@ -63,6 +63,7 @@
       "memory-bank/scripts/context_retrieval.py",
       "memory-bank/scripts/validate.py",
       "memory-bank/scripts/telemetry.py",
+      "memory-bank/scripts/workspace_roots.py",
       "memory-bank/local/",
       "memory-bank/chunks/",
       "project-brain/PROTOCOL.md",
@@ -85,7 +86,12 @@
       "project-brain/control/promotions/",
       "project-brain/control/retrieval-manifests/",
       "project-brain/archive/",
-      "project-brain/local/"
+      "project-brain/local/",
+      "memory-bank/scripts/mcp_server.py",
+      "memory-bank/scripts/mcp_config.py",
+      "memory-bank/MCP.md",
+      "memory-bank/scripts/automatic_query.py",
+      "memory-bank/scripts/memory_results.py"
     ],
     "creatable": [
       {
@@ -94,7 +100,7 @@
       },
       {
         "path": ".context-handoff/",
-        "via": "trusted enabled context-continuity hooks; local ignored same-repository, same-branch visible-context snapshots only"
+        "via": "the context-continuity hook (visible-text chat snapshots) and context_continuity.py --event merge (frozen merges under merges/); local ignored same-repository, same-branch state only"
       },
       {
         "path": "memory-bank/local/context.db",
@@ -188,8 +194,9 @@
       "python3 memory-bank/scripts/context.py context-save --input INPUT.json --output tasks/TASK-NNN/context-save-TIMESTAMP.md --detail full --source-client CLIENT --transcript VISIBLE-EXPORT.md --json": "create one exclusive-new portable full handoff from a curated payload and explicit visible transcript export, writing only the named artifact",
       "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --json": "validate one explicit portable handoff and report source-fingerprint drift without loading transcript content or writing files",
       "python3 memory-bank/scripts/context.py context-load --input HANDOFF.md --include-transcript --json": "validate one explicit portable handoff, include its explicit visible transcript, and report source-fingerprint drift without writing files",
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event capture": "quietly capture only the documented visible hook payload in ignored same-repository, same-branch local continuity storage",
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event restore --json": "return a bounded historical same-branch visible-context envelope for the host without mutating Brain, Bank, or SQLite"
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event hook": "read the hook payload's hook_event_name: on a prompt or a final answer, append the documented visible text to the chat's snapshot in ignored same-repository, same-branch local storage; on a session start, return in the host's context envelope only a merge prepared for this new task (or a merged task's frozen sources again on resume or compact); never mutates Brain, Bank, or SQLite",
+      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event list": "list the chats captured on this branch as host:session IDs with a short visible preview, without writing anything",
+      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B": "freeze 2-8 selected captured chats into one ignored local archive for the next new task in the destination client, refusing an invalid source or an already pending merge without replacing it"
     },
     "outcomes": {
       "python3 memory-bank/scripts/context.py status": [
@@ -290,22 +297,39 @@
           "meaning": "reports malformed or unsafe input without changing runtime state"
         }
       ],
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event capture": [
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event hook": [
         {
           "exit": 0,
-          "meaning": "silently captures a validated bounded visible payload when trusted hook input and branch identity are available; otherwise stores nothing"
+          "meaning": "always: captures or delivers when trusted hook input, branch identity and (for delivery) a prepared merge are available; otherwise stores and returns nothing"
         }
       ],
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event restore --json": [
+      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event list": [
         {
           "exit": 0,
-          "meaning": "silently returns the host-native bounded historical-context envelope when a validated same-branch snapshot exists; otherwise returns no context"
+          "meaning": "prints the captured chats of this branch as JSON"
+        },
+        {
+          "exit": 1,
+          "meaning": "reports unreadable snapshots, disabled continuity, or an invalid state root without changing snapshots"
+        }
+      ],
+      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B": [
+        {
+          "exit": 0,
+          "meaning": "prepares the merge for the next new task in the destination client and reports its archive"
+        },
+        {
+          "exit": 1,
+          "meaning": "reports invalid sources, disabled continuity, an invalid state root, a pending merge or a full archive store without replacing existing history"
         }
       ]
     },
     "automatic_continuity": [
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event capture",
-      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event restore --json"
+      "python3 memory-bank/scripts/context_continuity.py --root ROOT --host CLIENT --event hook"
+    ],
+    "chat_merge": [
+      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event list",
+      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B"
     ]
   },
   "runtime_fixed_skills": {
@@ -354,19 +378,21 @@
     }
   },
   "automatic_continuity": {
-    "enabled_by": "trusted enabled native project hooks; never bypass client trust or permissions",
+    "enabled_by": "trusted enabled native project hooks running one unargumented context-continuity.sh on session start, prompt and end of turn; never bypass client trust or permissions",
     "disabled_by": "CONTEXT_CONTINUITY_DISABLED=1, true, or yes",
-    "storage": ".context-handoff/",
+    "storage": ".context-handoff/ under the project root, or under the launcher's state directory in attached mode",
     "scope": "local ignored same-repository, same-Git-branch convenience state; excluded from Project Brain, Memory Bank, SQLite, automatic retrieval, and Git",
     "visible_input": "documented visible prompt or assistant text, or an explicit visible .txt/.md/.markdown export; known JSONL shapes are projected to visible user/assistant text only",
     "excluded_input": "private account/session stores, hidden reasoning, system/tool envelopes, arbitrary JSONL, and invented transcript text",
-    "restore": "new task: freeze up to eight same-checkout, same-branch sources with provenance and conflict_status not-evaluated; resumed task: same frozen sources plus current progress; total preview at most 6000 UTF-8 bytes including headers",
+    "dispatch": "--event hook reads the payload's hook_event_name: SessionStart/sessionStart delivers; UserPromptSubmit, Stop, beforeSubmitPrompt and afterAgentResponse capture; any other event does nothing",
+    "restore": "only a merge explicitly prepared with context-load merge: a new task claims the merge waiting for its client, a merged task receives the same frozen sources plus its own current progress on resume or compact; nothing else is restored, because the Task Capsule carries a branch's work into the next session; total preview at most 6000 UTF-8 bytes including headers",
     "hosts": [
       "claude",
       "codex",
       "cursor"
     ],
     "events": [
+      "hook",
       "capture",
       "restore",
       "list",
@@ -374,13 +400,15 @@
     ],
     "merge_storage": ".context-handoff/merges/",
     "selection": "context-load merge lists captured host:session IDs and prepares 2-8 selected sources for the next new task in the destination host; one pending merge per branch/host, no overwrite",
-    "identity": "SessionStart session_id for codex/claude, conversation_id for cursor; missing identity fails closed",
+    "identity": "every hook payload's session_id for codex/claude, conversation_id for cursor; a missing or invalid identity stores and delivers nothing",
     "creation": "native task creation only through a supported client tool when the current user asks; otherwise await a newly opened task",
     "commands": [
-      "python3 memory-bank/scripts/context_continuity.py --root . --host CLIENT --event list",
-      "python3 memory-bank/scripts/context_continuity.py --root . --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B"
+      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event list",
+      "python3 memory-bank/scripts/context_continuity.py --host CLIENT --event merge --source-session HOST:ID_A --source-session HOST:ID_B"
     ],
     "limits": "32 MiB serialized per frozen archive; 128 archives and 256 MiB total per checkout; refuse new archives at quota without evicting existing task history",
-    "disabled_restore_by": "CONTEXT_CONTINUITY_RESTORE_DISABLED=1, true, or yes; capture remains enabled"
+    "disabled_restore_by": "CONTEXT_CONTINUITY_RESTORE_DISABLED=1, true, or yes; capture remains enabled",
+    "snapshots": "one visible-text snapshot per chat; at most 8 per branch and 64 per checkout; snapshots idle for 30 days and interrupted temporary writes are removed before capture",
+    "skipped_when": "CONTEXT_MEMORY_RECOVERY=1 (a draft-only recovery is not part of the conversation)"
   }
 }

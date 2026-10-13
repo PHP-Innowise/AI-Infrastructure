@@ -436,6 +436,56 @@ class CommandSafetyTest(unittest.TestCase):
         )
         self.assertTrue(status.verification_safe)
 
+    def test_console_actions_are_refused_unless_listed_read_only(self) -> None:
+        """artisan, bin/console and symfony console used to be classified
+        non-mutating unless the action named a database operation, so a
+        fixture load, tinker, a queue flush or a cache clear passed the gate."""
+        command_analyzer = self.analyzer()
+        for command in (
+            "php artisan doctrine:fixtures:load",
+            "php bin/console doctrine:fixtures:load --no-interaction",
+            'php artisan tinker --execute="User::truncate()"',
+            "php artisan queue:flush",
+            "bin/console cache:clear",
+            "php artisan make:model Invoice",
+            "bin/console debug:dotenv",
+            "php artisan config:show database",
+            "bin/console debug:container --env-vars",
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, "CONSOLE_ACTION_UNATTESTED")
+                self.assertFalse(analysis.verification_safe)
+        for command in (
+            "php artisan route:list",
+            "php artisan test",
+            "php artisan about",
+            "php artisan --version",
+            "php artisan migrate:status",
+            "bin/console lint:container",
+            "bin/console debug:router",
+            "php bin/console doctrine:schema:validate",
+            "symfony console lint:yaml config",
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assertTrue(analysis.verification_safe, analysis.findings)
+
+    def test_find_actions_and_analyzer_rewrites_are_mutations(self) -> None:
+        command_analyzer = self.analyzer()
+        for command, code in (
+            ("find . -name '*.orig' -delete", "FIND_ACTION"),
+            ("find src -exec sed -i s/a/b/ {} +", "FIND_ACTION"),
+            ("vendor/bin/psalm --alter --issues=all", "WORKSPACE_WRITE_FLAG"),
+            ("vendor/bin/phpstan analyse --generate-baseline", "WORKSPACE_WRITE_FLAG"),
+        ):
+            with self.subTest(command=command):
+                analysis = command_analyzer.analyze(command, verification=True)
+                self.assert_code(analysis, code)
+                self.assertFalse(analysis.verification_safe)
+        listing = command_analyzer.analyze("find . -name '*.php'", verification=True)
+        self.assertTrue(listing.verification_safe)
+
     def test_package_manager_shorthands_and_runners_are_classified(self) -> None:
         command_analyzer = self.analyzer()
         for command in ("npm i", "npm ci", "pnpm up", "yarn upgrade"):

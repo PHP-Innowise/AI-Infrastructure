@@ -93,39 +93,36 @@ SQLite stores only a local binding/cache and optional replay episode. Use
 
 For an argument-free refresh, invoke the AI skill `memory` (or `/memory` in Claude/Cursor). In governed mode it validates Project Brain and refreshes only the disposable source index; it never derives a branch task or writes competing SQLite progress. `checkpoint` follows the same authority gate and captures sanitized local Working Memory only when lightweight mode is explicitly configured. Both workflows stop without completing tasks, applying promotions, or editing tracked sources.
 
-### Automatic Context Continuity
+### Chat Snapshots and Merges
 
-Trusted enabled client hooks make same-branch continuation automatic in Codex,
-Claude Code, and Cursor. The hooks capture only documented visible prompt or
-assistant text into ignored local `.context-handoff/` and restore a bounded
-historical excerpt at the next available session start. It is a convenience
-layer: it is outside Project Brain, Memory Bank, SQLite, automatic indexing,
-and Git; it never changes task state or preserves authorization. Verify restored
-claims against current sources.
-
-Client lifecycle data can be unavailable, delayed, partial, or projected. A
-recognised JSONL input contains only projected visible user/assistant text and
-is never a complete session. The runtime never scans account/session storage,
-hidden reasoning, tool envelopes, or private client data. Set
-`CONTEXT_CONTINUITY_DISABLED=1` (also `true` or `yes`) to disable it. Hooks must
-be enabled through the client's ordinary project trust mechanism; repository
-tests use synthetic payloads and do not prove live-account event delivery.
+The `context-continuity` hook keeps each chat's documented visible prompts and
+final answers in ignored local `.context-handoff/`, bound to this checkout and
+Git branch. The snapshots are outside Project Brain, Memory Bank, SQLite, the
+index and Git; recognised secrets refuse a capture, and nothing is read from a
+client's private session store. They exist so chosen chats can be combined:
+`context-load merge` (or `/context-load merge`) freezes 2-8 of them into an
+attributed archive, and the next new session in the chosen client receives a
+bounded preview with the archive's path. Conflicting decisions stay attributed
+and unresolved until the agent checks them against current sources. Nothing is
+restored without such a merge - a new session on the branch starts with the
+Task Capsule. Set `CONTEXT_CONTINUITY_DISABLED=1` (also `true` or `yes`) to
+turn snapshots off.
 
 ### Portable Context for Another Machine or Review
 
 Use `context-save summary`, `context-save topic <subject>`, or `context-save
 full --transcript <export-path>` in Codex, and `/context-save` with the same
-arguments in Claude Code or Cursor only when a portable, reviewable artifact is
+arguments in Claude Code or Cursor when a portable, reviewable artifact is
 needed. The current agent writes a curated Markdown continuation document with
 source fingerprints under `tasks/TASK-NNN/context-save-<timestamp>.md`. `full`
 additionally preserves an explicitly supplied visible-conversation export
 verbatim. Missing exports are reported, never replaced with fabricated history.
-Snapshots stay out of automatic indexing; transcript text is returned only by
+Handoffs stay out of automatic indexing; transcript text is returned only by
 `context-load --include-transcript`.
 
-In another checkout or machine, use `context-load <path>` (or
+In another checkout, machine or client, use `context-load <path>` (or
 `/context-load <path>`). It checks format and source drift without modifying
-Brain records or SQLite. The snapshot does not replace governed progress,
+Brain records or SQLite. The handoff does not replace governed progress,
 complete work, or preserve permissions for future actions. The exact procedures
 are the installed `context-save` and `context-load` skills.
 
@@ -134,8 +131,10 @@ are the installed `context-save` and `context-load` skills.
 At the start of a complex request and before a complex phase handoff, the agent
 derives a concise sanitized retrieval query and builds a Task Capsule from
 optional Working Memory and `context` retrieval. The raw request is not copied
-into the packet. The complete packet is capped at 8,000 Unicode characters and
-contains at most two Procedural, three Semantic, and one Episodic result.
+into the packet. The complete packet is capped at 8,000 Unicode characters (as
+the hooks print it, 3,600) and contains at most three Semantic and two Episodic
+results (the changelog and one recorded event) and no Procedural item: skills are
+left to the host's own list.
 Retrieved entries are short snippets with source paths; the next agent reads a
 full source only when its current step requires it.
 

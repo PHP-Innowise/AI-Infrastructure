@@ -45,7 +45,7 @@ How the generator's 25 skills fit together. This describes the generator itself,
     └─ rewrite manifest → bootstrap-verifier
 
   === stack-adapter (independent side path, own orchestration) ===
-  infra-adapt <target>  OR  infra-scan's offer, on user consent
+  stack-adapter <target>  OR  infra-scan's offer, on user consent
     → stack-adapter: research stack → replicate skeleton → re-author 25 skills
       + reference docs → mirror 3 editions → self-verify
     → reports path to new Infrastructure-Creator-[Stack]/ sibling generator
@@ -57,7 +57,7 @@ How the generator's 25 skills fit together. This describes the generator itself,
 - Just discover: `infra-scan <target>` (stops at the profile).
 - Just generate from an approved profile: `infra-generate <target>`.
 - Upgrade a previously generated target to this generator's current version: `infra-update <target>` (requires the target's `.infra-manifest.json`).
-- Target isn't PHP and you already know it: `infra-adapt <target>` (builds a sibling generator directly).
+- Target isn't PHP and you already know it: `stack-adapter <target>` (builds a sibling generator directly).
 
 ## Phase Map
 

@@ -6,6 +6,7 @@ import os
 import re
 import uuid
 
+from .filesystem import fs
 from .sessions import SessionError
 from .setup import _root_fd, _read, _safe_path, MAX_FILE_BYTES
 
@@ -43,7 +44,7 @@ class Attachments:
         self.sessions = sessions
         self.root = sessions.state_dir / 'attachments'
         self.root.mkdir(mode=0o700, exist_ok=True)
-        os.close(_root_fd(self.root))
+        fs.close(_root_fd(self.root))
         sessions.db.execute('CREATE TABLE IF NOT EXISTS attachments (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL)')
         sessions.db.commit()
 
@@ -53,12 +54,12 @@ class Attachments:
         try:
             for name, body in files:
                 identifier = uuid.uuid4().hex
-                os.mkdir(identifier, mode=0o700, dir_fd=root)
-                folder = os.open(identifier, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+                fs.mkdir(identifier, mode=0o700, dir_fd=root)
+                folder = fs.open(identifier, os.O_RDONLY | fs.O_DIRECTORY | fs.O_NOFOLLOW, dir_fd=root)
                 # Prefix avoids treating an uploaded AGENTS.md/CLAUDE.md as directory policy.
                 filename = 'upload-' + name
                 created.append((identifier, folder, filename))
-                descriptor = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=folder)
+                descriptor = fs.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW, 0o400, dir_fd=folder)
                 with os.fdopen(descriptor, 'wb') as output:
                     output.write(body)
                 saved.append({'id':identifier, 'name':name, 'size':len(body), 'digest':hashlib.sha256(body).hexdigest()})
@@ -67,13 +68,13 @@ class Attachments:
             return [{key: item[key] for key in ('id', 'name', 'size')} for item in saved]
         except Exception:
             for identifier, folder, filename in created:
-                try: os.unlink(filename, dir_fd=folder)
+                try: fs.unlink(filename, dir_fd=folder)
                 except FileNotFoundError: pass
-                os.rmdir(identifier, dir_fd=root)
+                fs.rmdir(identifier, dir_fd=root)
             raise
         finally:
-            for _, folder, _ in created: os.close(folder)
-            os.close(root)
+            for _, folder, _ in created: fs.close(folder)
+            fs.close(root)
 
     def read(self, sid, identifier):
         if not isinstance(identifier, str) or not re.fullmatch('[a-f0-9]{32}', identifier):
@@ -87,7 +88,7 @@ class Attachments:
         try:
             item = _read(root, relative, required=True)
         finally:
-            os.close(root)
+            fs.close(root)
         body = item['body']
         if len(body) != row['size'] or hashlib.sha256(body).hexdigest() != row['digest']:
             raise SessionError('The stored attachment changed. Attach the file again.')
@@ -105,5 +106,5 @@ class Attachments:
             rows = self.sessions.db.execute('SELECT id FROM attachments WHERE session_id=?', (sid,)).fetchall()
         directories = [self.root / row['id'] for row in rows]
         for directory in directories:
-            os.close(_root_fd(directory))
+            fs.close(_root_fd(directory))
         return [str(directory) for directory in directories]

@@ -51,7 +51,7 @@ New behavior
         |     |-- Form Request for validation
         |
         |-- Authorization rule?
-        |     |-- Policy (model-scoped) or Gate (ad hoc) via $this->authorize()
+        |     |-- Policy (model-scoped) or Gate (ad hoc) via Gate::authorize()
         |
         |-- Database-backed entity?
         |     |-- Migration (schema)
@@ -73,7 +73,7 @@ New behavior
 | Complex write workflow | Controller + Form Request + Action/Service + `DB::transaction()` |
 | Logic reused by several controllers/commands | Action or Service class, injected via the container |
 | Simple derived data on a model | Eloquent accessor, mutator, or scope |
-| User-specific permissions | Policy method checked via `$this->authorize()` or `can:` middleware |
+| User-specific permissions | Policy method checked via `Gate::authorize()` or `can:` middleware |
 | Complex role/permission matrix | `spatie/laravel-permission` roles/permissions instead of ad hoc Gate logic |
 | External API integration | Client behind an interface, bound in a Service Provider, built on `Http::` with timeout/retry |
 | Expensive side effect | Queued Job or queued Listener dispatched after the transaction commits (see `queues-jobs` skill) |
@@ -134,7 +134,7 @@ DB::transaction(function () use ($orderData): Order {
 });
 ```
 
-`DB::transaction()` auto-commits on success and rolls back on any thrown exception (including deadlock retries via its optional `$attempts` argument). Avoid holding a transaction open around slow external API calls (`Http::` requests, third-party SDKs). Persist intent first, then dispatch a queued Job/Event after commit (`DB::afterCommit()` or dispatching from inside the transaction closure, which Laravel defers automatically for queued listeners marked `ShouldQueue`).
+`DB::transaction()` auto-commits on success and rolls back on any thrown exception (including deadlock retries via its optional `$attempts` argument). Avoid holding a transaction open around slow external API calls (`Http::` requests, third-party SDKs). Persist intent first, then dispatch the queued Job/Event after commit. Nothing is deferred by default (`after_commit` is `false` in `config/queue.php`): a queued listener or job dispatched inside the closure can run before the transaction commits, and against a row that is then rolled back. Use one of `ShouldDispatchAfterCommit` on the event, `ShouldQueueAfterCommit` on a queued listener, `->afterCommit()` on a job, `DB::afterCommit()`, or `'after_commit' => true` on the queue connection, or dispatch after `DB::transaction()` returns.
 
 ## Security Checklist
 

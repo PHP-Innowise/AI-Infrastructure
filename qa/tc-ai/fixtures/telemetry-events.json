@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0.0",
+  "events": [
+    {
+      "id": "configured-off",
+      "telemetry_enabled": false,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost": null,
+      "expected_status": "not-available"
+    },
+    {
+      "id": "sanitized-adapter",
+      "telemetry_enabled": true,
+      "input_tokens": 120,
+      "output_tokens": 30,
+      "cost": null,
+      "contains_prompt_content": false,
+      "expected_status": "measured"
+    }
+  ]
+}

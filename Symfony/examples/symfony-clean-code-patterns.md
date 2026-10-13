@@ -196,6 +196,19 @@ Bad: ownership is checked only in Twig or by hiding a button.
 Good: the server authorizes the capability and the voter stays narrow.
 
 ```php
+<?php
+
+declare(strict_types=1);
+
+namespace App\Security\Voter;
+
+use App\Entity\Order;
+use App\Entity\User;
+use Symfony\Component\Security\Core\Authentication\Token\TokenInterface;
+use Symfony\Component\Security\Core\Authorization\Voter\Vote;
+use Symfony\Component\Security\Core\Authorization\Voter\Voter;
+
+/** @extends Voter<string, Order> */
 final class OrderVoter extends Voter
 {
     public const EDIT = 'ORDER_EDIT';
@@ -205,13 +218,19 @@ final class OrderVoter extends Voter
         return self::EDIT === $attribute && $subject instanceof Order;
     }
 
-    protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token): bool
+    // `?Vote $vote = null` is part of the parent signature from Symfony 8.0
+    // (optional since 7.3); an override without it is a fatal error on 8.x.
+    protected function voteOnAttribute(string $attribute, mixed $subject, TokenInterface $token, ?Vote $vote = null): bool
     {
         $user = $token->getUser();
 
-        return $user instanceof User
-            && $subject->belongsTo($user->id())
-            && $subject->isEditable();
+        if (!$user instanceof User || !$subject->belongsTo($user->id())) {
+            $vote?->addReason('The order belongs to another customer.');
+
+            return false;
+        }
+
+        return $subject->isEditable();
     }
 }
 ```

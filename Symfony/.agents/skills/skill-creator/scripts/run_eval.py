@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -20,6 +21,7 @@ def run_single_query(
     timeout: int,
     project_root: str,
     model: str | None = None,
+    env: dict | None = None,
 ) -> bool:
     """Run one isolated native CLI probe and report whether the skill body loaded."""
     return evaluate_trigger(
@@ -29,6 +31,7 @@ def run_single_query(
         timeout=timeout,
         project_root=Path(project_root),
         model=model,
+        env=env,
     )
 
 
@@ -53,6 +56,11 @@ def run_eval(
 
     query_triggers: dict[str, list[bool]] = {}
     query_items: dict[str, dict] = {}
+    # The caller's environment, taken now and handed to every worker. Python
+    # 3.14 starts pool workers from a forkserver, whose environment is the one
+    # it was started with, so a worker read a CLI path or variable that had
+    # since changed - or whose directory no longer existed.
+    environment = dict(os.environ)
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         future_to_item = {}
@@ -76,6 +84,7 @@ def run_eval(
                     timeout,
                     str(project_root),
                     model,
+                    environment,
                 )
                 future_to_item[future] = item
 

@@ -12,7 +12,7 @@ __pycache__/
 # Uncommitted personal agent memory
 memory-bank/local/
 
-# Local automatic same-branch AI context; never commit or index it
+# Local chat snapshots kept for an explicit chat merge; never commit or index them
 .context-handoff/
 
 # Auto-rendered Cursor working-memory rule (one turn stale by design; see

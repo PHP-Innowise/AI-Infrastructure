@@ -121,22 +121,13 @@ Infrastructure-Creator intentionally has no `memory-bank/` of its own: its job i
   stamped target `AGENTS.md` and `.infra-manifest.json`. `infra-update` MUST NOT
   overwrite any file whose hash differs from that manifest without an explicit
   per-file human decision, and MUST NOT touch files the manifest does not list.
-- Generated output MUST enable trusted automatic same-branch continuation for
-  every selected client through `context-continuity.sh` and
-  `memory-bank/scripts/context_continuity.py`. It may capture only documented
-  visible hook fields or an explicitly supplied native visible export into
-  ignored `.context-handoff/`; it MUST NOT bypass client trust, scrape private
-  account/session storage, retain hidden reasoning or tool envelopes, write
-  Project Brain/Memory Bank/SQLite, or claim lifecycle-dependent content is a
-  complete live session. `CONTEXT_CONTINUITY_DISABLED=1`, `true`, or `yes`
-  disables it for the process.
-- The generated `context-save`/`context-load` pair is the only portable
-  continuation surface. A user-requested visible transcript may be embedded
-  only in the explicit `tasks/TASK-NNN/context-save-*.md` artifact created by
-  `context-save --detail full --transcript`; it MUST NOT enter Project Brain,
-  Memory Bank, SQLite, automatic retrieval, hooks, or an exported shared chat.
-  A generator MUST never scrape private account/session files or invent an
-  unavailable client export.
+- Generated output keeps chat snapshots for every selected client: one
+  unargumented `context-continuity.sh` stores visible prompt/answer text in
+  ignored `.context-handoff/` via `memory-bank/scripts/context_continuity.py`,
+  and a session start receives only a merge prepared with `context-load merge`.
+  It MUST NOT scrape private account/session storage, keep hidden reasoning, or
+  write Project Brain, Memory Bank or SQLite. A `context-save full` transcript
+  stays in its explicit `tasks/TASK-NNN/context-save-*.md` artifact.
 - Root `.gitignore` is a narrowly scoped shared-file exception: forges declare
   exact requirements, only generation/update orchestration composes them, and
   a pre-existing file is changed only by explicit append approval with

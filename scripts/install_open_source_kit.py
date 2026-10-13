@@ -66,6 +66,8 @@ class KitError(Exception):
     """Raised when the resource catalog, a selection, or a pin is invalid."""
 
 
+import portable_fs as fs
+
 def load_resources(path: Path) -> list[dict]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -242,22 +244,8 @@ def review_note(resource_id: str, status: str | None) -> str | None:
 
 def open_target_directory(path: Path) -> int:
     try:
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    except AttributeError as error:
-        raise KitError("safe manifest handling is not supported on this platform") from error
-    if not path.is_absolute():
-        raise KitError(f"target directory must be absolute: {path}")
-    descriptor = None
-    try:
-        descriptor = os.open(path.anchor, flags)
-        for part in path.parts[1:]:
-            next_descriptor = os.open(part, flags, dir_fd=descriptor)
-            os.close(descriptor)
-            descriptor = next_descriptor
-        return descriptor
-    except OSError as error:
-        if descriptor is not None:
-            os.close(descriptor)
+        return fs.open_target_directory(path)
+    except (OSError, ValueError) as error:
         raise KitError(f"target directory could not be opened safely: {error}") from error
 
 
@@ -268,13 +256,13 @@ def load_manifest(path: Path, directory_fd: int | None = None) -> dict:
     descriptor = None
     try:
         try:
-            descriptor = os.open(
-                MANIFEST_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            descriptor = fs.open(
+                MANIFEST_NAME, os.O_RDONLY | fs.O_NOFOLLOW | fs.O_NONBLOCK,
                 dir_fd=directory_fd,
             )
         except FileNotFoundError:
             return {"schema_version": 1, "kit": "open-source-kit", "entries": {}}
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        if not stat.S_ISREG(fs.fstat(descriptor).st_mode):
             raise KitError(f"manifest path must be a regular file: {path}")
         handle = os.fdopen(descriptor, encoding="utf-8")
         descriptor = None
@@ -288,9 +276,9 @@ def load_manifest(path: Path, directory_fd: int | None = None) -> dict:
         raise KitError(f"existing manifest unreadable: {error}") from error
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            fs.close(descriptor)
         if owns_directory:
-            os.close(directory_fd)
+            fs.close(directory_fd)
     if not isinstance(data, dict):
         raise KitError("existing manifest must contain a JSON object")
     schema_version = data.get("schema_version")
@@ -317,12 +305,12 @@ def write_manifest(path: Path, manifest: dict, directory_fd: int | None = None) 
     temporary_name = f"{MANIFEST_NAME}.{secrets.token_hex(8)}.tmp"
     descriptor = None
     try:
-        current_directory = os.stat(path.parent, follow_symlinks=False)
-        if not os.path.samestat(current_directory, os.fstat(directory_fd)):
+        current_directory = fs.stat(path.parent, follow_symlinks=False)
+        if not os.path.samestat(current_directory, fs.fstat(directory_fd)):
             raise KitError("target directory changed while preparing the manifest")
 
         try:
-            existing = os.stat(
+            existing = fs.stat(
                 MANIFEST_NAME, dir_fd=directory_fd, follow_symlinks=False
             )
         except FileNotFoundError:
@@ -333,19 +321,19 @@ def write_manifest(path: Path, manifest: dict, directory_fd: int | None = None) 
             raise KitError(f"manifest path must be a regular file: {path}")
 
         mode = stat.S_IMODE(existing.st_mode) if existing is not None else 0o666
-        descriptor = os.open(
+        descriptor = fs.open(
             temporary_name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | fs.O_NOFOLLOW,
             mode,
             dir_fd=directory_fd,
         )
         if existing is not None:
-            os.fchmod(descriptor, mode)
+            fs.fchmod(descriptor, mode)
         handle = os.fdopen(descriptor, "w", encoding="utf-8")
         descriptor = None
         with handle:
             handle.write(payload)
-        os.replace(
+        fs.replace(
             temporary_name,
             MANIFEST_NAME,
             src_dir_fd=directory_fd,
@@ -358,14 +346,14 @@ def write_manifest(path: Path, manifest: dict, directory_fd: int | None = None) 
         raise KitError(f"manifest could not be written: {error}") from error
     finally:
         if descriptor is not None:
-            os.close(descriptor)
+            fs.close(descriptor)
         if temporary_name:
             try:
-                os.unlink(temporary_name, dir_fd=directory_fd)
+                fs.unlink(temporary_name, dir_fd=directory_fd)
             except OSError:
                 pass
         if owns_directory:
-            os.close(directory_fd)
+            fs.close(directory_fd)
 
 
 def parse_pins(values: list[str]) -> dict[str, str]:
@@ -553,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     finally:
         if target_fd is not None:
-            os.close(target_fd)
+            fs.close(target_fd)
 
 
 if __name__ == "__main__":

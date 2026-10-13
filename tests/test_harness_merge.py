@@ -2,7 +2,10 @@
 import json
 import os
 import queue
+import re
+import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -12,6 +15,16 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'harness/src'))
 from harness import chat_merge, sessions
+
+WEB = Path(__file__).resolve().parents[1] / 'harness/web'
+# The composer's prefilled instruction for a merged task, as the page sends it unchanged.
+MERGE_PROMPT = re.search(r"const MERGE_PROMPT = '([^']*)';", (WEB / 'app-core.js').read_text(encoding='utf-8')).group(1)
+
+
+def ui_script():
+    """The page's scripts in load order as one text; the Node checks slice functions out of it."""
+    page = (WEB / 'index.html').read_text(encoding='utf-8')
+    return '\n'.join((WEB / name).read_text(encoding='utf-8') for name in re.findall(r'<script src="/([\w.-]+\.js)"></script>', page))
 
 
 class HarnessMergeTests(unittest.TestCase):
@@ -171,5 +184,217 @@ class HarnessMergeTests(unittest.TestCase):
         with patch.object(self.store,'_new_workspace') as workspace, self.assertRaises(sessions.SessionError): self.store.merge(request)
         workspace.assert_not_called()
 
+
+    def test_merge_keeps_automatic_memory_and_the_first_message_as_any_new_session_has_them(self):
+        request=self.request([self.source('A'),self.source('B')])
+        request['destination']['brain']={'bank':'memory-bank','auto':True}
+        row=self.store.merge(request)
+        self.assertEqual(2,len(row['merge']['sources'])); self.assertTrue(row['brain']['task_id'])
+        first=json.loads(self.store.db.execute('SELECT data FROM events WHERE session_id=? ORDER BY id LIMIT 1',(row['id'],)).fetchone()[0])
+        self.assertEqual(('user','Reconcile sources and continue'),(first['kind'],first['text'])); self.assertIn('at',first)
+
+    def test_visible_history_leaves_out_memory_drafts_recovery_replies_and_special_runs(self):
+        a,b=self.source('A'),self.source('B')
+        self.store._event(a,{'kind':'text','text':'Done.\n\n```memory-draft\n{"progress": "PRIVATE_DRAFT"}\n```'})
+        self.store._event(a,{'kind':'text','text':'PRIVATE_RECOVERY','memory_recovery':True})
+        archive=json.dumps(self.store.merge_archive(self.store.merge(self.request([a,b]))['id']),ensure_ascii=False)
+        self.assertIn('Done.',archive); self.assertIn(chat_merge.DRAFT_NOTE,archive); self.assertNotIn('PRIVATE_',archive)
+        for column in ('system_run','system_discovery','creator','clash'):
+            special=self.source('Special '+column)
+            self.store.db.execute(f'UPDATE sessions SET {column}=? WHERE id=?',(json.dumps({'run_id':'0'*32}),special)); self.store.db.commit()
+            with self.subTest(column=column), self.assertRaises(sessions.SessionError): self.store.merge(self.request([a,special]))
+
+    def test_claude_command_prompt_and_held_runs_are_refused_before_anything_is_saved(self):
+        a,b=self.source('A'),self.source('B'); before=len(self.store.list())
+        request=self.request([a,b],'claude'); request['destination']['prompt']='/review the merged work'
+        with self.assertRaises(sessions.SessionError): self.store.merge(request)
+        row=self.store.merge(self.request([a,b])); self.store._status(row['id'],'interrupted')
+        self.assertEqual(0,self.store.hold_runs('Updating the Harness.'))
+        with self.assertRaises(sessions.SessionError): self.store.merge(self.request([a,b]))
+        with self.assertRaises(sessions.SessionError): self.store.restart_merge(row['id'])
+        self.assertEqual('interrupted',self.store.get(row['id'])['status'])
+        self.store.release_runs(); self.assertEqual('queued',self.store.restart_merge(row['id'])['status'])
+        self.assertEqual(before+1,len(self.store.list()))
+
+    def test_deleting_a_saved_context_frees_merge_storage_and_keeps_the_task(self):
+        a,b=self.source('A'),self.source('B'); first=self.store.merge(self.request([a,b]))
+        folder=chat_merge.archive_path(self.store,first['id']).parent
+        with patch.object(chat_merge,'MAX_ARCHIVES',1):
+            with self.assertRaisesRegex(sessions.SessionError,'Delete the saved context'): self.store.merge(self.request([a,b]))
+            # A queued or running task may still read its archive.
+            with self.assertRaises(sessions.SessionError): self.store.delete_merge_archive(first['id'])
+            self.store._status(first['id'],'failed')
+            deleted=self.store.delete_merge_archive(first['id'])
+            self.assertTrue(deleted['merge']['archive_deleted_at']); self.assertEqual([a,b],[s['id'] for s in deleted['merge']['sources']])
+            self.assertFalse(folder.exists())
+            with self.assertRaises(sessions.SessionError): self.store.merge_archive(first['id'])
+            # Without its saved copy the task can neither restart nor launch from the chats.
+            with self.assertRaises(sessions.SessionError): self.store.restart_merge(first['id'])
+            with self.assertRaises(sessions.SessionError): self.store._prompt(deleted,'Continue')
+            second=self.store.merge(self.request([a,b]))
+        self.assertEqual(2,len(self.store.merge_archive(second['id'])['sources']))
+        nested=self.store.merge_archive(self.store.merge(self.request([first['id'],b]))['id'])['sources'][0]
+        self.assertTrue(nested['inherited_context_deleted']); self.assertNotIn('inherited_context',nested)
+        # A folder a failed removal left behind goes at the next start; the task keeps its sources.
+        folder.mkdir(); (folder/'context.json').write_text('stale')
+        self.store.close(); self.store=sessions.Sessions(self.root/'state',[self.project,self.other])
+        self.assertFalse(folder.exists()); self.assertTrue(self.store.get(first['id'])['merge']['archive_deleted_at'])
+
+    def test_restart_rewrites_a_missing_or_changed_archive_from_its_record(self):
+        row=self.store.merge(self.request([self.source('A'),self.source('B')])); path=chat_merge.archive_path(self.store,row['id'])
+        saved=path.read_bytes()
+        for damage in (lambda: path.unlink(), lambda: path.write_bytes(saved+b' '), lambda: path.parent.rename(path.parent.with_name('gone'))):
+            damage(); self.store._status(row['id'],'failed')
+            with self.assertRaises(sessions.SessionError): self.store._prompt(self.store.get(row['id']),'Continue')
+            self.assertEqual('queued',self.store.restart_merge(row['id'])['status'])
+            self.assertEqual(saved,path.read_bytes()); self.assertEqual(0o600,path.stat().st_mode & 0o777)
+            self.assertIn('Merged chat context',self.store._prompt(self.store.get(row['id']),'Continue'))
+        self.assertIn('rewritten from',json.dumps(self.store.events(row['id'])))
+        # A link in the archive's place is never followed or written through.
+        outside=self.root/'outside'; outside.mkdir(); (outside/'context.json').write_text('keep')
+        shutil.rmtree(path.parent); path.parent.symlink_to(outside,target_is_directory=True); self.store._status(row['id'],'failed')
+        with self.assertRaises(sessions.SessionError): self.store.restart_merge(row['id'])
+        self.assertEqual('keep',(outside/'context.json').read_text()); self.assertEqual('failed',self.store.get(row['id'])['status'])
+
+    def test_merged_task_memory_names_the_chats_not_only_the_prefilled_instruction(self):
+        a,b=self.source('Design the payment retry queue'),self.source('Webhook idempotency keys')
+        request=self.request([a,b]); request['destination'].update(prompt=MERGE_PROMPT,brain={'bank':'memory-bank','auto':True})
+        row=self.store.merge(request); brain=row['brain']
+        for text in (brain['goal'],brain['query']):
+            self.assertIn('payment retry',text); self.assertIn('Webhook idempotency',text)
+        self.assertTrue(brain['task_id'].startswith('harness/merged-design-the-payment'),brain['task_id'])
+        # The first message stays as written; only memory reads the chats' subjects with it.
+        first=json.loads(self.store.db.execute('SELECT data FROM events WHERE session_id=? ORDER BY id LIMIT 1',(row['id'],)).fetchone()[0])
+        self.assertEqual(MERGE_PROMPT,first['text'])
+        # A merged chat is named by the chats it merged, not by its own prefilled instruction.
+        self.store._status(row['id'],'completed'); request=self.request([row['id'],self.source('Order export CSV')])
+        request['destination'].update(prompt=MERGE_PROMPT,brain={'bank':'memory-bank','auto':True})
+        goal=self.store.merge(request)['brain']['goal']
+        self.assertTrue(goal.startswith('Merged “Design the payment retry queue”, “Webhook idempotency keys”, “Order export CSV”: '),goal)
+
+    def test_a_written_instruction_leads_a_merged_tasks_goal_and_the_titles_follow(self):
+        # The server leaves out the page's prefilled instruction by its text, so the two must stay equal.
+        self.assertEqual(MERGE_PROMPT,chat_merge.PREFILLED_INSTRUCTION)
+        sources=[self.source(title) for title in (
+            'Investigate why the payment retry queue double-charges customers after a gateway timeout and a retry',
+            'Add idempotency keys to the webhook handler so that repeated deliveries are ignored safely by every consumer',
+            'Review the refund flow for partial captures and make sure the ledger stays balanced after each refund')]
+        instruction='Implement one shared idempotency layer used by retry, webhook and refund.'
+        for prompt in (instruction,MERGE_PROMPT+'\n'+instruction,MERGE_PROMPT+' '+instruction):
+            with self.subTest(prompt=prompt):
+                request=self.request(sources); request['destination'].update(prompt=prompt,brain={'bank':'memory-bank','auto':True})
+                brain=self.store.merge(request)['brain']
+                # Long titles cannot push the person's own words out of the goal or the task ID.
+                self.assertTrue(brain['goal'].startswith(instruction+' (merged “Investigate why the payment retry'),brain['goal'])
+                self.assertTrue(brain['task_id'].startswith('harness/implement-one-shared-idempotency-layer-'),brain['task_id'])
+                self.assertIn(instruction,brain['query']); self.assertIn('ledger stays balanced',brain['query'])
+                # The prefilled boilerplate names no subject; memory does not search for it.
+                self.assertNotIn('Continue the work',brain['goal']+brain['query'])
+
+    def test_a_merged_chat_whose_saved_copy_was_deleted_is_still_named_by_the_chats_it_merged(self):
+        def merge(ids):
+            request=self.request(ids); request['destination'].update(prompt=MERGE_PROMPT,brain={'bank':'memory-bank','auto':True})
+            row=self.store.merge(request); self.store._status(row['id'],'completed'); return row
+        first=merge([self.source('Payment retry queue'),self.source('Webhook idempotency')])
+        self.store.delete_merge_archive(first['id'])
+        second=merge([first['id'],self.source('Order export CSV')])
+        self.assertTrue(second['brain']['goal'].startswith('Merged “Payment retry queue”, “Webhook idempotency”, “Order export CSV”: '),second['brain']['goal'])
+        self.assertTrue(second['brain']['task_id'].startswith('harness/merged-payment-retry-queue-'),second['brain']['task_id'])
+        inherited=self.store.merge_archive(second['id'])['sources'][0]
+        self.assertTrue(inherited['inherited_context_deleted']); self.assertEqual(['Payment retry queue','Webhook idempotency'],inherited['inherited_subjects'])
+        # A deleted nested merge keeps every chat it was about, its own deleted source's included.
+        self.store.delete_merge_archive(second['id'])
+        goal=merge([second['id'],self.source('Invoice PDF')])['brain']['goal']
+        self.assertTrue(goal.startswith('Merged “Payment retry queue”, “Webhook idempotency”, “Order export CSV”, “Invoice PDF”: '),goal)
+
+    def test_deleting_a_saved_context_leaves_files_it_did_not_write_and_says_where(self):
+        row=self.store.merge(self.request([self.source('A'),self.source('B')]))
+        folder=chat_merge.archive_path(self.store,row['id']).parent
+        # An agent with access to the folder (Claude's --add-dir in Edit mode) wrote a file there.
+        (folder/'notes.md').write_text('agent notes'); self.store._status(row['id'],'completed')
+        self.store.delete_merge_archive(row['id'])
+        self.assertEqual(['notes.md'],sorted(path.name for path in folder.iterdir()))
+        note=[event['text'] for event in self.store.events(row['id']) if event['kind']=='status'][-1]
+        self.assertIn('left in place',note); self.assertIn(str(folder),note)
+        # Unknown files are never removed recursively, not even at the next start; the storage is free all the same.
+        self.store.close(); self.store=sessions.Sessions(self.root/'state',[self.project,self.other])
+        self.assertTrue((folder/'notes.md').exists())
+        self.assertEqual(0,self.store.db.execute("SELECT count(*) FROM session_merges WHERE bundle!=''").fetchone()[0])
+
+    @unittest.skipUnless(shutil.which('node'),'Merge picker check requires Node')
+    def test_merge_picker_leaves_out_system_runs_it_reads_from_session_summaries(self):
+        from harness import web
+        ordinary=self.source('Ordinary chat')
+        system=self.store.create({'project_id':self.project_id,'provider':'codex','prompt':'System change','workflow':'native'},_system_run={'run_id':'a'*32,'nonce':'b'*32})
+        scan=self.store.create({'project_id':self.project_id,'provider':'codex','prompt':'Discover services','workflow':'native','mode':'plan'},_system_discovery={'run_id':'c'*32,'nonce':'d'*32})
+        for row in (system,scan): self.store._status(row['id'],'completed')
+        page=ui_script(); start=page.index('\nconst isFleetSession'); eligible=page.index('\nconst mergeSourceEligible')
+        source=page[start:page.index('\n',start+1)]+page[eligible:page.index('\nconst mergeRestartable',eligible)]
+        script="const assert = require('node:assert/strict');\n"+source+"""
+const listed = JSON.parse(process.argv[1]).filter(session => mergeSourceEligible(session,process.argv[2])).map(session => session.title);
+assert.deepEqual(listed,['Ordinary chat']);
+"""
+        subprocess.run([shutil.which('node'),'-e',script,json.dumps(self.store.summaries()),self.project_id],check=True,capture_output=True,text=True)
+
+    @unittest.skipUnless(shutil.which('node'),'Session preference check requires Node')
+    def test_leaving_a_merge_draft_keeps_the_projects_saved_new_session_preferences(self):
+        page=ui_script()
+        def cut(start,end): return page[page.index(start):page.index(end,page.index(start))]
+        source=(cut('\nfunction readSessionPreferences(','\nfunction captureSessionPreferences(')
+                +cut('\nfunction saveSessionPreferences(','\nasync function restoreProjectPreferences(')
+                +cut('\nfunction discardMergeDraft(','\nfunction closeMergeArchive(')
+                +cut('\nasync function selectSession(',"\n$('session-form')"))
+        script="""const assert = require('node:assert/strict');
+const store = {}; const localStorage = {getItem: key => store[key] ?? null, setItem: (key, value) => { store[key] = value; }};
+const sessionPreferencesKey = 'prefs'; let sessionPreferencesReady = true, restoringSessionPreferences = false, sessionDraftProject = null, preferenceEpoch = 0;
+const element = () => ({value:'', setAttribute(){}, classList:{remove(){}}, style:{removeProperty(){}}, replaceChildren(){}});
+const fields = {project:{...element(), value:'p1'}, workflow:{...element(), value:'review'}}; const $ = id => fields[id] || (fields[id] = element());
+const state = {bootstrap:{}, pending:null, selectedId:null, selected:null, sessions:[], epoch:0, eventIds:new Set(), assistantTexts:new Set(), stepCalls:new Set()};
+const mergeUi = {draft:null, sourcesKey:null}; const sessionOptions = {};
+const brainLinkStrict = () => false, brainLinkDraft = {}, projectFor = id => id === 'p1';
+const captureSessionPreferences = () => ({fields:{workflow:fields.workflow.value}});
+const noop = () => {}; const closeMergeArchive = noop, clearAttachments = noop, stopPolling = noop, resetFleetProgress = noop, showError = noop,
+  applySessionSettings = noop, renderHistory = noop, setView = noop, updateControls = noop, pollSession = async () => {};
+const runView = {reset: noop};
+""" + source + """
+(async () => {
+  saveSessionPreferences();
+  // A merge draft forces a native task in the project folder; selecting the merged task must not keep that as the default.
+  mergeUi.draft = {projectId:'p1'}; fields.workflow.value = 'native';
+  await selectSession('merged-task');
+  assert.equal(JSON.parse(store.prefs).drafts.p1.fields.workflow,'review');
+  assert.equal(mergeUi.draft,null);
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+        subprocess.run([shutil.which('node'),'-e',script],check=True,capture_output=True,text=True)
+
+    @unittest.skipUnless(shutil.which('node'),'Merge panel check requires Node')
+    def test_merge_panel_asks_before_deleting_a_saved_context_and_says_when_it_is_gone(self):
+        page=ui_script()
+        def cut(start,end): return page[page.index(start):page.index(end,page.index(start))]
+        source=(cut('\nconst active =','\nconst isFleetSession')+cut('\nconst mergeRestartable','\nfunction discardMergeDraft(')
+                +cut('\nfunction renderMergeContext(','\nfunction applyMergeControls('))
+        script="""const assert = require('node:assert/strict');
+const fields = {}; const $ = id => fields[id] || (fields[id] = {hidden:false, disabled:false, textContent:'', replaceChildren(){}, classList:{set:new Set(), toggle(name, on){ on ? this.set.add(name) : this.set.delete(name); }}});
+const el = (tag, className, text) => ({tag, className, textContent:text, addEventListener(){}}); const providerFor = () => null;
+const state = {pending:null, bootstrap:{}, authFailed:false, selectedId:'t1', selected:null};
+const mergeUi = {draft:null, sourcesKey:null, deleteArmed:null};
+""" + source + """
+const merge = {sources:[{id:'a', title:'A'}, {id:'b', title:'B'}]};
+state.selected = {id:'t1', status:'failed', native_session_id:null, merge}; renderMergeContext();
+assert.equal($('merge-restart').hidden,false); assert.equal($('merge-delete').hidden,false); assert.equal($('merge-delete-keep').hidden,true);
+// The first click only asks: the note says what goes and what stays, and Keep it backs out.
+mergeUi.deleteArmed = 't1'; renderMergeContext();
+assert.match($('merge-context-note').textContent,/cannot be undone/); assert.equal($('merge-delete').textContent,'Delete saved copy');
+assert.equal($('merge-delete-keep').hidden,false); assert.ok($('merge-delete').classList.set.has('danger')); assert.equal($('merge-archive').hidden,true);
+// A run may still read it: a queued task offers no deletion and drops the question.
+state.selected = {...state.selected, status:'queued'}; renderMergeContext();
+assert.equal($('merge-delete').hidden,true); assert.equal(mergeUi.deleteArmed,null);
+// Once deleted, the task keeps its sources but offers neither the copy nor a restart from it.
+state.selected = {id:'t1', status:'failed', native_session_id:null, merge:{...merge, archive_deleted_at:'2026-10-10T00:00:00+00:00'}}; renderMergeContext();
+assert.match($('merge-context-note').textContent,/was deleted/);
+assert.deepEqual(['merge-restart','merge-archive','merge-delete'].map(id => $(id).hidden),[true,true,true]);
+"""
+        subprocess.run([shutil.which('node'),'-e',script],check=True,capture_output=True,text=True)
 
 if __name__=='__main__': unittest.main()

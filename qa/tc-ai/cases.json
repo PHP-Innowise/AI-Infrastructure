@@ -1,0 +1,421 @@
+{
+  "schema_version": "1.0.0",
+  "cases": [
+    {
+      "run_id": "RUN-20260803-001",
+      "test_case_id": "TC-AI-001",
+      "title": "Laravel Memory Bank regression suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "laravel-memory-bank",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Laravel/memory-bank/tests"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-002",
+      "test_case_id": "TC-AI-002",
+      "title": "Laravel Project Brain regression suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "laravel-project-brain",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Laravel/project-brain/tests"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-003",
+      "test_case_id": "TC-AI-003",
+      "title": "Symfony Memory Bank regression suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "symfony-memory-bank",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Symfony/memory-bank/tests"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-004",
+      "test_case_id": "TC-AI-004",
+      "title": "Symfony Project Brain regression suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "symfony-project-brain",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Symfony/project-brain/tests"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-005",
+      "test_case_id": "TC-AI-005",
+      "title": "PHP Core Memory Bank regression suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "php-core-memory-bank",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "PHP Core/memory-bank/tests"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-006",
+      "test_case_id": "TC-AI-006",
+      "title": "PHP Core Project Brain regression suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "php-core-project-brain",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "PHP Core/project-brain/tests"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-007",
+      "test_case_id": "TC-AI-007",
+      "title": "Infrastructure-Creator regression suite",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "infrastructure-creator",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Infrastructure-Creator/tests"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-008",
+      "test_case_id": "TC-AI-008",
+      "title": "Cross-stack integrity and static gates",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "mirror-check",
+          "argv": ["{python}", "scripts/build_mirrors.py", "--check"],
+          "cwd": "."
+        },
+        {
+          "id": "laravel-parity",
+          "argv": ["{python}", "memory-bank/scripts/context.py", "parity"],
+          "cwd": "Laravel"
+        },
+        {
+          "id": "laravel-cross-parity",
+          "argv": ["{python}", "memory-bank/scripts/context.py", "parity", "--cross-edition"],
+          "cwd": "Laravel"
+        },
+        {
+          "id": "symfony-parity",
+          "argv": ["{python}", "memory-bank/scripts/context.py", "parity"],
+          "cwd": "Symfony"
+        },
+        {
+          "id": "symfony-cross-parity",
+          "argv": ["{python}", "memory-bank/scripts/context.py", "parity", "--cross-edition"],
+          "cwd": "Symfony"
+        },
+        {
+          "id": "php-core-parity",
+          "argv": ["{python}", "memory-bank/scripts/context.py", "parity"],
+          "cwd": "PHP Core"
+        },
+        {
+          "id": "php-core-cross-parity",
+          "argv": ["{python}", "memory-bank/scripts/context.py", "parity", "--cross-edition"],
+          "cwd": "PHP Core"
+        },
+        {
+          "id": "bash-syntax",
+          "argv": ["bash", "-c", "git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n"],
+          "cwd": "."
+        },
+        {
+          "id": "shellcheck",
+          "argv": ["bash", "-c", "git ls-files -z -- '*.sh' | xargs -0 shellcheck -S error"],
+          "cwd": ".",
+          "requires_executable": "shellcheck"
+        },
+        {
+          "id": "json-validation",
+          "argv": ["bash", "-c", "git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do python3 -m json.tool \"$f\" >/dev/null || exit 1; done"],
+          "cwd": "."
+        },
+        {
+          "id": "link-check",
+          "argv": ["{python}", "scripts/check_links.py"],
+          "cwd": "."
+        },
+        {
+          "id": "context-budget",
+          "argv": ["{python}", "scripts/context_budget.py", "--check"],
+          "cwd": "."
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-009",
+      "test_case_id": "TC-AI-009",
+      "title": "Governed lifecycle and retrieval behavior",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "laravel-governed-runtime",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Laravel/project-brain/tests"
+        },
+        {
+          "id": "symfony-governed-runtime",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Symfony/project-brain/tests"
+        },
+        {
+          "id": "php-core-governed-runtime",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "PHP Core/project-brain/tests"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "*/project-brain/tests/test_*.py",
+          "regex": "governed"
+        }
+      ],
+      "native_requirement": "codex",
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-010",
+      "test_case_id": "TC-AI-010",
+      "title": "Lightweight checkpoint and automatic hook behavior",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "laravel-lightweight-runtime",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Laravel/memory-bank/tests"
+        },
+        {
+          "id": "symfony-lightweight-runtime",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Symfony/memory-bank/tests"
+        },
+        {
+          "id": "php-core-lightweight-runtime",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "PHP Core/memory-bank/tests"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "*/memory-bank/tests/test_*.py",
+          "regex": "lightweight|checkpoint"
+        }
+      ],
+      "native_requirement": "codex",
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-011",
+      "test_case_id": "TC-AI-011",
+      "title": "Reviewed and automatic durable-memory promotion modes",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "promotion-mode-regressions",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Laravel/project-brain/tests"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "*/project-brain/tests/test_*.py",
+          "regex": "test_.*(reviewed|automatic).*promotion|test_.*promotion.*(review|disabled)"
+        }
+      ],
+      "native_requirement": "codex",
+      "blocker": "Focused dual-mode promotion regressions must land before this case can pass."
+    },
+    {
+      "run_id": "RUN-20260803-012",
+      "test_case_id": "TC-AI-012",
+      "title": "Explicit completion authority at merge boundary",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "explicit-completion-regressions",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Laravel/project-brain/tests"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "*/project-brain/tests/test_*.py",
+          "regex": "test_.*(merge_candidate_without_complet|completion_requires_an_explicit|concurrent_completion_cas)"
+        }
+      ],
+      "native_requirement": "codex",
+      "blocker": "Focused explicit-completion regressions must land before this case can pass."
+    },
+    {
+      "run_id": "RUN-20260803-013",
+      "test_case_id": "TC-AI-013",
+      "title": "Validator handles relative and absolute target paths",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "target-path-regressions",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Infrastructure-Creator/tests"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "Infrastructure-Creator/tests/test_*.py",
+          "regex": "test_.*relative.*target|test_.*absolute.*target"
+        }
+      ],
+      "native_requirement": null,
+      "blocker": "The rejected finding requires committed caller-relative and absolute-path regressions."
+    },
+    {
+      "run_id": "RUN-20260803-014",
+      "test_case_id": "TC-AI-014",
+      "title": "Infrastructure-Creator full generate and update lifecycle",
+      "classification": "hybrid",
+      "commands": [
+        {
+          "id": "generator-lifecycle-regressions",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Infrastructure-Creator/tests"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "Infrastructure-Creator/tests/test_*.py",
+          "regex": "test_.*generate.*revalidate_lifecycle"
+        }
+      ],
+      "native_requirement": "claude-code",
+      "blocker": "A committed generated-target lifecycle fixture is required."
+    },
+    {
+      "run_id": "RUN-20260803-015",
+      "test_case_id": "TC-AI-015",
+      "title": "Exact-commit repository CI matrix",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "exact-local-ci-matrix",
+          "argv": [
+            "bash",
+            "-c",
+            "set -euo pipefail; (cd 'Laravel/memory-bank/tests' && python3 -m unittest discover); (cd 'Laravel/project-brain/tests' && python3 -m unittest discover); (cd 'Symfony/memory-bank/tests' && python3 -m unittest discover); (cd 'Symfony/project-brain/tests' && python3 -m unittest discover); (cd 'PHP Core/memory-bank/tests' && python3 -m unittest discover); (cd 'PHP Core/project-brain/tests' && python3 -m unittest discover); (cd 'Infrastructure-Creator/tests' && python3 -m unittest discover); for edition in Laravel Symfony 'PHP Core'; do (cd \"$edition\" && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition); done; python3 scripts/build_mirrors.py --check; git ls-files -z -- '*.sh' | xargs -0 -n1 bash -n; git ls-files -z -- '*.json' | while IFS= read -r -d '' f; do python3 -m json.tool \"$f\" >/dev/null; done; python3 scripts/context_budget.py --check; python3 scripts/check_links.py; python3 -m unittest discover -s scripts/qa/tests"
+          ],
+          "cwd": "."
+        },
+        {
+          "id": "shellcheck",
+          "argv": ["bash", "-c", "git ls-files -z -- '*.sh' | xargs -0 shellcheck -S error"],
+          "cwd": ".",
+          "requires_executable": "shellcheck"
+        }
+      ],
+      "required_test_patterns": [],
+      "native_requirement": null,
+      "blocker": null
+    },
+    {
+      "run_id": "RUN-20260803-016",
+      "test_case_id": "TC-AI-016",
+      "title": "Curated governed retrieval relevance benchmark",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "retrieval-quality-regressions",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Laravel/project-brain/tests"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "*/project-brain/tests/test_*.py",
+          "regex": "test_.*frozen_retrieval_corpus"
+        },
+        {
+          "glob": "qa/tc-ai/fixtures/retrieval-golden.json",
+          "regex": "\"queries\""
+        }
+      ],
+      "native_requirement": null,
+      "blocker": "Approved precision, recall, authority, freshness, privacy, and token thresholds are required."
+    },
+    {
+      "run_id": "RUN-20260803-017",
+      "test_case_id": "TC-AI-017",
+      "title": "Telemetry configured-off and sanitized adapter behavior",
+      "classification": "deterministic",
+      "commands": [
+        {
+          "id": "telemetry-regressions",
+          "argv": ["{python}", "-m", "unittest", "discover"],
+          "cwd": "Laravel/project-brain/tests"
+        }
+      ],
+      "required_test_patterns": [
+        {
+          "glob": "*/project-brain/tests/test_*.py",
+          "regex": "test_.*telemetry.*(configured_off|disabled|sanitized)"
+        },
+        {
+          "glob": "qa/tc-ai/fixtures/telemetry-events.json",
+          "regex": "\"events\""
+        }
+      ],
+      "native_requirement": null,
+      "blocker": "A focused configured-off and sanitized-adapter regression is required."
+    },
+    {
+      "run_id": "RUN-20260803-018",
+      "test_case_id": "TC-AI-018",
+      "title": "Native host runtime smoke across AI tools",
+      "classification": "native",
+      "commands": [],
+      "required_test_patterns": [],
+      "native_requirement": "claude-code,cursor,codex",
+      "blocker": "Requires reviewed native Claude Code, Cursor, and Codex observations."
+    }
+  ]
+}

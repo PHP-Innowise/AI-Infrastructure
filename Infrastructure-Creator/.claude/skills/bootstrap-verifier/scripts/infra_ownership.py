@@ -14,7 +14,7 @@ import os
 import re
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 
@@ -67,14 +67,22 @@ def sha256_file(path: Path) -> str:
 
 def normalize_relative_path(value: str | Path) -> str:
     """Return a safe POSIX target-relative path."""
-    raw = Path(value)
-    if raw.is_absolute() or ".." in raw.parts:
+    if not isinstance(value, (str, Path)):
+        raise OwnershipError('write-plan path must be a string or Path')
+    text = value.as_posix() if isinstance(value, Path) else value
+    raw = PurePosixPath(text)
+    reserved = re.compile(r'^(CON|CONIN\$|CONOUT\$|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$', re.I)
+    if (raw.is_absolute() or ".." in raw.parts or '\\' in text
+            or any(ord(c) < 32 or ord(c) == 127 or c in ':<>"|?*' for c in text)
+            or any(part.endswith(('.', ' ')) or reserved.match(part.partition('.')[0].rstrip(' ')) for part in raw.parts)):
         raise OwnershipError(f"write-plan path must be target-relative: {value}")
     rel = raw.as_posix()
     while rel.startswith("./"):
         rel = rel[2:]
     if not rel or rel == ".":
         raise OwnershipError("write-plan path must not be empty")
+    if rel != text:
+        raise OwnershipError(f"write-plan path must use canonical POSIX spelling: {value}")
     return rel
 
 
@@ -111,7 +119,7 @@ def read_write_plan(path: Path) -> list[str]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        rel = normalize_relative_path(stripped)
+        rel = normalize_relative_path(line)
         if rel not in seen:
             paths.append(rel)
             seen.add(rel)

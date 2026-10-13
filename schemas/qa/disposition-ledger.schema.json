@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://php-innowise.example/schemas/qa/disposition-ledger.schema.json",
+  "title": "75-run disposition ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "repository_commit",
+    "release_ready",
+    "source_checksums",
+    "records"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "repository_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "release_ready": {
+      "type": "boolean"
+    },
+    "source_checksums": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "records": {
+      "type": "array",
+      "minItems": 75,
+      "maxItems": 75,
+      "items": {
+        "$ref": "#/$defs/record"
+      }
+    }
+  },
+  "$defs": {
+    "nullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "run_id",
+        "test_case_id",
+        "historical_result",
+        "framework",
+        "tool",
+        "tested_commit",
+        "source_group",
+        "source_evidence_status",
+        "original_defect_id",
+        "namespaced_defect_id",
+        "evidence_status",
+        "evidence_path",
+        "evidence_sha256",
+        "classification",
+        "remediation_workstream",
+        "required_regressions",
+        "native_client_requirement",
+        "final_disposition",
+        "final_evidence_path",
+        "owner",
+        "review_status",
+        "provenance"
+      ],
+      "properties": {
+        "identity": {
+          "type": "string",
+          "pattern": "^RUN-[^|]+\\|TC-[^|]+\\|(?:DEF-[A-Z0-9-]+|NONE)$"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^RUN-(?:[0-9]{3}|20260803-[0-9]{3})$"
+        },
+        "test_case_id": {
+          "type": "string",
+          "pattern": "^TC-(?:[0-9]{3}|AI-[0-9]{3})$"
+        },
+        "historical_result": {
+          "enum": [
+            "Pass",
+            "Partial",
+            "Fail",
+            "Blocked"
+          ]
+        },
+        "framework": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tested_commit": {
+          "type": "string",
+          "minLength": 7
+        },
+        "source_group": {
+          "enum": [
+            "historical-57",
+            "codex-18"
+          ]
+        },
+        "source_evidence_status": {
+          "enum": [
+            "package-verified",
+            "workbook-recorded",
+            "newly-reproduced"
+          ]
+        },
+        "original_defect_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "namespaced_defect_id": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "evidence_status": {
+          "enum": [
+            "available-original",
+            "available-sanitized",
+            "withheld-sensitive",
+            "workbook-recorded",
+            "newly-reproduced",
+            "missing"
+          ]
+        },
+        "evidence_path": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "evidence_sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "classification": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remediation_workstream": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_regressions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "native_client_requirement": {
+          "enum": [
+            "none",
+            "claude-code",
+            "cursor",
+            "codex",
+            "multiple"
+          ]
+        },
+        "final_disposition": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "accepted-historical-pass",
+            "verified-after-remediation",
+            "closed-supported-defect",
+            "closed-test-definition-defect",
+            "closed-environment-or-setup-artifact",
+            "closed-rejected-finding",
+            "verified-unmodified-pass",
+            "accepted-limitation",
+            "accepted-native-host-limitation",
+            "external-client-finding-verified"
+          ]
+        },
+        "final_evidence_path": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "owner": {
+          "$ref": "#/$defs/nullableString"
+        },
+        "review_status": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "pending",
+            "approved",
+            "rejected",
+            "deferred"
+          ]
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "sources",
+            "conflicts"
+          ],
+          "properties": {
+            "sources": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "conflicts": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

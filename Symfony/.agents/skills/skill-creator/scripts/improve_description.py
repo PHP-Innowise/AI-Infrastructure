@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Improve a skill description using the repository edition's native CLI."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import re

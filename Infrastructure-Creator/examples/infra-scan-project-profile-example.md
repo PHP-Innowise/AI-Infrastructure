@@ -176,9 +176,9 @@
 - `billing-rules-review` - reviews changes against invoice transitions, refund amount/role/audit rules, Stripe idempotency, and the named regression scenarios, while surfacing the unresolved `voided` contradiction
 
 ### 11.2 Agents & Commands Preview
-- Skill count: 1 architecture + 3 design + 0 frontend + 18 process + 7 universal + 11 specialty + 7 integrations + 1 domain = **48 skills**.
-- Agents: 48 skills x 1 Claude edition = 48 agents.
-- Commands: 48 skills x 1 Claude edition = 48 commands.
+- Skill count: 1 architecture + 3 design + 0 frontend + 20 process + 7 universal + 11 specialty + 7 integrations + 1 domain = **50 skills**.
+- Agents: 50 skills x 1 Claude edition = 50 agents.
+- Commands: 50 skills x 1 Claude edition = 50 commands.
 
 ### 11.3 Non-PHP Neighbors
 - none

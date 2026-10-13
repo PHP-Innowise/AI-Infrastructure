@@ -28,6 +28,8 @@ preview. Skill management additionally needs Node.js **22.20.0+** and `npx`.
 
 The browser provides search, category/client/review filters, resource detail
 links and copyable commands. It does not execute commands on your computer.
+It follows the system light or dark theme; inside the Harness it follows the
+Harness theme switch.
 `serve` binds to localhost and serves only a temporary catalog build, not the
 repository. For static hosting, build and publish the resulting directory using
 your existing hosting workflow:

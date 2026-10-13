@@ -10,13 +10,17 @@ import subprocess
 import sys
 import threading
 import time
+import shutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from harness import process_runtime
 from harness import providers
 from harness.creator import (TASK, PLAN_NAMES, REPORTS, SCRIPTS, REGISTRY, load_file,
                              write_json, sandbox_command, profile_hashes, build_preview, publication_helpers as publisher)
 from harness.sessions import SessionError
 from harness.setup import _root_fd, _identity
+from harness.filesystem import fs
+from harness.windows_commands import command_argv
 
 
 def emit(kind, text='', **fields):
@@ -26,6 +30,7 @@ def emit(kind, text='', **fields):
 def run_process(command, cwd, stdin=None, provider=None, agents_enabled=False, agent_count=1):
     """Bound output while streaming; the outer process guard owns descendants/timeouts."""
     launch_started_at, native_id = time.time(), None
+    command = command_argv(command, provider)
     process = subprocess.Popen(command, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT)
     def feed():
@@ -38,13 +43,13 @@ def run_process(command, cwd, stdin=None, provider=None, agents_enabled=False, a
     writer = threading.Thread(target=feed, daemon=True); writer.start()
     buffer, total, terminal, failed = b'', 0, False, False
     delegation = providers.DelegationTracker(provider, agent_count) if provider and agents_enabled else None
-    selector = selectors.DefaultSelector(); selector.register(process.stdout, selectors.EVENT_READ)
+    selector = process_runtime.PipeSelector(); selector.register(process.stdout, selectors.EVENT_READ)
     try:
         while True:
             if not selector.select(.2):
-                if process.poll() is not None: break
+                if process.poll() is not None and not process_runtime.WINDOWS: break
                 continue
-            chunk = os.read(process.stdout.fileno(), 65536)
+            chunk = selector.read(process.stdout, 65536)
             buffer += chunk or b'\n'; total += len(chunk)
             if total > 3*1024*1024: raise SessionError('Creator phase output limit reached.')
             lines = buffer.split(b'\n'); buffer = lines.pop()
@@ -70,14 +75,17 @@ def run_process(command, cwd, stdin=None, provider=None, agents_enabled=False, a
         if code or provider and (not terminal or failed):
             raise SessionError('Native agent did not complete successfully.' if provider else 'Canonical verification failed; inspect the check output.')
     finally:
-        selector.close(); process.stdout.close()
-        if process.poll() is None: process.kill(); process.wait()
+        cleanup_failed = process.poll() is None and not process_runtime.reap_tree(process)
+        selector.close()
+        process.stdout.close()
         writer.join(timeout=1)
         if delegation:
             for receipt in delegation.reconcile(native_id, cwd, launch_started_at, time.time()):
                 emit(receipt['kind'], receipt['text'], ok=True)
             summary = delegation.summary()
             emit(**summary)
+        if cleanup_failed:
+            raise SessionError('Creator process cleanup could not be confirmed.')
 
 
 def prompt_for(request):
@@ -109,7 +117,9 @@ def verify(request, generated=False, installed=False):
     def check(script, *args):
         emit('status','Checking '+script)
         command=[sys.executable, '-B', str(SCRIPTS/script), *map(str,args)]
-        run_process(sandbox_command(work,target,command,runtime_cache=installed and script=='validate_generated.py'),work)
+        run_process(sandbox_command(work,target,command,
+            runtime_cache=installed and script=='validate_generated.py' and not process_runtime.WINDOWS,
+            sandbox_executable=request.get('sandbox_executable'), protected_roots=request.get('protected_roots', ())),work)
     if not generated or not installed:
         # Required profile cannot be replaced by the plan alone.
         profile_hashes(directory)
@@ -121,14 +131,23 @@ def verify(request, generated=False, installed=False):
             raise SessionError('The reviewed profile or plan changed. Start a new scan for review.')
         check('validate_plan_mutations.py','--plan',plan,'--target',target,'--registry',REGISTRY)
         check('validate_content_review.py','--publication-plan',task/PLAN_NAMES[0],'--review',task/'infra-validate-review.json')
-        check('validate_generated.py','--target',target if installed else task/'infra-generate-staging',
-              '--editions',','.join(request['tools']),'--skill-plan',plan,'--evidence-target',target,'--candidate-registry',REGISTRY)
+        validation_target = target if installed else task/'infra-generate-staging'
+        disposable = None
+        if installed and process_runtime.WINDOWS:
+            from harness.windows_creator import validation_copy
+            disposable = validation_target = validation_copy(target, work)
+        try:
+            check('validate_generated.py','--target',validation_target,
+                  '--editions',','.join(request['tools']),'--skill-plan',plan,'--evidence-target',target,'--candidate-registry',REGISTRY)
+        finally:
+            if disposable:
+                shutil.rmtree(disposable)
 
 
 def check_identity(request):
     fd = _root_fd(Path(request['target']))
     try:
-        if list(_identity(os.fstat(fd))) != request['identity']: raise SessionError('Target directory changed.')
+        if list(_identity(fs.fstat(fd))) != request['identity']: raise SessionError('Target directory changed.')
     finally: os.close(fd)
 
 
@@ -183,8 +202,12 @@ def apply(request):
         metadata=json.loads(load_file(directory,'journal/journal.json')['body'])
         metadata['status']='verified'; write_json(journal/'journal.json',metadata)
     except Exception:
-        value=load_file(directory,'journal/journal.json',False)
-        if value and json.loads(value['body']).get('status') not in ('rolled-back','verified'):
+        try:
+            value=load_file(directory,'journal/journal.json',False)
+            status=json.loads(value['body']).get('status') if value else None
+        except (ValueError, SessionError):
+            status = None
+        if status not in ('rolled-back','verified'):
             rollback(request)
         raise
 
@@ -193,6 +216,17 @@ def execute(request):
     check_identity(request)
     phase=request['phase']; directory=Path(request['directory']); work=directory/'agent'
     if phase=='rollback': rollback(request); return 'rolled_back'
+    if process_runtime.WINDOWS:
+        from harness.creator import ROOT, git_details
+        target = Path(request['target'])
+        protected = [target, directory, ROOT]
+        protected.extend(Path(path) for path in request.get('protected_roots', ()))
+        if (target/'.git').is_file():
+            protected.append(Path(git_details(target)['common_dir']))
+        probe = [sys.executable, '-B', str(Path(__file__).with_name('windows_creator_probe.py')),
+                 str(work), *map(str, protected)]
+        run_process(sandbox_command(work, target, probe, request['provider'],
+                    sandbox_executable=request.get('sandbox_executable'), protected_roots=request.get('protected_roots', ())), work)
     if phase=='apply': apply(request); return 'complete'
     # Questions from a prior attempt must be answered again, not mistaken for a new result.
     questions=work/TASK/'harness-questions.md'
@@ -204,12 +238,20 @@ def execute(request):
         model=request['model'],thinking_effort=request['thinking_effort'],
         agents_enabled=request['agents_enabled'],agent_count=request['agent_count'],
         **({'budget_usd':request['budgets']['usd']} if request.get('budgets', {}).get('usd') is not None else {}))
-    if request['provider']=='codex': command.insert(command.index('exec')+1,'--skip-git-repo-check')
+    if request['provider']=='codex':
+        command.insert(command.index('exec')+1,'--skip-git-repo-check')
+        if process_runtime.WINDOWS:
+            # The verified outer elevated sandbox already confines every tool.
+            # A nested elevated setup cannot reuse the host user's DPAPI state
+            # from the lower-privilege sandbox account.
+            sandbox_index = command.index('--sandbox')
+            command[sandbox_index:sandbox_index + 2] = ['-c', 'default_permissions=":danger-full-access"']
     if request['provider']=='claude':
         # Generator validators need shell execution inside the filesystem boundary.
         if '--allowedTools' in command: command.insert(command.index('--allowedTools')+1,'Bash')
         else: command += ['--allowedTools','Bash']
-    run_process(sandbox_command(work,Path(request['target']),command,request['provider']),work,
+    run_process(sandbox_command(work,Path(request['target']),command,request['provider'],
+                sandbox_executable=request.get('sandbox_executable'), protected_roots=request.get('protected_roots', ())),work,
                 providers.input_text(request['provider'],prompt),request['provider'],request['agents_enabled'],request['agent_count'])
     questions=load_file(work/TASK,'harness-questions.md',False)
     if questions and questions['body'].strip(): return 'needs_input'

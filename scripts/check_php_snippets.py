@@ -6,10 +6,15 @@ hundreds of fenced PHP blocks, and those blocks are what an agent copies when
 it writes code. A snippet with a syntax error therefore propagates into
 generated applications while every existing CI job stays green.
 
-Only blocks that begin with `<?php` are checked: those claim to be whole
-files. Fragments (a method body, a class with `...` elisions) are counted and
-reported, not linted - `php -l` cannot judge them, and pretending otherwise
-would turn a real guard into noise. The skipped count is printed so the
+A block that begins with `<?php` claims to be a whole file and is linted as
+it is. Most blocks are fragments - statements, or the members of a class -
+and those are linted in the first shape that makes them a file: behind an
+added `<?php` tag, then as the body of a class. A fragment is accepted raw
+only when it carries its own `<?php`/`<?=` tag (a template): `php -l` treats
+untagged text as inline HTML and accepts anything, so raw mode for untagged
+text would pass every broken fragment. A fragment that is deliberately not
+valid PHP on its own (pieces of two files, a config excerpt) is fenced
+```` ```php fragment ```` and only counted. Counts per mode are printed, so the
 coverage this job provides is never overstated.
 """
 
@@ -23,12 +28,21 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BLOCK = re.compile(r"^```php[ \t]*\n(.*?)^```", re.S | re.M)
+BLOCK = re.compile(r"^```php(?P<info>[^\n]*)\n(?P<body>.*?)^```", re.S | re.M)
+# The shapes a fragment is tried in, in order: statements, then class members.
+FRAGMENT_SHAPES = (
+    ("statements", "<?php\n{}\n"),
+    ("class members", "<?php\nclass __Snippet\n{{\n{}\n}}\n"),
+)
 
 
 def tracked_markdown(root: Path) -> list[Path]:
+    # A `Task/` directory holds a client's own material - epics, an
+    # application built inside an edition, the specs written for it - which
+    # the installer excludes (`Task/**`); its snippets are not what the
+    # accelerator ships.
     result = subprocess.run(
-        ["git", "ls-files", "-z", "--", "*.md"],
+        ["git", "ls-files", "-z", "--", "*.md", ":(glob,exclude)**/Task/**"],
         cwd=root,
         capture_output=True,
         check=True,
@@ -49,9 +63,31 @@ def php_available() -> bool:
         return False
 
 
-def check(root: Path) -> tuple[int, int, list[str]]:
-    checked = 0
-    skipped = 0
+def lint(target: Path, source: str) -> str | None:
+    """None when `source` parses, else php's message naming the problem."""
+    target.write_text(source, encoding="utf-8")
+    result = subprocess.run(["php", "-l", str(target)], capture_output=True, text=True)
+    if not result.returncode:
+        return None
+    # php -l splits its report: the parse error itself may go to either
+    # stream, with "Errors parsing <file>" as the summary. Prefer the line that
+    # names the syntax problem, because the summary alone says nothing
+    # actionable.
+    lines = [
+        line.strip()
+        for line in (result.stdout + "\n" + result.stderr).splitlines()
+        if line.strip()
+    ]
+    message = next(
+        (line for line in lines if "rror" in line and "Errors parsing" not in line),
+        lines[0] if lines else "php -l failed",
+    )
+    return message.replace(str(target), "<snippet>")
+
+
+def check(root: Path) -> tuple[dict[str, int], list[str]]:
+    """Counts per mode, and one failure line per block no mode accepts."""
+    counts = {"complete": 0, "statements": 0, "class members": 0, "template": 0, "declared fragment": 0}
     failures: list[str] = []
     with tempfile.TemporaryDirectory(prefix="php-snippets-") as raw:
         target = Path(raw) / "snippet.php"
@@ -60,35 +96,35 @@ def check(root: Path) -> tuple[int, int, list[str]]:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            for index, block in enumerate(BLOCK.findall(text), start=1):
-                if not block.lstrip().startswith("<?php"):
-                    skipped += 1
+            relative = path.relative_to(root).as_posix()
+            for index, match in enumerate(BLOCK.finditer(text), start=1):
+                block = match.group("body")
+                if "fragment" in match.group("info").split():
+                    counts["declared fragment"] += 1
                     continue
-                checked += 1
-                target.write_text(block, encoding="utf-8")
-                result = subprocess.run(
-                    ["php", "-l", str(target)], capture_output=True, text=True
-                )
-                if result.returncode:
-                    # php -l splits its report: the parse error itself may go
-                    # to either stream, with "Errors parsing <file>" as the
-                    # summary. Prefer the line that names the syntax problem,
-                    # because the summary alone says nothing actionable.
-                    lines = [
-                        line.strip()
-                        for line in (result.stdout + "\n" + result.stderr).splitlines()
-                        if line.strip()
-                    ]
-                    message = next(
-                        (line for line in lines if "rror" in line and "Errors parsing" not in line),
-                        lines[0] if lines else "php -l failed",
-                    )
-                    relative = path.relative_to(root).as_posix()
+                if block.lstrip().startswith("<?php"):
+                    problem = lint(target, block)
+                    if problem is None:
+                        counts["complete"] += 1
+                    else:
+                        failures.append(f"{relative} block #{index}: {problem}")
+                    continue
+                first_problem = None
+                for mode, shape in FRAGMENT_SHAPES:
+                    problem = lint(target, shape.format(block))
+                    if problem is None:
+                        counts[mode] += 1
+                        break
+                    first_problem = first_problem or problem
+                else:
+                    if ("<?php" in block or "<?=" in block) and lint(target, block) is None:
+                        counts["template"] += 1
+                        continue
                     failures.append(
-                        f"{relative} block #{index}: "
-                        + message.replace(str(target), "<snippet>")
+                        f"{relative} block #{index}: no shape parses (statements: "
+                        f"{first_problem}); fix it, or fence it ```php fragment"
                     )
-    return checked, skipped, failures
+    return counts, failures
 
 
 def main() -> int:
@@ -112,10 +148,16 @@ def main() -> int:
         print("SKIPPED\tphp not available; no snippet was checked")
         return 0
 
-    checked, skipped, failures = check(root)
+    counts, failures = check(root)
     for failure in failures:
         print(f"INVALID\t{failure}", file=sys.stderr)
-    print(f"CHECKED\t{checked} complete snippet(s)\tSKIPPED\t{skipped} fragment(s)")
+    linted = sum(value for key, value in counts.items() if key != "declared fragment")
+    detail = ", ".join(f"{value} {key}" for key, value in counts.items() if key != "declared fragment")
+    print(
+        f"CHECKED\t{linted} snippet(s) ({detail})\t"
+        f"SKIPPED\t{counts['declared fragment']} declared fragment(s)\t"
+        f"INVALID\t{len(failures)}"
+    )
     return 1 if failures else 0
 
 

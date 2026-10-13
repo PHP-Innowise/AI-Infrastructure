@@ -28,7 +28,7 @@ records the mean, the standard deviation and the per-case breakdown, keyed by
 the edition's `policy_digest` so a stale baseline is mechanically visible.
 
 This is NOT part of CI: it invokes a model, costs money and takes minutes.
-Run it deliberately, the way `docs/CI.md` describes for the harness.
+Run it deliberately, by hand: neither CI nor `scripts/check.py` runs it.
 """
 
 from __future__ import annotations

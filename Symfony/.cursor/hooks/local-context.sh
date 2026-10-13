@@ -4,6 +4,9 @@
 # Hook type: SessionStart
 # Exit codes: always 0 (informational only)
 
+# Internal draft recovery is part of the current turn, not a new memory session.
+[ "${CONTEXT_MEMORY_RECOVERY:-}" = "1" ] && exit 0
+
 echo "Project Context"
 echo "==============="
 
@@ -11,6 +14,23 @@ echo "==============="
 # changelog section; shared-core history lives in the repository-root
 # CHANGELOG.md.
 EDITION_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+ROOT_DIR=$EDITION_DIR
+# Installed, the accelerator, the project and its state are all ROOT_DIR.
+# Attached - a launcher lends this clone's edition to a project and names it
+# in ACCELERATOR_HOME - the project and the state directory are the
+# launcher's, so nothing is written into the clone or the project.
+PROJECT_DIR=$ROOT_DIR
+STATE_DIR=$ROOT_DIR
+accelerator_absolute() { case "$1" in /*|[A-Za-z]:[\\/]*) return 0 ;; esac; return 1; }
+if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${ACCELERATOR_PROJECT_DIR:-}" \
+  && [ "$(cd "${ACCELERATOR_HOME:-/nonexistent}" 2>/dev/null && pwd -P)" = "$(cd "$ROOT_DIR" && pwd -P)" ]; then
+  PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
+  STATE_DIR=$ACCELERATOR_STATE_DIR
+fi
+if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
+  # Attached: describe the project the session works in, whatever the cwd.
+  cd "$PROJECT_DIR" 2>/dev/null || exit 0
+fi
 if [ -f "$EDITION_DIR/VERSION" ]; then
   # The policy digest identifies the model-facing surface: policy, skills,
   # agents, commands, settings. VERSION names a release and moves rarely, so
@@ -36,11 +56,32 @@ if [ -f "$EDITION_DIR/VERSION" ]; then
   fi
 fi
 
-# Loop detection is session-scoped; discard counters from earlier sessions.
-# Counters are namespaced by a stable hash of the repo root; only reset ours.
+if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
+  echo "Accelerator: attached from $ROOT_DIR (nothing is installed in this project)."
+  echo "Accelerator state (Project Brain, Memory Bank, index): $STATE_DIR"
+fi
+
+# Edit and repetition counts are session-scoped (loop-detection.sh and the
+# guard at the end of bash-validator.sh). Their counters sit in this user's
+# directory for this repository, keyed by session: this session's start over,
+# any session's left untouched for a day are pruned, and another session still
+# running in this checkout keeps its own. A directory this user does not own,
+# or a symbolic link in its place, is left alone.
+LOOP_INPUT=
+[ -t 0 ] || IFS= read -r -d '' LOOP_INPUT || :
+SESSION_KEY=$(printf '%s' "$LOOP_INPUT" \
+  | sed -n -E 's/.*"(session_id|conversation_id)"[[:space:]]*:[[:space:]]*"([^"]*)".*/\2/p' | head -1)
+SESSION_KEY=${SESSION_KEY//[^A-Za-z0-9]/}
+SESSION_KEY=${SESSION_KEY:0:64}
+[ -n "$SESSION_KEY" ] || SESSION_KEY=shared
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 REPO_KEY=$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)
-find "/tmp/cursor-loop-detection-$REPO_KEY" -type f -delete 2>/dev/null || true
+TRACK_BASE=${TMPDIR:-/tmp}
+TRACK_DIR="${TRACK_BASE%/}/cursor-loop-detection-${EUID:-0}-$REPO_KEY"
+if [ -d "$TRACK_DIR" ] && [ ! -L "$TRACK_DIR" ] && [ -O "$TRACK_DIR" ]; then
+  find "$TRACK_DIR" -maxdepth 1 -type f \( -name "cmd-$SESSION_KEY-*" -o -name "edit-$SESSION_KEY-*" -o -mtime +0 \) \
+    -delete 2>/dev/null || true
+fi
 
 # Git info
 if git rev-parse --git-dir > /dev/null 2>&1; then
@@ -86,7 +127,6 @@ else
 fi
 
 # Report metadata only; never index, retrieve, print, or inject record contents.
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 
 # Validation results are cached per repository state so an unchanged checkout
@@ -98,7 +138,7 @@ CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 # and `context.py validate` stays authoritative. The directory name is
 # deliberately tool-neutral: the Claude, Cursor and Codex mirrors of this
 # hook share one cache per edition checkout.
-EDITION_KEY=$(printf '%s' "$ROOT_DIR" | cksum | cut -d' ' -f1)
+EDITION_KEY=$(printf '%s' "$STATE_DIR" | cksum | cut -d' ' -f1)
 VALIDATION_CACHE_DIR="${TMPDIR:-/tmp}/ai-accelerator-session-cache-$EDITION_KEY"
 VALIDATION_CACHE_KEY=""
 if git rev-parse --git-dir >/dev/null 2>&1; then
@@ -127,7 +167,7 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
       INDEX_HEALTH="missing"
     elif [ "$INDEX_DOCUMENTS" = "0" ]; then
       INDEX_HEALTH="empty"
-    elif find AGENTS.md README.md CHANGELOG.md specs docs tasks memory-bank/chunks project-brain/dynamic project-brain/control .agents/skills .claude/skills .cursor/skills -type f -name "*.md" -newer "$INDEX_DB" -print -quit 2>/dev/null | grep -q .; then
+    elif find "$PROJECT_DIR/AGENTS.md" "$PROJECT_DIR/README.md" "$PROJECT_DIR/CHANGELOG.md" "$PROJECT_DIR/specs" "$PROJECT_DIR/docs" "$PROJECT_DIR/tasks" "$STATE_DIR/memory-bank/chunks" "$STATE_DIR/project-brain/dynamic" "$STATE_DIR/project-brain/control" "$ROOT_DIR/AGENTS.md" "$ROOT_DIR/.agents/skills" "$ROOT_DIR/.claude/skills" "$ROOT_DIR/.cursor/skills" -type f -name "*.md" -newer "$INDEX_DB" -print -quit 2>/dev/null | grep -q .; then
       INDEX_STALENESS="stale"
     else
       INDEX_STALENESS="current"
@@ -150,14 +190,18 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
   fi
 fi
 
-if [ -f "memory-bank/README.md" ] && [ -f "memory-bank/INDEX.md" ]; then
+if [ -f "$ROOT_DIR/memory-bank/README.md" ] && [ -f "$STATE_DIR/memory-bank/INDEX.md" ]; then
   if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
     MEMORY_SUMMARY=$(cache_read memory-summary)
     if [ -z "$MEMORY_SUMMARY" ]; then
-      MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "memory-bank" 2>/dev/null)
+      MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "$STATE_DIR/memory-bank" 2>/dev/null)
       [ -n "$MEMORY_SUMMARY" ] && cache_write memory-summary "$MEMORY_SUMMARY"
     fi
-    echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant durable-memory work."
+    if [ "$STATE_DIR" = "$ROOT_DIR" ]; then
+      echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant durable-memory work."
+    else
+      echo "$MEMORY_SUMMARY Read $ROOT_DIR/memory-bank/README.md and $STATE_DIR/memory-bank/INDEX.md before relevant durable-memory work."
+    fi
   else
     echo "Memory bank: available (validation unavailable)."
   fi
@@ -183,14 +227,18 @@ if [ -d "specs" ]; then
   echo "  Specs: $SPEC_COUNT"
 fi
 
-# Capsule delivery: Cursor has no UserPromptSubmit-equivalent event; the
-# stop hook maintains .cursor/rules/working-memory.mdc instead (the
-# documented exception to the metadata-only session banner - see
+# Capsule delivery: Cursor reads the Task Capsule from
+# .cursor/rules/working-memory.mdc, which the prompt and stop hooks maintain
+# (the documented exception to the metadata-only session banner - see
 # docs/TOOL-INTEGRATIONS.md). Re-render it here so a fresh session or a
 # branch switch does not serve the previous session's capsule. Nothing is
 # printed: the rule file is the only output.
 CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
-CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null)}"
+CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
+# Attached, the rule folder is the shared clone's; see the stop hook. Nor
+# when the host delivered the capsule in the prompt.
+[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
 RULES_DIR="$ROOT_DIR/.cursor/rules"
 RULE_FILE="$RULES_DIR/working-memory.mdc"
 CAPSULE=""
@@ -210,10 +258,11 @@ fi
 # JSON parse.
 #
 # Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - including 4, "the retrieval gate withheld this turn" - falls through and
-# leaves the previous rule in place. That fallthrough is the correct
-# behaviour for a skip and is relied on: an enforce-mode skip must never
-# replace Cursor's only memory channel with an empty capsule.
+# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
+# this turn" - renders nothing. The rule in place then stays only when its
+# header names this task: an enforce-mode skip must never replace Cursor's
+# only memory channel with an empty capsule, and a fresh session on a switched
+# branch whose render fails must not start with the previous branch's capsule.
 if [ "$CAPSULE_STATUS" -eq 0 ]; then
   case "$CAPSULE" in
     working:*) ;;
@@ -241,5 +290,9 @@ elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2
     rm -f "$TMP_RULE" 2>/dev/null
   fi
 fi
+[ -n "$CAPSULE_TASK_ID" ] && {
+  grep -qxF "Session context as of end of previous turn (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null \
+    || grep -qxF "Session context retrieved for a recent prompt (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null
+} || rm -f "$RULE_FILE" 2>/dev/null
 
 exit 0

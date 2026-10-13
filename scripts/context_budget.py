@@ -68,7 +68,9 @@ around them. frontmatter_bytes is the exception on purpose - it is a file
 fact, keys included, and is gated as one.
 
 Token estimates use per-class bytes-per-token ratios measured with
-cl100k on this repository's own files (docs/TOKEN-ECONOMY-RESEARCH.md),
+cl100k on this repository's own files (docs/TOKEN-ECONOMY-RESEARCH.md as of
+9435dfc1^; that commit removed it, so read it with
+`git show 9435dfc1^:docs/TOKEN-ECONOMY-RESEARCH.md`),
 not the flat bytes / 4 this script used to apply — that heuristic runs
 19-25 % high on exactly these files, which is the difference between a
 gate that reflects spend and one that does not. The ratios are estimates
@@ -82,9 +84,12 @@ Usage:
 --check reads scripts/token_budget.json ({"editions": {name: {category:
 ceiling}}}), compares every measured value against its ceiling and exits 1
 on any excess (or on a budget file that is missing, unreadable, or out of
-sync with the editions on disk). Ceilings are the observed values + ~5%
-headroom, so the gate catches regressions without flagging normal noise;
-after a deliberate slimming, tighten them to the new observed values + ~5%.
+sync with the editions on disk). The stated policy is observed values plus
+~5% headroom, so the gate catches regressions without flagging normal noise,
+and after a deliberate slimming ceilings are tightened to the new observed
+values plus ~5%. In practice some ceilings were raised by exactly one change's
+growth and sit a few bytes above the measured value; --headroom lists what is
+left.
 
 Python 3 stdlib only.
 """
@@ -120,7 +125,9 @@ STARTUP_CATEGORIES = ("agents_md_bytes", "descriptor_bytes", "command_bytes",
                       "agent_bytes")
 
 # Bytes per cl100k token, measured on this repository's own files
-# (docs/TOKEN-ECONOMY-RESEARCH.md, all figures marked [M] there). Each class
+# (docs/TOKEN-ECONOMY-RESEARCH.md as of 9435dfc1^, all figures marked [M]
+# there; read it with `git show 9435dfc1^:docs/TOKEN-ECONOMY-RESEARCH.md`,
+# because 9435dfc1 removed it from the tree). Each class
 # tokenizes differently, and one flat divisor cannot represent them: prose
 # packs more bytes per token than YAML, and skill bodies - which carry code
 # blocks, command lines and tables - pack the least.
@@ -432,10 +439,13 @@ def headroom(measurements: dict[str, dict]) -> int:
     procedural pillar that can only add rules needs that number in front of
     whoever is adding one.
 
-    No warning threshold is printed on purpose. `token_budget.json` sets every
-    ceiling at the observed value plus about five per cent, so headroom is
-    ~4.8 % of the ceiling by construction and a percentage warning would fire
-    on every category at once, which is the same as no warning at all.
+    No warning threshold is printed on purpose. `token_budget.json` states a
+    policy of observed value plus about five per cent, but ceilings were raised
+    inconsistently (some refit to observed + 5 %, others by exactly one
+    change's growth), so headroom runs from a few bytes to just under 5 % of
+    the ceiling. A warning at the policy's own threshold would fire on every
+    category at once, which is the same as no warning at all; the byte count
+    is what a rule author needs.
     """
     try:
         ceilings = json.loads(BUDGET_FILE.read_text(encoding="utf-8"))["editions"]

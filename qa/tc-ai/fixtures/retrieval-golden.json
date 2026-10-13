@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0.0",
+  "status": "awaiting-approved-thresholds",
+  "thresholds": {
+    "precision_at_5": null,
+    "recall_at_5": null,
+    "maximum_context_tokens": null
+  },
+  "queries": [
+    {
+      "id": "authority",
+      "query": "verified architecture decision",
+      "required_labels": ["verified", "architecture"],
+      "forbidden_labels": ["private", "stale"]
+    },
+    {
+      "id": "freshness",
+      "query": "current deployment procedure",
+      "required_labels": ["fresh", "procedure"],
+      "forbidden_labels": ["stale"]
+    },
+    {
+      "id": "tail-term",
+      "query": "Provide context for a long request whose distinguishing subject is xylophonic-tail-marker",
+      "required_labels": ["tail-marker"],
+      "forbidden_labels": ["private"]
+    },
+    {
+      "id": "privacy",
+      "query": "safe public context only",
+      "required_labels": ["public"],
+      "forbidden_labels": ["private"]
+    }
+  ]
+}

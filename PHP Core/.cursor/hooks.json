@@ -7,7 +7,17 @@
         "timeout": 15
       },
       {
-        "command": ".cursor/hooks/context-continuity.sh restore",
+        "command": ".cursor/hooks/context-continuity.sh",
+        "timeout": 8
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": ".cursor/hooks/working-memory-read.sh",
+        "timeout": 8
+      },
+      {
+        "command": ".cursor/hooks/context-continuity.sh",
         "timeout": 8
       }
     ],
@@ -40,15 +50,9 @@
         "timeout": 5
       }
     ],
-    "beforeSubmitPrompt": [
-      {
-        "command": ".cursor/hooks/context-continuity.sh capture",
-        "timeout": 8
-      }
-    ],
     "afterAgentResponse": [
       {
-        "command": ".cursor/hooks/context-continuity.sh capture",
+        "command": ".cursor/hooks/context-continuity.sh",
         "timeout": 8
       }
     ],

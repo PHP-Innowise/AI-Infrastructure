@@ -23,13 +23,21 @@ class CheckpointIntegrationTest(unittest.TestCase):
         self.assertEqual(contents[0], contents[2])
 
     def test_governed_mode_never_creates_duplicate_task_authority(self) -> None:
+        """Governed mode records into the one branch task the hooks keep -
+        flushing the buffered turns, then a revision-checked update - instead
+        of declining, which left the skill contradicting the hooks."""
         skill = REPOSITORY_ROOT.joinpath(SKILL_PATHS[0]).read_text(encoding="utf-8")
         self.assertIn("If its mode is\n   `governed`", skill)
-        self.assertIn("do not derive a task from the\n   branch", skill)
-        self.assertIn("do not mutate SQLite working state", skill)
-        self.assertIn("expected revision", skill)
+        self.assertIn("context.py turn --task-id <task> --flush", skill)
+        self.assertIn("--revision auto", skill)
+        self.assertIn("`CONTEXT_TASK_ID`, otherwise", skill)
+        self.assertIn("MUST NOT create a second task authority in governed mode", skill)
         self.assertLess(
             skill.index("## Authority Gate"),
+            skill.index("## Governed Workflow"),
+        )
+        self.assertLess(
+            skill.index("## Governed Workflow"),
             skill.index("## Lightweight Workflow"),
         )
 
