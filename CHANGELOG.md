@@ -1116,6 +1116,33 @@ edition's own files remain in that edition's changelog.
   acceptance CI job. Creator also supports native Windows through Codex elevated
   permission profiles, with read-only project/control roots, per-phase boundary
   probes and disposable installed-runtime validation copies.
+- Let a Harness Creator re-launch change how the run executes, and stop losing
+  a phase to its own stream budget. Three defects found while scanning a real
+  project; each one alone could end a run that had already done its work.
+  - **Re-launching a phase applies the current model, thinking effort and
+    additional-agent settings.** `act()` now accepts a `routing` object and
+    applies it before `rescan`, `revise` and `generate`; the browser sends the
+    form's values and mirrors a run's settings into the form when a different
+    run is selected. Before this, `_launch` always read the values frozen at
+    `start()`: a corrected helper count (or model, or effort) was silently
+    ignored and the stale configuration ran again - including the one that had
+    just failed. Provider, tools and operation stay frozen; they define what the
+    run is, not how the next launch executes.
+  - **Cancelling a phase is no longer refused as stale.** The cancel branch runs
+    before the revision guard and always reports the live state: a background
+    poll can advance the revision between rendering the button and clicking it
+    (the phase ends on its own), after which cancel failed with "This Creator
+    view is stale" or silently did nothing. Cancellation during `apply` and
+    `rollback` stays refused, as before.
+  - **The phase output budget scales with the helpers that share the stream,
+    and exhausting it no longer discards completed work.** The limit was a fixed
+    3 MiB regardless of helper count, so a multi-helper scan spent it on the
+    helpers' own events and died holding a half-written profile; it is now
+    3 MiB plus 3 MiB per helper, capped at 96 MiB, and unchanged at 3 MiB when
+    additional agents are disabled. On exhaustion the runner stops reading the
+    stream, asks the agent to finish, and keeps every artifact already written -
+    the canonical verification that follows decides whether the phase passed,
+    instead of the limit ending it outright.
 
 - Run Harness Creator phases on macOS through the built-in `sandbox-exec`
   (Seatbelt) profile when bubblewrap is absent: writes are allowed only in the

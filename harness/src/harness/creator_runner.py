@@ -27,6 +27,26 @@ def emit(kind, text='', **fields):
     print(json.dumps({'kind':kind,'text':str(text)[:16000],**fields}), flush=True)
 
 
+BASE_OUTPUT_LIMIT = 3 * 1024 * 1024
+PER_HELPER_OUTPUT_LIMIT = 3 * 1024 * 1024
+MAX_OUTPUT_LIMIT = 96 * 1024 * 1024
+
+
+def output_limit(agents_enabled=False, agent_count=1):
+    """Stream budget for one phase, scaled by the helpers that share the stream.
+
+    Every helper reports through the same stdout, so a fixed budget sized for a
+    lone agent is spent by the helpers' own events long before the phase ends -
+    the phase then dies holding a half-written profile. A single agent keeps the
+    original budget exactly; helpers each add their own share, capped so a large
+    helper count cannot ask for unbounded memory.
+    """
+    if not agents_enabled:
+        return BASE_OUTPUT_LIMIT
+    helpers = max(1, agent_count)
+    return min(BASE_OUTPUT_LIMIT + helpers * PER_HELPER_OUTPUT_LIMIT, MAX_OUTPUT_LIMIT)
+
+
 def run_process(command, cwd, stdin=None, provider=None, agents_enabled=False, agent_count=1):
     """Bound output while streaming; the outer process guard owns descendants/timeouts."""
     launch_started_at, native_id = time.time(), None
@@ -42,6 +62,7 @@ def run_process(command, cwd, stdin=None, provider=None, agents_enabled=False, a
             process.stdin.close()
     writer = threading.Thread(target=feed, daemon=True); writer.start()
     buffer, total, terminal, failed = b'', 0, False, False
+    limit, truncated = output_limit(agents_enabled, agent_count), False
     delegation = providers.DelegationTracker(provider, agent_count) if provider and agents_enabled else None
     selector = process_runtime.PipeSelector(); selector.register(process.stdout, selectors.EVENT_READ)
     try:
@@ -51,7 +72,15 @@ def run_process(command, cwd, stdin=None, provider=None, agents_enabled=False, a
                 continue
             chunk = selector.read(process.stdout, 65536)
             buffer += chunk or b'\n'; total += len(chunk)
-            if total > 3*1024*1024: raise SessionError('Creator phase output limit reached.')
+            if total > limit:
+                # Stop reading, but let the phase end on its own terms: the agent's
+                # artifacts are already on disk, and the canonical verification that
+                # follows decides whether the phase succeeded. Killing the phase here
+                # discarded completed work and reported only the limit.
+                truncated = True
+                emit('status', 'Creator phase output limit reached; the remaining stream is not shown. '
+                               'Artifacts already written are kept and verified.')
+                break
             lines = buffer.split(b'\n'); buffer = lines.pop()
             for line in lines:
                 if not line: continue
@@ -71,9 +100,16 @@ def run_process(command, cwd, stdin=None, provider=None, agents_enabled=False, a
                     elif item['kind'] in ('text','error','status'):
                         emit(item['kind'],item.get('text',''))
             if not chunk: break
-        code = process.wait(timeout=3)
-        if code or provider and (not terminal or failed):
-            raise SessionError('Native agent did not complete successfully.' if provider else 'Canonical verification failed; inspect the check output.')
+        if truncated:
+            # The stream is no longer drained, so the agent would block on a full
+            # pipe. Ask it to finish, then stop waiting; its files are on disk.
+            process.terminate()
+            try: process.wait(timeout=10)
+            except subprocess.TimeoutExpired: process.kill(); process.wait()
+        else:
+            code = process.wait(timeout=3)
+            if code or provider and (not terminal or failed):
+                raise SessionError('Native agent did not complete successfully.' if provider else 'Canonical verification failed; inspect the check output.')
     finally:
         cleanup_failed = process.poll() is None and not process_runtime.reap_tree(process)
         selector.close()
