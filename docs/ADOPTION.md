@@ -82,8 +82,9 @@ undocumented inventory field name.
 
 The production payload retains runtime scripts, policies, workflow
 documentation, templates, Memory Bank, Project Brain, living-spec scaffolding,
-and lowercase `tasks/`. Repository research, test suites, worked examples, and
-bundled uppercase `Task/` material are source-only and are not installed.
+and lowercase `tasks/`. Repository research, test suites and worked examples
+are source-only and are not installed. Uppercase `Task/` contents remain local
+client inputs: this repository ignores them and does not bundle them.
 Uppercase `Task/` may be created and populated later when real client
 requirements or design assets exist; lowercase `tasks/` remains the operational
 temporary-work scaffold.
@@ -186,7 +187,7 @@ used by the chosen edition. Preserve the selected production payload's
 non-tool directories and files, including `AGENTS.md`, `memory-bank/`,
 `project-brain/`, lowercase `tasks/`, `specs/`, and installed runtime
 documentation and templates. Do not manually copy source-only tests, research,
-worked examples, or bundled uppercase `Task/` material around the inventory.
+worked examples, or local uppercase `Task/` client material around the inventory.
 
 Then install only the native integration trees the team uses:
 

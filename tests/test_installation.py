@@ -305,7 +305,11 @@ class InventoryTest(unittest.TestCase):
                     self.assertIn(path, excluded)
                     self.assertTrue((ROOT / EDITION_PATHS[edition] / path).is_file())
                     self.assertIn(path, tracked)
-            self.assertTrue(any(path.startswith("Task/") for path in excluded))
+            # Client inputs remain local, outside both the tracked tree and its inventory.
+            self.assertFalse(any(path.startswith("Task/") for path in tracked))
+            self.assertFalse(any(path.startswith("Task/") for path in excluded))
+            self.assertFalse(any(path.startswith("Task/")
+                                 for paths in data["installed"].values() for path in paths))
 
     def test_inventory_metadata_is_deterministic(self) -> None:
         inventory_paths = tuple(
@@ -847,6 +851,26 @@ class UntrackedSourceTest(unittest.TestCase):
             leak = base / "Symfony" / relative
             leak.parent.mkdir(parents=True, exist_ok=True)
             leak.write_text(self.MARKER + "\n", encoding="utf-8")
+
+    def test_tracked_client_input_is_excluded_from_installation(self) -> None:
+        # Even an explicitly tracked client input in a consuming source stays unshipped.
+        with tempfile.TemporaryDirectory(prefix="tracked client input ") as raw:
+            base = Path(raw).resolve()
+            self._write_editions(base)
+            client = base / "Symfony" / "Task" / "client-note.md"
+            client.parent.mkdir()
+            client.write_text("# Synthetic client requirement\n", encoding="utf-8")
+            initialized = run("git", "-c", "init.defaultBranch=main", "init", "-q", str(base))
+            self.assertEqual(0, initialized.returncode, initialized.stderr)
+            staged = run("git", "add", "--", *(path.as_posix() for path in EDITION_PATHS.values()), cwd=base)
+            self.assertEqual(0, staged.returncode, staged.stderr)
+            generated = run(sys.executable, str(INSTALLER), "--source-root", str(base),
+                            "--write-inventories", cwd=base)
+            self.assertEqual(0, generated.returncode, generated.stderr)
+            data = json.loads((base / "install" / "inventories" / "symfony.json").read_text(encoding="utf-8"))
+            self.assertIn("Task/client-note.md", data["excluded_tracked_paths"])
+            self.assertFalse(any(path.startswith("Task/")
+                                 for paths in data["installed"].values() for path in paths))
 
     def test_untracked_files_are_absent_from_generated_inventories(self) -> None:
         with tempfile.TemporaryDirectory(prefix="untracked source ") as raw:

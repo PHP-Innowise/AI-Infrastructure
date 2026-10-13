@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -362,11 +363,32 @@ class TestAgainstTheBinary(unittest.TestCase):
         self.assertEqual([f for f in collected if f.startswith("Task/")], [])
 
     def test_the_client_data_guard_is_load_bearing(self):
-        # Without the guard the same scope reaches the Epic specs; if this ever
-        # stops being true the test above has become vacuous.
-        collected = self.bundle_files("custom", "--include", "Laravel/**/*.md",
-                                      "--with-task")
-        self.assertTrue([f for f in collected if "/Task/Epics/" in f])
+        # Exercise both modes on public synthetic inputs, without bundled client data.
+        with tempfile.TemporaryDirectory(prefix="collect client inputs ") as raw:
+            root = Path(raw)
+            script = root / "scripts" / "collect_context.py"
+            script.parent.mkdir()
+            shutil.copyfile(SCRIPT, script)
+            specimens = {
+                "Laravel/README.md": "# Synthetic accelerator\n",
+                "Laravel/tasks/workflow.md": "# Synthetic workflow\n",
+                "Laravel/Task/Epics/client.md": "# Synthetic client requirement\n",
+            }
+            for name, text in specimens.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            for opted_in in (False, True):
+                with self.subTest(with_task=opted_in):
+                    args = [sys.executable, str(script), "custom", "--include", "Laravel/**/*.md",
+                            "--format", "json", "--stdout"]
+                    if opted_in:
+                        args.append("--with-task")
+                    proc = subprocess.run(args, cwd=root, capture_output=True, text=True, timeout=180)
+                    self.assertEqual(0, proc.returncode, proc.stderr)
+                    expected = set(specimens) if opted_in else set(specimens) - {"Laravel/Task/Epics/client.md"}
+                    self.assertEqual(expected, set(json.loads(proc.stdout)["files"]))
+                    self.assertEqual(opted_in, "WARNING: --with-task includes Task/" in proc.stderr)
 
     def test_generated_mirrors_stay_out_of_an_edition_bundle(self):
         collected = self.bundle_files("skills", "--edition", "Symfony")

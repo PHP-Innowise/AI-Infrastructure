@@ -62,7 +62,7 @@ CHANGELOG.md              # Versioned accelerator changes
 .cursor/                  # Cursor-native mirror and adapters
 .agents/skills/           # Canonical shared skills; Codex discovery
 .codex/                   # Codex config, hooks, and references
-Task/                     # Source-only sample/client material; not installed
+Task/                     # Optional local client inputs; no bundled contents
 tasks/                    # Installed temporary-task scaffold
 specs/                    # Permanent living specifications
 memory-bank/              # Indexed durable cross-session project memory
@@ -79,9 +79,9 @@ runtime scripts, hooks, skills, workflow documentation, templates,
 `memory-bank/`, `project-brain/`, `specs/`, and the lowercase `tasks/`
 scaffold.
 
-Source-only research, test suites, source-only worked examples, and this
-repository's bundled uppercase `Task/` product/design material are not
-installed. The Symfony clean-code patterns remain because active workflow
+Source-only research, test suites and worked examples are not installed.
+This accelerator repository does not track or bundle uppercase `Task/` contents.
+The Symfony clean-code patterns remain because active workflow
 documentation references them. A client project may create and populate
 uppercase `Task/` when real requirements or design inputs exist. Lowercase
 `tasks/` has a separate role: it remains the temporary, skill-prefixed

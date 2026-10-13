@@ -61,9 +61,10 @@ an edition directory.
 The production payload keeps the files required to operate and adapt the
 accelerator: policies, native tool integrations, runtime scripts, workflow
 documentation, templates, Memory Bank, Project Brain, living-spec and
-lowercase `tasks/` scaffolds. Source-only research, test suites, worked
-examples, and bundled uppercase `Task/` product/design material remain useful
-in this repository but are not copied into a consuming project.
+lowercase `tasks/` scaffolds. Source-only research, test suites and worked
+examples remain in this repository but are not copied into a consuming project.
+Uppercase `Task/` contents are local client inputs, ignored by this repository
+and absent from its versioned payload.
 
 Memory written while working inside an edition is source-only too. Every
 Memory Bank chunk (`memory-bank/chunks/**`) and the governed Brain runtime
@@ -80,8 +81,7 @@ until the inventories are regenerated, which lists it under
 
 - uppercase `Task/` is optional client-input space. A consuming project or
   generation workflow may create and populate it when actual client
-  requirements or design assets exist; the ready-made package does not seed it
-  with this repository's material;
+  requirements or design assets exist; the ready-made package does not seed it;
 - lowercase `tasks/` is the installed operational scaffold for temporary,
   skill-prefixed `TASK-NNN/` work artifacts.
 

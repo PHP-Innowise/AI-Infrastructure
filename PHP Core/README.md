@@ -49,7 +49,7 @@ AGENTS.md                # Shared, enforceable policy (all tools)
 .agents/skills/          # Codex skills (shared .agents convention)
 .codex/                  # Codex config.toml, hooks.json, hooks/, docs
 
-Task/                    # Source-only sample/client material; not installed
+Task/                    # Optional local client inputs; no bundled contents
 tasks/                   # Installed temporary-task scaffold
 specs/                   # Permanent living specifications
 memory-bank/             # Indexed durable cross-session project memory
@@ -66,9 +66,9 @@ scripts, policies, hooks, skills, workflow documentation, templates,
 `memory-bank/`, `project-brain/`, `specs/`, and the lowercase `tasks/`
 operational scaffold.
 
-Source-only research, tests, worked examples, and this repository's bundled
-uppercase `Task/` product/design material stay in the source repository and
-are not installed. A consuming project may create and populate uppercase
+Source-only research, tests and worked examples stay in the source repository
+and are not installed. This accelerator repository does not track or bundle
+uppercase `Task/` contents. A consuming project may create and populate uppercase
 `Task/` when real client input exists. Lowercase `tasks/` is separate and
 remains the temporary, skill-prefixed `TASK-NNN/` workspace used by normal
 accelerator workflows.

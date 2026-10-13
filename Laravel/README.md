@@ -49,7 +49,7 @@ AGENTS.md                # Shared, enforceable policy (all tools)
 .agents/skills/          # Codex skills (shared .agents convention)
 .codex/                  # Codex config.toml, hooks.json, hooks/, docs
 
-Task/                    # Source-only sample/client material; not installed
+Task/                    # Optional local client inputs; no bundled contents
 tasks/                   # Installed temporary-task scaffold
 specs/                   # Permanent living specifications
 memory-bank/             # Indexed durable cross-session project memory
@@ -65,9 +65,9 @@ Production inventories keep the runtime needed by a consuming Laravel project:
 workflow documentation, templates, `memory-bank/`, `project-brain/`, `specs/`,
 and the lowercase `tasks/` operational scaffold.
 
-Source-only research, tests, worked examples, and this repository's bundled
-uppercase `Task/` product/design material remain available to maintainers but
-are not copied into client projects. Uppercase `Task/` is optional client-input
+Source-only research, tests and worked examples remain available to maintainers
+but are not copied into client projects. This accelerator repository does not
+track or bundle uppercase `Task/` contents. Uppercase `Task/` is optional client-input
 space: create and populate it only when the consuming project actually has
 requirements or design assets to place there. It is distinct from lowercase
 `tasks/`, which remains available for temporary, skill-prefixed `TASK-NNN/`

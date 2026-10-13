@@ -26,6 +26,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- Keep uppercase `Task/` client applications, specifications and project work
+  local instead of versioning them in the accelerator repository. Regenerate
+  source inventories without changing installed payloads; use synthetic client
+  inputs to test installer exclusion and collection opt-in. Lowercase `tasks/`
+  workflow scaffolds remain versioned and installed.
+
 - Align Harness integration assertions with lossless compact capsule delivery,
   independent cost receipts and runtime-confirmed repeat saves. Preserve full
   capsule and warning checks, preview/delivery meter separation, refusal before
