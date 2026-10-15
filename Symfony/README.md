@@ -80,8 +80,9 @@ runtime scripts, hooks, skills, workflow documentation, templates,
 scaffold.
 
 Source-only research, test suites and worked examples are not installed.
-Restored uppercase `Task/` material is tracked as source-only reference work
-and excluded from installation.
+Only uppercase `Task/` assignment requirements, backlogs and design inputs are
+tracked and excluded from installation. `Task/app/` and generated
+`Task/project-work/` remain untracked.
 The Symfony clean-code patterns remain because active workflow
 documentation references them. A client project may create and populate
 uppercase `Task/` when real requirements or design inputs exist. Lowercase

@@ -66,8 +66,9 @@ workflow documentation, templates, `memory-bank/`, `project-brain/`, `specs/`,
 and the lowercase `tasks/` operational scaffold.
 
 Source-only research, tests and worked examples remain available to maintainers
-but are not copied into client projects. This repository tracks the restored
-uppercase `Task/` material as source-only reference work; it is not installed.
+but are not copied into client projects. This repository tracks only uppercase
+`Task/` assignment requirements, backlogs and design inputs; these are not installed.
+Applications under `Task/app/` and generated `Task/project-work/` remain untracked.
 Uppercase `Task/` is optional client-input
 space: create and populate it only when the consuming project actually has
 requirements or design assets to place there. It is distinct from lowercase

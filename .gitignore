@@ -11,3 +11,6 @@ memory-bank/local/
 infrastructure-creator/tasks/
 /docs/Accelerator-TestEvidence-Submission/
 /docs/qa/evidence*/
+# Keep the assignment in Git; implementation and generated work stay local.
+**/Task/app/
+**/Task/project-work/
