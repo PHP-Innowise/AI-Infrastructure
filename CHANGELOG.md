@@ -1,5 +1,7 @@
 # Changelog
 
+- Restore the 971 historical client `Task/` source files to version control; keep them excluded from installed accelerator payloads and classify them in inventories.
+
 Shared-core history for the PHP AI Accelerators monorepo. The shared
 core is what the `Laravel/`, `Symfony/` and `PHP Core/` editions have
 in common: the Python memory/context core (`memory-bank/scripts/`,

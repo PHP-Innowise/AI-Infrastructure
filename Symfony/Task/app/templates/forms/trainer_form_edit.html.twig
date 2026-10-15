@@ -1,0 +1,79 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ mode == 'create' ? 'Create' : 'Edit' }} {{ formType|capitalize }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ mode == 'create' ? 'Create' : 'Edit' }} {{ formType|capitalize }}</h1>
+
+        {% if mode == 'edit' and form is defined %}
+            <p class="skeleton-caption">
+                {% if isPublished is defined and isPublished %}
+                    Shareable link: <code>{{ url('forms_public_show', {code: form.shareableSlug}) }}</code>
+                {% else %}
+                    Not published yet.
+                    <form method="post" action="{{ path('forms_trainer_form_publish', {form: form.id}) }}" style="display:inline">
+                        <input type="hidden" name="_token" value="{{ csrf_token('form-publish' ~ form.id) }}">
+                        <button type="submit">Publish</button>
+                    </form>
+                {% endif %}
+            </p>
+
+            {# AC-08-28: warns how many participants are already registered. #}
+            {% if submissionCount is defined and submissionCount > 0 %}
+                <p role="status">{{ submissionCount }} participant(s) already registered. Changing fields or pricing does not affect existing registrations.</p>
+            {% endif %}
+
+            <p>
+                <a href="{{ path('forms_trainer_form_preview', {form: form.id}) }}">Preview</a>
+                &nbsp;|&nbsp;
+                <a href="{{ path('forms_trainer_submissions_index', {form: form.id}) }}">View Registrations</a>
+                {% if form.isCamp %}
+                    &nbsp;|&nbsp;
+                    <form method="post" action="{{ path('forms_trainer_form_toggle', {form: form.id}) }}" style="display:inline">
+                        <input type="hidden" name="_token" value="{{ csrf_token('form-toggle' ~ form.id) }}">
+                        <button type="submit">{{ form.isActiveFlag ? 'Disable Registration' : 'Enable Registration' }}</button>
+                    </form>
+                {% endif %}
+                &nbsp;|&nbsp;
+                <form method="post" action="{{ path('forms_trainer_form_delete', {form: form.id}) }}" style="display:inline" onsubmit="return confirm('Delete this form? This cannot be undone.');">
+                    <input type="hidden" name="_token" value="{{ csrf_token('form-delete' ~ form.id) }}">
+                    <button type="submit">Delete</button>
+                </form>
+            </p>
+        {% endif %}
+
+        {{ form_start(formView) }}
+            {# Global (non-field) errors -- e.g. Form::guardFields() rejecting
+               a submission missing the reserved participant name/email
+               fields (AC-08-2). Symfony's default theme only renders
+               field-level errors via form_row(); form-level ones need this
+               explicit call. #}
+            {{ form_errors(formView) }}
+
+            {{ form_row(formView.name) }}
+            {{ form_row(formView.description) }}
+            {% if formView.capacityLimit is defined %}
+                {{ form_row(formView.capacityLimit) }}
+            {% endif %}
+            {{ form_row(formView.priceMinorUnits) }}
+
+            <h2>Registration Fields</h2>
+            {# BR-08-2: Text/Email/Dropdown/Multi-select only. Reordering by
+               drag-and-drop and a JS "add another" control are
+               coder-frontend/Stimulus territory — see
+               templates/content/trainer_learn_form.html.twig's identical
+               note. Blank rows below (TrainerFormController::initialFieldRows())
+               are how a new field is added without JavaScript. #}
+            <div>
+                {% for field in formView.fields %}
+                    <fieldset>
+                        {{ form_widget(field) }}
+                    </fieldset>
+                {% endfor %}
+            </div>
+
+            {{ form_row(formView.submit) }}
+        {{ form_end(formView) }}
+    </div>
+{% endblock %}

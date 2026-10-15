@@ -11,5 +11,3 @@ memory-bank/local/
 infrastructure-creator/tasks/
 /docs/Accelerator-TestEvidence-Submission/
 /docs/qa/evidence*/
-# Client-owned inputs and applications stay local to this accelerator checkout.
-**/Task/

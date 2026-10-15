@@ -1,0 +1,16 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Your profile — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Your profile</h1>
+        <p class="skeleton-caption">Email: {{ account.email }} (read-only) · Role: {{ account.role.label }} (read-only)</p>
+
+        {# Symfony renders enctype="multipart/form-data" automatically because
+           this form contains a FileType field (the photo upload). #}
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

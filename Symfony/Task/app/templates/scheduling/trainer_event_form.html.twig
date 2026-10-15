@@ -1,0 +1,25 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}
+    {% if mode == 'edit' %}Edit event{% elseif mode == 'duplicate' %}Duplicate event{% else %}Create event{% endif %} — PracticePerfect
+{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>
+            {% if mode == 'edit' %}Edit event{% elseif mode == 'duplicate' %}Duplicate event{% else %}Create event{% endif %}
+        </h1>
+
+        {% if mode == 'duplicate' %}
+            <p class="skeleton-caption">Pre-filled from the original event. You must change the date/time before saving.</p>
+        {% endif %}
+
+        {% if isEventMaster is defined and isEventMaster %}
+            <p class="skeleton-caption">Editing as Super Admin — scheduling-conflict warnings are overridden automatically.</p>
+        {% endif %}
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

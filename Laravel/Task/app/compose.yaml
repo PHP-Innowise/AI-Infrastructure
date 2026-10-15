@@ -1,0 +1,155 @@
+name: ${COMPOSE_PROJECT_NAME:-practiceperfect-laravel}
+
+# PracticePerfect runtime, Laravel edition. Docker Compose is the only supported
+# way to run this application: nothing here requires PHP, Composer, Node or
+# PostgreSQL on the host. See specs/architect-architecture.md, "Deployment".
+
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: docker/php/Dockerfile
+    args:
+      UID: ${UID:-1000}
+      GID: ${GID:-1000}
+
+# Connection strings are composed here from the role credentials rather than
+# restated in .env, so there is exactly one place where "which role does the
+# application connect as" is decided.
+x-app-environment: &app-environment
+  DB_CONNECTION: pgsql
+  DB_HOST: db
+  DB_PORT: "5432"
+  DB_DATABASE: ${POSTGRES_DB:-practiceperfect}
+  # The application connects as the RLS-bound role. Migrations override this
+  # with the owner credentials for the duration of the command only.
+  DB_USERNAME: ${APP_DB_USER:-pp_app}
+  DB_PASSWORD: ${APP_DB_PASSWORD:-app_dev_only}
+  # Owner: DDL and migrations. Crossing: read-only, BYPASSRLS, projections only.
+  DB_OWNER_USERNAME: ${POSTGRES_OWNER_USER:-pp_owner}
+  DB_OWNER_PASSWORD: ${POSTGRES_OWNER_PASSWORD:-owner_dev_only}
+  DB_CROSSING_USERNAME: ${CROSSING_DB_USER:-pp_crossing}
+  DB_CROSSING_PASSWORD: ${CROSSING_DB_PASSWORD:-crossing_dev_only}
+  MAIL_MAILER: smtp
+  MAIL_HOST: mail
+  MAIL_PORT: "1025"
+  QUEUE_CONNECTION: database
+  CACHE_STORE: database
+  SESSION_DRIVER: database
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 17. Row-Level Security is load-bearing, so this container
+  # bootstraps three roles: owner (DDL), application (RLS-bound), crossing
+  # (read-only, BYPASSRLS). No other engine is acceptable for this product.
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-practiceperfect}
+      POSTGRES_USER: ${POSTGRES_OWNER_USER:-pp_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_OWNER_PASSWORD:-owner_dev_only}
+      APP_DB_USER: ${APP_DB_USER:-pp_app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:-app_dev_only}
+      CROSSING_DB_USER: ${CROSSING_DB_USER:-pp_crossing}
+      CROSSING_DB_PASSWORD: ${CROSSING_DB_PASSWORD:-crossing_dev_only}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    ports:
+      # Deliberately unusual host ports: 5432 and 8025 are commonly taken by
+      # another local stack, and a collision fails `up` outright.
+      - "${DB_PORT_HOST:-15434}:5432"
+
+  php:
+    <<: *app-build
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      <<: *app-environment
+    volumes:
+      - ./:/app
+      - app-storage:/app/storage
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/php-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  web:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    volumes:
+      - ./public:/app/public:ro
+      - ./docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${HTTP_PORT:-8091}:80"
+    healthcheck:
+      # 127.0.0.1, not localhost: inside the container localhost resolves to
+      # ::1 first, and nginx binds IPv4 only, so the check would never pass.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Queue worker. The database driver is deliberate: no Redis in the MVP compose
+  # (specs/architect-architecture.md, Decisions). Scheduled work runs here too,
+  # because a Compose-only constraint forbids host cron.
+  # ---------------------------------------------------------------------------
+  worker:
+    <<: *app-build
+    restart: unless-stopped
+    depends_on:
+      php:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      <<: *app-environment
+    volumes:
+      - ./:/app
+      - app-storage:/app/storage
+    command: ["worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'queue:work' >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+
+  mail:
+    image: axllent/mailpit:v1.21
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "${MAIL_UI_PORT:-8126}:8025"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8025/livez || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  db-data:
+  app-storage:

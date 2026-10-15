@@ -1,0 +1,40 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Billing — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Billing</h1>
+
+        {% if settings.stripeConnected %}
+            <p role="status">Stripe Connected ✓</p>
+        {% else %}
+            <p role="status">Stripe not connected</p>
+            <form method="post" action="{{ path('billing_trainer_stripe_connect') }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('billing-stripe-connect') }}">
+                <button type="submit">Connect Stripe</button>
+            </form>
+        {% endif %}
+
+        <dl>
+            <dt>Application fee</dt>
+            <dd>{{ (settings.platformFeeBasisPoints / 100) }}%</dd>
+            <dt>Monthly subscription price</dt>
+            <dd>${{ '%0.2f'|format(settings.monthlySubscriptionPriceMinorUnits / 100) }}</dd>
+            <dt>Token price</dt>
+            <dd>${{ '%0.2f'|format(settings.tokenPriceMinorUnits / 100) }}</dd>
+            <dt>Payout schedule</dt>
+            <dd>{{ settings.payoutSchedule }}</dd>
+        </dl>
+
+        <p><a href="{{ path('billing_trainer_pricing_edit') }}">Edit pricing</a></p>
+        <p><a href="{{ path('billing_trainer_earnings') }}">View earnings</a></p>
+
+        <h2>Token packages</h2>
+        <ul>
+            {% for package in packages %}
+                <li>{{ package.label }} — {{ package.tokenCount }} tokens — ${{ '%0.2f'|format(package.priceMinorUnits / 100) }}{% if not package.active %} (inactive){% endif %}</li>
+            {% endfor %}
+        </ul>
+    </div>
+{% endblock %}

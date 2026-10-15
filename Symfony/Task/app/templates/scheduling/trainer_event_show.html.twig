@@ -1,0 +1,53 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ event.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ event.eventType }} · {{ event.displayStatus(now) }}</p>
+        <h1>{{ event.title }}</h1>
+        <p>{{ event.startsAt|date('l, F j, Y \\a\\t g:i A', event.trainer.timezone) }} — {{ event.location }}</p>
+        <p>Capacity: {{ rsvpCount }} / {{ event.capacity }}</p>
+        {% if event.description %}<p>{{ event.description }}</p>{% endif %}
+
+        {% if event.canceled %}
+            <p role="status">Canceled: {{ event.canceledReason }}</p>
+        {% endif %}
+
+        {# AC-02-40: recorded attendance is visible to the trainer (and Super Admin) here. #}
+        {% if attendanceRecords is not empty %}
+            <h2>Attendance</h2>
+            <table>
+                <thead><tr><th>Player</th><th>Status</th></tr></thead>
+                <tbody>
+                    {% for record in attendanceRecords %}
+                        <tr>
+                            <td>{{ record.player.firstName }}</td>
+                            <td>{{ record.status }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+
+        <nav>
+            {% if isEventMaster is defined and isEventMaster %}
+                <a href="{{ path('administration_event_master_edit', {event: event.id}) }}">Edit</a>
+                ·
+                <a href="{{ path('administration_event_master_cancel', {event: event.id}) }}">Cancel event</a>
+                ·
+                <a href="{{ path('administration_event_master_rsvps', {event: event.id}) }}">RSVP List</a>
+            {% else %}
+                <a href="{{ path('scheduling_trainer_event_edit', {event: event.id}) }}">Edit</a>
+                ·
+                <a href="{{ path('scheduling_trainer_event_duplicate', {event: event.id}) }}">Duplicate</a>
+                ·
+                <a href="{{ path('scheduling_trainer_event_cancel', {event: event.id}) }}">Cancel event</a>
+                ·
+                <a href="{{ path('scheduling_trainer_event_rsvps', {event: event.id}) }}">RSVP List</a>
+                ·
+                <a href="{{ path('scheduling_trainer_event_attendance', {event: event.id}) }}">Take Attendance</a>
+            {% endif %}
+        </nav>
+    </div>
+{% endblock %}

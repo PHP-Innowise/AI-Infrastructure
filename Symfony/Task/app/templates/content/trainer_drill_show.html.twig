@@ -1,0 +1,40 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ drill.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">
+            {{ drill.difficultyLevel }}
+            {% if drill.public %}<span class="badge badge--public">Public</span>{% endif %}
+        </p>
+        <h1>{{ drill.title }}</h1>
+        <p>By {{ drill.trainer.businessName }}</p>
+
+        {% if drill.instructions %}<p>{{ drill.instructions }}</p>{% endif %}
+
+        <p>
+            <a href="{{ drill.youtubeUrl }}" target="_blank" rel="noopener">Watch demonstration</a>
+        </p>
+
+        <dl>
+            <dt>Categories</dt><dd>{{ drill.categories|join(', ') }}</dd>
+            {% if drill.equipment %}<dt>Equipment</dt><dd>{{ drill.equipment|join(', ') }}</dd>{% endif %}
+            {% if drill.spaceRequirement %}<dt>Space</dt><dd>{{ drill.spaceRequirement }}</dd>{% endif %}
+            {% if drill.playerCount %}<dt>Player count</dt><dd>{{ drill.playerCount }}</dd>{% endif %}
+            {% if drill.durationMinMinutes or drill.durationMaxMinutes %}
+                <dt>Duration</dt><dd>{{ drill.durationMinMinutes }}–{{ drill.durationMaxMinutes }} min</dd>
+            {% endif %}
+        </dl>
+
+        {% if is_granted('CONTENT_ITEM_EDIT', drill) %}
+            <nav>
+                <a href="{{ path('content_trainer_drill_edit', {drill: drill.id}) }}">Edit</a>
+                ·
+                <a href="{{ path('content_trainer_drill_visibility', {drill: drill.id}) }}">Visibility</a>
+                ·
+                <a href="{{ path('content_trainer_drill_delete', {drill: drill.id}) }}">Delete</a>
+            </nav>
+        {% endif %}
+    </div>
+{% endblock %}

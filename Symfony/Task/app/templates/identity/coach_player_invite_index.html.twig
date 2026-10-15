@@ -1,0 +1,33 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Invite a player — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Invite Player</h1>
+        <p>Generate a unique invite link to copy or send by email.</p>
+
+        {{ form_start(form, {action: path('identity_coach_player_invite')}) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+
+        <h2>Your sent invitations</h2>
+        {% if invites is empty %}
+            <p>No invitations sent yet.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Link</th><th>Sent to</th><th>Status</th></tr></thead>
+                <tbody>
+                    {% for invite in invites %}
+                        <tr>
+                            <td>/invite/{{ invite.code }}</td>
+                            <td>{{ invite.targetEmail }}</td>
+                            {# AC-03-52: pending / accepted. #}
+                            <td>{{ invite.useCount > 0 ? 'Accepted' : 'Pending' }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

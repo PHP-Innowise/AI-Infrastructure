@@ -1,0 +1,64 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}All Players — CRM Master — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>All Players</h1>
+        <p><a href="{{ path('crm_super_admin_dashboard') }}">System-wide Quick View</a></p>
+
+        <form method="get" action="{{ path('crm_super_admin_players_index') }}" role="search">
+            <input type="search" name="q" placeholder="Search player, trainer, or email...">
+
+            <select name="trainer">
+                <option value="">All trainers</option>
+                {% for trainer in trainers %}
+                    <option value="{{ trainer.id }}">{{ trainer.businessName }}</option>
+                {% endfor %}
+            </select>
+
+            <label>Skill Level <input type="text" name="skillLevel"></label>
+            <label>Age min <input type="number" name="minAge"></label>
+            <label>Age max <input type="number" name="maxAge"></label>
+            <select name="gender">
+                <option value="">All genders</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="other">Other</option>
+            </select>
+
+            <fieldset>
+                <legend>Flags</legend>
+                {% for type, def in flagDefinitions %}
+                    <label><input type="checkbox" name="flags[]" value="{{ type }}"> {{ def }}</label>
+                {% endfor %}
+            </fieldset>
+
+            <label>Registered from <input type="date" name="registeredFrom"></label>
+            <label>Registered to <input type="date" name="registeredTo"></label>
+
+            <button type="submit">Search</button>
+        </form>
+
+        <p class="skeleton-caption">{{ total }} player{{ total == 1 ? '' : 's' }} across all trainers</p>
+
+        {% if items is empty %}
+            <p>No players match your filters.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Name</th><th>Trainer</th><th>Age</th><th>Gender</th><th>Skill</th></tr></thead>
+                <tbody>
+                    {% for item in items %}
+                        <tr>
+                            <td><a href="{{ path('crm_super_admin_player_show', {membership: item.membership_id}) }}">{{ item.first_name }}</a></td>
+                            <td>{{ item.trainer_name }}</td>
+                            <td>{{ item.date_of_birth }}</td>
+                            <td>{{ item.gender }}</td>
+                            <td>{{ item.skill_level }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -1,0 +1,51 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}LPPP — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <nav>
+            <a href="{{ path('content_portal_index', {tab: 'learn'}) }}" {{ tab == 'learn' ? 'aria-current="page"' : '' }}>Learn</a>
+            ·
+            <a href="{{ path('content_portal_index', {tab: 'practice'}) }}" {{ tab == 'practice' ? 'aria-current="page"' : '' }}>Practice</a>
+            ·
+            <a href="{{ path('content_portal_progress') }}">Progress</a>
+        </nav>
+
+        {% if tab == 'learn' %}
+            <h1>Learn</h1>
+            {% if rows is empty %}
+                <p>No content available yet.</p>
+            {% else %}
+                <ul>
+                    {% for row in rows %}
+                        <li>
+                            <a href="{{ path('content_portal_playlist_show', {playlist: row.playlist.id}) }}">{{ row.playlist.title }}</a>
+                            {% if row.suggested %}<span class="badge">Suggested</span>{% endif %}
+                            {% if row.locked %}
+                                <span role="status">Locked</span>
+                            {% elseif row.progress %}
+                                <span>{{ row.progress.completed }} of {{ row.progress.total }} videos completed</span>
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        {% else %}
+            <h1>Practice</h1>
+            {% if rows is empty %}
+                <p>No workouts assigned yet.</p>
+            {% else %}
+                <ul>
+                    {% for row in rows %}
+                        <li>
+                            <a href="{{ path('content_portal_playlist_show', {playlist: row.playlist.id}) }}">{{ row.playlist.title }}</a>
+                            {% if row.dueDate %}<span>Due {{ row.dueDate|date('M j, Y') }}</span>{% endif %}
+                            <span>{{ row.progress.completed }} of {{ row.progress.total }} drills completed</span>
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% endif %}
+        {% endif %}
+    </div>
+{% endblock %}

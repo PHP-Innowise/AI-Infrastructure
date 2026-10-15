@@ -1,0 +1,32 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Usage — {{ coupon.code }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Usage — {{ coupon.code }}</h1>
+        <p><a href="{{ path('growth_trainer_coupons_index') }}">&larr; Back to Coupons</a></p>
+
+        {# AC-06-27: "view usage details (the list of players who used it)" #}
+        {% if redemptions is empty %}
+            <p>This coupon has not been used yet.</p>
+        {% else %}
+            <table>
+                <thead>
+                    <tr><th>Player</th><th>Original price</th><th>Discount</th><th>Final price</th><th>Redeemed at</th></tr>
+                </thead>
+                <tbody>
+                    {% for redemption in redemptions %}
+                        <tr>
+                            <td>{{ redemption.player.firstName }}</td>
+                            <td>${{ '%0.2f'|format(redemption.originalPriceMinorUnits / 100) }}</td>
+                            <td>${{ '%0.2f'|format(redemption.discountAmountMinorUnits / 100) }}</td>
+                            <td>${{ '%0.2f'|format(redemption.finalPriceMinorUnits / 100) }}</td>
+                            <td>{{ redemption.redeemedAt|date('Y-m-d H:i') }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

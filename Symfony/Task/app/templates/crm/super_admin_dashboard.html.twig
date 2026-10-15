@@ -1,0 +1,56 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}System-Wide CRM Dashboard — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>System-Wide Quick View</h1>
+        <p><a href="{{ path('crm_super_admin_players_index') }}">All Players</a></p>
+
+        {# AC-03-57: total players and sessions this week, across every trainer. Deliberately no revenue figure — see SuperAdminCrmController's own docblock. #}
+        <section>
+            <h2>Totals</h2>
+            <p>{{ totalPlayers }} total players across all trainers</p>
+            <p>{{ sessionsThisWeek }} sessions this week (all trainers)</p>
+        </section>
+
+        <section>
+            <h2>System-Wide Top Players</h2>
+            {% if topPlayers is empty %}
+                <p>No qualifying players in the last 90 days.</p>
+            {% else %}
+                <ol>
+                    {% for row in topPlayers %}
+                        <li>{{ row.name }} ({{ row.trainerName }}) - {{ row.sessionCount }} sessions</li>
+                    {% endfor %}
+                </ol>
+            {% endif %}
+        </section>
+
+        <section>
+            <h2>System-Wide Flag Counts</h2>
+            <ul>
+                {% for type, def in flagDefinitions %}
+                    <li>{{ def }}: {{ flagCounts[type] }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+
+        {# AC-03-57: drill down by selecting a trainer. #}
+        <section>
+            <h2>Drill down by trainer</h2>
+            <form method="get" action="{{ path('crm_super_admin_dashboard') }}">
+                <select name="trainer">
+                    <option value="">Select a trainer...</option>
+                    {% for trainer in trainers %}
+                        <option value="{{ trainer.id }}" {{ drillDownTrainerId == trainer.id ? 'selected' }}>{{ trainer.businessName }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit">View</button>
+            </form>
+            {% if drillDownTrainerId %}
+                <p><a href="{{ path('crm_trainer_quick_view') }}">View that trainer's own Quick View</a> (requires an administrative session for that trainer).</p>
+            {% endif %}
+        </section>
+    </div>
+{% endblock %}

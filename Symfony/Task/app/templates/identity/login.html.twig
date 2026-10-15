@@ -1,0 +1,39 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Sign in — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">PracticePerfect</p>
+        <h1>Sign in</h1>
+
+        {% if accountStatusMessage %}
+            {# AC-01-52 edge case: "Account deactivated. Contact support." —
+               not an enumeration risk, since a correct password already
+               proves the visitor owns these credentials. #}
+            <p role="alert" class="form-error">{{ accountStatusMessage }}</p>
+        {% elseif error %}
+            {# Generic by design: distinguishing "no such account" from "wrong
+               password" would turn this form into an enumeration oracle. #}
+            <p role="alert" class="form-error">Invalid credentials.</p>
+        {% endif %}
+
+        <form method="post" action="{{ path('identity_auth_login') }}">
+            <div class="form-row">
+                <label for="username">Email</label>
+                <input type="email" id="username" name="_username"
+                       value="{{ last_username }}" autocomplete="email" required autofocus>
+            </div>
+
+            <div class="form-row">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="_password"
+                       autocomplete="current-password" required>
+            </div>
+
+            <input type="hidden" name="_csrf_token" value="{{ csrf_token('authenticate') }}">
+
+            <button type="submit" class="button button--primary">Sign in</button>
+        </form>
+    </div>
+{% endblock %}

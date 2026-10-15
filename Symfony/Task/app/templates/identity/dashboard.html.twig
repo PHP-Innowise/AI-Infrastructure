@@ -1,0 +1,55 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ roleLabel }} dashboard — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ roleLabel }}</p>
+        <h1>Welcome, {{ account.profile ? account.profile.firstName : account.email }}</h1>
+
+        <p>You are signed in as <strong>{{ account.email }}</strong>.</p>
+
+        {% if not account.emailVerified %}
+            <p class="skeleton-caption">
+                Your email address is not verified.
+                <form method="post" action="{{ path('identity_email_verify_resend') }}" style="display:inline">
+                    <input type="hidden" name="_token" value="{{ csrf_token('email-verify-resend') }}">
+                    <button type="submit">Resend verification email</button>
+                </form>
+            </p>
+        {% endif %}
+
+        <h2>Tenant context</h2>
+        {% if activeTrainerId %}
+            <p>Active trainer: <code>#{{ activeTrainerId }}</code>. Trainer-scoped
+               data is readable only within this tenant.</p>
+        {% else %}
+            <p>No tenant resolved. Trainer-scoped data is unreachable — for a
+               Super Admin this is deliberate, because no role hierarchy grants
+               ownership implicitly.</p>
+        {% endif %}
+
+        {% if trainerLinks %}
+            <h2>Your trainers</h2>
+            {# Separated per trainer, never combined: owner decision A6 and
+               BR-01-10. This list is the switcher, not a merged view. #}
+            <ul>
+                {% for link in trainerLinks %}
+                    <li>
+                        {{ link.trainer.businessName }} — {{ link.roleInTenant }}
+                        {% if trainerLinks|length > 1 %}
+                            <form method="post" action="{{ path('platform_context_trainer_switch', {trainer: link.trainer.id}) }}" style="display:inline">
+                                <input type="hidden" name="_token" value="{{ csrf_token('trainer-context' ~ link.trainer.id) }}">
+                                <button type="submit">Switch to this trainer</button>
+                            </form>
+                        {% endif %}
+                    </li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        {# The navigation used to be here, and only here — which is why every
+           other screen in the product had none. It now renders from
+           base.html.twig on every page; see templates/platform/_navigation.html.twig. #}
+    </div>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">Walking skeleton</p>
+        <h1>PracticePerfect</h1>
+        <p>
+            The application is running. This placeholder renders the design-token
+            layer so the branding pipeline is provable before any feature exists:
+            the swatch below reads <code>--brand-primary</code>, which is emitted
+            per request rather than compiled in.
+        </p>
+
+        <p>
+            <span class="skeleton-swatch" aria-hidden="true"></span>
+            <span class="skeleton-caption">--brand-primary, overridable at runtime</span>
+        </p>
+
+        <p><a href="{{ path('app_health') }}">Health endpoint</a></p>
+    </div>
+{% endblock %}

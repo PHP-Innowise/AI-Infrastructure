@@ -1,0 +1,28 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Registration Confirmed — {{ form.name }}{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ form.trainer.businessName }}</p>
+        <h1>You're registered!</h1>
+        <p>Thanks for registering for <strong>{{ form.name }}</strong>, {{ submission.participantName }}.</p>
+
+        {% if submission.paymentStatus == 'paid' %}
+            <p class="skeleton-caption">Payment received.</p>
+        {% endif %}
+
+        {# AC-08-23/24: the "Create Your Account" CTA. #}
+        {% if accountAlreadyExists %}
+            <p>An account already exists for this email address.
+                <a href="{{ path('identity_auth_login') }}">Log in</a> to link this registration.</p>
+        {% else %}
+            <p>
+                <a href="{{ path('forms_public_convert_account', {code: form.shareableSlug, submission: app.request.query.get('submission')}) }}">
+                    Create Your Account
+                </a>
+                — access the training calendar and more.
+            </p>
+        {% endif %}
+    </div>
+{% endblock %}

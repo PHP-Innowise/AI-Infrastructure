@@ -1,0 +1,45 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Feature Settings — {{ trainer.businessName }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Feature Settings — {{ trainer.businessName }}</h1>
+
+        {% if pendingFeature and pendingToggle %}
+            <p role="alert" class="form-error">
+                {% if pendingToggle.enabled %}
+                    Disable {{ pendingToggle.label }} for {{ trainer.businessName }}? {{ warnings[pendingFeature] }}
+                {% else %}
+                    Enable {{ pendingToggle.label }} for {{ trainer.businessName }}? This restores trainer access immediately.
+                {% endif %}
+            </p>
+            <form method="post" action="{{ path('administration_trainer_features_edit', {trainer: trainer.id}) }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('trainer-feature-toggle' ~ trainer.id) }}">
+                <input type="hidden" name="feature" value="{{ pendingFeature }}">
+                <button type="submit" class="button button--primary">
+                    Confirm {{ pendingToggle.enabled ? 'disable' : 'enable' }}
+                </button>
+                <a href="{{ path('administration_trainer_features_edit', {trainer: trainer.id}) }}">Cancel</a>
+            </form>
+        {% endif %}
+
+        <table>
+            <thead><tr><th>Feature</th><th>Status</th><th>Last updated</th><th></th></tr></thead>
+            <tbody>
+                {% for toggle in toggles %}
+                    <tr>
+                        <td>{{ toggle.label }}</td>
+                        <td>{{ toggle.enabled ? 'Enabled' : 'Disabled' }}</td>
+                        <td>{{ toggle.updatedAt|date('Y-m-d H:i') }} by {{ toggle.updatedByAccount.email }}</td>
+                        <td>
+                            <a href="{{ path('administration_trainer_features_edit', {trainer: trainer.id, feature: toggle.featureName}) }}">
+                                {{ toggle.enabled ? 'Disable' : 'Enable' }}
+                            </a>
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}

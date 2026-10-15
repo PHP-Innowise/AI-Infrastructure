@@ -1,0 +1,32 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Tokens — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Tokens</h1>
+        <p>You have {{ balance }} tokens with {{ trainer.businessName }}</p>
+
+        <p><a class="button button--primary" href="{{ path('billing_portal_tokens_purchase') }}">Buy Tokens</a></p>
+
+        {% if is_granted('PAYMENT_METHOD_MANAGE') %}
+            {# AC-05-20: Settings -> Payment Methods -> "Manage Payment
+               Methods", redirecting to the Stripe Customer Portal — see
+               PortalPaymentMethodController's own docblock. Denied outright
+               for a child's own login (AC-01-30/AC-05-21), so the button is
+               simply not offered rather than shown and then rejected. #}
+            <h2>Payment methods</h2>
+            <form method="post" action="{{ path('billing_portal_payment_methods_manage') }}">
+                <input type="hidden" name="_token" value="{{ csrf_token('payment-methods-manage') }}">
+                <button type="submit">Manage Payment Methods</button>
+            </form>
+        {% endif %}
+
+        <h2>Recent activity</h2>
+        <ul>
+            {% for entry in recentActivity %}
+                <li>{{ entry.createdAt|date('Y-m-d') }} — {{ entry.kind }} — {{ entry.amount }} — {{ entry.description }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+{% endblock %}

@@ -1,0 +1,11 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Checkout Cancelled — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Checkout cancelled</h1>
+        <p role="status">Your payment was not completed.</p>
+        <p><a href="{{ path('billing_portal_tokens') }}">Back to Tokens</a></p>
+    </div>
+{% endblock %}

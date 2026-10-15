@@ -1,0 +1,19 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Create Your Account — {{ form.trainer.businessName }}{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Create Your Account</h1>
+
+        {# AC-08-23: name/email pre-filled read-only from the submission —
+           never bound as inputs on this form (ConvertSubmissionToAccountType's
+           own docblock). #}
+        <p><strong>Name:</strong> {{ submission.participantName }}</p>
+        <p><strong>Email:</strong> {{ submission.contactEmail }}</p>
+
+        {{ form_start(accountForm) }}
+            {{ form_widget(accountForm) }}
+        {{ form_end(accountForm) }}
+    </div>
+{% endblock %}

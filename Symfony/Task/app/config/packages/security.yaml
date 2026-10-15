@@ -1,0 +1,105 @@
+security:
+    password_hashers:
+        Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface: 'auto'
+
+    providers:
+        accounts:
+            entity:
+                class: App\Identity\Entity\Account
+                property: email
+
+    # No role_hierarchy, deliberately. If ROLE_SUPER_ADMIN inherited the other
+    # roles, an ownership voter would pass silently for a Super Admin holding
+    # no tenant — exactly the cross-tenant access the tenancy model forbids.
+    # Every voter handles Super Admin explicitly instead.
+    # See specs/architect-architecture.md Decisions, "Role hierarchy".
+
+    firewalls:
+        dev:
+            pattern: ^/(_(profiler|wdt)|css|images|js)/
+            security: false
+
+        # AC-05-34..36: no session, no cookie, no ambient browser authority
+        # to forge — the Stripe-Signature HMAC check inside
+        # BillingWebhookController IS the authorization. Must come before
+        # `main` (which carries no `pattern` and therefore matches
+        # everything) — Symfony uses the FIRST matching firewall, not the
+        # best one.
+        # @see specs/api-designer-spec.md "Stripe webhook contract" — "Firewall"
+        webhook:
+            pattern: ^/webhooks/
+            stateless: true
+            security: false
+
+        main:
+            lazy: true
+            provider: accounts
+            # AC-01-52 edge case: form_login alone never looks at account
+            # status — a deactivated (or GDPR-anonymized) Account can still
+            # present a correct password. AccountStatusUserChecker is what
+            # actually blocks the login attempt; see its own docblock.
+            user_checker: App\Identity\Security\AccountStatusUserChecker
+            form_login:
+                login_path: identity_auth_login
+                check_path: identity_auth_login
+                enable_csrf: true
+                default_target_path: app_dashboard
+            logout:
+                path: identity_auth_logout
+                target: identity_auth_login
+            # US-01.07: Symfony's native identity-swap mechanism
+            # (specs/api-designer-spec.md "Impersonation — a whole session,
+            # one identity swap").
+            #
+            # `role` here is not a role. SwitchUserListener passes it to the
+            # access decision manager as an ATTRIBUTE, with the TARGET user as
+            # the subject — `decide($actorToken, [$this->role], $targetUser)` —
+            # so naming the voter attribute makes the firewall ask
+            # ImpersonationVoter the same question the controller asks it, on
+            # exactly the same pair.
+            #
+            # It used to say ROLE_SUPER_ADMIN, which checked only who was
+            # asking and never who was being targeted. Manual testing found
+            # the consequence: appending `?_switch_user=<email>` to any URL
+            # impersonated another Super Admin — the one thing BR-01-21 and
+            # AC-01-37 forbid — because the voter that enforces it was only
+            # ever reached through the controller. The actor's own
+            # ROLE_SUPER_ADMIN is not lost by the change: the voter's first
+            # check is that the actor holds it.
+            switch_user:
+                role: IMPERSONATION_START
+                parameter: _switch_user
+
+    # Coarse gates on route prefixes only. These are never the real check:
+    # object-level decisions belong to voters, because "is this row mine"
+    # cannot be expressed as a path pattern. Ordered most-specific-first —
+    # Symfony uses the FIRST matching rule, not the best one.
+    access_control:
+        - { path: ^/login$, roles: PUBLIC_ACCESS }
+        - { path: ^/health$, roles: PUBLIC_ACCESS }
+        - { path: ^/password/, roles: PUBLIC_ACCESS }
+        - { path: ^/email/verify/resend, roles: IS_AUTHENTICATED_FULLY }
+        - { path: ^/email/verify/, roles: PUBLIC_ACCESS }
+        - { path: ^/account/setup/, roles: PUBLIC_ACCESS }
+        - { path: ^/account/, roles: IS_AUTHENTICATED_FULLY }
+        # identity_sharelink_associate: an already-authenticated player
+        # selecting which family members join a second trainer — more
+        # specific than the general /join/ rule below, so it must come first.
+        - { path: ^/join/[^/]+/associate, roles: ROLE_PLAYER }
+        - { path: ^/join/, roles: PUBLIC_ACCESS }
+        - { path: ^/invite/, roles: PUBLIC_ACCESS }
+        - { path: ^/forms/, roles: PUBLIC_ACCESS }
+        - { path: ^/context/, roles: ROLE_PLAYER }
+        - { path: ^/impersonation/, roles: IS_IMPERSONATOR }
+        - { path: ^/super-admin/, roles: ROLE_SUPER_ADMIN }
+        - { path: ^/trainer/, roles: ROLE_TRAINER }
+        - { path: ^/coach/, roles: ROLE_COACH }
+        - { path: ^/portal/, roles: ROLE_PLAYER }
+
+when@test:
+    security:
+        password_hashers:
+            # Fast, deliberately weak hashing so the suite is not dominated by
+            # bcrypt. Never reachable outside the test environment.
+            Symfony\Component\Security\Core\User\PasswordAuthenticatedUserInterface:
+                algorithm: plaintext

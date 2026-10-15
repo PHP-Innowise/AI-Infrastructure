@@ -1,0 +1,17 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Remove {{ child.firstName }} from {{ membership.trainer.businessName }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Remove {{ child.firstName }} from {{ membership.trainer.businessName }}?</h1>
+        <p role="alert" class="form-error">
+            This cancels all of {{ child.firstName }}'s upcoming RSVPs with this trainer. This cannot be undone from here.
+        </p>
+
+        <form method="post">
+            <input type="hidden" name="_token" value="{{ csrf_token('remove-trainer' ~ membership.id) }}">
+            <button type="submit" class="button button--primary">Confirm removal</button>
+        </form>
+    </div>
+{% endblock %}

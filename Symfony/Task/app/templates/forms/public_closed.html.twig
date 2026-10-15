@@ -1,0 +1,13 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ form.name }} — Registration Closed{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ form.trainer.businessName }}</p>
+        <h1>{{ form.name }}</h1>
+        {# AC-08-29: disabling a camp shows this message on the shareable
+           link instead of the form. #}
+        <p role="status">Registration Closed</p>
+    </div>
+{% endblock %}

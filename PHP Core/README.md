@@ -67,8 +67,8 @@ scripts, policies, hooks, skills, workflow documentation, templates,
 operational scaffold.
 
 Source-only research, tests and worked examples stay in the source repository
-and are not installed. This accelerator repository does not track or bundle
-uppercase `Task/` contents. A consuming project may create and populate uppercase
+and are not installed. Restored uppercase `Task/` material is tracked as
+source-only reference work and excluded from installation. A consuming project may create and populate uppercase
 `Task/` when real client input exists. Lowercase `tasks/` is separate and
 remains the temporary, skill-prefixed `TASK-NNN/` workspace used by normal
 accelerator workflows.

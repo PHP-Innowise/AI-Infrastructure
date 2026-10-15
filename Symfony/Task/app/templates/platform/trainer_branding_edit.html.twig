@@ -1,0 +1,17 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Branding — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Portal branding</h1>
+
+        {% if settings.logoPath %}
+            <p><img src="{{ settings.logoPath }}" alt="Current logo" height="64"></p>
+        {% endif %}
+
+        {{ form_start(form) }}
+            {{ form_widget(form) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

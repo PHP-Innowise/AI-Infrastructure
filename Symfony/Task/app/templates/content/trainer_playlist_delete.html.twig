@@ -1,0 +1,15 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Delete {{ playlist.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Delete playlist</h1>
+        <p role="alert">Delete "{{ playlist.title }}"? This will unassign it from all players.</p>
+
+        <form method="post" action="{{ path('content_trainer_playlist_delete', {playlist: playlist.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('playlist-delete' ~ playlist.id) }}">
+            <button type="submit">Confirm delete</button>
+        </form>
+    </div>
+{% endblock %}

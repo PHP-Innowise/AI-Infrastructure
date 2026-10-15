@@ -80,7 +80,8 @@ runtime scripts, hooks, skills, workflow documentation, templates,
 scaffold.
 
 Source-only research, test suites and worked examples are not installed.
-This accelerator repository does not track or bundle uppercase `Task/` contents.
+Restored uppercase `Task/` material is tracked as source-only reference work
+and excluded from installation.
 The Symfony clean-code patterns remain because active workflow
 documentation references them. A client project may create and populate
 uppercase `Task/` when real requirements or design inputs exist. Lowercase

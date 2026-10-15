@@ -1,0 +1,86 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Coupons — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Coupons</h1>
+        <p><a class="button button--primary" href="{{ path('growth_trainer_coupon_create') }}">+ Create Coupon</a></p>
+
+        {# AC-06-28: Analytics Summary (all coupons combined) #}
+        <section>
+            <h2>This month</h2>
+            <dl>
+                <dt>Total coupons created</dt>
+                <dd>{{ summary.totalCouponsCreated }}</dd>
+                <dt>Active coupons</dt>
+                <dd>{{ summary.activeCoupons }}</dd>
+                <dt>Uses this month</dt>
+                <dd>{{ summary.usesThisMonth }}</dd>
+                <dt>Discount given this month</dt>
+                <dd>${{ '%0.2f'|format(summary.discountGivenThisMonthMinorUnits / 100) }}</dd>
+                <dt>Revenue from coupon users this month</dt>
+                <dd>${{ '%0.2f'|format(summary.revenueThisMonthMinorUnits / 100) }}</dd>
+            </dl>
+        </section>
+
+        {# AC-06-26: per-coupon breakdown #}
+        <section>
+            <h2>All coupons</h2>
+            {% if rows is empty %}
+                <p>No coupons yet.</p>
+            {% else %}
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Code</th><th>Discount</th><th>Status</th><th>Uses</th><th>Usage limit</th>
+                            <th>Discount given</th><th>Revenue generated</th><th>Conversion rate</th>
+                            <th>Created</th><th>Expires</th><th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in rows %}
+                            <tr>
+                                <td>{{ row.coupon.code }}</td>
+                                <td>
+                                    {% if row.coupon.discountType == 'percentage' %}
+                                        {{ row.coupon.discountValue }}%
+                                    {% else %}
+                                        ${{ '%0.2f'|format(row.coupon.discountValue / 100) }}
+                                    {% endif %}
+                                </td>
+                                <td>{{ row.status|capitalize }}</td>
+                                <td>{{ row.totalUses }}</td>
+                                <td>{{ row.coupon.usageLimit is not null ? row.coupon.usageLimit : 'Unlimited' }}</td>
+                                <td>${{ '%0.2f'|format(row.totalDiscountGivenMinorUnits / 100) }}</td>
+                                <td>${{ '%0.2f'|format(row.revenueGeneratedMinorUnits / 100) }}</td>
+                                <td>{{ row.conversionRatePercent is not null ? row.conversionRatePercent ~ '%' : 'N/A' }}</td>
+                                <td>{{ row.coupon.createdAt|date('Y-m-d') }}</td>
+                                <td>{{ row.coupon.expiresAt is not null ? row.coupon.expiresAt|date('Y-m-d') : 'Never' }}</td>
+                                <td>
+                                    <a href="{{ path('growth_trainer_coupon_edit', {coupon: row.coupon.id}) }}">Edit</a>
+                                    ·
+                                    <a href="{{ path('growth_trainer_coupon_usage', {coupon: row.coupon.id}) }}">Usage</a>
+                                    {% if row.coupon.active %}
+                                        ·
+                                        <form method="post" action="{{ path('growth_trainer_coupon_deactivate', {coupon: row.coupon.id}) }}" style="display:inline" onsubmit="return confirm('Deactivate this coupon?');">
+                                            <input type="hidden" name="_token" value="{{ csrf_token('coupon-deactivate' ~ row.coupon.id) }}">
+                                            <button type="submit">Deactivate</button>
+                                        </form>
+                                    {% endif %}
+                                    {% if row.totalUses == 0 %}
+                                        ·
+                                        <form method="post" action="{{ path('growth_trainer_coupon_delete', {coupon: row.coupon.id}) }}" style="display:inline" onsubmit="return confirm('Delete this coupon? This cannot be undone.');">
+                                            <input type="hidden" name="_token" value="{{ csrf_token('coupon-delete' ~ row.coupon.id) }}">
+                                            <button type="submit">Delete</button>
+                                        </form>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% endif %}
+        </section>
+    </div>
+{% endblock %}

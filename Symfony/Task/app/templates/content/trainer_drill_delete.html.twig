@@ -1,0 +1,20 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Delete {{ drill.title }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Delete drill</h1>
+
+        {% if usedInPlaylists > 0 %}
+            <p role="alert">This drill is used in {{ usedInPlaylists }} playlist{{ usedInPlaylists == 1 ? '' : 's' }}. Delete anyway?</p>
+        {% else %}
+            <p role="alert">Delete "{{ drill.title }}"?</p>
+        {% endif %}
+
+        <form method="post" action="{{ path('content_trainer_drill_delete', {drill: drill.id}) }}">
+            <input type="hidden" name="_token" value="{{ csrf_token('drill-delete' ~ drill.id) }}">
+            <button type="submit">Confirm delete</button>
+        </form>
+    </div>
+{% endblock %}

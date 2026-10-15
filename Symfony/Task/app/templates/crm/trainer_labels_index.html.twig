@@ -1,0 +1,32 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Manage Labels — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Manage Labels</h1>
+        <p><a class="button button--primary" href="{{ path('crm_trainer_label_create') }}">+ New Label</a></p>
+
+        {% if labels is empty %}
+            <p>No labels yet.</p>
+        {% else %}
+            <table>
+                <thead><tr><th>Label</th><th>Usage</th><th></th></tr></thead>
+                <tbody>
+                    {% for label in labels %}
+                        <tr>
+                            <td><span class="badge" style="background:{{ label.colorHex }}">{{ label.name }}</span></td>
+                            {# AC-03-14 #}
+                            <td>Applied to {{ usageCounts[label.id] }} player{{ usageCounts[label.id] == 1 ? '' : 's' }}</td>
+                            <td>
+                                <a href="{{ path('crm_trainer_label_edit', {label: label.id}) }}">Edit</a>
+                                ·
+                                <a href="{{ path('crm_trainer_label_delete', {label: label.id}) }}">Delete</a>
+                            </td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        {% endif %}
+    </div>
+{% endblock %}

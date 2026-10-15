@@ -1,0 +1,152 @@
+{#
+    The product's navigation. Grouped by what the user is trying to do rather
+    than by which epic built it — an epic boundary is an implementation detail
+    nobody signing in cares about.
+
+    Rendered from base.html.twig, so it is on every page. It used to live in
+    the dashboard template, which meant the dashboard was the only screen with
+    any navigation at all: opening Players or Tokens left the user with the
+    browser's back button and nothing else.
+
+    Feature-gated groups are omitted entirely when the toggle is off, per
+    BR-07-1 ("the feature disappears from the trainer's UI"). A link that leads
+    to a 403 is a broken feature, not a disabled one.
+
+    DashboardNavigationTest holds this list against the router: every module's
+    entry point must appear for the role that owns it.
+#}
+{% set nav = navigation() %}
+{% if nav.role %}
+    {#
+        A disclosure, so a phone does not open every page with a third of the
+        screen given to links — measured at 275px of a 812px viewport before
+        this wrapper. Native <details>, no JavaScript: closed by default, and
+        a media query in app.css forces the nav visible and hides the summary
+        from 48rem up, so a desktop user never has to open anything.
+
+        The links stay in the DOM either way, which is what keeps the
+        collapsed state a presentation choice rather than a second, smaller
+        navigation to keep in sync.
+    #}
+    <details class="main-nav-disclosure">
+        <summary class="main-nav-disclosure__toggle">Menu</summary>
+    <nav aria-label="Main" class="main-nav">
+        <h2 class="main-nav__group">Account</h2>
+        <ul>
+            <li><a href="{{ path('app_dashboard') }}">Dashboard</a></li>
+            <li><a href="{{ path('identity_account_profile_edit') }}">Your profile</a></li>
+            <li><a href="{{ path('identity_auth_logout') }}">Sign out</a></li>
+        </ul>
+
+        {% if nav.isFor('super_admin') %}
+            <h2 class="main-nav__group">Platform</h2>
+            <ul>
+                <li><a href="{{ path('administration_dashboard') }}">Platform Dashboard</a></li>
+                <li><a href="{{ path('administration_users_index') }}">Users</a></li>
+                <li><a href="{{ path('administration_trainers_index') }}">Trainers</a></li>
+                <li><a href="{{ path('administration_event_master_index') }}">Event Master Tool</a></li>
+                <li><a href="{{ path('administration_audit_log_index') }}">Audit Log</a></li>
+                <li><a href="{{ path('administration_stripe_dashboard_link') }}">Stripe Dashboard</a></li>
+            </ul>
+
+            <h2 class="main-nav__group">Across trainers</h2>
+            <ul>
+                <li><a href="{{ path('crm_super_admin_dashboard') }}">CRM Dashboard</a></li>
+                <li><a href="{{ path('crm_super_admin_players_index') }}">Players</a></li>
+                <li><a href="{{ path('content_super_admin_analytics') }}">Content Analytics</a></li>
+                <li><a href="{{ path('growth_super_admin_referral_rules') }}">Referral Rules</a></li>
+            </ul>
+        {% endif %}
+
+        {% if nav.isFor('trainer') %}
+            <h2 class="main-nav__group">Players</h2>
+            <ul>
+                <li><a href="{{ path('crm_trainer_quick_view') }}">Quick View</a></li>
+                <li><a href="{{ path('crm_trainer_players_index') }}">Players</a></li>
+                <li><a href="{{ path('crm_trainer_labels_index') }}">Labels</a></li>
+            </ul>
+
+            <h2 class="main-nav__group">Scheduling</h2>
+            <ul>
+                <li><a href="{{ path('scheduling_trainer_event_index') }}">Events</a></li>
+                <li><a href="{{ path('identity_trainer_coaches_index') }}">Coaches</a></li>
+            </ul>
+
+            {% if nav.isEnabled('lppp') %}
+                <h2 class="main-nav__group">Content</h2>
+                <ul>
+                    <li><a href="{{ path('content_trainer_learn_index') }}">Learn Playlists</a></li>
+                    <li><a href="{{ path('content_trainer_practice_index') }}">Practice Playlists</a></li>
+                    <li><a href="{{ path('content_trainer_drills_index') }}">Drills</a></li>
+                </ul>
+            {% endif %}
+
+            <h2 class="main-nav__group">Money</h2>
+            <ul>
+                <li><a href="{{ path('billing_trainer_settings') }}">Billing &amp; Stripe</a></li>
+                <li><a href="{{ path('billing_trainer_pricing_edit') }}">Pricing</a></li>
+                <li><a href="{{ path('billing_trainer_earnings') }}">Earnings</a></li>
+            </ul>
+
+            {% if nav.isEnabled('marketing') %}
+                <h2 class="main-nav__group">Marketing</h2>
+                <ul>
+                    <li><a href="{{ path('growth_trainer_referrals_dashboard') }}">Referrals</a></li>
+                    <li><a href="{{ path('growth_trainer_coupons_index') }}">Coupons</a></li>
+                </ul>
+            {% endif %}
+
+            <h2 class="main-nav__group">Growing your roster</h2>
+            <ul>
+                <li><a href="{{ path('identity_trainer_sharelinks_index') }}">ShareLinks</a></li>
+                {% if nav.isEnabled('camps') %}
+                    <li><a href="{{ path('forms_trainer_index') }}">Camps &amp; Evaluations</a></li>
+                {% endif %}
+                <li><a href="{{ path('identity_trainer_branding_edit') }}">Branding</a></li>
+            </ul>
+        {% endif %}
+
+        {% if nav.isFor('coach') %}
+            <h2 class="main-nav__group">Coaching</h2>
+            <ul>
+                <li><a href="{{ path('scheduling_coach_activities') }}">My Activities</a></li>
+                <li><a href="{{ path('crm_coach_players_index') }}">My Players</a></li>
+                <li><a href="{{ path('identity_coach_player_invite_index') }}">Invite a Player</a></li>
+                <li><a href="{{ path('identity_coach_availability_edit') }}">My Times</a></li>
+            </ul>
+        {% endif %}
+
+        {% if nav.isFor('player') %}
+            <h2 class="main-nav__group">Training</h2>
+            <ul>
+                <li><a href="{{ path('scheduling_portal_calendar') }}">Training Calendar</a></li>
+                <li><a href="{{ path('scheduling_portal_reservations') }}">My Reservations</a></li>
+                <li><a href="{{ path('identity_portal_availability_edit') }}">My Times</a></li>
+            </ul>
+
+            {% if nav.isEnabled('lppp') %}
+                <h2 class="main-nav__group">Content</h2>
+                <ul>
+                    <li><a href="{{ path('content_portal_index') }}">Learn &amp; Practice</a></li>
+                    <li><a href="{{ path('content_portal_progress') }}">My Progress</a></li>
+                </ul>
+            {% endif %}
+
+            <h2 class="main-nav__group">Family</h2>
+            <ul>
+                <li><a href="{{ path('identity_portal_family_index') }}">Family</a></li>
+                <li><a href="{{ path('identity_portal_approvals_index') }}">Approvals</a></li>
+            </ul>
+
+            <h2 class="main-nav__group">Money</h2>
+            <ul>
+                <li><a href="{{ path('billing_portal_tokens') }}">Tokens</a></li>
+                <li><a href="{{ path('billing_portal_transactions') }}">Transaction History</a></li>
+                {% if nav.isEnabled('marketing') %}
+                    <li><a href="{{ path('growth_portal_referrals') }}">Refer a Friend</a></li>
+                {% endif %}
+            </ul>
+        {% endif %}
+    </nav>
+    </details>
+{% endif %}

@@ -1,0 +1,13 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Payment received — {{ form.name }}{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <p class="skeleton-eyebrow">{{ form.trainer.businessName }}</p>
+        <h1>Payment received</h1>
+        {# BR-08-8/14: the real confirmation is the async webhook — this
+           page never claims the registration is confirmed on its own. #}
+        <p role="status">We're confirming your registration for <strong>{{ form.name }}</strong>. You'll receive a confirmation email shortly.</p>
+    </div>
+{% endblock %}

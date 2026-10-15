@@ -1,0 +1,20 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}My Times — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>My Times</h1>
+        <p>Set the days and times {{ player.firstName }} is usually available to train.</p>
+
+        {{ form_start(form) }}
+            {% for day in 0..6 %}
+                <fieldset>
+                    <legend>{{ dayLabels[day] }}</legend>
+                    {{ form_widget(form['day' ~ day]) }}
+                </fieldset>
+            {% endfor %}
+            {{ form_widget(form.submit) }}
+        {{ form_end(form) }}
+    </div>
+{% endblock %}

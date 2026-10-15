@@ -1,0 +1,14 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ form.name }} — Send Bulk Email{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>{{ form.name }} — Send Bulk Email</h1>
+        <p class="skeleton-caption">Sent to every confirmed participant.</p>
+
+        {{ form_start(formView) }}
+            {{ form_widget(formView) }}
+        {{ form_end(formView) }}
+    </div>
+{% endblock %}

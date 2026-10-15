@@ -1,0 +1,17 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Deactivate {{ account.email }} — PracticePerfect{% endblock %}
+
+{% block body %}
+    <div class="skeleton-card">
+        <h1>Deactivate this account?</h1>
+        <p role="alert" class="form-error">
+            {{ account.email }} will not be able to log in. All historical data is preserved and stays visible.
+        </p>
+
+        <form method="post">
+            <input type="hidden" name="_token" value="{{ csrf_token('deactivate' ~ account.id) }}">
+            <button type="submit" class="button button--primary">Confirm deactivation</button>
+        </form>
+    </div>
+{% endblock %}
