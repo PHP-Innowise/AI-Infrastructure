@@ -1,5 +1,7 @@
 # Changelog
 
+- Restore only the 89 historical `Task/` assignment files (epics, backlogs and design inputs); keep applications and generated project work untracked and all `Task/` material excluded from installed accelerator payloads.
+
 Shared-core history for the PHP AI Accelerators monorepo. The shared
 core is what the `Laravel/`, `Symfony/` and `PHP Core/` editions have
 in common: the Python memory/context core (`memory-bank/scripts/`,

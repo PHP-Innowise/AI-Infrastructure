@@ -83,8 +83,9 @@ undocumented inventory field name.
 The production payload retains runtime scripts, policies, workflow
 documentation, templates, Memory Bank, Project Brain, living-spec scaffolding,
 and lowercase `tasks/`. Repository research, test suites and worked examples
-are source-only and are not installed. Uppercase `Task/` contents remain local
-client inputs: this repository ignores them and does not bundle them.
+are source-only and are not installed. Only uppercase `Task/` assignment
+requirements, backlogs and design inputs are tracked and excluded from the
+installed payload; applications and generated project work remain untracked.
 Uppercase `Task/` may be created and populated later when real client
 requirements or design assets exist; lowercase `tasks/` remains the operational
 temporary-work scaffold.
