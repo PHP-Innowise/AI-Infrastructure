@@ -850,7 +850,8 @@ def validate_bank_report(
         if row is None:
             errors.append(f"{shown(path)}: chunk is missing from INDEX.md")
             continue
-        expected_file = str(path.relative_to(bank_root))
+        # INDEX.md names chunks with '/', as render_bank_index writes them.
+        expected_file = path.relative_to(bank_root).as_posix()
         if row["file"] != expected_file:
             errors.append(f"{index_label}: {memory_id} file must be {expected_file}")
         for index_key, metadata_key in (
