@@ -28,6 +28,12 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Native Windows CI — 2026-10-16
+
+- The Windows hook test gives Git Bash each hook command in a file. Passed as
+  `bash -c` from Python, `"${CLAUDE_PROJECT_DIR}"/...` reached Git Bash without
+  its quotes and failed to parse, so the test stopped before any hook ran.
+
 ### Automatic structured native results — 2026-10-16
 
 - Native prompt/Stop hooks coordinate one same-agent structured save, including clean research tasks without Git edits, through the existing guarded result contract. No raw transcript is adopted; task completion and person review stay explicit.

@@ -138,7 +138,13 @@ class WindowsMemoryHooksTest(unittest.TestCase):
                 "CONTEXT_HOOK_BUDGET": BUDGET}
 
     def bash_run(self, env: dict[str, str], script: str, payload: str = "") -> subprocess.CompletedProcess:
-        return subprocess.run([self.bash, "-c", script], cwd=self.project, env=env, input=payload,
+        # Windows gives bash.exe one command line. subprocess leaves an argument
+        # without spaces unquoted, so the double quotes in `"${CLAUDE_PROJECT_DIR}"/...`
+        # reached Git Bash bare and `bash -c` failed to parse: bash reads the
+        # command from a file instead.
+        command = self.tmpdir.parent / "command.sh"
+        command.write_text(script + "\n", encoding="utf-8", newline="\n")
+        return subprocess.run([self.bash, command.as_posix()], cwd=self.project, env=env, input=payload,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=HOOK_TIMEOUT)
 
