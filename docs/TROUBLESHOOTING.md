@@ -198,6 +198,17 @@ Distinguish data classes before replacement:
 
 ### Recover
 
+In governed mode the commands the hooks run (`refresh`, `turn`,
+`hook-context`, `retrieve`, `index`) recover by themselves when SQLite reports
+the file damaged ("database disk image is malformed", "file is not a
+database"): they move it and its journal files aside to
+`memory-bank/local/context.db.quarantine-<UTC time>`, build a new one and run
+once more, and the capsule says so. Everything in it is derived there - the
+index is rebuilt, the binding comes back from the Brain at the next
+checkpoint - except the turns buffered since the last checkpoint. Lightweight
+mode keeps its working tasks only in that file, so it is never moved
+automatically; use the steps below.
+
 First preserve the database:
 
 ```bash
@@ -386,6 +397,64 @@ lightweight mode only for explicitly local, disposable work.
 
 See [`CONTEXT-MODES.md`](CONTEXT-MODES.md) for the full contract.
 
+## Two Task Records Claim One Branch
+
+### Symptom
+
+The capsule warns "Task record <UUID> also claims <branch>; this turn uses
+<UUID>.", or `context.py rebind --task-id <branch>` reports that the
+identifier is ambiguous.
+
+### Cause
+
+Two copies of the branch each started its task - two people, or one person
+on two machines, before either pulled the other's commit - and the branches
+were merged. Each record is valid; the task ID now names both.
+
+### What the runtime does
+
+A machine without a binding for the branch reads, and binds to at its next
+checkpoint, the earliest-created active record, so every new clone settles
+on the same one. A machine already bound to a record keeps it. The capsule
+names the other record on every prompt until one of them is closed.
+
+### Recover
+
+Keep one task per branch. Carry what matters from the other record's
+progress and next steps into the kept one, then cancel the other:
+
+```bash
+python3 memory-bank/scripts/context.py brain-update --record-id <other UUID> \
+  --revision auto --transition cancelled --reason "Duplicate of <kept UUID>"
+```
+
+A machine bound to the record you cancelled follows the branch to the record
+that is left: its next prompt reads it and its next checkpoint binds to it.
+When owners are configured (`PROJECT_BRAIN_OWNER`), only an authorized owner
+of the record can cancel it - see "Update Fails with an Owner Authorization
+Error".
+
+## The Capsule Carries No Working State, or Another Task's
+
+### Symptom
+
+A prompt's capsule opens with something other than `working: <task> — <goal>`,
+or carries a warning about the branch's task.
+
+### What each first line means
+
+| First line or warning | Meaning | What to do |
+|---|---|---|
+| `working: not recorded yet (the task starts at the 5-turn checkpoint)` | The branch has no task yet; a later checkpoint records one. | Nothing, or `context.py start` to record it now. |
+| `working: closed (this branch's task is finished; ...)` | The branch's task was completed or cancelled, and turns after it are not recorded. | `python3 memory-bank/scripts/context.py start --task-id <branch> --goal "..."`; the finished record moves to the archive. |
+| `working: unavailable (the task's record cannot be read)` | The record is invalid - a merge conflict, a hand edit; a warning names the file. | Repair or restore that file; checkpoints wait for it. |
+| `working: unavailable (the task's record changed while this turn read it; read <path>)` | Another session's checkpoint rewrote the record in the last moments of this read. | Read the named record; the next prompt carries it again. |
+| warning `This branch was renamed from <old>; its task continues here.` | The branch was renamed with `git branch -m`, and its earlier name's task is used. | Nothing; `start --task-id <new name>` records a task of its own instead. |
+| `working: <id> — ...` where `<id>` is the branch name with `-` for some characters and eight hex digits at the end | The branch name has characters a task ID does not take; the ID is derived from it. | Nothing; use that ID with the CLI. |
+
+On a detached HEAD there is no task, and the prompt hook stays silent -
+except during a rebase, where it reads the branch being rebased.
+
 ## Promotion Review or Apply Fails
 
 ### Symptom
@@ -465,6 +534,13 @@ python3 memory-bank/scripts/context.py validate
 - If a manually edited/merged record caused deterministic-index drift,
   reconcile the record through supported mutation paths or restore the last
   valid tracked state, then validate again.
+- A merge of two branches that both added records can leave conflict markers,
+  or one side's list, in `project-brain/indexes/*.json`. Those files are
+  derived from the records: resolve the Git conflict either way, and the next
+  Brain write (a checkpoint, `update`, `record-result`) rebuilds them;
+  `context.py compact` rebuilds them too, even with nothing to archive.
+  Compaction no longer refuses because of a stale or conflicted index, only
+  because of an invalid record.
 - If compaction fails, retain all files and indexes. The runtime is designed to
   roll moves back; inspect the reported blocker before retrying.
 
@@ -496,6 +572,24 @@ blocked, or a hook times out.
    `echo '$TOOL_INPUT' | <script>` wrapper passes the literal variable name
    instead of the payload, and the hook then exits 0 on every call.
 8. Check return-code semantics in the edition hook README.
+9. Memory hooks that stay silent - no capsule on any prompt, no checkpoint in
+   `memory-bank/local/last-turn-report.json` - while `context.py status`
+   works: check that Python 3.9+ runs in the shell the host starts hooks with
+   (Git Bash on native Windows). The hooks take `python3`; on native Windows,
+   where the python.org installer provides `python` and `py` but no
+   `python3` and the `python3` found may be the Microsoft Store stub, they try
+   `python`, `py -3` and `python3`, in that order, and take the first that is
+   Python 3.9+. With none of them the hooks exit quietly, and the session
+   banner says `Context governance: unavailable - no Python 3.9+ found`. The
+   name found is remembered in `ai-accelerator-python-<uid>` in the temporary
+   directory and used while the shell finds it at the same path; delete that
+   file to make the hooks look again.
+   Outside Windows a `python3` on `PATH` is taken without a check, so one that
+   is not Python makes every prompt report `Memory refresh unavailable`.
+   Where Python has another name, the session banner says which, and the
+   agent runs the memory CLI with it: Claude Code allows the CLI under
+   `python3`, `python` and `py -3`, the Cursor CLI under `python3` and
+   `python`.
 
 ### Recover
 

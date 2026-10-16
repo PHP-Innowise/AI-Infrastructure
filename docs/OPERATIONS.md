@@ -259,9 +259,25 @@ python3 memory-bank/scripts/context.py --owner alice brain-create finding \
   --conflict 550e8400-e29b-41d4-a716-446655440000
 ```
 
-Task IDs and external IDs accept letters, digits, `.`, `_`, `/`, and `-`, must
-start with a letter or digit, and are limited to 128 characters. Record
-relationships use Project Brain UUIDs, not external aliases.
+Task IDs and external IDs accept letters and digits of any script, `.`, `_`,
+`/`, `#`, `+` and `-`, must start with a letter or digit, and are limited to
+128 characters: an inferred ID is the branch name, and `feature/счёт-экспорт`
+or `fix/#123-crash` is one. Whitespace and other punctuation are refused.
+The branch the checkout is on is the exception: Git takes names the grammar
+does not (`fix/user's-login`, `release/v2.0@hotfix`, a name past 128
+characters), and its task ID is derived from it - each run of refused
+characters becomes `-`, the name is cut to fit, and eight hex digits of the
+whole name's SHA-256 keep two such branches apart: `fix/user-s-login-b813ac24`.
+The capsule names that ID; the branch name itself, given as `--task-id` while
+it is checked out, reaches the same task.
+A branch renamed with `git branch -m` keeps its task: when the renamed branch
+has no active task of its own and its reflog says it was renamed from a
+branch that has one, the hooks' reads, checkpoints and Cursor rule work with
+that task, and the capsule says `This branch was renamed from <old name>; its
+task continues here.` The record keeps its ID, so a copy of the branch still
+under the old name shares it; `start --task-id <new name>` still records a
+task of its own.
+Record relationships use Project Brain UUIDs, not external aliases.
 
 ## CLI Reference
 
@@ -614,10 +630,16 @@ existing task is never overwritten: a goal written by an operator survives.
 
 When the governed record already exists but the machine-local binding does not
 — a second machine or a fresh clone, where `context.db` never travels with Git
-— the flush restores the binding to the existing record instead of failing on
-a duplicate. The turn result and the last-turn report carry the reconnected
-record UUID in `rebound`, and the next capsule's `Last turn` section states
-`binding restored to the existing task`. A turn that fails outright also
+— the prompts before the first flush already read that record, and the flush
+restores the binding to it instead of failing on a duplicate. The turn result
+and the last-turn report carry the reconnected record UUID in `rebound`, and
+the next capsule's `Last turn` section states `binding restored to the
+existing task`. When two active records claim the task ID - two copies of the
+branch each started it before they were merged - the earliest created is the
+one read and bound, so every clone settles on the same record; the capsule
+names the other with the command that cancels it, and a binding to a record
+cancelled that way follows the task ID to the one that is left (see
+TROUBLESHOOTING, "Two Task Records Claim One Branch"). A turn that fails outright also
 writes the report, with the error text, so the next capsule surfaces
 `turn failed: ...` rather than losing the failure with the silenced output.
 
