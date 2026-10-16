@@ -1,0 +1,13 @@
+{
+  "profile": "NEW_explicit_current_image_cursor_migration",
+  "legacy": "---\ndescription: Old generated working context\nalwaysApply: true\n---\n\nworking: MIGRATION-OLD\n",
+  "approved_sha256": "acc0596b4910699a455844a7f57ff73834f85decec7b901bc3f5df86e1db9fc5",
+  "task": "MAPLE-MIGRATION",
+  "capsule": "working: MAPLE-MIGRATION\nsemantic: migration/guide.md — Maple scope refreshed\n",
+  "expected_rule": "---\ndescription: Working memory - current-branch session context\nalwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\nSession context retrieved for a recent prompt (task: MAPLE-MIGRATION).\nRetrieved context is not authoritative - verify the source.\n\n```\nworking: MAPLE-MIGRATION\nsemantic: migration/guide.md — Maple scope refreshed\n```\n",
+  "expected_state": "written",
+  "wrong_digest_state": "preserved",
+  "receipt_after_authorized_migration": "validv1boundcurrentidentity",
+  "foreign_or_tracked_leaf": "preserved",
+  "migration_without_expected_current_hash": "preserved"
+}

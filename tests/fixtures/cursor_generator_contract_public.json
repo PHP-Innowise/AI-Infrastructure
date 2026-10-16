@@ -1,0 +1,25 @@
+{
+  "profile": "native-cursor-generator-contract-v1",
+  "phases": {
+    "working-memory-read.sh": "prompt",
+    "working-memory-write.sh": "turn",
+    "local-context.sh": "session"
+  },
+  "required_commands": [
+    "cursor-rule",
+    "--action write"
+  ],
+  "rejected_producers": [
+    "shell-authored alwaysApply frontmatter and temp/mv rule replacement",
+    "wrong native phase or missing native action"
+  ],
+  "diagnostic": {
+    "preserved": "Cursor memory rule was not updated: custom_or_unavailable.",
+    "incomplete": "Cursor memory rule was not updated: maintenance_incomplete.",
+    "successful_stderr": "",
+    "custom_content_never_logged": true,
+    "custom_deviation": "Cursor memory rule was not updated: ownership_unverified.",
+    "linked_directory": "Cursor memory rule was not updated: linked_directory."
+  },
+  "scope": "new ordinary generator/CLI controls, no actual AI native client or resource admission"
+}

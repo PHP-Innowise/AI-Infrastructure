@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Shell(python3:memory-bank/scripts/context.py*)"
+      "Shell(python3:memory-bank/scripts/context.py*)",
+      "Shell(python:memory-bank/scripts/context.py*)"
     ],
     "deny": []
   }

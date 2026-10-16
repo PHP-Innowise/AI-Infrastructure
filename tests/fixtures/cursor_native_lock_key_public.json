@@ -1,0 +1,8 @@
+{
+  "profile": "native-cursor-registry-key-correspondence-v1",
+  "root_alias": "one lexical .. under same trusted root",
+  "Windows_existing_lock_spelling": "Runtime.Lock",
+  "expected_native_depth_under_cursor": 2,
+  "expected_changed_capsule_state": "written",
+  "actual_Windows_kernel_verification": "UNRUN on Linux"
+}

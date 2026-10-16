@@ -1,0 +1,21 @@
+{
+  "continued_query_source": "task",
+  "continued_semantic_paths": [
+    "specs/juniper-relay.md"
+  ],
+  "initial_excerpt": "durable ownership receipt",
+  "changed_excerpt": "two ownership reviewers",
+  "deleted_semantic_paths": [],
+  "other_semantic_paths": [
+    "specs/topaz-sensor.md"
+  ],
+  "ordinary_query_source": "prompt",
+  "withheld": true,
+  "progress": "Juniper relay review is ready",
+  "next_step": "Check the relay lease",
+  "zero_skip_publication": "written",
+  "repeat_skip_publication": "kept",
+  "absent_binding_query_source": "prompt",
+  "auto_goal_query_source": "prompt",
+  "direct_and_other_host_query_source": "prompt"
+}

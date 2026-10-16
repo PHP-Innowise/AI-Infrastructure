@@ -24,6 +24,8 @@
       "Bash(vendor/bin/phpbench:*)",
       "Bash(git:*)",
       "Bash(python3 memory-bank/scripts/context.py:*)",
+      "Bash(python memory-bank/scripts/context.py:*)",
+      "Bash(py -3 memory-bank/scripts/context.py:*)",
       "Bash(gh:*)",
       "Bash(ls:*)",
       "Bash(mkdir:*)",

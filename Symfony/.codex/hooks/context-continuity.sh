@@ -33,16 +33,55 @@ fi
 RUNTIME="$ROOT_DIR/memory-bank/scripts/context_continuity.py"
 BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 
-command -v python3 > /dev/null 2>&1 || exit 0
+# Python 3.9+ by whichever name this shell knows it. Native Windows (Git Bash)
+# often has no working python3: the python.org installer provides python and
+# py, and the python3 found there may be the Microsoft Store stub, which only
+# offers to install Python. Elsewhere python3 is taken without a probe.
+resolve_python() {
+  PYTHON=()
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 > /dev/null 2>&1; then
+    PYTHON=(python3)
+    return 0
+  fi
+  # On Windows the name found is remembered per user, and taken again while
+  # the shell finds it at the same path (the hash table, no process): every
+  # hook otherwise started an interpreter just to ask its version.
+  local name path remembered="${TMPDIR:-/tmp}/ai-accelerator-python-${UID:-0}"
+  if [ "${OS:-}" = "Windows_NT" ] && [ -f "$remembered" ] && [ ! -L "$remembered" ] \
+      && IFS=$'\t' read -r name path < "$remembered" && [ -n "$path" ]; then
+    case "$name" in
+      python|py|python3)
+        if hash "$name" 2> /dev/null && [ "${BASH_CMDS[$name]:-}" = "$path" ]; then
+          PYTHON=("$name")
+          [ "$name" = py ] && PYTHON+=(-3)
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  for name in python py python3; do
+    PYTHON=("$name")
+    [ "$name" = py ] && PYTHON+=(-3)
+    if "${PYTHON[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      if [ "${OS:-}" = "Windows_NT" ] && [ ! -L "$remembered" ] && hash "$name" 2> /dev/null; then
+        printf '%s\t%s\n' "$name" "${BASH_CMDS[$name]:-}" > "$remembered" 2> /dev/null
+      fi
+      return 0
+    fi
+  done
+  PYTHON=()
+  return 1
+}
+resolve_python || exit 0
 [ -f "$RUNTIME" ] || exit 0
 
 HOOK_STDIN=$(cat 2>/dev/null)
 
 ARGUMENTS=(--root "$STATE_DIR" --host codex --event hook)
 if command -v timeout > /dev/null 2>&1; then
-  printf '%s' "$HOOK_STDIN" | timeout "$BUDGET_SECONDS" python3 "$RUNTIME" "${ARGUMENTS[@]}" 2>/dev/null
+  printf '%s' "$HOOK_STDIN" | timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$RUNTIME" "${ARGUMENTS[@]}" 2>/dev/null
 else
-  printf '%s' "$HOOK_STDIN" | python3 "$RUNTIME" "${ARGUMENTS[@]}" 2>/dev/null
+  printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" "$RUNTIME" "${ARGUMENTS[@]}" 2>/dev/null
 fi
 
 exit 0

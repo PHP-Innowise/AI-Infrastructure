@@ -31,95 +31,181 @@ if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${
   PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
   STATE_DIR=$ACCELERATOR_STATE_DIR
 fi
-CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
+# context_cli.py runs context.py from its cached bytecode - run as a script,
+# context.py is compiled again on every start. An older runtime has only
+# context.py.
+CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context_cli.py"
+[ -f "$CONTEXT_CLI" ] || CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 FLUSH_AFTER="${CONTEXT_FLUSH_AFTER:-5}"
 
-command -v python3 > /dev/null 2>&1 || exit 0
+# Python 3.9+ by whichever name this shell knows it. Native Windows (Git Bash)
+# often has no working python3: the python.org installer provides python and
+# py, and the python3 found there may be the Microsoft Store stub, which only
+# offers to install Python. Elsewhere python3 is taken without a probe.
+resolve_python() {
+  PYTHON=()
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 > /dev/null 2>&1; then
+    PYTHON=(python3)
+    return 0
+  fi
+  # On Windows the name found is remembered per user, and taken again while
+  # the shell finds it at the same path (the hash table, no process): every
+  # hook otherwise started an interpreter just to ask its version.
+  local name path remembered="${TMPDIR:-/tmp}/ai-accelerator-python-${UID:-0}"
+  if [ "${OS:-}" = "Windows_NT" ] && [ -f "$remembered" ] && [ ! -L "$remembered" ] \
+      && IFS=$'\t' read -r name path < "$remembered" && [ -n "$path" ]; then
+    case "$name" in
+      python|py|python3)
+        if hash "$name" 2> /dev/null && [ "${BASH_CMDS[$name]:-}" = "$path" ]; then
+          PYTHON=("$name")
+          [ "$name" = py ] && PYTHON+=(-3)
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  for name in python py python3; do
+    PYTHON=("$name")
+    [ "$name" = py ] && PYTHON+=(-3)
+    if "${PYTHON[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      if [ "${OS:-}" = "Windows_NT" ] && [ ! -L "$remembered" ] && hash "$name" 2> /dev/null; then
+        printf '%s\t%s\n' "$name" "${BASH_CMDS[$name]:-}" > "$remembered" 2> /dev/null
+      fi
+      return 0
+    fi
+  done
+  PYTHON=()
+  return 1
+}
+resolve_python || exit 0
 [ -f "$CONTEXT_CLI" ] || exit 0
 
 HOOK_STDIN=$(cat 2>/dev/null)
 
+rebased_branch() {
+  local directory state name
+  directory=$(git -C "$PROJECT_DIR" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  for state in rebase-merge rebase-apply; do
+    [ -f "$directory/$state/head-name" ] || continue
+    name=
+    IFS= read -r name < "$directory/$state/head-name" || [ -n "$name" ] || continue
+    case "$name" in refs/heads/?*) printf '%s' "${name#refs/heads/}"; return 0 ;; esac
+  done
+  return 1
+}
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
+[ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
 [ -n "$TASK_ID" ] || exit 0
 
+# A bookkeeping continuation must not checkpoint the same turn again.
+MEMORY_RECOVERY=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+except (ValueError, UnicodeError):
+    payload = {}
+if not isinstance(payload, dict):
+    payload = {}
+active = (type(payload.get("loop_count")) is int and payload["loop_count"] > 0
+          if sys.argv[-1] == "cursor" else payload.get("stop_hook_active") is True)
+print("1" if active else "0")
+' --host cursor 2>/dev/null)
+
+if [ "$MEMORY_RECOVERY" != "1" ]; then
 if command -v timeout > /dev/null 2>&1; then
-  timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" turn \
+  timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" turn \
     --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
 else
-  python3 "$CONTEXT_CLI" turn \
+  "${PYTHON[@]}" "$CONTEXT_CLI" turn \
     --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
 fi
 
-# Capsule delivery: Cursor's prompt-time event (beforeSubmitPrompt) cannot
-# add context to a prompt, so Cursor reads the Task Capsule from an
-# alwaysApply rule, which it sends with every request. working-memory-read.sh
-# renders the rule for each prompt; here, after the turn checkpoint, the
-# branch's capsule replaces any rule that hook did not render for this task
-# (an install without it, a prompt without a task, a switched branch). The
-# file is ignored local state, replaced only when a fresh render succeeds.
-# Attached, .cursor/rules is the shared clone's own rule folder, which every
-# project using the clone reads; the attaching launcher delivers the capsule
-# in the prompt instead. A host that put the capsule into the prompt itself
-# (the Harness) gets no second, branch-built one.
+fi
+
+# The payload travels on stdin; only a metadata challenge is kept. A supported
+# Stop requests one structured save from the same agent, never a new model.
+if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] && [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
+  if command -v timeout > /dev/null 2>&1; then
+    NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
+      --host cursor --task-id "$TASK_ID" 2>/dev/null)
+  else
+    NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
+      --host cursor --task-id "$TASK_ID" 2>/dev/null)
+  fi
+  NATIVE_STATUS=$?
+  [ "$NATIVE_STATUS" -eq 0 ] && [ -n "$NATIVE_RESPONSE" ] && printf '%s\n' "$NATIVE_RESPONSE"
+fi
+
+# Cursor keeps working-memory.mdc, a generated alwaysApply rule, for direct-host delivery.
+# Attached rules belong to the shared clone and are never maintained here.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
-[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
-RULES_DIR="$ROOT_DIR/.cursor/rules"
-RULE_FILE="$RULES_DIR/working-memory.mdc"
-# The prompt hook's rule for this task holds what was retrieved for the
-# conversation's latest prompt. Rebuilt here from the task alone it would lose
-# that, and when Cursor reads its rules before the prompt hook has run, it is
-# what the next request carries.
-grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null && exit 0
+cursor_rule_run() {
+  local CURSOR_MAINTENANCE_STATUS=0 CURSOR_MAINTENANCE_REPORT CURSOR_PROJECTION_STATUS=0
+  if command -v timeout >/dev/null 2>&1; then
+    CURSOR_MAINTENANCE_REPORT=$(timeout 3 "${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  else
+    CURSOR_MAINTENANCE_REPORT=$("${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  fi
+  if [ "$CURSOR_MAINTENANCE_STATUS" -ne 0 ]; then
+    printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2
+    return "$CURSOR_MAINTENANCE_STATUS"
+  fi
+  # 4096 limits projection admission, not the shell capture of trusted CLI
+  # stdout. Both subprocess stderr streams are discarded before fixed reports.
+  printf '%s' "$CURSOR_MAINTENANCE_REPORT" | "${PYTHON[@]}" -I -S -c '
+import json,sys
+try:
+    raw=sys.stdin.buffer.read(4097)
+    if len(raw)>4096: raise ValueError("bounded outcome required")
+    value=json.loads(raw)
+    state=value.get("state") if isinstance(value,dict) else None
+    if state not in ("written","unchanged","kept","removed","absent","attached","preserved","incomplete"):
+        raise ValueError("known state required")
+    print(json.dumps({"state":state}))
+    sys.exit(5 if state=="preserved" and value.get("reason")=="linked_directory"
+             else 3 if state=="preserved" else 4 if state=="incomplete" else 0)
+except (ValueError,TypeError,RecursionError):
+    sys.exit(1)
+' 2>/dev/null || CURSOR_PROJECTION_STATUS=$?
+  case "$CURSOR_PROJECTION_STATUS" in
+    0) return 0 ;;
+    3) printf '%s\n' 'Cursor memory rule was not updated: custom_or_unavailable.' >&2 ;;
+    5) printf '%s\n' 'Cursor memory rule was not updated: linked_directory.' >&2 ;;
+    4) printf '%s\n' 'Cursor memory rule was not updated: maintenance_incomplete.' >&2 ;;
+    *) printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2; return 1 ;;
+  esac
+  return 0
+}
+if [ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ]; then
+  cursor_rule_run cursor-rule-retire >/dev/null || true
+  exit 0
+fi
+# Preserve this task's proven prompt rule after checkpointing. Task alias is
+# not chat ownership or current canonical-source authority. This only asks:
+# "preserved" means another rule is there, which the write below replaces, so
+# it reports nothing - the write, keep or retire that follows says what
+# happened to the rule.
+HELD_RULE=$(cursor_rule_run cursor-rule --action prompt-held --task-id "$TASK_ID" 2>/dev/null || true)
+case "$HELD_RULE" in *'"state": "kept"'*) exit 0 ;; esac
+CAPSULE_IDENTITY_ARGUMENTS=()
+if [ -z "${CONTEXT_TASK_ID:-}" ] && [ -n "$TASK_ID" ]; then
+  CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch "$TASK_ID")
+fi
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
-  CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-    --host cursor --task-id "$TASK_ID" 2>/dev/null)
+  CAPSULE=$(timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$TASK_ID" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)
   CAPSULE_STATUS=$?
 else
-  CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-    --host cursor --task-id "$TASK_ID" 2>/dev/null)
+  CAPSULE=$("${PYTHON[@]}" "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$TASK_ID" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)
   CAPSULE_STATUS=$?
 fi
-# The rendered capsule always opens with the working line. Anything else is a
-# broken render and must not replace a good rule. This guard replaces the JSON
-# parse that protected the --json form.
-#
-# Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
-# this turn" - renders nothing. The rule in place then stays only when its
-# header names this task: an enforce-mode skip must never replace Cursor's
-# only memory channel with an empty capsule, and another task's capsule (a
-# switched branch whose render keeps failing) must never be sent with this
-# task's prompts as their working memory.
-if [ "$CAPSULE_STATUS" -eq 0 ]; then
-  case "$CAPSULE" in
-    working:*) ;;
-    *) CAPSULE_STATUS=1 ;;
-  esac
-fi
 if [ "$CAPSULE_STATUS" -eq 3 ]; then
-  rm -f "$RULE_FILE" 2>/dev/null
-elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
-  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$TMP_RULE" ]; then
-    {
-      printf -- '---\n'
-      printf 'description: Working memory - current-branch session context\n'
-      printf 'alwaysApply: true\n'
-      printf -- '---\n\n'
-      printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Session context as of end of previous turn (task: %s).\n' "$TASK_ID"
-      printf 'Retrieved context is not authoritative - verify the source.\n\n'
-      printf '%s\n' '```'
-      printf '%s\n' "$CAPSULE"
-      printf '%s\n' '```'
-    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
-    rm -f "$TMP_RULE" 2>/dev/null
-  fi
+  cursor_rule_run cursor-rule-retire >/dev/null || true
+elif [ "$CAPSULE_STATUS" -eq 0 ]; then
+  printf '%s' "$CAPSULE" | cursor_rule_run cursor-rule --action write --phase turn --task-id "$TASK_ID" >/dev/null || true
+else
+  cursor_rule_run cursor-rule --action keep --task-id "$TASK_ID" >/dev/null || true
 fi
-grep -qxF "Session context as of end of previous turn (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
-  || grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
-  || rm -f "$RULE_FILE" 2>/dev/null
 
 exit 0

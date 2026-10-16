@@ -92,3 +92,9 @@ with 32 MiB per archive; a full store refuses a new merge and never blocks a
 turn. The store writes its own `.gitignore`, so it stays out of Git even where
 the project's `.gitignore` does not name it. The repository's context-handoff guide lists the
 limits of each client.
+
+### Automatic structured result capture
+
+In governed native sessions the prompt hook arms a metadata-only challenge. At Stop, after the Git checkpoint, the same agent receives at most one internal continuation to submit progress, optional next steps and up to three checked source-backed learnings via `context.py native-result`. A clean research turn needs no Git delta or manual memory command. Empty learnings and an explicit skip are valid; no transcript or final prose is automatically adopted as knowledge. Task provisioning occurs only after a valid structured result; agent attestation never becomes person review or task completion.
+
+Pending captures pin project, actor, session, task revision, checkout and runtime. Conflicts are held; repeated saves use the same result ID. Recovery does not checkpoint the user turn twice. A failed or uncertain save is reported in the next capsule. Harness/recovery and lightweight sessions do not arm this path. Local challenges expire for save after 24 hours and are bounded to 128 sessions; a new prompt always starts fresh. Cursor's Stop entry uses `loop_limit: 1`.

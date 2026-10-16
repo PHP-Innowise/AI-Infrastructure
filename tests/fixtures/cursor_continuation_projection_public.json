@@ -1,0 +1,10 @@
+{
+  "auto_task_progress": "Juniper relay ownership",
+  "expected_source": "task",
+  "expected_semantic_paths": [
+    "specs/juniper-relay.md"
+  ],
+  "explicit_goal_query": "Juniper relay ownership",
+  "full_working_progress_remains": "Juniper relay review is ready",
+  "query_projection_only": true
+}

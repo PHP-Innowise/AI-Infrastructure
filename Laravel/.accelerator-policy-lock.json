@@ -242,20 +242,20 @@
     ".claude/commands/test-generator.md": "dcfdebec04e49a2f58f3d7271bafcd5d81c1df142cb6da6ffd8001236760a84c",
     ".claude/commands/verify.md": "09f1de609dbf6db63a7688d26eb5f92a6dbed19838239f8630b662c83539c344",
     ".claude/commands/writing-plans.md": "183238cd9fe57613f955cc23496e149b2a3624e8a13b9cd5dd4a2051e915ac53",
-    ".claude/settings.json": "75735e11d1e55648b421d691c85390dc3bb546a23911c0f95f13471cae11c999",
+    ".claude/settings.json": "a5eabfd94483a4f8d3f4fd65c61b75a9aa81d171cd6c55bda320fb7be0f2e584",
     ".claude/skills/SKILL FLOW.md": "cb232196c83923028fffeb49bc88433001b1c68d009664ec8b99cf44517186f6",
     ".claude/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     ".codex/config.toml": "42c947e361a7bb6606d6455bae697d90569ce8a7b0b90cf7c39c570083f29ced",
     ".codex/hooks.json": "84602eedb4f359016de43238f3f197c80dc2f44a1e3ac0534cb4c84f1b28795b",
-    ".cursor/hooks.json": "d831f91927e33e1dbcfc54dd4268193d4758cd1adc7983d1677f01d730b6d895",
+    ".cursor/hooks.json": "90a87a1326da60259a14e1f0e3642c0aacae9de2ad4869764abaa3fecfc376ea",
     ".cursor/rules/accelerator-workflow.mdc": "af7986b75156c4a6fe58d69bedcab24db6a3299a9f232ccc3daac2827feae19c",
     ".cursor/rules/php-standards.mdc": "cd3672b7a2b9fc108a49aa1ad907871bf6954f1fc2ecc37bb93114894d82abc7",
     ".cursor/rules/safety-and-verification.mdc": "05c0da0cf1cd5aa24a12c9d8346719fb1c8bf713a18f9ec35f878498fb8b4386",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    "AGENTS.md": "6995261374fb01628af139bdd29774dfa0fb18868ce5c3f7df1d6ff71ec55f94"
+    "AGENTS.md": "35da4288b99f28054185f0160c5efa326714de46835b23828cb1fd035c5cfecb"
   },
-  "policy_digest": "ab5202c41fab8b5cac9c9b8f93497a3585e5223f1129b19c074331f606e59925",
+  "policy_digest": "2ef77cc299369c1dc96dd15c45d469771108ffd09b4b8990b6242d0a199125a1",
   "release": "2.0.0",
   "schema_version": 1
 }

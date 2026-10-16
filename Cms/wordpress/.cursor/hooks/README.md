@@ -37,7 +37,7 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### subagentStop: Subagent Dispatch Observer
 **Script:** `subagent-dispatch.sh`
-**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without python3 or the context runtime. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported in one line - its exit status and the last line of its error - on stdout and stderr. That line reaches only the hooks output: Cursor's `subagentStop` has no channel to the orchestrating agent but `followup_message`, which would start another turn, so - unlike Claude Code, where a `PostToolUse` relay hands it on - the orchestrator is not told.
+**Purpose:** Records each subagent completion in the task's agent channel (`msg-dispatch --event complete`; uses `subagent_type` and `status` - the documented `summary` field is unreliable in current Cursor builds) and releases the write-agent lock the gate took for a `writes: true` agent. Degrades to a no-op without Python 3.9+ or the context runtime. A completion write that fails for any other reason (not a missing task, not lightweight mode) is reported in one line - its exit status and the last line of its error - on stdout and stderr. That line reaches only the hooks output: Cursor's `subagentStop` has no channel to the orchestrating agent but `followup_message`, which would start another turn, so - unlike Claude Code, where a `PostToolUse` relay hands it on - the orchestrator is not told.
 **Return:** Always exit 0, no JSON output (observation only)
 
 ### afterFileEdit: File Naming Validator
@@ -86,21 +86,58 @@ with every request:
 - `working-memory-read.sh` (`beforeSubmitPrompt`) retrieves for the prompt and
   renders that capsule into the rule before the request leaves - in the same
   turn when Cursor reads its rules after the hook, on the next prompt
-  otherwise. Cursor puts rules at the start of the model's context, where a
-  change costs the conversation its cached prefix, so the rule is replaced
-  only when the prompt retrieved an item - a document section - it does not
-  hold yet. Its header
-  says "retrieved for a recent prompt".
+  otherwise. An identical complete render leaves the file unchanged; a
+  changed excerpt or selected set replaces it even when document labels match.
+  Its header says "retrieved for a recent prompt". Provider cache/token effects
+  and native rule-loading order are not measured by these hooks.
 - `working-memory-write.sh` (`stop`) renders the branch's capsule after the
   turn checkpoint, unless the rule holds the prompt hook's capsule for the same
-  task; `local-context.sh` (`sessionStart`) always does, so a fresh session or
-  a branch switch never serves the previous session's capsule.
+  task; `local-context.sh` (`sessionStart`) attempts a fresh render. Publication
+  and retirement require current custody; unproven rules remain intact.
 
-The rule is replaced atomically and only when a fresh render succeeds. A
-render that fails, times out, breaks or is withheld by the retrieval gate
-keeps the rule in place only when its header names the current task; a rule
-another task left behind (a switched branch) is removed rather than sent as
-this task's working memory. The rule is ignored local state (this edition's `.gitignore` lists it). Cursor also
+The ignored `memory-bank/local/cursor-rule.json` receipt binds exact bytes,
+phase and task. Stored device/inode/mtime fields are advisory historical locators,
+not permanent ownership: copy, restore, rename, touch and reboot changes reconcile
+against the current opened image. Losing the disposable local cache is safe.
+A Git ignore directive for the path - the root `.gitignore` line the installer
+writes, `.git/info/exclude` or a global excludes file - reserves this generated
+output slot. A complete historical machine envelope in that untracked slot
+upgrades on the next invocation, including a stale receipt left by an older
+branch. A file that still opens with the auto-rendered header but was edited -
+a note appended below the capsule, say - is copied to
+`memory-bank/local/cursor-rule-edits/` (the newest 20 are kept) and the slot is
+written again, so it never freezes with another task's capsule. Put custom rules
+at another path: a file without that header, tracked files and foreign links
+are preserved. The rule is written only into the project's own `.cursor/rules`
+directory: a `.cursor` or `.cursor/rules` that is a symbolic link - a rules
+folder shared between projects - is never written through, since the capsule
+would reach every project sharing it, and the hooks report `linked_directory`.
+Keep `.cursor/rules` a directory and link shared rule files inside it. A rule
+the first releases (2026-08-03..05) wrote under their own frontmatter is
+generated output too: it is saved like an edited one and the slot is written
+again.
+A failed render keeps a proven current-task rule; a proven other-task rule or
+missing task can be retired. This is local maintenance, not source authority or
+chat ownership. New facts always come from the current render, never the old rule.
+
+Direct-host maintenance uses anchored POSIX operations or the native Windows
+handle backend and the cooperative Brain lock. Linux uses no-clobber rename
+when supported; other POSIX systems can use the link fallback. An old interrupted
+two-link publication is recoverable only with its exact same-directory UUID
+alias, full managed image, two untracked names and locked identity rechecks;
+other links stay untouched. Native Windows/foreign filesystem behavior requires
+its own platform CI; unsupported operations preserve the file.
+
+Harness and delivered hook paths attempt retirement before redundant delivery.
+Hook maintenance has a three-second process budget where `timeout` exists;
+Harness uses its execution supervisor. Cleanup may outlast those budgets. Fixed
+stderr diagnostics report refusal/incomplete/unavailable maintenance without
+printing capsule content. Protected Git system/global `safe.directory` policy is
+honored narrowly for the selected root; inherited Git command configuration never
+grants trust. Rule and receipt remain separate publications, without a durable
+transaction or atomic CAS against unsynchronized foreign writers.
+
+The rule is ignored local state (this edition's `.gitignore` lists it). Cursor also
 runs the Claude Code hooks it finds; the Claude copies of the two
 working-memory hooks recognize Cursor's payload and stand down while this
 folder's hooks serve. These Cursor copies differ from the canonical
@@ -139,3 +176,9 @@ with 32 MiB per archive; a full store refuses a new merge and never blocks a
 turn. The store writes its own `.gitignore`, so it stays out of Git even where
 the project's `.gitignore` does not name it. The repository's context-handoff guide lists the
 limits of each client.
+
+### Automatic structured result capture
+
+In governed native sessions the prompt hook arms a metadata-only challenge. At Stop, after the Git checkpoint, the same agent receives at most one internal continuation to submit progress, optional next steps and up to three checked source-backed learnings via `context.py native-result`. A clean research turn needs no Git delta or manual memory command. Empty learnings and an explicit skip are valid; no transcript or final prose is automatically adopted as knowledge. Task provisioning occurs only after a valid structured result; agent attestation never becomes person review or task completion.
+
+Pending captures pin project, actor, session, task revision, checkout and runtime. Conflicts are held; repeated saves use the same result ID. Recovery does not checkpoint the user turn twice. A failed or uncertain save is reported in the next capsule. Harness/recovery and lightweight sessions do not arm this path. Local challenges expire for save after 24 hours and are bounded to 128 sessions; a new prompt always starts fresh. Cursor's Stop entry uses `loop_limit: 1`.

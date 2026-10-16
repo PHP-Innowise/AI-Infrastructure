@@ -158,9 +158,56 @@ cache_write() {
   printf '%s\n' "$2" > "$VALIDATION_CACHE_DIR/$1-$VALIDATION_CACHE_KEY" 2>/dev/null || true
 }
 
-if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
-  CONTEXT_STATUS=$(python3 "$CONTEXT_CLI" status --json 2>/dev/null || true)
-  STATUS_FIELDS=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print("{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("database", "")))' "$CONTEXT_STATUS" 2>/dev/null || true)
+# Python 3.9+ by whichever name this shell knows it. Native Windows (Git Bash)
+# often has no working python3: the python.org installer provides python and
+# py, and the python3 found there may be the Microsoft Store stub, which only
+# offers to install Python. Elsewhere python3 is taken without a probe.
+resolve_python() {
+  PYTHON=()
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 > /dev/null 2>&1; then
+    PYTHON=(python3)
+    return 0
+  fi
+  # On Windows the name found is remembered per user, and taken again while
+  # the shell finds it at the same path (the hash table, no process): every
+  # hook otherwise started an interpreter just to ask its version.
+  local name path remembered="${TMPDIR:-/tmp}/ai-accelerator-python-${UID:-0}"
+  if [ "${OS:-}" = "Windows_NT" ] && [ -f "$remembered" ] && [ ! -L "$remembered" ] \
+      && IFS=$'\t' read -r name path < "$remembered" && [ -n "$path" ]; then
+    case "$name" in
+      python|py|python3)
+        if hash "$name" 2> /dev/null && [ "${BASH_CMDS[$name]:-}" = "$path" ]; then
+          PYTHON=("$name")
+          [ "$name" = py ] && PYTHON+=(-3)
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  for name in python py python3; do
+    PYTHON=("$name")
+    [ "$name" = py ] && PYTHON+=(-3)
+    if "${PYTHON[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      if [ "${OS:-}" = "Windows_NT" ] && [ ! -L "$remembered" ] && hash "$name" 2> /dev/null; then
+        printf '%s\t%s\n' "$name" "${BASH_CMDS[$name]:-}" > "$remembered" 2> /dev/null
+      fi
+      return 0
+    fi
+  done
+  PYTHON=()
+  return 1
+}
+resolve_python
+# The policy names the memory CLI as `python3 memory-bank/scripts/context.py`,
+# which fails where python3 is not Python - native Windows with the
+# python.org installer. The session hears the name that works here.
+if [ -n "${PYTHON[0]:-}" ] && [ "${PYTHON[*]}" != python3 ] && [ -f "$CONTEXT_CLI" ]; then
+  echo "Python here is \`${PYTHON[*]}\`, not python3: run the memory CLI commands the policy names with \`${PYTHON[*]}\` in place of \`python3\`."
+fi
+
+if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ]; then
+  CONTEXT_STATUS=$("${PYTHON[@]}" "$CONTEXT_CLI" status --json 2>/dev/null || true)
+  STATUS_FIELDS=$("${PYTHON[@]}" -c 'import json,sys; d=json.loads(sys.argv[1]); print("{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("database", "")))' "$CONTEXT_STATUS" 2>/dev/null || true)
   if [ -n "$STATUS_FIELDS" ]; then
     IFS=$'\t' read -r CONTEXT_MODE ACTIVE_BINDINGS INDEX_DOCUMENTS INDEX_DB <<< "$STATUS_FIELDS"
     INDEX_HEALTH="healthy"
@@ -176,9 +223,9 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
     fi
     VALIDATION_STATUS=$(cache_read brain-validation)
     if [ -z "$VALIDATION_STATUS" ]; then
-      VALIDATION_JSON=$(python3 "$CONTEXT_CLI" validate --json 2>/dev/null || true)
+      VALIDATION_JSON=$("${PYTHON[@]}" "$CONTEXT_CLI" validate --json 2>/dev/null || true)
       # The CLI emits {"valid": true|false, ...}; a substring test replaces a
-      # third python3 startup just to read one boolean.
+      # third Python startup just to read one boolean.
       case "$VALIDATION_JSON" in
         *'"valid": true'*|*'"valid":true'*) VALIDATION_STATUS="valid" ;;
         *'"valid"'*) VALIDATION_STATUS="invalid" ;;
@@ -190,13 +237,17 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
   else
     echo "Context governance: mode/index/bindings/validation unavailable."
   fi
+elif [ -f "$CONTEXT_CLI" ]; then
+  # The memory hooks stay silent without Python, prompt after prompt; this is
+  # the one place a session hears why memory is neither read nor written.
+  echo "Context governance: unavailable - no Python 3.9+ found (python3, python or py -3), so memory is neither read nor written."
 fi
 
 if [ -f "$ROOT_DIR/memory-bank/README.md" ] && [ -f "$STATE_DIR/memory-bank/INDEX.md" ]; then
-  if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
+  if [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
     MEMORY_SUMMARY=$(cache_read memory-summary)
     if [ -z "$MEMORY_SUMMARY" ]; then
-      MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "$STATE_DIR/memory-bank" 2>/dev/null)
+      MEMORY_SUMMARY=$("${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "$STATE_DIR/memory-bank" 2>/dev/null)
       [ -n "$MEMORY_SUMMARY" ] && cache_write memory-summary "$MEMORY_SUMMARY"
     fi
     if [ "$STATE_DIR" = "$ROOT_DIR" ]; then
@@ -229,72 +280,71 @@ if [ -d "specs" ]; then
   echo "  Specs: $SPEC_COUNT"
 fi
 
-# Capsule delivery: Cursor reads the Task Capsule from
-# .cursor/rules/working-memory.mdc, which the prompt and stop hooks maintain
-# (the documented exception to the metadata-only session banner - see
-# docs/TOOL-INTEGRATIONS.md). Re-render it here so a fresh session or a
-# branch switch does not serve the previous session's capsule. Nothing is
-# printed: the rule file is the only output.
+# Cursor's direct-host channel is the owned local working-memory.mdc rule.
+[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+cursor_rule_run() {
+  local CURSOR_MAINTENANCE_STATUS=0 CURSOR_MAINTENANCE_REPORT CURSOR_PROJECTION_STATUS=0
+  if command -v timeout >/dev/null 2>&1; then
+    CURSOR_MAINTENANCE_REPORT=$(timeout 3 "${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  else
+    CURSOR_MAINTENANCE_REPORT=$("${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  fi
+  if [ "$CURSOR_MAINTENANCE_STATUS" -ne 0 ]; then
+    printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2
+    return "$CURSOR_MAINTENANCE_STATUS"
+  fi
+  # 4096 limits projection admission, not the shell capture of trusted CLI
+  # stdout. Both subprocess stderr streams are discarded before fixed reports.
+  printf '%s' "$CURSOR_MAINTENANCE_REPORT" | "${PYTHON[@]}" -I -S -c '
+import json,sys
+try:
+    raw=sys.stdin.buffer.read(4097)
+    if len(raw)>4096: raise ValueError("bounded outcome required")
+    value=json.loads(raw)
+    state=value.get("state") if isinstance(value,dict) else None
+    if state not in ("written","unchanged","kept","removed","absent","attached","preserved","incomplete"):
+        raise ValueError("known state required")
+    print(json.dumps({"state":state}))
+    sys.exit(5 if state=="preserved" and value.get("reason")=="linked_directory"
+             else 3 if state=="preserved" else 4 if state=="incomplete" else 0)
+except (ValueError,TypeError,RecursionError):
+    sys.exit(1)
+' 2>/dev/null || CURSOR_PROJECTION_STATUS=$?
+  case "$CURSOR_PROJECTION_STATUS" in
+    0) return 0 ;;
+    3) printf '%s\n' 'Cursor memory rule was not updated: custom_or_unavailable.' >&2 ;;
+    5) printf '%s\n' 'Cursor memory rule was not updated: linked_directory.' >&2 ;;
+    4) printf '%s\n' 'Cursor memory rule was not updated: maintenance_incomplete.' >&2 ;;
+    *) printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2; return 1 ;;
+  esac
+  return 0
+}
+if [ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ]; then
+  cursor_rule_run cursor-rule-retire >/dev/null || true
+  exit 0
+fi
 CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
-# Attached, the rule folder is the shared clone's; see the stop hook. Nor
-# when the host delivered the capsule in the prompt.
-[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
-[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
-RULES_DIR="$ROOT_DIR/.cursor/rules"
-RULE_FILE="$RULES_DIR/working-memory.mdc"
-CAPSULE=""
+CAPSULE_IDENTITY_ARGUMENTS=()
+if [ -z "${CONTEXT_TASK_ID:-}" ] && [ -n "$CAPSULE_TASK_ID" ]; then
+  CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch "$CAPSULE_TASK_ID")
+fi
 CAPSULE_STATUS=3
-if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
-  if command -v timeout > /dev/null 2>&1; then
-    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-      --host cursor --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$CAPSULE_TASK_ID" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)
     CAPSULE_STATUS=$?
   else
-    CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-      --host cursor --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+    CAPSULE=$("${PYTHON[@]}" "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$CAPSULE_TASK_ID" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)
     CAPSULE_STATUS=$?
   fi
 fi
-# See the stop hook: the working line is the render marker that replaces the
-# JSON parse.
-#
-# Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
-# this turn" - renders nothing. The rule in place then stays only when its
-# header names this task: an enforce-mode skip must never replace Cursor's
-# only memory channel with an empty capsule, and a fresh session on a switched
-# branch whose render fails must not start with the previous branch's capsule.
-if [ "$CAPSULE_STATUS" -eq 0 ]; then
-  case "$CAPSULE" in
-    working:*) ;;
-    *) CAPSULE_STATUS=1 ;;
-  esac
-fi
 if [ "$CAPSULE_STATUS" -eq 3 ]; then
-  rm -f "$RULE_FILE" 2>/dev/null
-elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
-  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$TMP_RULE" ]; then
-    {
-      printf -- '---\n'
-      printf 'description: Working memory - current-branch session context\n'
-      printf 'alwaysApply: true\n'
-      printf -- '---\n\n'
-      printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Session context as of end of previous turn (task: %s).\n' \
-        "$CAPSULE_TASK_ID"
-      printf 'Retrieved context is not authoritative - verify the source.\n\n'
-      printf '%s\n' '```'
-      printf '%s\n' "$CAPSULE"
-      printf '%s\n' '```'
-    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
-    rm -f "$TMP_RULE" 2>/dev/null
-  fi
+  cursor_rule_run cursor-rule-retire >/dev/null || true
+elif [ "$CAPSULE_STATUS" -eq 0 ]; then
+  printf '%s' "$CAPSULE" | cursor_rule_run cursor-rule --action write --phase session --task-id "$CAPSULE_TASK_ID" >/dev/null || true
+else
+  cursor_rule_run cursor-rule --action keep --task-id "$CAPSULE_TASK_ID" >/dev/null || true
 fi
-[ -n "$CAPSULE_TASK_ID" ] && {
-  grep -qxF "Session context as of end of previous turn (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null \
-    || grep -qxF "Session context retrieved for a recent prompt (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null
-} || rm -f "$RULE_FILE" 2>/dev/null
 
 exit 0

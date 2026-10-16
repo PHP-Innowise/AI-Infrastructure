@@ -1,0 +1,25 @@
+{
+  "profile": "cursor-portable-custody-v1",
+  "task": "PINE-WINDOWS",
+  "capsule": "working: PINE-WINDOWS\n- source specs/pine-lift.md — Pine lift\n  A pine lift has two operators.",
+  "expected_prompt": "---\ndescription: Working memory - current-branch session context\nalwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\nSession context retrieved for a recent prompt (task: PINE-WINDOWS).\nRetrieved context is not authoritative - verify the source.\n\n```\nworking: PINE-WINDOWS\n- source specs/pine-lift.md — Pine lift\n  A pine lift has two operators.\n```\n",
+  "expected_prompt_bytes": 356,
+  "replacement": "working: PINE-WINDOWS\n- source specs/pine-lift.md — Pine lift\n  A pine lift has three reviewers.",
+  "foreign_sentinel": "HUMAN PINE POLICY\n",
+  "expected_states": {
+    "write": "written",
+    "repeat": "unchanged",
+    "retire": "removed",
+    "foreign": "preserved",
+    "orphan": "written",
+    "contention": "preserved"
+  },
+  "no_clobber": "preserve foreign bytes even when destination appears immediately before publication",
+  "unsupported_root_profiles": [
+    "UNC",
+    "junction",
+    "symlink",
+    "reparse point"
+  ],
+  "windows_validation": "actual native Windows tests required; POSIX adapter is not proof of NT APIs"
+}

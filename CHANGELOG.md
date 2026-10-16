@@ -126,6 +126,20 @@ edition's own files remain in that edition's changelog.
   records from 222 to 204 ms; a turn checkpoint is unchanged. Tests:
   `tests/test_memory_brain_scale.py` (`BrainScaleTests`).
 
+- A rebase no longer leaves the turn without memory. It detaches HEAD on the
+  commits it replays, so the prompt hook found no branch and named no task -
+  exactly while a turn asks about the conflict the rebase stopped on. The
+  read hook now falls back to the branch being rebased (Git's
+  `rebase-merge/head-name`, or `rebase-apply/` for the apply backend, in the
+  worktree's own Git directory), and the runtime admits that branch as the
+  inferred one only while the rebase is in progress: another branch's name
+  there, or a detached HEAD with no rebase, is still refused. The capsule
+  then carries the task and the conflicted passage. Turn checkpoints still
+  wait for the symbolic branch. Checked in a checkout and a linked worktree;
+  the generator's hook contract admits the one fallback line. Tests:
+  `tests/test_memory_git_reuse.py`, `memory-bank/tests/test_hooks.py`
+  (`RebaseIdentityTest`).
+
 - A branch whose name Git takes but a task ID does not - an apostrophe
   (`fix/user's-login`), `@`, parentheses, more than 128 characters - no
   longer turns memory off. Every prompt there said `Capsule unavailable: Task
@@ -137,6 +151,40 @@ edition's own files remain in that edition's changelog.
   subagent dispatch and the readiness report. Any other ID the grammar
   refuses is still refused. Tests: `project-brain/tests/test_runtime.py`
   (`AnyScriptTaskIdTest`).
+
+- Memory works on native Windows with the python.org installer. The hooks
+  ran only `python3`, which that installer does not provide: Git Bash then
+  finds nothing, or the Microsoft Store stub that only offers to install
+  Python, so memory was neither read nor written - silently, or with the
+  stub's message on every prompt. Every hook that runs Python
+  (`working-memory-read.sh`, `working-memory-write.sh`,
+  `context-continuity.sh`, `subagent-dispatch.sh`, `local-context.sh` and
+  Cursor's rule maintenance) now finds it with one `resolve_python`
+  function: on Windows it tries `python`, `py -3` and `python3` and takes the
+  first that is Python 3.9+, the order the memory MCP launcher already uses;
+  elsewhere a `python3` on `PATH` is taken without a probe, so the common
+  case starts no extra interpreter. On Windows the name found is remembered
+  per user (`$TMPDIR/ai-accelerator-python-<uid>`) and taken again while the
+  shell finds it at the same path - read from bash's own lookup table, no
+  process - so the probe runs once, not in every hook. With no Python at all the prompt hooks
+  stay silent as before, and the session banner now says memory is off
+  (`Context governance: unavailable - no Python 3.9+ found`) instead of
+  nothing. The memory CLI the policy has the agent run as `python3
+  memory-bank/scripts/context.py` failed there too, and under `claude -p`
+  (the Harness runs it so) a `python ...` retry was refused as not allowed:
+  `.claude/settings.json` now allows the CLI under `python` and `py -3` as
+  well, `.cursor/cli.json` under `python`, and where Python has another name
+  the session banner says which (``Python here is `py -3`, not python3``).
+  Attached on Windows, the policy preamble names the runtime as `python`.
+  The generator's hook contract (hook-forge,
+  `validate_generated.py`) takes the resolved call and still accepts hooks
+  that call `python3`. Tests: `memory-bank/tests/test_hooks.py`
+  (`PythonResolutionTest`); checked live on an installed project with
+  `OS=Windows_NT`, a Store-stub `python3` and the interpreter answering only
+  to `python`, then only to `py -3`. On native Windows,
+  `tests/test_windows_memory_hooks.py` (CI job `windows-harness`) installs
+  PHP Core and runs the session, prompt and Stop hooks through Git Bash,
+  with a real `python.exe` and no `python3` on `PATH`.
 
 - A large Memory Bank no longer slows every prompt. Each prompt checks the
   chunks again, since a citation can go away while a chunk stays, and it
@@ -164,9 +212,27 @@ edition's own files remain in that edition's changelog.
   that file, keeps the manual recovery in `docs/TROUBLESHOOTING.md`. Tests:
   `tests/test_memory_orphaned_task.py`.
 
+- A prompt with a pasted log keeps its memory. The read hook passes the
+  prompt to the CLI as one argument, and Linux refuses one over 128 KiB
+  (Windows a whole command line over 32,767 characters): a prompt past that
+  failed the refresh with "Argument list too long" and the turn got no
+  memory. The hook now keeps the first 16,000 and the last 8,000 characters
+  of a prompt over 24,000 - the question usually stands at one end - and
+  the query is distilled from those as before. Test:
+  `tests/test_memory_prompt_read.py`.
+
 - Tests: `tests/test_memory_onnx.py` no longer fails when a worker process is
   reaped between the open and the read of its `/proc/<pid>/stat` (the read
   raises ESRCH); a full check hit that race once.
+
+- Claude Code and Codex: on a checkout that names no branch - a detached
+  HEAD in a rebase or a bisect - the prompt hook has no task to read and
+  only keeps the index current, and the refresh's operator report ("procedural:
+  updated (94 documents)", the phase timings) reached the model as noise on
+  every prompt. A hook's refresh without a task and a query now prints
+  nothing when every layer refreshed; a failure still prints, and `/memory`
+  (`refresh` without `--host`) keeps its report. Test:
+  `tests/test_memory_prompt_read.py`.
 
 - A project with tens of thousands of documents keeps its memory. The ignore
   check asked `git check-ignore` about every candidate document, and Git
@@ -260,6 +326,41 @@ edition's own files remain in that edition's changelog.
   from 301 to 270 ms on 3.9. Tests: `tests/test_memory_brain_scale.py`
   (`BrainIndexStabilityTests`, `SourceKeyTests`).
 
+- Cursor: a `.cursor` or `.cursor/rules` that is a symbolic link - a rules
+  folder shared between projects - is still never written through, since the
+  capsule would reach every project sharing it, but the hooks now say so:
+  "Cursor memory rule was not updated: linked_directory." instead of the
+  generic `custom_or_unavailable`, and `cursor-rule` reports the reason in its
+  JSON. Keep `.cursor/rules` a directory and link shared rule files inside it.
+
+- Cursor: a rule written by the releases of 2026-08-03..05 - frontmatter
+  "Task Capsule as of end of previous turn" or "warming up, no Task Capsule
+  rendered yet" - is generated output, not a person's rule: it is copied to
+  `memory-bank/local/cursor-rule-edits/` like an edited rule and the slot is
+  written again. Before, such a file stayed in the slot after an upgrade and
+  Cursor sent its August capsule with every request.
+
+- Claude Code and Codex: a refresh stopped at its budget now adds "If this
+  repeats on every prompt, build the index once outside the hook: python3
+  memory-bank/scripts/context.py index" in an installed project. A first
+  index of a large documentation tree (about 19 MB of Markdown on a loaded
+  machine) does not fit a prompt's five seconds, and an index stopped there
+  starts over on the next prompt.
+
+- Cursor: a prompt whose capsule selected nothing no longer becomes the
+  topic a "yes", "да" or "go on" continues. A short reply ("thanks, looks
+  good") took the topic's place, and every whitelisted continuation after it
+  searched by that reply and delivered nothing. Such a prompt - a reply or a
+  question nothing matched - now clears the topic without reviving the one
+  before it, and the next prompt that selects something sets it again. Test:
+  `tests/test_cursor_continuation_state.py`.
+
+- Cursor: a `safe.directory` in `$XDG_CONFIG_HOME/git/config` trusts the
+  project for the rule's custody as it does for Git. The trust check read
+  `git config --global`, which reads only `~/.gitconfig` when that file
+  exists; it now reads every file with its scope and keeps the system and
+  global values, so the rule was neither written nor retired on such setups.
+
 - A working task whose record is unreadable (bytes that are not UTF-8, say)
   keeps its binding: the lookup now says "invalid" - the file's name is the
   record's UUID - instead of "not found", which would have let the next
@@ -315,6 +416,13 @@ edition's own files remain in that edition's changelog.
   Windows, where each Git start costs tens of milliseconds, this is most of a
   prompt's Git time.
 
+- Cursor: the Stop hook no longer prints "Cursor memory rule was not updated:
+  custom_or_unavailable." on every turn that replaces a session or turn rule.
+  Its check for a held prompt rule is a question - "preserved" there means
+  another rule is in place for the write that follows - and the write, keep
+  or retire after it reports the rule's real outcome. TOOL-INTEGRATIONS gives
+  the maintenance budget the hooks use, three seconds, not one.
+
 ### Memory repairs and resumable saves — 2026-10-15
 
 - Brain reads at scale: a command reads each Project Brain record once. The
@@ -350,6 +458,10 @@ edition's own files remain in that edition's changelog.
   `stale_task_revision` refusals. Both folders are documented in the Brain
   README, `MCP.md`, `MEMORY-INTEGRATION.md` and the generator's runtime
   contract.
+- A Cursor rule a person edited is preserved: before the rule is regenerated
+  or retired, an edited generation is copied to
+  `memory-bank/local/cursor-rule-edits/` (newest 20), and temporary files an
+  interrupted write left are swept.
 - Prompt hook cost on a 500-record Brain is back to the evening level (221 ms
   against 225 ms; it was 23% slower). The Brain is read once per pass -
   `iter_record_images` hands the index the very image it validated, and the
@@ -379,6 +491,17 @@ edition's own files remain in that edition's changelog.
 
 ### Fixes after the third memory review — 2026-10-15
 
+- Remove the Claude/Codex prompt supervisor from the read hooks; they call
+  `context.py refresh` directly again under the one `CONTEXT_HOOK_BUDGET`.
+  The supervisor refused any budget above 5 seconds and any prompt above
+  8 KB, so a pasted log or a raised budget left the turn with no memory at
+  all, not even working state; it hid the runtime's own error behind its
+  JSON report, gave the refresh only 70% of the budget and cost an
+  interpreter start per prompt, while its read-only fallback rarely
+  delivered. The hook now drops a capsule cut off at the budget (status 124)
+  instead. `workspace_roots.py prompt-supervise`, `context.py --prompt-wire`,
+  their tests and the generator's supervised profile go with it; generated
+  hooks that still call the supervisor are rejected.
 - An ignored file a record cites no longer withholds the record or the task's
   working state. Ignore rules still decide what is indexed and served from
   the cache (a document's own path); a task citing `vendor/...` lost its
@@ -415,6 +538,12 @@ edition's own files remain in that edition's changelog.
   typed result code and ask for current, not original, revisions. File-image
   checks compare identity fields without st_atime, which reading the file
   itself moves.
+- Cursor: a generated rule is recognized as registered when Git ignores the
+  slot through `.git/info/exclude` or a global excludes file, not only a
+  root `.gitignore` line; retire never unlinks `cursor-rule.json` relative to
+  the process directory and no longer reports a false incomplete; an
+  unreadable receipt with no rule no longer blocks the next write; short
+  acknowledgements ("sure", "go ahead", "давай") keep the rule's topic.
 - Tests: fixtures updated to the image-carrying capsule contract and to the
   receipts-after-publication order; a fixed 2026-11-13 review date that would
   have failed CI from 14 November moved to 2099; imported temporary runtimes
@@ -426,6 +555,8 @@ edition's own files remain in that edition's changelog.
 - Aggregate allowlisted omitted-source notice occurrences in health JSON/text after windowing, with explicit journal-record counts and no source identities; preserve legacy output when notices are absent.
 
 - Add fresh actual CLI/MCP save-to-promotion-to-recall integration with complete chunk/digest/INDEX oracles, source presence lifecycle, ordinary decode isolation, private request refusal and byte-identical Claude/Codex hook delivery. Keep provider/token claims unmeasured.
+
+- Request Cursor refresh JSON after the prompt-query conditional, including empty/missing/non-string inputs, so native rule publication cannot silently keep a same-task stale rule after parsing operator text. Remove the generator native-profile exception; preserve Claude/Codex text output and native custom/link custody.
 
 - Refuse malformed Brain inventory paths before lookup/yield, direct reads and held-text parsing; pre-admit managed handoff paths outside per-file catches. Guard portable handoff paths before affected reads, writes and projection. Add fresh preservation, no-false-absence and complete Unicode roundtrip controls.
 
@@ -586,6 +717,16 @@ edition's own files remain in that edition's changelog.
   generator runtime assets. Local validation does not establish Windows,
   live-client behavior or provider-token savings.
 
+### Cursor persistent-rule continuity — 2026-10-14
+
+- Keep a bounded, policy/task/branch-scoped query-only topic for referential Cursor replies; refresh current canonical sources on every delivery and transfer only to an internally created checkpoint generation. Ordinary CLI/Claude/Codex/Harness profiles keep their previous behavior.
+- Use one stable persistent-rule render through selection, manifest and final text/JSON; suppress routine checkpoint/report counts while retaining substantive progress and failures.
+- Bound optional cache UTF-8 transport, reject malformed timestamps/JSON and abstain immediately on SQLite write contention without committing caller work. Add fresh local continuation, source-change, failure, projection and ownership regressions; native clients/Windows/provider-token savings remain unmeasured.
+
+- Run session-hook cache/counter/validator tests from disposable copied
+  runtimes. A temporary cwd alone does not isolate hooks that derive their
+  root from the script location; actual private health writes are asserted.
+
 ### Memory result saves, Cursor custody and Harness bindings — 2026-10
 
 - Suppress current metadata and mutations for existing learnings outside the
@@ -596,10 +737,34 @@ edition's own files remain in that edition's changelog.
   of an unchanged runtime-owned learning. Protect manual/person/archived/type
   conflicts individually while saving independent progress and facts; resume
   only new, exactly observed source/scope/domain frontiers after interruption.
+- Recover Cursor's registered generated rule after copy, touch, cache loss and
+  an older branch writer. Keep physical identities as current-operation guards,
+  honor protected Git trust narrowly, reconcile the old exact two-link window,
+  and use Linux no-clobber rename when supported. Generated hooks delegate to
+  native maintenance with fixed diagnostics; custom deviations remain intact.
+- Add actual copied-helper Harness interruption/recovery controls and portable
+  UTF-8/root-rename tests. Local checks do not establish native Windows runtime,
+  AI provider tokens, client rule-loading order or semantic-quality savings.
 - Fence native memory result attempts before shared effects and retain complete
   proof outside disposable local receipts; refuse unknown partial retries, stale
   implicit corrections and generic retry rebasing. Deliberate corrections carry
   their original learning revision through CLI/MCP/Harness.
+- Reconcile recorded Cursor custody after a physical checkout rename, preserving
+  held capsule bytes and refusing copied/foreign/orphan custody. Add fresh Opal
+  result-fence/rename regressions and exclude project attempt metadata from install.
+
+- Cursor continuation prompts now re-query current governed task context, preferring an explicit goal while rendering fresh progress and next steps. Privacy-modified/withheld requests and meaningful new queries retain their ordinary behavior. Known empty enforced selections replace stale selected facts with current working state; repeat/legacy skips preserve the owned rule. Added fresh actual-helper CLI regressions and matching local/Linux/Windows CI entries; unknown legacy ownership still requires exact-image operator approval.
+
+- Cursor working-memory rules now use prospective local custody receipts:
+  exact byte/identity and Git checks protect custom, edited, tracked and linked
+  files; installed POSIX maintenance shares a nonblocking anchored Brain lock.
+  Harness capsule delivery attempts guarded retirement before Cursor startup.
+  Identical complete renders remain unchanged; changed excerpts refresh even
+  under the same document labels. Fixed partial-failure metadata and runtime
+  I/O accounting distinguish successful retirement from incomplete custody.
+  Attached clones and unsupported platforms preserve their rule files; no
+  native loading, cache or provider-token benefit is claimed.
+
 - Invalidate cached task-file membership on the effective Git index, shared index,
   worktree/prefix and supported object-resolution generation. Preserve warm
   batched-probe reuse; unavailable or changed captures clear cached proof without
