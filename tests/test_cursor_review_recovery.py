@@ -25,7 +25,7 @@ class CursorReviewRecoveryTests(unittest.TestCase):
         try: self.runtime = importlib.import_module('context_retrieval')
         finally: sys.path.pop(0)
         temp = tempfile.TemporaryDirectory(prefix='kite-cursor-recovery-'); self.addCleanup(temp.cleanup)
-        self.base = Path(temp.name); self.root = self.base/'original'; self.root.mkdir()
+        self.base = Path(temp.name).resolve(); self.root = self.base/'original'; self.root.mkdir()
         subprocess.run(['git','init','-q',str(self.root)],check=True,capture_output=True)
         (self.root/'.gitignore').write_text(PUBLIC['ignore_entry'],encoding='utf-8')
         self.layout = mock.patch.object(self.runtime.workspace_roots, 'TOOLING_ROOT', self.root)

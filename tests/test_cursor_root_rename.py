@@ -14,7 +14,7 @@ class CursorRootRenameTests(unittest.TestCase):
         sys.path.insert(0,str(ROOT/'PHP Core/memory-bank/scripts'))
         try:self.r=importlib.import_module('context_retrieval')
         finally:sys.path.pop(0)
-        folder=tempfile.TemporaryDirectory(prefix='opal-root-rename-');self.addCleanup(folder.cleanup);self.base=Path(folder.name)
+        folder=tempfile.TemporaryDirectory(prefix='opal-root-rename-');self.addCleanup(folder.cleanup);self.base=Path(folder.name).resolve()
         self.root=self.base/'first';self.root.mkdir();subprocess.run(['git','init','-q',str(self.root)],check=True,capture_output=True)
         self.layout=mock.patch.object(self.r.workspace_roots,'TOOLING_ROOT',self.root);self.layout.start();self.addCleanup(self.layout.stop)
         self.assertEqual('written',self.call()['state'])

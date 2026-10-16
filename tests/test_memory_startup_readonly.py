@@ -12,12 +12,13 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+from tests.hook_shell import BASH
 ROOT=Path(__file__).resolve().parents[1]
 PUBLIC=json.loads((ROOT/'tests/fixtures/memory_startup_readonly_public.json').read_text(encoding='utf-8'))
 
 class MemoryStartupReadonlyTests(unittest.TestCase):
     def setUp(self):
-        tmp=tempfile.TemporaryDirectory(prefix='teal-startup-');self.addCleanup(tmp.cleanup);self.root=Path(tmp.name)
+        tmp=tempfile.TemporaryDirectory(prefix='teal-startup-');self.addCleanup(tmp.cleanup);self.root=Path(tmp.name).resolve()
         self.env={k:v for k,v in os.environ.items() if not k.startswith(('GIT_','CONTEXT_','ACCELERATOR_'))}
         self.env.update(GIT_OPTIONAL_LOCKS='0',PYTHONDONTWRITEBYTECODE='1',PYTHONIOENCODING='utf-8',CONTEXT_HOOK_BUDGET='1')
         for relative in ('memory-bank/scripts','memory-bank/templates','project-brain/config','project-brain/schemas','project-brain/templates'):
@@ -39,10 +40,17 @@ class MemoryStartupReadonlyTests(unittest.TestCase):
         self.call('update','--task-id',self.task,'--progress',PUBLIC['progress'],'--next-step',PUBLIC['next'][0],'--revision','1','--json')
         normal=self.refresh(expected=0);self.uuid=normal['capsule']['task_uuid']
         self.assertIn(PUBLIC['forbidden_fact'],normal['capsule_text'])
+        # The runtime imported here comes from this temporary copy and leaves
+        # sys.modules with it: a later module in the same process (the Windows
+        # job runs them together) must not import files that are gone.
+        names=[leaf.stem for leaf in self.cli.parent.glob('*.py')]
+        previous={name:sys.modules.pop(name) for name in names if name in sys.modules}
+        def restore():
+            for name in names:sys.modules.pop(name,None)
+            sys.modules.update(previous)
+        self.addCleanup(restore)
         scripts=str(self.cli.parent);sys.path.insert(0,scripts)
         try:
-            for name in ('context','context_retrieval','brain_runtime','memory_results','automatic_query','validate','workspace_roots','context_handoff'):
-                sys.modules.pop(name,None)
             self.context=importlib.import_module('context');self.brain=importlib.import_module('brain_runtime')
         finally:sys.path.remove(scripts)
 
@@ -80,12 +88,12 @@ class MemoryStartupReadonlyTests(unittest.TestCase):
             reply=self.refresh(timeout=1.5);elapsed=time.monotonic()-started
             self.assert_degraded(reply);self.assertLess(elapsed,1.0);self.assertEqual(before,self.database.read_bytes())
 
-    @unittest.skipUnless(shutil.which('bash') and shutil.which('timeout'),'actual Bash hook tools required')
+    @unittest.skipUnless(BASH and shutil.which('timeout'),'actual Bash hook tools required')
     def test_actual_one_second_claude_codex_hooks_keep_same_fresh_working(self):
         with self.db() as owner:
             owner.execute('BEGIN IMMEDIATE');outputs=[]
             for host in ('.claude','.codex'):
-                result=subprocess.run(['bash',str(self.root/host/'hooks/working-memory-read.sh')],input=json.dumps({'prompt':PUBLIC['query']}).encode(),cwd=self.root,env=self.env,capture_output=True,timeout=3)
+                result=subprocess.run([BASH,str(self.root/host/'hooks/working-memory-read.sh')],input=json.dumps({'prompt':PUBLIC['query']}).encode(),cwd=self.root,env=self.env,capture_output=True,timeout=3)
                 self.assertEqual(0,result.returncode);text=result.stdout.decode('utf-8');outputs.append(text)
                 self.assertIn(PUBLIC['progress'],text);self.assertIn(PUBLIC['expected']['safe_warning'],text);self.assertNotIn(PUBLIC['forbidden_fact'],text)
             self.assertEqual(outputs[0],outputs[1])
@@ -239,17 +247,17 @@ class MemoryStartupReadonlyTests(unittest.TestCase):
         reply=self.call('--mode','lightweight','refresh','--read-only','--query',PUBLIC['query'],'--task-id',self.task.upper(),'--json',expected=1)
         self.assert_degraded(reply,False)
 
-    @unittest.skipUnless(shutil.which('bash') and shutil.which('timeout'),'actual Bash hook tools required')
+    @unittest.skipUnless(BASH and shutil.which('timeout'),'actual Bash hook tools required')
     def test_actual_cursor_degraded_rule_replaces_old_facts_and_preserves_custom(self):
         rules=self.root/'.cursor/rules';rules.mkdir(parents=True)
         managed=subprocess.run([sys.executable,'-B',str(self.cli),'--root',str(self.root),'cursor-rule','--action','write','--task-id',self.task],input=('working: '+PUBLIC['goal']+'\nmemory (reference data — verify against canonical sources)\n'+PUBLIC['forbidden_fact']).encode(),env=self.env,capture_output=True,timeout=3)
         self.assertEqual(0,managed.returncode);rule=rules/'working-memory.mdc';self.assertIn(PUBLIC['forbidden_fact'],rule.read_text(encoding='utf-8'))
         with self.db() as db:
-            db.execute('BEGIN IMMEDIATE');hook=subprocess.run(['bash',str(self.root/'.cursor/hooks/working-memory-read.sh')],input=json.dumps({'prompt':PUBLIC['query']}).encode(),env=self.env,cwd=self.root,capture_output=True,timeout=5)
+            db.execute('BEGIN IMMEDIATE');hook=subprocess.run([BASH,str(self.root/'.cursor/hooks/working-memory-read.sh')],input=json.dumps({'prompt':PUBLIC['query']}).encode(),env=self.env,cwd=self.root,capture_output=True,timeout=5)
         self.assertEqual(0,hook.returncode);text=rule.read_text(encoding='utf-8');self.assertNotIn(PUBLIC['forbidden_fact'],text);self.assertIn(PUBLIC['progress'],text)
         rule.write_text('Human Teal rule must survive.\n',encoding='utf-8')
         with self.db() as db:
-            db.execute('BEGIN IMMEDIATE');subprocess.run(['bash',str(self.root/'.cursor/hooks/working-memory-read.sh')],input=json.dumps({'prompt':PUBLIC['query']}).encode(),env=self.env,cwd=self.root,capture_output=True,timeout=5)
+            db.execute('BEGIN IMMEDIATE');subprocess.run([BASH,str(self.root/'.cursor/hooks/working-memory-read.sh')],input=json.dumps({'prompt':PUBLIC['query']}).encode(),env=self.env,cwd=self.root,capture_output=True,timeout=5)
         self.assertEqual('Human Teal rule must survive.\n',rule.read_text(encoding='utf-8'))
 
 if __name__=='__main__':unittest.main()

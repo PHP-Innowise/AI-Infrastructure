@@ -109,7 +109,7 @@ class GeneratorBoundaryTests(unittest.TestCase):
             # generated-hook fixture explicitly requires executable scripts.
             for script in target.rglob('*.sh'):
                 script.chmod(0o755)
-            files = {str(f.relative_to(target)): {} for f in target.rglob('*.sh')}
+            files = {f.relative_to(target).as_posix(): {} for f in target.rglob('*.sh')}
             errors = []
             self.validator.validate_hooks(target, ['claude', 'cursor', 'codex'], files, errors)
             self.observe(case='all native owned hook source', errors=errors)

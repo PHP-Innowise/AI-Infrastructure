@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from tests.hook_shell import BASH
+
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = json.loads((ROOT / 'tests/fixtures/memory_git_source_scope_public.json').read_text(encoding='utf-8'))
 
@@ -138,7 +140,7 @@ class GitSourceScopeTests(unittest.TestCase):
         self.assertEqual(native['progress'], working['progress'])
         self.assertEqual(before_db, database.read_bytes())
         self.assertEqual(before_shared, shared())
-        if not shutil.which('bash'):
+        if BASH is None:
             self.skipTest('actual Bash hooks unavailable; native CLI assertions completed')
         binaries = self.base / 'bin'
         binaries.mkdir()
@@ -153,7 +155,7 @@ class GitSourceScopeTests(unittest.TestCase):
             hook = self.root / host / 'hooks/working-memory-read.sh'
             hook.parent.mkdir(parents=True)
             shutil.copy2(ROOT / 'PHP Core' / host / 'hooks/working-memory-read.sh', hook)
-            observed = subprocess.run(['bash', str(hook)], cwd=self.root, env=environment,
+            observed = subprocess.run([BASH, str(hook)], cwd=self.root, env=environment,
                                       input=json.dumps({'prompt': native['query']}).encode('utf-8'), capture_output=True, timeout=12)
             self.assertEqual(expected['hook_returncode'], observed.returncode)
             self.assertIn('working: ' + native['task_id'], observed.stdout.decode('utf-8'))

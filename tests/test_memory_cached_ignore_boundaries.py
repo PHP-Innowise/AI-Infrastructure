@@ -44,7 +44,8 @@ class SkylarkTests(controls.CachedIgnoreTests):
         excludes.write_text(SKYLARK['ignore'], encoding='utf-8')
         config = Path(self.env['XDG_CONFIG_HOME']) / 'git/config'
         config.parent.mkdir(parents=True)
-        config.write_text('[core]\n\texcludesFile = ' + str(excludes) + '\n', encoding='utf-8')
+        # Forward slashes: a backslash starts an escape in a Git config value.
+        config.write_text('[core]\n\texcludesFile = ' + excludes.as_posix() + '\n', encoding='utf-8')
         result = self.call('search', SKYLARK['query'], '--json')
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(['docs/skylark-public.md'], [d['path'] for d in json.loads(result.stdout)['documents']])

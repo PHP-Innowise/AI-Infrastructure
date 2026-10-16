@@ -1,5 +1,6 @@
 """Fresh Wren/Marten copied-CLI continuity and persistent-rule assertions."""
 from __future__ import annotations
+from contextlib import closing
 from datetime import datetime, timezone
 import importlib
 import json
@@ -152,6 +153,15 @@ class CursorContinuityStateTests(unittest.TestCase):
     def local_module(self):
         scripts=self.cli.parent;sys.path.insert(0,str(scripts))
         self.addCleanup(lambda:sys.path.remove(str(scripts)))
+        # The runtime modules it imports come from this temporary copy and
+        # leave sys.modules with it: a later module in the same process (the
+        # Windows job runs them together) must not import files that are gone.
+        names=[leaf.stem for leaf in scripts.glob('*.py')]
+        previous={name:sys.modules.pop(name) for name in names if name in sys.modules}
+        def restore():
+            for name in names:sys.modules.pop(name,None)
+            sys.modules.update(previous)
+        self.addCleanup(restore)
         spec=importlib.util.spec_from_file_location('wren_context_control',self.cli)
         module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
         return module
@@ -342,7 +352,9 @@ class CursorContinuityStateTests(unittest.TestCase):
     def test_overcap_or_malformed_seed_is_not_used(self):
         self.seed()
         database=self.root/'memory-bank/local/context.db'
-        with sqlite3.connect(database) as connection:
+        # sqlite3's own context manager commits without closing, and Windows
+        # cannot remove the temporary project while the database is open.
+        with closing(sqlite3.connect(database)) as connection, connection:
             connection.execute("UPDATE index_state SET value=? WHERE key='cursor-topic-v1'",('x'*7000,))
         reply=self.refresh('yes do it');self.assertEqual([],self.paths(reply))
         self.assertNotEqual('continuation',reply['capsule']['query_source'])

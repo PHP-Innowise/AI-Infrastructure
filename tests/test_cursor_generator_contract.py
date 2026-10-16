@@ -21,12 +21,12 @@ class CursorGeneratorContractTests(unittest.TestCase):
         clean['GIT_OPTIONAL_LOCKS']='0';environment=mock.patch.dict(os.environ,clean,clear=True)
         environment.start();self.addCleanup(environment.stop)
         temporary=tempfile.TemporaryDirectory(prefix='heron-generator-cursor-');self.addCleanup(temporary.cleanup)
-        self.root=Path(temporary.name)
+        self.root=Path(temporary.name).resolve()
         spec=importlib.util.spec_from_file_location('heron_generator_validator',
             ROOT/'Infrastructure-Creator/.agents/skills/bootstrap-verifier/scripts/validate_generated.py')
         self.validator=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.validator)
         shutil.copytree(ROOT/'PHP Core/.cursor/hooks',self.root/'.cursor/hooks')
-        self.files={str(leaf.relative_to(self.root)):{} for leaf in (self.root/'.cursor/hooks').glob('*') if leaf.is_file()}
+        self.files={leaf.relative_to(self.root).as_posix():{} for leaf in (self.root/'.cursor/hooks').glob('*') if leaf.is_file()}
 
     def errors(self):
         errors=[];self.validator.validate_hooks(self.root,['cursor'],self.files,errors);return errors

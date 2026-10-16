@@ -25,7 +25,7 @@ class AuthorityUtf8Tests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='scoter-authority-')
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)/'project'
+        self.root = Path(temporary.name).resolve()/'project'
         self.root.mkdir()
         env = {k:os.environ[k] for k in ('PATH','HOME','LANG','LC_ALL','LC_CTYPE',
                'SystemRoot','WINDIR','COMSPEC','PATHEXT') if k in os.environ}

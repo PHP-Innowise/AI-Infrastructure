@@ -1,6 +1,7 @@
 """Fresh real-CLI Cursor continuation checks on owned public temporary projects."""
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -214,7 +215,9 @@ class CursorContinuationTests(unittest.TestCase):
                 self.assertNotEqual(self.boundary['expected_terminal_source_not'],
                                     (report['capsule'] or {}).get('query_source'))
         self.start()
-        with sqlite3.connect(self.project / 'memory-bank/local/context.db') as connection:
+        # sqlite3's own context manager commits without closing, and Windows
+        # cannot remove the temporary project while the database is open.
+        with closing(sqlite3.connect(self.project / 'memory-bank/local/context.db')) as connection, connection:
             connection.execute('UPDATE task_bindings SET task_uuid=? WHERE external_id=?',
                                ('00000000-0000-4000-8000-000000000001', self.public['task']))
         broken = self.refresh('go on')

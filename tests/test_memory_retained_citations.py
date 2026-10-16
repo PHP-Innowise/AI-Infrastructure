@@ -40,7 +40,9 @@ class RetainedCitationTests(unittest.TestCase):
 
     def warm(self,metadata=None):
         self.metadata=copy.deepcopy(PUBLIC['metadata'] if metadata is None else metadata)
-        self.chunk.write_text('---\n'+json.dumps(self.metadata,ensure_ascii=False,indent=2,sort_keys=True)+'\n---\n\n'+PUBLIC['body'],encoding='utf-8')
+        # The fixture's same-stat images are these LF bytes; text mode would
+        # write CRLF on Windows.
+        self.chunk.write_bytes(('---\n'+json.dumps(self.metadata,ensure_ascii=False,indent=2,sort_keys=True)+'\n---\n\n'+PUBLIC['body']).encode('utf-8'))
         self.call('index','--json')
         names=('context','context_retrieval','brain_runtime','automatic_query','validate','memory_results','workspace_roots','context_handoff')
         # Modules imported from this temporary copy leave sys.modules when the

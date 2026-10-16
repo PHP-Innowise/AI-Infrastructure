@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from tests.hook_shell import BASH
+
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = json.loads((ROOT / 'tests/fixtures/memory_generator_identity_public.json').read_text(encoding='utf-8'))
 SAFE_ENV = ('PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT')
@@ -207,16 +209,18 @@ class GeneratorIdentityTests(unittest.TestCase):
             self.check_errors(PUBLIC['unowned_errors'])
 
     def test_trusted_fixture_native_argv_transport(self):
-        bash = shutil.which('bash')
+        bash = BASH
         git = shutil.which('git')
         self.assertIsNotNone(bash)
         self.assertIsNotNone(git)
         # The recorder stands in for context.py. The hooks reach it through the
         # loader memory-seed ships, then - the loader gone, as in an older
         # runtime - directly; it notes which (only the loader sets __spec__).
+        # Bytes, as context.py writes them: its stdout keeps LF on Windows,
+        # where a text stream would end the line with CRLF.
         helper = self.project / 'memory-bank/scripts/context.py'
         helper.parent.mkdir(parents=True)
-        write_utf8(helper, 'import json,os,sys\nfrom pathlib import Path\nwith Path(os.environ["PLOVER_RECORD"]).open("a",encoding="utf-8") as stream: stream.write(json.dumps(sys.argv[1:])+"\\n")\nwith Path(os.environ["PLOVER_ROUTE"]).open("a",encoding="utf-8") as stream: stream.write(("loader" if __spec__ else "direct")+"\\n")\nsys.stdout.write(' + repr(PUBLIC['reader_stdout']) + ')\n')
+        write_utf8(helper, 'import json,os,sys\nfrom pathlib import Path\nwith Path(os.environ["PLOVER_RECORD"]).open("a",encoding="utf-8") as stream: stream.write(json.dumps(sys.argv[1:])+"\\n")\nwith Path(os.environ["PLOVER_ROUTE"]).open("a",encoding="utf-8") as stream: stream.write(("loader" if __spec__ else "direct")+"\\n")\nsys.stdout.buffer.write(' + repr(PUBLIC['reader_stdout'].encode('utf-8')) + ')\n')
         loader = helper.with_name('context_cli.py')
         shutil.copyfile(ROOT / 'Infrastructure-Creator/.agents/skills/memory-seed/assets/scripts/context_cli.py', loader)
         launcher_directory = self.directory / 'bin'

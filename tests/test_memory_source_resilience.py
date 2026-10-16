@@ -40,10 +40,17 @@ class MemorySourceResilienceTests(unittest.TestCase):
         self.assertIn(PUBLIC['fact'],reply['capsule_text'])
         self.handoff=self.root/f'project-brain/control/handoffs/{self.uuid}.md'
         self.database=self.root/'memory-bank/local/context.db'
+        # The runtime imported here comes from this temporary copy and leaves
+        # sys.modules with it: a later module in the same process (the Windows
+        # job runs them together) must not import files that are gone.
+        names=[leaf.stem for leaf in self.cli.parent.glob('*.py')]
+        previous={name:sys.modules.pop(name) for name in names if name in sys.modules}
+        def restore():
+            for name in names:sys.modules.pop(name,None)
+            sys.modules.update(previous)
+        self.addCleanup(restore)
         scripts=str(self.cli.parent);sys.path.insert(0,scripts)
         try:
-            for name in ('context','context_retrieval','brain_runtime','memory_results','automatic_query','validate','workspace_roots','context_handoff','mcp_server'):
-                sys.modules.pop(name,None)
             self.context=importlib.import_module('context');self.brain=importlib.import_module('brain_runtime')
             self.retrieval=importlib.import_module('context_retrieval');self.results=importlib.import_module('memory_results')
             self.mcp=importlib.import_module('mcp_server')

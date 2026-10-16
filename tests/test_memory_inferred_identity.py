@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from tests.hook_shell import BASH
+
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = json.loads((ROOT / 'tests/fixtures/memory_inferred_identity_public.json').read_text(encoding='utf-8'))
 
@@ -142,7 +144,7 @@ class InferredIdentityTests(unittest.TestCase):
             self.assertEqual(value, packet['working'][key], key)
 
     def race_hook(self, host):
-        if not shutil.which('bash'):
+        if BASH is None:
             self.skipTest('actual Bash hook profile unavailable')
         self.native()
         binaries = self.base / 'bin'
@@ -161,7 +163,8 @@ else
   exec "$OTTER_REAL_GIT" "$@"
 fi
 '''
-        (binaries / 'git').write_text(shim, encoding='utf-8')
+        # LF: Git Bash reads a carriage return as part of each command.
+        (binaries / 'git').write_bytes(shim.encode('utf-8'))
         (binaries / 'git').chmod(0o755)
         hook = self.root / host / 'hooks/working-memory-read.sh'
         hook.parent.mkdir(parents=True)
@@ -172,7 +175,7 @@ fi
         before_db, before_shared = self.database.read_bytes(), self.shared()
         self.before_guard_state = self.guard_state()
         self.branch_before_guard = self.git_call('symbolic-ref', '--quiet', '--short', 'HEAD').stdout.decode('utf-8').rstrip('\n')
-        result = subprocess.run(['bash', str(hook)], cwd=self.root, env=environment,
+        result = subprocess.run([BASH, str(hook)], cwd=self.root, env=environment,
                                 input=json.dumps({'prompt': PUBLIC['query']}).encode('utf-8'),
                                 capture_output=True, timeout=15)
         observed = self.observe(host, result)
@@ -384,7 +387,7 @@ fi
             self.assertIn('--task-id "$' + task + '"', text)
 
     def test_prompt_hook_marker_transport_inferred_vs_explicit(self):
-        if not shutil.which('bash'):
+        if BASH is None:
             self.skipTest('Bash transport unavailable')
         scripts = self.root / 'memory-bank/scripts'
         scripts.mkdir(parents=True)
@@ -417,7 +420,7 @@ raise SystemExit(1)
                 self.switch(PUBLIC['other_branch'])
             else:
                 self.switch(PUBLIC['branch'])
-            result = subprocess.run(['bash', str(hook)], cwd=self.root, env=environment,
+            result = subprocess.run([BASH, str(hook)], cwd=self.root, env=environment,
                                     input=json.dumps({'prompt': PUBLIC['query']}).encode(),
                                     capture_output=True, timeout=15)
             self.observe('transport-' + host + '-' + str(row['explicit']), result)
