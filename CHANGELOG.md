@@ -601,6 +601,20 @@ edition's own files remain in that edition's changelog.
   boundary controls. Local bytes/receipts are not measured provider savings;
   real Windows, live clients, remote CI and semantic benchmarks remain unrun.
 
+### Generated memory task identity — 2026-10-15
+
+- Specify inferred-only branch markers in generated prompt, Cursor turn and
+  session readers. Explicit tasks remain unmarked. Add a manifest-owned
+  canonical fragment lint for identity, relay and both renderer call arms;
+  reject missing guards, data-only spoofs and unsupported array rewrites.
+- Reject delimiter-prefix, arithmetic/data, Unicode-comment, quote-adjacency
+  and selector-mutation spoofing; preserve literal-data continuations and
+  require Cursor JSON before dispatch. Admit the finite installed hook profile
+  without relaxing inference guards.
+- Add fresh structural and trusted argv-recorder fixtures. Structural lint
+  does not execute generated hooks or prove arbitrary shell control flow,
+  actual AI generation, live delivery or whole-hook deadlines.
+
 ### Portable memory CLI streams — 2026-10-15
 
 - Configure standard stdout/stderr wrappers for UTF-8 and untranslated LF,

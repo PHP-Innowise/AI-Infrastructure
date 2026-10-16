@@ -14,7 +14,10 @@ Checks:
   - Every selected edition root exists and no unselected edition root exists.
   - Every hook script passes `bash -n` and carries the executable bit, and the
     expected hook set is complete per edition (Cursor's working-memory-read.sh
-    runs on beforeSubmitPrompt and must answer {"continue": true}).
+    runs on beforeSubmitPrompt and must answer {"continue": true}). The memory
+    read hooks point CONTEXT_CLI only at memory-bank/scripts/context_cli.py
+    with its context.py fallback, or - generated before the loader - at
+    context.py itself.
   - Every flow command's stages name agents that were generated, no parallel
     stage holds two write-capable agents (the gate runs those one at a time),
     and a multi-stage flow declares at least one checkpoint.
@@ -32,9 +35,10 @@ Checks:
     prompt, end of turn) and calling context_continuity.py --event hook.
   - The seeded memory-bank passes its own scripts/validate.py.
   - The context-brain runtime is present (RUNTIME_SCRIPTS under
-    memory-bank/scripts/: context.py, context_handoff.py,
-    context_continuity.py, brain_runtime.py, context_retrieval.py,
-    validate.py and the modules they import) and the project-brain/ skeleton
+    memory-bank/scripts/: context.py, context_cli.py - the entry the memory
+    hooks run - context_handoff.py, context_continuity.py, brain_runtime.py,
+    context_retrieval.py, validate.py and the modules they import) and the
+    project-brain/ skeleton
     is seeded with a substituted runtime.json whose canonical_edition points
     at a skills tree that actually exists.
   - Smoke: `python3 memory-bank/scripts/context.py status --json` and
@@ -123,6 +127,8 @@ MEMORY_CONTINUITY_SKILLS = (
 # The context-brain runtime memory-seed installs verbatim.
 RUNTIME_SCRIPTS = (
     "context.py",
+    # The memory hooks run it: context.py from its cached bytecode.
+    "context_cli.py",
     "context_handoff.py",
     "context_continuity.py",
     "brain_runtime.py",
@@ -415,6 +421,11 @@ def check_placeholders(
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return
+    if verbatim_runtime_copy(path, manifest_relative_path):
+        # memory-seed copies the runtime byte for byte; its date-format and
+        # example tokens are documentation of the runtime, not unfilled
+        # generator slots. Only a byte-identical copy is exempt.
+        return
     for pat in PLACEHOLDER_PATTERNS:
         if not pat.search(text):
             continue
@@ -422,6 +433,20 @@ def check_placeholders(
         if declaration in APPROVED_VERBATIM_PLACEHOLDERS:
             continue
         errors.append(f"{path}: leftover placeholder matching /{pat.pattern}/")
+
+
+def verbatim_runtime_copy(path: Path, manifest_relative_path: str | None) -> bool:
+    """Whether an owned file is an unmodified memory-seed runtime script."""
+    if not manifest_relative_path or not manifest_relative_path.startswith("memory-bank/scripts/"):
+        return False
+    name = manifest_relative_path[len("memory-bank/scripts/"):]
+    if name not in RUNTIME_SCRIPTS:
+        return False
+    asset = Path(__file__).resolve().parents[2] / "memory-seed" / "assets" / "scripts" / name
+    try:
+        return asset.is_file() and asset.read_bytes() == path.read_bytes()
+    except OSError:
+        return False
 
 
 def validate_owned_placeholders(target: Path, files: dict, errors: list) -> None:
@@ -545,6 +570,335 @@ def validate_edition_scope(
                 )
 
 
+def memory_hook_code_lines(source: str):
+    """Conservative lexical view for the canonical memory fragments, not a Bash AST.
+
+    Quoted program bodies and literal heredoc data cannot stand in for code.
+    Keep live tails after a multiline quote, and fold escaped newlines so a
+    split variable name cannot hide a later mutation. Unsupported lexical
+    forms fail this narrow contract rather than being guessed equivalent.
+    """
+    if len(source.encode("utf-8")) > 128 * 1024 or "\0" in source:
+        return None
+    quote = None
+    heredoc = None
+    pending = None
+    continuation = False
+    chunks = []
+    lines = []
+    # Bash physical records end at LF, not Python's Unicode line separators.
+    for raw in source.split("\n"):
+        if heredoc is not None:
+            delimiter, tabs = heredoc
+            if (raw.lstrip("\t") if tabs else raw) == delimiter:
+                heredoc = None
+            continue
+        if (continuation and quote is None and chunks
+                and chunks[-1][-1] in "<>" and raw.startswith(("<", ">", "&", "|"))):
+            # Do not assemble a new redirection operator only in the display
+            # view and then misclassify its following physical data as code.
+            return None
+        start = 0 if continuation or quote is None else None
+        quoted_tail = False
+        end = len(raw)
+        folded = False
+        index = 0
+        while index < len(raw):
+            character = raw[index]
+            if quote is not None:
+                if character == "\\" and quote != "'":
+                    if index == len(raw) - 1:
+                        if quote != '"':
+                            return None
+                        end, folded = index, True
+                        break
+                    index += 2
+                    continue
+                if character == ("'" if quote == "ansi" else quote):
+                    quote = None
+                    if start is None:
+                        start = index + 1
+                        # The preceding word may still own this tail (NOTE='x
+                        # 'TASK_ID=...). Never invent a standalone statement.
+                        quoted_tail = True
+                index += 1
+                continue
+            if character == "\\":
+                if index == len(raw) - 1:
+                    end, folded = index, True
+                    break
+                index += 2
+                continue
+            if character in ("'", '"'):
+                quote = "ansi" if character == "'" and index and raw[index - 1] == "$" else character
+                index += 1
+                continue
+            if character == "`":
+                return None
+            if character == "#" and (index == 0 or raw[index - 1] in " \t;|&()"):
+                end = index
+                break
+            if raw.startswith("<<<", index):
+                index += 3  # a here-string has no following data body
+                continue
+            if raw.startswith("<<", index):
+                # Only quoted literal data is supported. Unquoted expansions,
+                # concatenated delimiter words and arithmetic shifts are not
+                # silently reinterpreted as an opaque data body.
+                declaration = re.match(r"<<(-?)[ \t]*([\"'])([A-Za-z_][A-Za-z0-9_]*)\2", raw[index:])
+                boundary = index + declaration.end() if declaration else index
+                if (declaration is None or pending is not None
+                        or "((" in "".join(chunks) + raw[:index]
+                        or (boundary < len(raw) and raw[boundary] not in " \t;|&()<>") ):
+                    return None
+                pending = (declaration.group(3), bool(declaration.group(1)))
+                index += declaration.end()
+                continue
+            index += 1
+        if start is not None:
+            piece = ("__quoted_tail__ " if quoted_tail else "") + raw[start:end]
+            if piece:
+                chunks.append(piece)
+        if folded:
+            continuation = True
+            continue
+        if chunks:
+            line = "".join(chunks).strip(" \t")
+            if line:
+                lines.append(line)
+        chunks = []
+        continuation = False
+        if pending is not None:
+            if quote is not None:
+                return None
+            heredoc = pending
+            pending = None
+    return None if quote is not None or heredoc is not None or continuation else lines
+
+
+# The runtime entry the memory hooks call (hook-forge step 6): the loader that
+# runs context.py from its cached bytecode, falling back to context.py where an
+# older runtime has no loader - or, in hooks generated before the loader,
+# context.py itself. A hook pointed anywhere else finds no file, and its
+# `[ -f "$CONTEXT_CLI" ] || exit 0` then skips memory on every prompt unseen.
+RUNTIME_ENTRY = 'CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"'
+RUNTIME_LOADER = 'CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context_cli.py"'
+RUNTIME_FALLBACK = '[ -f "$CONTEXT_CLI" ] || ' + RUNTIME_ENTRY
+
+
+# The interpreter word of a memory call: python3, or the array a hook fills
+# with whichever of python3, python and py -3 runs (hook-forge step 6). Native
+# Windows often has no working python3, and a hook that names only python3
+# reads no memory there.
+MEMORY_INTERPRETERS = ('"${PYTHON[@]}"', 'python3')
+
+
+def memory_call_line(lines: list, forms: list) -> str:
+    """The one form of a memory call these lines hold, else the first form.
+
+    A hook holding two forms makes two calls; the first form is then
+    returned, and the other call fails the contract as an unadmitted read.
+    """
+    present = [form for form in forms if form in lines]
+    return present[0] if len(present) == 1 else forms[0]
+
+
+def memory_runtime_entry_contract(lines: list) -> bool:
+    """Every CONTEXT_CLI assignment is one of the two runtime entry forms."""
+    for index, line in enumerate(lines):
+        write = (re.search(r"\bCONTEXT_CLI(?:\[[^]]*\])?\s*:?[+*/%&|^<>-]*=", line)
+                 or re.search(r"\b(?:unset|declare|typeset|local|readonly|export|read|mapfile|readarray)\b"
+                              r".*\bCONTEXT_CLI\b|\bprintf\s+-v\s+[\"']?CONTEXT_CLI\b", line))
+        if not write or line == RUNTIME_ENTRY:
+            continue
+        if line == RUNTIME_LOADER and lines[index + 1:index + 2] == [RUNTIME_FALLBACK]:
+            continue
+        if line == RUNTIME_FALLBACK and lines[index - 1:index] == [RUNTIME_LOADER]:
+            continue
+        return False
+    return True
+
+
+_HOOK_OPENERS = frozenset({"if", "case", "while", "until", "for", "select", "{", "("})
+_HOOK_CLOSERS = frozenset({"fi", "esac", "done", "}", ")"})
+_HOOK_BODY_WORDS = frozenset({"then", "else", "do", "{", "("})
+
+
+def memory_hook_early_exit(lines: list, end: int) -> bool:
+    """Whether a statement every run reaches exits before line `end`.
+
+    Lexical, like the rest of this contract: an `exit` that begins a
+    statement outside any if/case/loop/function/group block. A guarded exit
+    (`[ -f "$CONTEXT_CLI" ] || exit 0`, one inside `if ... fi`) stays allowed;
+    an unguarded one meant the hook never reached the memory call, and the
+    contract passed it.
+    """
+    depth = 0
+    for line in lines[:end]:
+        # Quoted words carry no structure; keep a placeholder in their place.
+        text = re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", "''", line)
+        for statement in re.split(r";;|;", text):
+            words = statement.split()
+            while words and words[0] in _HOOK_BODY_WORDS:
+                if words[0] in ("{", "("):
+                    depth += 1
+                words = words[1:]
+            if depth == 0 and words and words[0] == "exit":
+                return True
+            for word in words:
+                if word in _HOOK_OPENERS:
+                    depth += 1
+                elif word in _HOOK_CLOSERS:
+                    depth = max(0, depth - 1)
+    return False
+
+
+# The one other identity write a prompt hook may make, right after its
+# fallback: during a rebase the branch being rebased (the runtime admits it as
+# the inferred branch only while that rebase runs).
+REBASE_FALLBACK = '[ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)'
+
+
+def memory_hook_identity_contract(source: str, edition: str, name: str) -> bool:
+    """Lint the supported five role-specific fragments; never execute a hook.
+
+    This establishes lexical structure and argument forwarding in these fixed
+    fragments, not arbitrary shell control flow, eval, sourcing or runtime
+    function redefinition. Identity reads used by Cursor maintenance may stay
+    outside the fragment; unexpected identity writes/array uses may not.
+    """
+    lines = memory_hook_code_lines(source)
+    if lines is None or not memory_runtime_entry_contract(lines):
+        return False
+    prompt = name == "working-memory-read.sh"
+    rebase_allowed = name in {"working-memory-read.sh", "working-memory-write.sh"}
+    identity = "CAPSULE_TASK_ID" if name == "local-context.sh" else "TASK_ID"
+    fallbacks = [identity + '="${CONTEXT_TASK_ID:-$(git -C "$ROOT_DIR" symbolic-ref --quiet --short HEAD 2>/dev/null)}"',
+                 identity + '="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"']
+    admitted = [line for line in lines if line in fallbacks]
+    if len(admitted) != 1:
+        return False
+    fallback = admitted[0]
+    rebase = [index for index, line in enumerate(lines) if line == REBASE_FALLBACK]
+    if rebase and (not rebase_allowed or len(rebase) > 1 or rebase[0] != lines.index(fallback) + 1):
+        return False
+    if prompt:
+        initial = "ARGUMENTS=(refresh --host " + edition + (" --delivery-profile cursor-rule" if edition == "cursor" else "") + ")"
+        query_if = 'if [ -n "$QUERY" ] && [ -n "$TASK_ID" ]; then'
+        query = 'ARGUMENTS+=(--query "$QUERY" --task-id "$TASK_ID" --ephemeral --sanitize)'
+        marker = '[ -n "${CONTEXT_TASK_ID:-}" ] || ARGUMENTS+=(--expected-branch "$TASK_ID")'
+        report = memory_call_line(lines, ['REPORT=$(run ' + interpreter + ' "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>"$ERROR_FILE")'
+                                          for interpreter in MEMORY_INTERPRETERS])
+        optional = {'[ -n "$SESSION_ID" ] && ARGUMENTS+=(--session-id "$SESSION_ID")',
+                    '[ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT" ] && ARGUMENTS+=(--transcript "$TRANSCRIPT")'} if edition != "cursor" else set()
+        json_line = 'ARGUMENTS+=(--json)'
+        if edition == "cursor":
+            if lines.count(json_line) != 1:
+                return False
+        elif json_line in lines:
+            return False
+        block = [initial, query_if, query, marker]
+        # The runtime ships no separate prompt supervisor any more: a hook
+        # still calling one would fail on every prompt.
+        if any('prompt-supervise' in line for line in lines):
+            return False
+        required = [*block, report]
+        first_report = lines.index(report) if report in lines else len(lines)
+        if any(lines.count(line) != 1 for line in required):
+            return False
+        position = lines.index(initial)
+        if lines[position:position + 4] != block:
+            return False
+        boundary = position + 4
+        while boundary < len(lines) and lines[boundary] in optional:
+            boundary += 1
+        if boundary >= len(lines) or lines[boundary] != "fi" or not lines.index(fallback) < position < first_report:
+            return False
+        if memory_hook_early_exit(lines, first_report):
+            return False
+        if edition == "cursor":
+            json_position = lines.index(json_line)
+            if not (lines.index(marker) < json_position < lines.index(report)):
+                return False
+            if json_position <= boundary:
+                return False
+        relay = ['run() {', 'if command -v timeout >/dev/null 2>&1; then',
+                 'timeout "${CONTEXT_HOOK_BUDGET:-5}" "$@"', 'else', '"$@"', 'fi', '}']
+        relay_headers = [index for index, line in enumerate(lines) if re.match(r"run\s*\(\s*\)", line)]
+        if len(relay_headers) != 1:
+            return False
+        relay_position = relay_headers[0]
+        if relay_position >= first_report:
+            return False
+        native_relay = ['run() {', 'if command -v timeout > /dev/null 2>&1; then',
+                        'timeout "$BUDGET_SECONDS" "$@"', 'else', '"$@"', 'fi', '}']
+        documented_relay = [*relay[:2], 'timeout "$BUDGET_SECONDS" "$@"', *relay[3:]]
+        if (lines[relay_position] != 'run() { "$@"; }'
+                and lines[relay_position:relay_position + len(relay)] not in (relay, native_relay, documented_relay)):
+            return False
+        allowed = set(required) | optional | {'ARGUMENTS+=(--json)'}
+        array = "ARGUMENTS"
+        reads = {report}
+    else:
+        array = "CAPSULE_IDENTITY_ARGUMENTS"
+        marker = 'CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch "$' + identity + '")'
+        block = ['CAPSULE_IDENTITY_ARGUMENTS=()', 'if [ -z "${CONTEXT_TASK_ID:-}" ] && [ -n "$' + identity + '" ]; then', marker, 'fi']
+        budget = "CAPSULE_BUDGET_SECONDS" if name == "local-context.sh" else "BUDGET_SECONDS"
+        arguments = [interpreter + ' "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$'
+                     + identity + '" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)' for interpreter in MEMORY_INTERPRETERS]
+        timed = memory_call_line(lines, ['CAPSULE=$(timeout "$' + budget + '" ' + form for form in arguments])
+        untimed = memory_call_line(lines, ['CAPSULE=$(' + form for form in arguments])
+        required = [*block[:3], timed, untimed]
+        if any(lines.count(line) != 1 for line in required):
+            return False
+        position = lines.index(block[0])
+        if lines[position:position + 4] != block or not lines.index(fallback) < position < min(lines.index(timed), lines.index(untimed)):
+            return False
+        if memory_hook_early_exit(lines, min(lines.index(timed), lines.index(untimed))):
+            return False
+        allowed = set(required)
+        reads = {timed, untimed}
+    for line in lines:
+        selector_lines = {fallback, marker if prompt else block[1]}
+        if re.search(r"\bCONTEXT_TASK_ID\b", line) and line not in selector_lines:
+            return False
+        if re.search(rf"\b{array}\b", line) and line not in allowed:
+            return False
+        if "--expected-branch" in line and line != marker:
+            return False
+        protected = rf"(?:{identity}|CONTEXT_TASK_ID)"
+        write = (re.search(rf"\b{protected}(?:\[[^]]*\])?\s*(?::?[+*/%&|^<>-]*=|\+\+|--)", line)
+                 or re.search(rf"(?:\+\+|--)\s*\b{protected}\b", line))
+        mutator = re.search(rf"\b(?:unset|declare|typeset|local|read|mapfile)\b.*\b{protected}\b|\bprintf\s+-v\s+[\"']?{protected}\b", line)
+        if (write or mutator) and line != fallback and not (rebase_allowed and line == REBASE_FALLBACK):
+            return False
+        if "CONTEXT_CLI" in line and re.search(r"\b(?:refresh|hook-context)\b", line) and line not in reads:
+            return False
+    return True
+
+
+def native_capture_hook_contract(source: str, edition: str, name: str) -> bool:
+    """Check the fixed paired native adapter boundary, not arbitrary shell."""
+    lines = memory_hook_code_lines(source)
+    if lines is None:
+        return False
+    prompt = name == "working-memory-read.sh"
+    command = "native-prompt" if prompt else "native-stop"
+    calls = [line for line in lines if re.search(r"\b" + command + r"\b", line)]
+    if len(calls) != (1 if prompt else 2):
+        return False
+    for line in calls:
+        if ("printf '%s' \"$HOOK_STDIN\" |" not in line or '"$CONTEXT_CLI" ' + command not in line
+                or '--host ' + edition + ' --task-id "$TASK_ID"' not in line
+                or line.count('--task-id') != 1):
+            return False
+    if prompt:
+        return ' | run ' in calls[0] and 'NATIVE_REPORT=$(' in calls[0]
+    return (sum(' | timeout "$BUDGET_SECONDS" ' in line for line in calls) == 1
+            and all('NATIVE_RESPONSE=$(' in line for line in calls)
+            and any('NATIVE_STATUS=$?' in line for line in lines))
+
+
 def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> None:
     for edition in editions:
         hooks_rel, _ = EDITION_HOOK_WIRING[edition]
@@ -556,6 +910,22 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
             expected_rel = f"{hooks_rel}/{expected}"
             if not is_owned(files, expected_rel):
                 errors.append(f"[{edition}] required hook is not manifest-owned: {expected_rel}")
+        identity_roles = ["working-memory-read.sh"]
+        if edition == "cursor":
+            identity_roles.extend(("working-memory-write.sh", "local-context.sh"))
+        for name in identity_roles:
+            relative = f"{hooks_rel}/{name}"
+            if not is_owned(files, relative):
+                continue
+            source = (target / relative).read_text(encoding="utf-8", errors="replace")
+            if not memory_hook_identity_contract(source, edition, name):
+                errors.append(f"[{edition}] {relative} lacks canonical inferred-branch read contract (hook-forge step 6)")
+        if (target / "memory-bank/scripts/native_results.py").is_file():
+            for name in ("working-memory-read.sh", "working-memory-write.sh"):
+                relative = f"{hooks_rel}/{name}"
+                if is_owned(files, relative) and not native_capture_hook_contract(
+                        (target / relative).read_text(encoding="utf-8", errors="replace"), edition, name):
+                    errors.append(f"[{edition}] {relative} lacks the bounded native result adapter (hook-forge step 6)")
         continuity_rel = f"{hooks_rel}/{CONTINUITY_HOOK}"
         if is_owned(files, continuity_rel):
             # One unargumented script serves every event, so it must hand the
@@ -579,12 +949,18 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
             # render the capsule into the alwaysApply working-memory rule, and
             # the prompt hook must always let the prompt through.
             read_hook = target / hooks_rel / "working-memory-read.sh"
-            if is_owned(files, f"{hooks_rel}/working-memory-read.sh") and '"continue": true' not in read_hook.read_text(
-                encoding="utf-8", errors="replace"
-            ).replace('\\"', '"'):
+            # Code lines only: a comment that mentions the answer or the
+            # publication call is not the call.
+            def code_lines(text):
+                return [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+            if is_owned(files, f"{hooks_rel}/working-memory-read.sh") and not any(
+                re.match(r"\s*trap\s", line) and re.search(r"\bEXIT\s*$", line)
+                and '"continue": true' in line.replace('\\"', '"')
+                for line in code_lines(read_hook.read_text(encoding="utf-8", errors="replace"))
+            ):
                 errors.append(
                     f"[cursor] {hooks_rel}/working-memory-read.sh does not answer "
-                    '{"continue": true} to beforeSubmitPrompt'
+                    '{"continue": true} to beforeSubmitPrompt on every exit (trap ... EXIT)'
                 )
             for renderer in ("working-memory-read.sh", "working-memory-write.sh", "local-context.sh"):
                 renderer_rel = f"{hooks_rel}/{renderer}"
@@ -592,16 +968,17 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
                     continue  # already reported as a missing required hook
                 script = target / renderer_rel
                 text = script.read_text(encoding="utf-8", errors="replace")
-                if (
-                    ".cursor/rules/working-memory.mdc" not in text
-                    or "alwaysApply: true" not in text
-                ):
+                phase = {"working-memory-read.sh": "prompt", "working-memory-write.sh": "turn",
+                         "local-context.sh": "session"}[renderer]
+                if not any(all(token in line for token in ("cursor-rule", "--action write", "--phase " + phase))
+                           for line in code_lines(text)):
                     errors.append(
-                        f"[cursor] {hooks_rel}/{renderer} does not render the "
-                        "alwaysApply working-memory rule "
-                        "(.cursor/rules/working-memory.mdc) that serves as "
-                        "Cursor's read path (hook-forge step 6)"
+                        f"[cursor] {hooks_rel}/{renderer} does not delegate rule publication "
+                        f"to native cursor-rule --action write --phase {phase} (hook-forge step 6)"
                     )
+                if "alwaysApply: true" in text:
+                    errors.append(f"[cursor] {hooks_rel}/{renderer} inlines working-memory frontmatter; "
+                                  "use native cursor-rule maintenance instead")
         for rel in owned_children(files, hooks_rel, ".sh"):
             sh = target / rel
             result = subprocess.run(

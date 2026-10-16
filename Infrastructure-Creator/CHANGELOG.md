@@ -4,7 +4,134 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+- Seed the structured native result coordinator and require it in the runtime skeleton. Generated prompt/Stop hooks use one bounded same-agent save with guarded revisions and Cursor loop limits, retaining the existing Harness result path.
+
+- Generated Stop hooks now infer the branch being rebased just as prompt
+  hooks do. The structural verifier accepts that unique, immediately placed
+  fallback for the working-memory pair while rejecting unsupported task-ID
+  rewrites. Seeded memory receives proof-safe corrections, Unicode duplicate
+  detection and scheduled promotion recovery from the shared runtime.
+
+### Generated prompt hooks read the rebased branch's memory — 2026-10-16
+
+- During a rebase HEAD is detached and the generated prompt hook named no
+  task, so a turn resolving the rebase's conflict read no memory. hook-forge
+  documents `rebased_branch` (the branch name Git keeps in
+  `rebase-merge/head-name` or `rebase-apply/head-name`) and one fallback line
+  after the branch fallback; bootstrap-verifier's identity contract admits
+  exactly that line, right after the fallback and in prompt hooks only. The
+  runtime admits the branch only while the rebase is in progress.
+
+### Generated hooks find Python on native Windows — 2026-10-16
+
+- hook-forge has every hook that runs Python find it with one
+  `resolve_python` function and call it as `"${PYTHON[@]}"`. On native
+  Windows (Git Bash) the python.org installer provides `python` and `py` but
+  no `python3`, and the `python3` found there may be the Microsoft Store
+  stub, so a generated project's memory was neither read nor written there;
+  the function tries `python`, `py -3` and `python3` and takes the first that
+  is Python 3.9+. Elsewhere `python3` is taken without a probe. Where Python
+  has another name, `local-context.sh` says which at session start, and the
+  wiring allows the memory CLI under `python` and `py -3` (Claude Code) and
+  `python` (Cursor CLI) beside `python3`.
+  bootstrap-verifier's memory-hook contract accepts the resolved call, and
+  still accepts a hook generated earlier that calls `python3`. Tests:
+  `tests/test_memory_prompt_generator.py` (the shipped hooks and the
+  documented fragments pass the contract).
+
+### A generated memory hook that exits before its memory call fails the gate — 2026-10-16
+
+- bootstrap-verifier's inferred-branch read contract checked the shape of a
+  memory hook's runtime call, not that a run reaches it: an `exit` standing
+  as a statement before the `refresh` or `hook-context` call, outside any
+  `if`/`case`/loop/function block, passed, and the generated project got no
+  memory on any turn. It now fails with the same diagnostic. Guarded exits
+  (`[ -f "$CONTEXT_CLI" ] || exit 0`, one inside `if ... fi` or a `case`
+  arm) stay allowed. Test: `tests/test_memory_generator_identity.py`.
+
+### Generated hooks run the runtime loader — 2026-10-15
+
+- hook-forge resolves the runtime entry of every memory hook (both
+  working-memory hooks, `local-context.sh`, `subagent-dispatch.sh`) with two
+  fixed lines: `memory-bank/scripts/context_cli.py`, which runs `context.py`
+  from its cached bytecode, falling back to `context.py` where a runtime has
+  no loader. Run as a script, the 8,300-line `context.py` was compiled again
+  on every prompt: a generated prompt reader on a 500-record Brain now takes
+  251 ms instead of 286 ms (faster in all 60 paired runs) once the bytecode
+  is cached.
+- The loader memory-seed copies writes that cache even under
+  PYTHONDONTWRITEBYTECODE, which Claude Desktop sets for Claude Code (its
+  hooks inherit it) and the Harness for every runtime call: only the
+  runtime's own modules, into `memory-bank/scripts/__pycache__/`. Before, the
+  cache never appeared there and both entries cost about the same (347
+  against 356 ms); now the prompt reader takes 305 ms instead of 429 ms from
+  the second call on (60 of 60 paired runs). memory-seed names this as the
+  reason for its `__pycache__/` root-ignore requirement; policy lock
+  regenerated.
+- bootstrap-verifier requires `context_cli.py` among the runtime scripts and
+  accepts `CONTEXT_CLI` in the memory read hooks only as that loader with its
+  fallback, or as `context.py` alone in hooks generated before the loader;
+  any other assignment fails the read contract - a path that names no file
+  made the hook skip memory on every prompt without a word. memory-seed and
+  the verifier's skill text name the loader; policy lock regenerated.
+
+### Memory saves and runtime launcher — 2026-10-15
+
+- The runtime contract ships `memory-bank/scripts/context_cli.py` (memory-seed
+  copies it with the other scripts) and lists the save evidence
+  `project-brain/control/result-attempts/{task_uuid}/*.json` and
+  `project-brain/control/result-learning-images/*.json`. policy-forge says an
+  interrupted save repeated with the same result ID resumes or runs again.
+  Runtime assets carry this date's shared-core fixes; policy lock
+  regenerated.
+
+### Memory read path and verifier — 2026-10-15
+
+- hook-forge generates prompt readers that call `context.py refresh` directly
+  under `CONTEXT_HOOK_BUDGET` and drop a capsule cut off at the budget (status
+  124); the prompt supervisor is gone from the runtime, and bootstrap-verifier
+  rejects any generated hook that still calls `prompt-supervise`.
+- bootstrap-verifier no longer reports the date-format and example tokens of
+  byte-identical memory-seed runtime scripts as leftover placeholders - every
+  real generation failed on the verbatim `context.py` and `brain_runtime.py`;
+  an edited copy is still scanned. Cursor renderer checks read code lines
+  only: the publication call and the `trap ... EXIT` that answers
+  `{"continue": true}` must be code, not a comment.
+- memory-seed copies every runtime script (twelve, not "seven"); hook-forge
+  records the Cursor hook timeouts the inner calls need (10 s prompt, 20 s
+  stop). Runtime assets carry the shared-core memory fixes of this date.
+
+### Native source resilience assets — 2026-10-14
+
+- Seed current eligibility checks for retained memory chunks, including local
+  citations omitted from legacy source digests. Rejected chunks leave every
+  index store; ordinary cached documents and original digests are preserved.
+
+- Seed optional local manifest publication and same-invocation source transport.
+  Governed manifests remain required; trace cleanup retires owned descriptors
+  before a single close attempt and preserves primary failures.
+
+- Seed the refresh-only bounded startup wait and compatible read-only working
+  fallback, including fresh canonical identity/citation/privacy guards and
+  explicit incomplete reports. Other commands retain writable initialization.
+
+- Seed typed complete-catalogue absence, fixed native corruption diagnostics,
+  strict authority scans, derived handoff isolation and Unicode metadata
+  validation. Runtime assets match the editions; source failure cannot silently
+  authorize a new native record or a partial successful refresh.
+
+### Persistent Cursor memory delivery — 2026-10-14
+
+- Seed the persistent-rule delivery profile, scoped query continuation and stable render in the native runtime; hook-forge/bootstrap verification require the canonical profile without session suppression.
+
 ### Changed
+
+- `hook-forge` delegates Cursor rule maintenance to current `memory-seed`
+  helpers instead of recreating a shell writer. The generated-project verifier
+  requires native prompt/turn/session phases and rejects inline frontmatter.
+  Shared runtime assets include exact-frontier result recovery and registered
+  Cursor-slot reconciliation; their limitations are documented in the root
+  changelog and memory integration guide.
 
 - **`memory-seed` asset: automatic session-window observation.** Generated
   projects retain their four-turn novelty and ordinary FTS5 behavior. Bounded

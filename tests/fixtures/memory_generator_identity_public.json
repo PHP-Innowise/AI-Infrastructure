@@ -1,0 +1,247 @@
+{
+  "branch": "feature/plover",
+  "explicit": "manual/plover-cross",
+  "query": "Plover nests beside the public lighthouse",
+  "roles": {
+    "claude-prompt": {
+      "host": "claude",
+      "relative": ".claude/hooks/working-memory-read.sh",
+      "identity": "TASK_ID",
+      "array": "ARGUMENTS",
+      "guard": "[ -n \"${CONTEXT_TASK_ID:-}\" ] || ARGUMENTS+=(--expected-branch \"$TASK_ID\")",
+      "report": "REPORT=$(run python3 \"$CONTEXT_CLI\" \"${ARGUMENTS[@]}\" 2>\"$ERROR_FILE\")"
+    },
+    "codex-prompt": {
+      "host": "codex",
+      "relative": ".codex/hooks/working-memory-read.sh",
+      "identity": "TASK_ID",
+      "array": "ARGUMENTS",
+      "guard": "[ -n \"${CONTEXT_TASK_ID:-}\" ] || ARGUMENTS+=(--expected-branch \"$TASK_ID\")",
+      "report": "REPORT=$(run python3 \"$CONTEXT_CLI\" \"${ARGUMENTS[@]}\" 2>\"$ERROR_FILE\")"
+    },
+    "cursor-prompt": {
+      "host": "cursor",
+      "relative": ".cursor/hooks/working-memory-read.sh",
+      "identity": "TASK_ID",
+      "array": "ARGUMENTS",
+      "guard": "[ -n \"${CONTEXT_TASK_ID:-}\" ] || ARGUMENTS+=(--expected-branch \"$TASK_ID\")",
+      "report": "REPORT=$(run python3 \"$CONTEXT_CLI\" \"${ARGUMENTS[@]}\" 2>\"$ERROR_FILE\")"
+    },
+    "cursor-turn": {
+      "host": "cursor",
+      "relative": ".cursor/hooks/working-memory-write.sh",
+      "identity": "TASK_ID",
+      "array": "CAPSULE_IDENTITY_ARGUMENTS",
+      "guard": "CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch \"$TASK_ID\")",
+      "block": "CAPSULE_IDENTITY_ARGUMENTS=()\nif [ -z \"${CONTEXT_TASK_ID:-}\" ] && [ -n \"$TASK_ID\" ]; then\n  CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch \"$TASK_ID\")\nfi",
+      "timed": "CAPSULE=$(timeout \"$BUDGET_SECONDS\" python3 \"$CONTEXT_CLI\" hook-context --host cursor --delivery-profile cursor-rule --task-id \"$TASK_ID\" \"${CAPSULE_IDENTITY_ARGUMENTS[@]}\" 2>/dev/null)",
+      "untimed": "CAPSULE=$(python3 \"$CONTEXT_CLI\" hook-context --host cursor --delivery-profile cursor-rule --task-id \"$TASK_ID\" \"${CAPSULE_IDENTITY_ARGUMENTS[@]}\" 2>/dev/null)"
+    },
+    "cursor-session": {
+      "host": "cursor",
+      "relative": ".cursor/hooks/local-context.sh",
+      "identity": "CAPSULE_TASK_ID",
+      "array": "CAPSULE_IDENTITY_ARGUMENTS",
+      "guard": "CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch \"$CAPSULE_TASK_ID\")",
+      "block": "CAPSULE_IDENTITY_ARGUMENTS=()\nif [ -z \"${CONTEXT_TASK_ID:-}\" ] && [ -n \"$CAPSULE_TASK_ID\" ]; then\n  CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch \"$CAPSULE_TASK_ID\")\nfi",
+      "timed": "CAPSULE=$(timeout \"$CAPSULE_BUDGET_SECONDS\" python3 \"$CONTEXT_CLI\" hook-context --host cursor --delivery-profile cursor-rule --task-id \"$CAPSULE_TASK_ID\" \"${CAPSULE_IDENTITY_ARGUMENTS[@]}\" 2>/dev/null)",
+      "untimed": "CAPSULE=$(python3 \"$CONTEXT_CLI\" hook-context --host cursor --delivery-profile cursor-rule --task-id \"$CAPSULE_TASK_ID\" \"${CAPSULE_IDENTITY_ARGUMENTS[@]}\" 2>/dev/null)"
+    }
+  },
+  "scripts": {
+    "claude-prompt": "#!/usr/bin/env bash\nROOT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/../..\" && pwd)\"\nCONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context_cli.py\"\n[ -f \"$CONTEXT_CLI\" ] || CONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context.py\"\nQUERY=\"Plover nests beside the public lighthouse\"\nERROR_FILE=\"$(mktemp)\"\ntrap 'rm -f \"$ERROR_FILE\"' EXIT\nrun() { \"$@\"; }\nTASK_ID=\"${CONTEXT_TASK_ID:-$(git -C \"$ROOT_DIR\" symbolic-ref --quiet --short HEAD 2>/dev/null)}\"\nARGUMENTS=(refresh --host claude)\nif [ -n \"$QUERY\" ] && [ -n \"$TASK_ID\" ]; then\n  ARGUMENTS+=(--query \"$QUERY\" --task-id \"$TASK_ID\" --ephemeral --sanitize)\n  [ -n \"${CONTEXT_TASK_ID:-}\" ] || ARGUMENTS+=(--expected-branch \"$TASK_ID\")\nfi\nREPORT=$(run python3 \"$CONTEXT_CLI\" \"${ARGUMENTS[@]}\" 2>\"$ERROR_FILE\")\nprintf '%s\\n' \"$REPORT\"\n",
+    "codex-prompt": "#!/usr/bin/env bash\nROOT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/../..\" && pwd)\"\nCONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context_cli.py\"\n[ -f \"$CONTEXT_CLI\" ] || CONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context.py\"\nQUERY=\"Plover nests beside the public lighthouse\"\nERROR_FILE=\"$(mktemp)\"\ntrap 'rm -f \"$ERROR_FILE\"' EXIT\nrun() { \"$@\"; }\nTASK_ID=\"${CONTEXT_TASK_ID:-$(git -C \"$ROOT_DIR\" symbolic-ref --quiet --short HEAD 2>/dev/null)}\"\nARGUMENTS=(refresh --host codex)\nif [ -n \"$QUERY\" ] && [ -n \"$TASK_ID\" ]; then\n  ARGUMENTS+=(--query \"$QUERY\" --task-id \"$TASK_ID\" --ephemeral --sanitize)\n  [ -n \"${CONTEXT_TASK_ID:-}\" ] || ARGUMENTS+=(--expected-branch \"$TASK_ID\")\nfi\nREPORT=$(run python3 \"$CONTEXT_CLI\" \"${ARGUMENTS[@]}\" 2>\"$ERROR_FILE\")\nprintf '%s\\n' \"$REPORT\"\n",
+    "cursor-prompt": "#!/usr/bin/env bash\nROOT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/../..\" && pwd)\"\nCONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context_cli.py\"\n[ -f \"$CONTEXT_CLI\" ] || CONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context.py\"\nQUERY=\"Plover nests beside the public lighthouse\"\nERROR_FILE=\"$(mktemp)\"\ntrap 'rm -f \"$ERROR_FILE\"; printf \"{\\\"continue\\\": true}\\n\"' EXIT\nrun() { \"$@\"; }\nTASK_ID=\"${CONTEXT_TASK_ID:-$(git -C \"$ROOT_DIR\" symbolic-ref --quiet --short HEAD 2>/dev/null)}\"\nARGUMENTS=(refresh --host cursor --delivery-profile cursor-rule)\nif [ -n \"$QUERY\" ] && [ -n \"$TASK_ID\" ]; then\n  ARGUMENTS+=(--query \"$QUERY\" --task-id \"$TASK_ID\" --ephemeral --sanitize)\n  [ -n \"${CONTEXT_TASK_ID:-}\" ] || ARGUMENTS+=(--expected-branch \"$TASK_ID\")\nfi\nARGUMENTS+=(--json)\n: cursor-rule --action write --phase prompt\n: '{\"continue\": true}'\nREPORT=$(run python3 \"$CONTEXT_CLI\" \"${ARGUMENTS[@]}\" 2>\"$ERROR_FILE\")\nprintf '%s\\n' \"$REPORT\"\n",
+    "cursor-turn": "#!/usr/bin/env bash\nROOT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/../..\" && pwd)\"\nCONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context_cli.py\"\n[ -f \"$CONTEXT_CLI\" ] || CONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context.py\"\nTASK_ID=\"${CONTEXT_TASK_ID:-$(git -C \"$ROOT_DIR\" symbolic-ref --quiet --short HEAD 2>/dev/null)}\"\nBUDGET_SECONDS=5\nCAPSULE_IDENTITY_ARGUMENTS=()\nif [ -z \"${CONTEXT_TASK_ID:-}\" ] && [ -n \"$TASK_ID\" ]; then\n  CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch \"$TASK_ID\")\nfi\n[ -n \"$TASK_ID\" ] || exit 0\nif [ \"${PLOVER_TIMEOUT:-0}\" = 1 ]; then\n  CAPSULE=$(timeout \"$BUDGET_SECONDS\" python3 \"$CONTEXT_CLI\" hook-context --host cursor --delivery-profile cursor-rule --task-id \"$TASK_ID\" \"${CAPSULE_IDENTITY_ARGUMENTS[@]}\" 2>/dev/null)\nelse\n  CAPSULE=$(python3 \"$CONTEXT_CLI\" hook-context --host cursor --delivery-profile cursor-rule --task-id \"$TASK_ID\" \"${CAPSULE_IDENTITY_ARGUMENTS[@]}\" 2>/dev/null)\nfi\n: cursor-rule --action write --phase turn\nprintf '%s\\n' \"$CAPSULE\"\n",
+    "cursor-session": "#!/usr/bin/env bash\nROOT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")/../..\" && pwd)\"\nCONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context_cli.py\"\n[ -f \"$CONTEXT_CLI\" ] || CONTEXT_CLI=\"$ROOT_DIR/memory-bank/scripts/context.py\"\nCAPSULE_TASK_ID=\"${CONTEXT_TASK_ID:-$(git -C \"$ROOT_DIR\" symbolic-ref --quiet --short HEAD 2>/dev/null)}\"\nCAPSULE_BUDGET_SECONDS=5\nCAPSULE_IDENTITY_ARGUMENTS=()\nif [ -z \"${CONTEXT_TASK_ID:-}\" ] && [ -n \"$CAPSULE_TASK_ID\" ]; then\n  CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch \"$CAPSULE_TASK_ID\")\nfi\n[ -n \"$CAPSULE_TASK_ID\" ] || exit 0\nif [ \"${PLOVER_TIMEOUT:-0}\" = 1 ]; then\n  CAPSULE=$(timeout \"$CAPSULE_BUDGET_SECONDS\" python3 \"$CONTEXT_CLI\" hook-context --host cursor --delivery-profile cursor-rule --task-id \"$CAPSULE_TASK_ID\" \"${CAPSULE_IDENTITY_ARGUMENTS[@]}\" 2>/dev/null)\nelse\n  CAPSULE=$(python3 \"$CONTEXT_CLI\" hook-context --host cursor --delivery-profile cursor-rule --task-id \"$CAPSULE_TASK_ID\" \"${CAPSULE_IDENTITY_ARGUMENTS[@]}\" 2>/dev/null)\nfi\n: cursor-rule --action write --phase session\nprintf '%s\\n' \"$CAPSULE\"\n"
+  },
+  "diagnostics": {
+    "claude-prompt": "[claude] .claude/hooks/working-memory-read.sh lacks canonical inferred-branch read contract (hook-forge step 6)",
+    "codex-prompt": "[codex] .codex/hooks/working-memory-read.sh lacks canonical inferred-branch read contract (hook-forge step 6)",
+    "cursor-prompt": "[cursor] .cursor/hooks/working-memory-read.sh lacks canonical inferred-branch read contract (hook-forge step 6)",
+    "cursor-turn": "[cursor] .cursor/hooks/working-memory-write.sh lacks canonical inferred-branch read contract (hook-forge step 6)",
+    "cursor-session": "[cursor] .cursor/hooks/local-context.sh lacks canonical inferred-branch read contract (hook-forge step 6)"
+  },
+  "valid_errors": [],
+  "unowned_errors": [
+    "[claude] required hook is not manifest-owned: .claude/hooks/working-memory-read.sh"
+  ],
+  "expected_argv": {
+    "claude-prompt": {
+      "inferred": [
+        [
+          "refresh",
+          "--host",
+          "claude",
+          "--query",
+          "Plover nests beside the public lighthouse",
+          "--task-id",
+          "feature/plover",
+          "--ephemeral",
+          "--sanitize",
+          "--expected-branch",
+          "feature/plover"
+        ]
+      ],
+      "explicit": [
+        [
+          "refresh",
+          "--host",
+          "claude",
+          "--query",
+          "Plover nests beside the public lighthouse",
+          "--task-id",
+          "manual/plover-cross",
+          "--ephemeral",
+          "--sanitize"
+        ]
+      ],
+      "absent": [
+        [
+          "refresh",
+          "--host",
+          "claude"
+        ]
+      ]
+    },
+    "codex-prompt": {
+      "inferred": [
+        [
+          "refresh",
+          "--host",
+          "codex",
+          "--query",
+          "Plover nests beside the public lighthouse",
+          "--task-id",
+          "feature/plover",
+          "--ephemeral",
+          "--sanitize",
+          "--expected-branch",
+          "feature/plover"
+        ]
+      ],
+      "explicit": [
+        [
+          "refresh",
+          "--host",
+          "codex",
+          "--query",
+          "Plover nests beside the public lighthouse",
+          "--task-id",
+          "manual/plover-cross",
+          "--ephemeral",
+          "--sanitize"
+        ]
+      ],
+      "absent": [
+        [
+          "refresh",
+          "--host",
+          "codex"
+        ]
+      ]
+    },
+    "cursor-prompt": {
+      "inferred": [
+        [
+          "refresh",
+          "--host",
+          "cursor",
+          "--delivery-profile",
+          "cursor-rule",
+          "--query",
+          "Plover nests beside the public lighthouse",
+          "--task-id",
+          "feature/plover",
+          "--ephemeral",
+          "--sanitize",
+          "--expected-branch",
+          "feature/plover",
+          "--json"
+        ]
+      ],
+      "explicit": [
+        [
+          "refresh",
+          "--host",
+          "cursor",
+          "--delivery-profile",
+          "cursor-rule",
+          "--query",
+          "Plover nests beside the public lighthouse",
+          "--task-id",
+          "manual/plover-cross",
+          "--ephemeral",
+          "--sanitize",
+          "--json"
+        ]
+      ],
+      "absent": [
+        [
+          "refresh",
+          "--host",
+          "cursor",
+          "--delivery-profile",
+          "cursor-rule",
+          "--json"
+        ]
+      ]
+    },
+    "cursor-turn": {
+      "inferred": [
+        [
+          "hook-context",
+          "--host",
+          "cursor",
+          "--delivery-profile",
+          "cursor-rule",
+          "--task-id",
+          "feature/plover",
+          "--expected-branch",
+          "feature/plover"
+        ]
+      ],
+      "explicit": [
+        [
+          "hook-context",
+          "--host",
+          "cursor",
+          "--delivery-profile",
+          "cursor-rule",
+          "--task-id",
+          "manual/plover-cross"
+        ]
+      ],
+      "absent": []
+    },
+    "cursor-session": {
+      "inferred": [
+        [
+          "hook-context",
+          "--host",
+          "cursor",
+          "--delivery-profile",
+          "cursor-rule",
+          "--task-id",
+          "feature/plover",
+          "--expected-branch",
+          "feature/plover"
+        ]
+      ],
+      "explicit": [
+        [
+          "hook-context",
+          "--host",
+          "cursor",
+          "--delivery-profile",
+          "cursor-rule",
+          "--task-id",
+          "manual/plover-cross"
+        ]
+      ],
+      "absent": []
+    }
+  },
+  "reader_stdout": "{\"reference\":\"plover-public\"}\n",
+  "reader_usage": null
+}
