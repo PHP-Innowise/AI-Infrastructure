@@ -260,7 +260,7 @@ HARNESS_TESTS = (
 
 # Branches that carry the native-Windows and System-orchestration work run
 # more modules in the harness step and add the `system-orchestration`,
-# `windows-harness` and `windows-creator` jobs. Those entries are guarded by
+# `windows-harness`, `windows-memory` and `windows-creator` jobs. Those entries are guarded by
 # the files they need: where the files are absent they skip as "not present"
 # (and CI has no such step); where they exist CI runs them, and
 # tests/test_check.py then holds them to that workflow like every other entry.
@@ -318,32 +318,6 @@ SYSTEM_PYTHONS = ("3.9", "3.x")
 # on that floor and on the current release.
 MEMORY_PYTHONS = ("3.9", "3.x")
 RELIABILITY_PYTHON = "3.9"
-# The memory suites below failed on their first native Windows run (8.3 short
-# temp paths such as RUNNER~1, SQLite files still open at cleanup, Cursor rule
-# custody, generator lint paths) and run on Linux only until they are ported:
-# tests.test_cursor_continuation
-# tests.test_cursor_continuation_state
-# tests.test_cursor_generator_contract
-# tests.test_cursor_review_recovery
-# tests.test_cursor_root_rename
-# tests.test_memory_authority_utf8
-# tests.test_memory_brain_scale
-# tests.test_memory_cached_ignore_boundaries
-# tests.test_memory_generator_boundary
-# tests.test_memory_generator_identity
-# tests.test_memory_git_source_scope
-# tests.test_memory_inferred_identity
-# tests.test_memory_native_roundtrip
-# tests.test_memory_quoted_image
-# tests.test_memory_result_evidence
-# tests.test_memory_result_fencing
-# tests.test_memory_retained_citations
-# tests.test_memory_review_harness
-# tests.test_memory_review_privacy
-# tests.test_memory_review_regressions
-# tests.test_memory_secret_policy_delivery
-# tests.test_memory_source_resilience
-# tests.test_memory_startup_readonly
 WINDOWS_HARNESS_TESTS = (
     "tests.test_harness_windows",
     "tests.test_harness_launcher",
@@ -380,6 +354,33 @@ WINDOWS_HARNESS_TESTS = (
     "tests.test_longmemeval_compile_portability",
     "tests.test_ai_system_portable",
     "tests.test_desktop_app",
+)
+# The memory regression suites that were ported to native Windows run in a job
+# of their own: with them windows-harness took 12 to 14.5 of its 15 minutes.
+WINDOWS_MEMORY_TESTS = (
+    "tests.test_cursor_continuation",
+    "tests.test_cursor_continuation_state",
+    "tests.test_memory_source_resilience",
+    "tests.test_memory_startup_readonly",
+    "tests.test_memory_retained_citations",
+    "tests.test_memory_git_source_scope",
+    "tests.test_memory_inferred_identity",
+    "tests.test_memory_generator_identity",
+    "tests.test_memory_generator_boundary",
+    "tests.test_memory_cached_ignore_boundaries",
+    "tests.test_memory_secret_policy_delivery",
+    "tests.test_memory_quoted_image",
+    "tests.test_memory_authority_utf8",
+    "tests.test_memory_native_roundtrip",
+    "tests.test_cursor_root_rename",
+    "tests.test_memory_result_fencing",
+    "tests.test_memory_result_evidence",
+    "tests.test_memory_brain_scale",
+    "tests.test_memory_review_regressions",
+    "tests.test_memory_review_privacy",
+    "tests.test_memory_review_harness",
+    "tests.test_cursor_review_recovery",
+    "tests.test_cursor_generator_contract",
 )
 WINDOWS_CREATOR_TESTS = ("tests.test_windows_creator", "tests.test_windows_discovery")
 
@@ -749,6 +750,20 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                     "Native Windows Harness acceptance and boundary tests",
                     "python -m unittest " + " ".join(WINDOWS_HARNESS_TESTS),
                     paths=guarded(WINDOWS_HARNESS_TESTS),
+                ),
+            ),
+        ),
+        Group(
+            name="windows-memory",
+            title="Windows memory (Python 3.13)",
+            job="windows-memory",
+            timeout_minutes=15,
+            platform="windows",
+            commands=(
+                pwsh(
+                    "Native Windows memory regression suites",
+                    "python -m unittest " + " ".join(WINDOWS_MEMORY_TESTS),
+                    paths=guarded(WINDOWS_MEMORY_TESTS),
                 ),
             ),
         ),

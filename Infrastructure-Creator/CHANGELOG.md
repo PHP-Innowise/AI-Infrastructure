@@ -4,6 +4,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Generated projects on native Windows — 2026-10-16
+
+- bootstrap-verifier checks hook syntax with Git Bash on Windows -
+  `CLAUDE_CODE_GIT_BASH_PATH`, or `bin\bash.exe` beside git. A bare `bash`
+  started WSL's launcher from System32, and every generated hook failed
+  `bash -n` with an empty message.
+- memory-seed carries the runtime's Windows fixes: file identity under
+  Python 3.12+, Memory Bank index paths, 8.3 project roots for the memory MCP
+  server and its registration, and source hints through NT handles.
+
 - Seed the structured native result coordinator and require it in the runtime skeleton. Generated prompt/Stop hooks use one bounded same-agent save with guarded revisions and Cursor loop limits, retaining the existing Harness result path.
 
 - Generated Stop hooks now infer the branch being rebased just as prompt

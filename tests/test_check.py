@@ -418,6 +418,7 @@ UNMIRRORED_PYTHON = {
         "the graph tests run on harness/.venv's own interpreter; the Fleet step on the one running check.py"
     ),
     ("ci.yml", "windows-harness", "3.13"): "Windows-only: it skips wherever check.py runs",
+    ("ci.yml", "windows-memory", "3.13"): "Windows-only: it skips wherever check.py runs",
 }
 
 

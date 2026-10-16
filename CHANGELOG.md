@@ -28,6 +28,37 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Memory suites on native Windows — 2026-10-16
+
+- The 23 memory regression suites that failed on their first native Windows
+  run pass there, in a new `windows-memory` job: with them `windows-harness`
+  took 12 to 14.5 of its 15 minutes. Where a Windows user hit the same
+  failure, the runtime is fixed:
+  - Python 3.12+ on Windows gives `os.stat()` and `os.lstat()` the creation
+    time as `st_ctime_ns` and `os.fstat()` the last change time, so every
+    check that an open file is still the one its path names refused the same
+    unchanged file: learning images were never recorded, and the save
+    frontier and the Cursor continuation topic were always unavailable. Those
+    checks compare `workspace_roots.change_time_ns()`.
+  - `validate.py` compared each Memory Bank index row (`chunks/<file>`) with a
+    backslash path: on Windows every chunk failed validation and every
+    automatic promotion was refused.
+  - The memory MCP server and its registration script refused a project root
+    spelled with 8.3 short names (`C:\Users\RUNNER~1\...`) as a symlink
+    root. Short names are now expanded with `GetLongPathNameW`, which keeps
+    links, before the check.
+  - Source hints abstained on Windows, which has no `O_NOFOLLOW` or `dir_fd`;
+    they now read through the NT handles the Cursor rule already uses.
+  - `workspace_roots.key_for` no longer files `\\srv\a.md` - the share `a.md`
+    on the server `srv` - under `\\srv`.
+- Where only the tests were not portable, the tests are fixed: resolved
+  temporary roots, hooks run by Git Bash (`tests/hook_shell.py`: a bare
+  `bash` is WSL's launcher in System32), POSIX manifest keys and Git config
+  paths, LF fixture bytes, closed SQLite connections, runtime modules from a
+  temporary copy removed from `sys.modules` (the Windows jobs run their
+  suites in one process), and a churn and a branch-race fixture that hold
+  with Windows' coarse file times and Git Bash's own `PATH`.
+
 ### Native Windows CI — 2026-10-16
 
 - The Windows hook test gives Git Bash each hook command in a file. Passed as
