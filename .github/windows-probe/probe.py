@@ -298,8 +298,36 @@ def cursor_topic():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def timestamp_granularity():
+    directory = Path(tempfile.mkdtemp(prefix="probe-tick-")).resolve()
+    times = []
+    for index in range(40):
+        (directory / f"f{index}").write_bytes(b"x")
+        times.append(os.lstat(directory).st_mtime_ns)
+    distinct = sorted(set(times))
+    show("dir mtimes after 40 quick creates: distinct", len(distinct))
+    show("smallest step (ns)", min((b - a for a, b in zip(distinct, distinct[1:])), default=None))
+    leaf = directory / "f0"
+    stamps = []
+    for index in range(40):
+        leaf.write_bytes(b"y" * index)
+        stamps.append(os.lstat(leaf).st_mtime_ns)
+    show("file mtimes after 40 quick rewrites: distinct", len(set(stamps)))
+    sys.path.insert(0, str(EDITION / "memory-bank/scripts"))
+    try:
+        roots = importlib.import_module("workspace_roots")
+    finally:
+        sys.path.pop(0)
+    with open(leaf, "rb") as stream:
+        handle = os.fstat(stream.fileno())
+    named = os.lstat(leaf)
+    show("change_time_ns lstat == fstat", roots.change_time_ns(named) == roots.change_time_ns(handle))
+    shutil.rmtree(directory)
+
+
 def main():
-    for function in (platform_facts, file_stats, directory_stats, bash_and_git, learning_image, cursor_topic):
+    for function in (platform_facts, file_stats, directory_stats, bash_and_git, timestamp_granularity,
+                     learning_image, cursor_topic):
         experiment(function)
 
 
