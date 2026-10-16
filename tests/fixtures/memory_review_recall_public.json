@@ -1,0 +1,21 @@
+{
+  "profile": "heron-lifecycle-recall-v2",
+  "query": "Heron keeper identity",
+  "initial_fact": "Every Heron packet has one active keeper.",
+  "changed_fact": "Every Heron packet has two active keepers.",
+  "promotion_disabled": {
+    "resolved_finding_selected": false,
+    "bank_chunks": 0,
+    "canonical_source_selected": true
+  },
+  "promotion_enabled": {
+    "resolved_finding_selected": false,
+    "bank_chunks": 1,
+    "bank_chunk_selected": true,
+    "attestation": "agent"
+  },
+  "source_change": "Fresh canonical fact must be available; any returned old bank claim must be marked source_changed.",
+  "source_deletion": "Neither deleted canonical source nor its unsupported bank claim may be selected.",
+  "reads_never_rewrite_learning": true,
+  "scope": "local lifecycle and source freshness; no AI/provider benefit claim"
+}

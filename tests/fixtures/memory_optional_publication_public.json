@@ -1,0 +1,29 @@
+{
+  "profile": "avocet-optional-publication-v1",
+  "task_id": "feature/avocet-beacons",
+  "goal": "Inspect Avocet estuary beacon maintenance",
+  "query": "Avocet estuary beacon copper floaters",
+  "source": "specs/avocet-beacons.md",
+  "source_text": "# Avocet estuary beacon maintenance\n\nAvocet estuary beacons carry seven copper floaters.\n",
+  "fact": "Avocet estuary beacons carry seven copper floaters.",
+  "unrelated_source": "specs/heron-vane.md",
+  "unrelated_text": "# Heron weather vane\n\nHeron vanes are painted ivory.\n",
+  "digest": "a21f6700bdd83c84fc05cdb9116ff4c956a2e5209e610733c0bd297d058fba1a",
+  "transport_profile": "local-source-provenance-v1",
+  "oracles": {
+    "selection": [
+      "specs/avocet-beacons.md"
+    ],
+    "local_publish_failure": "current verified fact/working delivered; manifestNone; local profile unconfirmed; no new ordinary receipts/window claims; complete same-invocation source rows and exact capsuleSHA outside modelcapsule; old rows unchanged",
+    "governed_failure": "exception before ordinary receipt pair, no returned capsule; old rows unchanged",
+    "prune_failure": "confirmed real manifest remains usable; actual ordinary receipt pair may commit; actual current fact delivered",
+    "partial_effect_then_error": "manifest may exist, outcome unconfirmed not absent/noop; no receipt pair; no adoption/deletion/retry",
+    "cancellation": "BaseException propagates and no new receipt claims for unconfirmed publication",
+    "Harness": "explicit ephemeral negotiated response, complete exact bound proof accepted; actual map equals normal same-invocation manifest values; approval/freshness compares material/hash as before",
+    "refusals": "wrong/missing/duplicate/extra/invalid path/hash, boolrev,wronguuid,stale/corrupt claimed manifest,governed scope,frame mutation,oversize/missing profile rejected; zero visible only valid complete empty explicit proof",
+    "budget": "modelcapsule still<=8000 chars, proof transport<=65536UTF8 bytes/32 rows; no effectful re-pack, every metadata/read-byte cost charged",
+    "trace_cleanup": "each exact owned fd retired then attempted once; ordinary close failures do not mask capsule/primary; drain other ownedfds before cancellation; directory child registered before closing parent; uncertain fd not retried",
+    "legacy": "old helper no marker => no new flag; default raw retrieve contract unchanged"
+  },
+  "closed_cases": "never use previous fixture/output/gold"
+}

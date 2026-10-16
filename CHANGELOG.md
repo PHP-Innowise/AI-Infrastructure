@@ -26,6 +26,602 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Automatic structured native results — 2026-10-16
+
+- Native prompt/Stop hooks coordinate one same-agent structured save, including clean research tasks without Git edits, through the existing guarded result contract. No raw transcript is adopted; task completion and person review stay explicit.
+- Challenges pin owner/session/task revision, checkout and runtime; repeats are idempotent, recovery checkpoints are suppressed, conflicts/partial outcomes remain held and the next capsule reports failures. Cursor follow-ups are capped at one.
+- Add real-hook roundtrip, replay, schema/source/privacy, stale scope, corrupt metadata and interruption regressions; include them in the standard check runner.
+
+### Memory fixes after the assessment — 2026-10-16
+
+- Automatic memory preserves manual corrections when a learning-image proof
+  is missing or could not be written; deliberate corrections still accept an
+  explicit current revision. Promotion duplicate checks retain Unicode words,
+  so independent Cyrillic findings from one source both reach the bank.
+  Native Stop hooks use the branch being rebased for checkpoints, consistently
+  with prompt reads, across Claude Code, Cursor and Codex.
+- Failed or interrupted automatic promotion leaves an owner-scoped ignored
+  retry marker. A due governed turn retries one record after a 30-second delay,
+  without requiring a Git delta or creating a task. Retries rotate past failed
+  records, obey existing source/owner/configuration guards, and drain blocked
+  duplicate work; schedule-write failures do not trigger repeated full scans.
+  Source traversal retains the existing promotion implementation and hook
+  timeout. Markerless failures from older runtimes still need a normal flush
+  or an explicit replay. Regression coverage exercises save conflicts,
+  Unicode promotion, rebase adapters and bounded clean-turn recovery.
+
+### Memory reliability round — 2026-10-15/16
+
+- A reply with no word in it - `?`, an emoji - no longer fills the turn with
+  the operator's report. It passed the sanitizer, failed the word check
+  later, and its prompt got four lines of layer report and `Capsule
+  unavailable: Search query must contain a word`, often on the turn that
+  approves a plan. Such a prompt is now withheld like one the sanitizer left
+  empty: the turn is silent, and Cursor keeps its rule. Tests:
+  `project-brain/tests/test_runtime.py` (`WordlessPromptTest`).
+
+- A branch whose task is finished says so, and the way on works. Work that
+  went on after the task was completed - review fixes, say - is not recorded,
+  by design, yet its prompts read `working: not recorded yet (the task starts
+  at the 5-turn checkpoint)`, though no checkpoint would start one, and the
+  advice to start a new task was refused: the finished record keeps the ID
+  until compaction archives it, and automatic compaction waits for five
+  finished records. The capsule now opens with `working: closed (this
+  branch's task is finished; turns are not recorded until a new one starts:
+  start a new task: context.py start --task-id <id> --goal "...")`, without
+  the warming line, and the turn report says the same; `start`, refused only
+  by finished records of that ID, now moves those to the archive - no other
+  record - and creates the task (`compact(only_external_id=...)`). Tests:
+  `project-brain/tests/test_runtime.py` (`ClosedBranchTaskTest`).
+
+- Knowledge that stops being retrieved because its cited file moved is no
+  longer silent. A Memory Bank chunk citing a file renamed with `git mv` (or
+  deleted) is left out of every capsule, while the session banner went on
+  counting it as active. The summary now adds `N active chunk(s) cite a file
+  that is gone and are not retrieved; memory-bank/scripts/validate.py names
+  them.`, and `validate.py` follows Git's renames to say where each such file
+  went (`source path does not exist: AGENTS.md - Git moved it to POLICY.md`);
+  the checks on every prompt start no Git for it. Tests:
+  `memory-bank/tests/test_validate.py`.
+
+- A branch renamed with `git branch -m` keeps its task. Its prompts read
+  `working: not recorded yet`, and its fifth turn recorded a second task
+  beside the one holding the branch's progress and next steps. Git moves the
+  reflog with the branch and notes `Branch: renamed refs/heads/<old> to
+  refs/heads/<new>`; when the branch the checkout is on has no active task
+  and an earlier name has one, the commands the hooks run (refresh,
+  hook-context, turn, cursor-rule, msg-dispatch) work with that task, and the
+  capsule says `This branch was renamed from <old>; its task continues here.`
+  The reflog is read as a file, so a branch never renamed costs nothing
+  more; a copy of a branch and a finished earlier task start their own, the
+  record keeps its ID, and an explicit `start` for the new name still
+  records a new task. Tests: `project-brain/tests/test_runtime.py`
+  (`RenamedBranchTaskTest`).
+
+- Several sessions on one checkout no longer cost each other the working
+  state. A prompt's capsule reads the task record, retrieves, and checks
+  before delivery that the record is still the one it read; another
+  session's turn checkpoint rewriting it in between withdrew the working
+  state, and the capsule said only `working: unavailable`. With four sessions
+  checkpointing every turn, 22 of 48 prompts lost it. The record is now read
+  again just before the capsule is signed and packed, and its newest state is
+  delivered (a query derived from the task keeps the state it came from); a
+  rewrite in the last moments still withdraws it, and the capsule then says
+  so and names the record to read. 47 of 48 such prompts keep their working
+  state. Tests: `tests/test_memory_brain_scale.py`
+  (`ConcurrentCheckpointTests`).
+
+- A large Brain no longer costs every prompt a read of every record. Each
+  prompt is a new process, and each one read, parsed and validated every
+  Brain record again - with 3,133 records most of the prompt. The images the
+  runtime already kept for one process are now carried to the next in the
+  ignored `project-brain/local/record-images.cache`: keyed as before by each
+  file's identity (device, inode, size, modification and change times), tied
+  to the validator's file and the Python that wrote them, and holding only
+  this project's records. A record changed since is read again; one changed
+  within two seconds of a save is left out, since a coarse clock could give a
+  second edit the same times; anything unreadable is a miss, never an error;
+  and a refresh that promises no filesystem writes (read-only or degraded)
+  writes none. A prompt on 3,133 records went from 441 to 325 ms, on 524
+  records from 222 to 204 ms; a turn checkpoint is unchanged. Tests:
+  `tests/test_memory_brain_scale.py` (`BrainScaleTests`).
+
+- A branch whose name Git takes but a task ID does not - an apostrophe
+  (`fix/user's-login`), `@`, parentheses, more than 128 characters - no
+  longer turns memory off. Every prompt there said `Capsule unavailable: Task
+  ID must use letters, digits...` and no turn was ever recorded. The branch
+  the checkout is on now gets a task ID derived from its name
+  (`fix/user-s-login-b813ac24`: refused characters become `-`, the name is cut
+  to fit, eight hex digits of its SHA-256 keep such branches apart), wherever
+  the hooks or a person name the branch: reads, checkpoints, Cursor's rule,
+  subagent dispatch and the readiness report. Any other ID the grammar
+  refuses is still refused. Tests: `project-brain/tests/test_runtime.py`
+  (`AnyScriptTaskIdTest`).
+
+- A large Memory Bank no longer slows every prompt. Each prompt checks the
+  chunks again, since a citation can go away while a chunk stays, and it
+  also screened every unchanged chunk for secrets (two dozen patterns over
+  the whole file, about 0.4 ms a chunk) and resolved every citation again
+  chunk by chunk: with 2,045 chunks a prompt took 1.8 s, 1.5 s of it in that
+  pass, and auto-promotion keeps adding chunks. A chunk whose text still
+  hashes to what an index screened and stored under the same secret policy
+  is no longer screened again - other text is, even behind an unchanged
+  stat, and a changed policy rebuilds the index - and within one pass each
+  cited source is looked at once; citations are still checked on every
+  prompt. That prompt now takes 0.35 s, and an ordinary project's prompt
+  went from 260 to 221 ms. Tests: `tests/test_memory_brain_scale.py`
+  (`MemoryBankScaleTests`).
+
+- A damaged local database no longer stops memory for good. When SQLite
+  reported `memory-bank/local/context.db` damaged ("database disk image is
+  malformed", "file is not a database") every prompt and every checkpoint
+  failed until a person moved the file. In governed mode, where all it holds
+  is derived, the hook commands now move it and its journals aside to
+  `context.db.quarantine-<UTC time>`, build a new one and run once more; the
+  capsule says so, the branch's task is read from the Brain at once and bound
+  again at the next checkpoint, and only the turns buffered since the last
+  checkpoint are lost. Lightweight mode, whose working tasks live only in
+  that file, keeps the manual recovery in `docs/TROUBLESHOOTING.md`. Tests:
+  `tests/test_memory_orphaned_task.py`.
+
+- Tests: `tests/test_memory_onnx.py` no longer fails when a worker process is
+  reaped between the open and the read of its `/proc/<pid>/stat` (the read
+  raises ESRCH); a full check hit that race once.
+
+- A project with tens of thousands of documents keeps its memory. The ignore
+  check asked `git check-ignore` about every candidate document, and Git
+  looks each path up against the index - about a tenth of a millisecond a
+  path in a 20,000-file checkout - so 20,000 Markdown files outlasted the
+  check's two seconds and every refresh failed with "Git source context
+  unavailable": no capsule, no knowledge, on every prompt. Above 256 paths
+  the rules are now asked without the index (`--no-index`, milliseconds),
+  and the tracked files among the paths they name - which Git never counts
+  as ignored - are taken out with `ls-files`, only when there are any: one
+  call for the directories they lie in when they are many (generated pages
+  under an ignored folder), not a call per batch of paths.
+  The answer is the same; on that project a prompt's refresh takes 0.44 s
+  warm and 2.0 s cold. Tests: `tests/test_memory_git_reuse.py`
+  (`ManyDocumentsIgnoreTests`).
+
+- A long document no longer holds the prompt. FTS5 marked the whole of a
+  delivered document - about a third of a second a megabyte - and a prompt
+  marked each delivered item several times (its identity, its excerpt, the
+  render), so a question that matched a 20 MB reference under `docs/` held
+  the prompt hook for minutes: past its five seconds the turn got no memory
+  at all, and a 2 MB document took about 7 s. A document longer than 65,536
+  characters is now marked only in its answering stretch - the section, from its
+  heading, where most distinct words of the query meet, or within a longer
+  section the window where they do - and one command marks a document for a
+  query once. The document is still matched and ranked over all of its text.
+  Such a prompt now takes about 1.6 s with the 20 MB document and 0.3 s with
+  the 2 MB one. Tests: `tests/test_memory_brain_scale.py`
+  (`LongDocumentTests`).
+
+- A branch named in any script gets memory. The task ID is the branch name,
+  and it had to be ASCII: on `feature/счёт-экспорт` every prompt said
+  "Capsule unavailable: Task ID must use letters, digits, '.', '_', '/', or
+  '-'" and delivered nothing, and no turn was recorded; so did
+  `fix/#123-crash` and `feature/c++-parser`. Task IDs now take letters and
+  digits of any script (and combining marks) with `.`, `_`, `/`, `#`, `+`
+  and `-`, in the runtime, the memory MCP server, the Cursor rule's receipt
+  and the Harness; whitespace and other punctuation stay refused. Test:
+  `PHP Core/project-brain/tests/test_runtime.py` (`AnyScriptTaskIdTest`).
+
+- Two task records for one branch no longer stop that branch's memory.
+  Two copies of a branch that each started its task - two people, or one
+  person on two machines - leave two active records with one task ID once
+  they merge. A clone without a binding for it failed every checkpoint as
+  ambiguous, which the Stop hook hides, and its prompts showed the task as
+  not recorded. Now a machine without a binding reads, and binds to at its
+  next checkpoint, the earliest-created active record, so every clone settles
+  on the same one; the capsule names the other record on every prompt with
+  the command that keeps one (`brain-update --record-id <other> --revision
+  auto --transition cancelled`); and a machine whose bound record was
+  cancelled that way follows the task ID to the record that is left instead
+  of dropping its turns as work on a closed task. A finished task with no
+  active record beside it keeps its binding, as before. A fresh clone or a
+  second machine also reads the branch's existing task from its first prompt
+  and in Cursor's session rule (`hook-context`), where it showed "working:
+  not recorded yet" until its first checkpoint; reading binds nothing.
+  The index pass notes such task IDs (`task-twins` in the index state), so
+  the check costs no extra pass over the Brain. `docs/TROUBLESHOOTING.md`
+  has the steps. Tests: `PHP Core/project-brain/tests/test_runtime.py`
+  (`MultiMachineContinuityTest`).
+
+- After a merge of two branches that both added Project Brain records,
+  `project-brain/indexes/active.json` holds conflict markers or one side's
+  list. `validate` said "/abs/path/project-brain/indexes: Expecting value:
+  line 1 column 1" and `compact` refused, claiming that "active records are
+  invalid". Validation now names the index file by its repository path, says
+  what is wrong with it and that the next Brain write rebuilds it, and
+  compaction - which rebuilds the indexes - goes ahead when they are the only
+  problem; an invalid record still stops it. Test:
+  `PHP Core/project-brain/tests/test_runtime.py`.
+
+- The automatic checkpoint names when its first turn began to the minute
+  ("Auto-checkpoint: 5 turn(s) since 2026-10-15 20:02 UTC"), not as
+  `2026-10-15T20:02:04.002114+00:00`: the capsule repeats the line on every
+  prompt of the task, and the seconds, microseconds and offset told a reader
+  nothing more.
+
+- A prompt no longer rewrites the index when the Project Brain did not
+  change. The Brain rows are rebuilt from the records on every refresh, and
+  every refresh used to delete and insert all of them again and stamp a new
+  index generation, which also threw away the token frequencies cached
+  against it; now a digest of the rows is stored with them and an unchanged
+  set leaves the tables and the generation as they are. Within one pass
+  over the records each cited file is looked up once, however many records
+  cite it. A document's key is cut from the path string instead of by
+  `pathlib` (half of the source walk), and `workspace_roots` no longer
+  imports `dataclasses`, which brought `inspect`, `ast` and `dis` into every
+  runtime start for one class. On a 524-record Brain the index phase of a
+  prompt went from about 67 to 55 ms, and the prompt hook, measured
+  interleaved over 31 prompts each, from 257 to 239 ms on Python 3.14 and
+  from 301 to 270 ms on 3.9. Tests: `tests/test_memory_brain_scale.py`
+  (`BrainIndexStabilityTests`, `SourceKeyTests`).
+
+- A working task whose record is unreadable (bytes that are not UTF-8, say)
+  keeps its binding: the lookup now says "invalid" - the file's name is the
+  record's UUID - instead of "not found", which would have let the next
+  checkpoint record a duplicate beside it. The read serves the turn's other
+  memory with a warning that names the record by its repository-relative path
+  and cause, and the capsule says "working: unavailable (the task's record
+  cannot be read)" rather than "not recorded yet"; an invalid record cost the
+  turn its whole capsule before. An invalid record's absolute path no longer
+  reaches prompts or messages.
+- Windows: the Brain refuses only reparse points that redirect a path - a
+  symbolic link or a junction, or one whose tag cannot be read. A OneDrive
+  placeholder or a deduplicated file is the file itself with its storage
+  elsewhere; any reparse attribute used to make the whole Brain unavailable on
+  such volumes. Save evidence (receipts, attempts, learning images, the save
+  frontier) follows the same rule; the Cursor rule's custody stays strict.
+
+- A result saved before the runtime keyed everything by task UUID replays
+  after an upgrade instead of being refused for good (`receipt_unavailable`).
+  Those local receipts named the task as the caller did, usually by its
+  branch alias; they sit under the same UUID key with the same digest, so the
+  task's current alias is accepted there and the replay rewrites the receipt
+  with the UUID.
+
+- A project under a directory whose name is not UTF-8 (a Latin-1 home or
+  share) keeps its memory. Brain paths are checked from `project-brain` down
+  - they become record keys and index entries - and handoffs check the paths
+  below the repository they store; the machine's own directories above the
+  project are never stored and are no longer checked. The Git frame is read
+  with the filesystem's own codec. Before, one such directory name switched
+  the Brain and handoffs off for every command and the prompt hook answered
+  "Git source context unavailable". A handoff transcript's file name, which
+  is never stored, is no longer refused either.
+
+- A working task whose uncommitted record `git stash -u` or `git clean` swept
+  away comes back. Every later Stop failed with "record not found" while
+  `status` reported memory as active, and the prompt hook delivered nothing at
+  all. The read now serves the turn as for a task not recorded yet - knowledge
+  included - with a warning naming the gone record, and the next checkpoint
+  drops the dead binding and records the task again with the turns buffered
+  meanwhile. A record that is only invalid keeps its binding and its refusal.
+
+- Git starts per prompt: 12 became 6 on a prompt that delivers a project
+  document (5 when it delivers none). The inferred branch is asked once; the
+  two checks before delivery compare the checkout's HEAD - and the reftable
+  list - with the snapshot taken before that answer and ask Git again only
+  when either is a new file. The first ignore check of a command still
+  confirms its frame with Git before and after its query; later checks in the
+  same command reuse that frame while every file that decides it (the
+  directories from the project to its top, each `.git` marker, the admin
+  directory, its config and commondir) keeps its identity, and confirm it
+  with Git again when one moved. A branch switched mid-refresh and a
+  repository retargeted during a reused check are refused as before. On
+  Windows, where each Git start costs tens of milliseconds, this is most of a
+  prompt's Git time.
+
+### Memory repairs and resumable saves — 2026-10-15
+
+- Brain reads at scale: a command reads each Project Brain record once. The
+  runtime keeps every valid record's image for the rest of the process, keyed
+  by the file's identity (device, inode, size, modification and change
+  times), and hands each pass its own copy; the save frontier's file hashes
+  and the Memory Bank's secret scan are remembered the same way, and listing
+  works on strings rather than Path objects. A `record-result` with two new
+  learnings on a 500-record Brain went from about 820 to 300 ms - it walked
+  every record thirty times. A directory a writer changes while it is being
+  listed is listed again (up to six times) instead of failing the reader with
+  "Project Brain inventory unavailable", and a writer's temporary file that
+  disappears before it is looked at is no longer an error.
+
+- Memory saves: a save interrupted at any point and repeated with the same
+  `result_id` now finishes. It resumes at an unchanged frontier, or runs
+  again from the start with every effect idempotent against the current
+  records - a learning is created only when absent, finished only when it is
+  exactly this save's open record, revised only under the usual proofs, and
+  the task takes only progress it does not already hold. Harness
+  `replay-result` finishes a started attempt the same way; without one a
+  replay is still never a first write. `attempt_incomplete` is left for stage
+  records that disagree with the records. MCP texts, `MCP.md`,
+  `MEMORY-INTEGRATION.md` and policy-forge say so.
+- Save evidence in the shared Brain: `control/result-attempts/<task UUID>/`
+  holds one file per task, result ID and request content, so a teammate's
+  clone that reuses a result ID for other content makes its own save instead
+  of being refused, and two clones' files never meet in a merge. A finished
+  save keeps a proof under 400 bytes (the whole attempt was kept, 3.5 times
+  the size), the newest 64 per task; compaction removes an archived task's
+  folder, the `control/result-learning-images/` of archived learnings and
+  files of the earlier flat layout. MCP names the `result_id_reused` and
+  `stale_task_revision` refusals. Both folders are documented in the Brain
+  README, `MCP.md`, `MEMORY-INTEGRATION.md` and the generator's runtime
+  contract.
+- Prompt hook cost on a 500-record Brain is back to the evening level (221 ms
+  against 225 ms; it was 23% slower). The Brain is read once per pass -
+  `iter_record_images` hands the index the very image it validated, and the
+  archive test no longer walks `path.parents`; the metadata Unicode check
+  runs only for frontmatter with a `\u` escape, as one `json.dumps` instead
+  of a Python walk; the hooks run the new `memory-bank/scripts/context_cli.py`,
+  which runs `context.py` from cached bytecode (run as a script it was
+  compiled again on every prompt). `context.py` names itself in usage text.
+- `context_cli.py` writes the runtime's bytecode cache even when the caller
+  asks Python for none. Claude Desktop starts Claude Code with
+  `PYTHONDONTWRITEBYTECODE=1`, which every hook inherits, and the Harness sets
+  it on each runtime call, so neither ever wrote the cache and the whole
+  runtime was compiled again on every call. A path hook now gives the
+  loader's own directory Python's finder with a loader that caches; every
+  other import keeps the caller's setting. `memory-bank/scripts/__pycache__/`
+  is ignored in installed projects (the editions' `.gitignore`), in the clone
+  the Harness attaches and in generated projects (memory-seed's root-ignore
+  requirement). Under `PYTHONDONTWRITEBYTECODE=1` on a 500-record Brain the
+  Claude prompt hook takes 305 ms instead of 429 ms from the second call on
+  (faster in 60 of 60 paired runs; the first call, which writes the cache,
+  costs what every call did) - as much as where bytecode is allowed, where
+  both loaders take 304-306 ms - and a Harness refresh through
+  `KnowledgeManager.run` 300 ms instead of 422 ms (40 of 40). A runtime
+  without the loader, which the Harness calls directly, still writes nothing.
+  `test_context.py` and the Harness loader test check that the cache appears,
+  in the runtime's directory only.
+
+### Fixes after the third memory review — 2026-10-15
+
+- An ignored file a record cites no longer withholds the record or the task's
+  working state. Ignore rules still decide what is indexed and served from
+  the cache (a document's own path); a task citing `vendor/...` lost its
+  progress and next steps for good, and knowledge citing the accelerator's
+  own ignored specs or skills left every capsule.
+- One unreadable or schema-invalid Project Brain record is skipped, as before
+  the overnight change, instead of stopping memory for every task, `get` of
+  unrelated tasks and `validate`'s own report. `validate` names each skipped
+  record and its cause; a lookup whose identifier only an invalid record
+  claims refuses by name (or as ambiguous) rather than reporting absence, so
+  no duplicate is created beside it.
+- Git source checks: a GIT_DIR, GIT_INDEX_FILE or discovery variable in the
+  environment is dropped from the probe instead of disabling memory; a `.git`
+  directory without HEAD, objects and refs (an empty `~/.git` or `/tmp/.git`)
+  is skipped as Git itself skips it; the inferred-branch check is one Git
+  start instead of three, so a prompt starts 7 Git processes rather than 13,
+  and the probes allow 2 seconds instead of 0.1-1.
+- Refresh waits for SQLite write admission (2 s, or a quarter of the hook
+  budget under a hook) and then for busy writers (5 s, or half the budget)
+  instead of 50 ms for the whole refresh, which lost a parallel session's
+  knowledge in a third of turns.
+- Delivery: a Memory Bank chunk citing a directory (`src/Billing`) is no
+  longer withheld as source-missing; `retrieve`/`context` answer with the
+  knowledge on a branch the first checkpoint has not provisioned yet; the
+  degraded read-only refresh keeps working state for an edited or ignored
+  citation, as the full refresh does. Repeated record validation and
+  frontmatter text checks are remembered per exact file text within a run.
+- Record results: an `expected_revision` on a learning that does not exist yet
+  creates it instead of holding it as a "kept" conflict; a person's attested
+  correction of a closed learning applies; an agent may revise its own
+  learning recorded before learning images were kept; an open learning that
+  an interrupted save created with exactly this content is finished by the
+  next result instead of staying open and unpromoted. MCP errors name the
+  typed result code and ask for current, not original, revisions. File-image
+  checks compare identity fields without st_atime, which reading the file
+  itself moves.
+- Tests: fixtures updated to the image-carrying capsule contract and to the
+  receipts-after-publication order; a fixed 2026-11-13 review date that would
+  have failed CI from 14 November moved to 2099; imported temporary runtimes
+  leave `sys.modules`; the stale Hindsight case for unescaped JSON strings is
+  dropped (the forward screen no longer decodes them).
+
+### Memory review remediation — 2026-10-14/15
+
+- Aggregate allowlisted omitted-source notice occurrences in health JSON/text after windowing, with explicit journal-record counts and no source identities; preserve legacy output when notices are absent.
+
+- Add fresh actual CLI/MCP save-to-promotion-to-recall integration with complete chunk/digest/INDEX oracles, source presence lifecycle, ordinary decode isolation, private request refusal and byte-identical Claude/Codex hook delivery. Keep provider/token claims unmeasured.
+
+- Refuse malformed Brain inventory paths before lookup/yield, direct reads and held-text parsing; pre-admit managed handoff paths outside per-file catches. Guard portable handoff paths before affected reads, writes and projection. Add fresh preservation, no-false-absence and complete Unicode roundtrip controls.
+
+- Reject malformed UTF-8 policy keys in direct/supplied fingerprints and light/full/cross-edition parity. Validate reverse inventories before partial-install shortcuts; preserve normal Unicode digests, drift shapes, ignored files and valid partial installs. Add fresh fail-closed and actual CLI controls.
+
+- Isolate ordinary invalid UTF-8 document contents and path keys before Git/SQLite; retain healthy Unicode neighbors and report count-only, nonfatal source notices through refresh, capsules and health records. Keep malformed skill policy paths strict. Turn Memory Bank INDEX/chunk decode errors into fixed diagnostics, including second-read races, and keep summaries available.
+
+- Keep rich memory rendering, section identities and window proposals on admitted indexed bodies through packing, printing and refresh. Carry immutable images outside public JSON, including lightweight packets; detached capsules use admitted snippets. A moved cache is highlighted through isolated in-memory FTS over held bytes, and shared sinks match first-row dedup ownership.
+
+- Bind candidate policy images to the same SQL row as their highlighted/plain excerpt. Missing or changed row identities cannot be rebound by a later cache read; path/hint/source-graph excerpts reuse their already-admitted body. Add fresh native policy-refresh race and supplied channel controls.
+
+- Reapply the current secret-recognition policy to full indexed images and returned paths at cached search and governed delivery, including after packing. Preserve safe masked/template records and the five-field raw-search contract; retain the source-hint byte cap before image hydration.
+
+- Recheck declared Memory Bank expiry in cached FTS search and governed delivery after packing; boundary-day knowledge remains valid, expired chunks leave manifests and receipt identities without waiting for refresh.
+
+### Final memory source-image custody — 2026-10-15
+
+- Recheck delivered ordinary/Brain content and full local citation existence
+  after packing, with fresh privacy/owner/authority configuration. Preserve
+  initial citation-drift warnings and original scores; withhold newly changed
+  or restored drift sets rather than expand already packed text.
+- Revalidate full semantic working-record images and withdraw dependent
+  queries/views when tasks change or disappear. Read final working records
+  through admitted regular descriptors; POSIX FIFO replacement cannot block
+  open. Preserve active cancellation through single-attempt cleanup failures.
+- Recompute receipts after ordinary packing omissions. Add fresh Wren/Lark/
+  Swan controls with native temporary CLI setup, assembly/proof checks and
+  supplied dual-faults. This is point-in-time custody, not atomic filesystem
+  stability, complete eligibility rescreening, client or provider validation.
+
+### Cached memory source admission — 2026-10-15
+
+- Recheck current project Git ignore policy for cached CLI/Harness search,
+  governed candidates and all declared local citations, including legacy
+  chunks without digests. Preserve lexical Git names, attached roots,
+  protected configuration and ordinary accelerator document exemptions.
+- Batch citation/hint admission and recheck selected views after packing.
+  Check full working citations before display clipping; withdraw dependent
+  automatic queries/history and all packed episode views when sources close.
+  Unknown Git policy remains a typed failure, including read-only refresh.
+- Add fresh CLI, MCP, SQLite, global-ignore, symlink, working and interruption
+  boundary controls. Local bytes/receipts are not measured provider savings;
+  real Windows, live clients, remote CI and semantic benchmarks remain unrun.
+
+### Portable memory CLI streams — 2026-10-15
+
+- Configure standard stdout/stderr wrappers for UTF-8 and untranslated LF,
+  including diagnostic paths. Preserve explicit CR characters and buffered
+  bytes written before startup. Custom streams retain the two-keyword API;
+  ordinary configuration errors are best effort and cancellation propagates.
+- Add fresh exact-byte stream and actual CLI diagnostic controls to local
+  checks and both CI platform mappings. Supplied CRLF profiles on Linux do
+  not establish a native Windows or live-client pass.
+
+### Inferred task branch identity — 2026-10-15
+
+- Preserve whether automatic read hooks inferred their task from a branch or
+  received an explicit task ID. Mark inferred prompt and Cursor session/Stop
+  reads with a private expected-branch value; explicit cross-branch recall
+  remains supported, including requests without a committed HEAD.
+- Revalidate the protected full symbolic branch before state work, after
+  packing/schema work before manifest and delivery receipt publication, and
+  before output. Read-only delivery checks after rendering; branch failures
+  stay explicit rather than becoming warnings or valid no-context outcomes.
+- Add fresh native Claude/Codex branch-movement reproductions, positive saved
+  recall and callback/transport controls. Checks are point observations:
+  write attribution, atomic branch epochs, downstream Cursor publication and
+  whole-hook deadline guarantees remain separate work.
+
+### Protected project source-ignore context — 2026-10-15
+
+- Reject inherited repository/index/object/discovery selectors in source-ignore
+  checks and read entry points. Strip Git command-environment overrides while
+  preserving ordinary global exclusions and Git's protected trust policy.
+- Observe the actual project top, prefix and Git directory, pin the ignore
+  query to that frame and rediscover afterward. Unknown markers, failed probes
+  and malformed responses refuse delivery instead of becoming empty ignores.
+- Apply one deadline across each operation and propagate source-policy failure
+  through refresh. Early read admission precedes state creation; ordinary
+  accelerator exemptions remain separate from working-source citations.
+- Add fresh Git, transport and real CLI/Claude/Codex hook controls. These are
+  local finite profiles; no atomic filesystem snapshot, general branch
+  authority, hard capture-memory bound or whole-hook deadline is established.
+
+### Strict optional runtime configuration — 2026-10-15
+
+- Distinguish ordinary missing configuration from an unobservable or invalid
+  entry. Directories, special files, dangling links, failed reads and invalid
+  UTF-8 no longer enable defaults or produce an `absent` fingerprint.
+- Share strict configuration text observation between the loader and index
+  fingerprint. Preserve valid dictionary overlays, readable links and exact
+  newline hashes; close the owned descriptor once on errors and cancellation.
+  Resolve known Windows link/reparse targets before accepting parent absence.
+- Add fresh full-value and fingerprint controls plus real governed CLI/hook
+  refusal checks. POSIX FIFO replacement is guarded; native Windows,
+  cross-call snapshots and general cold-refresh deadlines remain unproved.
+
+### Assigned credential prefix search — 2026-10-15
+
+- Avoid repeatedly searching underscore-prefix suffixes for the exact known
+  assigned-credential pattern. Preserve the full key grammar, original value
+  validation, consumed spans, masking passes and policy fingerprint; changed
+  patterns and string subclasses retain the original search methods.
+- Add fresh complete mask/span oracles and actual lightweight CLI-save,
+  Claude cold-hook and Codex warm-hook checks. A fixed public 192 KiB lookup
+  corpus that timed out now delivers saved progress and a complete index.
+  Value lookahead and general cold-refresh liveness remain separate limits.
+
+### Cold document screening cost — 2026-10-15
+
+- Skip secret-pattern scans only when an exact known pattern cannot match:
+  its mandatory literal is absent. Keep masking outputs, privacy checks,
+  policy fingerprints and whole-index publication unchanged; unknown or
+  replaced patterns retain full scanning.
+- Add fresh complete masking and native hook/index assertions, including
+  Unicode and custom pattern compatibility. This reduces screening work;
+  oversized or slow cold refreshes still have no durable scan checkpoint.
+
+### Retained memory citation admission — 2026-10-14
+
+- Revalidate current chunk eligibility before retaining cached durable memory.
+  An unchanged legacy or partially fingerprinted chunk is removed from the
+  index when any local citation disappears or escapes the supported roots.
+  Preserve ordinary document reuse and declared historical hashes. Add fresh
+  CLI/SQLite eviction, surviving citation and UTF-8 regression coverage.
+
+### Optional local memory publication — 2026-10-14
+
+- Confirm a retrieval manifest before recording its delivery. A failed local
+  publication preserves fresh context without a manifest reference or new
+  ordinary receipt pair; required governed publication still fails closed.
+- Allow supported Harness helpers to return bounded source provenance from
+  that same invocation, with exact task, capsule and visible-source bindings.
+  Keep required approval/result journals and physical-manifest checks.
+- Retire trace descriptor ownership before cleanup, drain remaining handles
+  once and preserve primary errors. Add fresh actual CLI/Harness, privacy,
+  partial-write and controlled descriptor regressions.
+
+### Read-only memory startup — 2026-10-14
+
+- Bound refresh SQLite busy waits and preserve freshly validated working task
+  delivery when startup writes are unavailable. Existing compatible rollback
+  state is read without cached search or delivery publication; unsupported or
+  unknown state remains explicitly incomplete. Add temporary CLI, hook,
+  schema, identity, privacy and real permission regression coverage.
+
+### Native memory source resilience — 2026-10-14
+
+- Report native UTF-8, JSON, metadata and inventory failures without treating
+  unknown governance as an absent task. Creation, result, promotion and MCP
+  callers use typed absence from a complete validated catalogue.
+- Isolate invalid derived handoffs while preserving independent valid memory;
+  abort native authority failures before publishing a partial index. Validate
+  the captured second image and Unicode metadata, retain actual task paths,
+  and render fallback warnings once.
+- Add fresh copied-helper CLI and stdio MCP regressions for corruption,
+  incomplete scans, archival, save/recall and Unicode. Synchronize edition and
+  generator runtime assets. Local validation does not establish Windows,
+  live-client behavior or provider-token savings.
+
+### Memory result saves, Cursor custody and Harness bindings — 2026-10
+
+- Suppress current metadata and mutations for existing learnings outside the
+  public/team save privacy scope, including archived restatements and completed
+  replay. Return only the sanitized incoming learning and a fixed held outcome;
+  preserve independent progress and facts through CLI/MCP/Harness.
+- Restore automatic result saving for hook-updated tasks and ordinary rewording
+  of an unchanged runtime-owned learning. Protect manual/person/archived/type
+  conflicts individually while saving independent progress and facts; resume
+  only new, exactly observed source/scope/domain frontiers after interruption.
+- Fence native memory result attempts before shared effects and retain complete
+  proof outside disposable local receipts; refuse unknown partial retries, stale
+  implicit corrections and generic retry rebasing. Deliberate corrections carry
+  their original learning revision through CLI/MCP/Harness.
+- Invalidate cached task-file membership on the effective Git index, shared index,
+  worktree/prefix and supported object-resolution generation. Preserve warm
+  batched-probe reuse; unavailable or changed captures clear cached proof without
+  changing citation links or ordinary document writes. Add index-only staging,
+  removal, split/alternate index and full capsule/manifest regressions.
+
+- Preserve exact receipted result replay through CLI and MCP after task
+  archival or citation deletion, with current owner/privacy checks and no
+  rewrite of later corrections. New writes retain live-source validation;
+  archived tasks require a matching receipt. Resolve CLI auto revisions
+  under the mutation lock and keep MCP revisions strictly numeric.
+
+- Build Project Brain retrieval rows from one coherent text image: content,
+  privacy, lifecycle and source hash now describe the same record or handoff.
+  Failed index refreshes deliver only fresh working state, retain diagnostics,
+  and skip stale retrieval, frequency lookup and delivery receipts.
+- Honor the explicit trailing verification attestation even when its reason
+  quotes another marker; keep Memory MCP serving after escaped surrogate IDs
+  while preserving ordinary Unicode output.
+
+### Earlier unreleased changes
+
 - Keep uppercase `Task/` client applications, specifications and project work
   local instead of versioning them in the accelerator repository. Regenerate
   source inventories without changing installed payloads; use synthetic client

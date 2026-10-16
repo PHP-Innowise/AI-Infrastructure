@@ -57,6 +57,7 @@
       "memory-bank/INDEX.md",
       "memory-bank/templates/chunk.md",
       "memory-bank/scripts/context.py",
+      "memory-bank/scripts/native_results.py",
       "memory-bank/scripts/context_handoff.py",
       "memory-bank/scripts/context_continuity.py",
       "memory-bank/scripts/brain_runtime.py",
@@ -91,7 +92,8 @@
       "memory-bank/scripts/mcp_config.py",
       "memory-bank/MCP.md",
       "memory-bank/scripts/automatic_query.py",
-      "memory-bank/scripts/memory_results.py"
+      "memory-bank/scripts/memory_results.py",
+      "memory-bank/scripts/context_cli.py"
     ],
     "creatable": [
       {
@@ -129,6 +131,14 @@
       {
         "path": "project-brain/control/retrieval-manifests/*.json",
         "via": "context.py retrieve without --ephemeral"
+      },
+      {
+        "path": "project-brain/control/result-attempts/{task_uuid}/*.json",
+        "via": "context.py record-result or replay-result and the memory_record_result MCP tool: an attempt, then a completion proof; compaction removes an archived task's folder"
+      },
+      {
+        "path": "project-brain/control/result-learning-images/*.json",
+        "via": "context.py record-result: the image of the learning an agent last wrote; compaction removes those of archived learnings"
       },
       {
         "path": "project-brain/archive/**",

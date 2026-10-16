@@ -10,11 +10,15 @@ import re
 import subprocess
 import sys
 
-from brain_runtime import (BrainError, create_task, get_record, get_task, guard_shared_text,
+from brain_runtime import (BrainError, BrainRecordNotFound, create_task, get_record, get_task, guard_shared_text,
     load_config, mutation_lock, validate_actor)
 from memory_results import check_source, record_result
 
 VERSION = '2025-06-18'
+# Fixed refusals that carry nothing of the request, named for the agent
+# like the typed result codes.
+NAMED_REFUSALS = (('Result ID was already used with different content', 'result_id_reused'),
+                  ('Stale task revision:', 'stale_task_revision'))
 MAX_MESSAGE = 128 * 1024
 # A JSON-RPC message of this server nests a few levels. Deeper input is a
 # parse error decided here: the parser's own limit follows the C stack, and a
@@ -105,7 +109,7 @@ class Memory:
 
     def task(self, task_id, *, active=True):
         task_id = text(task_id, 'task ID', 200)
-        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}', task_id) or '..' in task_id.split('/'):
+        if not re.fullmatch(r'[^\W_][\w\u0300-\u036f./#+-]{0,199}', task_id) or '..' in task_id.split('/'):
             raise BrainError('Invalid task ID')
         task = get_task(self.root, task_id)
         config = load_config(self.root)
@@ -120,8 +124,8 @@ class Memory:
     def existing(self, identifier):
         try:
             return get_record(self.root, identifier)
-        except BrainError as error:
-            if 'not found' not in str(error): raise
+        except BrainRecordNotFound as error:
+            if error.identifier != identifier or error.record_type is not None: raise
             return None
 
     def call(self, name, data):
@@ -135,7 +139,7 @@ class Memory:
         if name == 'memory_status':
             return self.cli('status')
         task_id = text(data['task_id'], 'task ID', 200)
-        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}', task_id) or '..' in task_id.split('/'):
+        if not re.fullmatch(r'[^\W_][\w\u0300-\u036f./#+-]{0,199}', task_id) or '..' in task_id.split('/'):
             raise BrainError('Invalid task ID')
         if name == 'memory_retrieve':
             if self.existing(task_id) is not None:
@@ -167,6 +171,8 @@ class Memory:
         return self.record(task_id, data)
 
     def record(self, task_id, data):
+        if type(data['revision']) is not int or data['revision'] < 1:
+            raise BrainError('Supply the current task revision as a positive integer')
         # The schema says progress is text: null is the client's error, not
         # "leave the task's progress alone", which only an absent key means.
         if 'progress' in data and not isinstance(data['progress'], str):
@@ -190,12 +196,13 @@ TOOLS = [
         {'task_id': S, 'query': S, 'paths': {'type': 'array', 'items': S, 'maxItems': 10}}, ('task_id', 'query'), read=True),
     tool('memory_checkpoint', 'Flush working Git metadata into the existing branch/task. Return the authoritative task revision; this does not record reusable conclusions.',
         {'task_id': S, 'goal': S}, ('task_id',)),
-    tool('memory_record_result', 'Record sanitized progress/next steps and source-backed reusable findings/decisions before finishing. Supply the current task revision and a stable result_id: replaying the same result_id and content completes a save that stopped half way and never writes a second copy. verified=true is agent attestation, not human review. Empty learnings is valid.',
+    tool('memory_record_result', 'Record sanitized progress/next steps and source-backed reusable findings/decisions before finishing. Supply the current task revision and a stable result_id: exact completed replay preserves later edits, and repeating an interrupted save with the same result_id finishes it without duplicating what it already wrote. Unchanged runtime-owned agent knowledge can be revised automatically; a deliberate correction may supply the current revision of that learning as expected_revision. A protected/conflicting learning is held individually while independent progress and valid facts save. verified=true is agent attestation, not human review. Empty learnings is valid.',
         {'task_id': S, 'result_id': S, 'revision': {'type': 'integer', 'minimum': 1}, 'progress': S,
          'next_steps': A, 'verified': {'type': 'boolean'}, 'learnings': {'type': 'array', 'maxItems': 3,
           'items': {'type': 'object', 'required': ['type', 'title', 'consequence', 'sources'], 'additionalProperties': False,
            'properties': {'type': {'enum': ['finding', 'decision']}, 'title': S, 'consequence': S,
-            'sources': {'type': 'array', 'items': S, 'minItems': 1, 'maxItems': 10}}}}}, ('task_id', 'result_id', 'revision')),
+            'sources': {'type': 'array', 'items': S, 'minItems': 1, 'maxItems': 10},
+            'expected_revision': {'type': 'integer', 'minimum': 1}}}}}, ('task_id', 'result_id', 'revision')),
 ]
 
 
@@ -241,9 +248,16 @@ def serve(memory, incoming=sys.stdin.buffer, outgoing=sys.stdout):
                 try:
                     value = memory.call(params['name'], params.get('arguments', {}))
                     result = {'content': [{'type': 'text', 'text': json.dumps(value, ensure_ascii=False)}], 'structuredContent': value, 'isError': False}
-                except (BrainError, ValueError, RecursionError, OSError, subprocess.SubprocessError):
-                    # Error text is never the submitted content or a runtime traceback.
-                    result = {'content': [{'type': 'text', 'text': 'Memory operation failed. Check arguments, source paths, current revision and runtime health. A save that stopped half way is completed by replaying the same result_id and content, with the current revision.'}], 'isError': True}
+                except (BrainError, ValueError, RecursionError, OSError, subprocess.SubprocessError) as error:
+                    # Error text is never the submitted content or a runtime
+                    # traceback. A typed result code is fixed vocabulary, and
+                    # it is the one thing an agent can act on.
+                    code = re.fullmatch(r'memory-result-v1:([a-z_]{1,64})', str(error)) if isinstance(error, BrainError) else None
+                    name = code.group(1) if code else next((named for opening, named in NAMED_REFUSALS
+                        if isinstance(error, BrainError) and str(error).startswith(opening)), None)
+                    result = {'content': [{'type': 'text', 'text': 'Memory operation failed'
+                        + (f' ({name})' if name else '')
+                        + '. Check arguments, source paths, the current task revision and runtime health. Repeating an interrupted save with the same result_id finishes it without duplicates. Exact completed replay leaves later edits untouched; a new write needs the current task revision, and a learning correction may name the learning\'s current revision as expected_revision.'}], 'isError': True}
             else:
                 outgoing.write(json.dumps({'jsonrpc': '2.0', 'id': identifier, 'error': {'code': -32601, 'message': 'Method not found'}}) + '\n'); outgoing.flush(); continue
             response = {'jsonrpc': '2.0', 'id': identifier, 'result': result}
@@ -253,7 +267,10 @@ def serve(memory, incoming=sys.stdin.buffer, outgoing=sys.stdout):
             response = {'jsonrpc': '2.0', 'id': identifier, 'error': {'code': -32700, 'message': 'Invalid JSON-RPC message'}}
         except BrainError:
             response = {'jsonrpc': '2.0', 'id': identifier, 'error': {'code': -32602, 'message': 'Invalid request parameters or initialization state'}}
-        outgoing.write(json.dumps(response, ensure_ascii=False, allow_nan=False) + '\n')
+        # JSON permits escaped surrogate IDs. Escape just those code points
+        # while retaining ordinary Unicode text and keeping the stream alive.
+        payload = json.dumps(response, ensure_ascii=False, allow_nan=False)
+        outgoing.write(payload.encode('utf-8', 'backslashreplace').decode('utf-8') + '\n')
         outgoing.flush()
         if len(raw) > MAX_MESSAGE: break
 

@@ -1,0 +1,38 @@
+{
+  "task_alias": "feature/kite-retry",
+  "task_title": "Kite retry policy review",
+  "source_path": "specs/kite-policy.md",
+  "source": "# Kite request policy\nRetries are capped at one attempt after the first failure.\n",
+  "learning": {
+    "type": "finding",
+    "title": "Kite retry policy",
+    "consequence": "Kite retries once.",
+    "sources": [
+      "specs/kite-policy.md"
+    ]
+  },
+  "first_progress": "Kite policy inspected.",
+  "followup_progress": "Kite independent transport decision completed.",
+  "followup_steps": [
+    "Verify Kite caller"
+  ],
+  "reworded_consequence": "Kite retries once and then stops.",
+  "person_consequence": "Kite retries are disabled for a person-approved exception.",
+  "new_learning": {
+    "type": "decision",
+    "title": "Kite lifecycle receipt",
+    "consequence": "Kite transport keeps the receipt for the completed request.",
+    "sources": [
+      "specs/kite-policy.md"
+    ]
+  },
+  "expected": {
+    "auto_hook_task": "task progress saved at current locked revision",
+    "agent_reword": "updated only if exact last-native-write image still current; independent finding created and progress/next saved",
+    "person_or_manual_learning": "differs with fixed retained reason and current revision; exact existing record bytes preserved; independent finding and progress saved",
+    "archived_learning": "archived-differs with exact preserved archive image; progress/next saved",
+    "wrong_learning_CAS": "differs, reason revision-conflict; existing image preserved; progress and independent fact saved",
+    "same_result_altered_payload": "whole request refused before effects",
+    "numeric_stale_task_CAS": "whole request refused before effects"
+  }
+}

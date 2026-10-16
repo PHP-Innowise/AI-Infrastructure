@@ -7,7 +7,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -576,8 +578,8 @@ class ContextEngineTest(unittest.TestCase):
 
         with mock.patch.object(CONTEXT.subprocess, "run", return_value=failed):
             with self.assertRaisesRegex(
-                CONTEXT.ContextError,
-                "Git ignore probe failed with exit status 2",
+                CONTEXT.SourceGitError,
+                "^Git source context unavailable$",
             ):
                 CONTEXT.git_ignored_paths(self.repository, ["docs/private.md"])
 
@@ -586,8 +588,8 @@ class ContextEngineTest(unittest.TestCase):
 
         with mock.patch.object(CONTEXT.subprocess, "run", side_effect=error):
             with self.assertRaisesRegex(
-                CONTEXT.ContextError,
-                "^Git ignore probe failed$",
+                CONTEXT.SourceGitError,
+                "^Git source context unavailable$",
             ) as raised:
                 CONTEXT.git_ignored_paths(self.repository, ["docs/private.md"])
 
@@ -667,7 +669,7 @@ class ContextEngineTest(unittest.TestCase):
             self.assertEqual(0, indexed.returncode, indexed.stderr)
             self.assertEqual(1, json.loads(indexed.stdout)["documents"])
 
-    def test_index_reports_invalid_utf8_and_preserves_previous_index(self) -> None:
+    def test_index_excludes_invalid_utf8_without_disabling_valid_documents(self) -> None:
         self.repository.joinpath("README.md").write_text(
             "# Project\n\nThe celadon rule remains searchable.\n",
             encoding="utf-8",
@@ -679,11 +681,9 @@ class ContextEngineTest(unittest.TestCase):
         self.repository.joinpath("docs/broken.md").write_bytes(b"\xff")
         failed = self.run_context("index", "--json")
 
-        self.assertNotEqual(0, failed.returncode)
-        self.assertEqual(
-            "context: Source document is not valid UTF-8: docs/broken.md\n",
-            failed.stderr,
-        )
+        self.assertEqual(0, failed.returncode, failed.stderr)
+        report = json.loads(failed.stdout)
+        self.assertIn({"path": "docs/broken.md", "reason": "invalid-utf8"}, report["excluded"])
         self.assertNotIn("Traceback", failed.stderr)
 
         searched = self.run_context("search", "celadon", "--json")
@@ -2656,14 +2656,8 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual(0, packet.returncode, packet.stderr)
         payload = json.loads(packet.stdout)
         self.assertEqual("CAPSULE-3", payload["working"]["task_id"])
-        self.assertEqual([], payload["procedural"])
-        self.assertEqual([], payload["semantic"])
-        self.assertEqual([], payload["episodic"])
-        self.assertIn(
-            "Index refresh failed: Source document is not valid UTF-8: docs/broken.md",
-            payload["warnings"],
-        )
-        self.assertNotIn("celadon source", packet.stdout)
+        self.assertTrue(any(item["path"] == "README.md" for item in payload["semantic"]))
+        self.assertFalse(any("Index refresh failed" in warning for warning in payload["warnings"]))
         self.assertNotIn("Traceback", packet.stderr)
 
     def test_context_rejects_secret_query_without_echoing_it(self) -> None:
@@ -2822,6 +2816,8 @@ class ContextEngineTest(unittest.TestCase):
         )
         self.assertEqual("Manual narrative.", task["progress"])
         self.assertIn("Auto-checkpoint: 1 turn(s)", task["auto_checkpoint"])
+        # To the minute: the capsule repeats it on every prompt.
+        self.assertRegex(task["auto_checkpoint"], r"turn\(s\) since \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC, ")
 
         # The capsule leads with the manual narrative and labels the
         # checkpoint as a supplement rather than blending the two silently.
@@ -3154,6 +3150,76 @@ class ConnectCleanupTest(unittest.TestCase):
         self.assertFalse(connection.in_transaction)
         self.assertEqual(1, connection.execute('SELECT 1').fetchone()[0])
         self.assert_writer_available()
+
+
+class ContextCliBytecodeTest(unittest.TestCase):
+    """context_cli.py caches the runtime even when its caller writes no bytecode.
+
+    Claude Desktop starts Claude Code with PYTHONDONTWRITEBYTECODE=1, which its
+    hooks inherit, and the Harness sets it for every runtime call.
+    """
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="context-cli-")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+        for name in ("PYTHONPATH", "PYTHONPYCACHEPREFIX", "PYTHONSAFEPATH"):
+            self.env.pop(name, None)
+
+    def run_loader(self, scripts, *arguments, **environment):
+        return subprocess.run(
+            [sys.executable, str(scripts / "context_cli.py"), *arguments],
+            cwd=self.root, env={**self.env, **environment},
+            capture_output=True, encoding="utf-8", timeout=120,
+        )
+
+    @staticmethod
+    def cache(directory):
+        return {path.name.split(".", 1)[0]: path.stat().st_mtime_ns
+                for path in (directory / "__pycache__").glob("*.pyc")}
+
+    def test_runtime_modules_are_cached_without_bytecode_writes(self):
+        scripts = self.root / "scripts"
+        shutil.copytree(SCRIPT.parent, scripts, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        completed = self.run_loader(scripts, "--help")
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertTrue(completed.stdout.startswith("usage: context.py"), completed.stdout[:200])
+        self.assertLessEqual(
+            {"context", "brain_runtime", "context_retrieval", "validate", "workspace_roots"},
+            set(self.cache(scripts)),
+        )
+
+    def test_only_its_own_directory_is_cached_and_the_run_is_the_script(self):
+        runtime, elsewhere = self.root / "runtime", self.root / "elsewhere"
+        runtime.mkdir()
+        elsewhere.mkdir()
+        shutil.copyfile(SCRIPT.with_name("context_cli.py"), runtime / "context_cli.py")
+        (runtime / "sibling.py").write_text("VALUE = 'sibling'\n", encoding="utf-8")
+        (elsewhere / "outside.py").write_text("VALUE = 'outside'\n", encoding="utf-8")
+        (runtime / "context.py").write_text(
+            "import os, sys\nimport outside, sibling\n"
+            "print(__name__, os.path.basename(sys.argv[0]), sys.argv[1:],"
+            " sys.dont_write_bytecode, sibling.VALUE, outside.VALUE)\n"
+            "raise SystemExit(3)\n",
+            encoding="utf-8",
+        )
+        written = None
+        for run in ("compiles", "reads the cache"):
+            with self.subTest(run=run):
+                completed = self.run_loader(runtime, "--task-id", "T-1", PYTHONPATH=str(elsewhere))
+                self.assertEqual(3, completed.returncode, completed.stderr)
+                # The caller's setting holds for everything the runtime does.
+                self.assertEqual(
+                    "__main__ context.py ['--task-id', 'T-1'] True sibling outside\n",
+                    completed.stdout,
+                )
+                self.assertEqual({"context", "sibling"}, set(self.cache(runtime)))
+                self.assertFalse((elsewhere / "__pycache__").exists())
+                if written is not None:
+                    self.assertEqual(written, self.cache(runtime))
+                written = self.cache(runtime)
+
 
 if __name__ == "__main__":
     unittest.main()

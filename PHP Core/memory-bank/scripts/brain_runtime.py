@@ -7,9 +7,11 @@ import contextlib
 import errno
 import hashlib
 import json
+import marshal
 import os
 import re
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -166,6 +168,51 @@ class BrainError(Exception):
     """A safe, user-facing Project Brain error."""
 
 
+def linked_reparse(image: os.stat_result) -> bool:
+    """Whether a Windows reparse point redirects its path - a symlink or a
+    junction - or cannot be told apart from one. Other reparse points (a
+    OneDrive placeholder, a deduplicated file) are the file itself with its
+    storage elsewhere; refusing them switched the Brain off on such volumes."""
+    if not getattr(image, 'st_file_attributes', 0) & 0x400:
+        return False
+    tag = getattr(image, 'st_reparse_tag', 0)
+    return not tag or tag in workspace_roots.LINK_REPARSE_TAGS
+
+
+def _require_utf8_record_path(path: Path) -> Path:
+    """Brain paths become record keys and index entries, so they are UTF-8 -
+    from the project-brain directory down. The directories above the project
+    are the machine's own and are never stored: one Latin-1 name in a home
+    directory used to switch the whole Brain off."""
+    parts = path.parts
+    try:
+        start = len(parts) - 1 - parts[::-1].index("project-brain")
+    except ValueError:
+        start = max(len(parts) - 1, 0)
+    try:
+        os.sep.join(parts[start:]).encode('utf-8')
+    except UnicodeError as error:
+        raise BrainError('Project Brain source invalid-utf8-path') from error
+    return path
+
+
+class BrainRecordNotFound(BrainError):
+    """Positive absence after exhausting a readable native record inventory."""
+    def __init__(self, identifier: str, record_type: Optional[str] = None):
+        self.identifier = identifier
+        self.record_type = record_type
+        super().__init__(f"Project Brain {record_type or 'record'} not found: {identifier}")
+
+
+class BrainRecordReadError(BrainError):
+    """A fixed read diagnostic; never the decoder's raw byte/error prose."""
+    def __init__(self, path: Path, reason: str):
+        self.path = path
+        self.reason = reason
+        description = 'invalid UTF-8' if reason == 'invalid-utf8' else 'record unavailable'
+        super().__init__(f"{path}: {description}")
+
+
 def normalize_phase(value: str) -> str:
     """Return the canonical stored phase for a CLI/API input value."""
     normalized = TASK_PHASE_ALIASES.get(value, value)
@@ -197,6 +244,29 @@ def is_uuid4(value: object) -> bool:
 
 def brain_root(repository: Path) -> Path:
     return repository / "project-brain"
+
+
+# Shared evidence of memory-result saves (memory_results.py), relative to the
+# Brain root: a folder per task of attempts and completion proofs, and the
+# image of each learning an agent last wrote.
+RESULT_ATTEMPTS = ("control", "result-attempts")
+RESULT_LEARNING_IMAGES = ("control", "result-learning-images")
+_EVIDENCE_NAME = re.compile(r"[0-9a-f]{64}\.json")
+
+
+def _admit_brain_anchor(repository: Path) -> bool:
+    """Reject an observed linked/reparse namespace before reads or lock writes."""
+    anchor = _require_utf8_record_path(brain_root(repository))
+    try:
+        image = anchor.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise BrainError(f"Project Brain inventory unavailable: {anchor}") from error
+    if (not stat.S_ISDIR(image.st_mode)
+            or linked_reparse(image)):
+        raise BrainError(f"Project Brain inventory unavailable: {anchor}")
+    return True
 
 
 # What an installed accelerator's state looks like, for a state directory an
@@ -375,6 +445,80 @@ def ensure_attached_state(repository: Path) -> list[str]:
     return created
 
 
+def _runtime_config_present(path: Path) -> bool:
+    """Distinguish a missing layout from a dangling or unavailable entry."""
+    probe = path
+    missing = False
+    while True:
+        try:
+            image = probe.lstat()
+        except FileNotFoundError:
+            missing = True
+            parent = probe.parent
+            if parent == probe:
+                raise BrainError(f"Invalid Project Brain configuration: {path}")
+            probe = parent
+            continue
+        if (stat.S_ISLNK(image.st_mode)
+                or getattr(image, "st_reparse_tag", None) in workspace_roots.LINK_REPARSE_TAGS):
+            image = probe.stat()
+        if missing:
+            if not stat.S_ISDIR(image.st_mode):
+                raise BrainError(f"Invalid Project Brain configuration: {path}")
+            return False
+        if not stat.S_ISREG(image.st_mode):
+            raise BrainError(f"Invalid Project Brain configuration: {path}")
+        return True
+
+
+def read_runtime_config_text(repository: Path) -> Optional[str]:
+    """Strict existing text view; None only on observed ordinary absence.
+
+    Readable links retain their existing behavior. POSIX nonblocking open
+    rejects a raced FIFO before reading. Windows retains regular-file
+    observations without that POSIX race guarantee. Regular filesystem I/O
+    has no universal wall deadline, and separate calls are not one snapshot.
+    """
+    path = brain_root(repository) / "config" / "runtime.json"
+    try:
+        if not _runtime_config_present(path):
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        nonblocking = getattr(os, "O_NONBLOCK", None)
+        if nonblocking is None:
+            if os.name != "nt":
+                raise BrainError(f"Invalid Project Brain configuration: {path}")
+        else:
+            flags |= nonblocking
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        descriptor = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise BrainError(f"Invalid Project Brain configuration: {path}")
+            raw = bytearray()
+            while True:
+                block = os.read(descriptor, 65536)
+                if not block:
+                    break
+                raw.extend(block)
+            text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        except BaseException:
+            # One close owner; an ordinary cleanup failure cannot hide the
+            # original error/cancellation. A close cancellation propagates.
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            raise
+        else:
+            # A failed successful-path close refuses the result. Never retry
+            # a descriptor whose closure may already have taken effect.
+            os.close(descriptor)
+        return text
+    except (OSError, UnicodeError) as error:
+        raise BrainError(f"Invalid Project Brain configuration: {path}") from error
+
+
 def load_config(repository: Path) -> dict[str, Any]:
     path = brain_root(repository) / "config" / "runtime.json"
     defaults: dict[str, Any] = {
@@ -392,10 +536,11 @@ def load_config(repository: Path) -> dict[str, Any]:
         "compaction_threshold": 5,
         "codebase_map_max_drift": 25,
     }
-    if not path.is_file():
+    text = read_runtime_config_text(repository)
+    if text is None:
         return defaults
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(text)
     except (OSError, json.JSONDecodeError) as error:
         raise BrainError(f"Invalid Project Brain configuration: {path}") from error
     if not isinstance(value, dict):
@@ -433,6 +578,7 @@ def configured_retrieval_gate(
 @contextlib.contextmanager
 def mutation_lock(repository: Path) -> Iterator[None]:
     """Serialize every repository mutation through one global lock file."""
+    _admit_brain_anchor(repository)
     lock_path = brain_root(repository) / "local" / "runtime.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     key = str(lock_path.resolve())
@@ -523,20 +669,41 @@ def index_paths(repository: Path) -> tuple[Path, Path]:
     return root / "active.json", root / "archive.json"
 
 
-def parse_markdown_record(path: Path) -> tuple[dict[str, Any], str]:
+def read_record_text(path: Path) -> str:
+    """Capture one native record image or retain an explicit unknown outcome."""
+    _require_utf8_record_path(path)
     try:
-        text = path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise BrainRecordReadError(path, 'invalid-utf8') from error
     except OSError as error:
-        raise BrainError(f"Cannot read Project Brain record: {path}") from error
+        raise BrainRecordReadError(path, 'unavailable') from error
+
+
+def parse_markdown_record(
+    path: Path, *, text: Optional[str] = None
+) -> tuple[dict[str, Any], str]:
+    """Parse one image; callers that also hash it can supply the same text."""
+    _require_utf8_record_path(path)
+    if text is None:
+        text = read_record_text(path)
     if not text.startswith("---\n"):
         raise BrainError(f"{path}: missing JSON frontmatter")
     try:
         raw, body = text[4:].split("\n---\n", 1)
         metadata = json.loads(raw)
-    except (ValueError, json.JSONDecodeError) as error:
+    except (ValueError, json.JSONDecodeError, RecursionError) as error:
         raise BrainError(f"{path}: invalid JSON frontmatter") from error
     if not isinstance(metadata, dict):
         raise BrainError(f"{path}: frontmatter must be an object")
+    # Text read as UTF-8 holds no lone surrogate of its own; only a JSON
+    # `\u` escape can decode to one, so frontmatter without one needs no
+    # walk. validate_record checks the record again in any case.
+    if "\\u" in raw:
+        try:
+            _validate_metadata_text(metadata)
+        except BrainError as error:
+            raise BrainError(f"{path}: invalid Unicode metadata") from error
     # Records persisted before the canonical phase vocabulary used
     # `execution`. Normalize that legacy value on read; the next supported
     # mutation rewrites the record and handoff with `implementation`.
@@ -667,14 +834,49 @@ def validate_schema_file(repository: Path, name: str, value: Any) -> None:
     validate_schema_value(value, schema)
 
 
+# Per thread: a pass in one thread never answers from another's.
+_CITED_FILES = threading.local()
+
+
+@contextlib.contextmanager
+def cited_file_memo() -> Iterator[None]:
+    """Answer each cited path once within a read-only pass over the Brain.
+
+    A prompt's index rebuild asked the filesystem again for every record
+    citing the same file - three path resolutions each, most of the
+    rebuild's eligibility cost. The answers live only inside the `with`,
+    where nothing creates, moves or removes a file.
+    """
+    previous = getattr(_CITED_FILES, "memo", None)
+    _CITED_FILES.memo = {}
+    try:
+        yield
+    finally:
+        _CITED_FILES.memo = previous
+
+
 def _cited_file(repository: Path, source: str) -> Path:
     """The regular file inside the repository a citation names."""
     relative = source.split("#", 1)[0]
-    path = workspace_roots.resolve(repository, relative).resolve()
-    if not workspace_roots.contains(repository, path):
-        raise BrainError(f"Source escapes repository: {relative}")
-    if not path.is_file() or path.is_symlink():
-        raise BrainError(f"Source does not exist or is not a regular file: {relative}")
+    memo = getattr(_CITED_FILES, "memo", None)
+    key = (os.fspath(repository), relative)
+    if memo is not None and key in memo:
+        answer = memo[key]
+        if isinstance(answer, Path):
+            return answer
+        raise BrainError(answer)
+    try:
+        path = workspace_roots.resolve(repository, relative).resolve()
+        if not workspace_roots.contains(repository, path):
+            raise BrainError(f"Source escapes repository: {relative}")
+        if not path.is_file() or path.is_symlink():
+            raise BrainError(f"Source does not exist or is not a regular file: {relative}")
+    except BrainError as error:
+        if memo is not None:
+            memo[key] = str(error)
+        raise
+    if memo is not None:
+        memo[key] = path
     return path
 
 
@@ -864,6 +1066,35 @@ def _require_string(record: dict[str, Any], key: str) -> None:
         raise BrainError(f"{key} must be a non-empty string")
 
 
+def _validate_metadata_text(value: Any) -> None:
+    """JSON escapes must also produce text accepted by native UTF-8 storage."""
+    try:
+        # One pass in C for a JSON-shaped record: a lone surrogate anywhere,
+        # key or value, fails the encode. What JSON cannot hold is walked.
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+        return
+    except UnicodeEncodeError as error:
+        raise BrainError("invalid Unicode metadata") from error
+    except (TypeError, ValueError, RecursionError):
+        pass
+    pending = [value]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            try:
+                current.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise BrainError("invalid Unicode metadata") from error
+        elif isinstance(current, (dict, list)) and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, dict):
+                pending.extend(current.keys())
+                pending.extend(current.values())
+            else:
+                pending.extend(current)
+
+
 def _require_string_list(record: dict[str, Any], key: str) -> None:
     value = record.get(key)
     if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
@@ -879,6 +1110,9 @@ def _require_datetime(record: dict[str, Any], key: str) -> None:
 
 
 def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
+    if not isinstance(record, dict):
+        raise BrainError('record must be an object')
+    _validate_metadata_text(record)
     required = {
         "schema_version", "id", "type", "external_id", "title", "status", "revision",
         "owner", "authorized_owners", "privacy", "authority", "confidence", "created_at",
@@ -906,14 +1140,16 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
         if record["type"] != "task":
             raise BrainError("only a task may record an auto checkpoint")
         _require_string(record, "auto_checkpoint")
-    if record["schema_version"] != SCHEMA_VERSION:
+    if type(record["schema_version"]) is not int or record["schema_version"] != SCHEMA_VERSION:
         raise BrainError("unsupported schema_version")
     if not is_uuid4(record["id"]):
         raise BrainError("record id must be UUIDv4")
     if record["type"] not in RECORD_TYPES:
         raise BrainError(f"type must be one of: {', '.join(RECORD_TYPES)}")
-    for key in ("external_id", "title", "owner", "goal"):
+    for key in ("external_id", "title", "owner", "goal", "status", "privacy", "authority"):
         _require_string(record, key)
+    if not isinstance(record['progress'], str):
+        raise BrainError('progress must be text')
     for key in ("created_at", "updated_at"):
         _require_datetime(record, key)
     for key in (
@@ -928,9 +1164,9 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
         raise BrainError("invalid privacy")
     if record["authority"] not in AUTHORITIES:
         raise BrainError("invalid authority")
-    if not isinstance(record["confidence"], (int, float)) or not 0 <= record["confidence"] <= 1:
+    if type(record["confidence"]) not in (int, float) or not 0 <= record["confidence"] <= 1:
         raise BrainError("confidence must be between 0 and 1")
-    if not isinstance(record["revision"], int) or record["revision"] < 1:
+    if type(record["revision"]) is not int or record["revision"] < 1:
         raise BrainError("revision must be a positive integer")
     lifecycle = LIFECYCLES[record["type"]]
     transitions = lifecycle["transitions"]
@@ -949,6 +1185,8 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
         _require_string(transition, "reason")
         current_from = transition.get("from")
         current_to = transition.get("to")
+        if not isinstance(current_to, str) or (current_from is not None and not isinstance(current_from, str)):
+            raise BrainError('transition endpoints must be text, with a null initial source')
         if index == 0:
             if current_from is not None or current_to != lifecycle["initial"]:
                 raise BrainError(
@@ -970,12 +1208,15 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
         previous = current_to
     if previous != record["status"]:
         raise BrainError("transition history does not match status")
+    if not isinstance(record['source_fingerprints'], list):
+        raise BrainError('source_fingerprints must be a list')
     for fingerprint_item in record["source_fingerprints"]:
         if (
             not isinstance(fingerprint_item, dict)
             or set(fingerprint_item) != {"path", "sha256"}
             or not isinstance(fingerprint_item["path"], str)
-            or re.fullmatch(r"[0-9a-f]{64}", str(fingerprint_item["sha256"])) is None
+            or not isinstance(fingerprint_item['sha256'], str)
+            or re.fullmatch(r"[0-9a-f]{64}", fingerprint_item["sha256"]) is None
         ):
             raise BrainError("source_fingerprints does not match strict schema")
     for relationship in [*record["conflicts"], *record["supersedes"]]:
@@ -988,6 +1229,9 @@ def validate_record(record: dict[str, Any], *, archived: bool = False) -> None:
 
 
 def validate_handoff(record: dict[str, Any], task: Optional[dict[str, Any]] = None) -> None:
+    if not isinstance(record, dict):
+        raise BrainError('handoff must be an object')
+    _validate_metadata_text(record)
     required = {
         "schema_version", "id", "type", "task_id", "task_revision", "revision",
         "owner", "privacy", "created_at", "updated_at", "objective", "current_state",
@@ -999,20 +1243,25 @@ def validate_handoff(record: dict[str, Any], task: Optional[dict[str, Any]] = No
         raise BrainError(f"handoff missing keys: {', '.join(sorted(missing))}")
     if extra:
         raise BrainError(f"handoff has unexpected keys: {', '.join(sorted(extra))}")
+    if type(record['schema_version']) is not int or record['schema_version'] != SCHEMA_VERSION:
+        raise BrainError('unsupported handoff schema_version')
     if "phase" in record and record["phase"] not in TASK_PHASES:
         raise BrainError(f"phase must be one of: {', '.join(TASK_PHASES)}")
     if not is_uuid4(record["id"]) or not is_uuid4(record["task_id"]):
         raise BrainError("handoff and task IDs must be UUIDv4")
+    _require_string(record, 'status')
     if record["type"] != "handoff" or record["status"] not in {"active", "closed"}:
         raise BrainError("invalid handoff type or status")
     if record["privacy"] not in PRIVACY:
         raise BrainError("invalid handoff privacy")
     for key in ("owner", "objective"):
         _require_string(record, key)
+    if not isinstance(record['current_state'], str):
+        raise BrainError('current_state must be text')
     for key in ("created_at", "updated_at"):
         _require_datetime(record, key)
     for key in ("task_revision", "revision"):
-        if not isinstance(record[key], int) or record[key] < 1:
+        if type(record[key]) is not int or record[key] < 1:
             raise BrainError(f"{key} must be a positive integer")
     for key in ("next_actions", "files", "sources"):
         _require_string_list(record, key)
@@ -1033,19 +1282,398 @@ def handoff_path(repository: Path, task_uuid: str) -> Path:
     return brain_root(repository) / "control" / "handoffs" / f"{task_uuid}.md"
 
 
-def iter_records(repository: Path, *, include_archive: bool = False) -> Iterator[tuple[Path, dict[str, Any], str]]:
-    roots = [brain_root(repository) / "dynamic"]
-    if include_archive:
-        roots.append(brain_root(repository) / "archive")
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for path in sorted(root.glob("**/*.md")):
-            if path.is_file() and not path.is_symlink():
-                metadata, body = parse_markdown_record(path)
-                if metadata.get("type") == "handoff":
+# A directory a writer changed while it was being listed is read again this
+# many times before the inventory gives up: an atomic record write adds a
+# temporary file beside the record and renames it over it.
+_INVENTORY_ATTEMPTS = 6
+
+
+def _record_inventory(root: Path) -> list[Path]:
+    """Enumerate every candidate before yielding; failed traversal is unknown.
+
+    This is an error-aware native inventory, not a filesystem snapshot or proof
+    against unsynchronized external writers. No linked/reparse authority path
+    is followed. Only a positively absent initial root can mean an empty tree.
+    """
+    return [path for path, _, _ in _record_inventory_stats(root)]
+
+
+def _record_inventory_stats(root: Path) -> list[tuple[Path, os.stat_result, str]]:
+    """_record_inventory with each record file's lstat, taken as it was
+    listed, and its path as a string."""
+    _require_utf8_record_path(root)
+
+    def unavailable(candidate: Path) -> BrainError:
+        return BrainError(f"Project Brain inventory unavailable: {candidate}")
+
+    def directory(candidate: Path):
+        try:
+            image = candidate.lstat()
+        except OSError as error:
+            raise unavailable(candidate) from error
+        if (not stat.S_ISDIR(image.st_mode)
+                or linked_reparse(image)):
+            raise unavailable(candidate)
+        return image
+
+    try:
+        root.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise unavailable(root) from error
+    pending = [root]
+    result: list[tuple[str, os.stat_result]] = []
+    while pending:
+        current = pending.pop()
+        for attempt in range(_INVENTORY_ATTEMPTS):
+            files: list[tuple[str, os.stat_result]] = []
+            directories: list[Path] = []
+            settled = True
+            before = directory(current)
+            try:
+                with os.scandir(current) as scanner:
+                    entries = sorted(scanner, key=lambda entry: entry.name)
+            except OSError as error:
+                raise unavailable(current) from error
+            for entry in entries:
+                # Strings until an entry is kept: a large Brain is listed many
+                # times by one command, and Path objects dominated the cost.
+                try:
+                    entry.name.encode('utf-8')
+                except UnicodeError as error:
+                    raise BrainError('Project Brain source invalid-utf8-path') from error
+                try:
+                    # The entry's own type, without a system call where the
+                    # platform reports it: a writer's temporary file may be
+                    # renamed away before anything else looks at it.
+                    if entry.is_symlink() or (
+                            os.name == "nt"
+                            and linked_reparse(entry.stat(follow_symlinks=False))):
+                        raise unavailable(Path(entry.path))
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(Path(entry.path))
+                        continue
+                except FileNotFoundError:
+                    settled = False
+                    break
+                except OSError as error:
+                    raise unavailable(Path(entry.path)) from error
+                # What fnmatch(name, '*.md') decides, without its pattern work.
+                if not os.path.normcase(entry.name).endswith('.md'):
                     continue
-                yield path, metadata, body
+                try:
+                    image = os.lstat(entry.path)
+                except FileNotFoundError:
+                    settled = False
+                    break
+                except OSError as error:
+                    raise unavailable(Path(entry.path)) from error
+                if (stat.S_ISLNK(image.st_mode) or not stat.S_ISREG(image.st_mode)
+                        or linked_reparse(image)):
+                    raise unavailable(Path(entry.path))
+                files.append((entry.path, image))
+            after = directory(current)
+            if settled and all(getattr(before, key) == getattr(after, key) for key in
+                               ('st_dev', 'st_ino', 'st_mode', 'st_mtime_ns', 'st_ctime_ns')):
+                break
+            # A writer replaced or moved a record while this directory was
+            # listed; what was read may miss it. Read the directory again.
+            time.sleep(0.002 * (attempt + 1))
+        else:
+            raise unavailable(current)
+        result.extend(files)
+        pending.extend(directories)
+    # Path order - by normalized components - computed once per string rather
+    # than by Path comparisons, which dominated listing a large Brain.
+    result.sort(key=lambda item: os.path.normcase(item[0]).split(os.sep))
+    return [(Path(text), image, text) for text, image in result]
+
+
+# Record images this process has already validated: (archived, sha256 of the
+# file text). validate_record depends on nothing but the record, and one prompt
+# walks the Brain more than once (index, then the task lookup) - validating
+# every record each time was a third of a warm prompt on a 500-record Brain.
+_VALID_RECORD_IMAGES: set[tuple[bool, str]] = set()
+_VALID_RECORD_LIMIT = 50000
+
+
+def validate_record_image(record: dict[str, Any], text: str, *, archived: bool = False) -> None:
+    """validate_record, remembered per exact file text within this process."""
+    key = (archived, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest())
+    if key in _VALID_RECORD_IMAGES:
+        return
+    validate_record(record, archived=archived)
+    if len(_VALID_RECORD_IMAGES) < _VALID_RECORD_LIMIT:
+        _VALID_RECORD_IMAGES.add(key)
+
+
+def _claimed_identity(text: Optional[str]) -> Optional[dict[str, Any]]:
+    """The type/id/external_id a record that failed to parse still names."""
+    if not isinstance(text, str) or not text.startswith("---\n"):
+        return None
+    try:
+        raw = text[4:].split("\n---\n", 1)[0]
+        metadata = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    return {key: metadata.get(key) for key in ("type", "id", "external_id")}
+
+
+def _record_problem(repository: Path, path: Path, metadata: Any, error: BrainError, *,
+                    schema: bool = True) -> dict[str, Any]:
+    """One skipped record: where, why, and the identity it claims if readable."""
+    message = str(error)
+    # Read errors already lead with the path; the report adds it once.
+    if message.startswith(f"{path}: "):
+        message = message[len(f"{path}: "):]
+    if isinstance(metadata, dict):
+        # The schema names the offending field; the lifecycle check alone may
+        # not. A record that failed to parse keeps its parse error instead.
+        if schema:
+            try:
+                validate_schema_file(repository, "dynamic-record.schema.json", metadata)
+            except BrainError as detail:
+                message = str(detail)
+            except (OSError, ValueError, TypeError, KeyError, RecursionError):
+                pass
+        identity = tuple(metadata.get(key) if isinstance(metadata.get(key), str) else None
+                         for key in ("type", "id", "external_id"))
+    else:
+        identity = None
+    return {"path": path, "error": message, "identity": identity}
+
+
+def iter_records(repository: Path, *, include_archive: bool = False,
+                 problems: Optional[list[dict[str, Any]]] = None
+                 ) -> Iterator[tuple[Path, dict[str, Any], str]]:
+    """Every readable, valid governed record.
+
+    A record that cannot be read or does not pass validation is skipped and,
+    when `problems` is given, reported there with its cause and the identity it
+    claims. One bad file - a half-merged conflict, a teammate's record from a
+    newer schema, a hand edit - used to stop every task's memory, `get` of
+    unrelated tasks and `validate`'s own report. Lookups by identifier still
+    refuse rather than report absence when the one they ask for is the bad one
+    (find_record), so a skipped record never turns into a duplicate.
+    """
+    for path, metadata, body, _ in iter_record_images(repository, include_archive=include_archive,
+                                                       problems=problems):
+        yield path, metadata, body
+
+
+# Valid record images this process has read, by path: the file's identity as
+# listed (device, inode, size, modification and change times), whether it lay
+# in the archive, and the image. A pass over an unchanged Brain then reads no
+# file again - one record-result made thirty passes over every record. Every
+# write here replaces a record whole, so the new file never has the old one's
+# identity, and an edit in place changes its times.
+_RECORD_IMAGE_CACHE: dict[str, tuple[tuple[int, ...], bool, bytes, str, str]] = {}
+_RECORD_IMAGE_CACHE_LIMIT = 20000
+
+
+def _remember_record_image(path: str, image: os.stat_result, archived: bool,
+                           metadata: dict[str, Any], body: str, text: str) -> None:
+    try:
+        packed = marshal.dumps(metadata)
+    except ValueError:
+        return
+    if len(_RECORD_IMAGE_CACHE) >= _RECORD_IMAGE_CACHE_LIMIT:
+        _RECORD_IMAGE_CACHE.clear()
+    _RECORD_IMAGE_CACHE[path] = (_image_key(image), archived, packed, body, text)
+
+
+def _image_key(image: os.stat_result) -> tuple[int, ...]:
+    return (image.st_dev, image.st_ino, image.st_size, image.st_mtime_ns, image.st_ctime_ns)
+
+
+# The cache above, carried from one process to the next: every prompt is a new
+# process, and reading, parsing and validating every record again was most of
+# a prompt on a large Brain. It is kept in the ignored project-brain/local/,
+# for this project's records only, and tied to this module's file and the
+# Python that wrote it - another validator or marshal format starts it over.
+# A record whose times are within two seconds of the save stays out of it: a
+# file system with a coarse clock could give a second edit in the same tick
+# the first one's times. Anything unreadable is a cache miss, never an error.
+_PERSISTED_IMAGES = "record-images.cache"
+_PERSISTED_LIMIT = 64 * 1024 * 1024
+_PERSISTED_SETTLE_NS = 2_000_000_000
+_PERSISTED_STATE: dict[str, Any] = {"root": None, "dirty": False, "used": set(), "held": False}
+
+
+def hold_persisted_images() -> None:
+    """Read the carried cache but write none of it for the rest of this
+    process: a run that promised to leave the filesystem as it found it."""
+    _PERSISTED_STATE["held"] = True
+
+
+def _persisted_version() -> tuple:
+    source = os.stat(__file__)
+    return (2, tuple(sys.version_info[:2]), source.st_size, source.st_mtime_ns)
+
+
+def _persisted_entry(value: Any) -> Optional[tuple]:
+    """A stored entry as the in-process cache holds it, or None. The body is
+    stored as its length: it is the end of the record's text."""
+    if not (isinstance(value, tuple) and len(value) == 5
+            and isinstance(value[0], tuple) and len(value[0]) == 5
+            and all(type(part) is int for part in value[0])
+            and type(value[1]) is bool and type(value[2]) is bytes
+            and type(value[3]) is int and type(value[4]) is str
+            and 0 <= value[3] <= len(value[4])):
+        return None
+    text = value[4]
+    return (value[0], value[1], value[2], text[len(text) - value[3]:], text)
+
+
+def _load_persisted_images(repository: Path) -> None:
+    root = str(brain_root(repository))
+    if _PERSISTED_STATE["root"] == root:
+        return
+    _PERSISTED_STATE.update(root=root, dirty=False, used=set())
+    path = os.path.join(root, "local", _PERSISTED_IMAGES)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+        with os.fdopen(descriptor, "rb") as handle:
+            raw = handle.read(_PERSISTED_LIMIT + 1)
+        if len(raw) > _PERSISTED_LIMIT:
+            return
+        version, entries = marshal.loads(raw)
+        if version != _persisted_version() or not isinstance(entries, dict):
+            return
+        prefix = root + os.sep
+        for key, value in entries.items():
+            entry = _persisted_entry(value)
+            if (entry is not None and isinstance(key, str) and key.startswith(prefix)
+                    and key not in _RECORD_IMAGE_CACHE
+                    and len(_RECORD_IMAGE_CACHE) < _RECORD_IMAGE_CACHE_LIMIT):
+                _RECORD_IMAGE_CACHE[key] = entry
+    except (OSError, ValueError, EOFError, TypeError):
+        return
+
+
+def _save_persisted_images() -> None:
+    root = _PERSISTED_STATE["root"]
+    if root is None or not _PERSISTED_STATE["dirty"] or _PERSISTED_STATE["held"]:
+        return
+    _PERSISTED_STATE["dirty"] = False
+    local = os.path.join(root, "local")
+    temporary = None
+    try:
+        if os.path.islink(local) or not os.path.isdir(local):
+            return
+        settled = time.time_ns() - _PERSISTED_SETTLE_NS
+        prefix = root + os.sep
+        entries = {}
+        for key, value in list(_RECORD_IMAGE_CACHE.items()):
+            if (not key.startswith(prefix) or max(value[0][3], value[0][4]) >= settled
+                    or not value[4].endswith(value[3])):
+                continue
+            if key not in _PERSISTED_STATE["used"]:
+                # Loaded but not looked at this time: kept while the file is
+                # the one it was read from, dropped once it is gone.
+                try:
+                    if _image_key(os.lstat(key)) != value[0]:
+                        continue
+                except OSError:
+                    continue
+            entries[key] = (value[0], value[1], value[2], len(value[3]), value[4])
+        if not entries and not os.path.lexists(os.path.join(local, _PERSISTED_IMAGES)):
+            return
+        raw = marshal.dumps((_persisted_version(), entries))
+        if len(raw) > _PERSISTED_LIMIT:
+            return
+        descriptor, temporary = tempfile.mkstemp(prefix="." + _PERSISTED_IMAGES + ".", dir=local)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(raw)
+        os.replace(temporary, os.path.join(local, _PERSISTED_IMAGES))
+        temporary = None
+    except (OSError, ValueError, RuntimeError):
+        return
+    finally:
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temporary)
+
+
+def iter_record_images(repository: Path, *, include_archive: bool = False,
+                       problems: Optional[list[dict[str, Any]]] = None
+                       ) -> Iterator[tuple[Path, dict[str, Any], str, str]]:
+    """iter_records with the exact text each record was read and validated
+    from, for a caller that hashes or indexes it: one read, one image."""
+    if not _admit_brain_anchor(repository):
+        return
+    _load_persisted_images(repository)
+    used = _PERSISTED_STATE["used"]
+    roots = [(brain_root(repository) / "dynamic", False)]
+    if include_archive:
+        roots.append((brain_root(repository) / "archive", True))
+    # Finish all active/archive directory scans before the first record is
+    # consumed by lookup, duplicate admission or a mutation caller.
+    paths = [(path, image, text, archived) for root, archived in roots
+             for path, image, text in _record_inventory_stats(root)]
+    archived_handoffs = brain_root(repository) / 'archive' / 'handoffs'
+
+    def skip(path: Path, metadata: Any, error: BrainError, *, schema: bool = True) -> None:
+        if problems is not None:
+            problems.append(_record_problem(repository, path, metadata, error, schema=schema))
+
+    for path, image, key_text, archived in paths:
+        cached = _RECORD_IMAGE_CACHE.get(key_text)
+        if cached is not None and cached[0] == _image_key(image) and cached[1] == archived:
+            used.add(key_text)
+            # A fresh copy each time: callers edit the record they are handed.
+            yield path, marshal.loads(cached[2]), cached[3], cached[4]
+            continue
+        text = None
+        try:
+            text = read_record_text(path)
+            metadata, body = parse_markdown_record(path, text=text)
+        except BrainError as error:
+            # Keep the identity it claims when the frontmatter still parses
+            # (invalid Unicode in a title, say): a lookup for that task then
+            # says the record is invalid instead of "not found".
+            claimed = _claimed_identity(text)
+            if claimed is None and is_uuid4(path.stem):
+                # Unreadable bytes name nothing, but the file is named by the
+                # record's UUID: a lookup must say "invalid", not "not found".
+                claimed = {"type": None, "id": path.stem, "external_id": None}
+            skip(path, claimed, error, schema=False)
+            continue
+        if metadata.get("type") == "handoff":
+            # Whatever identity the file carries stays claimed, so no lookup
+            # reads its absence as room for a new record.
+            claimed = {"type": None, "id": metadata.get("id"),
+                       "external_id": metadata.get("external_id") or metadata.get("task_id")}
+            if path.parent == archived_handoffs and path.stem == metadata.get('task_id'):
+                try:
+                    validate_handoff(metadata)
+                    if metadata['status'] != 'closed':
+                        raise BrainError('archived handoff must be closed')
+                except (BrainError, KeyError, TypeError) as error:
+                    skip(path, claimed, BrainError(f'archived handoff invalid: {error}'), schema=False)
+                continue
+            skip(path, claimed, BrainError("unexpected handoff in authority path"), schema=False)
+            continue
+        if (metadata.get('type') not in RECORD_TYPES
+                or not is_uuid4(metadata.get('id'))
+                or not isinstance(metadata.get('external_id'), str)
+                or not metadata['external_id'].strip()):
+            skip(path, metadata, BrainError("record identity unavailable"))
+            continue
+        try:
+            validate_record_image(metadata, text, archived=archived)
+        except BrainError as error:
+            skip(path, metadata, error)
+            continue
+        _remember_record_image(key_text, image, archived, metadata, body, text)
+        used.add(key_text)
+        _PERSISTED_STATE["dirty"] = True
+        yield path, metadata, body, text
+    # A whole pass that read anything leaves the cache for the next process.
+    _save_persisted_images()
 
 
 def find_record(
@@ -1056,17 +1684,31 @@ def find_record(
     include_archive: bool = False,
 ) -> tuple[Path, dict[str, Any], str]:
     matches = []
-    for path, record, body in iter_records(repository, include_archive=include_archive):
+    problems: list[dict[str, Any]] = []
+    for path, record, body in iter_records(repository, include_archive=include_archive,
+                                           problems=problems):
         if (
             (record_type is None or record.get("type") == record_type)
             and identifier in {record.get("id"), record.get("external_id")}
         ):
             matches.append((path, record, body))
-    if not matches:
-        label = record_type or "record"
-        raise BrainError(f"Project Brain {label} not found: {identifier}")
-    if len(matches) > 1:
+    # A skipped record that claims this identity is not absence: answering
+    # "not found" would let the caller create a duplicate beside it.
+    claimants = [problem for problem in problems
+                 if problem["identity"] is not None and identifier in problem["identity"][1:]
+                 and (record_type is None or problem["identity"][0] in (None, record_type))]
+    if len(matches) + len(claimants) > 1:
         raise BrainError(f"Project Brain record identifier is ambiguous: {identifier}")
+    if claimants:
+        # Repository-relative: the message reaches prompts and logs, and the
+        # absolute path names the machine's own directories.
+        try:
+            shown = claimants[0]['path'].relative_to(repository).as_posix()
+        except ValueError:
+            shown = claimants[0]['path'].name
+        raise BrainError(f"Project Brain record invalid: {shown}: {claimants[0]['error']}")
+    if not matches:
+        raise BrainRecordNotFound(identifier, record_type)
     return matches[0]
 
 
@@ -1244,8 +1886,8 @@ def create_record(
         # Alias lookup and creation must share the same repository lock.
         try:
             find_record(repository, external_id)
-        except BrainError as error:
-            if "not found" not in str(error):
+        except BrainRecordNotFound as error:
+            if error.identifier != external_id or error.record_type is not None:
                 raise
         else:
             raise BrainError(f"Project Brain record already exists: {external_id}")
@@ -1331,9 +1973,11 @@ def record_attestation(record: dict[str, Any]) -> str:
         if transition.get("to") != "verified" or transition.get("from") not in AUTHORITY_TRANSITIONS:
             continue
         reason = str(transition.get("reason") or "")
-        mark = ATTESTATION_MARK.search(reason)
-        if mark:
-            return mark.group(1)
+        marks = ATTESTATION_MARK.findall(reason)
+        if marks:
+            # Supported writes append the explicit mark after free-form
+            # prose, which may itself quote an older attestation marker.
+            return marks[-1]
         return "agent" if "agent-attested" in reason else ""
     return ""
 
@@ -1786,17 +2430,32 @@ def record_is_eligible(repository: Path, record: dict[str, Any], config: dict[st
     return True, "eligible"
 
 
+def _relative_posix(path: Path, repository: Path) -> str:
+    """path.relative_to(repository).as_posix() for a path known to lie under
+    it, by slicing the string: pathlib's version was most of an index rebuild
+    on a large Brain."""
+    text, base = str(path), str(repository)
+    if base in ("", os.curdir) and not os.path.isabs(text):
+        relative = text
+    elif text.startswith(base) and text[len(base):len(base) + 1] == os.sep and not base.endswith(os.sep):
+        relative = text[len(base) + 1:]
+    else:
+        return path.relative_to(repository).as_posix()
+    return relative.replace(os.sep, "/") if os.sep != "/" else relative
+
+
 def build_index_data(
     repository: Path,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     active: list[dict[str, Any]] = []
     archived: list[dict[str, Any]] = []
     for path, record, _ in iter_records(repository, include_archive=True):
+        relative = _relative_posix(path, repository)
         item = {
             "id": record.get("id"), "type": record.get("type"), "status": record.get("status"),
-            "revision": record.get("revision"), "path": path.relative_to(repository).as_posix(),
+            "revision": record.get("revision"), "path": relative,
         }
-        if "archive" in path.parts:
+        if "archive" in relative.split("/"):
             archived.append(item)
         else:
             active.append(item)
@@ -1853,7 +2512,8 @@ def validate_repository(
     errors: list[str] = []
     seen: set[str] = set()
     records: dict[str, tuple[Path, dict[str, Any]]] = {}
-    for path, record, _ in iter_records(repository, include_archive=True):
+    problems: list[dict[str, Any]] = []
+    for path, record, _ in iter_records(repository, include_archive=True, problems=problems):
         try:
             archived = "archive" in path.parts
             validate_schema_file(
@@ -1883,18 +2543,23 @@ def validate_repository(
             records[record["id"]] = (path, record)
         except BrainError as error:
             errors.append(f"{path}: {error}")
+    # Records the inventory skipped are reported here by name and cause; a
+    # skipped one still counts as present for the relationship checks below.
+    errors.extend(f"{problem['path']}: {problem['error']}" for problem in problems)
+    present = set(records) | {problem["identity"][1] for problem in problems
+                              if problem["identity"] is not None and problem["identity"][1]}
     for record_id, (path, record) in records.items():
         for relationship in [*record["conflicts"], *record["supersedes"]]:
-            if relationship not in records:
+            if relationship not in present:
                 errors.append(f"{path}: relationship points to missing {relationship}")
         replacement = record["superseded_by"]
-        if replacement is not None and replacement not in records:
+        if replacement is not None and replacement not in present:
             errors.append(f"{path}: superseded_by points to missing {replacement}")
         if replacement in records and record_id not in records[replacement][1]["supersedes"]:
             errors.append(f"{path}: supersession backlink is missing from {replacement}")
-    handoff_root = brain_root(repository) / "control" / "handoffs"
+    handoff_root = _require_utf8_record_path(brain_root(repository) / "control" / "handoffs")
     if handoff_root.is_dir():
-        for path in sorted(handoff_root.glob("*.md")):
+        for path in [_require_utf8_record_path(p) for p in sorted(handoff_root.glob("*.md"))]:
             try:
                 handoff, _ = parse_markdown_record(path)
                 validate_schema_file(repository, "handoff.schema.json", handoff)
@@ -1902,9 +2567,9 @@ def validate_repository(
                 validate_handoff(handoff, task)
             except (BrainError, KeyError) as error:
                 errors.append(f"{path}: {error}")
-    archived_handoffs = brain_root(repository) / "archive" / "handoffs"
+    archived_handoffs = _require_utf8_record_path(brain_root(repository) / "archive" / "handoffs")
     if archived_handoffs.is_dir():
-        for path in sorted(archived_handoffs.glob("*.md")):
+        for path in [_require_utf8_record_path(p) for p in sorted(archived_handoffs.glob("*.md"))]:
             try:
                 handoff, _ = parse_markdown_record(path)
                 validate_schema_file(repository, "handoff.schema.json", handoff)
@@ -2034,18 +2699,42 @@ def validate_repository(
                 )
             except (OSError, json.JSONDecodeError, BrainError, KeyError, TypeError) as error:
                 errors.append(f"{path}: {error}")
+    errors.extend(index_errors(repository))
+    return errors
+
+
+_INDEX_REMEDY = ("It is derived from the records: the next Brain write rebuilds it - a "
+                 "checkpoint, `update`, `record-result` or `compact`.")
+
+
+def index_errors(repository: Path) -> list[str]:
+    """What is wrong with the two deterministic indexes, each named by its
+    repository path, with the way out: a merge of two branches that both
+    added records leaves conflict markers or one side's list in them."""
+    def shown(path: Path) -> str:
+        # Attached, the Brain lives in the state directory, outside the project.
+        try:
+            return _relative_posix(path, repository)
+        except ValueError:
+            return path.as_posix()
+    errors: list[str] = []
     try:
-        expected_active, expected_archive = build_index_data(repository)
-        active_path, archive_path = index_paths(repository)
-        for path, expected in (
-            (active_path, expected_active),
-            (archive_path, expected_archive),
-        ):
+        expected = build_index_data(repository)
+    except (OSError, BrainError) as error:
+        return [f"{shown(brain_root(repository) / 'indexes')}: {error}"]
+    for path, wanted in zip(index_paths(repository), expected):
+        relative = shown(path)
+        try:
             actual = json.loads(path.read_text(encoding="utf-8"))
-            if actual != expected:
-                errors.append(f"{path}: deterministic index is stale or non-canonical")
-    except (OSError, json.JSONDecodeError, BrainError) as error:
-        errors.append(f"{brain_root(repository) / 'indexes'}: {error}")
+        except json.JSONDecodeError as error:
+            errors.append(f"{relative}: deterministic index is not valid JSON ({error}); a merge "
+                          f"can leave conflict markers in it. {_INDEX_REMEDY}")
+            continue
+        except (OSError, UnicodeError) as error:
+            errors.append(f"{relative}: deterministic index unreadable ({error}). {_INDEX_REMEDY}")
+            continue
+        if actual != wanted:
+            errors.append(f"{relative}: deterministic index is stale or non-canonical. {_INDEX_REMEDY}")
     return errors
 
 
@@ -2145,12 +2834,18 @@ def promoted_source_rewrites(
     return rewrites
 
 
-def compact(repository: Path) -> dict[str, int]:
+def compact(repository: Path, *, only_external_id: Optional[str] = None) -> dict[str, int]:
+    """Archive terminal and superseded records; with ``only_external_id``,
+    only those of that ID - what a new task of the same name needs moved."""
     with mutation_lock(repository):
         # Without freshness: moving terminal records can neither cause nor
         # cure a stale citation, and the documented contract is that
         # compaction skips stale records, not that one refuses all of it.
         errors = validate_repository(repository, check_freshness=False)
+        # The indexes are rebuilt from the records below: a stale or
+        # conflicted one is what compaction repairs, not a reason to refuse.
+        derived = set(index_errors(repository))
+        errors = [error for error in errors if error not in derived]
         if errors:
             raise BrainError(
                 "Compaction refused because active records are invalid "
@@ -2162,6 +2857,8 @@ def compact(repository: Path) -> dict[str, int]:
                 record["status"] not in LIFECYCLES[record["type"]]["terminal"]
                 and record.get("superseded_by") is None
             ):
+                continue
+            if only_external_id is not None and record.get("external_id") != only_external_id:
                 continue
             destination = brain_root(repository) / "archive" / record["type"] / path.name
             if destination.exists():
@@ -2214,10 +2911,70 @@ def compact(repository: Path) -> dict[str, int]:
         except Exception:
             restore_files(snapshot)
             raise
+        prune_result_evidence(repository)
     moved_records = sum(
         1 for source, _ in moves if "dynamic" in source.parts
     )
     return {"moved": moved_records}
+
+
+def _evidence_entries(folder: Path) -> list[os.DirEntry]:
+    try:
+        if folder.is_symlink() or not folder.is_dir():
+            return []
+        with os.scandir(folder) as entries:
+            return list(entries)
+    except OSError:
+        return []
+
+
+def _remove_evidence(entry: os.DirEntry) -> int:
+    try:
+        if _EVIDENCE_NAME.fullmatch(entry.name) and entry.is_file(follow_symlinks=False):
+            os.unlink(entry.path)
+            return 1
+    except OSError:
+        pass
+    return 0
+
+
+def prune_result_evidence(repository: Path) -> int:
+    """Remove save evidence that names no active record; return the count.
+
+    An archived task takes no new memory and an archived learning is never
+    revised, so what is left of their saves could serve only a replay - and
+    the clone that saved proves that from its own receipt. Runs under the
+    compaction lock, best effort: evidence left behind is harmless, and the
+    next compaction tries again.
+    """
+    try:
+        active = {record["id"] for _, record, _ in iter_records(repository)}
+    except (BrainError, OSError):
+        return 0
+    removed = 0
+    for folder in _evidence_entries(brain_root(repository).joinpath(*RESULT_ATTEMPTS)):
+        if not folder.is_dir(follow_symlinks=False):
+            # A file at the top is the layout before folders per task;
+            # nothing reads it any more.
+            removed += _remove_evidence(folder)
+            continue
+        if folder.name in active:
+            continue
+        for entry in _evidence_entries(Path(folder.path)):
+            removed += _remove_evidence(entry)
+        try:
+            os.rmdir(folder.path)
+        except OSError:
+            pass
+    for entry in _evidence_entries(brain_root(repository).joinpath(*RESULT_LEARNING_IMAGES)):
+        try:
+            with open(entry.path, "rb") as stream:
+                record_id = json.loads(stream.read(4097)).get("record_id")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(record_id, str) and record_id not in active:
+            removed += _remove_evidence(entry)
+    return removed
 
 
 PROMOTION_KEYS = {
@@ -2510,9 +3267,11 @@ def obsolete_promotion(
         return f"already promoted as {winner.get('destination_memory_id')}"
     try:
         path, record, _ = find_record(repository, source["id"], include_archive=True)
-    except BrainError as error:
-        if "not found" in str(error):
+    except BrainRecordNotFound as error:
+        if error.identifier == source['id'] and error.record_type is None:
             return "its record no longer exists"
+        return None
+    except BrainError:
         return None
     if record["revision"] != source["revision"]:
         return f"its record moved on to revision {record['revision']}"
@@ -2718,7 +3477,7 @@ def _duplicate_tokens(text: str) -> list[str]:
     # never confuse.
     return [
         token
-        for token in re.findall(r"[a-z0-9]+", str(text).lower())
+        for token in re.findall(r"[^\W_]+", str(text).casefold())
         if (len(token) >= 2 or token.isdigit())
         and token not in _DUPLICATE_STOPWORDS
     ]
@@ -2800,12 +3559,67 @@ def bank_duplicate_ratio(config: dict[str, Any]) -> float:
     return ratio if 0.0 < ratio <= 1.0 else BANK_DUPLICATE_RATIO
 
 
+PROMOTION_RETRY_SECONDS = 30
+
+
+def _promotion_retry_file(repository: Path, owner: str) -> Path:
+    directory = brain_root(repository) / "local"
+    for parent in (directory, directory.parent):
+        if os.path.lexists(parent):
+            image = parent.lstat()
+            if not stat.S_ISDIR(image.st_mode) or linked_reparse(image):
+                raise BrainError("Automatic promotion retry state is unavailable")
+    key = hashlib.sha256(owner.encode("utf-8")).hexdigest()
+    destination = directory / ("promotion-retry-" + key + ".json")
+    if os.path.lexists(destination):
+        image = destination.lstat()
+        if not stat.S_ISREG(image.st_mode) or image.st_nlink != 1 or linked_reparse(image):
+            raise BrainError("Automatic promotion retry state is unavailable")
+    return destination
+
+
+def _promotion_retry_state(repository: Path, owner: str) -> Optional[dict[str, Any]]:
+    try:
+        destination = _promotion_retry_file(repository, owner)
+        with destination.open("rb") as stream:
+            raw = stream.read(513)
+        value = json.loads(raw) if len(raw) <= 512 else None
+        if (isinstance(value, dict)
+                and set(value) in ({"profile", "next_attempt"}, {"profile", "next_attempt", "after_record"})
+                and value["profile"] == "automatic-promotion-retry-v1"
+                and type(value["next_attempt"]) is int and value["next_attempt"] >= 0
+                and (value.get("after_record") is None or is_uuid4(value["after_record"]))):
+            return value
+    except (OSError, BrainError, ValueError, UnicodeError, RecursionError):
+        pass
+    return None
+
+
+def _promotion_retry_due(repository: Path, owner: str) -> bool:
+    value = _promotion_retry_state(repository, owner)
+    return value is not None and value["next_attempt"] <= time.time()
+
+
+def retry_pending_auto_promotion(repository: Path, *, owner: str) -> dict[str, Any]:
+    """Retry one due batch; an ordinary clean turn reads only a local marker."""
+    empty = {"enabled": False, "promoted": [], "failed": [],
+             "blocked": [], "closed": [], "skipped": 0}
+    if not _promotion_retry_due(repository, owner):
+        return empty
+    with mutation_lock(repository):
+        # Another Stop hook may have drained or rescheduled it while we waited.
+        if not _promotion_retry_due(repository, owner):
+            return empty
+        return auto_promote(repository, owner=owner, limit=1, max_attempts=1)
+
+
 def auto_promote(
     repository: Path,
     *,
     owner: str,
     limit: int = 5,
     only: Optional[set[str]] = None,
+    max_attempts: Optional[int] = None,
 ) -> dict[str, Any]:
     """Promote resolved, verified knowledge into durable memory without review.
 
@@ -2817,7 +3631,8 @@ def auto_promote(
     chunk supersedes the old one. A stalled promotion that can never apply
     is withdrawn (`closed`) rather than retried for good. `limit` caps new
     nonduplicate proposal attempts (including failures), not duplicate scans
-    or the separate stalled-promotion retries.
+    or the separate stalled-promotion retries. Clean-turn recovery supplies
+    `max_attempts` to bound both stalled and new attempts together.
     """
     config = load_config(repository)
     if not config.get("automatic_promotion"):
@@ -2825,6 +3640,8 @@ def auto_promote(
             "enabled": False, "promoted": [], "failed": [],
             "blocked": [], "closed": [], "skipped": 0,
         }
+    if max_attempts is not None and (type(max_attempts) is not int or max_attempts < 1):
+        raise BrainError("Automatic promotion attempt limit must be positive")
     promoted: list[dict[str, Any]] = []
     failed: list[dict[str, str]] = []
     closed: list[dict[str, str]] = []
@@ -2834,14 +3651,69 @@ def auto_promote(
     # proposal stayed `reviewed`, refused on every retry, or wrote a second
     # chunk of the same record on a later day.
     with mutation_lock(repository):
+        retry_file = None
+        previous_retry = _promotion_retry_state(repository, owner) or {}
+        retry_value = {"profile": "automatic-promotion-retry-v1",
+                       "next_attempt": int(time.time()) + PROMOTION_RETRY_SECONDS,
+                       "after_record": previous_retry.get("after_record")}
+        try:
+            retry_file = _promotion_retry_file(repository, owner)
+            make_private_directory(retry_file.parent)
+            # Persist before any attempt: interruption leaves a retry, with a
+            # delay already in place instead of a scan on every clean turn.
+            atomic_json(retry_file, retry_value)
+        except (OSError, BrainError, ValueError, OverflowError):
+            retry_file = None
+        if max_attempts is not None and retry_file is None:
+            return {"enabled": False, "promoted": [], "failed": [],
+                    "blocked": [], "closed": [], "skipped": 0, "retry_unavailable": True}
+        attempts = deferred_stalled = 0
         _, applied = promotion_ledger(repository)
+        work_only, deferred_records = only, 0
+        retry_blocked = []
+        if max_attempts is not None:
+            # Rotate across stalled AND fresh records. A single unavailable
+            # citation must not occupy every bounded recovery batch forever.
+            fresh, retry_blocked = promotable_records(repository, config, allow_changed_sources=True, only=only)
+            bank = active_chunk_texts(repository)
+            eligible = []
+            for candidate in fresh:
+                record = candidate['record']
+                duplicate = near_duplicate_chunk(
+                    f"{record['title']}\n{candidate['content']}",
+                    [item for item in bank if item[0] != candidate.get('supersedes')], bank_duplicate_ratio(config))
+                if duplicate is None:
+                    eligible.append(candidate)
+                else:
+                    retry_blocked.append({'record_id': record['id'],
+                        'reason': f'near-duplicate of {duplicate}; merge or supersede first'})
+            fresh = eligible
+            identities = sorted({item['record']['id'] for item in fresh} | {
+                proposal['source_records'][0]['id']
+                for _, proposal in stalled_automatic_promotions(repository)
+                if only is None or proposal['source_records'][0]['id'] in only})
+            after = previous_retry.get('after_record') or ''
+            ordered = [key for key in identities if key > after] + [key for key in identities if key <= after]
+            work_only = set(ordered[:max_attempts])
+            deferred_records = len(identities) - len(work_only)
+            if work_only and retry_file is not None:
+                retry_value['after_record'] = ordered[len(work_only) - 1]
+                try:
+                    atomic_json(retry_file, retry_value)
+                except (OSError, BrainError):
+                    return {"enabled": False, "promoted": [], "failed": [],
+                            "blocked": [], "closed": [], "skipped": 0, "retry_unavailable": True}
         # Retry a promotion that stalled after its record was created, in
         # place: creating a second one would leave the first orphaned. One
         # that can never apply is withdrawn instead.
         for promotion_id, proposal in stalled_automatic_promotions(repository):
             source = proposal["source_records"][0]
-            if only is not None and source["id"] not in only:
+            if work_only is not None and source["id"] not in work_only:
                 continue
+            if max_attempts is not None and attempts >= max_attempts:
+                deferred_stalled += 1
+                continue
+            attempts += 1
             try:
                 obsolete = obsolete_promotion(repository, proposal, applied)
                 if obsolete is not None:
@@ -2870,8 +3742,10 @@ def auto_promote(
             for _, proposal in stalled_automatic_promotions(repository)
         }
         candidates, blocked = promotable_records(
-            repository, config, allow_changed_sources=True, only=only
+            repository, config, allow_changed_sources=True, only=work_only
         )
+        blocked = list({(item['record_id'], item['reason']): item
+                        for item in [*retry_blocked, *blocked]}.values())
         candidates = [
             candidate for candidate in candidates
             if candidate["record"]["id"] not in pending
@@ -2886,6 +3760,8 @@ def auto_promote(
         # Preserve the existing slice's argument semantics, but use its length
         # to cap new proposal attempts, not the duplicate-bearing prefix.
         admission_limit = len(candidates[:limit])
+        if max_attempts is not None:
+            admission_limit = min(admission_limit, max(0, max_attempts - attempts))
         admitted = considered = 0
         for candidate in candidates:
             if admitted >= admission_limit:
@@ -2916,6 +3792,7 @@ def auto_promote(
             # Failed attempts also spend admission: systematic errors must
             # not create an unbounded batch of proposals or writes.
             admitted += 1
+            attempts += 1
             try:
                 proposal = create_promotion(
                     repository,
@@ -2949,14 +3826,25 @@ def auto_promote(
                     f"{record['title']}\n{candidate['content']}",
                 )
             ]
-    return {
+        skipped = len(candidates) - considered + deferred_stalled + deferred_records
+        if retry_file is not None and only is None and not failed and not skipped:
+            try:
+                # Recheck the local destination before removing it. A scoped
+                # success cannot establish that earlier unrelated work drained.
+                _promotion_retry_file(repository, owner).unlink(missing_ok=True)
+            except (OSError, BrainError):
+                retry_file = None
+    result = {
         "enabled": True,
         "promoted": promoted,
         "failed": failed,
         "blocked": blocked,
         "closed": closed,
-        "skipped": len(candidates) - considered,
+        "skipped": skipped,
     }
+    if retry_file is None and (failed or skipped):
+        result["retry_unavailable"] = True
+    return result
 
 
 def archivable_records(repository: Path) -> int:

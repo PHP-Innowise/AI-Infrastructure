@@ -4,10 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
+import os
 import re
+import subprocess
 import sys
+import threading
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -202,6 +206,29 @@ def require_date(metadata: dict, key: str) -> date:
         raise ValidationError(f"{key} must use YYYY-MM-DD") from error
 
 
+def memory_temporal_reason(metadata: dict) -> Optional[str]:
+    """Current expiry of declared bounds, using one calendar observation.
+
+    This is an admission recheck, not a replacement for full chunk validation.
+    Older raw SQL rows without declared bounds retain their existing contract;
+    every chunk admitted by normal discovery has a required review boundary.
+    """
+    today = date.today()
+    bounds = {}
+    for key in ("review_after", "valid_to"):
+        if key not in metadata or (key == "valid_to" and metadata[key] is None):
+            continue
+        try:
+            bounds[key] = require_date(metadata, key)
+        except ValidationError:
+            return "invalid"
+    if "valid_to" in bounds and today > bounds["valid_to"]:
+        return "retired"
+    if "review_after" in bounds and today > bounds["review_after"]:
+        return "overdue-review"
+    return None
+
+
 def terminal_chunk(metadata: dict, valid_to: object) -> bool:
     """Whether a chunk has reached the end of its life, by status or by date.
 
@@ -213,6 +240,41 @@ def terminal_chunk(metadata: dict, valid_to: object) -> bool:
     if metadata.get("status") in {"superseded", "archived"}:
         return True
     return valid_to is not None and valid_to < date.today()
+
+
+_SOURCE_FACTS = threading.local()
+
+
+@contextlib.contextmanager
+def source_fact_memo():
+    """Within one read-only pass over the Memory Bank, look at each cited
+    source once: thousands of chunks citing the same files resolved and
+    checked them again chunk by chunk, on every prompt. The answers live only
+    inside the `with`, where no file is created, moved or removed."""
+    previous = getattr(_SOURCE_FACTS, "memo", None)
+    _SOURCE_FACTS.memo = {}
+    try:
+        yield
+    finally:
+        _SOURCE_FACTS.memo = previous
+
+
+def _source_facts(repository_root: Path, source_path: str) -> tuple[bool, bool]:
+    """Whether a cited source lies inside the repository, and exists."""
+    memo = getattr(_SOURCE_FACTS, "memo", None)
+    key = (os.fspath(repository_root), source_path)
+    if memo is not None and key in memo:
+        return memo[key]
+    if workspace_roots is not None:
+        resolved_source = workspace_roots.resolve(repository_root, source_path).resolve()
+        inside = workspace_roots.contains(repository_root, resolved_source)
+    else:
+        resolved_source = (repository_root / source_path).resolve()
+        inside = resolved_source.is_relative_to(repository_root.resolve())
+    facts = (inside, inside and resolved_source.exists())
+    if memo is not None:
+        memo[key] = facts
+    return facts
 
 
 def validate_metadata(
@@ -326,15 +388,10 @@ def validate_metadata(
         if source.startswith(("https://", "http://")):
             continue
         source_path = source.split("#", 1)[0]
-        if workspace_roots is not None:
-            resolved_source = workspace_roots.resolve(repository_root, source_path).resolve()
-            inside = workspace_roots.contains(repository_root, resolved_source)
-        else:
-            resolved_source = (repository_root / source_path).resolve()
-            inside = resolved_source.is_relative_to(repository_root.resolve())
+        inside, exists = _source_facts(repository_root, source_path)
         if not inside:
             raise ValidationError(f"source path escapes the repository: {source_path}")
-        if not resolved_source.exists():
+        if not exists:
             # The containment check above stays fatal in every status: it is a
             # boundary guarantee, not a freshness one.
             if warnings is not None and terminal_chunk(metadata, valid_to):
@@ -369,11 +426,30 @@ def parse_index(path: Path) -> dict[str, dict[str, str]]:
     return rows
 
 
+# Files this process found free of every secret pattern, by path and file
+# identity (device, inode, size, modification and change times). Promotion
+# validates the whole bank before and after each chunk it writes, and every
+# pass searched every chunk again.
+_SECRET_FREE: dict[str, tuple[int, ...]] = {}
+
+
 def validate_secret_patterns(path: Path) -> None:
+    try:
+        image = path.stat()
+        key: Optional[tuple[int, ...]] = (image.st_dev, image.st_ino, image.st_size,
+                                          image.st_mtime_ns, image.st_ctime_ns)
+    except OSError:
+        key = None
+    if key is not None and _SECRET_FREE.get(str(path)) == key:
+        return
     text = path.read_text(encoding="utf-8")
     for label, pattern in SECRET_PATTERNS.items():
         if pattern.search(text):
             raise ValidationError(f"possible {label} detected; value intentionally not printed")
+    if key is not None:
+        if len(_SECRET_FREE) >= 50000:
+            _SECRET_FREE.clear()
+        _SECRET_FREE[str(path)] = key
 
 
 # A match that opens with a key and a separator keeps the key - it is the
@@ -429,6 +505,152 @@ def _masked_span(text: str, label: str, match: "re.Match[str]") -> tuple[int, in
     return separator.end(), (len(text) if line_end < 0 else line_end)
 
 
+# Necessary ASCII literals for these exact source/flags profiles. A changed
+# or unknown pattern keeps the full scan; this never decides what is secret.
+_MASK_PREFILTERS = {
+    'private key': ('42d5f36d732a5e75d1a8e481fda6c7a226948c56a005eb54e2ca65c3fd34156d', 32, ('-----begin ',)),
+    'GitHub token': ('68761294102b638abad4a26260391647743fa10bb874d45c6159f572cd96de7a', 32, ('ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_')),
+    'GitLab token': ('6cf7ed0fce6679d0e13564578f16dfece2fe3fc29729d876ceef111abf9f43eb', 32, ('gl',)),
+    'Slack token': ('5ad38f6c78f86ce64f20a423704ec912647b1ec9efc40c7cf1599ba17ee007e1', 32, ('xox', 'xapp-')),
+    'Slack webhook': ('f40b6113132ea8a516c11e934688b099d79e909cedcfa1184eb923bd6e7aceec', 34, ('hooks.slack.com/',)),
+    'Discord webhook': ('b0d1d794dbbbf3d1a3d0dbee5e39bf5588ffac8c7da4f405ec37a5d27bfdfb12', 34, ('.com/api/webhooks/',)),
+    'Telegram bot token': ('0d73b9142c78a8f6d9bd69c95f15a64a9e272ca7c6dcadb8ac5b3c425ce16959', 32, (':aa',)),
+    'AWS access key': ('7f8a678753a46ba3f6704958b8320cba8e038fd7fb8d8cb8e0c173db25ea24f9', 32, ('akia', 'asia')),
+    'Google API key': ('34494ea7dde5044d930ce9fd926f1c23e7b36e5197c42007728ba26a1ae4dcd9', 32, ('aiza',)),
+    'Google OAuth token': ('429afb0689fd198c3bf36fc2a1210aa9288b9010a916efa78f55cb4f39224c65', 32, ('ya29.',)),
+    'OpenAI-style token': ('1fcad04827f5b98cc5d41309369d1802d3639e23f4d35eddac1a93b52c009809', 32, ('sk-',)),
+    'Stripe secret key': ('a6b6ed7945eefeb3695a7477b82f30c6c0b0abff91a14dd7a9f52e6cbb4c86ff', 32, ('rk_', 'sk_')),
+    'npm token': ('3d97ff554ee799bff07ff452c2a5327654ec2fb76d7d92c1c625ab5318063983', 32, ('npm_',)),
+    'PyPI token': ('f2edca40d579d9ccb9b07ae016b754d34086235f9903e03eff15fa2d586e964b', 32, ('pypi-age',)),
+    'Hugging Face token': ('a0b78eeb650697addc2777dbf7554a95ebe8098be27b4e8622c467b9e22d8091', 32, ('hf_',)),
+    'SendGrid key': ('3de13be719f8c8a1db81a233d44c9d75b3e9781564bc49fbff3d775b4b83f994', 32, ('sg.',)),
+    'Shopify token': ('aaea7614b9095bdafc9d0305256b1f029f42bc19cb97cc25b927f0bec50d78f9', 32, ('shp',)),
+    'DigitalOcean token': ('5ef55bfd23ba33d17e5788cdc297e1744f2d4894b87d23053d28c17588ce0b6c', 32, ('_v1_',)),
+    'JWT': ('d190c7a28bb6084cfc4bfafd2d67ff1a8781b83e38ce367267a5f4ecd2c5c875', 32, ('eyj',)),
+    'Laravel application key': ('c291ae904226de167e2c62f924a58e32c809f577e0e7750021a68498773e3b9c', 32, ('app_key',)),
+    'credential in URL': ('633cc88e42dc82836c82d03949215d6d65fbaff1d1cea0b8249131ddb793acc5', 34, ('://',)),
+    'authorization header': ('a30545248891aef90bec6fbd535e17f6b391bc5fe49cb8e76cf5492e8ea48fb1', 34, ('authorization',)),
+    'basic credentials': ('caf3189272465291e6592220028ef036076b261109ac5ee486603e0ca67a1cd8', 34, ('authorization',)),
+    'bearer token': ('ee8f758f0d60a50dd2c85bb10a910c7b2fd8200fab3ec9b448b807d34afe3030', 34, ('bearer',)),
+    'assigned credential': ('0f981eb49ea9ecedab5fa894792b7ddd1d5adb1821ab23d6b444ac27fa6922dd', 34, ('password', 'passwd', 'secret', 'apikey', 'api_key', 'api-key', 'accesstoken', 'accesskey', 'access_token', 'access_key', 'access-token', 'access-key', 'authtoken', 'auth_token', 'auth-token', 'refreshtoken', 'refresh_token', 'refresh-token', 'privatekey', 'private_key', 'private-key', 'accountkey', 'account_key', 'account-key', 'sharedaccesskey', 'sharedaccess_key', 'sharedaccess-key', 'shared_accesskey', 'shared_access_key', 'shared_access-key', 'shared-accesskey', 'shared-access_key', 'shared-access-key')),
+}
+_MASK_ORIGINAL_PATTERNS = {
+    label: (pattern, _MASK_PREFILTERS[label][2])
+    for label, pattern in SECRET_PATTERNS.items()
+    if label in _MASK_PREFILTERS
+    and type(pattern) is re.Pattern
+    and type(pattern.pattern) is str
+    and pattern.flags == _MASK_PREFILTERS[label][1]
+    and hashlib.sha256(pattern.pattern.encode("utf-8")).hexdigest()
+        == _MASK_PREFILTERS[label][0]
+}
+
+
+def _mask_pattern_candidates(text: str):
+    """Skip only impossible exact-pattern matches, retaining original order.
+
+    Unicode IGNORECASE also admits dotless/dotted i, long s and Kelvin.
+    This view is deliberately overinclusive; every actual regex still sees
+    the original text and computes its spans there. Recompute after each
+    masking pass because a replacement may introduce a subsequent cue.
+    """
+    folded = text.casefold().replace("\u0131", "i").replace("\u0307", "")
+    for label, pattern in SECRET_PATTERNS.items():
+        original = _MASK_ORIGINAL_PATTERNS.get(label)
+        if (original is None or pattern is not original[0]
+                or any(cue in folded for cue in original[1])):
+            yield label, pattern
+
+
+# The full key grammar of the pinned assigned-credential policy. Do not use
+# the looser cue list here: these positions are only possible regex anchors.
+_ASSIGNED_KEY_START = re.compile(
+    r"(?<![A-Za-z0-9])" + '(?:password|passwd|secret(?:_access)?(?:_key|_token)?|api[_-]?key|access[_-]?(?:token|key)|auth[_-]?token|refresh[_-]?token|private[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)' + r"[ \t]*[:=]",
+    re.IGNORECASE,
+)
+
+
+def _assigned_prefix_character(character: str) -> bool:
+    return (
+        "a" <= character <= "z" or "A" <= character <= "Z"
+        or "0" <= character <= "9" or character in "\u0130\u0131\u017f\u212a"
+    )
+
+
+def _assigned_mask_profile(label, pattern, text) -> bool:
+    original = _MASK_ORIGINAL_PATTERNS.get("assigned credential")
+    return (label == "assigned credential" and original is not None
+            and pattern is original[0] and type(text) is str)
+
+
+def _assigned_mask_matches(pattern, text):
+    """Original consumed spans without retrying every valid prefix suffix.
+
+    Keep this private: anchored Match.pos differs from finditer's, whereas
+    the masking caller consumes only the original start/end/span methods.
+    Value validation is still the original regex and can have its own cost.
+    """
+    resume = 0
+    for candidate in _ASSIGNED_KEY_START.finditer(text):
+        start = candidate.start()
+        if start < resume:
+            continue
+        while start > resume and text[start - 1] == "_":
+            segment_end = start - 1
+            segment_start = segment_end
+            while (segment_start > resume
+                   and _assigned_prefix_character(text[segment_start - 1])):
+                segment_start -= 1
+            if segment_start == segment_end:
+                # A double underscore is not an ALNUM+_ prefix segment.
+                break
+            if (segment_start == resume and resume > 0
+                    and _assigned_prefix_character(text[resume - 1])):
+                # The search resumed inside a word; its clipped beginning
+                # cannot satisfy the original negative lookbehind.
+                break
+            start = segment_start
+        found = pattern.match(text, start)
+        if found is not None:
+            yield found
+            # A quoted value may contain more original matches even when the
+            # mask later expands to its closing quote. Resume at the regex end.
+            resume = found.end()
+
+
+def _mask_pattern_matches(label, pattern, text):
+    if _assigned_mask_profile(label, pattern, text):
+        yield from _assigned_mask_matches(pattern, text)
+    else:
+        yield from pattern.finditer(text)
+
+
+def _mask_pattern_search(label, pattern, text):
+    if _assigned_mask_profile(label, pattern, text):
+        return next(_assigned_mask_matches(pattern, text), None)
+    return pattern.search(text)
+
+
+def indexed_secret_policy_reason(*texts: str) -> Optional[str]:
+    """Whether a held indexed projection needs a new privacy pass.
+
+    Admission must not remask an old capsule into apparent validity. Ordinary
+    sources can intentionally contain values already masked in their indexed
+    image; check that image, using the existing expression/template semantics.
+    Strict structured authority callers also pass their held original source.
+    """
+    for text in texts:
+        if not isinstance(text, str):
+            return "secret-policy"
+        try:
+            masked, _ = mask_secrets(text)
+        except ValidationError:
+            return "secret-policy"
+        if masked != text:
+            return "secret-policy"
+    return None
+
+
 def mask_secrets(text: str) -> tuple[str, int]:
     """`text` with each value SECRET_PATTERNS recognises replaced by
     `[redacted: <label>]`, and how many values were replaced.
@@ -444,8 +666,8 @@ def mask_secrets(text: str) -> tuple[str, int]:
     for _ in range(MASK_PASSES):
         spans = sorted(
             (*_masked_span(text, label, found), label)
-            for label, pattern in SECRET_PATTERNS.items()
-            for found in pattern.finditer(text)
+            for label, pattern in _mask_pattern_candidates(text)
+            for found in _mask_pattern_matches(label, pattern, text)
         )
         if not spans:
             return text, masked
@@ -461,9 +683,38 @@ def mask_secrets(text: str) -> tuple[str, int]:
             masked += 1
         pieces.append(text[end:])
         text = "".join(pieces)
-    if any(pattern.search(text) for pattern in SECRET_PATTERNS.values()):
+    if any(_mask_pattern_search(label, pattern, text)
+           for label, pattern in _mask_pattern_candidates(text)):
         raise ValidationError("possible secret survives masking; value intentionally not printed")
     return text, masked
+
+
+def moved_to(project_root: Path, source: str) -> Optional[str]:
+    """Where Git moved a cited file that is gone - the end of its rename
+    chain, when that file exists - or None. For the person repointing a
+    chunk; the per-prompt checks never start Git for this."""
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+    current = source
+    for _ in range(5):
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(project_root), "log", "-M", "--diff-filter=R", "--name-status",
+                 "--format=", "-n", "1", "--full-diff", "--", current],
+                capture_output=True, text=True, timeout=5, env=environment, check=False)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return None
+        fields = [line.split("\t") for line in result.stdout.splitlines() if line.startswith("R")]
+        target = next((parts[2] for parts in fields if len(parts) == 3 and parts[1] == current), None)
+        if result.returncode != 0 or target is None:
+            break
+        current = target
+        if (project_root / current).is_file():
+            return current
+    return None
+
+
+_MISSING_SOURCE = re.compile(r"source path does not exist: (.+)$")
 
 
 def summarize_bank(bank_root: Path) -> str:
@@ -472,26 +723,42 @@ def summarize_bank(bank_root: Path) -> str:
     active = 0
     needs_review = 0
     expired = 0
+    # An active chunk whose cited file was moved or deleted is no longer
+    # retrieved, and the summary went on counting it as active: renaming a
+    # file with `git mv` took its knowledge out of every capsule unseen.
+    gone = 0
     if chunks_dir.is_dir():
-        for path in sorted(chunks_dir.iterdir()):
-            if path.is_symlink() or not path.is_file() or FILENAME_PATTERN.fullmatch(path.name) is None:
-                continue
-            total += 1
-            try:
-                metadata = parse_frontmatter(path)
-                status = metadata.get("status")
-                if isinstance(metadata.get("valid_to"), str):
+        with source_fact_memo():
+            for path in sorted(chunks_dir.iterdir()):
+                if path.is_symlink() or not path.is_file() or FILENAME_PATTERN.fullmatch(path.name) is None:
+                    continue
+                total += 1
+                try:
+                    metadata = parse_frontmatter(path)
+                    status = metadata.get("status")
+                    if isinstance(metadata.get("valid_to"), str):
+                        try:
+                            if date.fromisoformat(metadata["valid_to"]) < date.today():
+                                expired += 1
+                        except ValueError:
+                            pass
+                except (OSError, UnicodeDecodeError, ValidationError):
+                    continue
+                active += status == "active"
+                needs_review += status == "needs-review"
+                if status == "active":
+                    sources = metadata.get("sources")
                     try:
-                        if date.fromisoformat(metadata["valid_to"]) < date.today():
-                            expired += 1
-                    except ValueError:
+                        gone += any(isinstance(source, str) and _source_facts(bank_root.parent, source) == (True, False)
+                                    for source in (sources if isinstance(sources, list) else []))
+                    except (OSError, ValueError):
                         pass
-            except (OSError, ValidationError):
-                continue
-            active += status == "active"
-            needs_review += status == "needs-review"
     summary = f"Memory bank: {total} chunks ({active} active, {needs_review} needs review"
-    return summary + (f", {expired} past valid_to)." if expired else ").")
+    summary += f", {expired} past valid_to)." if expired else ")."
+    if gone:
+        summary += (f" {gone} active chunk(s) cite a file that is gone and are not retrieved;"
+                    " memory-bank/scripts/validate.py names them.")
+    return summary
 
 
 def validate_bank(bank_root: Path, source_root: Path | None = None) -> list[str]:
@@ -535,6 +802,9 @@ def validate_bank_report(
 
     try:
         index = parse_index(index_path)
+    except UnicodeDecodeError:
+        errors.append(f'{index_label}: invalid UTF-8 index')
+        index = {}
     except ValidationError as error:
         errors.append(f"{index_label}: {error}")
         index = {}
@@ -570,6 +840,8 @@ def validate_bank_report(
             if memory_id in chunks:
                 raise ValidationError(f"duplicate chunk ID: {memory_id}")
             chunks[memory_id] = (path, metadata)
+        except UnicodeDecodeError:
+            errors.append(f'{shown(path)}: invalid UTF-8 chunk')
         except (OSError, ValidationError) as error:
             errors.append(f"{shown(path)}: {error}")
 
@@ -678,6 +950,18 @@ def main() -> int:
     errors, warnings = validate_bank_report(
         bank_root, args.source_root.resolve() if args.source_root else None
     )
+    # A chunk citing a file renamed with `git mv` is left out of every
+    # capsule; say where the file went, so the chunk can be repointed.
+    source_root = args.source_root.resolve() if args.source_root else bank_root.parent
+    project_root = workspace_roots.project_root(source_root) if workspace_roots is not None else source_root
+
+    def located(line: str) -> str:
+        missing = _MISSING_SOURCE.search(line)
+        target = moved_to(project_root, missing.group(1).strip()) if missing else None
+        return line + (f" - Git moved it to {target}" if target else "")
+
+    errors = [located(error) for error in errors]
+    warnings = [located(warning) for warning in warnings]
     if warnings:
         # Printed on both paths and never fatal: a warning describes a chunk
         # that is doing what it promised, so it must not fail a task that has

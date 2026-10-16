@@ -1,0 +1,226 @@
+{
+  "branch": "feature/otter-ledger",
+  "other_branch": "feature/heron-audit",
+  "goal": "Inspect the otter ledger",
+  "progress": "Otter ledger inspection is saved.",
+  "next_steps": [
+    "Confirm the copper marker."
+  ],
+  "source": "docs/otter.md",
+  "source_text": "# Otter ledger\n\nThe public otter marker is copper.\n",
+  "query": "otter ledger copper",
+  "ignore": "memory-bank/local/\nproject-brain/local/\n",
+  "configuration": {
+    "mode": "governed",
+    "automatic_promotion": false,
+    "automatic_compaction": false,
+    "automatic_completion": false
+  },
+  "branch_error": "Inferred task branch changed or unavailable",
+  "required_negative": {
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "context: Inferred task branch changed or unavailable\n",
+    "hook_returncode": 0,
+    "hook_stdout": "Memory refresh unavailable: it exited 1 — context: Inferred task branch changed or unavailable.\nWorking memory was NOT consulted this turn. Read the canonical sources directly.\n",
+    "hook_stderr": ""
+  },
+  "persisted_fields": {
+    "external_id": "feature/otter-ledger",
+    "goal": "Inspect the otter ledger",
+    "progress": "Otter ledger inspection is saved.",
+    "next_steps": [
+      "Confirm the copper marker."
+    ],
+    "sources": [
+      "docs/otter.md"
+    ],
+    "revision": 2
+  },
+  "positive_working_fields": {
+    "task_id": "feature/otter-ledger",
+    "goal": "Inspect the otter ledger",
+    "progress": "Otter ledger inspection is saved.",
+    "next_steps": [
+      "Confirm the copper marker."
+    ],
+    "sources": [
+      "docs/otter.md"
+    ]
+  },
+  "symbolic_cases": [
+    {
+      "name": "same-unborn",
+      "status": 0,
+      "output": "refs/heads/feature/otter-ledger\n",
+      "allow": true
+    },
+    {
+      "name": "other-branch",
+      "status": 0,
+      "output": "refs/heads/feature/heron-audit\n",
+      "allow": false
+    },
+    {
+      "name": "detached",
+      "status": 1,
+      "output": "",
+      "allow": false
+    },
+    {
+      "name": "failed",
+      "status": 128,
+      "output": "",
+      "allow": false
+    },
+    {
+      "name": "missing-newline",
+      "status": 0,
+      "output": "refs/heads/feature/otter-ledger",
+      "allow": false
+    },
+    {
+      "name": "extra-line",
+      "status": 0,
+      "output": "refs/heads/feature/otter-ledger\nextra\n",
+      "allow": false
+    },
+    {
+      "name": "tag-ref",
+      "status": 0,
+      "output": "refs/tags/feature/otter-ledger\n",
+      "allow": false
+    },
+    {
+      "name": "carriage-return",
+      "status": 0,
+      "output": "refs/heads/feature/otter-ledger\r\n",
+      "allow": false
+    },
+    {
+      "name": "oversize",
+      "status": 0,
+      "output": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "allow": false
+    }
+  ],
+  "deadline": {
+    "seconds": 1.0,
+    "times": [
+      20.0,
+      20.1,
+      20.2,
+      20.4
+    ],
+    "timeouts": [
+      0.9,
+      0.8,
+      0.6
+    ]
+  },
+  "invalid_expected": [
+    "",
+    "feature/otter-ledger\n",
+    "feature/otter-ledger\u0000"
+  ],
+  "metadata_admission_before_failure": {
+    "manifest_atomic_json_calls": 0,
+    "ordinary_receipt_commit_calls": 0
+  },
+  "explicit_other_branch": "allowed",
+  "explicit_without_expected_marker": "zero branch-identity probes",
+  "inferred_unborn_branch": "allowed; no HEAD commit required",
+  "hooks": [
+    ".claude",
+    ".codex"
+  ],
+  "transport_hooks": [
+    ".claude",
+    ".codex",
+    ".cursor"
+  ],
+  "separate_profiles": {
+    "native_committed_detached": "UNRUN",
+    "supplied_detached_observation": "covered",
+    "actual_Windows_live_clients_remote_CI": "UNRUN"
+  },
+  "no_stage_commit_push_or_fixture_history": true,
+  "scope": "inferred symbolic branch identity only; not HEAD commit/binding epoch/full controller/publication transaction",
+  "race_boundary": "checks are point observations; late branch movement may follow publication, no linearizable epoch guarantee",
+  "observability": "full native stdout/stderr/returncode and branch before/after stored before assertions, per fresh profile/method",
+  "transport_supplement": {
+    "additional_transport": "Cursor Stop hook-context only; turn/checkpoint semantics unchanged",
+    "transport_cases": [
+      {
+        "host": ".claude",
+        "explicit": false,
+        "expected_marker": true
+      },
+      {
+        "host": ".claude",
+        "explicit": true,
+        "expected_marker": false
+      },
+      {
+        "host": ".codex",
+        "explicit": false,
+        "expected_marker": true
+      },
+      {
+        "host": ".codex",
+        "explicit": true,
+        "expected_marker": false
+      },
+      {
+        "host": ".cursor",
+        "explicit": false,
+        "expected_marker": true
+      },
+      {
+        "host": ".cursor",
+        "explicit": true,
+        "expected_marker": false
+      }
+    ],
+    "cursor_literal_sources": [
+      "_WM_DELIVERY_STOP_CURSOR",
+      "_WM_DELIVERY_SESSION_CURSOR"
+    ],
+    "fixed_marker_option": "--expected-branch",
+    "callback_covered_modes": [
+      "governed-success-after-pack-schema",
+      "lightweight",
+      "governed-warning",
+      "readonly-working",
+      "hook-context-warming",
+      "main-final-output"
+    ],
+    "native_control_receipts": [
+      "returncode",
+      "stdout",
+      "stderr",
+      "branch_after",
+      "branch_capture"
+    ],
+    "whole_state_proofs": [
+      "DB bytes unchanged on early/read-only refusal",
+      "shared Brain bytes unchanged on early/read-only refusal",
+      "zero manifest and ordinary delivery commits on guard failure before publication"
+    ]
+  },
+  "callback_supplement": {
+    "new_hook_callback_assertions": {
+      "warming": "actual assembler with supplied changed-path observation refuses after branch movement",
+      "governed": "actual assembler/native governed pack path refuses before zero manifest and receipt commits"
+    },
+    "state_observation": "current profiles retain per-hook starting branch and before/after DB/shared hashes before assertions",
+    "baseline_limitation": "Two baseline full native outputs retained, DB/shared after-state and per-hook starting-branch image not separately retained before failure. No replay or retroactive claim."
+  },
+  "encoding_supplement": {
+    "invalid_utf8_expected_codepoints": [
+      "dcff"
+    ],
+    "expected": "SourceGitError fixed branch message, no traceback",
+    "before_new_control_code_calls": true
+  }
+}

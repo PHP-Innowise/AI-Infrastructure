@@ -1,0 +1,9 @@
+{
+  "body": "# Tanager cedar\n\nKeep the brass latch aligned.\n",
+  "different": "# Tanager cedar\n\nKeep the bronze latch aligned.\n",
+  "valid": "tanager-érable/SKILL.md",
+  "bad_hex": "74616e616765722dff",
+  "mtime_ns": 1700000000000000000,
+  "error": "Policy source invalid-utf8-path",
+  "provider_usage": null
+}

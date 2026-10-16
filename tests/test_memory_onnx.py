@@ -179,7 +179,9 @@ def running(pid):
     try:
         text = Path("/proc") / str(pid) / "stat"
         return text.read_text().rsplit(")", 1)[1].split()[0] != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # A process reaped between the open and the read of its stat file
+        # answers ESRCH instead: it is gone either way.
         return False
 
 
