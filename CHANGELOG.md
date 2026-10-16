@@ -310,6 +310,11 @@ edition's own files remain in that edition's changelog.
   prompt of the task, and the seconds, microseconds and offset told a reader
   nothing more.
 
+- Harness: a capsule that does not match the session's linked task now says
+  why when the runtime said it - "Retrieved context does not match the
+  linked task and revision" carries the capsule's warnings, such as the task
+  record that cannot be read. Test: `tests/test_harness_task_context.py`.
+
 - A prompt no longer rewrites the index when the Project Brain did not
   change. The Brain rows are rebuilt from the records on every refresh, and
   every refresh used to delete and insert all of them again and stamp a new
@@ -470,6 +475,16 @@ edition's own files remain in that edition's changelog.
   of a Python walk; the hooks run the new `memory-bank/scripts/context_cli.py`,
   which runs `context.py` from cached bytecode (run as a script it was
   compiled again on every prompt). `context.py` names itself in usage text.
+- The Harness runs the installed runtime through `context_cli.py` too,
+  falling back to `context.py` in a runtime without it: each message makes
+  several runtime calls (rebind, refresh, Cursor's checkpoint and rule
+  retirement), and each compiled `context.py` again. With the runtime cached
+  (next entry), a refresh on a 500-record Brain, with the Harness's arguments
+  and environment, takes 226 ms instead of 258 ms. Behind the process guard,
+  which looked for the runtime's exit every 50 ms, one call gained 0 or 50 ms;
+  the guard now waits for the exit itself (see the process guard entry below).
+  Infrastructure-Creator's generated hooks take the same entry (see its
+  changelog).
 - `context_cli.py` writes the runtime's bytecode cache even when the caller
   asks Python for none. Claude Desktop starts Claude Code with
   `PYTHONDONTWRITEBYTECODE=1`, which every hook inherits, and the Harness sets
@@ -488,6 +503,154 @@ edition's own files remain in that edition's changelog.
   without the loader, which the Harness calls directly, still writes nothing.
   `test_context.py` and the Harness loader test check that the cache appears,
   in the runtime's directory only.
+
+### Harness process guard — 2026-10-15/16
+
+- The Harness process guard (POSIX) waits for its native process's exit as an
+  event instead of looking every 50 ms: a pidfd in the selector that already
+  holds the owner's watchdog on Linux 5.3+, elsewhere (macOS, older kernels,
+  a sandbox that refuses pidfds) SIGCHLD through Python's signal wakeup pipe,
+  which carries SIGTERM and SIGINT too - a handled signal alone resumes a
+  blocking select. The owner reads EOF only when the guard exits, so every
+  guarded call (each memory-runtime call of a message, guarded Git, commands,
+  skills) waited up to 50 ms after the native process had finished. A short
+  call's EOF now reaches the owner 3.5 ms after the native exit instead of
+  48 ms (what is left is the guard interpreter's own exit), and the whole call
+  takes 26 ms instead of 70 ms. A refresh on a 500-record Brain through
+  `KnowledgeManager.run` costs 23 ms over the same call without a guard
+  instead of 44 ms, 21 ms less per call (paired medians of 60 interleaved
+  runs), and no longer lands on the 50 ms grid. Owner loss and cancel keep
+  SIGTERM to the group, `TERMINATION_GRACE`, then SIGKILL, and still never
+  return while a stubborn descendant may live in the group; they end at the
+  deadline, not at the next tick. Exit statuses (128+N for a signal) and the
+  Windows Job Object path are unchanged. `test_harness_process_guard` counts
+  the guard's wakeups while its child sleeps (8 in 0.4 s before, none now)
+  and runs the exit, signal-status and stop tests with and without a pidfd.
+- The Harness process guard (POSIX) also starts and exits faster. Every
+  guarded call waits for the guard's interpreter twice: before its native
+  process starts, and after it ends, since the owner reads EOF only once the
+  guard is gone. `process_runtime.launch_guarded` starts the guard with `-S`
+  (it needs only the standard library), the guard imports `ctypes` only in
+  its Windows functions, and once its native process has ended it flushes
+  stdout/stderr and leaves through `os._exit` instead of interpreter
+  finalization. Paired medians of 120 interleaved runs on Python 3.14: `-S`
+  saves 1.1 ms a call, `ctypes` 2.0 ms, `os._exit` 2.9 ms (EOF reaches the
+  owner 0.9 ms after the native exit instead of 4.1 ms). A short guarded call
+  takes 22.1 ms instead of 27.9 ms (6.4 ms without a guard), on Python 3.9
+  20.2 instead of 24.5 ms. A refresh on a 500-record Brain through
+  `KnowledgeManager.run` costs 15.9 ms over the same call without a guard
+  instead of 21.5 ms (100 runs). `-I` was left out: it ignores
+  `PYTHONCOERCECLOCALE`, so under the C locale the guard would hand its native
+  process an `LC_CTYPE` the owner did not give it. The Windows launch and
+  exit, waiting, stopping and exit statuses are unchanged. The guard tests
+  start it with `-S` as the Harness does; new tests check that a start
+  failure still exits 127 with its one line, that the POSIX guard imports no
+  `ctypes`, and that a `sitecustomize` on `PYTHONPATH` runs in the native
+  process but not in the guard.
+- The Harness process guard (POSIX) starts its native process with
+  `os.posix_spawn` and waits with `select.poll` instead of importing
+  `subprocess` and `selectors`, which with what they pull in (`threading`,
+  `collections`, `contextlib`, `warnings`, and `locale` on Python 3.14) were
+  about a third of the guard's start; every guarded call waits for it. The
+  native process gets what `Popen(close_fds=True, pass_fds=(lock,))` gave it:
+  stdin, stdout, stderr and the runner lock and nothing else (posix_spawn
+  closes only close-on-exec descriptors, so the guard marks every other one
+  it holds, listed from `/proc/self/fd`, on macOS `/dev/fd`); SIGPIPE and
+  SIGXFSZ, which Python ignores, at default; and the executable Popen would
+  find on PATH - past an entry it cannot run and never through a shell,
+  where `posix_spawnp` gives up on glibc and runs `/bin/sh` on macOS. A
+  `stat` skips an absent PATH entry before a spawn is tried (each refused
+  spawn costs ~0.05-0.1 ms; 0.6 ms a call for the 12 entries ahead of
+  `/usr/bin` on the test machine). A start failure still exits 127 with its
+  one line. Where posix_spawn might not report a failed exec - anything but
+  macOS and Linux with glibc 2.24+, as `subprocess` itself decides - or
+  `/proc` is not mounted, Popen still starts it. Waiting, stopping, exit
+  statuses, `-S`, `os._exit` and the Windows path are unchanged. Paired
+  medians of 150 interleaved runs on Python 3.14: a short guarded call takes
+  17.3 ms instead of 22.2 ms (6.3 ms without a guard), 17.7 instead of 22.5
+  when its executable is looked up on PATH (120 runs); on Python 3.9 16.1
+  instead of 19.4 ms (120 runs). A refresh on a 500-record Brain through
+  `KnowledgeManager.run` costs 11.0 ms over the same call without a guard
+  instead of 15.9 ms (100 runs; on Python 3.9 9.6 instead of 11.8, 80 runs).
+  New tests compare the guard with Popen on PATH lookups and their failures,
+  and check that the native process holds only descriptors 0-2 and the lock
+  (also one the guard got non-inheritable), starts with SIGPIPE and SIGXFSZ
+  at default, and that a whole POSIX run imports none of `subprocess`,
+  `selectors`, `threading` and `ctypes`. The start-failure, PATH, descriptor
+  and signal tests run both through posix_spawn and through the Popen
+  fallback.
+- The Harness process guard (POSIX) starts in half the time.
+  `process_runtime.launch_guarded` starts it through the new
+  `harness/src/harness/process_guard_cli.py`, which runs `process_guard.py`
+  from cached bytecode: run as a script, the guard, its Windows code
+  included, was compiled again on every guarded call. As `context_cli.py`
+  does for the memory runtime, the launcher writes that cache even under
+  `PYTHONDONTWRITEBYTECODE=1`, which the Harness sets for its runtime, setup
+  and result calls - for `process_guard.py` only; what the guard imports
+  keeps the caller's setting (`harness/.gitignore` ignores `__pycache__/`).
+  The guard imports `_signal` instead of `signal`, whose IntEnum wrappers
+  brought in `enum`; `posix` instead of `os`, whose `os.py` brought in `abc`,
+  `_collections_abc` and `posixpath` (PATH is searched in bytes, as Popen
+  searches it); and no `__future__` (annotations Python 3.9 cannot evaluate
+  are strings). The launcher takes `SourceFileLoader` from the importlib
+  module Python loaded at startup: importing `importlib` cost 0.1-0.5 ms,
+  and `from importlib.machinery import ...` alone imported `warnings` on
+  Python 3.14, through that module's `__getattr__`. Beyond the interpreter's
+  own start the guard now imports `stat` and `select`. Paired medians of 200
+  interleaved runs on Python 3.14: a short guarded call takes 10.8 ms
+  instead of 15.5 ms (5.6 ms without a guard; the guard's own start 4.8 ms
+  instead of 9.5), 11.0 instead of 15.7 when its executable is looked up on
+  PATH (150 runs); on Python 3.9 10.9 instead of 14.4 ms (150 runs). Each
+  change taken back alone (300 runs on Python 3.14): the cache is worth
+  2.1 ms, `signal` 1.7, `os` 1.3, `importlib` 0.1, `__future__` under 0.1.
+  A refresh on a 500-record Brain through `KnowledgeManager.run` costs
+  5.7 ms over the same call without a guard instead of 11.2 ms (100 runs;
+  on Python 3.9 4.7 instead of 8.8, 80 runs).
+  Windows still starts `process_guard.py` itself, and its code is
+  unchanged, as are waiting, stopping, exit statuses, `-S`, `os._exit` and
+  what posix_spawn or Popen hands the native process. New tests check that
+  the launcher caches the guard under `PYTHONDONTWRITEBYTECODE` and nothing
+  else, and runs it from the cache (after an edit of the same size and
+  modification time it still prints the line it was compiled with), that
+  `launch_guarded` starts it that way, that the guard imports none of `os`,
+  `signal`, `enum`, `importlib`, `warnings` and `__future__`, and that a
+  non-ASCII executable in a non-ASCII PATH entry is found as Popen finds
+  it. The guard tests start it through the launcher, as the Harness does,
+  and the in-process import test counts only what the guard adds: on
+  Python 3.11 `runpy` itself imports `threading`, which failed it before.
+- The Harness process guard starts from cached bytecode on Windows too:
+  `process_runtime` starts `process_guard_cli.py` there as well, instead of
+  `process_guard.py`, which run as a script was compiled again on every
+  guarded call. The launcher now finds the guard beside itself whichever
+  slash ends its folder: Windows hands it a path with backslashes, and the
+  launcher, which does without `os.path`, looked only for a slash, so it
+  would have looked for `process_guard.py` in the working directory.
+  Through the launcher the guard is the same script - `__main__`, the same
+  argv, `sys.argv[0]` naming `process_guard.py`, its folder first on
+  `sys.path` (where the Windows guard imports `windows_commands`) - and its
+  `sys.exit` still ends the interpreter normally, so the final close of the
+  Job Object handle still ends the tree. The guard's Windows code, the
+  duplicated watchdog and lock handles in the `STARTUPINFO` handle list,
+  `CREATE_NEW_PROCESS_GROUP` and the start without `-S` are unchanged;
+  under `PYTHONDONTWRITEBYTECODE` only the guard's own cache is written, as
+  on POSIX. Not measured on Windows (no machine at hand). In the Windows
+  launch shape on Linux - no `-S`, the same failing start for both - paired
+  medians of 300 interleaved runs: the launcher saves 1.85 ms a call on
+  Python 3.14, 1.81 on 3.12, 1.43 on 3.11 and 1.33 on 3.9 (within 0.1 ms
+  under `PYTHONDONTWRITEBYTECODE=1`; faster in 297-300 of 300 runs).
+  Compiling the guard takes 2.4 ms on 3.14 (2.0 on 3.12, 1.5 on 3.9), the
+  launcher 0.2 ms, reading the guard from its cache 0.1 ms. These figures
+  leave out what Windows file access adds: one more stat (the guard) and
+  one more open (its cache) per call. Where the cache cannot be written - a
+  read-only folder; the Harness's own clone, which it updates in place, is
+  writable - a call costs 0.7-1.1 ms more than before, on POSIX too: the
+  guard is still compiled, now through `compile()`, whose first call in a
+  process builds the AST node types (~0.6 ms; a script run skips that).
+  `test_guard_runs_from_cached_bytecode_the_caller_did_not_ask_for` now
+  runs in the windows-harness job too (exactly one cache file, the guard's,
+  not `windows_commands`), and a new test on every platform checks that the
+  launcher names the guard beside it for a `__file__` whose folders end
+  with backslashes, slashes or both; the previous launcher fails it.
 
 ### Fixes after the third memory review — 2026-10-15
 
@@ -791,6 +954,12 @@ edition's own files remain in that edition's changelog.
   changing citation links or ordinary document writes. Add index-only staging,
   removal, split/alternate index and full capsule/manifest regressions.
 
+- Freeze native-validated automatic Harness memory requests in a separate private
+  table for their original session/generation/event. Add explicit prepare/replay
+  CLI operations, receipt-only retries, immutable omissions, current scope guards
+  and complete transient request-file cleanup. Keep manual and unsupported fresh
+  saves compatible; unknown partial writes and post-final replay stay incomplete.
+
 - Preserve exact receipted result replay through CLI and MCP after task
   archival or citation deletion, with current owner/privacy checks and no
   rewrite of later corrections. New writes retain live-source validation;
@@ -804,6 +973,10 @@ edition's own files remain in that edition's changelog.
 - Honor the explicit trailing verification attestation even when its reason
   quotes another marker; keep Memory MCP serving after escaped surrogate IDs
   while preserving ordinary Unicode output.
+- Isolate each Harness launch from inherited memory task IDs. Validate the
+  task and embedded timestamp of bounded Cursor checkpoint reports instead
+  of file mtime, using portable paths. Observe recovery compaction before
+  event normalization so the context history records its divider once.
 
 ### Earlier unreleased changes
 

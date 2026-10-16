@@ -44,6 +44,8 @@ REQUEST = (
     "knowledge you verified in a project file during this run, not progress and not a "
     "guess; use [] when there is none. Never include secrets, personal data, logs or "
     "transcripts. "
+    "Normal saves need no learning revision. For a deliberate correction with an inspected record, "
+    "you may include its positive integer expected_revision. "
     "List at most 10 used_memory paths; [] is valid. This is your report of use, not proof of reading. "
 )
 AUTOMATIC = ("The Harness saves the draft to project memory as written, with no review, "
@@ -92,6 +94,9 @@ def parse(text):
             "sources": [source.strip() for source in sources
                         if isinstance(source, str) and source.strip()][:SOURCE_COUNT],
         }
+        if "expected_revision" in item:
+            if type(item["expected_revision"]) is int and item["expected_revision"] >= 1:
+                learning["expected_revision"] = item["expected_revision"]
         if learning["title"] and learning["consequence"]:
             learnings.append(learning)
     result = {
@@ -253,7 +258,8 @@ def submission(data):
         raise SessionError(f"Keep at most {LEARNING_COUNT} learnings.")
     kept = []
     for item in learnings:
-        if (not isinstance(item, dict) or set(item) != {"type", "title", "consequence", "sources"}
+        fields = {"type", "title", "consequence", "sources"}
+        if (not isinstance(item, dict) or not fields <= set(item) or set(item) - fields - {"expected_revision"}
                 or item["type"] not in KINDS):
             raise SessionError("Each learning needs a type, a title, a consequence and sources.")
         title = _text(item["title"], "learning title", TITLE_LIMIT * 4).strip()
@@ -266,6 +272,10 @@ def submission(data):
             raise SessionError(f"Cite 1 to {SOURCE_COUNT} project files for each learning.")
         kept.append({"type": item["type"], "title": title, "consequence": consequence,
                      "sources": list(dict.fromkeys(_source(source) for source in sources))})
+        if "expected_revision" in item:
+            if type(item["expected_revision"]) is not int or item["expected_revision"] < 1:
+                raise SessionError("Learning expected_revision must be a positive original revision.")
+            kept[-1]["expected_revision"] = item["expected_revision"]
     # Saving writes each learning as verified evidence; that word has to be the person's.
     if kept and data.get("verified") is not True:
         raise SessionError("Confirm that you checked each kept learning against its sources.")
@@ -341,6 +351,11 @@ def usable(root, draft, known=()):
                 sources.append(source)
         learning = {"type": item.get("type"), "title": plain(item.get("title"), TITLE_LIMIT),
                     "consequence": plain(item.get("consequence"), CONSEQUENCE_LIMIT), "sources": sources}
+        if "expected_revision" in item:
+            if type(item["expected_revision"]) is not int or item["expected_revision"] < 1:
+                prepared.append((learning, None))
+                continue
+            learning["expected_revision"] = item["expected_revision"]
         if not (learning["type"] in KINDS and learning["title"] and learning["consequence"] and sources):
             identity = None
         else:
@@ -381,7 +396,8 @@ def summary(state, result=None):
     written = [record for record in records if record.get("state") in (None, "created", "completed", "updated")]
     parts = (["the task's progress and next steps"] if saved.get("task") else []) + [named(r) for r in written]
     text = ("Saved to project memory: " + "; ".join(parts) + "." if parts
-            else "Nothing new to save to project memory from this run.")
+            else "Nothing new to save to project memory from this run." if result.get('ok')
+            else "Project memory could not complete this save.")
     already = [record for record in records if record.get("state") in ("existing", "archived")]
     if already:
         text += " Already in project memory: " + "; ".join(named(r) for r in already) + "."
@@ -390,6 +406,9 @@ def summary(state, result=None):
         text += (" Kept as recorded, with a different consequence than this run's: "
                  + "; ".join(named(r) for r in held)
                  + " (verified by a person, someone else's, archived or moved on).")
+        for record in held:
+            if type(record.get('revision')) is int and record.get('reason'):
+                text += f" Retained {named(record)} at revision {record['revision']} ({record['reason']})."
     # A replay names a learning it saved before whose record was removed since; it does not write it again.
     removed = [record for record in records if record.get("state") == "missing"]
     if removed:

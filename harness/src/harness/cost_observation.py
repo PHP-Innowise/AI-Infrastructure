@@ -322,7 +322,7 @@ class LocalOperation:
         data = result.get("result") if isinstance(result, dict) and isinstance(result.get("result"), dict) else {}
         allowed = {"created", "updated", "existing", "archived", "differs", "archived-differs", "missing", "completed"}
         state_status = "not_applicable"
-        if self.name == "record-result" and outcome == "returned":
+        if self.name in ("record-result", "replay-result") and outcome == "returned":
             records = data.get("records")
             state_status = "observed"
             if type(records) not in (list, tuple) or len(records) > 128:
@@ -352,6 +352,7 @@ class LaunchObservation:
         self.phases, self.processes, self.payloads, self.usd_reports = {}, {}, {}, {}
         self.diagnostics = {}
         self.durations, self.operations, self.notes = {}, [], {}
+        self.remote_operations, self.remote_overflow = [], False
         self.incomplete = False
         self.final = None
         self.outcome = "unknown"
@@ -428,7 +429,7 @@ class LaunchObservation:
     def operation(self, operation, action=None):
         if operation == "run" and action == "turn":
             action = "checkpoint"
-        allowed = {"refresh", "retrieve", "start", "rebind", "record-result", "brain-create", "brain-update", "promote-auto", "checkpoint"}
+        allowed = {"refresh", "retrieve", "start", "rebind", "record-result", "prepare-result", "replay-result", "brain-create", "brain-update", "promote-auto", "checkpoint", "cursor-rule-retire"}
         name = action if operation == "run" and action in allowed else operation if operation in ("inspect", "info") else "other"
         return LocalOperation(self, name)
 
@@ -439,6 +440,33 @@ class LaunchObservation:
             self.incomplete = True
         else:
             self.operations.append(record)
+
+    def source_hints(self, *, provider_calls, outcome, seconds, references=0, transport=None):
+        """Separate optional-remote metadata; unknown billing never alters native totals."""
+        if self.final is not None:
+            return
+        if len(self.remote_operations) >= 16:
+            self.remote_overflow = True
+            return
+        supplied = transport if type(transport) is dict else {}
+        def bounded(key, maximum):
+            value = supplied.get(key)
+            return value if type(value) is int and 0 <= value <= maximum else None
+        record = {'schema': 'source-hint-observation-v1', 'operation': 'recall-references',
+                  'provider_calls': provider_calls if type(provider_calls) is int and provider_calls in (0, 1) else None,
+                  'outcome': outcome if type(outcome) is str and outcome in ('resolved', 'empty', 'invalid', 'unavailable', 'cancelled', 'unsupported') else 'unavailable',
+                  'seconds': money(seconds),
+                  'supplied_references': references if type(references) is int and 0 <= references <= 8 else None,
+                  'transport_method_calls': bounded('attempts', 1),
+                  'request_body_bytes': bounded('request_body_bytes', 8192),
+                  'response_body_bytes': bounded('response_body_bytes', 65537),
+                  'response_eof': supplied.get('response_eof') if type(supplied.get('response_eof')) is bool else None,
+                  'remote_tokens': None, 'remote_usd': None, 'provider_tokens': None,
+                  'total_cost_complete': False}
+        record['metadata_state'] = 'observed_schema_only' if all(record[key] is not None for key in (
+            'provider_calls', 'seconds', 'supplied_references', 'transport_method_calls',
+            'request_body_bytes', 'response_body_bytes', 'response_eof')) else 'incomplete'
+        self.remote_operations.append(record)
 
     def note(self, name):
         if self.final is None and name in ("stale_revision_retries", "observation_errors"):
@@ -478,6 +506,8 @@ class LaunchObservation:
                     'root_cause': 'unmeasured', 'stderr': 'not_captured'} for label in self.diagnostics},
                 "constructed_payloads": copy.deepcopy(self.payloads), "payload_contract": "prompt parts are subsets, not additive; construction/write does not prove model use",
                 "local_operations": copy.deepcopy(self.operations), "notes": dict(self.notes),
+                "remote_operations": copy.deepcopy(self.remote_operations), "remote_metadata_overflow": self.remote_overflow,
+                "remote_cost_contract": "provider totals exclude unknown remote billing; method calls/body bytes do not prove server receipt or model tokens",
                 "local_cost_contract": "local I/O/write bytes are not model tokens; filesystem I/O unmeasured"}
 
     def finish(self, outcome=None):

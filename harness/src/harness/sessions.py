@@ -630,6 +630,9 @@ class Sessions:
                 summary TEXT NOT NULL, context TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS registered_projects (
                 id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE);
+            CREATE TABLE IF NOT EXISTS memory_result_attempts (
+                session_id TEXT NOT NULL, generation TEXT NOT NULL, binding TEXT NOT NULL,
+                PRIMARY KEY(session_id,generation));
         ''')
         # Inherited by the guard, so a restart waits for a crashed owner's run.
         lock_deadline = time.monotonic() + 5
@@ -1875,7 +1878,7 @@ class Sessions:
             return
         session = self.get(sid)
         with self.lock:
-            row = self.db.execute('SELECT receipt FROM launches WHERE id=?', (generation,)).fetchone()
+            row = self.db.execute('SELECT receipt FROM launches WHERE id=? AND session_id=?', (generation, sid)).fetchone()
         try:
             receipt = json.loads(row[0]) if row and row[0] else {}
         except ValueError:
@@ -1888,7 +1891,7 @@ class Sessions:
             result = self._task_context(wait=MEMORY_WAIT, observation=observation,
                 guard=self._generation_guard(sid, generation)).save_memory(
                 session, latest['draft'], automatic=True,
-                generation=generation)
+                generation=generation, origin_event_id=latest['event_id'])
         except Exception as error:
             result = {'ok': False, 'saved': {}, 'skipped': [],
                       'error': str(error) if isinstance(error, SessionError) else f'the runtime call failed ({type(error).__name__}).'}
@@ -1910,6 +1913,7 @@ class Sessions:
         supported = not any(session.get(name) for name in ('fleet', 'clash', 'creator', 'system_run', 'system_discovery'))
         try:
             observation = cost_observation.LaunchObservation(session['provider'], supported)
+            observation.memory_owner = (sid, generation)
         except Exception:
             observation = cost_observation.UnavailableObservation()
         try:
@@ -2133,6 +2137,12 @@ class Sessions:
         if native_launch:
             cost_observation.safe(observation, 'new_phase', 'main', session.get('native_session_id'))
         if native_launch:
+            if provider == 'cursor' and not native_command and (session.get('brain') or {}).get('capsule'):
+                guard = self._generation_guard(sid, generation)
+                guard()
+                maintenance = self._task_context(wait=0, observation=observation, guard=guard)
+                context_record['cursor_rule_retirement'] = maintenance.retire_cursor_rule(session)
+                guard()
             context_record.update(context_usage.launch_files(project, provider))
         tracker = context_usage.ContextTracker(provider) if native_launch else None
         if tracker:
@@ -2160,13 +2170,11 @@ class Sessions:
             # This task carries an explicit, frozen selection of chats. A native merge that `context-load merge`
             # prepared for this client is not consumed here; the hooks still capture this task's chat.
             environment['CONTEXT_CONTINUITY_RESTORE_DISABLED'] = '1'
-        # Only this launch can say its capsule is in the prompt; never inherit the claim.
+        # Memory identity and delivery claims belong to this launch.
         environment.pop('CONTEXT_CAPSULE_DELIVERED', None)
         environment.pop('CONTEXT_MEMORY_RECOVERY', None)
-        if native_command:
-            # As in the CLI's own terminal: the project's hooks see no Harness task and deliver memory themselves.
-            environment.pop('CONTEXT_TASK_ID', None)
-        elif session['brain']:
+        environment.pop('CONTEXT_TASK_ID', None)
+        if not native_command and session['brain']:
             environment['CONTEXT_TASK_ID'] = session['brain']['task_id']
             if session['brain'].get('capsule'):
                 # The project's own read hook would build a second capsule from this whole
@@ -2485,8 +2493,6 @@ class Sessions:
                 cost_observation.safe(observation, 'new_phase', 'recovery', native_id)
                 def observe_recovery(raw, clean):
                     recovery_cost.observe(raw)
-                    if tracker:
-                        tracker.observe(raw)
                     if clean.get('kind') == 'usage':
                         clean = dict(clean)
                         tokens = providers.total_tokens(clean)
@@ -2515,10 +2521,15 @@ class Sessions:
                 def recovery_launched():
                     cost_observation.safe(observation, 'process', 'recovery', 'started')
                     cost_observation.safe(observation, 'payload', 'recovery_prompt', memory_recovery.PROMPT)
+                def observe_recovery_raw(raw):
+                    cost_observation.safe(observation, 'raw', 'recovery', raw)
+                    if tracker:
+                        tracker.observe(raw)
+                        note_compactions()
                 with cost_observation.span(observation, 'recovery'):
                     recovery = memory_recovery.recover(self, sid, current, generation, project, environment,
                         remaining_seconds=remaining, exhausted=bool(budget_usage['limit_reached']), observe=observe_recovery,
-                        observe_raw=lambda raw: cost_observation.safe(observation, 'raw', 'recovery', raw),
+                        observe_raw=observe_recovery_raw,
                         observe_boundary=lambda signal, code=None: cost_observation.safe(observation, 'diagnostic', 'recovery', signal, code),
                         on_launch=recovery_launched,
                         observe_transport=lambda count, state: cost_observation.safe(observation, 'transport', 'recovery', count, state))

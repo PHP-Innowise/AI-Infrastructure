@@ -21,6 +21,9 @@ from typing import Any, BinaryIO, Iterable
 
 WINDOWS = os.name == "nt"
 GUARD = Path(__file__).with_name("process_guard.py")
+# The guard starts through this file, which runs it from cached bytecode: run
+# as a script, it was compiled again on every guarded call (~2 ms).
+GUARD_CLI = Path(__file__).with_name("process_guard_cli.py")
 _HANDLE_LAUNCH_LOCK = threading.Lock()
 
 
@@ -120,7 +123,7 @@ def _windows_guard_popen(command: list[str], watchdog_fd: int, lock_fd: int | No
             startup = subprocess.STARTUPINFO()
             startup.lpAttributeList = {"handle_list": handles}
             creationflags = options.pop("creationflags", 0) | subprocess.CREATE_NEW_PROCESS_GROUP
-            arguments = [sys.executable, str(GUARD), "--watchdog-handle", str(handles[0])]
+            arguments = [sys.executable, str(GUARD_CLI), "--watchdog-handle", str(handles[0])]
             if lock_fd is not None:
                 arguments.extend(["--lock-handle", str(handles[1]), "--lock-fd", str(lock_fd)])
             arguments.extend(["--", *command])
@@ -145,7 +148,9 @@ def launch_guarded(command: list[str], watchdog_fd: int, *, lock_fd: int | None 
     if WINDOWS:
         return _windows_guard_popen(command, watchdog_fd, lock_fd,
                                     {**guard_kwargs(), **popen_options})
-    arguments = [sys.executable, str(GUARD), str(watchdog_fd)]
+    # -S: the guard uses only the standard library, and site cost every
+    # guarded call about 1 ms before its native process could start.
+    arguments = [sys.executable, "-S", str(GUARD_CLI), str(watchdog_fd)]
     if lock_fd is not None:
         arguments.extend(["--lock-fd", str(lock_fd)])
     arguments.extend(["--", *command])

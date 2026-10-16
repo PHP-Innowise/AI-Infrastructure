@@ -17,10 +17,12 @@ import tempfile
 import threading
 import time
 import uuid
+import unicodedata
 import zipfile
 
 from .filesystem import fs
 from . import process_runtime
+from .automatic_query import source_path_problem
 from .sessions import SessionError, _memory_bank_selection, open_project_path, read_context
 
 RECORD_TYPES = ('task', 'finding', 'bug', 'incident', 'decision', 'event')
@@ -50,11 +52,15 @@ ACTION_FIELDS = {
     'promote-apply': ('promotion_id',),
     'promote-auto': (),
     # One result - progress, next steps, learnings - in one replayable call.
-    'record-result': ('task_id', 'result_id', 'revision', 'request', 'attestation', 'reason'),
+    'record-result': ('task_id', 'result_id', 'revision', 'request', 'attestation', 'reason', 'prepared_scope'),
+    'prepare-result': ('task_id', 'result_id', 'revision', 'request', 'attestation', 'reason'),
+    'replay-result': ('task_id', 'result_id', 'revision', 'request', 'attestation', 'reason', 'prepared_scope'),
     'export': ('include_archive', 'include_superseded'),
     # The turn checkpoint a host's Stop hook runs; the Harness runs it for a
     # provider whose headless mode fires no Stop event (Cursor).
     'turn': ('task_id',),
+    # Custody-only best-effort maintenance; no recall or task-state mutation.
+    'cursor-rule-retire': (),
 }
 
 # What `run` says when the project's runtime predates an operation; callers
@@ -194,13 +200,36 @@ def _entry(path, size, content):
     return result, metadata
 
 
+def runtime_cli(scripts):
+    """The script that runs an installed runtime's command line.
+
+    context_cli.py runs context.py from its cached bytecode; run as a script,
+    context.py is compiled again on every call, and a message makes several.
+    The loader writes that cache itself, into the runtime's own __pycache__/,
+    although _execute sets PYTHONDONTWRITEBYTECODE; nothing else the runtime
+    imports is cached. An older runtime has only context.py.
+    """
+    loader = scripts / 'context_cli.py'
+    return loader if loader.is_file() else scripts / 'context.py'
+
+
 class KnowledgeBusy(SessionError):
     """The non-blocking knowledge lock is held by another operation."""
 
 
+class KnowledgeRefusal(SessionError):
+    """A fixed runtime refusal code; arbitrary error prose is not proof."""
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
+
+
 class KnowledgeManager:
-    def __init__(self, sessions):
+    def __init__(self, sessions, *, source_hint_provider=None):
+        if source_hint_provider is not None and not callable(source_hint_provider):
+            raise ValueError('The internal source-hint provider must be callable.')
         self.sessions = sessions
+        self.source_hint_provider = source_hint_provider
         self.lock = threading.Lock()
         self.closed = threading.Event()
         self.process = None
@@ -351,6 +380,8 @@ class KnowledgeManager:
             'promote-propose': ('source_ids', 'title', 'content'),
             'promote-review': ('promotion_id', 'reviewer'), 'promote-apply': ('promotion_id',),
             'turn': ('task_id',), 'record-result': ('task_id', 'result_id', 'revision', 'request'),
+            'prepare-result': ('task_id', 'result_id', 'revision', 'request', 'reason'),
+            'replay-result': ('task_id', 'result_id', 'revision', 'request', 'reason', 'prepared_scope'),
         }.get(action, ())
         if any(field not in data for field in required):
             raise SessionError('Required knowledge operation fields are missing.')
@@ -402,9 +433,9 @@ class KnowledgeManager:
                 value = _text(value, field.replace('_', ' '), 16000 if field in ('goal', 'progress', 'outcome', 'content', 'query') else 2000)
                 if field in ('task_id', 'external_id'):
                     value = value.strip()
-                    if (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}', value)
+                    if (not re.fullmatch(r'[^\W_][\w\u0300-\u036f./#+-]{0,199}', value)
                             or '..' in value.split('/')):
-                        raise SessionError('Use a task ID with letters, digits, dots, underscores, slashes or hyphens.')
+                        raise SessionError('Use a task ID with letters, digits, dots, underscores, slashes, hyphens, # or +.')
                 if field in ('record_id', 'promotion_id'):
                     value = value.strip()
                     if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', value):
@@ -419,6 +450,8 @@ class KnowledgeManager:
                     raise SessionError('Say whether the agent or a person checked the learnings.')
                 if field == 'result_id' and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', value):
                     raise SessionError('Use a result ID of letters, digits, dots, underscores or hyphens.')
+                if field == 'prepared_scope' and not re.fullmatch(r'[0-9a-f]{64}', value):
+                    raise SessionError('Use a valid prepared memory scope.')
                 if field in ('memory_id', 'superseded_by') and not re.fullmatch(r'MEM-(?:\d+|\d{8}-[0-9a-f]{8})', value):
                     raise SessionError('Select a valid Memory Bank ID.')
                 if field in ('review_after', 'valid_to'):
@@ -439,6 +472,7 @@ class KnowledgeManager:
     def _execute(self, command, root, extra=None, *, _guard=None, _io_observer=None, _request_bytes=None):
         from . import cost_observation
         measured_start = time.monotonic()
+        execution_timeout = 3 if command[-2:] == ['cursor-rule-retire', '--json'] else EXECUTION_TIMEOUT
         returned = False
         eof = [False, False]
         argument_bytes = None
@@ -474,7 +508,7 @@ class KnowledgeManager:
             while selector.get_map():
                 if self.closed.is_set() or self.sessions.stopping.is_set():
                     raise SessionError('Knowledge operation was stopped. Refresh the records before retrying; changes may have been applied.')
-                if time.monotonic() - started > EXECUTION_TIMEOUT:
+                if time.monotonic() - started > execution_timeout:
                     raise SessionError('Knowledge operation timed out. Refresh the records before retrying; changes may have been applied.')
                 ready = selector.select(.1)
                 if not ready and process.poll() is not None and not process_runtime.WINDOWS:
@@ -598,10 +632,83 @@ class KnowledgeManager:
                 raise SessionError('The installed runtime could not check eligibility. Check record validity and source paths.')
             return {**info, **result}
 
-    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None, _guard=None, _io_observer=None):
+    @staticmethod
+    def _source_hints_json(value):
+        """Fixed internal transport; native admission independently revalidates it."""
+        try:
+            if type(value) is not dict or set(value) != {'schema_version', 'references'}:
+                return None
+            if type(value['schema_version']) is not int or value['schema_version'] != 1:
+                return None
+            references = value['references']
+            if type(references) is not list or len(references) > 8:
+                return None
+            clean = []
+            for item in references:
+                if type(item) is not dict or set(item) != {'path', 'source_sha256'}:
+                    return None
+                name, digest = item['path'], item['source_sha256']
+                if (type(name) is not str or not 1 <= len(name) <= 512 or len(name.encode('utf-8')) > 512
+                        or name.startswith('/') or any(mark in name for mark in ('\\', ':', '#'))
+                        or any(unicodedata.category(char).startswith('C') for char in name)
+                        or any(part in ('', '.', '..') for part in name.split('/'))
+                        or source_path_problem('hints/' + name) is not None
+                        or type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None):
+                    return None
+                clean.append({'path': name, 'source_sha256': digest})
+            encoded = json.dumps({'schema_version': 1, 'references': clean}, ensure_ascii=False,
+                                 separators=(',', ':'), allow_nan=False)
+            return encoded if len(encoded.encode('utf-8')) <= 8192 else None
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            return None
+
+    def _supports_source_hints(self, project_id, info, _root=None):
+        descriptor = None
+        try:
+            if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_NONBLOCK'):
+                return False
+            layout = self.layout(project_id, _root)
+            scripts = layout['scripts'] or layout['folder'] / info['root'] / 'memory-bank/scripts'
+            descriptor = os.open(scripts / 'context.py', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return False
+            return b'SOURCE_HINT_PROFILE = "source-hints-v1"' in os.read(descriptor, 8192)
+        except (OSError, KeyError, TypeError):
+            return False
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def supports_provenance_response(self, project_id, info, _root=None):
+        """Versioned helper interface marker; not runtime/source authentication."""
+        descriptor = None
+        try:
+            if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_NONBLOCK'):
+                return False
+            layout = self.layout(project_id, _root)
+            scripts = layout['scripts'] or layout['folder'] / info['root'] / 'memory-bank/scripts'
+            descriptor = os.open(scripts / 'context.py', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return False
+            return b'SOURCE_PROVENANCE_PROFILE = "local-source-provenance-v1"' in os.read(descriptor, 8192)
+        except (OSError, KeyError, TypeError):
+            return False
+        finally:
+            owned, descriptor = descriptor, None
+            if owned is not None:
+                try:
+                    os.close(owned)
+                except OSError:
+                    pass  # Uncertain closure must not retry a reused fd number.
+
+    def run(self, project_id, data, *, _root=None, _ephemeral=False, _gate=None, _host=None, _guard=None, _io_observer=None, _source_hints=None, _provenance_response=False):
         if not isinstance(data, dict) or not isinstance(data.get('action'), str) or data['action'] not in ACTION_FIELDS:
             raise SessionError('Select a supported knowledge operation.')
         action = data['action']
+        if _source_hints is not None and action not in ('retrieve', 'refresh'):
+            raise SessionError('Source hints require an internal retrieval operation.')
         if set(data) - {'action', 'bank', *ACTION_FIELDS[action]}:
             raise SessionError('Unknown knowledge operation field.')
         arguments = self._arguments(action, data)
@@ -613,7 +720,7 @@ class KnowledgeManager:
                 raise SessionError('The selected Memory Bank does not have an installed context runtime.')
             if action in ('start', 'brain-create', 'brain-update', 'complete', 'rebind',
                           'promote-propose', 'promote-review', 'promote-apply', 'promote-auto',
-                          'record-result') and info['mode'] != 'governed':
+                          'record-result', 'prepare-result', 'replay-result') and info['mode'] != 'governed':
                 raise SessionError('Project Brain editing requires the project to use governed mode.')
             layout = self.layout(project_id, _root)
             root = layout['folder'] / info['root']
@@ -622,6 +729,10 @@ class KnowledgeManager:
                 options = []
                 if _ephemeral:
                     options.append('--ephemeral')
+                if _provenance_response:
+                    if not _ephemeral:
+                        raise SessionError('Source provenance transport requires an ephemeral read.')
+                    options.append('--provenance-response')
                 if _gate is not None:
                     if _gate not in ('off', 'shadow', 'enforce'):
                         raise SessionError('Invalid internal retrieval gate.')
@@ -637,6 +748,10 @@ class KnowledgeManager:
                         # runtime cuts private data and pasted transcript prefixes
                         # out instead of refusing the turn its memory.
                         options.append('--sanitize')
+                if _source_hints is not None and self._supports_source_hints(project_id, info, _root):
+                    hints_json = self._source_hints_json(_source_hints)
+                    if hints_json is not None:
+                        options.append('--source-hints-json=' + hints_json)
                 arguments[1:1] = options
             export_id, destination = None, None
             if action == 'export':
@@ -644,20 +759,23 @@ class KnowledgeManager:
                 destination = Path(self.temporary.name) / export_id
                 arguments.extend(['--destination', str(destination)])
             request_file = None
-            if action == 'record-result':
+            if action in ('record-result', 'prepare-result', 'replay-result'):
                 request = data['request']
                 try:
                     encoded = json.dumps(request, ensure_ascii=False, allow_nan=False)
-                except (TypeError, ValueError, RecursionError) as error:
+                    request_size = len(encoded.encode('utf-8'))
+                except (TypeError, ValueError, RecursionError, UnicodeError) as error:
                     raise SessionError('The memory result is not plain JSON.') from error
-                if not isinstance(request, dict) or len(encoded.encode('utf-8')) > 262144:
+                if not isinstance(request, dict) or request_size > 262144:
                     raise SessionError('The memory result must be a JSON object of at most 256 KiB.')
                 request_file = Path(self.temporary.name) / f'result-{uuid.uuid4().hex}.json'
-                request_file.write_text(encoded, encoding='utf-8')
                 arguments.extend(['--input', str(request_file)])
             scripts = layout['scripts'] or root / 'memory-bank/scripts'
-            command = [sys.executable, str(scripts / 'context.py'), '--root', str(root), *arguments]
+            command = [sys.executable, str(runtime_cli(scripts)), '--root', str(root), *arguments]
             try:
+                if request_file is not None:
+                    # Even a partial staging write belongs to the cleanup boundary.
+                    request_file.write_text(encoded, encoding='utf-8')
                 if action in ('promote-propose', 'promote-apply'):
                     eligibility = self._inspect_runtime(root, {'check': True, **{
                         field: data[field] for field in ('source_ids', 'promotion_id') if field in data}}, layout,
@@ -686,7 +804,21 @@ class KnowledgeManager:
             if code != 0:
                 detail = stderr.decode('utf-8', errors='replace')
                 message = 'The context runtime rejected this operation. Check record fields, sources and project validation.'
-                if 'Stale ' in detail and 'revision' in detail:
+                fixed = {'prepared_stale_no_write': 'The prepared task revision changed before any result writes.',
+                         'receipt_unavailable': 'Memory replay is incomplete: its exact receipt is unavailable.',
+                         'attempt_incomplete': 'Memory replay is incomplete: its started attempt disagrees with the current records.',
+                         'attempt_unavailable': 'Memory replay is incomplete: its shared attempt proof is unavailable.',
+                         'attempt_scope_changed': 'The memory attempt owner or attestation changed.',
+                         'original_revision_required': 'A new save needs the original task revision.',
+                         'learning_original_revision_required': 'A deliberate learning correction needs its original record revision.',
+                         'learning_revision_conflict': 'The original learning revision changed; no result writes started.',
+                         'learning_correction_not_authorized': 'An agent cannot repair person-attested or unknown verified learning.',
+                         'scope_changed': 'The prepared memory runtime or policy scope changed.'}
+                refusal = next((name for name in fixed if detail.strip() == 'context: memory-result-v1:' + name), None)
+                if refusal is not None:
+                    message = fixed[refusal]
+                    response['error_code'] = refusal
+                elif 'Stale ' in detail and 'revision' in detail:
                     message = STALE_RECORD
                 elif 'Owner is not authorized' in detail:
                     message = 'The configured Project Brain owner is not authorized to edit this record.'

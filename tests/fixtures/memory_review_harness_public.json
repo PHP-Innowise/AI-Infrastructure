@@ -1,0 +1,49 @@
+{
+  "source_path": "specs/heron.md",
+  "source": "# Heron allocation\n\nEvery Heron packet has one active keeper. A handoff expires after six hours.\n",
+  "task": "HERON-HARNESS",
+  "goal": "Check Heron keeper and handoff expiry",
+  "draft": {
+    "progress": "Heron keeper and six-hour expiry verified.",
+    "next_steps": [
+      "Test handoff expiry boundary."
+    ],
+    "learnings": [
+      {
+        "type": "finding",
+        "title": "Heron keeper identity",
+        "consequence": "Every Heron packet has one active keeper.",
+        "sources": [
+          "specs/heron.md#heron-allocation"
+        ]
+      }
+    ],
+    "verified": true
+  },
+  "oracles": {
+    "first_save_ok": false,
+    "first_frozen_binding_present": true,
+    "second_save_ok": true,
+    "third_save_ok": true,
+    "record_count": 1,
+    "task_progress": "Heron keeper and six-hour expiry verified.",
+    "task_next_steps": [
+      "Test handoff expiry boundary."
+    ],
+    "learning_status": "resolved",
+    "learning_authority": "verified",
+    "learning_progress": "Every Heron packet has one active keeper.",
+    "late_replay_preserves_all_domain_bytes": true,
+    "operations": [
+      "prepare-result",
+      "record-result",
+      "replay-result",
+      "replay-result"
+    ],
+    "provider_calls": 0
+  },
+  "cuts": [
+    "after_created_frontier",
+    "after_task_frontier"
+  ]
+}
