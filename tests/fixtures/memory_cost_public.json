@@ -1,0 +1,463 @@
+{
+  "fixture": "public-memory-cost-arithmetic-v1",
+  "profile": "memory-benchmark-ledger-v1",
+  "usage_profile": "inclusive-input-output-v1",
+  "cases": [
+    {
+      "name": "public-inclusive-cache-whole-horizon",
+      "horizon": 2,
+      "calls": [
+        {
+          "phase": "build",
+          "ordinal": null,
+          "call_id": "PUBLIC-BUILD",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 40,
+            "output_tokens": 10,
+            "total_tokens": 50,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": 0
+          },
+          "usd_micros": 40000,
+          "billing": "provider_reported",
+          "component_ns": 1000000000,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        },
+        {
+          "phase": "reader",
+          "ordinal": 0,
+          "call_id": "PUBLIC-READER-A",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "cached_input_tokens": 60,
+            "reasoning_output_tokens": 5
+          },
+          "usd_micros": 120000,
+          "billing": "provider_reported",
+          "component_ns": 2000000000,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        },
+        {
+          "phase": "reader",
+          "ordinal": 1,
+          "call_id": "PUBLIC-READER-B",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 80,
+            "output_tokens": 20,
+            "total_tokens": 100,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": 10
+          },
+          "usd_micros": 100000,
+          "billing": "provider_reported",
+          "component_ns": 3000000000,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        },
+        {
+          "phase": "judge",
+          "ordinal": 0,
+          "call_id": "PUBLIC-JUDGE-A",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 30,
+            "output_tokens": 5,
+            "total_tokens": 35,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": 0
+          },
+          "usd_micros": 35000,
+          "billing": "provider_reported",
+          "component_ns": 1000000000,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        },
+        {
+          "phase": "judge",
+          "ordinal": 1,
+          "call_id": "PUBLIC-JUDGE-B",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 35,
+            "output_tokens": 5,
+            "total_tokens": 40,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": 0
+          },
+          "usd_micros": 40000,
+          "billing": "provider_reported",
+          "component_ns": 1500000000,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        }
+      ],
+      "units": [
+        {
+          "phase": "build",
+          "ordinal": null,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 250000000,
+          "constructed_bytes": 80
+        },
+        {
+          "phase": "query",
+          "ordinal": 0,
+          "model_work": "none_observed_local",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 200000000,
+          "constructed_bytes": 100
+        },
+        {
+          "phase": "query",
+          "ordinal": 1,
+          "model_work": "none_observed_local",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 300000000,
+          "constructed_bytes": 110
+        },
+        {
+          "phase": "reader",
+          "ordinal": 0,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 2000
+        },
+        {
+          "phase": "reader",
+          "ordinal": 1,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 2100
+        },
+        {
+          "phase": "judge",
+          "ordinal": 0,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 600
+        },
+        {
+          "phase": "judge",
+          "ordinal": 1,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 620
+        }
+      ],
+      "grades": [
+        [
+          0,
+          true
+        ],
+        [
+          1,
+          false
+        ]
+      ]
+    },
+    {
+      "name": "public-failure-partial-hidden-and-pending",
+      "horizon": 2,
+      "calls": [
+        {
+          "phase": "query",
+          "ordinal": 1,
+          "call_id": "PUBLIC-QUERY-B",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 10,
+            "output_tokens": null,
+            "total_tokens": null,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": null
+          },
+          "usd_micros": null,
+          "billing": "unknown",
+          "component_ns": 15,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        },
+        {
+          "phase": "reader",
+          "ordinal": 0,
+          "call_id": "PUBLIC-READER-A",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 70,
+            "output_tokens": 20,
+            "total_tokens": 90,
+            "cached_input_tokens": 10,
+            "reasoning_output_tokens": 2
+          },
+          "usd_micros": 90000,
+          "billing": "provider_reported",
+          "component_ns": 30,
+          "outcome": "failed",
+          "pending": false,
+          "duplicate": true,
+          "conflict": null
+        },
+        {
+          "phase": "reader",
+          "ordinal": 1,
+          "call_id": "PUBLIC-READER-B",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 30,
+            "output_tokens": 10,
+            "total_tokens": 40,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": 0
+          },
+          "usd_micros": 40000,
+          "billing": "provider_reported",
+          "component_ns": 40,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        },
+        {
+          "phase": "judge",
+          "ordinal": 0,
+          "call_id": "PUBLIC-JUDGE-A",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 15,
+            "output_tokens": 5,
+            "total_tokens": 20,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": 0
+          },
+          "usd_micros": 20000,
+          "billing": "provider_reported",
+          "component_ns": 20,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        },
+        {
+          "phase": "judge",
+          "ordinal": 1,
+          "call_id": "PUBLIC-JUDGE-B",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": null,
+          "usd_micros": null,
+          "billing": "unknown",
+          "component_ns": null,
+          "outcome": "succeeded",
+          "pending": true,
+          "duplicate": false,
+          "conflict": null
+        }
+      ],
+      "units": [
+        {
+          "phase": "build",
+          "ordinal": null,
+          "model_work": "none_observed_local",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 5,
+          "constructed_bytes": 30
+        },
+        {
+          "phase": "query",
+          "ordinal": 0,
+          "model_work": "unknown",
+          "coverage": "incomplete",
+          "billing_complete": false,
+          "local_ns": 10,
+          "constructed_bytes": 40
+        },
+        {
+          "phase": "query",
+          "ordinal": 1,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": false,
+          "local_ns": 0,
+          "constructed_bytes": 50
+        },
+        {
+          "phase": "reader",
+          "ordinal": 0,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 100
+        },
+        {
+          "phase": "reader",
+          "ordinal": 1,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 110
+        },
+        {
+          "phase": "judge",
+          "ordinal": 0,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 60
+        },
+        {
+          "phase": "judge",
+          "ordinal": 1,
+          "model_work": "reported_calls",
+          "coverage": "incomplete",
+          "billing_complete": false,
+          "local_ns": null,
+          "constructed_bytes": null
+        }
+      ],
+      "grades": [
+        [
+          0,
+          true
+        ],
+        [
+          1,
+          null
+        ]
+      ]
+    },
+    {
+      "name": "public-conflicting-reports-and-grade",
+      "horizon": 1,
+      "calls": [
+        {
+          "phase": "reader",
+          "ordinal": 0,
+          "call_id": "PUBLIC-READER",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 60,
+            "output_tokens": 10,
+            "total_tokens": 70,
+            "cached_input_tokens": 20,
+            "reasoning_output_tokens": 2
+          },
+          "usd_micros": 70000,
+          "billing": "provider_reported",
+          "component_ns": 10,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": {
+            "input_tokens": 61,
+            "output_tokens": 10,
+            "total_tokens": 71,
+            "cached_input_tokens": 20,
+            "reasoning_output_tokens": 2
+          }
+        },
+        {
+          "phase": "judge",
+          "ordinal": 0,
+          "call_id": "PUBLIC-JUDGE",
+          "attempt_id": "ATTEMPT-ONE",
+          "usage": {
+            "input_tokens": 15,
+            "output_tokens": 5,
+            "total_tokens": 20,
+            "cached_input_tokens": 0,
+            "reasoning_output_tokens": 0
+          },
+          "usd_micros": 20000,
+          "billing": "provider_reported",
+          "component_ns": 5,
+          "outcome": "succeeded",
+          "pending": false,
+          "duplicate": false,
+          "conflict": null
+        }
+      ],
+      "units": [
+        {
+          "phase": "build",
+          "ordinal": null,
+          "model_work": "none_observed_local",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 0
+        },
+        {
+          "phase": "query",
+          "ordinal": 0,
+          "model_work": "none_observed_local",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 0
+        },
+        {
+          "phase": "reader",
+          "ordinal": 0,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 80
+        },
+        {
+          "phase": "judge",
+          "ordinal": 0,
+          "model_work": "reported_calls",
+          "coverage": "complete",
+          "billing_complete": true,
+          "local_ns": 0,
+          "constructed_bytes": 30
+        }
+      ],
+      "grades": [
+        [
+          0,
+          true
+        ],
+        [
+          0,
+          false
+        ]
+      ]
+    }
+  ]
+}

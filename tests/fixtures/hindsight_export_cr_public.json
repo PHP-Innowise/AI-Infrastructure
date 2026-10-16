@@ -1,0 +1,5 @@
+{
+  "profile": "decoded-string-logical-line-projection-v1",
+  "text": "{\"note\":\"Public heading\\rSecond logical line\"}\n",
+  "expected_decoded_view": "Public heading\nSecond logical line"
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "fixture": "public-harbor-ingestion-20261013",
+  "team_id": "dd722f97-2408-40b5-a929-f35c36a9b4ee",
+  "project_id": "ddcd01ba-1482-4b36-a877-e508c61e4a8e",
+  "other_project_id": "ef2dc90c-42d6-490c-885b-98d69bbadf41",
+  "sources": [
+    {
+      "path": "docs/harbor.md",
+      "text": "# Harbor dispatch\nThe cobalt ferry uses pier seven. The dispatch cap is twelve crates.\n",
+      "changed_text": "# Harbor dispatch\nThe cobalt ferry uses pier nine. The dispatch cap is eight crates.\n"
+    },
+    {
+      "path": "src/quay.php",
+      "text": "<?php\nfunction berth_limit(): int { return 12; }\n"
+    },
+    {
+      "path": "docs/storm.md",
+      "text": "# Tide bulletin\r\nAmber sails remain docked during the Ω storm.\r\n"
+    }
+  ],
+  "unsafe_paths": [".env", "docs/private/notes.md", "memory-bank/chunks/derived.md", "project-brain/dynamic/session.md", "tasks/run.md", "Task/client.md", ".git/config", "docs/../outside.md", "docs/link#part.md", "docs/double//name.md", "docs/key.pem", "docs/user@example.com.md"],
+  "rejected_content": [
+    {"label": "personal", "text": "Contact fixture.reader@example.test for the sailing list.\n"},
+    {"label": "blank", "text": " \n\t\r\n"}
+  ]
+}

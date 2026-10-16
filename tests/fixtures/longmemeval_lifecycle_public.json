@@ -1,0 +1,126 @@
+{
+  "profile": "fresh-maple-lifecycle-input-v1",
+  "questions": [
+    {
+      "question": "buoy cadence",
+      "query_image": null
+    },
+    {
+      "question": "amber slate",
+      "query_image": null
+    }
+  ],
+  "contexts": [
+    [
+      {
+        "type": "text",
+        "value": "Reference data; verify canonical sources.\nMaple buoy emits every 17 seconds."
+      }
+    ],
+    []
+  ],
+  "reader_budget": 256,
+  "local_build_ns": 13,
+  "local_insert_bytes": 173,
+  "local_query_ns": [
+    3,
+    5
+  ],
+  "clock_values": [
+    0,
+    11,
+    100,
+    113,
+    200,
+    207,
+    300,
+    305,
+    400,
+    409
+  ],
+  "reader_reports": [
+    {
+      "outcome": "failed",
+      "value": null,
+      "usage": {
+        "input_tokens": 6,
+        "output_tokens": 1,
+        "total_tokens": 7,
+        "cached_input_tokens": 2,
+        "reasoning_output_tokens": 0
+      },
+      "usd_micros": 5,
+      "billing": "provider_reported"
+    },
+    {
+      "outcome": "succeeded",
+      "value": "17 seconds",
+      "usage": {
+        "input_tokens": 8,
+        "output_tokens": 2,
+        "total_tokens": 10,
+        "cached_input_tokens": 3,
+        "reasoning_output_tokens": 1
+      },
+      "usd_micros": 7,
+      "billing": "provider_reported"
+    },
+    {
+      "outcome": "succeeded",
+      "value": "Unknown; no evidence.",
+      "usage": {
+        "input_tokens": 4,
+        "output_tokens": 1,
+        "total_tokens": 5,
+        "cached_input_tokens": 1,
+        "reasoning_output_tokens": 0
+      },
+      "usd_micros": 3,
+      "billing": "provider_reported"
+    }
+  ],
+  "judge_reports": [
+    {
+      "outcome": "succeeded",
+      "value": true,
+      "usage": {
+        "input_tokens": 3,
+        "output_tokens": 1,
+        "total_tokens": 4,
+        "cached_input_tokens": 1,
+        "reasoning_output_tokens": 0
+      },
+      "usd_micros": 2,
+      "billing": "provider_reported"
+    },
+    {
+      "outcome": "succeeded",
+      "value": false,
+      "usage": {
+        "input_tokens": 5,
+        "output_tokens": 2,
+        "total_tokens": 7,
+        "cached_input_tokens": 2,
+        "reasoning_output_tokens": 1
+      },
+      "usd_micros": 4,
+      "billing": "provider_reported"
+    }
+  ],
+  "native_trajectory": {
+    "id": "public-maple-buoy-82",
+    "goal": "Record the Maple buoy beacon interval",
+    "start_url": "https://maple.example.invalid/buoy",
+    "outcome": "Beacon interval recorded",
+    "states": [
+      {
+        "url": "https://maple.example.invalid/buoy/panel",
+        "action": "open beacon cadence",
+        "thought": null,
+        "text": "Maple buoy emits every 17 seconds. The configuration key is buoy_beacon_interval.",
+        "screenshot": "public-images/maple-82.png",
+        "step": 12
+      }
+    ]
+  }
+}

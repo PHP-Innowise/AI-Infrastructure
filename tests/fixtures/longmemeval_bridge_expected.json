@@ -1,0 +1,135 @@
+{
+  "profile": "public-nacre-registration-whole-oracles-v1",
+  "normalized_config": {
+    "memory_type": "native_fts5_states_v1",
+    "memory_params": {
+      "horizon": 2,
+      "local_token_profile": "unknown"
+    }
+  },
+  "controlled_hooks": [
+    {
+      "profile": "longmemeval/native-fts5-registration-v1",
+      "ordinal": 0,
+      "stage": "constructed_before_reader_truncation",
+      "query_receipt": {
+        "ordinal": 0,
+        "state": "delivered",
+        "outcome": "succeeded",
+        "native_metadata_bound": true,
+        "input_bytes": 64,
+        "output_bytes": 122,
+        "component_ns": 100,
+        "query_image_ignored": false
+      },
+      "reader_usage": null,
+      "reader_usage_complete": false
+    },
+    {
+      "profile": "longmemeval/native-fts5-registration-v1",
+      "ordinal": 1,
+      "stage": "constructed_before_reader_truncation",
+      "query_receipt": {
+        "ordinal": 1,
+        "state": "no_evidence",
+        "outcome": "succeeded",
+        "native_metadata_bound": true,
+        "input_bytes": 79,
+        "output_bytes": 2,
+        "component_ns": 100,
+        "query_image_ignored": true
+      },
+      "reader_usage": null,
+      "reader_usage_complete": false
+    }
+  ],
+  "bridge_final_projection": {
+    "profile": "longmemeval/native-fts5-registration-v1",
+    "closed": true,
+    "contexts_admitted": 2,
+    "queries_attempted": 2,
+    "hooks_verified": 3,
+    "hook_replays": 1,
+    "contexts_cleared": 2,
+    "prework_cancelled": 0,
+    "pending_contexts": 0,
+    "runtime_overrides_ignored": false
+  },
+  "local_final_projection": {
+    "build_component_ns": 300,
+    "query_component_ns": 200,
+    "insert_ingress_bytes": 449,
+    "query_ingress_bytes": 143,
+    "returned_context_bytes": 124,
+    "unique_projection_bytes": 550,
+    "query_calls": 2,
+    "query_failed": 0,
+    "query_cancelled": 0,
+    "unlaunched_queries": 0,
+    "observation_incomplete": false
+  },
+  "document": {
+    "text": "# Recorded trajectory 0c6bb6a01be65778c1d75b2f57161d6e77e16436685581a87a291e2b1d0dd8f8\n\nGoal: \"Record the Nacre sail calibration yaw offset\"\nStart URL: \"https://nacre.example.invalid/calibration\"\nOutcome: \"Calibration offset recorded\"\n\n## Recorded state 0 (step 9)\nURL: \"https://nacre.example.invalid/calibration/panel\"\nArrival action: \"open yaw calibration panel\"\nThought: null\nScreenshot reference (not ingested): \"public-images/nacre-54.png\"\n\nRecorded text:\n\nNacre sail calibration uses a 31 degree yaw offset. Its setting key is sail_yaw_offset.\n",
+    "sha256": "d890f809bbb7c022287e8c110017501aa44b40338a1ddf4a31a8b5a17349bc26",
+    "bytes": 550
+  },
+  "future_reader": {
+    "tokens": null,
+    "usage_complete": false,
+    "quality": "UNRUN"
+  },
+  "adversarial": {
+    "duplicate_ids": [
+      "public-nacre-invocation-A",
+      " public-nacre-invocation-A",
+      "public-nacre-invocation-A "
+    ],
+    "extra_params": {
+      "repository": "PRIVATE_SELECTOR_NOT_ALLOWED",
+      "factory": "PRIVATE_FACTORY_NOT_ALLOWED",
+      "answer": "PUBLIC_EVALUATOR_SENTINEL"
+    },
+    "bad_horizons": [
+      0,
+      true,
+      513
+    ],
+    "hook_wrong_query": "PUBLIC_OTHER_QUERY",
+    "hook_wrong_context": [
+      {
+        "type": "text",
+        "value": "PUBLIC_WRONG_CONTEXT"
+      }
+    ],
+    "missing_context_sequence": [
+      "query",
+      "hook"
+    ],
+    "cancellation": "threading.Event set beforequery; localqueryunlaunched and IDconsumedno replacement",
+    "runtime_overrides": {
+      "query_trace_dir": "PUBLIC_NO_TRACE_IO",
+      "generation_temperature": 0.2,
+      "generation_top_p": 0.9
+    },
+    "registry_foreign": "FOREIGN_CLASS_SENTINEL",
+    "cases": [
+      "configcopy",
+      "registrationcollision",
+      "invalidfactorytuple",
+      "constructorfailclose",
+      "missingid",
+      "overwriteunclearedid",
+      "failed/cancelledIDreplay",
+      "clearbeforequery",
+      "exacthookreplay",
+      "interleavedhooks2threads",
+      "reentrantclear/close",
+      "save/classload/reconcilebeforeIO",
+      "global_loader_readscope",
+      "factoryscopefieldrefusal",
+      "postfinalfreeze",
+      "cancel_event",
+      "configureafterworkrefusal"
+    ]
+  }
+}

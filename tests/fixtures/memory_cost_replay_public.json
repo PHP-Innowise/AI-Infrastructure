@@ -1,0 +1,12 @@
+{
+  "call_id": "Oriole-cost-reader",
+  "attempt_id": "attempt-cedar-1",
+  "new_attempt_id": "attempt-ochre-2",
+  "usage": {"input_tokens": 23, "output_tokens": 5, "total_tokens": 28, "cached_input_tokens": 3, "reasoning_output_tokens": 2},
+  "usd_micros": 7,
+  "attempt_ns": 29,
+  "units": [["build", null, "none_observed_local", 11, 13], ["query", 0, "none_observed_local", 17, 19], ["reader", 0, "reported_calls", 31, 37]],
+  "product": {"known_input_tokens": 23, "known_output_tokens": 5, "known_tokens": 28, "known_usd_micros": 7, "known_component_ns": 88, "known_constructed_bytes": 69, "input_tokens": 23, "output_tokens": 5, "tokens": 28, "cached_input_tokens": 3, "reasoning_output_tokens": 2, "uncached_input_tokens": 20, "usd_micros": 7, "component_ns": 88, "constructed_bytes": 69, "complete": {"coverage": true, "tokens": true, "cache": true, "reasoning": true, "billing": true, "timing": true, "bytes": true}, "overflow": false, "tokens_per_planned_query": 28.0, "usd_micros_per_planned_query": 7.0, "tokens_per_correct": null, "usd_micros_per_correct": null},
+  "expected_phase_work": {"build": [0, 0, 11, 13], "query": [0, 0, 17, 19], "reader": [1, 1, 60, 37], "judge": [0, 0, 0, 0]},
+  "provider_observed_usage": null
+}

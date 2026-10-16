@@ -654,6 +654,17 @@ edition's own files remain in that edition's changelog.
 
 ### Fixes after the third memory review — 2026-10-15
 
+- Harness Hindsight/LongMemEval: the export screen refuses camel and kebab
+  credential keys, `token`, `pass`, `pwd`, `passphrase`, `salt`, `APP_KEY`,
+  `encryption_key`, unquoted `.env`/YAML values, literal `env()` and
+  `os.getenv` defaults and SQL `IDENTIFIED BY`/`PASSWORD '...'`; the forward
+  scanner decodes `\u{...}` code points, keeps an unknown `\u` literal in
+  PHP, Markdown, text and SQL sources and never pairs a quote across a line
+  break. The LongMemEval projection rewinds its directory descriptor before
+  each scan: btrfs returned the previous scan's list and the instance fenced
+  itself with `source_changed`. Recall counts `socket.timeout` as a timeout on
+  Python 3.9, and the journal test removes its SQLite authorizer the way
+  Python before 3.11 needs.
 - Remove the Claude/Codex prompt supervisor from the read hooks; they call
   `context.py refresh` directly again under the one `CONTEXT_HOOK_BUDGET`.
   The supervisor refused any budget above 5 seconds and any prompt above
@@ -734,6 +745,8 @@ edition's own files remain in that edition's changelog.
 - Isolate ordinary invalid UTF-8 document contents and path keys before Git/SQLite; retain healthy Unicode neighbors and report count-only, nonfatal source notices through refresh, capsules and health records. Keep malformed skill policy paths strict. Turn Memory Bank INDEX/chunk decode errors into fixed diagnostics, including second-read races, and keep summaries available.
 
 - Keep rich memory rendering, section identities and window proposals on admitted indexed bodies through packing, printing and refresh. Carry immutable images outside public JSON, including lightweight packets; detached capsules use admitted snippets. A moved cache is highlighted through isolated in-memory FTS over held bytes, and shared sinks match first-row dedup ownership.
+
+- Keep verified existing cost bookings idempotent after unit closure and before final freeze. New reservations remain refused; malformed stored tickets cannot be repaired by replay. Add independent supplied-observation arithmetic and concurrency controls.
 
 - Bind candidate policy images to the same SQL row as their highlighted/plain excerpt. Missing or changed row identities cannot be rebound by a later cache read; path/hint/source-graph excerpts reuse their already-admitted body. Add fresh native policy-refresh race and supplied channel controls.
 
@@ -858,6 +871,15 @@ edition's own files remain in that edition's changelog.
   Unicode and custom pattern compatibility. This reduces screening work;
   oversized or slow cold refreshes still have no durable scan checkpoint.
 
+### Public OpenAPI declaration export — 2026-10-15
+
+- Recognize a narrow whole-JSON OpenAPI 3.1.1 HTTP bearer declaration by its
+  actual structural source position. Keep credential maps, unrelated objects,
+  nested decoded documents, duplicate keys and unknown syntax refused.
+- Preserve original approved source, request, packet and journal bytes. Add
+  fresh complete byte oracles and offline constructor, planner, SQLite journal
+  and protected-file capture checks; remote ingestion remains unavailable.
+
 ### Retained memory citation admission — 2026-10-14
 
 - Revalidate current chunk eligibility before retaining cached durable memory.
@@ -885,6 +907,31 @@ edition's own files remain in that edition's changelog.
   state is read without cached search or delivery publication; unsupported or
   unknown state remains explicitly incomplete. Add temporary CLI, hook,
   schema, identity, privacy and real permission regression coverage.
+
+### Hindsight forward screening and cancellation — 2026-10-14
+
+- Discover JSON string spans in one forward pass; ordinary strings no longer
+  consume decoded-view capacity. Keep raw credential refusal, valid Unicode,
+  changed-view/depth/byte ceilings and exact retained source/request bytes.
+- Propagate cooperative cancellation through public export/plan revalidation
+  and current journal admission before commit. Init-only callbacks remain
+  unstored; manual validation and dataclass replacement retain current guards.
+- Add fresh byte oracles, indexed-inspection/decoder controls, a fixed standalone
+  hang guard and actual SQLite rollback regressions. Remaining regex/decoder
+  work is nonpreemptible; no whole-screen linearity or hard-deadline claim.
+
+### Hindsight historical integrity and current admission — 2026-10-14
+
+- Keep intact ingestion history readable for diagnostics, terminal settlement
+  and supplied reconciliation after current content/path rules tighten.
+  Preserve canonical envelopes, identities, source/body/packet hashes, bounds
+  and manifest correspondence independently of mutable admission rules.
+- Re-admit only the selected frozen request before body access or a new attempt;
+  public export/prepare remain screened. Clean replacements retain blocked
+  prior bindings for reconciliation without authorizing remote mutations.
+- Add fresh public whole-byte oracles and SQLite regressions for policy drift,
+  selected dispatch, unchanged frontiers, forged exports and rehashed corruption.
+  Remote transport, provider costs and source authority remain unmeasured.
 
 ### Native memory source resilience — 2026-10-14
 
@@ -977,6 +1024,146 @@ edition's own files remain in that edition's changelog.
   task and embedded timestamp of bounded Cursor checkpoint reports instead
   of file mtime, using portable paths. Observe recovery compaction before
   event normalization so the context history records its divider once.
+
+### LongMemEval and Hindsight evaluation pilots — 2026-10
+
+- Keep the pinned LongMemEval API test image byte-identical while explicitly
+  deferring its newer annotations in offline compiler controls on Python 3.9.
+  This selected-source test profile does not certify the official environment.
+
+- Memory: strengthen offline public Hindsight export screening for literal
+  PHP/WordPress/Composer credentials and escaped JSON tokens; accompany pinned
+  LongMemEval source fixtures with their upstream license and extraction notices.
+  Cursor installed runtimes now include rooted NT handle maintenance and
+  no-clobber publication, with native Windows acceptance in CI and abort cleanup
+  controls. Linux validation does not certify Windows kernel behavior.
+
+- Harness: add fixed two-slot memory-accounting controls for cancelled and
+  unlaunched queries, preserving known subtotals, incomplete quality denominators
+  and null full provider costs through construction and repeated finalization.
+
+- Harness: add isolated real temporary descriptor ownership controls for
+  LongMemEval adapter cleanup, including retained original handles and immediate
+  descriptor reuse. Supplied faults are not actual OS-failure or token evidence.
+
+- Harness: retain privacy-safe fixed projection guard labels per failed local
+  operation through a detached optional accessor; preserve task exceptions and
+  existing snapshot/receipt/cost schemas. Unknown labels, root causes and provider
+  costs remain unmeasured.
+
+- Fix memory regression boundaries: isolate LongMemEval test output in temporary
+  projects, retain private Harness bindings without a lifetime admission quota,
+  sanitize fixed Cursor Git probes, preserve enforced skipped context, recover
+  owned absent rules, and exclude invalid UTF-8 documents per source. Restore
+  CI/local gate parity and receipt privacy assertions after manifest validation.
+
+- Classify isolated LongMemEval controller errors by their actual exception type,
+  without consulting a supplied `__class__` property. Preserve cancellation and
+  primary errors across queries, callback dispatch, construction and finalization;
+  keep ordinary failure and partial-construction semantics unchanged.
+
+- Keep isolated LongMemEval diagnostic clock failures from replacing query or
+  cleanup errors. Clear delivery metadata when a new timer abort prevents return,
+  retain unknown elapsed time, and attempt owned teardown before propagating an
+  observer start-clock interruption. Repeated close stays once-only.
+
+- Drain registered directory-descriptor close attempts in the isolated LongMemEval
+  adapter after individual cleanup errors. Preserve construction primary errors,
+  report the first owner-close error, and never retry retired descriptors or adopt
+  an already-closed ambiguous registry. Attempt bookkeeping does not prove closure.
+
+- Fence further insert/query work in the isolated LongMemEval adapter when a
+  final inserted-file close fails. Retain already-published state and the same
+  exception; do not retry an uncertain descriptor or change teardown behavior.
+
+- Forward optional custody-failure stage metadata through the isolated
+  LongMemEval observer and registered bridge. Canonical bounded dispatch works
+  after close without changing query hooks, frozen views or cost accounting;
+  missing/unsupported observations do not imply source validity or freshness.
+
+- Add optional fixed custody-failure stage metadata to the isolated LongMemEval
+  adapter. Existing guards, fencing and I/O remain unchanged; detached metadata
+  identifies a source region, with root causes and provider costs unmeasured.
+
+- Add an isolated selected-upstream async reader/synchronous judge controller,
+  binding actual SDK argument proxies and supplied usage to owned tickets across
+  awaits, errors and cancellations. Legacy zero-filled reader counters are kept
+  only for compatibility; physical/provider coverage and full costs stay unknown.
+  Fresh offline controls leave automatic production memory unchanged.
+
+- Add a separate isolated Chat receipt controller: budget and seal exact injected
+  request bodies, preserve captured usage through decoder/validation failures,
+  bind attempts to owned tickets, and keep judge requests in a post-gate journal.
+  Physical/provider/SDK coverage and billing remain unknown; fresh offline
+  controls do not claim token savings or change automatic production memory.
+
+- Add bounded supplied ChatCompletion usage capture before answer decoding for the
+  isolated memory benchmark. Missing counters stay unknown; paid supplied usage
+  survives decoder failures/cancellation, without provider/attempt/billing claims.
+  Fresh offline controls include pinned selected reader/judge code with fake SDK
+  values; production memory, defaults and the closed lifecycle remain unchanged.
+
+- Add a local LongMemEval lifecycle controller with fixed-to-native query binding,
+  one-use reader/judge callback tickets, whole-envelope byte selection and an
+  immutable construction gate before evaluator lookup. Frozen native scalar
+  observations join once; retries, cancellation and missing horizon remain
+  accounted. Fresh public controls keep hidden provider coverage/full cost unknown;
+  this modified text reader is separate from the official multimodal runtime.
+
+- Register the isolated FTS5 states adapter through a pinned LongMemEval Memory
+  API contract with strict direct configuration, invocation-bound ordinal hooks,
+  bounded replay, pre-work cancellation and explicit cleanup/persistence refusal.
+  Fresh public controls execute the unchanged stdlib API prefix and native FTS5;
+  the full official environment, reader/judge costs and token benefit remain pending.
+
+- Add a separate fixed-horizon local observation wrapper for the LongMemEval
+  text-projection pilot, connecting native FTS5 operations to the cost ledger.
+  Ordinal receipts retain failure/cancellation and unknown usage; disjoint local
+  timings and exact JSON byte proxies include insertion replay and teardown.
+  Fresh public integration controls keep reader/judge, billing and provider token
+  benefit unmeasured; production automatic memory and runtime defaults unchanged.
+
+- Add an experimental fixed-horizon build/query/reader/judge cost ledger with
+  private physical-attempt identities, independent completeness, inclusive cache
+  accounting and conservative unknown/conflict handling. Fresh literal oracles
+  test full scopes and cost-per-correct arithmetic; runtime/provider integration
+  and actual token benefit remain pending.
+
+- Add an isolated LongMemEval-V2 public-states text projection with exclusive
+  corpus ownership, strict admission and native automatic FTS5 refresh/packing/
+  rendering. Fresh synthetic tests keep evaluator labels and image bodies out;
+  upstream registration, multimodal accuracy and full provider costs are pending.
+
+- Add a private offline Hindsight ingestion journal: frozen public request
+  bodies, monotonic desired generations, committed one-owner reservations and
+  cross-version ambiguous-attempt barriers. Supplied document observations bind
+  a fresh local challenge and complete history; HTTP404 never proves global
+  absence. Suggestions authorize no upload/delete/retry and retain unknown costs.
+  No service executor, default wiring or provider-token benefit is claimed.
+
+- Add an offline operator-approved public-source export and Hindsight ingestion
+  draft planner. Exact scoped approvals, anchored POSIX custody, raw UTF-8 hashes,
+  privacy screening and whole-payload limits precede returned images. Version
+  changes retire current catalogue membership; prior input never proves upload
+  or remote no-op. All current request bodies remain available for reconciliation.
+  No executor, live upload or provider-token savings are claimed.
+
+- Add bounded internal source hints for optional remote recall: native exact
+  indexed-source hydration, raw-byte and normalized hash checks, POSIX custody,
+  ordinary guards and final packing own delivery. Explicit local project/bank/
+  workspace routes prevent cross-project outbound queries. Separate remote
+  diagnostics retain unknown costs on local failure; FTS5 and provider defaults
+  remain unchanged. Fresh public whole-caller tests cover guards, cancellation,
+  history priority and delivered-only manifests/receipts. No live service or
+  provider-token benefit is claimed.
+
+- Add an isolated stdlib Hindsight recall pilot with registered team/project
+  scopes, bounded direct HTTP transport, locally admitted source-byte evidence,
+  whole-envelope budgets and exact local fallback. Remote prose and arbitrary
+  diagnostics cannot enter context; unknown costs remain null. New public
+  offline/loopback controls cover corrections, deletion, isolation and failures.
+  Automatic Harness/native routing, ingestion and live token savings remain
+  pending; local FTS5 defaults and Python runtime requirements are unchanged.
 
 ### Earlier unreleased changes
 

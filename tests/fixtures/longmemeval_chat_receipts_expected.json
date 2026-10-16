@@ -1,0 +1,256 @@
+{
+  "reader_request": {
+    "model": "public-larch-reader",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Use reference memory; verify canonical sources."
+      },
+      {
+        "role": "user",
+        "content": "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nLarch beacon ticks every 23 seconds.\"}],\"question\":\"Larch interval?\"}"
+      }
+    ],
+    "max_completion_tokens": 37,
+    "n": 1,
+    "stream": false
+  },
+  "reader_request_utf8": "{\"max_completion_tokens\":37,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[{\\\"type\\\":\\\"text\\\",\\\"value\\\":\\\"Reference data; verify canonical sources.\\\\nLarch beacon ticks every 23 seconds.\\\"}],\\\"question\\\":\\\"Larch interval?\\\"}\",\"role\":\"user\"}],\"model\":\"public-larch-reader\",\"n\":1,\"stream\":false}",
+  "reader_bytes": 369,
+  "baseline_request": {
+    "model": "public-larch-reader",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Use reference memory; verify canonical sources."
+      },
+      {
+        "role": "user",
+        "content": "{\"memory_context\":[],\"question\":\"Larch interval?\"}"
+      }
+    ],
+    "max_completion_tokens": 37,
+    "n": 1,
+    "stream": false
+  },
+  "baseline_request_utf8": "{\"max_completion_tokens\":37,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[],\\\"question\\\":\\\"Larch interval?\\\"}\",\"role\":\"user\"}],\"model\":\"public-larch-reader\",\"n\":1,\"stream\":false}",
+  "baseline_bytes": 255,
+  "local_envelope": {
+    "system": "Use reference memory; verify canonical sources.",
+    "question": "Larch interval?",
+    "memory_context": [
+      {
+        "type": "text",
+        "value": "Reference data; verify canonical sources.\nLarch beacon ticks every 23 seconds."
+      }
+    ]
+  },
+  "local_envelope_bytes": 214,
+  "construction": {
+    "profile": "longmemeval/injected-chat-reader-construction-v1",
+    "horizon": 2,
+    "slots": [
+      {
+        "ordinal": 0,
+        "question": "Larch interval?",
+        "query_outcome": "succeeded",
+        "local_ordinal": 0,
+        "reader_request": {
+          "system": "Use reference memory; verify canonical sources.",
+          "question": "Larch interval?",
+          "memory_context": [
+            {
+              "type": "text",
+              "value": "Reference data; verify canonical sources.\nLarch beacon ticks every 23 seconds."
+            }
+          ]
+        },
+        "reader_outcome": "succeeded",
+        "reader_answer": "The larch period is 23 s."
+      },
+      {
+        "ordinal": 1,
+        "question": "Larch interval?",
+        "query_outcome": "succeeded",
+        "local_ordinal": 1,
+        "reader_request": {
+          "system": "Use reference memory; verify canonical sources.",
+          "question": "Larch interval?",
+          "memory_context": [
+            {
+              "type": "text",
+              "value": "Reference data; verify canonical sources.\nLarch beacon ticks every 23 seconds."
+            }
+          ]
+        },
+        "reader_outcome": "succeeded",
+        "reader_answer": "The larch period is 23 s."
+      }
+    ],
+    "reader_attempts": [
+      {
+        "ordinal": 0,
+        "reservation": 1,
+        "request": {
+          "model": "public-larch-reader",
+          "messages": [
+            {
+              "role": "system",
+              "content": "Use reference memory; verify canonical sources."
+            },
+            {
+              "role": "user",
+              "content": "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nLarch beacon ticks every 23 seconds.\"}],\"question\":\"Larch interval?\"}"
+            }
+          ],
+          "max_completion_tokens": 37,
+          "n": 1,
+          "stream": false
+        },
+        "prepared_request_bytes": 369,
+        "request_bytes": 369,
+        "injected_transport_boundaries": 1,
+        "response_bytes": 326,
+        "usage_state": "complete",
+        "usage": {
+          "input_tokens": 41,
+          "output_tokens": 7,
+          "total_tokens": 48,
+          "cached_input_tokens": 9,
+          "reasoning_output_tokens": 2
+        },
+        "outcome": "failed"
+      },
+      {
+        "ordinal": 0,
+        "reservation": 2,
+        "request": {
+          "model": "public-larch-reader",
+          "messages": [
+            {
+              "role": "system",
+              "content": "Use reference memory; verify canonical sources."
+            },
+            {
+              "role": "user",
+              "content": "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nLarch beacon ticks every 23 seconds.\"}],\"question\":\"Larch interval?\"}"
+            }
+          ],
+          "max_completion_tokens": 37,
+          "n": 1,
+          "stream": false
+        },
+        "prepared_request_bytes": 369,
+        "request_bytes": 369,
+        "injected_transport_boundaries": 1,
+        "response_bytes": 334,
+        "usage_state": "complete",
+        "usage": {
+          "input_tokens": 44,
+          "output_tokens": 9,
+          "total_tokens": 53,
+          "cached_input_tokens": 10,
+          "reasoning_output_tokens": 3
+        },
+        "outcome": "succeeded"
+      },
+      {
+        "ordinal": 1,
+        "reservation": 1,
+        "request": {
+          "model": "public-larch-reader",
+          "messages": [
+            {
+              "role": "system",
+              "content": "Use reference memory; verify canonical sources."
+            },
+            {
+              "role": "user",
+              "content": "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nLarch beacon ticks every 23 seconds.\"}],\"question\":\"Larch interval?\"}"
+            }
+          ],
+          "max_completion_tokens": 37,
+          "n": 1,
+          "stream": false
+        },
+        "prepared_request_bytes": 369,
+        "request_bytes": 369,
+        "injected_transport_boundaries": 1,
+        "response_bytes": 333,
+        "usage_state": "complete",
+        "usage": {
+          "input_tokens": 41,
+          "output_tokens": 7,
+          "total_tokens": 48,
+          "cached_input_tokens": 9,
+          "reasoning_output_tokens": 2
+        },
+        "outcome": "succeeded"
+      }
+    ]
+  },
+  "construction_utf8": "{\"horizon\":2,\"profile\":\"longmemeval/injected-chat-reader-construction-v1\",\"reader_attempts\":[{\"injected_transport_boundaries\":1,\"ordinal\":0,\"outcome\":\"failed\",\"prepared_request_bytes\":369,\"request\":{\"max_completion_tokens\":37,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[{\\\"type\\\":\\\"text\\\",\\\"value\\\":\\\"Reference data; verify canonical sources.\\\\nLarch beacon ticks every 23 seconds.\\\"}],\\\"question\\\":\\\"Larch interval?\\\"}\",\"role\":\"user\"}],\"model\":\"public-larch-reader\",\"n\":1,\"stream\":false},\"request_bytes\":369,\"reservation\":1,\"response_bytes\":326,\"usage\":{\"cached_input_tokens\":9,\"input_tokens\":41,\"output_tokens\":7,\"reasoning_output_tokens\":2,\"total_tokens\":48},\"usage_state\":\"complete\"},{\"injected_transport_boundaries\":1,\"ordinal\":0,\"outcome\":\"succeeded\",\"prepared_request_bytes\":369,\"request\":{\"max_completion_tokens\":37,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[{\\\"type\\\":\\\"text\\\",\\\"value\\\":\\\"Reference data; verify canonical sources.\\\\nLarch beacon ticks every 23 seconds.\\\"}],\\\"question\\\":\\\"Larch interval?\\\"}\",\"role\":\"user\"}],\"model\":\"public-larch-reader\",\"n\":1,\"stream\":false},\"request_bytes\":369,\"reservation\":2,\"response_bytes\":334,\"usage\":{\"cached_input_tokens\":10,\"input_tokens\":44,\"output_tokens\":9,\"reasoning_output_tokens\":3,\"total_tokens\":53},\"usage_state\":\"complete\"},{\"injected_transport_boundaries\":1,\"ordinal\":1,\"outcome\":\"succeeded\",\"prepared_request_bytes\":369,\"request\":{\"max_completion_tokens\":37,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[{\\\"type\\\":\\\"text\\\",\\\"value\\\":\\\"Reference data; verify canonical sources.\\\\nLarch beacon ticks every 23 seconds.\\\"}],\\\"question\\\":\\\"Larch interval?\\\"}\",\"role\":\"user\"}],\"model\":\"public-larch-reader\",\"n\":1,\"stream\":false},\"request_bytes\":369,\"reservation\":1,\"response_bytes\":333,\"usage\":{\"cached_input_tokens\":9,\"input_tokens\":41,\"output_tokens\":7,\"reasoning_output_tokens\":2,\"total_tokens\":48},\"usage_state\":\"complete\"}],\"slots\":[{\"local_ordinal\":0,\"ordinal\":0,\"query_outcome\":\"succeeded\",\"question\":\"Larch interval?\",\"reader_answer\":\"The larch period is 23 s.\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nLarch beacon ticks every 23 seconds.\"}],\"question\":\"Larch interval?\",\"system\":\"Use reference memory; verify canonical sources.\"}},{\"local_ordinal\":1,\"ordinal\":1,\"query_outcome\":\"succeeded\",\"question\":\"Larch interval?\",\"reader_answer\":\"The larch period is 23 s.\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nLarch beacon ticks every 23 seconds.\"}],\"question\":\"Larch interval?\",\"system\":\"Use reference memory; verify canonical sources.\"}}]}",
+  "construction_bytes": 2921,
+  "construction_sha256": "aa411cce26cefad8cf388975e48a913f0e936fa1141fba061b8be82ed0bfb666",
+  "judge_requests": [
+    {
+      "model": "public-larch-judge",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Use reference memory; verify canonical sources."
+        },
+        {
+          "role": "user",
+          "content": "{\"answer\":\"The larch period is 23 s.\",\"construction_sha256\":\"aa411cce26cefad8cf388975e48a913f0e936fa1141fba061b8be82ed0bfb666\",\"question\":\"Larch interval?\"}"
+        }
+      ],
+      "max_completion_tokens": 19,
+      "n": 1,
+      "stream": false
+    },
+    {
+      "model": "public-larch-judge",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Use reference memory; verify canonical sources."
+        },
+        {
+          "role": "user",
+          "content": "{\"answer\":\"The larch period is 23 s.\",\"construction_sha256\":\"aa411cce26cefad8cf388975e48a913f0e936fa1141fba061b8be82ed0bfb666\",\"question\":\"Larch interval?\"}"
+        }
+      ],
+      "max_completion_tokens": 19,
+      "n": 1,
+      "stream": false
+    }
+  ],
+  "judge_request_utf8": [
+    "{\"max_completion_tokens\":19,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"answer\\\":\\\"The larch period is 23 s.\\\",\\\"construction_sha256\\\":\\\"aa411cce26cefad8cf388975e48a913f0e936fa1141fba061b8be82ed0bfb666\\\",\\\"question\\\":\\\"Larch interval?\\\"}\",\"role\":\"user\"}],\"model\":\"public-larch-judge\",\"n\":1,\"stream\":false}",
+    "{\"max_completion_tokens\":19,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"answer\\\":\\\"The larch period is 23 s.\\\",\\\"construction_sha256\\\":\\\"aa411cce26cefad8cf388975e48a913f0e936fa1141fba061b8be82ed0bfb666\\\",\\\"question\\\":\\\"Larch interval?\\\"}\",\"role\":\"user\"}],\"model\":\"public-larch-judge\",\"n\":1,\"stream\":false}"
+  ],
+  "judge_bytes": [
+    366,
+    366
+  ],
+  "product_known_tokens": 149,
+  "product_known_input": 126,
+  "product_known_output": 23,
+  "experiment_known_tokens": 190,
+  "experiment_known_input": 162,
+  "experiment_known_output": 28,
+  "product_known_component_ns": 46,
+  "experiment_known_component_ns": 57,
+  "product_known_request_bytes": 1562,
+  "experiment_known_request_bytes": 2294,
+  "full_tokens": null,
+  "full_usd": null,
+  "physical_attempts": null,
+  "callback_entries": 5,
+  "injected_transport_boundaries": 5,
+  "scripted_grades": [
+    true,
+    false
+  ]
+}

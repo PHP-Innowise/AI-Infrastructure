@@ -1,0 +1,23 @@
+{
+  "expected_observation": {
+    "observation_state": "unmeasured",
+    "profile": "longmemeval/custody-failure-stage-v1",
+    "provider_tokens": null,
+    "root_cause": null,
+    "scope": "last_caught_custody_body_failure",
+    "stage": null,
+    "usd_micros": null
+  },
+  "native_lock_failure_trace": [
+    "observed:enter",
+    "native:enter",
+    "observed:exit"
+  ],
+  "nested_observer_lock_failure_trace": [
+    "bridge:enter",
+    "observed:enter",
+    "bridge:exit"
+  ],
+  "profile": "independent-new-nested-admission-oracles-v1",
+  "scope": "each owner lock admission propagates directly; nested bound getter failure is optional diagnostic unknown; supplied TraceLocks only"
+}

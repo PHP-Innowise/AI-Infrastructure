@@ -1,0 +1,15 @@
+{
+  "profile": "fresh-export-nested-string-v1",
+  "denied": [
+    {
+      "name": "composer_environment_json_string",
+      "text": "{\"COMPOSER_AUTH\": \"{\\\"github-oauth\\\": {\\\"github.com\\\": \\\"SYNTHETIC_ENCODED_CREDENTIAL_8\\\"}}\"}\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "nested_escaped_credential_key",
+      "text": "{\"configuration\": \"{\\\"pass\\\\u0077ord\\\":\\\"SYNTHETIC_ENCODED_CREDENTIAL_8\\\"}\"}\n",
+      "reason": "private_content"
+    }
+  ]
+}

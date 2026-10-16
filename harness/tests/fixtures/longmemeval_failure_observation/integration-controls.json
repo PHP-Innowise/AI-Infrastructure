@@ -1,0 +1,32 @@
+{
+  "trajectory": {
+    "id": "public-observation-zeta-701",
+    "goal": "Record public diagnostic flag",
+    "start_url": "https://observations.invalid/board",
+    "states": [
+      {
+        "url": "https://observations.invalid/board",
+        "screenshot": "frames/zeta.png",
+        "text": "Zeta recorder threshold is 61 cycles."
+      }
+    ]
+  },
+  "reflective_abort": {
+    "reported_guard": null,
+    "reported_exception": "unclassified",
+    "outcome": "cancelled",
+    "original_identity_preserved": true
+  },
+  "metadata_capture_failure": {
+    "observer_error": "KeyboardInterrupt injected into classifier only",
+    "original_task_error": "ProjectionError corpus_bound",
+    "original_identity_preserved": true
+  },
+  "constructor_and_cleanup": "direct Observed owner accessible; failed bridge constructor unavailable; separate phase records",
+  "snapshot_top_keys": [
+    "profile",
+    "observed",
+    "ledger"
+  ],
+  "prohibited": "no H4 source/input/output replay, native/FTS/SDK/network work"
+}

@@ -1,0 +1,126 @@
+{
+  "profile": "observed-public-saffron-full-oracles-v1",
+  "document": {
+    "text": "# Recorded trajectory d3aefeaf0b618ccdd784880ee87a2b8c1b7aa979ea538ce0d27c72a1f10298a4\n\nGoal: \"Configure the Saffron observatory beacon retry delay\"\nStart URL: \"https://observatory.example.invalid/beacon\"\nOutcome: \"Retry delay recorded\"\n\n## Recorded state 0 (step 4)\nURL: \"https://observatory.example.invalid/beacon/settings\"\nArrival action: \"open beacon settings\"\nThought: null\nScreenshot reference (not ingested): \"public-images/saffron-17.png\"\n\nRecorded text:\n\nSaffron beacon retry delay is 23 seconds. The setting is named beacon_retry_delay.\n",
+    "sha256": "27051832eb9ee2fce1c90233a04ebaf69c21457a8feb54feec60ca091bdbb79e",
+    "bytes": 547
+  },
+  "captured": {
+    "insert_bytes": 464,
+    "query_bytes": [
+      57,
+      83
+    ],
+    "context_bytes": 112,
+    "empty_context_bytes": 2
+  },
+  "success_control": {
+    "status": "finalized",
+    "local_token_profile": "pinned_local_no_model",
+    "initialization_attempted": true,
+    "initialization_outcome": "succeeded",
+    "cleanup_outcome": "succeeded",
+    "insert_calls": 2,
+    "inserted": 1,
+    "replayed": 1,
+    "insert_failed": 0,
+    "insert_cancelled": 0,
+    "query_calls": 2,
+    "query_failed": 0,
+    "query_cancelled": 0,
+    "unlaunched_queries": 0,
+    "unique_projection_bytes": 547,
+    "insert_ingress_bytes": 928,
+    "query_ingress_bytes": 140,
+    "returned_context_bytes": 114,
+    "images_ingested": 0,
+    "observation_incomplete": false,
+    "build_component_ns": 400,
+    "query_component_ns": 200,
+    "query_receipts": [
+      {
+        "ordinal": 0,
+        "state": "delivered",
+        "outcome": "succeeded",
+        "native_metadata_bound": true,
+        "input_bytes": 57,
+        "output_bytes": 112,
+        "component_ns": 100,
+        "query_image_ignored": false
+      },
+      {
+        "ordinal": 1,
+        "state": "no_evidence",
+        "outcome": "succeeded",
+        "native_metadata_bound": true,
+        "input_bytes": 83,
+        "output_bytes": 2,
+        "component_ns": 100,
+        "query_image_ignored": true
+      }
+    ]
+  },
+  "failure_control": {
+    "query_receipt": {
+      "ordinal": 1,
+      "state": "input_refused",
+      "outcome": "failed",
+      "native_metadata_bound": false,
+      "input_bytes": 0,
+      "output_bytes": 0,
+      "component_ns": 100,
+      "query_image_ignored": false
+    },
+    "query_component_ns": 200,
+    "query_ingress_bytes": 57,
+    "returned_context_bytes": 112,
+    "query_failed": 1
+  },
+  "ledger_contract": {
+    "horizon": 2,
+    "physical_provider_attempts": 0,
+    "build": {
+      "closed_units": 1,
+      "known_tokens": 0,
+      "tokens": 0,
+      "usd_micros": null,
+      "component_ns": 400,
+      "constructed_bytes": 928,
+      "billing_complete": false
+    },
+    "query": {
+      "closed_units": 2,
+      "known_tokens": 0,
+      "tokens": 0,
+      "usd_micros": null,
+      "component_ns": 200,
+      "constructed_bytes": 254,
+      "billing_complete": false
+    },
+    "reader": {
+      "closed_units": 0,
+      "tokens": null,
+      "complete_coverage": false
+    },
+    "judge": {
+      "closed_units": 0,
+      "tokens": null,
+      "complete_coverage": false
+    },
+    "product": {
+      "tokens": null,
+      "usd_micros": null,
+      "component_ns": null,
+      "known_component_ns": 600,
+      "known_constructed_bytes": 1182,
+      "tokens_per_correct": null
+    },
+    "grading": {
+      "observed": 0,
+      "known_correct": 0,
+      "correct": null,
+      "complete": false,
+      "conflicting": 0
+    }
+  }
+}

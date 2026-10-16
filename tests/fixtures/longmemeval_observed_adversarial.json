@@ -1,0 +1,54 @@
+{
+  "module_implemented": false,
+  "product_calls": 0,
+  "failure_second_query": {
+    "text": 17,
+    "query_image": null
+  },
+  "request_wire_literals": [
+    "{\"query\":\"Saffron beacon retry delay\",\"query_image\":null}",
+    "{\"query\":\"unrelated glacier molybdenum\",\"query_image\":\"public-images/query-88.png\"}"
+  ],
+  "controlled_context_wire": "[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nSaffron beacon retry delay is 23 seconds.\"}]",
+  "query_cases": {
+    "invalid_encoding": "\ud800",
+    "empty": "",
+    "nonstring": 17,
+    "valid_after_rejected": "Saffron beacon retry delay"
+  },
+  "rejected_trajectory_extra": {
+    "answer": "PUBLIC_EVALUATOR_SENTINEL_NEVER_CONSTRUCT"
+  },
+  "changed_trajectory_text": "Changed Saffron beacon retry delay is 29 seconds.",
+  "hook_cases": [
+    "missing_queries",
+    "unchanged_counter",
+    "unknown_state",
+    "arbitrary_extra_private_field",
+    "throws"
+  ],
+  "context_cases": [
+    "wrong_type",
+    "unknown_itemfield",
+    "JSON_escaping_over256KiB"
+  ],
+  "operation_cases": [
+    "initthrows",
+    "insertthrows",
+    "insertcancel",
+    "querythrows",
+    "querycancel",
+    "cleanupthrows",
+    "clockthrows",
+    "clockbackwards",
+    "clockbool",
+    "frozen",
+    "unlaunched",
+    "query_after_failed_init",
+    "insert_after_query",
+    "query_above_horizon",
+    "caller_mutation",
+    "interleaving"
+  ],
+  "scope": "fresh controller-generated public refusal variants only; no real dataset or gold"
+}

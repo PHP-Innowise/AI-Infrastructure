@@ -1,0 +1,152 @@
+{
+  "profile": "NEW Sandpiper history/current-admission public controls",
+  "team_id": "1c237a2d-9c82-4296-90c4-6a91d7564ac2",
+  "project_id": "d27c2401-45bf-4f1e-91da-f0d54c923ab6",
+  "journal_id": "fb927321-00d7-4e67-b989-f5e5bcaf6923",
+  "generations": [
+    "b9d0a8c9-8dbb-43f6-a3f2-f5dd883e9c41",
+    "c5ba4c3f-471f-46ba-a354-7b49b52dd181"
+  ],
+  "nonces": [
+    "2231c170-0a61-4c85-894a-ef1f0a69d241",
+    "49d882d2-328f-4240-9c30-d1e37117df05",
+    "c8c55db3-8357-433f-b10e-f435f2f91f1e"
+  ],
+  "sources": [
+    {
+      "path": "docs/sandpiper-routing.md",
+      "text": "Sandpiper keeper routes eastern parcels through gate seven.\n"
+    },
+    {
+      "path": "docs/plover-status.md",
+      "text": "Plover status remains amber until the morning review.\n"
+    }
+  ],
+  "replacement": [
+    {
+      "path": "docs/tern-current.md",
+      "text": "Tern current routing uses gate eleven after the approved change.\n"
+    }
+  ],
+  "policy_trigger": "Sandpiper keeper",
+  "expected": {
+    "historical_reopen": "same manifest/revision",
+    "history_screen_calls": 0,
+    "current_draft_refusal": "input",
+    "authorized_mutations": 0,
+    "transport_calls": 0,
+    "provider_tokens": null,
+    "total_cost_complete": false
+  },
+  "oracle": [
+    {
+      "revision": 1,
+      "manifest": "{\"profile\":\"hindsight-ingestion-journal-v1\",\"journal_id\":\"fb927321-00d7-4e67-b989-f5e5bcaf6923\",\"scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"generation\":\"b9d0a8c9-8dbb-43f6-a3f2-f5dd883e9c41\",\"revision\":1,\"export_sha256\":\"2eebc8d01cedec37129bd3a493889e4e277ca559dbd5c4426169b8eeca8b84f5\",\"current\":[{\"document_id\":\"source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2\",\"path\":\"docs/sandpiper-routing.md\",\"source_sha256\":\"4e77dd60e3efa0c4314da72f3c06e2a0c375ea625d3f946c5f88ce250908ff32\",\"source_id\":\"logical-2f2abf350068d9d345cedb155747375c2c4a99c0e5ad12c500ae53f5228d009a\",\"body_sha256\":\"0e9d273a502b03f7f15e94cf725ba2b042efeee44a99caa223075f6bea7cbd62\",\"body_bytes\":770,\"intent_id\":\"intent-39db761ab29bf545b1307913e714e590d44d46a3c84ac5df79401d6ead0ca16e\"},{\"document_id\":\"source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f\",\"path\":\"docs/plover-status.md\",\"source_sha256\":\"bb7d38b18f62f0c902a0e982abdc151f520082c7fb797993338c7fec1176eefa\",\"source_id\":\"logical-2353ab611bfc6c65874f0d35ab4443bdf5fa8ff0705bd633e1ee083190b82ff2\",\"body_sha256\":\"63a7a3ed7654ac6433af94bc5d378f3d1d873ee2e2550a578839b7f0c9bd0548\",\"body_bytes\":764,\"intent_id\":\"intent-dc43139855569051c68079be89bbd8bc282a37b47ac6154e9c4fb6b7b4d62e2e\"}],\"previous\":[]}",
+      "manifest_sha256": "f43037e98934aed88cf64b3c33339c2e7b56e219d1c6997505678d46c237f210",
+      "packet": "{\"schema_version\":1,\"profile\":\"hindsight-public-export-v1\",\"bank_id\":\"harness-040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"sources\":[{\"source_id\":\"logical-2f2abf350068d9d345cedb155747375c2c4a99c0e5ad12c500ae53f5228d009a\",\"path\":\"docs/sandpiper-routing.md\",\"document_id\":\"source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2\",\"source_sha256\":\"4e77dd60e3efa0c4314da72f3c06e2a0c375ea625d3f946c5f88ce250908ff32\",\"classification\":\"operator-attested-public\",\"retain_request\":{\"items\":[{\"content\":\"Sandpiper keeper routes eastern parcels through gate seven.\\n\",\"document_id\":\"source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"source_sha256\":\"4e77dd60e3efa0c4314da72f3c06e2a0c375ea625d3f946c5f88ce250908ff32\",\"source_id\":\"logical-2f2abf350068d9d345cedb155747375c2c4a99c0e5ad12c500ae53f5228d009a\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"]}},{\"source_id\":\"logical-2353ab611bfc6c65874f0d35ab4443bdf5fa8ff0705bd633e1ee083190b82ff2\",\"path\":\"docs/plover-status.md\",\"document_id\":\"source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f\",\"source_sha256\":\"bb7d38b18f62f0c902a0e982abdc151f520082c7fb797993338c7fec1176eefa\",\"classification\":\"operator-attested-public\",\"retain_request\":{\"items\":[{\"content\":\"Plover status remains amber until the morning review.\\n\",\"document_id\":\"source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"source_sha256\":\"bb7d38b18f62f0c902a0e982abdc151f520082c7fb797993338c7fec1176eefa\",\"source_id\":\"logical-2353ab611bfc6c65874f0d35ab4443bdf5fa8ff0705bd633e1ee083190b82ff2\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"]}}]}",
+      "documents": [
+        {
+          "binding": {
+            "document_id": "source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2",
+            "path": "docs/sandpiper-routing.md",
+            "source_sha256": "4e77dd60e3efa0c4314da72f3c06e2a0c375ea625d3f946c5f88ce250908ff32"
+          },
+          "source_id": "logical-2f2abf350068d9d345cedb155747375c2c4a99c0e5ad12c500ae53f5228d009a",
+          "body": "{\"items\":[{\"content\":\"Sandpiper keeper routes eastern parcels through gate seven.\\n\",\"document_id\":\"source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"source_sha256\":\"4e77dd60e3efa0c4314da72f3c06e2a0c375ea625d3f946c5f88ce250908ff32\",\"source_id\":\"logical-2f2abf350068d9d345cedb155747375c2c4a99c0e5ad12c500ae53f5228d009a\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"]}",
+          "descriptor": {
+            "document_id": "source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2",
+            "path": "docs/sandpiper-routing.md",
+            "source_sha256": "4e77dd60e3efa0c4314da72f3c06e2a0c375ea625d3f946c5f88ce250908ff32",
+            "source_id": "logical-2f2abf350068d9d345cedb155747375c2c4a99c0e5ad12c500ae53f5228d009a",
+            "body_sha256": "0e9d273a502b03f7f15e94cf725ba2b042efeee44a99caa223075f6bea7cbd62",
+            "body_bytes": 770,
+            "intent_id": "intent-39db761ab29bf545b1307913e714e590d44d46a3c84ac5df79401d6ead0ca16e"
+          }
+        },
+        {
+          "binding": {
+            "document_id": "source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f",
+            "path": "docs/plover-status.md",
+            "source_sha256": "bb7d38b18f62f0c902a0e982abdc151f520082c7fb797993338c7fec1176eefa"
+          },
+          "source_id": "logical-2353ab611bfc6c65874f0d35ab4443bdf5fa8ff0705bd633e1ee083190b82ff2",
+          "body": "{\"items\":[{\"content\":\"Plover status remains amber until the morning review.\\n\",\"document_id\":\"source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"source_sha256\":\"bb7d38b18f62f0c902a0e982abdc151f520082c7fb797993338c7fec1176eefa\",\"source_id\":\"logical-2353ab611bfc6c65874f0d35ab4443bdf5fa8ff0705bd633e1ee083190b82ff2\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"]}",
+          "descriptor": {
+            "document_id": "source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f",
+            "path": "docs/plover-status.md",
+            "source_sha256": "bb7d38b18f62f0c902a0e982abdc151f520082c7fb797993338c7fec1176eefa",
+            "source_id": "logical-2353ab611bfc6c65874f0d35ab4443bdf5fa8ff0705bd633e1ee083190b82ff2",
+            "body_sha256": "63a7a3ed7654ac6433af94bc5d378f3d1d873ee2e2550a578839b7f0c9bd0548",
+            "body_bytes": 764,
+            "intent_id": "intent-dc43139855569051c68079be89bbd8bc282a37b47ac6154e9c4fb6b7b4d62e2e"
+          }
+        }
+      ]
+    },
+    {
+      "revision": 2,
+      "manifest": "{\"profile\":\"hindsight-ingestion-journal-v1\",\"journal_id\":\"fb927321-00d7-4e67-b989-f5e5bcaf6923\",\"scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"generation\":\"c5ba4c3f-471f-46ba-a354-7b49b52dd181\",\"revision\":2,\"export_sha256\":\"fcdef42813991a7e967a20fc0b7ba6226a9bf07f12e8e348c4f616a88d6a9583\",\"current\":[{\"document_id\":\"source-2c3828471ede186a11bfddb3d9b68b05f5e1cec17759776b026859346633ea3c\",\"path\":\"docs/tern-current.md\",\"source_sha256\":\"803dcfd3701dc1b940611c1f7f92918788cb29cea844612015ec4b5c39c52dde\",\"source_id\":\"logical-f8cc9024a5ea60a8011fbc5e0be613189807a6f505e8523dfb1d90b4806f5545\",\"body_sha256\":\"cb7fbbd4167770fa661b36f0ed518a2c1b13807f6dc16ba78da49d81ff1e377c\",\"body_bytes\":775,\"intent_id\":\"intent-6f6efb335f2a8587840364552ec1af48fe5ce28c355236374be89f8d5493e53c\"}],\"previous\":[{\"document_id\":\"source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2\",\"path\":\"docs/sandpiper-routing.md\",\"source_sha256\":\"4e77dd60e3efa0c4314da72f3c06e2a0c375ea625d3f946c5f88ce250908ff32\"},{\"document_id\":\"source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f\",\"path\":\"docs/plover-status.md\",\"source_sha256\":\"bb7d38b18f62f0c902a0e982abdc151f520082c7fb797993338c7fec1176eefa\"}]}",
+      "manifest_sha256": "1083f5a07ea7de7f50e77ae2eb37cfd2fcdee9b5322525b661cef2263729cc4d",
+      "packet": "{\"schema_version\":1,\"profile\":\"hindsight-public-export-v1\",\"bank_id\":\"harness-040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"sources\":[{\"source_id\":\"logical-f8cc9024a5ea60a8011fbc5e0be613189807a6f505e8523dfb1d90b4806f5545\",\"path\":\"docs/tern-current.md\",\"document_id\":\"source-2c3828471ede186a11bfddb3d9b68b05f5e1cec17759776b026859346633ea3c\",\"source_sha256\":\"803dcfd3701dc1b940611c1f7f92918788cb29cea844612015ec4b5c39c52dde\",\"classification\":\"operator-attested-public\",\"retain_request\":{\"items\":[{\"content\":\"Tern current routing uses gate eleven after the approved change.\\n\",\"document_id\":\"source-2c3828471ede186a11bfddb3d9b68b05f5e1cec17759776b026859346633ea3c\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"source_sha256\":\"803dcfd3701dc1b940611c1f7f92918788cb29cea844612015ec4b5c39c52dde\",\"source_id\":\"logical-f8cc9024a5ea60a8011fbc5e0be613189807a6f505e8523dfb1d90b4806f5545\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"]}}]}",
+      "documents": [
+        {
+          "binding": {
+            "document_id": "source-2c3828471ede186a11bfddb3d9b68b05f5e1cec17759776b026859346633ea3c",
+            "path": "docs/tern-current.md",
+            "source_sha256": "803dcfd3701dc1b940611c1f7f92918788cb29cea844612015ec4b5c39c52dde"
+          },
+          "source_id": "logical-f8cc9024a5ea60a8011fbc5e0be613189807a6f505e8523dfb1d90b4806f5545",
+          "body": "{\"items\":[{\"content\":\"Tern current routing uses gate eleven after the approved change.\\n\",\"document_id\":\"source-2c3828471ede186a11bfddb3d9b68b05f5e1cec17759776b026859346633ea3c\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\",\"source_sha256\":\"803dcfd3701dc1b940611c1f7f92918788cb29cea844612015ec4b5c39c52dde\",\"source_id\":\"logical-f8cc9024a5ea60a8011fbc5e0be613189807a6f505e8523dfb1d90b4806f5545\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449\"]}",
+          "descriptor": {
+            "document_id": "source-2c3828471ede186a11bfddb3d9b68b05f5e1cec17759776b026859346633ea3c",
+            "path": "docs/tern-current.md",
+            "source_sha256": "803dcfd3701dc1b940611c1f7f92918788cb29cea844612015ec4b5c39c52dde",
+            "source_id": "logical-f8cc9024a5ea60a8011fbc5e0be613189807a6f505e8523dfb1d90b4806f5545",
+            "body_sha256": "cb7fbbd4167770fa661b36f0ed518a2c1b13807f6dc16ba78da49d81ff1e377c",
+            "body_bytes": 775,
+            "intent_id": "intent-6f6efb335f2a8587840364552ec1af48fe5ce28c355236374be89f8d5493e53c"
+          }
+        }
+      ]
+    }
+  ],
+  "scope_key": "040fd3a7cf0c6d6558265ab68641aab1e0177a3ab74f73417e5ba6bdc5189449",
+  "boundary_oracles": {
+    "new_boundary_cells": [
+      "path-policy drift preserves old bindings in challenge/evaluate/plan",
+      "allowed selected Plover beside newly denied Sandpiper history",
+      "refused request/reservation preserves whole attempts and nonce frontier"
+    ],
+    "selected_screen_views": [
+      "docs/plover-status.md",
+      "Plover status remains amber until the morning review.\n"
+    ],
+    "selected_path_calls": [
+      "docs/plover-status.md"
+    ],
+    "history_screen_calls": 0,
+    "blocked_reservation_reason": "input",
+    "blocked_frontier": "identical full journal/generations/intents/attempts rows",
+    "replacement_plan": {
+      "retire_document_ids": [
+        "source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2",
+        "source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f"
+      ],
+      "reconciliation_document_ids": [
+        "source-cc17ee2a04c3a169584a059e8b0ff85a1c04817c5d237b50c6713469b2a76cb2",
+        "source-b8e96361ed952521f773b9543ae057ec96d2b6617f6942de3a3cecc51f7ea49f",
+        "source-2c3828471ede186a11bfddb3d9b68b05f5e1cec17759776b026859346633ea3c"
+      ],
+      "authorized_mutations": 0,
+      "transport_calls": 0
+    },
+    "precall_correction": "Source path admission itself screens the path; selected dispatch must have exactly path plus text views, not only one body screen. Initial prechange2FAIL+3ERROR retained; policy-corrupt errors are actual failures."
+  },
+  "current_boundary_oracles": {
+    "public_text_rejection_reason": "approval",
+    "historical_object_public_export": "refused by current admission",
+    "forged_public_export_prepare": "input",
+    "database_frontier": "unchanged",
+    "scope": "NEW historical-factory/current-public boundary and original RetainDraft text-error compatibility"
+  }
+}
