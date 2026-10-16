@@ -13,6 +13,7 @@ import sys
 from brain_runtime import (BrainError, BrainRecordNotFound, create_task, get_record, get_task, guard_shared_text,
     load_config, mutation_lock, validate_actor)
 from memory_results import check_source, record_result
+import workspace_roots
 
 VERSION = '2025-06-18'
 # Fixed refusals that carry nothing of the request, named for the agent
@@ -65,7 +66,7 @@ def strings(values, label, count, limit):
 
 class Memory:
     def __init__(self, root, host='cli'):
-        requested = Path(root).expanduser().absolute()
+        requested = workspace_roots.long_path(Path(root).expanduser().absolute())
         self.root = requested.resolve(strict=True)
         if requested != self.root or self.root != Path(__file__).resolve().parents[2]:
             raise BrainError('Run the installed server with its own project root; symlink roots are refused')

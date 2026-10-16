@@ -106,6 +106,31 @@ def linked_state_entry(state: Path) -> Optional[Path]:
     return None
 
 
+def long_path(path: Path) -> Path:
+    """`path` with any Windows 8.3 short name spelled long; elsewhere `path`.
+
+    Path.resolve() spells a short name such as RUNNER~1 long while it resolves
+    links, so a root spelled short never equalled its resolution and was
+    refused as a link. GetLongPathNameW expands short names and keeps every
+    link, so its answer still differs from resolve() where a link is.
+    """
+    if os.name != "nt":
+        return path
+    import ctypes
+    from ctypes import wintypes
+    expand = ctypes.WinDLL("kernel32", use_last_error=True).GetLongPathNameW
+    expand.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    expand.restype = wintypes.DWORD
+    text = str(path)
+    size = expand(text, None, 0)
+    if not size:
+        return path
+    buffer = ctypes.create_unicode_buffer(size)
+    if not expand(text, buffer, size):
+        return path
+    return Path(buffer.value)
+
+
 def configuration_error() -> Optional[str]:
     """Why the attached variables cannot be honoured, or None.
 
@@ -225,9 +250,12 @@ def key_for(repository: Path, base: Path, path: Path) -> str:
     # path.relative_to(base).as_posix() by slicing the strings when `path` is
     # spelled under `base`: pathlib's version was half of a prompt's source
     # walk. Any other spelling takes pathlib's answer, or its ValueError.
+    # On Windows the drive decides too: \\srv\a.md is the share a.md on the
+    # server srv, not a file under \\srv.
     text, prefix = str(path), str(base)
     if (len(text) > len(prefix) + 1 and text.startswith(prefix)
-            and text[len(prefix)] == os.sep and not prefix.endswith(os.sep)):
+            and text[len(prefix)] == os.sep and not prefix.endswith(os.sep)
+            and path.drive == base.drive):
         relative = text[len(prefix) + 1:]
         return relative.replace(os.sep, "/") if os.sep != "/" else relative
     return path.relative_to(base).as_posix()
