@@ -13,3 +13,6 @@ infrastructure-creator/tasks/
 /docs/qa/evidence*/
 # Client-owned inputs and applications stay local to this accelerator checkout.
 **/Task/
+# Agent work journals at the repository root are local and temporary: they
+# hold absolute paths of the machine they ran on.
+/tasks/

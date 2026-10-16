@@ -201,11 +201,6 @@ jobs:
         run: python3 -m unittest tests.test_hook_wiring
       - name: Attach an edition without copying it
         run: python3 -m unittest tests.test_accelerator_attach
-      - name: Memory evaluation stand
-        # The stand runs on client prompts and stays out of CI; its as-of
-        # reconstruction, edition overlay, scoring, report and transcript
-        # parsing run here on a synthetic project, with one real refresh.
-        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot tests.test_memory_miss_audit tests.test_memory_onnx tests.test_memory_onnx_pilot
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.
@@ -218,6 +213,131 @@ jobs:
         run: python3 -m unittest tests.test_registry tests.test_open_source_kit tests.test_kit_fetcher tests.test_kit3 tests.test_kit3_catalog
       - name: Native browser harness regression tests
         run: python3 -m unittest tests.test_harness_providers tests.test_harness_run_activity tests.test_harness_commands tests.test_harness_sessions tests.test_harness_web tests.test_harness_merge tests.test_harness_merge_archive tests.test_harness_process_guard tests.test_harness_process_runtime tests.test_harness_launcher tests.test_harness_skills tests.test_harness_fleet tests.test_harness_knowledge tests.test_harness_memory_use tests.test_harness_context_usage tests.test_harness_task_context tests.test_harness_memory_draft tests.test_memory_mcp tests.test_mcp_registration tests.test_harness_setup tests.test_harness_creator tests.test_harness_results tests.test_harness_delivery tests.test_harness_clash tests.test_harness_accelerators tests.test_desktop_app tests.test_harness_mentions tests.test_harness_updates tests.test_portable_fs tests.test_windows_security tests.test_windows_commands tests.test_windows_creator
+
+  memory:
+    name: "memory (Python ${{ matrix.python }})"
+    runs-on: ubuntu-latest
+    # The memory runtime's own regression steps, split from installation:
+    # together they ran about 1000 s of that job's 20 minutes, and each
+    # half now runs beside the other. The runtime is declared for Python 3.9
+    # and later, so it runs on that floor too.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Memory evaluation stand
+        # The stand runs on client prompts and stays out of CI; its as-of
+        # reconstruction, edition overlay, scoring, report and transcript
+        # parsing run here on a synthetic project, with one real refresh.
+        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot tests.test_memory_miss_audit tests.test_memory_onnx tests.test_memory_onnx_pilot
+      - name: Memory snapshot and failed-refresh boundaries
+        run: python3 -m unittest tests.test_memory_runtime_reliability
+      - name: Native memory source diagnostics and complete-governance boundaries
+        run: python3 -m unittest tests.test_memory_source_resilience
+      - name: Native read-only startup and fresh working-state delivery
+        run: python3 -m unittest tests.test_memory_startup_readonly
+      - name: Optional local publication and native source transport
+        run: python3 -m unittest tests.test_memory_optional_publication
+      - name: Retained memory revalidates current citations
+        run: python3 -m unittest tests.test_memory_retained_citations
+      - name: Exact secret-pattern prefilters and complete cold-hook indexing
+        run: python3 -m unittest tests.test_memory_mask_prefilter
+      - name: Assigned credential prefix search and saved-memory delivery
+        run: python3 -m unittest tests.test_memory_credential_prefix
+      - name: Strict optional runtime configuration observation
+        run: python3 -m unittest tests.test_memory_config_observation
+      - name: Protected project source-ignore context
+        run: python3 -m unittest tests.test_memory_git_source_scope
+      - name: Inferred task branch identity
+        run: python3 -m unittest tests.test_memory_inferred_identity
+      - name: Portable memory CLI stream bytes
+        run: python3 -m unittest tests.test_memory_portable_output
+      - name: Generated memory identity contract
+        run: python3 -m unittest tests.test_memory_generator_identity tests.test_memory_generator_boundary tests.test_memory_generator_continuation
+      - name: Current cached-memory source ignore admission
+        run: python3 -m unittest tests.test_memory_cached_ignore tests.test_memory_cached_ignore_boundaries
+      - name: Prompt memory read hook
+        run: python3 -m unittest tests.test_memory_prompt_read tests.test_memory_prompt_generator
+      - name: Current memory temporal admission
+        run: python3 -m unittest tests.test_memory_temporal_delivery
+      - name: Current indexed secret-policy admission
+        run: python3 -m unittest tests.test_memory_secret_policy_delivery
+      - name: Exact quoted indexed-image custody
+        run: python3 -m unittest tests.test_memory_quoted_image
+      - name: Admitted rendered memory image custody
+        run: python3 -m unittest tests.test_memory_rendered_image
+      - name: Ordinary memory UTF-8 source isolation
+        run: python3 -m unittest tests.test_memory_utf8_sources
+      - name: Strict memory policy UTF-8 keys
+        run: python3 -m unittest tests.test_memory_policy_utf8
+      - name: Strict Brain and handoff UTF-8 paths
+        run: python3 -m unittest tests.test_memory_authority_utf8
+      - name: Cursor prompt report JSON transport
+        run: python3 -m unittest tests.test_memory_cursor_report
+      - name: Native CLI MCP promoted-memory roundtrips
+        run: python3 -m unittest tests.test_memory_native_roundtrip tests.test_memory_native_capture
+      - name: Typed health source-notice summaries
+        run: python3 -m unittest tests.test_memory_health_notices
+      - name: Closed-unit memory cost booking replay (offline)
+        run: python3 -m unittest tests.test_memory_cost_replay
+      - name: Final memory source-image custody
+        run: python3 -m unittest tests.test_memory_final_source_image tests.test_memory_final_task_fifo tests.test_memory_final_reader_abort
+      - name: Cursor memory rule custody
+        run: python3 -m unittest tests.test_cursor_memory_rule tests.test_cursor_portable_custody tests.test_cursor_continuation tests.test_cursor_root_rename tests.test_cursor_continuation_state
+      - name: Task-file membership follows the actual Git index
+        run: python3 -m unittest tests.test_memory_task_membership_index
+      - name: A large Brain is read once per command
+        run: python3 -m unittest tests.test_memory_brain_scale
+      - name: Fewer Git starts per prompt, every safety check kept
+        run: python3 -m unittest tests.test_memory_git_reuse
+      - name: A working task swept away by git stash or clean is recorded again
+        run: python3 -m unittest tests.test_memory_orphaned_task
+      - name: Exact memory result replay after archival and source deletion
+        run: python3 -m unittest tests.test_memory_result_replay tests.test_memory_result_fencing tests.test_memory_result_evidence
+      - name: Private Harness memory request binding
+        run: python3 -m unittest tests.test_harness_memory_binding
+      - name: Reviewed memory saves and Cursor upgrade regressions
+        run: python3 -m unittest tests.test_memory_review_regressions tests.test_memory_review_privacy tests.test_memory_review_harness tests.test_cursor_review_recovery tests.test_cursor_generator_contract tests.test_longmemeval_compile_portability
+      - name: Source-only Hindsight recall boundaries (offline and loopback)
+        run: python3 -m unittest tests.test_hindsight_recall
+      - name: Native source hints
+        run: python3 -m unittest tests.test_hindsight_native_hints
+      - name: Governed public Hindsight export drafts (offline)
+        run: python3 -m unittest tests.test_hindsight_public_export tests.test_hindsight_export_security tests.test_hindsight_export_gaps
+      - name: Durable private Hindsight ownership journal (offline SQLite)
+        run: python3 -m unittest tests.test_hindsight_journal
+      - name: Hindsight historical integrity and current dispatch admission (offline SQLite)
+        run: python3 -m unittest tests.test_hindsight_history_admission
+      - name: Hindsight forward JSON screening and cancellation (offline)
+        run: python3 -m unittest tests.test_hindsight_screen_forward
+      - name: Public OpenAPI declaration export (offline)
+        run: python3 -m unittest tests.test_hindsight_openapi_declaration
+      - name: Public LongMemEval states projection through native FTS5 (offline)
+        run: python3 -m unittest tests.test_longmemeval_projection
+      - name: Full lifecycle memory benchmark cost accounting (offline)
+        run: python3 -m unittest tests.test_memory_benchmark_cost
+      - name: Observed local LongMemEval lifecycle and native FTS5 (offline)
+        run: python3 -m unittest tests.test_longmemeval_observed
+      - name: Pinned LongMemEval API registration and invocation-bound hooks (offline)
+        run: python3 -m unittest tests.test_longmemeval_bridge
+      - name: LongMemEval local construction and callback lifecycle (offline)
+        run: python3 -m unittest tests.test_longmemeval_lifecycle
+      - name: Supplied LongMemEval provider usage before decoder (offline)
+        run: python3 -m unittest tests.test_longmemeval_provider_usage
+      - name: Invocation-owned injected Chat receipts (offline)
+        run: python3 -m unittest tests.test_longmemeval_chat_receipts
+      - name: Selected upstream async reader and sync judge ownership (offline)
+        run: python3 -m unittest tests.test_longmemeval_upstream_async tests.test_longmemeval_attribution
+      - name: Harness memory delivery, accounting and diagnostics
+        run: python3 -m unittest tests.test_harness_capsule_economy tests.test_harness_cost_observation tests.test_harness_memory_metadata tests.test_harness_native_diagnostics tests.test_harness_reviewed_delivery_json tests.test_harness_sdd tests.test_harness_unattended_capsule_json
+      - name: Promotion admission
+        run: python3 -m unittest tests.test_promotion_admission
 
   windows-harness:
     name: "Windows Harness (Python 3.13)"
@@ -244,6 +364,53 @@ jobs:
           tests.test_windows_commands
           tests.test_windows_creator
           tests.test_windows_discovery
+          tests.test_windows_memory_hooks
+          tests.test_cursor_portable_custody
+          tests.test_cursor_continuation
+          tests.test_cursor_continuation_state
+          tests.test_memory_source_resilience
+          tests.test_memory_startup_readonly
+          tests.test_memory_optional_publication
+          tests.test_memory_retained_citations
+          tests.test_memory_mask_prefilter
+          tests.test_memory_credential_prefix
+          tests.test_memory_config_observation
+          tests.test_memory_git_source_scope
+          tests.test_memory_inferred_identity
+          tests.test_memory_portable_output
+          tests.test_memory_generator_identity
+          tests.test_memory_generator_boundary
+          tests.test_memory_generator_continuation
+          tests.test_memory_cached_ignore
+          tests.test_memory_cached_ignore_boundaries
+          tests.test_memory_final_source_image
+          tests.test_memory_final_task_fifo
+          tests.test_memory_final_reader_abort
+          tests.test_memory_temporal_delivery
+          tests.test_memory_secret_policy_delivery
+          tests.test_memory_quoted_image
+          tests.test_memory_rendered_image
+          tests.test_memory_utf8_sources
+          tests.test_memory_policy_utf8
+          tests.test_memory_authority_utf8
+          tests.test_memory_cursor_report
+          tests.test_memory_native_roundtrip
+          tests.test_memory_native_capture
+          tests.test_memory_health_notices
+          tests.test_memory_cost_replay
+          tests.test_memory_prompt_generator
+          tests.test_hindsight_openapi_declaration
+          tests.test_cursor_root_rename
+          tests.test_memory_result_fencing
+          tests.test_memory_result_evidence
+          tests.test_memory_brain_scale
+          tests.test_memory_orphaned_task
+          tests.test_memory_review_regressions
+          tests.test_memory_review_privacy
+          tests.test_memory_review_harness
+          tests.test_cursor_review_recovery
+          tests.test_cursor_generator_contract
+          tests.test_longmemeval_compile_portability
           tests.test_ai_system_portable
           tests.test_desktop_app
 

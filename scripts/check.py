@@ -266,6 +266,17 @@ HARNESS_TESTS = (
 # tests/test_check.py then holds them to that workflow like every other entry.
 # A guard never hides a step CI runs: the drift test fails on it, and here it
 # fails under --strict.
+# Harness modules of the memory delivery and accounting paths; none of
+# them ran anywhere before the memory job.
+HARNESS_MEMORY_TESTS = (
+    "tests.test_harness_capsule_economy",
+    "tests.test_harness_cost_observation",
+    "tests.test_harness_memory_metadata",
+    "tests.test_harness_native_diagnostics",
+    "tests.test_harness_reviewed_delivery_json",
+    "tests.test_harness_sdd",
+    "tests.test_harness_unattended_capsule_json",
+)
 HARNESS_TESTS_NEWER = (
     "tests.test_harness_merge",
     "tests.test_harness_merge_archive",
@@ -296,7 +307,16 @@ SYSTEM_TESTS = (
 SYSTEM_CATALOG = "docs/examples/ai-system/system.json"
 # Interpreter pins as ci.yml writes them ("3.x" is the interpreter running this
 # script); tests/test_check.py compares them with every setup-python step.
+# Variables that point Git at another repository, index or object store.
+GIT_SELECTORS = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE", "GIT_REPLACE_REF_BASE",
+})
 SYSTEM_PYTHONS = ("3.9", "3.x")
+# The memory runtime is declared for Python 3.9 and later; its own steps run
+# on that floor and on the current release.
+MEMORY_PYTHONS = ("3.9", "3.x")
 RELIABILITY_PYTHON = "3.9"
 WINDOWS_HARNESS_TESTS = (
     "tests.test_harness_windows",
@@ -308,6 +328,53 @@ WINDOWS_HARNESS_TESTS = (
     "tests.test_windows_commands",
     "tests.test_windows_creator",
     "tests.test_windows_discovery",
+    "tests.test_windows_memory_hooks",
+    "tests.test_cursor_portable_custody",
+    "tests.test_cursor_continuation",
+    "tests.test_cursor_continuation_state",
+    "tests.test_memory_source_resilience",
+    "tests.test_memory_startup_readonly",
+    "tests.test_memory_optional_publication",
+    "tests.test_memory_retained_citations",
+    "tests.test_memory_mask_prefilter",
+    "tests.test_memory_credential_prefix",
+    "tests.test_memory_config_observation",
+    "tests.test_memory_git_source_scope",
+    "tests.test_memory_inferred_identity",
+    "tests.test_memory_portable_output",
+    "tests.test_memory_generator_identity",
+    "tests.test_memory_generator_boundary",
+    "tests.test_memory_generator_continuation",
+    "tests.test_memory_cached_ignore",
+    "tests.test_memory_cached_ignore_boundaries",
+    "tests.test_memory_final_source_image",
+    "tests.test_memory_final_task_fifo",
+    "tests.test_memory_final_reader_abort",
+    "tests.test_memory_temporal_delivery",
+    "tests.test_memory_secret_policy_delivery",
+    "tests.test_memory_quoted_image",
+    "tests.test_memory_rendered_image",
+    "tests.test_memory_utf8_sources",
+    "tests.test_memory_policy_utf8",
+    "tests.test_memory_authority_utf8",
+    "tests.test_memory_cursor_report",
+    "tests.test_memory_native_roundtrip",
+    "tests.test_memory_native_capture",
+    "tests.test_memory_health_notices",
+    "tests.test_memory_cost_replay",
+    "tests.test_memory_prompt_generator",
+    "tests.test_hindsight_openapi_declaration",
+    "tests.test_cursor_root_rename",
+    "tests.test_memory_result_fencing",
+    "tests.test_memory_result_evidence",
+    "tests.test_memory_brain_scale",
+    "tests.test_memory_orphaned_task",
+    "tests.test_memory_review_regressions",
+    "tests.test_memory_review_privacy",
+    "tests.test_memory_review_harness",
+    "tests.test_cursor_review_recovery",
+    "tests.test_cursor_generator_contract",
+    "tests.test_longmemeval_compile_portability",
     "tests.test_ai_system_portable",
     "tests.test_desktop_app",
 )
@@ -343,6 +410,71 @@ def _parity_commands(edition: str) -> List[Command]:
             unittests("Generator-asset parity regression tests", ["tests.test_asset_parity"], leg=edition),
         ]
     return commands
+
+
+def _memory_commands(version: str) -> List[Command]:
+    leg = f"Python {version}"
+    python = "" if version == "3.x" else version
+
+    def unittests_leg(name: str, modules: Sequence[str], **options) -> Command:
+        return unittests(name, modules, leg=leg, python=python, **options)
+
+    return [
+                unittests_leg("Memory evaluation stand", ["tests.test_memory_eval", "tests.test_memory_graph_pilot",
+                                                      "tests.test_memory_miss_audit", "tests.test_memory_onnx",
+                                                      "tests.test_memory_onnx_pilot"]),
+                unittests_leg('Memory snapshot and failed-refresh boundaries', ['tests.test_memory_runtime_reliability']),
+                unittests_leg('Native memory source diagnostics and complete-governance boundaries', ['tests.test_memory_source_resilience']),
+                unittests_leg('Native read-only startup and fresh working-state delivery', ['tests.test_memory_startup_readonly']),
+                unittests_leg('Optional local publication and native source transport', ['tests.test_memory_optional_publication']),
+                unittests_leg('Retained memory revalidates current citations', ['tests.test_memory_retained_citations']),
+                unittests_leg('Exact secret-pattern prefilters and complete cold-hook indexing', ['tests.test_memory_mask_prefilter']),
+                unittests_leg('Assigned credential prefix search and saved-memory delivery', ['tests.test_memory_credential_prefix']),
+                unittests_leg('Strict optional runtime configuration observation', ['tests.test_memory_config_observation']),
+                unittests_leg('Protected project source-ignore context', ['tests.test_memory_git_source_scope']),
+                unittests_leg('Inferred task branch identity', ['tests.test_memory_inferred_identity']),
+                unittests_leg('Portable memory CLI stream bytes', ['tests.test_memory_portable_output']),
+                unittests_leg('Generated memory identity contract', ['tests.test_memory_generator_identity', 'tests.test_memory_generator_boundary', 'tests.test_memory_generator_continuation']),
+                unittests_leg('Current cached-memory source ignore admission', ['tests.test_memory_cached_ignore', 'tests.test_memory_cached_ignore_boundaries']),
+                unittests_leg('Prompt memory read hook', ['tests.test_memory_prompt_read', 'tests.test_memory_prompt_generator']),
+                unittests_leg('Current memory temporal admission', ['tests.test_memory_temporal_delivery']),
+                unittests_leg('Current indexed secret-policy admission', ['tests.test_memory_secret_policy_delivery']),
+                unittests_leg('Exact quoted indexed-image custody', ['tests.test_memory_quoted_image']),
+                unittests_leg('Admitted rendered memory image custody', ['tests.test_memory_rendered_image']),
+                unittests_leg('Ordinary memory UTF-8 source isolation', ['tests.test_memory_utf8_sources']),
+                unittests_leg('Strict memory policy UTF-8 keys', ['tests.test_memory_policy_utf8']),
+                unittests_leg('Strict Brain and handoff UTF-8 paths', ['tests.test_memory_authority_utf8']),
+                unittests_leg('Cursor prompt report JSON transport', ['tests.test_memory_cursor_report']),
+                unittests_leg('Native CLI MCP promoted-memory roundtrips', ['tests.test_memory_native_roundtrip', 'tests.test_memory_native_capture']),
+                unittests_leg('Typed health source-notice summaries', ['tests.test_memory_health_notices']),
+                unittests_leg('Final memory source-image custody', ['tests.test_memory_final_source_image', 'tests.test_memory_final_task_fifo', 'tests.test_memory_final_reader_abort']),
+                unittests_leg('Cursor memory rule custody', ['tests.test_cursor_memory_rule', 'tests.test_cursor_portable_custody', 'tests.test_cursor_continuation', 'tests.test_cursor_root_rename', 'tests.test_cursor_continuation_state']),
+                unittests_leg('Task-file membership follows the actual Git index', ['tests.test_memory_task_membership_index']),
+                unittests_leg('A large Brain is read once per command', ['tests.test_memory_brain_scale']),
+                unittests_leg('Fewer Git starts per prompt, every safety check kept', ['tests.test_memory_git_reuse']),
+                unittests_leg('A working task swept away by git stash or clean is recorded again', ['tests.test_memory_orphaned_task']),
+                unittests_leg('Exact memory result replay after archival and source deletion', ['tests.test_memory_result_replay', 'tests.test_memory_result_fencing', 'tests.test_memory_result_evidence']),
+                unittests_leg('Private Harness memory request binding', ['tests.test_harness_memory_binding']),
+                unittests_leg('Reviewed memory saves and Cursor upgrade regressions', ['tests.test_memory_review_regressions', 'tests.test_memory_review_privacy', 'tests.test_memory_review_harness', 'tests.test_cursor_review_recovery', 'tests.test_cursor_generator_contract', 'tests.test_longmemeval_compile_portability']),
+                unittests_leg('Source-only Hindsight recall boundaries (offline and loopback)', ['tests.test_hindsight_recall']),
+                unittests_leg('Native source hints', ['tests.test_hindsight_native_hints']),
+                unittests_leg('Governed public Hindsight export drafts (offline)', ['tests.test_hindsight_public_export', 'tests.test_hindsight_export_security', 'tests.test_hindsight_export_gaps']),
+                unittests_leg('Durable private Hindsight ownership journal (offline SQLite)', ['tests.test_hindsight_journal']),
+                unittests_leg('Hindsight historical integrity and current dispatch admission (offline SQLite)', ['tests.test_hindsight_history_admission']),
+                unittests_leg('Hindsight forward JSON screening and cancellation (offline)', ['tests.test_hindsight_screen_forward']),
+                unittests_leg('Public OpenAPI declaration export (offline)', ['tests.test_hindsight_openapi_declaration']),
+                unittests_leg('Public LongMemEval states projection through native FTS5 (offline)', ['tests.test_longmemeval_projection']),
+                unittests_leg('Full lifecycle memory benchmark cost accounting (offline)', ['tests.test_memory_benchmark_cost']),
+                unittests_leg('Closed-unit memory cost booking replay (offline)', ['tests.test_memory_cost_replay']),
+                unittests_leg('Observed local LongMemEval lifecycle and native FTS5 (offline)', ['tests.test_longmemeval_observed']),
+                unittests_leg('Pinned LongMemEval API registration and invocation-bound hooks (offline)', ['tests.test_longmemeval_bridge']),
+                unittests_leg('LongMemEval local construction and callback lifecycle (offline)', ['tests.test_longmemeval_lifecycle']),
+                unittests_leg('Supplied LongMemEval provider usage before decoder (offline)', ['tests.test_longmemeval_provider_usage']),
+                unittests_leg('Invocation-owned injected Chat receipts (offline)', ['tests.test_longmemeval_chat_receipts']),
+                unittests_leg('Selected upstream async reader and sync judge ownership (offline)', ['tests.test_longmemeval_upstream_async', 'tests.test_longmemeval_attribution']),
+                unittests_leg("Harness memory delivery, accounting and diagnostics", HARNESS_MEMORY_TESTS),
+                unittests_leg("Promotion admission", ["tests.test_promotion_admission"]),
+    ]
 
 
 def _system_commands(version: str) -> List[Command]:
@@ -473,9 +605,6 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                 unittests("Test selected-tool clean installations", ["tests.test_installation"]),
                 unittests("Hook wiring runs from any working directory", ["tests.test_hook_wiring"]),
                 unittests("Attach an edition without copying it", ["tests.test_accelerator_attach"]),
-                unittests("Memory evaluation stand", ["tests.test_memory_eval", "tests.test_memory_graph_pilot",
-                                                      "tests.test_memory_miss_audit", "tests.test_memory_onnx",
-                                                      "tests.test_memory_onnx_pilot"]),
                 unittests("Preserve framework-specific skill semantics", ["tests.test_framework_semantics"]),
                 unittests("Project Brain active-alias creation is atomic", ["tests.test_brain_create_atomic_alias"]),
                 unittests("Generated memory promotion preserves admission fairness", ["tests.test_generator_promotion_admission"]),
@@ -489,6 +618,15 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                     paths=guarded(HARNESS_TESTS_NEWER),
                 ),
             ),
+        ),
+        Group(
+            name="memory",
+            matrix=True,
+            title=f"memory (matrix: Python {', '.join(MEMORY_PYTHONS)})",
+            job="memory",
+            timeout_minutes=15,
+            weight=95,
+            commands=tuple(command for version in MEMORY_PYTHONS for command in _memory_commands(version)),
         ),
         Group(
             name="harness-fleet",
@@ -903,7 +1041,11 @@ class Runner:
         assert self._work is not None
         interpreter = find_python(command.python)
         assert interpreter is not None
-        env = dict(os.environ)
+        # Git's repository selectors are dropped: run from a Git hook (a
+        # pre-commit `check.py`), GIT_INDEX_FILE and GIT_DIR name the commit
+        # being made, and a test's `git add` in its own temporary repository
+        # would write into that index. CI sets none of them.
+        env = {name: value for name, value in os.environ.items() if name not in GIT_SELECTORS}
         env["PATH"] = str(self._shim(interpreter)) + os.pathsep + env.get("PATH", "")
         env.update(dict(group.env))
         env.update(dict(command.env))

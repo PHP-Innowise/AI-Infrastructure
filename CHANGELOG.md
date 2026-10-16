@@ -375,6 +375,21 @@ edition's own files remain in that edition's changelog.
   cannot be read)" rather than "not recorded yet"; an invalid record cost the
   turn its whole capsule before. An invalid record's absolute path no longer
   reaches prompts or messages.
+- `check.py` drops Git's repository selectors (`GIT_DIR`, `GIT_INDEX_FILE`,
+  `GIT_WORK_TREE`, ...) from the commands it runs: from a pre-commit hook they
+  name the commit being made, and a test's `git add` in its own temporary
+  repository wrote into that index. The Cursor rule tests prepare their
+  fixtures in a clean environment too.
+
+- CI: the memory runtime's regression steps left the `installation` job for a
+  `memory` job of their own, which runs beside it on Python 3.9 - the floor the
+  runtime is declared for, where no memory test ran before - and on the
+  current release. `installation` had reached about 1000 s of its 20 minutes.
+  The memory job also runs eight test modules no workflow ran: the Harness
+  capsule economy, cost observation, memory metadata, native diagnostics,
+  reviewed and unattended capsule JSON and SDD modules, and promotion
+  admission. All 1322 tests of the job pass on Python 3.9.
+
 - Windows: the Brain refuses only reparse points that redirect a path - a
   symbolic link or a junction, or one whose tag cannot be read. A OneDrive
   placeholder or a deduplicated file is the file itself with its storage
@@ -665,6 +680,12 @@ edition's own files remain in that edition's changelog.
   itself with `source_changed`. Recall counts `socket.timeout` as a timeout on
   Python 3.9, and the journal test removes its SQLite authorizer the way
   Python before 3.11 needs.
+- Tests and CI: `test_memory_result_evidence` and `test_hindsight_export_gaps`
+  run in CI and `check.py`; `test_memory_optional_publication` no longer
+  leaves its temporary runtime modules in `sys.modules`, which failed 39 tests
+  of the Windows harness job. The root `tasks/` (agent journals with absolute
+  paths) is ignored, and the installer inventories carry `context_cli.py`.
+
 - Remove the Claude/Codex prompt supervisor from the read hooks; they call
   `context.py refresh` directly again under the one `CONTEXT_HOOK_BUDGET`.
   The supervisor refused any budget above 5 seconds and any prompt above
