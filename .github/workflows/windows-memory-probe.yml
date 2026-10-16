@@ -24,6 +24,11 @@ jobs:
       - name: Platform facts the memory suites depend on
         shell: pwsh
         run: python .github/windows-probe/probe.py
+      - name: Promotion failures with full diffs
+        if: matrix.python == '3.13'
+        continue-on-error: true
+        shell: pwsh
+        run: python .github/windows-probe/maxdiff.py tests.test_memory_native_roundtrip tests.test_memory_review_harness
 
   suites:
     name: "Memory suites (${{ matrix.shard }})"
