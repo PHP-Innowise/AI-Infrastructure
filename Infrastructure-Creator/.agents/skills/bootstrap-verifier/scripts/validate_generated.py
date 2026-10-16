@@ -67,6 +67,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -899,7 +900,28 @@ def native_capture_hook_contract(source: str, edition: str, name: str) -> bool:
             and any('NATIVE_STATUS=$?' in line for line in lines))
 
 
+def hook_shell() -> str | None:
+    """The bash that hosts start hook scripts with, which checks their syntax.
+
+    On Windows that is Git for Windows' bin\\bash.exe: CLAUDE_CODE_GIT_BASH_PATH
+    names it for Claude Code, otherwise it is found beside the git on PATH. A
+    bare "bash" there starts WSL's launcher in System32, which CreateProcess
+    searches before PATH, and every hook failed `bash -n`.
+    """
+    if os.name != "nt":
+        return shutil.which("bash")
+    configured = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if configured:
+        return configured if Path(configured).is_file() else None
+    git = shutil.which("git")
+    for folder in Path(git).resolve().parents if git else ():
+        if (folder / "bin" / "bash.exe").is_file():
+            return str(folder / "bin" / "bash.exe")
+    return None
+
+
 def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> None:
+    shell = hook_shell()
     for edition in editions:
         hooks_rel, _ = EDITION_HOOK_WIRING[edition]
         hd = target / hooks_rel
@@ -981,11 +1003,15 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
                                   "use native cursor-rule maintenance instead")
         for rel in owned_children(files, hooks_rel, ".sh"):
             sh = target / rel
-            result = subprocess.run(
-                ["bash", "-n", str(sh)], capture_output=True, text=True
-            )
-            if result.returncode != 0:
-                errors.append(f"{sh}: bash -n failed: {result.stderr.strip()}")
+            if shell is None:
+                errors.append(f"{sh}: bash -n not run: no bash to run hooks with "
+                              "(on Windows, Git for Windows' bash)")
+            else:
+                result = subprocess.run(
+                    [shell, "-n", str(sh)], capture_output=True, text=True
+                )
+                if result.returncode != 0:
+                    errors.append(f"{sh}: bash -n failed: {result.stderr.strip()}")
             mode = sh.stat().st_mode
             if os.name != 'nt' and not (mode & 0o111):
                 errors.append(f"{sh}: not executable (chmod +x needed)")
