@@ -28,6 +28,21 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A pause of a second no longer costs a query its memory — 2026-10-16
+
+- `refresh`, `retrieve`, `context`, `hook-context` and `index` ask Git for the
+  project's source frame before anything else when they have no branch to
+  admit - an explicit `CONTEXT_TASK_ID`, an agent's own `retrieve`, a detached
+  HEAD - and gave that one `git rev-parse` one second, half of what every
+  other Git source check has. A windows-latest runner in a burst of slowness
+  failed a refresh with "Git source context unavailable": that check was the
+  refresh's only Git process, and the whole test took 2.17 s, too short for
+  any two-second check to have run out. On 8 runners over 30 minutes the
+  check never took more than 535 ms in about 24,500 runs, but on three of
+  the machines a 5 ms sleep in the probe woke up to 963 ms late, and one
+  second left no margin. The check now has the same two seconds; a Git that
+  does not answer within them still ends the command with that error.
+
 ### Memory suites on native Windows — 2026-10-16
 
 - The 23 memory regression suites that failed on their first native Windows
