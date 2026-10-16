@@ -253,6 +253,9 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - memory-seed carries the runtime's Windows fixes: file identity under
   Python 3.12+, Memory Bank index paths, 8.3 project roots for the memory MCP
   server and its registration, and source hints through NT handles.
+- memory-seed's runtime gives the Git frame check before a query with no
+  branch to admit two seconds, as every other Git source check has: with one,
+  a Windows runner that paused for about a second cost a refresh its memory.
 
 - Seed the structured native result coordinator and require it in the runtime skeleton. Generated prompt/Stop hooks use one bounded same-agent save with guarded revisions and Cursor loop limits, retaining the existing Harness result path.
 

@@ -1059,6 +1059,21 @@ change below has a test that fails on `a47e1eb8`.
 - Keep routine native memory capture silent and preserve the original substantive answer, source citations and requested format after successful or skipped capture. A save acknowledgement must not replace the task result consumed as the last agent message. Refused saves retain their warning alongside the answer.
 - Reproduced against an actual Codex Stop continuation; empty reusable learnings remain valid and do not create findings merely to pass a lifecycle probe.
 
+### A pause of a second no longer costs a query its memory — 2026-10-16
+
+- `refresh`, `retrieve`, `context`, `hook-context` and `index` ask Git for the
+  project's source frame before anything else when they have no branch to
+  admit - an explicit `CONTEXT_TASK_ID`, an agent's own `retrieve`, a detached
+  HEAD - and gave that one `git rev-parse` one second, half of what every
+  other Git source check has. A windows-latest runner in a burst of slowness
+  failed a refresh with "Git source context unavailable": that check was the
+  refresh's only Git process, and the whole test took 2.17 s, too short for
+  any two-second check to have run out. On 8 runners over 30 minutes the
+  check never took more than 535 ms in about 24,500 runs, but on three of
+  the machines a 5 ms sleep in the probe woke up to 963 ms late, and one
+  second left no margin. The check now has the same two seconds; a Git that
+  does not answer within them still ends the command with that error.
+
 ### Automatic promotion apply admission — 2026-10-16
 
 - Recheck configured near-duplicate admission inside automatic promotion apply, including stalled retries. A chunk left by an interrupted apply cannot be duplicated under a later date; the original chunk and authoritative records remain untouched. A valid revision still excludes its recorded predecessor.

@@ -8439,10 +8439,13 @@ def _command() -> int:
             delivery_admission = _branch_admission(repository, expected_branch)
         elif arguments.command in ("refresh", "context", "retrieve", "hook-context", "index"):
             # Even an empty candidate list must not let a foreign/unknown source
-            # context create state or return unverified working memory.
+            # context create state or return unverified working memory. Two
+            # seconds, as every other Git source check has: with one, a pause
+            # of about a second on a Windows runner - whose `git rev-parse`
+            # takes 40 ms - cost a refresh its memory.
             environment = _source_git_environment()
             _source_git_frame(workspace_roots.project_root(repository), environment,
-                              time.monotonic() + 1.0)
+                              time.monotonic() + 2.0)
         if workspace_roots.is_attached(repository) and os.name != "nt":
             # Attached state is the project's memory kept outside it, so it is
             # its owner's alone: whatever this run creates there - records, the

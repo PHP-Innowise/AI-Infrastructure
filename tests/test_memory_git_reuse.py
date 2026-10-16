@@ -5,7 +5,7 @@ checks of three processes each. The branch is now asked once and re-checked
 by the checkout's HEAD identity, and the second ignore check reuses the frame
 the first one confirmed while every file that decides it is unchanged. These
 tests run the real CLI and real Git through a logging shim, and move the
-branch or the repository at the worst moment.
+branch or the repository at the worst moment, or make Git slow to answer.
 """
 from __future__ import annotations
 import json
@@ -99,6 +99,20 @@ exit $status
     def calls(self):
         return self.log.read_text(encoding='utf-8').splitlines() if self.log.exists() else []
 
+    def unbranched(self, action):
+        # Without a branch to admit - an explicit task, an agent's own
+        # retrieval - a command asks Git for the source frame before anything.
+        commands = {'refresh': ['refresh', '--host', 'claude', '--query', QUERY, '--task-id', TASK,
+                                '--ephemeral', '--sanitize'],
+                    'retrieve': ['retrieve', QUERY, '--task-id', TASK]}
+        results = {}
+        for name, arguments in commands.items():
+            (self.base / 'answered').unlink(missing_ok=True)
+            results[name] = subprocess.run(
+                [sys.executable, str(self.root / 'memory-bank/scripts/context.py'), *arguments],
+                cwd=self.root, env=self.shim(action), capture_output=True, text=True, timeout=120)
+        return results
+
     def test_a_prompt_asks_the_branch_once_and_the_frame_twice(self):
         full_capsule(self.root)  # counts the Git calls of the full search path
         result = self.refresh(self.shim())
@@ -159,6 +173,28 @@ exit $status
         self.assertNotEqual(0, result.returncode)
         self.assertIn('Git source context unavailable', result.stderr)
         self.assertNotIn('working: ' + TASK, result.stdout)
+
+    def test_a_slow_git_answer_keeps_a_query_without_a_branch(self):
+        # That frame check had one second, half of every other Git source
+        # check's two: a pause of about a second on a Windows runner - whose
+        # `git rev-parse` takes 40 ms - cost a refresh its memory. Here the
+        # first answer each command gets takes 1.2 seconds.
+        full_capsule(self.root)  # the editions ship recall; the document shows the search ran
+        results = self.unbranched(f'case "$*" in *rev-parse*) [ -e "{self.base}/answered" ] || '
+                                  f'{{ touch "{self.base}/answered"; sleep 1.2; }} ;; esac')
+        for name, result in results.items():
+            with self.subTest(command=name):
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn('docs/ledger.md', result.stdout)
+
+    def test_a_git_that_does_not_answer_in_time_still_fails_closed(self):
+        full_capsule(self.root)  # a full search would deliver the document
+        results = self.unbranched('case "$*" in *rev-parse*) exec sleep 5 ;; esac')
+        for name, result in results.items():
+            with self.subTest(command=name):
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn('Git source context unavailable', result.stderr)
+                self.assertNotIn('docs/ledger.md', result.stdout)
 
 
 @unittest.skipUnless(shutil.which('git'), 'Git')
