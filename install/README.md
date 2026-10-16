@@ -18,7 +18,9 @@ either of those, see the [Open-Source Kit](open-source-kit/README.md).
 ## Prerequisites
 
 - Clone or check out the accelerator repository separately from the target.
-- Use Python 3.9 or newer.
+- Use Python 3.9 or newer. The hooks find it as `python3`; on native Windows
+  (Git Bash) also as `python` or `py -3`, the names the python.org installer
+  provides.
 - Put the target project in a clean, recoverable Git state.
 - Back up existing AI configuration, policies, Memory Bank, and Project Brain
   data.

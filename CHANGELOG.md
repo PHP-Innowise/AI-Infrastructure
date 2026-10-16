@@ -544,6 +544,12 @@ edition's own files remain in that edition's changelog.
   the process directory and no longer reports a false incomplete; an
   unreadable receipt with no rule no longer blocks the next write; short
   acknowledgements ("sure", "go ahead", "давай") keep the rule's topic.
+- `install_accelerator.py --sync` identifies a PHP Core installation (its file
+  names tie with Laravel and Symfony; the larger share of the edition's own
+  inventory now decides), so the update path - and the Harness's own sync on
+  opening a project - reaches PHP Core projects. A project holding only a copy
+  of the memory runtime, with no tool's files, is not an installation and is
+  no longer filled with one.
 - Tests: fixtures updated to the image-carrying capsule contract and to the
   receipts-after-publication order; a fixed 2026-11-13 review date that would
   have failed CI from 14 November moved to 2099; imported temporary runtimes
