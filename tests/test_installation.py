@@ -305,9 +305,14 @@ class InventoryTest(unittest.TestCase):
                     self.assertIn(path, excluded)
                     self.assertTrue((ROOT / EDITION_PATHS[edition] / path).is_file())
                     self.assertIn(path, tracked)
-            # Client inputs remain local, outside both the tracked tree and its inventory.
-            self.assertFalse(any(path.startswith("Task/") for path in tracked))
-            self.assertFalse(any(path.startswith("Task/") for path in excluded))
+            # Only the assignment is tracked; implementations remain local.
+            client_inputs = {path for path in tracked if path.startswith("Task/")}
+            self.assertTrue(client_inputs)
+            self.assertTrue(all(path.split("/", 2)[1] in {"Epics", "Epics-Project", "designs"}
+                                for path in client_inputs))
+            self.assertFalse(any(path.startswith(("Task/app/", "Task/project-work/"))
+                                 for path in tracked))
+            self.assertEqual(client_inputs, {path for path in excluded if path.startswith("Task/")})
             self.assertFalse(any(path.startswith("Task/")
                                  for paths in data["installed"].values() for path in paths))
 

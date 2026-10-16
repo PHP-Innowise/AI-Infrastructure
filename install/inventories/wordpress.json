@@ -643,6 +643,8 @@
     ".cursor-plugin/plugin.json",
     ".install/gitattributes",
     "CHANGELOG.md",
+    "Task/Epics/Epic-01_Content_Platform_SPEC.md",
+    "Task/designs/.gitkeep",
     "examples/completed-task/writing-plans-plan.md",
     "examples/context-summary.md",
     "examples/pr-description.md",

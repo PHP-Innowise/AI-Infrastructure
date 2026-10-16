@@ -65,8 +65,9 @@ accelerator: policies, native tool integrations, runtime scripts, workflow
 documentation, templates, Memory Bank, Project Brain, living-spec and
 lowercase `tasks/` scaffolds. Source-only research, test suites and worked
 examples remain in this repository but are not copied into a consuming project.
-Uppercase `Task/` contents are local client inputs, ignored by this repository
-and absent from its versioned payload.
+Only uppercase `Task/` assignment requirements, backlogs and design inputs are
+tracked, listed under `excluded_tracked_paths` and absent from the installed
+payload. `Task/app/` and generated `Task/project-work/` remain untracked locally.
 
 Memory written while working inside an edition is source-only too. Every
 Memory Bank chunk (`memory-bank/chunks/**`) and the governed Brain runtime
