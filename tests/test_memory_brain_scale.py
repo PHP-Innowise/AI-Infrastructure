@@ -204,7 +204,12 @@ class BrainScaleTests(unittest.TestCase):
         real_scandir = os.scandir
         def scandir(directory):
             if str(directory).endswith('findings'):
-                (Path(directory) / f'.churn-{len(os.listdir(directory))}').write_text('x', encoding='utf-8')
+                churn = len(os.listdir(directory))
+                (Path(directory) / f'.churn-{churn}').write_text('x', encoding='utf-8')
+                # Windows' file times advance only every few milliseconds: two
+                # writes in one tick left the directory's time as it was, and
+                # the listing looked settled. Each churn moves it on.
+                os.utime(directory, ns=(churn * 10**9, churn * 10**9))
             return real_scandir(directory)
         with mock.patch.object(self.brain.os, 'scandir', scandir), mock.patch.object(self.brain.time, 'sleep'):
             with self.assertRaisesRegex(self.brain.BrainError, 'inventory unavailable'):

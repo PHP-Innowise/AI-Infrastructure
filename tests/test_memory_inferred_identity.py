@@ -175,7 +175,14 @@ fi
         before_db, before_shared = self.database.read_bytes(), self.shared()
         self.before_guard_state = self.guard_state()
         self.branch_before_guard = self.git_call('symbolic-ref', '--quiet', '--short', 'HEAD').stdout.decode('utf-8').rstrip('\n')
-        result = subprocess.run([BASH, str(hook)], cwd=self.root, env=environment,
+        command = [BASH, str(hook)]
+        if os.name == 'nt':
+            # Git for Windows' bin\bash.exe puts its own mingw64\bin and
+            # usr\bin - git.exe among them - before PATH. The shell it starts
+            # puts the shim first again and runs the hook in a child bash.
+            command = [BASH, '-c', 'PATH="$(cygpath -u "$1"):$PATH"; exec bash "$2"', 'otter',
+                       str(binaries), str(hook)]
+        result = subprocess.run(command, cwd=self.root, env=environment,
                                 input=json.dumps({'prompt': PUBLIC['query']}).encode('utf-8'),
                                 capture_output=True, timeout=15)
         observed = self.observe(host, result)
