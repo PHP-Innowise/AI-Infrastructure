@@ -325,9 +325,53 @@ def timestamp_granularity():
     shutil.rmtree(directory)
 
 
+def git_timing():
+    root = Path(tempfile.mkdtemp(prefix="probe-git-")).resolve()
+    copy_runtime(root)
+    (root / "specs").mkdir()
+    (root / "specs/kite.md").write_bytes(b"# Kite\n\nKites glide.\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_"))}
+    env.update(GIT_OPTIONAL_LOCKS="0", PYTHONDONTWRITEBYTECODE="1")
+    subprocess.run(["git", "init", "-q", str(root)], env=env, check=True)
+    command = ["git", "-C", str(root), "rev-parse", "--show-toplevel", "--show-prefix", "--absolute-git-dir"]
+    for attempt in range(8):
+        started = time.monotonic()
+        subprocess.run(command, env=env, capture_output=True)
+        show(f"git rev-parse {attempt} (ms)", round((time.monotonic() - started) * 1000))
+    sys.path.insert(0, str(root / "memory-bank/scripts"))
+    names = [leaf.stem for leaf in (root / "memory-bank/scripts").glob("*.py")]
+    previous = {name: sys.modules.pop(name) for name in names if name in sys.modules}
+    try:
+        roots = importlib.import_module("workspace_roots")
+        for attempt in range(8):
+            started = time.monotonic()
+            try:
+                roots._source_git_ignored(root, ["specs/kite.md"], 30.0)
+                outcome = "ok"
+            except roots.SourceGitError:
+                outcome = traceback.format_exc().splitlines()[-3:]
+            show(f"_source_git_ignored {attempt} (ms)", (round((time.monotonic() - started) * 1000), outcome))
+    finally:
+        sys.path.pop(0)
+        for name in names:
+            sys.modules.pop(name, None)
+        sys.modules.update(previous)
+    cli = root / "memory-bank/scripts/context.py"
+    subprocess.run([sys.executable, "-B", str(cli), "--root", str(root), "start", "--task-id", "kite/one",
+                    "--goal", "Kite gliding", "--json"], env=env, cwd=root, capture_output=True, timeout=60)
+    for attempt in range(6):
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, "-B", str(cli), "--root", str(root), "refresh", "--query", "go on",
+                                 "--task-id", "kite/one", "--host", "codex", "--gate", "shadow", "--ephemeral",
+                                 "--json", "--sanitize"], env=env, cwd=root, capture_output=True, timeout=60)
+        show(f"refresh {attempt} (ms)", (round((time.monotonic() - started) * 1000), result.returncode,
+                                         result.stderr[-200:]))
+    shutil.rmtree(root, ignore_errors=True)
+
+
 def main():
     for function in (platform_facts, file_stats, directory_stats, bash_and_git, timestamp_granularity,
-                     learning_image, cursor_topic):
+                     git_timing, learning_image, cursor_topic):
         experiment(function)
 
 
