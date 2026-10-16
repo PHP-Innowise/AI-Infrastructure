@@ -131,6 +131,22 @@ def long_path(path: Path) -> Path:
     return Path(buffer.value)
 
 
+def change_time_ns(image: os.stat_result) -> int:
+    """st_ctime_ns as a path's stat and an open file's fstat both report it.
+
+    Python 3.12+ on Windows gives os.stat() and os.lstat() the creation time
+    as st_ctime_ns and os.fstat() the last change time, so a file nobody
+    touched compared unequal to itself. Both report the creation time as
+    st_birthtime_ns there, as earlier Pythons do st_ctime_ns; elsewhere
+    st_ctime_ns is the inode change time in both.
+    """
+    if os.name == "nt":
+        birth = getattr(image, "st_birthtime_ns", None)
+        if birth is not None:
+            return birth
+    return image.st_ctime_ns
+
+
 def configuration_error() -> Optional[str]:
     """Why the attached variables cannot be honoured, or None.
 

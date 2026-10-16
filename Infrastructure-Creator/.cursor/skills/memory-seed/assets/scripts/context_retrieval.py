@@ -2617,9 +2617,12 @@ def _same_file_image(left, right) -> bool:
     Comparing whole stat results compared st_atime too, and reading the
     file - which this very check does - moves atime on strictatime mounts and
     often on relatime ones, so the image never matched and recovery failed.
+    The change time is the one a path's stat and an open file's fstat agree
+    on: Windows gives them different ones.
     """
-    keys = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
-    return all(getattr(left, key) == getattr(right, key) for key in keys)
+    keys = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+    return (all(getattr(left, key) == getattr(right, key) for key in keys)
+            and workspace_roots.change_time_ns(left) == workspace_roots.change_time_ns(right))
 
 
 def _cursor_registered_slot(root: Path) -> bool:
@@ -5569,27 +5572,35 @@ def _source_hint_read(repository: Path, name: str, expected: str) -> Optional[st
     """Contained current raw image, then the native universal-newline digest text.
 
     No Path.resolve/read_text fallback: unsupported secure primitives abstain.
+    Windows reads through the Cursor rule's NT handles, which follow no reparse
+    point; every stat compared here comes from that one backend.
     This is a point-in-time check, not a filesystem snapshot or source authority.
     """
-    if (not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
-            or os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd):
+    try:
+        files = _cursor_backend()
+    except (OSError, ImportError, AttributeError):
+        return None
+    if files is None or (files is os and (
+            not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
+            or os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd)):
         return None
     descriptors = []
     directories = []
     try:
         root = workspace_roots.project_root(repository)
-        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        parent = (os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) if files is os
+                  else files.open_root(root))
         root_fd = parent
         descriptors.append(parent)
         parts = name.split("/")
         for part in parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            child = files.open(part, os.O_RDONLY | files.O_DIRECTORY | files.O_NOFOLLOW, dir_fd=parent)
             directories.append((parent, part, child))
             parent = child
             descriptors.append(parent)
-        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        fd = files.open(parts[-1], os.O_RDONLY | files.O_NOFOLLOW | files.O_NONBLOCK, dir_fd=parent)
         descriptors.append(fd)
-        before = os.fstat(fd)
+        before = files.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > SOURCE_HINT_FILE_BYTES:
             return None
         raw = bytearray()
@@ -5598,8 +5609,8 @@ def _source_hint_read(repository: Path, name: str, expected: str) -> Optional[st
             if not chunk:
                 break
             raw.extend(chunk)
-        after = os.fstat(fd)
-        named = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        after = files.fstat(fd)
+        named = files.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
         def identity(info):
             return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
                     info.st_size, info.st_mtime_ns, info.st_ctime_ns)
@@ -5608,10 +5619,10 @@ def _source_hint_read(repository: Path, name: str, expected: str) -> Optional[st
             return None
         def directory_identity(info):
             return (info.st_dev, info.st_ino, info.st_mode)
-        if directory_identity(os.fstat(root_fd)) != directory_identity(os.stat(root, follow_symlinks=False)):
+        if directory_identity(files.fstat(root_fd)) != directory_identity(files.stat(root, follow_symlinks=False)):
             return None
         for parent_fd, part, child_fd in directories:
-            if directory_identity(os.fstat(child_fd)) != directory_identity(os.stat(part, dir_fd=parent_fd, follow_symlinks=False)):
+            if directory_identity(files.fstat(child_fd)) != directory_identity(files.stat(part, dir_fd=parent_fd, follow_symlinks=False)):
                 return None
         return bytes(raw).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
     except (OSError, UnicodeError, ValueError):

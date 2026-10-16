@@ -347,9 +347,12 @@ def _same_file_image(left, right) -> bool:
     Comparing whole stat results compared st_atime too, and reading the
     file - which this very check does - moves atime on strictatime mounts and
     often on relatime ones, so the image never matched and recovery failed.
+    The change time is the one a path's stat and an open file's fstat agree
+    on: Windows gives them different ones.
     """
-    keys = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
-    return all(getattr(left, key) == getattr(right, key) for key in keys)
+    keys = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+    return (all(getattr(left, key) == getattr(right, key) for key in keys)
+            and workspace_roots.change_time_ns(left) == workspace_roots.change_time_ns(right))
 
 
 def _learning_image(root: Path, identifier: str) -> Optional[str]:

@@ -3428,14 +3428,16 @@ def _cursor_topic_scope(connection, repository, task_id, mode):
             meta = config_leaf.lstat()
             if not stat_module.S_ISREG(meta.st_mode) or meta.st_nlink != 1 or meta.st_size > 65536:
                 return None
+            def same(image):
+                return (all(getattr(image, key) == getattr(meta, key)
+                            for key in ('st_dev','st_ino','st_size','st_mtime_ns','st_mode','st_nlink'))
+                        and workspace_roots.change_time_ns(image) == workspace_roots.change_time_ns(meta))
             with config_leaf.open('rb') as stream:
                 raw = stream.read(65537)
                 after = os.fstat(stream.fileno())
-                if len(raw) > 65536 or any(getattr(after, key) != getattr(meta, key)
-                        for key in ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns','st_mode','st_nlink')):
+                if len(raw) > 65536 or not same(after):
                     return None
-            if any(getattr(config_leaf.lstat(), key) != getattr(meta, key)
-                   for key in ('st_dev','st_ino','st_size','st_mtime_ns','st_ctime_ns','st_mode','st_nlink')):
+            if not same(config_leaf.lstat()):
                 return None
             config_identity = hashlib.sha256(raw).hexdigest()
         except FileNotFoundError:
