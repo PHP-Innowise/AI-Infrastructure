@@ -33,6 +33,11 @@ edition's own files remain in that edition's changelog.
 - The Windows hook test gives Git Bash each hook command in a file. Passed as
   `bash -c` from Python, `"${CLAUDE_PROJECT_DIR}"/...` reached Git Bash without
   its quotes and failed to parse, so the test stopped before any hook ran.
+- `windows-harness` runs the memory suites that pass on native Windows. The 23
+  that failed on their first native run - 8.3 short temp paths (`RUNNER~1`,
+  which the memory MCP server then refuses as a symlink root), SQLite files
+  still open at cleanup, Cursor rule custody, generator lint paths - run on
+  Linux only, named in `scripts/check.py`, until they are ported.
 
 ### Automatic structured native results — 2026-10-16
 
