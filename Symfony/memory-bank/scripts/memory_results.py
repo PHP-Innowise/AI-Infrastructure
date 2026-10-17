@@ -148,6 +148,7 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
     if not isinstance(learnings, list) or len(learnings) > LEARNING_LIMIT:
         raise BrainError(f"Keep at most {LEARNING_LIMIT} learnings")
     checked = []
+    identities = {}
     for learning in learnings:
         fields = {"type", "title", "consequence", "sources"}
         if (not isinstance(learning, dict) or not fields <= set(learning)
@@ -171,6 +172,16 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
         })
         if "expected_revision" in learning:
             checked[-1]["expected_revision"] = learning["expected_revision"]
+        # This static conflict must precede native task provisioning and
+        # digest binding, so a refused format can be corrected in place.
+        # Match learning_id's semantic key; its hashed collision guard also
+        # remains in record_result before any authoritative result effect.
+        item = checked[-1]
+        identity = (item["type"], " ".join(item["title"].casefold().split()),
+                    tuple(sorted(item["sources"])))
+        if identity in identities and identities[identity] != item:
+            raise BrainError("Conflicting learning identities in one result")
+        identities[identity] = item
     if checked and data.get("verified") is not True:
         raise BrainError("Attest that each learning was checked against its sources with verified=true")
     if progress is None and steps is None and not checked:

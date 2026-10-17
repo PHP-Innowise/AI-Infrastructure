@@ -126,6 +126,8 @@ save records when this optional local state is unavailable. These retries need
 subsequent turns; they are not a background timer. Older failures without a
 marker are recovered by the existing normal flush or exact result replay.
 
+Automatic apply rechecks the configured near-duplicate rule for stalled proposals as well as fresh ones. A chunk left by an interrupted apply remains protected from a later duplicate under a different date. The failed promotion names the conflicting chunk; it does not adopt, rewrite or delete that chunk. A valid revision can still supersede its recorded predecessor. This guard does not repair an interrupted index/proposal transaction or promise general crash convergence.
+
 Use `CONTEXT_TASK_ID`, otherwise the branch task. During a rebase that is the
 branch being rebased: the prompt hook reads its memory and the Stop hook
 checkpoints that same task while the rebase runs.
@@ -263,6 +265,10 @@ client connections from isolated protocol tests.
 Governed Codex, Claude Code and Cursor sessions now use one bounded same-agent Stop continuation to record the result of the work already performed. The prompt hook arms ignored metadata only; the normal Git checkpoint runs first at Stop. The continuation calls `context.py native-result` with progress, optional next steps and at most three source-backed findings/decisions. `verified` is a top-level boolean and means agent attestation, never human review. Empty learnings and an explicit skip are valid. No prompt, final prose or transcript is parsed into authoritative knowledge.
 
 A read-only research result can provision its task after validation without inventing a Git delta. The challenge pins project, actor, host/session, task UUID/revision, checkout and runtime/config. A new user prompt retires the prior generation; the native internal continuation preserves it. Duplicate Stops request no additional continuation; exact repeated saves reuse existing result fencing. The recovery Stop does not checkpoint the same user work again. Completion still requires the explicit verified workflow.
+
+Conflicting learnings with the same type, normalized title and source set are refused before task provisioning or result digest binding. The first payload can then be corrected within the same continuation. Exact duplicate learnings remain valid and create one record. A save that genuinely began still requires its original payload and canonical evidence; this preflight correction does not authorize rebasing or changing a begun result.
+
+An exact save that already began can retry through the canonical result protocol even after the recovery Stop marked it failed. Its original UUID, revision, content digest and prepared scope remain bound. A completed replay needs no live citation or active alias, so archival or alias reuse cannot redirect it. Losing the disposable receipt cache leaves shared completion evidence usable. Without canonical receipt/attempt evidence, a retry is refused rather than becoming a first write. Incomplete saves still require current safe sources and ordinary ownership/CAS checks; fresh saves validate sources before provisioning a task. This recovery adds no automatic continuation.
 
 Challenges live under ignored `project-brain/local/native-results/`, contain metadata only, allow save for 24 hours and retain at most 128 sessions. Missing/invalid state is a refusal, never permission to overwrite. A full save proof without its outcome metadata remains held because it cannot prove every learning was accepted. Failed/held capture is surfaced by the next capsule, including Cursor's JSON-safe rule path. Cursor sets `loop_limit: 1`; aborted/error stops do not capture. Harness-delivered, internal-recovery and lightweight sessions keep their existing behavior.
 
