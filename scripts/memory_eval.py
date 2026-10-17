@@ -229,11 +229,11 @@ def parse_instant(value: object) -> Optional[datetime]:
     text = re.sub(r"([+-]\d\d)(\d\d)$", r"\1:\2", text)
     try:
         moment = datetime.fromisoformat(text)
-    except ValueError:
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        return moment.astimezone(UTC)
+    except (ValueError, OverflowError):
         return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC)
 
 
 def parse_day(value: object) -> Optional[date]:
@@ -1847,9 +1847,9 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     classes = Counter(str(item.get("class")) for item in evaluated)
     count = len(evaluated)
     passage_measured = bool(evaluated) and all(
-        type(item.get(key)) is int for item in evaluated
+        type(item.get(key)) is int and 0 <= item[key] <= 2**53-1 for item in evaluated
         for key in ("answer_passages_existed", "answer_passages_delivered")
-    )
+    ) and all(item['answer_passages_delivered'] <= item['answer_passages_existed'] for item in evaluated)
     passage_total = sum(item["answer_passages_existed"] for item in evaluated) if passage_measured else None
     passage_delivered = sum(item["answer_passages_delivered"] for item in evaluated) if passage_measured else None
     deliverable_measured = bool(evaluated) and all(
@@ -2154,6 +2154,102 @@ def resolve_project(value: str, projects_root: Optional[Path]) -> Optional[Path]
     return candidate if candidate.is_dir() else None
 
 
+def planned_delivery(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Supplementary logical-plan delivery, never a successful-pair delta.
+
+    Recorded bindings/counts establish internal consistency only. Missing source
+    opportunity or unfinished execution cannot establish a final denominator.
+    """
+    unknown = {'profile': 'planned-delivery-v1', 'status': 'unknown',
+               'unit_delivery_rate': None, 'passage_recall': None}
+    plan, items, meta = (document.get(key) for key in ('planned', 'items', 'meta'))
+    if not isinstance(plan, dict) or plan.get('profile') != unknown['profile']:
+        return unknown
+    ids, units = plan.get('ids'), plan.get('units')
+    if (not isinstance(ids, list) or any(not isinstance(key, str) or not key.strip() for key in ids)
+            or len(set(ids)) != len(ids) or not isinstance(units, dict) or set(units) != set(ids)
+            or not isinstance(items, dict) or not set(items) <= set(ids) or not isinstance(meta, dict)
+            or type(meta.get('interrupted', False)) is not bool):
+        return unknown
+    count = lambda value: type(value) is int and 0 <= value <= 2**53-1
+    paths = lambda value: (isinstance(value, list)
+                           and all(installer.is_safe_relative_path(path) and normalise_path(path) == path for path in value)
+                           and len(set(value)) == len(value))
+    result = {**unknown, 'status': 'incomplete', 'planned': len(ids), 'terminal': len(items),
+              'without_terminal': len(ids)-len(items), 'unattempted': 0, 'runtime_admitted': 0,
+              'source_known': 0, 'source_excluded': 0, 'useful_eligible': 0,
+              'useful_units_delivered': 0, 'answer_passages_existed': 0, 'answer_passages_delivered': 0}
+    bindings: Set[str] = set()
+    for key in ids:
+        unit, item = units[key], items.get(key)
+        if not isinstance(unit, dict):
+            return unknown
+        state, binding, admitted = unit.get('state'), unit.get('input_sha256'), unit.get('runtime_admitted')
+        if (unit.get('id') != key
+                or state not in ('unattempted', 'preparing', 'runtime-admitted', 'finished', 'interrupted')
+                or not isinstance(binding, str) or not re.fullmatch(r'[0-9a-f]{64}', binding)
+                or binding in bindings
+                or type(admitted) is not bool or (state == 'finished') != (key in items)
+                or state in ('unattempted', 'preparing') and admitted
+                or state == 'runtime-admitted' and not admitted):
+            return unknown
+        bindings.add(binding)
+        result['unattempted'] += state == 'unattempted'
+        result['runtime_admitted'] += admitted
+        if key in items and (not isinstance(item, dict) or item.get('input_sha256') != binding
+                                 or item.get('planned_id') != key
+                                 or item.get('status') not in ('ok', 'skipped')):
+            return unknown
+        opportunity = unit.get('source_opportunity')
+        if opportunity is None:
+            if admitted or item is not None and item.get('status') == 'ok':
+                return unknown
+            if item is not None and item.get('reason') in ('bad-timestamp', 'no-project', 'no-history'):
+                result['source_excluded'] += 1
+            continue
+        if (not admitted or not isinstance(opportunity, dict)
+                or set(opportunity) != {'useful_paths', 'answer_paths', 'answer_passages'}
+                or not all(count(value) for value in opportunity.values())
+                or opportunity['answer_paths'] > opportunity['useful_paths']
+                or opportunity['answer_passages'] and not opportunity['answer_paths']):
+            return unknown
+        result['source_known'] += 1
+        result['useful_eligible'] += opportunity['useful_paths'] > 0
+        result['answer_passages_existed'] += opportunity['answer_passages']
+        if item is None or item['status'] != 'ok':
+            continue
+        useful, existed, answered = (item.get(field) for field in ('useful_delivered', 'existed_useful', 'answer_existed'))
+        ceiling, delivered = item.get('answer_passages_existed'), item.get('answer_passages_delivered')
+        if (not all(paths(value) for value in (useful, existed, answered))
+                or len(existed) != opportunity['useful_paths'] or len(answered) != opportunity['answer_paths']
+                or not set(useful) <= set(existed) or not set(answered) <= set(existed)
+                or not count(ceiling) or ceiling != opportunity['answer_passages']
+                or not count(delivered) or delivered > ceiling or delivered and not useful):
+            return unknown
+        result['useful_units_delivered'] += bool(useful)
+        result['answer_passages_delivered'] += delivered
+    if any(not count(result[field]) for field in ('answer_passages_existed', 'answer_passages_delivered')):
+        return unknown
+    if (parse_instant(meta.get('finished')) is not None and not meta.get('interrupted', False)
+            and result['terminal'] == result['source_known'] == len(ids)):
+        result['status'] = 'complete'
+        if result['useful_eligible']:
+            result['unit_delivery_rate'] = result['useful_units_delivered']/result['useful_eligible']
+        if result['answer_passages_existed']:
+            result['passage_recall'] = result['answer_passages_delivered']/result['answer_passages_existed']
+    return result
+
+
+def planned_input_sha256(prompt: Dict[str, Any]) -> str:
+    """Bind a logical unit without retaining the prompt text in results."""
+    value = {key: prompt[key] for key in ('id', 'project', 'ts', 'prompt')}
+    try:
+        encoded = json.dumps(value, sort_keys=True, ensure_ascii=False).encode('utf-8')
+    except UnicodeError as error:
+        raise EvalError('planned inputs must be valid UTF-8') from error
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class Run:
     """One `run`: its settings, caches, and the output being written."""
 
@@ -2176,6 +2272,7 @@ class Run:
         self.detected: Dict[Path, Tuple[str, str]] = {}
         self.snapshots: Dict[Path, Path] = {}
         self.items: Dict[str, Dict[str, Any]] = {}
+        self.planned: Optional[Dict[str, Any]] = None
         self.meta: Dict[str, Any] = {
             "tool": "scripts/memory_eval.py",
             "edition": self.forced or "auto",
@@ -2242,7 +2339,11 @@ class Run:
         return self.detected[project]
 
     def document(self) -> Dict[str, Any]:
-        return {"meta": self.meta, "items": self.items, "summary": summarize(self.items)}
+        document = {"meta": self.meta, "items": self.items, "summary": summarize(self.items)}
+        if self.planned is not None:
+            document['planned'] = self.planned
+            document['planned_delivery'] = planned_delivery(document)
+        return document
 
     def evaluate(self, prompt: Dict[str, Any]) -> Dict[str, Any]:
         item: Dict[str, Any] = {"project": prompt["project"], "ts": prompt["ts"], "status": "skipped"}
@@ -2291,7 +2392,9 @@ class Run:
             item["overlay"] = overlay(corpus, edition)
             grades = self.judgments.get(prompt["id"], {})
             existed = existing_useful(corpus, grades)
-            answered = answer_existing(corpus, grades, self.passages.get(prompt["id"], {}))
+            prompt_passages = self.passages.get(prompt["id"], {})
+            answered = answer_existing(corpus, grades, prompt_passages)
+            expected_passages = existing_answer_passages(corpus, answered, prompt_passages)
             env = runtime_env(self.cache, moment, moment if self.pinned else None)
             objects = repository.history(self.cache, parent) if parent else None
             branch = f"eval/{safe_name(prompt['id'])}"
@@ -2299,6 +2402,14 @@ class Run:
             item["history_linked"] = objects is not None
             # A fresh corpus starts with no index; the hook's index is warm.
             # Building it first keeps the timed refresh the per-turn cost.
+            if self.planned is not None:
+                unit = self.planned['units'][prompt['id']]
+                unit.update(state='runtime-admitted', runtime_admitted=True, source_opportunity={
+                    'useful_paths': len(existed), 'answer_paths': len(answered),
+                    'answer_passages': len(expected_passages)})
+                # A failed checkpoint prevents runtime admission. This write
+                # remains outside scoring; the prior atomic document survives.
+                write_json(self.arguments.out, self.document())
             warm = run_runtime(corpus, ["index"], env, self.arguments.timeout)
             pilot = None
             pilot_stats = corpus / ".memory-onnx-stats.json"
@@ -2368,12 +2479,10 @@ class Run:
             stats = index_stats(corpus)
             if stats is not None:
                 item["refresh"]["index"] = stats
-            prompt_passages = self.passages.get(prompt["id"], {})
-            expected = existing_answer_passages(corpus, answered, prompt_passages)
-            reachable, long_documents = indexed_answer_passages(corpus, answered, expected)
+            reachable, long_documents = indexed_answer_passages(corpus, answered, expected_passages)
             item.update(score(
                 result, grades, prompt_passages, existed, answered,
-                expected_passages=expected, deliverable_passages=reachable,
+                expected_passages=expected_passages, deliverable_passages=reachable,
                 secret_patterns=runtime_policy().SECRET_PATTERNS,
             ))
             item["answer_passages_long_document"] = len(long_documents)
@@ -2401,11 +2510,25 @@ class Run:
     def execute(self) -> int:
         selected = self.selected()
         out = self.arguments.out
+        active: Optional[str] = None
         try:
+            self.planned = {'profile': 'planned-delivery-v1', 'ids': [prompt['id'] for prompt in selected],
+                            'units': {prompt['id']: {'id': prompt['id'], 'input_sha256': planned_input_sha256(prompt),
+                                                    'state': 'unattempted', 'runtime_admitted': False}
+                                      for prompt in selected}}
+            write_json(out, self.document())
             for index, prompt in enumerate(selected, 1):
-                item = self.evaluate(prompt)
-                self.items[prompt["id"]] = item
+                active = prompt['id']
+                unit = self.planned['units'][active]
+                unit['state'] = 'preparing'
                 write_json(out, self.document())
+                item = self.evaluate(prompt)
+                item['input_sha256'] = unit['input_sha256']
+                item['planned_id'] = active
+                self.items[active] = item
+                unit['state'] = 'finished'
+                write_json(out, self.document())
+                active = None
                 if item["status"] == "ok":
                     note = f"{item['class']}  delivered={len(item['delivered'])}  {item['refresh']['seconds']:.2f}s"
                 else:
@@ -2413,6 +2536,8 @@ class Run:
                 print(f"[{index}/{len(selected)}] {prompt['id']}  {note}", file=sys.stderr)
         except KeyboardInterrupt:
             self.meta["interrupted"] = True
+            if active is not None and active not in self.items:
+                self.planned['units'][active]['state'] = 'interrupted'
             write_json(out, self.document())
             raise
         finally:
@@ -2580,15 +2705,24 @@ def row_cell(summary: Dict[str, Any], key: str) -> str:
 
 
 def describe_meta(meta: Dict[str, Any], items: Dict[str, Dict[str, Any]]) -> str:
-    edition = str(meta.get("edition"))
+    meta = meta if isinstance(meta, dict) else {}
+    edition = meta.get('edition')
+    edition = edition if isinstance(edition, str) and edition in (*installer.EDITIONS, 'auto') else 'unknown'
     if edition == "auto":
-        used = Counter(str(item.get("edition")) for item in items.values() if item.get("edition"))
+        used = Counter(item['edition'] for item in items.values()
+                       if isinstance(item.get('edition'), str) and item['edition'] in installer.EDITIONS)
         edition += " (" + ", ".join(f"{name} {count}" for name, count in sorted(used.items())) + ")"
-    commit = str(meta.get("clone_commit") or "?")[:10]
-    dirty = any((info or {}).get("dirty") for info in (meta.get("editions") or {}).values())
+    commit = meta.get('clone_commit')
+    commit = commit[:10] if isinstance(commit, str) and re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', commit) else '?'
+    editions = meta.get('editions')
+    dirty = isinstance(editions, dict) and any(isinstance(info, dict) and info.get('dirty') is True
+                                              for info in editions.values())
+    as_of = meta.get('as_of') if isinstance(meta.get('as_of'), str) and meta['as_of'] in ('prompt', 'now') else 'unknown'
+    clock = meta.get('clock') if isinstance(meta.get('clock'), str) and meta['clock'] in ('pinned', 'real') else 'unknown'
+    host = meta.get('host') if isinstance(meta.get('host'), str) and meta['host'] in HOSTS else 'unknown'
     return (
-        f"edition={edition} as_of={meta.get('as_of')} clock={meta.get('clock')} "
-        f"host={meta.get('host')} clone={commit}{' (edition dirty)' if dirty else ''}"
+        f"edition={edition} as_of={as_of} clock={clock} "
+        f"host={host} clone={commit}{' (edition dirty)' if dirty else ''}"
     )
 
 
@@ -2596,19 +2730,119 @@ def evaluated_ids(items: Dict[str, Dict[str, Any]]) -> Set[str]:
     return {prompt_id for prompt_id, item in items.items() if item.get("status") == "ok"}
 
 
+def comparison_compatibility(first: Dict[str, Any], second: Dict[str, Any]) -> Dict[str, Any]:
+    """Compare recorded conditions, never infer historical corpus-body identity.
+
+    Runtime version/assets are the treatment. Missing evidence is unknown;
+    a known condition mismatch still dominates an unrelated missing field.
+    Reasons name fixed fields only, never supplied metadata values or ids.
+    """
+    missing = object()
+    mismatch: Set[str] = set()
+    unknown: Set[str] = set()
+    meta = [document.get('meta') if isinstance(document.get('meta'), dict) else {}
+            for document in (first, second)]
+
+    def compare(field, left, right, valid):
+        if valid(left) and valid(right):
+            if left != right:
+                mismatch.add(field)
+        else:
+            unknown.add(field)
+
+    digest = lambda value: isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+    choice = lambda value, allowed: isinstance(value, str) and value in allowed
+    for key in ('set_sha256', 'judgments_sha256'):
+        compare('meta.'+key, *(item.get(key, missing) for item in meta), digest)
+    compare('meta.passages_sha256', *(item.get('passages_sha256', missing) for item in meta),
+            lambda value: value is None or digest(value))
+    for key, allowed in (('host', HOSTS), ('clock', ('pinned', 'real')), ('as_of', ('prompt', 'now')),
+                         ('updated_after', ('drop', 'keep'))):
+        compare('meta.'+key, *(item.get(key, missing) for item in meta), lambda value: choice(value, allowed))
+    compare('meta.timeout', *(item.get('timeout', missing) for item in meta),
+            lambda value: _finite_duration(value, positive=True))
+    if any('onnx_excerpts' in item for item in meta):
+        profiles = [item.get('onnx_excerpts') for item in meta]
+        compare('meta.onnx_excerpts.worker_timeout',
+                *(profile.get('worker_timeout', missing) if isinstance(profile, dict) else missing
+                  for profile in profiles), lambda value: _finite_duration(value, positive=True))
+    runtimes = [item.get('runtime_under_test') for item in meta]
+    if any('runtime_under_test' in item for item in meta):
+        compare('meta.runtime_under_test.scorer_sha256',
+                *(profile.get('scorer_sha256', missing) if isinstance(profile, dict) else missing
+                  for profile in runtimes), digest)
+
+    runs = [document['items'] for document in (first, second)]
+    both = evaluated_ids(runs[0]) & evaluated_ids(runs[1])
+    if not both:
+        unknown.add('items.shared_sources')
+    for identifier in both:
+        units = [items[identifier] for items in runs]
+        compare('items.project', *(unit.get('project', missing) for unit in units),
+                lambda value: isinstance(value, str) and bool(value.strip()))
+        compare('items.ts', *(parse_instant(unit.get('ts')) for unit in units), lambda value: value is not None)
+        compare('items.commit', *(unit.get('commit', missing) for unit in units),
+                lambda value: isinstance(value, str) and re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', value) is not None)
+        compare('items.edition', *(unit.get('edition', missing) for unit in units),
+                lambda value: choice(value, installer.EDITIONS))
+        for key in ('history_linked', 'contaminated'):
+            compare('items.'+key, *(unit.get(key, missing) for unit in units), lambda value: type(value) is bool)
+        if any(unit.get('contaminated') is True for unit in units):
+            unknown.add('items.contaminated')
+        provenance = [unit.get('provenance') for unit in units]
+        counter = lambda value: type(value) is int and value >= 0
+        for profile, settings in zip(provenance, meta):
+            required = ({'from_git', 'from_worktree', 'dropped_future', 'undetermined', 'updated_after',
+                         'unreconstructable_updated', *ARCHIVE_COUNTS} if settings.get('as_of') == 'prompt'
+                        else {'from_git', 'from_worktree', 'dropped_future', 'future_present', 'undetermined'})
+            if (not isinstance(profile, dict) or not required <= profile.keys()
+                    or not profile.keys() <= required | {'config_from_worktree'}
+                    or any(not counter(value) for value in profile.values())):
+                unknown.add('items.provenance')
+        if all(isinstance(profile, dict) for profile in provenance):
+            if provenance[0].keys() != provenance[1].keys():
+                unknown.add('items.provenance')
+            for key in provenance[0].keys() & provenance[1].keys():
+                if counter(provenance[0][key]) and counter(provenance[1][key]) and provenance[0][key] != provenance[1][key]:
+                    mismatch.add('items.provenance')
+    return {'profile': 'recorded-comparison-v1',
+            'status': 'incompatible' if mismatch else 'unknown' if unknown else 'compatible',
+            'mismatched_fields': sorted(mismatch), 'unknown_fields': sorted(unknown)}
+
+
 def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
     summaries = [summarize(document["items"]) for _, _, document in results]
     lines = []
     for (label, path, document), _summary in zip(results, summaries):
         lines.append(f"{label}: {path}  {describe_meta(document.get('meta') or {}, document['items'])}")
+        whole = planned_delivery(document)
+        line = f"whole-planned {label}: {whole['status']}"
+        if whole['status'] != 'unknown':
+            percent = lambda value: '-' if value is None else f'{value*100:.1f}%'
+            line += (f"; terminal={whole['terminal']}/{whole['planned']}"
+                     f"; source-known={whole['source_known']}/{whole['planned']}"
+                     f"; source-excluded={whole['source_excluded']}"
+                     f"; unattempted={whole['unattempted']}; without-terminal={whole['without_terminal']}"
+                     f"; unit delivery={percent(whole['unit_delivery_rate'])}"
+                     f"; passage recall={percent(whole['passage_recall'])}")
+        lines.append(line+'; supplementary per-run delivery only')
     paired: List[Dict[str, Any]] = []
     delta_title = "delta"
     if len(results) == 2:
+        comparison = comparison_compatibility(results[0][2], results[1][2])
+        status = comparison['status']
+        lines.append('comparison: '+status+' recorded metadata'
+                     + ('; quality/latency deltas withheld' if status == 'incompatible'
+                        else '; ID-overlap diagnostics only' if status == 'unknown'
+                        else '; not a corpus-body identity proof'))
+        for name in ('mismatched_fields', 'unknown_fields'):
+            if comparison[name]:
+                lines.append(name.replace('_', ' ')+': '+', '.join(comparison[name]))
         # A measure's delta is over the prompts both runs evaluated: a prompt
         # one of them skipped would otherwise read as a loss or a gain.
         runs = [document["items"] for _, _, document in results]
         both = evaluated_ids(runs[0]) & evaluated_ids(runs[1])
-        if both:
+        if both and status != 'incompatible':
             paired = [summarize({prompt_id: items[prompt_id] for prompt_id in both}) for items in runs]
         only = [len(evaluated_ids(items) - both) for items in runs]
         if any(only):
@@ -2617,6 +2851,12 @@ def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
                 f"note: {len(both)} evaluated in both, {only[0]} only in A, {only[1]} only in B: each measure's "
                 "delta is over the prompts evaluated in both; prompts, evaluated and skipped compare the whole runs"
             )
+        if status == 'unknown':
+            delta_title = 'diagnostic paired' if any(only) else 'diagnostic delta'
+            if any(only):
+                lines.append('note: diagnostic paired delta does not establish compatible comparison conditions')
+        elif status == 'incompatible':
+            delta_title = 'no paired delta'
     for (label, _path, _document), summary in zip(results, summaries):
         audit = summary.get("miss_audit") or {}
         candidate = audit.get("candidate_recall")
@@ -2683,7 +2923,7 @@ def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
 def paired_diff(
     first: Dict[str, Dict[str, Any]], second: Dict[str, Dict[str, Any]]
 ) -> Tuple[int, Dict[str, Tuple[List[str], List[str]]]]:
-    """Prompts evaluated in both, and per measure the ids B gained and lost."""
+    """ID-only successful-intersection diagnostic; caller checks compatibility."""
     ids = [
         prompt_id
         for prompt_id, item in first.items()
@@ -2719,18 +2959,20 @@ def command_report(arguments: argparse.Namespace) -> int:
     print(format_report(results))
     if len(results) == 2:
         second = results[1][2]
-        meta_a, meta_b = first.get("meta") or {}, second.get("meta") or {}
-        for key in ("set_sha256", "judgments_sha256", "passages_sha256"):
-            if meta_a.get(key) != meta_b.get(key):
-                print(f"note: {key} differs between A and B; the pairing is by prompt id only")
+        status = comparison_compatibility(first, second)['status']
         count, changes = paired_diff(first["items"], second["items"])
         print("")
-        print(f"paired over {count} prompt(s) evaluated in both (B against A)")
+        if status == 'compatible':
+            print(f"paired over {count} prompt(s) evaluated in both (B against A)")
+        elif status == 'unknown':
+            print(f"diagnostic ID-overlap over {count} prompt(s) evaluated in both (B against A; compatibility unknown)")
+        else:
+            print(f"ID overlap: {count} prompt(s) evaluated in both; paired gains withheld")
         for label, items, other in (("A", first["items"], second["items"]), ("B", second["items"], first["items"])):
             only = sorted(evaluated_ids(items) - evaluated_ids(other))
             if only:
                 print(f"  evaluated only in {label}: {', '.join(only)}")
-        for name, (gained, lost) in changes.items():
+        for name, (gained, lost) in (changes.items() if status != 'incompatible' else ()):
             print(f"  {name:<11} +{len(gained)} -{len(lost)}")
             if gained:
                 print(f"    gained: {', '.join(gained)}")
