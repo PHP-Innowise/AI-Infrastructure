@@ -529,6 +529,26 @@ change below has a test that fails on `a47e1eb8`.
   documents longer than it marks whole (64 KB). On the labelled sets every
   existing passage was reachable.
 
+### Native final-answer preservation — 2026-10-17
+
+- Keep routine native memory capture silent and preserve the original substantive answer, source citations and requested format after successful or skipped capture. A save acknowledgement must not replace the task result consumed as the last agent message. Refused saves retain their warning alongside the answer.
+- Reproduced against an actual Codex Stop continuation; empty reusable learnings remain valid and do not create findings merely to pass a lifecycle probe.
+
+### Automatic promotion apply admission — 2026-10-16
+
+- Recheck configured near-duplicate admission inside automatic promotion apply, including stalled retries. A chunk left by an interrupted apply cannot be duplicated under a later date; the original chunk and authoritative records remain untouched. A valid revision still excludes its recorded predecessor.
+- Add a date-bound interruption/replay regression and public process-exit controls. This prevents a later normal write from duplicating knowledge; it does not adopt an unproven chunk or promise arbitrary crash recovery.
+
+### Correctable native result preflight — 2026-10-16
+
+- Reject conflicting learning identities during normalization, before native task provisioning or digest binding. A refused first payload can be corrected in the same continuation; identical duplicates still save once, while genuinely begun results retain their exact-payload and canonical-proof guards.
+- Cover existing and unprovisioned tasks, normalized identity conflicts and duplicate save/replay through the public CLI. Apply the shared JSON contract across all editions and generator assets.
+
+### Native exact-result recovery — 2026-10-16
+
+- An already-started native save can finish through the canonical guarded retry after its recovery Stop marks the challenge failed. Completed saves replay without requiring a still-present citation or active task alias, including after archival and alias reuse.
+- Native retries require the original content, pinned task UUID/revision and canonical result evidence; missing evidence cannot turn a retry into a first write. Fresh saves still check current sources before task creation. Add interruption, archive, disposable receipt loss and refusal regressions; the single automatic continuation remains bounded.
+
 ### Memory suites on native Windows — 2026-10-16
 
 - The 23 memory regression suites that failed on their first native Windows
