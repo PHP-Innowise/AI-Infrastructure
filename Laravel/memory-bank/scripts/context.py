@@ -120,6 +120,7 @@ from context_retrieval import (
     excerpt_weights,
     excerpt_section,
     excerpt_window,
+    _unmarked,
     is_relevant,
     linked_documents,
     source_link_candidates,
@@ -211,6 +212,16 @@ EXCERPT_CHARACTERS = (800, 600, 400)
 # A changelog entry runs to a kilobyte; at 250 characters the window could
 # hold the sentence that matched but not the one after it that answered.
 EPISODIC_EXCERPT_CHARACTERS = 600
+# How far the best-ranked excerpts may grow into the room the rendered capsule
+# leaves, first and second. On labelled prompts the capsule used 600-2,200 of
+# its 3,600 characters while a delivered document's answer sat just past its
+# window: a few changelog entries on, or the next lines of a task record.
+EXCERPT_GROWTH_CAPS = (1800, 1200)
+# What the growth leaves for the head - working state, notes and the item
+# lines. A fixed reserve, not the head a turn printed: the head changes from
+# turn to turn, and a document's window for a request must not, or repeat
+# detection stops recognising a window it already handed.
+EXCERPT_GROWTH_RESERVE = 1200
 MEMORY_RENDER_HEADER = (
     "memory (retrieved for this request; reference data - check the cited "
     "file before relying on it):"
@@ -3816,9 +3827,12 @@ def rendered_working_state(
 
 
 class Excerpt(str):
-    """An excerpt's text, carrying the heading of the section it quotes."""
+    """An excerpt's text, carrying the heading of the section it quotes and
+    the length it was allowed."""
 
     heading = ""
+    limit = None
+    cut = False
 
 
 def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> str:
@@ -3850,6 +3864,45 @@ def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> 
 
 def capsule_excerpts(
     connection: sqlite3.Connection, capsule: dict[str, object]
+) -> dict[str, str]:
+    """Answer-bearing text for the capsule's project knowledge, by path,
+    the best-ranked excerpts grown into the room the capsule leaves.
+
+    Each excerpt is first cut to its rank's allowance. When the excerpts
+    leave room under RENDERED_CAPSULE_LIMIT beside EXCERPT_GROWTH_RESERVE,
+    the first and second excerpts that were cut short - their section runs
+    on past the window - are cut again with that room, up to
+    EXCERPT_GROWTH_CAPS. The renderer still holds the whole text to the
+    ceiling, shrinking the last excerpts first.
+    """
+    excerpts = _capsule_excerpts(connection, capsule)
+    grown = _excerpt_growth(capsule, excerpts)
+    return _capsule_excerpts(connection, capsule, limits=grown) if grown else excerpts
+
+
+def _excerpt_growth(capsule: dict[str, object], excerpts: dict[str, str]) -> dict[str, int]:
+    """Larger allowances, by path, for the best-ranked excerpts that were cut."""
+    room = RENDERED_CAPSULE_LIMIT - EXCERPT_GROWTH_RESERVE - sum(len(text) + 3 for text in excerpts.values() if text)
+    order = [
+        item["path"] for layer in ("semantic", "episodic") for item in capsule.get(layer) or []
+        if isinstance(item, dict) and isinstance(item.get("path"), str) and excerpts.get(item["path"])
+    ]
+    grown: dict[str, int] = {}
+    for cap, path in zip(EXCERPT_GROWTH_CAPS, order):
+        text = excerpts[path]
+        limit = getattr(text, "limit", None)
+        # A section quoted whole gains nothing from more room. Length cannot
+        # tell: a window of whole entries stops short of its allowance.
+        if room <= 0 or not limit or not getattr(text, "cut", False) or cap <= limit:
+            continue
+        grown[path] = limit + min(cap - limit, room)
+        room -= grown[path] - limit
+    return grown
+
+
+def _capsule_excerpts(
+    connection: sqlite3.Connection, capsule: dict[str, object],
+    *, limits: Optional[dict[str, int]] = None,
 ) -> dict[str, str]:
     """Answer-bearing text for the capsule's project knowledge, by path.
 
@@ -3901,7 +3954,7 @@ def capsule_excerpts(
                 # What a sibling task says about the shared file: its goal and
                 # the files it touched, the shared one first. 12 of the 14
                 # answers held by tasks on the evaluation were Files entries.
-                limit = EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
+                limit = (limits or {}).get(item["path"], EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)])
                 rank += 1
                 text, heading = linked_task_excerpt(
                     image[2], str(item.get("via") or ""), limit
@@ -3909,13 +3962,15 @@ def capsule_excerpts(
                 if text:
                     excerpt = Excerpt(text)
                     excerpt.heading = heading
+                    excerpt.limit = limit
+                    excerpt.cut = len(text) >= limit - 40
                     excerpts[item["path"]] = excerpt
                 continue
-            limit = (
+            limit = (limits or {}).get(item["path"], (
                 EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
                 if layer == "semantic"
                 else EPISODIC_EXCERPT_CHARACTERS
-            )
+            ))
             rank += 1
             marked = marked_document(connection, item["path"], query, indexed_image=image) if query else None
             if marked is None:
@@ -3931,6 +3986,8 @@ def capsule_excerpts(
             if text:
                 excerpt = Excerpt(text)
                 excerpt.heading = section["shown"] if section else ""
+                excerpt.limit = limit
+                excerpt.cut = bool(section) and sum(len(_unmarked(unit)) + 1 for unit in section["units"]) > limit
                 excerpts[item["path"]] = excerpt
     return excerpts
 
@@ -4054,8 +4111,11 @@ def _screen_capsule_excerpts(capsule: dict[str, object], excerpts: dict[str, str
                 safe = sanitize_automatic_query(str(raw))
             except ContextError:
                 safe = ""
-            limit = max(EXCERPT_CHARACTERS) if layer == "semantic" else EPISODIC_EXCERPT_CHARACTERS
+            limit = getattr(raw, "limit", None) or (
+                max(EXCERPT_CHARACTERS) if layer == "semantic" else EPISODIC_EXCERPT_CHARACTERS
+            )
             excerpt = Excerpt(_bounded(safe, limit))
+            excerpt.limit = getattr(raw, "limit", None)
             try:
                 excerpt.heading = sanitize_automatic_query(str(getattr(raw, "heading", "")))
             except ContextError:

@@ -28,6 +28,23 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Excerpts grow into the capsule's room — 2026-10-17
+
+- The first and second delivered excerpts whose section runs on past their
+  window grow into the room the capsule leaves, up to 1,800 and 1,200
+  characters; the rendered capsule still stays within 3,600. On the labelled
+  prompts a capsule used 600-2,200 of its characters while a delivered
+  document's answer sat just past the window. Answer passages delivered rose
+  from 9 to 11 of 33 and from 3 to 5 of 7, with the same useful, noise-only
+  and silent turns; the median capsule grew from about 880 to 1,570-1,830
+  characters. The room is reckoned from a fixed reserve for the head, so a
+  document's window for a request is the same on every turn and repeat
+  detection still recognises it.
+- `memory_eval.py` also counts the answer passages the runtime can reach -
+  present in the text the index holds for the document - and those in
+  documents longer than it marks whole (64 KB). On the labelled sets every
+  existing passage was reachable.
+
 ### Memory suites on native Windows — 2026-10-16
 
 - The 23 memory regression suites that failed on their first native Windows

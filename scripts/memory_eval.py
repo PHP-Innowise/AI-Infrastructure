@@ -1463,6 +1463,7 @@ def score(
     answer_existed: Sequence[str] = (),
     *,
     expected_passages: Optional[Set[str]] = None,
+    deliverable_passages: Optional[Set[str]] = None,
     secret_patterns: Optional[Mapping[str, Pattern[str]]] = None,
 ) -> Dict[str, Any]:
     """Score one refresh result. Paths and counts only: no capsule text."""
@@ -1476,6 +1477,8 @@ def score(
     expected = (expected_passages if expected_passages is not None
                 else labelled_passages(answer_existed, passages))
     delivered_answers = labelled_passages(useful, passages) & expected
+    # What the runtime could have quoted: in the index's text of the document.
+    deliverable = expected if deliverable_passages is None else deliverable_passages & expected
     haystack = flatten(text)
     return {
         "class": classify(delivered, useful, noise, withheld),
@@ -1490,6 +1493,8 @@ def score(
         "answer_in_text": answer_in_text(useful, passages, text),
         "answer_passages_existed": len(expected),
         "answer_passages_delivered": sum(value in haystack for value in delivered_answers),
+        "answer_passages_deliverable": len(deliverable),
+        "answer_passages_delivered_deliverable": sum(value in haystack for value in delivered_answers & deliverable),
         "query_withheld": withheld,
         "capsule_chars": len(text),
         **delivery_breakdown(result.get("capsule")),
@@ -1587,6 +1592,49 @@ def answer_existing(corpus: Path, grades: Dict[str, int], passages: Dict[str, Di
                         for passage in entry.get("passages") or []):
             found.append(path)
     return found
+
+
+# The runtime marks and quotes a document longer than this only in the stretch
+# its query's words point at (MARKED_DOCUMENT_CHARACTERS in context_retrieval).
+RUNTIME_MARKED_CHARACTERS = 65536
+
+
+def indexed_answer_passages(corpus: Path, paths: Sequence[str], expected: Set[str]) -> Tuple[Set[str], Set[str]]:
+    """The expected answers the runtime can reach, and those in long documents.
+
+    `existing_answer_passages` asks the file on disk, but the runtime quotes
+    the text its index holds for the document: a document the index left out,
+    or text it does not store, cannot reach the capsule whatever retrieval
+    does, so such an answer is not a retrieval miss. An answer in a document
+    longer than the runtime marks whole is still reachable, but only from the
+    stretch the query points at; it is counted apart. Read-only.
+    """
+    database = corpus / "memory-bank/local/context.db"
+    if not expected or not database.is_file() or database.is_symlink():
+        return set(), set()
+    reachable: Set[str] = set()
+    long_documents: Set[str] = set()
+    connection = None
+    try:
+        connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+        for path in paths:
+            names = [path] + ([tool + path[len(CANON_SKILLS):] for tool in TOOL_SKILLS]
+                              if path.startswith(CANON_SKILLS) else [])
+            for name in names:
+                for title, summary, content in connection.execute(
+                    "SELECT title, summary, content FROM documents WHERE path = ?", (name,)
+                ).fetchall():
+                    text = flatten(" ".join(str(part or "") for part in (title, summary, content)))
+                    found = {value for value in expected if value in text}
+                    reachable |= found
+                    if len(str(content or "")) > RUNTIME_MARKED_CHARACTERS:
+                        long_documents |= found
+    except sqlite3.Error:
+        return set(), set()
+    finally:
+        if connection is not None:
+            connection.close()
+    return reachable, long_documents
 
 
 def existing_answer_passages(corpus: Path, paths: Sequence[str], passages: Dict[str, Dict[str, Any]]) -> Set[str]:
@@ -1752,6 +1800,14 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     )
     passage_total = sum(item["answer_passages_existed"] for item in evaluated) if passage_measured else None
     passage_delivered = sum(item["answer_passages_delivered"] for item in evaluated) if passage_measured else None
+    deliverable_measured = bool(evaluated) and all(
+        type(item.get(key)) is int for item in evaluated
+        for key in ("answer_passages_deliverable", "answer_passages_delivered_deliverable")
+    )
+    deliverable_total = (sum(item["answer_passages_deliverable"] for item in evaluated)
+                         if deliverable_measured else None)
+    deliverable_delivered = (sum(item["answer_passages_delivered_deliverable"] for item in evaluated)
+                             if deliverable_measured else None)
 
     def mean(key: str) -> Optional[float]:
         return round(sum(len(item.get(key) or []) for item in evaluated) / count, 3) if count else None
@@ -1772,6 +1828,12 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         "answer_passages_existed": passage_total,
         "answer_passages_delivered": passage_delivered,
         "answer_passage_recall": round(passage_delivered / passage_total, 4) if passage_total else None,
+        "answer_passages_deliverable": deliverable_total,
+        "answer_passages_long_document": (sum(int(item.get("answer_passages_long_document") or 0)
+                                              for item in evaluated) if deliverable_measured else None),
+        "answer_passages_delivered_deliverable": deliverable_delivered,
+        "deliverable_passage_recall": (round(deliverable_delivered / deliverable_total, 4)
+                                       if deliverable_total else None),
         "contaminated": sum(1 for item in evaluated if item.get("contaminated")),
         "answer_in_text_among_answer_could_help": sum(
             1 for item in evaluated if item.get("answer_could_help") and item.get("answer_in_text")
@@ -2214,11 +2276,14 @@ class Run:
             if stats is not None:
                 item["refresh"]["index"] = stats
             prompt_passages = self.passages.get(prompt["id"], {})
+            expected = existing_answer_passages(corpus, answered, prompt_passages)
+            reachable, long_documents = indexed_answer_passages(corpus, answered, expected)
             item.update(score(
                 result, grades, prompt_passages, existed, answered,
-                expected_passages=existing_answer_passages(corpus, answered, prompt_passages),
+                expected_passages=expected, deliverable_passages=reachable,
                 secret_patterns=runtime_policy().SECRET_PATTERNS,
             ))
+            item["answer_passages_long_document"] = len(long_documents)
             if self.arguments.diagnose_misses:
                 known_paths = sorted(path for path, grade in grades.items() if grade >= 1)
                 answer_passages = audit_answer_passages(grades, prompt_passages)
@@ -2330,6 +2395,10 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("answer passages existed", "answer_passages_existed"),
     ("answer passages delivered", "answer_passages_delivered"),
     ("answer passage recall", "answer_passage_recall"),
+    ("answer passages deliverable (in the index)", "answer_passages_deliverable"),
+    ("  of them in documents over 64 KB", "answer_passages_long_document"),
+    ("deliverable passages delivered", "answer_passages_delivered_deliverable"),
+    ("deliverable passage recall", "deliverable_passage_recall"),
     ("could answer (a labelled answer existed)", "answer_could_help"),
     ("contaminated (today's body of a later edit)", "contaminated"),
     ("answer in text among could-answer", "answer_in_text_among_answer_could_help"),
@@ -2394,7 +2463,7 @@ def row_cell(summary: Dict[str, Any], key: str) -> str:
         return f"{int(value)}/{int(summary.get('could_help') or 0)}"
     if key == "answer_in_text_among_answer_could_help":
         return f"{int(value)}/{int(summary.get('answer_could_help') or 0)}"
-    if key == "answer_passage_recall":
+    if key in ("answer_passage_recall", "deliverable_passage_recall"):
         return f"{value:.1%}"
     if key == "useful_paths_delivered":
         return f"{int(value)}/{int(summary.get('useful_paths_existed') or 0)}"
@@ -2469,7 +2538,7 @@ def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
             values = [row_value(summary, key) for summary in (summaries if key in COVERAGE_ROWS else paired)]
             if len(values) == 2 and values[0] is not None and values[1] is not None:
                 change = values[1] - values[0]
-                delta = (f"{change * 100:+.1f}pp" if key == "answer_passage_recall"
+                delta = (f"{change * 100:+.1f}pp" if key in ("answer_passage_recall", "deliverable_passage_recall")
                          else f"{change:+.3f}" if key.startswith(("mean", "latency", "index_latency"))
                          else f"{int(change):+d}")
                 row += delta.rjust(cell)

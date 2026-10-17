@@ -10317,6 +10317,25 @@ class DeliveryTest(RuntimeHarness):
         self.assertIn("specs/auth.md § Sessions", text)
         self.assertIn("SessionStore::purge after the password reset", text)
 
+    def test_a_short_capsule_lets_the_best_excerpt_run_on(self) -> None:
+        # The section's answer sat past its 800-character window while the
+        # capsule used a fraction of its room: the best excerpt takes it.
+        filler = " ".join(["Each line of the export is written in the order the entries were booked."] * 12)
+        self.repository.joinpath("specs/ledger.md").write_text(
+            "# Ledger\n\nThe ledger export writes refunds and ledger totals. "
+            f"{filler} Refunds older than ninety days move to the archive ledger.\n",
+            encoding="utf-8",
+        )
+        for index in range(6):
+            self.repository.joinpath(f"specs/other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+        self.start("TASK-DELIVER")
+        text = self.refresh("where do old refunds in the ledger export go")["capsule_text"]
+        self.assertIn("specs/ledger.md", text)
+        self.assertIn("Refunds older than ninety days move to the archive ledger", text)
+        self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+
     def test_the_excerpt_matches_words_as_the_index_does(self) -> None:
         # The request says "session", the answering section "Sessions": the
         # index matched them, the excerpt counted them as different words.
