@@ -17,6 +17,7 @@ Run: python3 -m unittest tests.test_memory_eval
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -456,15 +457,147 @@ class EndToEndTest(unittest.TestCase):
         self.assertIn("latency p95 (s)", single)
         compared = main_output("report", prompt, "--compare", now, "--show-unjudged")
         self.assertIn("delta", compared)
-        self.assertIn("paired over 2 prompt(s) evaluated in both", compared)
+        self.assertIn('comparison: incompatible recorded metadata', compared)
+        self.assertIn('meta.as_of', compared)
+        self.assertIn('ID overlap: 2 prompt(s) evaluated in both', compared)
+        self.assertNotIn('paired over', compared)
+        useful = next(line for line in compared.splitlines() if line.startswith('useful turns'))
+        self.assertEqual('-', useful.split()[-1])
         self.assertIn("pair(s) without a judgment", compared)
         for prompt_entry in SET:
             self.assertNotIn(prompt_entry["prompt"], compared)
+        same = main_output('report', prompt, '--compare', prompt)
+        self.assertIn('comparison: compatible recorded metadata', same)
+        self.assertIn('paired over 2 prompt(s) evaluated in both', same)
+        useful = next(line for line in same.splitlines() if line.startswith('useful turns'))
+        self.assertEqual('+0', useful.split()[-1])
 
     def test_the_cache_holds_no_leftover_corpus(self) -> None:
         self.assertEqual(list((self.cache / "runs").iterdir()), [])
         self.assertTrue(any((self.cache / "public-trees-v1").iterdir()))
         self.assertTrue(any((self.cache / "history").iterdir()))
+
+
+class ComparisonCompatibilityTest(unittest.TestCase):
+    @staticmethod
+    def document(kind='silent'):
+        return {'meta': {'set_sha256':'a'*64,'judgments_sha256':'b'*64,'passages_sha256':None,
+            'host':'codex','clock':'pinned','as_of':'prompt','updated_after':'drop','timeout':30},
+            'items': {'p1': {'status':'ok','project':'public-project','ts':P1_TS,'commit':'d'*40,
+                'edition':'PHP Core','edition_source':'forced','history_linked':True,'contaminated':False,
+                'provenance': {'from_git':1,'from_worktree':0,'dropped_future':0,'undetermined':0,
+                    'updated_after':0,'unreconstructable_updated':0,**NO_ARCHIVE},
+                'class':kind,'could_help':True,'answer_in_text':kind=='useful',
+                'delivered':['specs/public.md'] if kind=='useful' else [],
+                'noise_delivered':[],'unjudged':[],'refresh':{'seconds':0.1}}}}
+
+    def report(self, first, second):
+        return memory_eval.format_report([('A',Path('a.json'),first),('B',Path('b.json'),second)])
+
+    def useful_delta(self, report):
+        return next(line.split()[-1] for line in report.splitlines() if line.startswith('useful turns'))
+
+    def command(self, first, second):
+        with tempfile.TemporaryDirectory(prefix='comparison-report-') as directory:
+            a=Path(directory)/'a.json';b=Path(directory)/'b.json'
+            a.write_text(json.dumps(first));b.write_text(json.dumps(second))
+            return main_output('report',str(a),'--compare',str(b),'--show-unjudged')
+
+    def test_ten_known_mismatches_withhold_numeric_quality_and_paired_gains(self):
+        changes=[('meta','set_sha256','e'*64),('meta','judgments_sha256','e'*64),
+            ('meta','passages_sha256','e'*64),('meta','host','cursor'),('meta','clock','real'),
+            ('meta','as_of','now'),('meta','timeout',31),('item','commit','e'*40),
+            ('item','ts',P2_TS),('item','edition','Symfony')]
+        for scope,field,value in changes:
+            with self.subTest(field=field):
+                first=self.document();second=self.document('useful')
+                target=second['meta'] if scope=='meta' else second['items']['p1']
+                target[field]=value
+                report=self.command(first,second)
+                self.assertIn('comparison: incompatible',report)
+                self.assertIn(field,report)
+                self.assertLess(report.index('comparison: incompatible'),report.index('useful turns'))
+                self.assertEqual('-',self.useful_delta(report))
+                self.assertNotIn('paired over',report)
+                self.assertNotRegex(report,r'useful\s+\+1\s+-0')
+                self.assertIn('pair(s) without a judgment',report)
+
+    def test_compatible_different_runtime_treatment_retains_gain(self):
+        first=self.document();second=self.document('useful')
+        first['meta']['clone_commit']='1'*40;second['meta']['clone_commit']='2'*40
+        first['meta']['editions']={'PHP Core':{'digest':'1'*64,'dirty':False}}
+        second['meta']['editions']={'PHP Core':{'digest':'2'*64,'dirty':True}}
+        report=self.command(first,second)
+        self.assertIn('comparison: compatible recorded metadata',report)
+        self.assertEqual('+1',self.useful_delta(report))
+        self.assertIn('paired over 1 prompt(s)',report)
+
+    def test_legacy_unknown_remains_readable_diagnostic(self):
+        first=self.document();second=self.document('useful')
+        first['meta']={};second['meta']={}
+        report=self.command(first,second)
+        self.assertIn('comparison: unknown',report)
+        self.assertIn('diagnostic',report)
+        self.assertNotIn('paired over',report)
+        self.assertEqual('+1',self.useful_delta(report))
+
+    def test_missing_evidence_does_not_hide_a_known_mismatch(self):
+        first=self.document();second=self.document('useful')
+        first['meta'].pop('judgments_sha256');second['meta']['host']='cursor'
+        report=self.command(first,second)
+        self.assertIn('comparison: incompatible',report)
+        self.assertEqual('-',self.useful_delta(report))
+
+    def test_explicit_absence_is_distinct_from_missing_passage_metadata(self):
+        first=self.document();second=self.document('useful')
+        self.assertIn('comparison: compatible',self.report(first,second))
+        second['meta'].pop('passages_sha256')
+        self.assertIn('comparison: unknown',self.report(first,second))
+
+    def test_typed_and_missing_source_evidence_is_unknown_without_traceback(self):
+        mutations=[('meta',[]),('meta',True),('history_linked',1),('contaminated',0),
+                   ('contaminated',True),('provenance',{'from_git':True}),('commit',None)]
+        for field,value in mutations:
+            with self.subTest(field=field,value=value):
+                first=self.document();second=self.document('useful')
+                if field=='meta':second['meta']=value
+                else:second['items']['p1'][field]=value
+                if field=='contaminated' and value is True:
+                    first['items']['p1'][field]=True
+                self.assertIn('comparison: unknown',self.command(first,second))
+
+    def test_shared_success_diagnostics_keep_failure_coverage_visible(self):
+        first=self.document('useful');second=copy.deepcopy(first)
+        first['items']['p2']=copy.deepcopy(first['items']['p1'])
+        second['items']['p2']={'status':'skipped','reason':'refresh-timeout'}
+        report=self.report(first,second)
+        self.assertIn('comparison: compatible',report)
+        self.assertEqual('+0',self.useful_delta(report))
+        rows={line[:42].strip():line.split()[-1] for line in report.splitlines() if line[:1].strip()}
+        self.assertEqual('-1',rows['evaluated']);self.assertEqual('+1',rows['skipped'])
+
+    def test_optional_scorer_and_worker_budgets_are_checked_when_declared(self):
+        first=self.document();second=self.document('useful')
+        for document in (first,second):
+            document['meta']['runtime_under_test']={'scorer_sha256':'c'*64}
+            document['meta']['onnx_excerpts']={'worker_timeout':5}
+        self.assertIn('comparison: compatible',self.report(first,second))
+        second['meta']['runtime_under_test']['scorer_sha256']='e'*64
+        self.assertIn('comparison: incompatible',self.report(first,second))
+        second['meta']['runtime_under_test']['scorer_sha256']='c'*64
+        second['meta']['onnx_excerpts']['worker_timeout']=4
+        self.assertIn('comparison: incompatible',self.report(first,second))
+        second['meta'].pop('onnx_excerpts')
+        self.assertIn('comparison: unknown',self.report(first,second))
+
+    def test_utc_overflow_in_recorded_timestamp_is_unknown(self):
+        for stamp in ('0001-01-01T00:00:00+01:00','9999-12-31T23:59:59-01:00'):
+            with self.subTest(timestamp=stamp):
+                first=self.document();second=self.document('useful')
+                second['items']['p1']['ts']=stamp
+                report=self.command(first,second)
+                self.assertIn('comparison: unknown',report)
+                self.assertNotIn('paired over',report)
 
 
 class AutoEditionTest(unittest.TestCase):
@@ -1347,6 +1480,226 @@ class FunnelDiagnosisMetadataTest(unittest.TestCase):
         unavailable = memory_diagnosis.unavailable_funnel_diagnosis()
         unavailable['boundaries']['pack_input'] = {'count': 0, 'state': 'exact'}
         self.assertIsNone(memory_diagnosis.normalize_funnel_diagnosis(unavailable))
+
+
+class PlannedDeliveryTest(unittest.TestCase):
+    """Actual producer persistence, including failures outside successful pairs."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='memory-eval-planned-')
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+        project = self.base / 'projects/shop'
+        project.mkdir(parents=True)
+        git(project, 'init', '-q')
+        self.answers = ['Alpha orders use email.', 'Beta orders use post.',
+                        'Gamma orders use courier.', 'Delta orders use pickup.']
+        write(project, 'docs/orders.md', '# Orders\n\n'+'\n\n'.join(self.answers)+'\n')
+        git(project, 'add', '-A')
+        git(project, 'commit', '-q', '-m', 'public source', when=T1)
+        prompts = [{'id': key, 'project': 'shop', 'ts': P1_TS, 'prompt': 'PRIVATE-PROMPT-'+key}
+                   for key in ('p1', 'p2')]
+        passages = {key: {'docs/orders.md': {'useful': True, 'passages': answers}}
+                    for key, answers in (('p1', self.answers[:3]), ('p2', self.answers[3:]))}
+        for name, value in (('set', prompts), ('judgments', {key: {'docs/orders.md': 2} for key in ('p1', 'p2')}),
+                            ('passages', passages)):
+            (self.base / (name+'.json')).write_text(json.dumps(value))
+        self.out = self.base / 'result.json'
+        args = memory_eval.build_parser().parse_args([
+            'run', '--set', str(self.base/'set.json'), '--judgments', str(self.base/'judgments.json'),
+            '--passages', str(self.base/'passages.json'), '--projects-root', str(self.base/'projects'),
+            '--edition', 'PHP Core', '--cache', str(self.base/'cache'), '--out', str(self.out)])
+        self.stand = memory_eval.Run(args)
+
+    def saved(self):
+        return json.loads(self.out.read_text())
+
+    def runtime(self, corpus, arguments, env, timeout):
+        if arguments[0] == 'index':
+            saved = self.saved()
+            key = 'p1' if corpus.name.startswith('p1-') else 'p2'
+            unit = saved['planned']['units'][key]
+            self.assertEqual('runtime-admitted', unit['state'])
+            self.assertEqual(3 if key == 'p1' else 1, unit['source_opportunity']['answer_passages'])
+            return {'exit': 0, 'seconds': 0.1, 'stdout': b'', 'stderr': b''}
+        output = {'capsule': {'semantic': [{'path': 'docs/orders.md'}]},
+                  'capsule_text': '\n'.join(self.answers)}
+        return {'exit': 0, 'seconds': 0.2, 'stdout': json.dumps(output).encode(), 'stderr': b''}
+
+    def execute(self, runtime=None):
+        with mock.patch.object(memory_eval, 'run_runtime', runtime or self.runtime), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return self.stand.execute()
+
+    def test_full_manifest_is_durable_before_first_evaluate(self):
+        def first(prompt):
+            saved = self.saved()
+            self.assertEqual(['p1', 'p2'], saved['planned']['ids'])
+            self.assertEqual({}, saved['items'])
+            self.assertEqual('unattempted', saved['planned']['units']['p2']['state'])
+            raise KeyboardInterrupt()
+        with mock.patch.object(self.stand, 'evaluate', first), self.assertRaises(KeyboardInterrupt):
+            self.execute()
+        result = memory_eval.planned_delivery(self.saved())
+        self.assertEqual(('incomplete', 2, 1, 2),
+                         (result['status'], result['planned'], result['unattempted'], result['without_terminal']))
+        self.assertIsNone(result['unit_delivery_rate'])
+
+    def test_timeout_keeps_denominator_and_asymmetric_passage_ceiling(self):
+        for failed, recall in (('p2', .75), ('p1', .25)):
+            if failed == 'p1':
+                # Each execute has its own Run/cache, like the public CLI.
+                self.temporary.cleanup()
+                self.setUp()
+            def runtime(corpus, arguments, env, timeout):
+                normal = self.runtime(corpus, arguments, env, timeout)
+                if arguments[0] == 'refresh' and corpus.name.startswith(failed+'-'):
+                    return {**normal, 'exit': None}
+                return normal
+            self.assertEqual(0, self.execute(runtime))
+            saved = self.saved()
+            result = memory_eval.planned_delivery(saved)
+            self.assertEqual(('complete', 2, 2, 2, .5, recall),
+                             (result['status'], result['planned'], result['terminal'], result['source_known'],
+                              result['unit_delivery_rate'], result['passage_recall']))
+            self.assertEqual(1, saved['summary']['evaluated'])
+            self.assertEqual({'refresh-timeout': 1}, saved['summary']['skipped'])
+            rendered = memory_eval.format_report([('A', self.out, saved)])
+            self.assertIn('whole-planned A: complete', rendered)
+            self.assertIn('unit delivery=50.0%', rendered)
+            self.assertNotIn('PRIVATE-PROMPT', json.dumps(saved))
+            self.assertNotIn('Alpha orders', json.dumps(saved))
+
+    def test_interrupt_during_first_or_second_warm_is_not_unattempted(self):
+        for failed, terminal, unattempted in (('p1', 0, 1), ('p2', 1, 0)):
+            if failed == 'p2':
+                self.temporary.cleanup()
+                self.setUp()
+            def runtime(corpus, arguments, env, timeout):
+                normal = self.runtime(corpus, arguments, env, timeout)
+                if arguments[0] == 'index' and corpus.name.startswith(failed+'-'):
+                    raise KeyboardInterrupt()
+                return normal
+            with self.assertRaises(KeyboardInterrupt):
+                self.execute(runtime)
+            saved = self.saved()
+            result = memory_eval.planned_delivery(saved)
+            self.assertEqual(('incomplete', 2, terminal, unattempted, 2-terminal),
+                             (result['status'], result['planned'], result['terminal'], result['unattempted'],
+                              result['without_terminal']))
+            self.assertEqual('interrupted', saved['planned']['units'][failed]['state'])
+            self.assertTrue(saved['planned']['units'][failed]['runtime_admitted'])
+            self.assertIsNone(result['passage_recall'])
+
+    def test_source_opportunity_is_captured_once_before_warm(self):
+        self.stand.passages['p1']['docs/orders.md']['passages'].append('Future answer only after warm.')
+        original = memory_eval.existing_answer_passages
+        observed = []
+        def capture(corpus, answered, passages):
+            observed.append(corpus.name)
+            return original(corpus, answered, passages)
+        def runtime(corpus, arguments, env, timeout):
+            normal = self.runtime(corpus, arguments, env, timeout)
+            if arguments[0] == 'index':
+                self.assertEqual(len(observed), 1 if corpus.name.startswith('p1-') else 2)
+                with (corpus/'docs/orders.md').open('a') as stream:
+                    stream.write('\nFuture answer only after warm.\n')
+            return normal
+        with mock.patch.object(memory_eval, 'existing_answer_passages', capture):
+            self.execute(runtime)
+        self.assertEqual(2, len(observed))
+        self.assertEqual(3, self.saved()['items']['p1']['answer_passages_existed'])
+        self.assertEqual(1.0, memory_eval.planned_delivery(self.saved())['passage_recall'])
+
+    def test_missing_source_and_legacy_are_unknown_not_zero(self):
+        self.stand.prompts[1]['project'] = 'missing'
+        self.execute()
+        result = memory_eval.planned_delivery(self.saved())
+        self.assertEqual(('incomplete', 1, 1), (result['status'], result['source_known'], result['source_excluded']))
+        self.assertIsNone(result['passage_recall'])
+        self.assertEqual('unknown', memory_eval.planned_delivery({'items': {}})['status'])
+
+    def test_failed_opportunity_checkpoint_stops_before_runtime(self):
+        original = memory_eval.write_json
+        writes = []
+        def checkpoint(target, document):
+            writes.append(document['planned']['units']['p1']['state'])
+            if len(writes) == 3:
+                raise memory_eval.EvalError('injected checkpoint write failure')
+            original(target, document)
+        with mock.patch.object(memory_eval, 'write_json', checkpoint), mock.patch.object(memory_eval, 'run_runtime') as runtime:
+            with self.assertRaises(memory_eval.EvalError):
+                self.execute(runtime)
+        runtime.assert_not_called()
+        self.assertEqual(['unattempted', 'preparing', 'runtime-admitted'], writes)
+        saved = self.saved()
+        self.assertEqual('preparing', saved['planned']['units']['p1']['state'])
+        self.assertEqual({}, saved['items'])
+        self.assertEqual('incomplete', memory_eval.planned_delivery(saved)['status'])
+        self.assertFalse(self.stand.work.exists())
+
+    def test_invalid_unicode_plan_input_preserves_output_and_cleans_work(self):
+        previous = {'meta': {}, 'items': {}, 'sentinel': 'previous result'}
+        memory_eval.write_json(self.out, previous)
+        prompts = json.loads((self.base/'set.json').read_text())
+        prompts[0]['prompt'] = 'invalid-unicode-'+chr(0xD800)
+        (self.base/'set.json').write_text(json.dumps(prompts))
+        self.stand.prompts = memory_eval.load_set(self.base/'set.json')
+        with mock.patch.object(memory_eval, 'run_runtime') as runtime, self.assertRaises(memory_eval.EvalError):
+            self.execute(runtime)
+        runtime.assert_not_called()
+        self.assertEqual(previous, self.saved())
+        self.assertFalse(self.stand.work.exists())
+
+    def test_known_zero_opportunity_is_complete_without_fabricated_rate(self):
+        self.stand.judgments = {}
+        self.stand.passages = {}
+        def runtime(corpus, arguments, env, timeout):
+            return {'exit': 0, 'seconds': .1, 'stderr': b'',
+                    'stdout': b'' if arguments[0] == 'index' else b'{"capsule": null}'}
+        self.execute(runtime)
+        result = memory_eval.planned_delivery(self.saved())
+        self.assertEqual(('complete', 2, 0, 0),
+                         (result['status'], result['source_known'], result['useful_eligible'], result['answer_passages_existed']))
+        self.assertIsNone(result['unit_delivery_rate'])
+        self.assertIsNone(result['passage_recall'])
+
+    def test_bad_bindings_states_and_counts_cannot_publish_rates(self):
+        self.execute()
+        baseline = self.saved()
+        mutations = [lambda doc: doc['planned']['ids'].append('missing'),
+                     lambda doc: doc['planned']['ids'].append('p1'),
+                     lambda doc: doc['items']['p1'].update(input_sha256='0'*64),
+                     lambda doc: doc['planned']['units']['p1'].update(state='unattempted'),
+                     lambda doc: doc['items'].update(extra=copy.deepcopy(doc['items']['p1'])),
+                     lambda doc: doc['items']['p1'].update(answer_passages_delivered=4)]
+        for value in (True, -1, 10**400, float('nan'), 'PRIVATE-SENTINEL'):
+            mutations.append(lambda doc, value=value: doc['items']['p1'].update(answer_passages_delivered=value))
+        def copied(doc):
+            doc['planned']['units']['p2'] = copy.deepcopy(doc['planned']['units']['p1'])
+            doc['items']['p2'] = copy.deepcopy(doc['items']['p1'])
+        def swapped(doc):
+            for mapping in (doc['planned']['units'], doc['items']):
+                mapping['p1'], mapping['p2'] = mapping['p2'], mapping['p1']
+        def blank_id(doc):
+            doc['planned']['ids'][0] = ' '
+            doc['planned']['units'][' '] = doc['planned']['units'].pop('p1')
+            doc['items'][' '] = doc['items'].pop('p1')
+        mutations.extend((copied, swapped, blank_id))
+        for path in ('', '../outside.md', '/absolute.md', './docs/orders.md'):
+            def bad_path(doc, path=path):
+                for field in ('useful_delivered', 'existed_useful', 'answer_existed'):
+                    doc['items']['p1'][field] = [path]
+            mutations.append(bad_path)
+        for value in (True, -1, 10**400, float('nan'), 'PRIVATE-SENTINEL'):
+            mutations.append(lambda doc, value=value: doc['planned']['units']['p1']['source_opportunity'].update(answer_passages=value))
+        for mutate in mutations:
+            doc = copy.deepcopy(baseline)
+            mutate(doc)
+            result = memory_eval.planned_delivery(doc)
+            self.assertEqual('unknown', result['status'])
+            self.assertIsNone(result['unit_delivery_rate'])
+            rendered = memory_eval.format_report([('A', self.out, doc)])
+            self.assertNotIn('PRIVATE-SENTINEL', rendered)
 
 
 class RefreshOutcomeTest(unittest.TestCase):

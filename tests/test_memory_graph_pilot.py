@@ -73,6 +73,30 @@ class GraphPilotTest(unittest.TestCase):
             first_metadata = json.loads(first.read_text().split("---", 2)[1])
             self.assertEqual("MEM-20260801-bbbbbbbb", first_metadata["id"])
 
+    def test_real_report_accepts_shared_conditions_with_different_runtime_treatments(self):
+        from tests.test_memory_eval import ComparisonCompatibilityTest
+        with tempfile.TemporaryDirectory(prefix='graph-comparison-') as temporary:
+            output=Path(temporary)/'pilot'
+            def supplied_results(runtime, arguments):
+                document=ComparisonCompatibilityTest.document('useful' if runtime==ROOT else 'silent')
+                destination=Path(arguments[arguments.index('--out')+1])
+                destination.parent.mkdir(parents=True,exist_ok=True)
+                destination.write_text(json.dumps(document))
+                return 0
+            rendered=io.StringIO()
+            with mock.patch.object(pilot,'evaluate_runtime',side_effect=supplied_results), \
+                    contextlib.redirect_stdout(rendered):
+                self.assertEqual(0,pilot.main(['--out-dir',str(output)]))
+            report=rendered.getvalue()
+            self.assertIn('comparison: compatible recorded metadata',report)
+            self.assertIn('paired over 1 prompt(s)',report)
+            useful=next(line for line in report.splitlines() if line.startswith('useful turns'))
+            self.assertEqual('+1',useful.split()[-1])
+            a=json.loads((output/'results/baseline.json').read_text())['meta']['runtime_under_test']
+            b=json.loads((output/'results/automatic.json').read_text())['meta']['runtime_under_test']
+            self.assertNotEqual(a['materialization'],b['materialization'])
+            self.assertEqual(a['scorer_sha256'],b['scorer_sha256'])
+
 
 if __name__ == "__main__":
     unittest.main()

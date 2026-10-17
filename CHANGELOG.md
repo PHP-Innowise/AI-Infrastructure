@@ -65,6 +65,16 @@ edition's own files remain in that edition's changelog.
 - Apply configured authority/privacy admission before filling governed lexical windows: eligible observed or team Brain answers survive documents excluded by an observed-only or team-only project profile. Keep the full BM25 corpus, default/direct behavior, existing ceilings and final source/custody checks.
 - Scope custom-profile ranks, score floors, no-match and bounded diagnostics to metadata-admitted proposals before live checks. Add public CLI starvation/negative/default-competition regressions and score, deterministic-order, bounds and direct-caller controls; the default privacy/owner hypothesis was not reproduced.
 
+### Whole-planned memory delivery — 2026-10-16
+
+- Persist the full selected logical plan before evaluation and freeze source opportunity before warm-up. Completed refresh failures retain their source denominator; interruptions preserve in-flight evidence without changing terminal-only successful-intersection metrics.
+- Report supplementary unit delivery and passage recall only for complete, internally consistent plans with known source opportunities. Legacy, malformed, missing-source and interrupted evidence cannot produce a final rate; no whole-planned paired delta or task-success/cost claim is inferred. Add actual producer, timeout, interruption, checkpoint-failure, frozen-source and malformed-evidence regressions.
+
+### Recorded memory-evaluation compatibility — 2026-10-16
+
+- Classify comparison metadata before numeric reports: matching recorded inputs/source conditions and budgets retain paired gains; known mismatches withhold quality/latency deltas and gains; missing or malformed legacy evidence is explicitly diagnostic. Runtime treatment versions may differ. Preserve the existing successful-intersection arithmetic and visible coverage losses.
+- Keep malformed legacy headers readable and treat out-of-range UTC conversions as unknown timestamps. Add mismatch, typed/absent evidence, runtime-treatment and real graph-pilot report regressions; document that recorded compatibility does not prove corpus-body identity or whole-planned task outcomes.
+
 ### Same-section answer coverage — 2026-10-16
 
 - A session can receive a new query-bearing sentence or list unit from a previously quoted section. Bounded hashes of complete source units surviving the final rendered quote retain incidental answers and earlier windows, so changing rank/window alone does not repeat known answers.
