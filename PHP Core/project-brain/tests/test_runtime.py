@@ -10667,9 +10667,17 @@ class DeliveryTest(RuntimeHarness):
             ),
             first["capsule_text"],
         )
+        self.assertFalse(any(line.startswith('  ') for line in first['capsule_text'].splitlines()))
         second = refresh_in_process("--session-id", "c-render")
-        self.assertEqual([left_out], self.shown_notes(second))
-        self.assertEqual(2, second["capsule"]["repeated"])
+        # The first turn showed two headers but no answer bodies. At the
+        # ordinary ceiling all three answers are new, including the entry
+        # whose header was omitted; pointers alone do not cover source units.
+        self.assertEqual(list(self.DISPATCH_NOTES), self.shown_notes(second))
+        self.assertIn(left_out, self.shown_notes(second))
+        for name in self.DISPATCH_NOTES:
+            self.assertIn(f'The {name} quartz falcon dispatch retries stop after three attempts.',
+                          second['capsule_text'])
+        self.assertEqual(0, second["capsule"]["repeated"])
 
     def test_the_capsule_keeps_only_the_items_its_text_shows(self) -> None:
         # At the real ceiling: a full working state, two warnings and a
@@ -11879,18 +11887,20 @@ class WindowObservationSessionTest(unittest.TestCase):
     def observation(self, result):
         return next(item for item in self.trace(result)['records'] if item['path'] == 'specs/guide.md')['window_observation']
 
-    def test_different_window_is_observed_without_releasing_repeat(self):
+    def test_new_unit_releases_the_section_and_preserves_window_observation(self):
         first = self.refresh()
         state = self.state()['window-1']
         body = next(item for item in self.trace(first)['render']['records'] if item['path'] == 'specs/guide.md')
         self.assertIn('RetryGuard requires', first['capsule_text'])
         self.assertNotIn('DetachGuard refuses', first['capsule_text'])
         second = self.refresh('DetachGuard')
-        self.assertNotIn('specs/guide.md', second['capsule_text'])
-        self.assertEqual(1, second['capsule']['repeated'])
+        self.assertIn('DetachGuard refuses', second['capsule_text'])
+        self.assertEqual(0, second['capsule']['repeated'])
         after = self.state()['window-1']
-        self.assertEqual(state['items'], after['items'])
-        self.assertEqual(state['window_observation'], after['window_observation'])
+        self.assertNotEqual(state['items'], after['items'])
+        self.assertNotEqual(state['window_observation'], after['window_observation'])
+        coverage = next(iter(after['render_coverage']['receipts'].values()))
+        self.assertEqual(2, len(coverage['exposures']))
         observed = self.observation(second)
         self.assertEqual('different-exposure-window', observed['classification'])
         self.assertEqual(body['body_sha256'], observed['prior']['body_sha256'])
@@ -11927,6 +11937,7 @@ class WindowObservationSessionTest(unittest.TestCase):
         self.refresh()
         state = self.state()
         state['window-1'].pop('window_observation')
+        state['window-1'].pop('render_coverage')
         original = copy.deepcopy(state['window-1']['items'])
         self.replace_state(state)
         result = self.refresh('DetachGuard')
@@ -11948,7 +11959,7 @@ class WindowObservationSessionTest(unittest.TestCase):
             transcript.write_text('{"type":"user"}\n')
             first = self.refresh(transcript=transcript)
             original = self.state()['window-1']['window_observation']
-            repeated = self.refresh('DetachGuard', transcript=transcript)
+            repeated = self.refresh('RetryGuard', transcript=transcript)
             self.assertNotIn('specs/guide.md', repeated['capsule_text'])
             self.assertEqual(original, self.state()['window-1']['window_observation'])
             for marker in ('{"type":"system","subtype":"compact_boundary"}', '{"type":"compacted"}'):
@@ -11959,6 +11970,8 @@ class WindowObservationSessionTest(unittest.TestCase):
                 state = self.state()['window-1']
                 self.assertEqual(0, fresh['capsule']['repeated'])
                 self.assertEqual(1, len(state['window_observation']['receipts']))
+                coverage = next(iter(state['render_coverage']['receipts'].values()))
+                self.assertEqual(1, len(coverage['exposures']))
                 ref = next(iter(state['window_observation']['receipts'].values()))
                 self.assertEqual(state['turn'], ref['handed_turn'])
                 self.assertEqual(Path(fresh['capsule']['manifest']).stem, ref['manifest_id'])

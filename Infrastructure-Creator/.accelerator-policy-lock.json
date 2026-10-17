@@ -99,11 +99,11 @@
     ".agents/skills/memory-seed/assets/runtime-contract.json": "64522a0fa2fab417e806fc4be611e3f25e97a844256607f449f5d911f2684e4a",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "13e09d26050f26bf4ba15af6c034ea236c1b2ee85c0fa7937f399f27e1987933",
     ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "5fec9b5cddb9fa28b57bbc3aa6621b88e16c0053abe29dce26b0614d22d2b93e",
-    ".agents/skills/memory-seed/assets/scripts/context.py": "2f0cadce421d3e2bd21e358efb26696189ff29c376feb1b41b53a20b1d68bb0f",
+    ".agents/skills/memory-seed/assets/scripts/context.py": "92c60da458917bc26d7b2020489bec2f4ff887e628091062eb11a57a18734b66",
     ".agents/skills/memory-seed/assets/scripts/context_cli.py": "ec874c9312133eafae8f16bc298fc011fb55579cb4b300453e81e3f31a4d0123",
     ".agents/skills/memory-seed/assets/scripts/context_continuity.py": "70c8f134f2374225829d14aa6935262b60b0329b9bfc27251637867981befee5",
     ".agents/skills/memory-seed/assets/scripts/context_handoff.py": "eb0ba874c162091a696aeb4658bfc1680bf22618536416290c56c86a80d46306",
-    ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "2cb77d2e30b225e536a9821eca6c6cdc3427ef33434bcc583c047b62f26553c3",
+    ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "0726b4d4e6299ccb868d5e33dcd55f80cc051cbda3a8e44dfe6d07ce22c177bf",
     ".agents/skills/memory-seed/assets/scripts/mcp_config.py": "d3bac7148db0afbc84d71772e76bbe20729f157e4ade571261e9b61c39bbe87c",
     ".agents/skills/memory-seed/assets/scripts/mcp_server.py": "df2f98eb1690e0ae66239fb680713e92b1ce9c188a36b1612f952ef5bd798f48",
     ".agents/skills/memory-seed/assets/scripts/memory_results.py": "cbf49bc18ada432c6f6eab960bb0ca1c783f08987734e0fb865c7afaa4ed93fd",
@@ -174,7 +174,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "a7f433179383153ecb1271d20dea27391f422c1baab609bc0ec6ae9786f5a5a8",
+  "policy_digest": "6ee0ee8d3e4c4fb855e8f429ecc44205f288d58a71c46f14f0bc0bf902429e20",
   "release": "2.5.0",
   "schema_version": 1
 }

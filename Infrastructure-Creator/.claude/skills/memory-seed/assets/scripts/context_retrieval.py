@@ -87,6 +87,10 @@ CAPSULE_EPISODIC_LIMIT = 1
 # the changelog held on every turn of the 121 evaluated prompts that had an
 # event - while 19 answers sat in events never delivered.
 CAPSULE_EVENT_LIMIT = 1
+# Each independently delivered layer gets its own bounded lexical window.
+# Skills are host-listed rather than quoted, so they must not consume the
+# project knowledge or changelog window before source admission can run.
+CAPSULE_CANDIDATE_LAYERS = ("procedural", "semantic", "episodic")
 HISTORY_KIND = "brain-event"
 # How many prompt terms survive into a retrieval query. Rarity in the index
 # decides which ones, so the cap bounds cost without deciding relevance by
@@ -4584,7 +4588,8 @@ def _excerpt_piece(
 
 
 def excerpt_window(
-    units: list[str], limit: int, weights: Optional[dict[str, float]] = None
+    units: list[str], limit: int, weights: Optional[dict[str, float]] = None,
+    *, coverage: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     """The stretch of a section that carries most of the query, within limit.
 
@@ -4593,8 +4598,16 @@ def excerpt_window(
     where its condition usually is. Elided text is shown as an ellipsis.
     """
     plain = [_unmarked(unit) for unit in units]
+    def capture(start: int, end: int, offset: int) -> None:
+        if coverage is not None:
+            for index in range(start, end):
+                text = plain[index]
+                coverage.append({'text': text, 'marked': units[index],
+                                 'start': offset, 'end': offset + len(text)})
+                offset += len(text) + 1
     whole = " ".join(plain)
     if len(whole) <= limit:
+        capture(0, len(units), 0)
         return whole
     budget = max(1, limit - 4)
     best: Optional[tuple[tuple[float, int], int, int, Optional[tuple[str, int, int]]]] = None
@@ -4638,6 +4651,7 @@ def excerpt_window(
             start -= 1
             end = lead_end
     text = " ".join(plain[start:end])
+    capture(start, end, 2 if start else 0)
     return ("… " if start else "") + text + (" …" if end < len(units) else "")
 
 
@@ -4776,7 +4790,9 @@ def ranking_weight(
 
 def _candidates(
     connection: sqlite3.Connection, query: str, limit: int = 100,
-    *, trace: Optional[RetrievalTrace] = None,
+    *, trace: Optional[RetrievalTrace] = None, layer_windows: bool = False,
+    allowed_authority: Optional[list[str]] = None,
+    allowed_privacy: Optional[list[str]] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Ranked candidates, plus what the ranking knew about the query.
 
@@ -4787,8 +4803,28 @@ def _candidates(
     Project Brain events are not candidates here: they reach the capsule only
     through their own search (`history_query`), so they neither take rows of
     this window nor set the episodic floor the changelog is held to.
+
+    Governed delivery requests independent windows for its three layers.
+    Their union is bounded by three times limit; direct callers retain the
+    legacy global window. Corpus statistics and the score-floor formula are
+    unchanged, and every fetched row still needs normal source admission.
+    Governed callers also admit configured authorities and privacy classes
+    before filling windows; denied rows cannot displace an eligible answer.
+    Diagnostics then describe that metadata-admitted window, before live
+    source/custody checks. None retains the direct caller's raw window.
     """
     ensure_metadata_tables(connection)
+    layers = CAPSULE_CANDIDATE_LAYERS if layer_windows else (None,)
+    authorities = (tuple(value for value in brain_runtime.AUTHORITIES if value in allowed_authority)
+                   if allowed_authority is not None else ())
+    authority_clause = ("AND m.authority IN ("+",".join("?" for _ in authorities)+")"
+                        if authorities else "AND 0" if allowed_authority is not None else "")
+    privacies = (tuple(value for value in brain_runtime.PRIVACY if value in allowed_privacy)
+                 if allowed_privacy is not None else ())
+    privacy_clause = ("AND m.privacy IN ("+",".join("?" for _ in privacies)+")"
+                      if privacies else "AND 0" if allowed_privacy is not None else "")
+    if trace is not None:
+        trace.search_limit = limit * len(layers)
     tokens = informative_tokens(connection, query_tokens(query))
     evidence = evidence_tokens(tokens)
     if not evidence:
@@ -4802,8 +4838,10 @@ def _candidates(
         for path, record in trace.records.items():
             if record["state"] != "unavailable":
                 record["evidence_matched_terms"] = coverage.get(path, 0)
-    rows = connection.execute(
-        """
+    rows = []
+    for layer in layers:
+        layer_clause = "AND d.layer = ?" if layer is not None else ""
+        statement = f"""
         SELECT
             d.rowid AS document_rowid, d.path, d.layer, d.kind, d.title,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
@@ -4813,11 +4851,16 @@ def _candidates(
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
         WHERE documents MATCH ? AND d.kind != ?
+        {authority_clause}
+        {privacy_clause}
+        {layer_clause}
         ORDER BY score, d.path
         LIMIT ?
-        """,
-        (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), HISTORY_KIND, limit),
-    ).fetchall()
+        """
+        parameters = (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens),
+                      HISTORY_KIND, *authorities, *privacies, *((layer,) if layer is not None else ()), limit)
+        rows.extend(connection.execute(statement, parameters).fetchall())
+    rows.sort(key=lambda row: (row["score"], row["path"]))
     result = []
     observed_rank = 0
     for row in rows:
@@ -4884,8 +4927,8 @@ def _candidates(
         "distinctive_matches": sum(
             1 for item in result if item.get("match") == "distinctive"
         ),
-        # Pre-filter, so a top candidate withheld by policy is still visible
-        # to the gate. Corpus-scaled telemetry for H3, never a threshold.
+        # Before live source filters, after optional metadata admission.
+        # Corpus-scaled telemetry for H3, never a threshold.
         "top_score": (
             round(float(result[0]["adjusted_score"]), 6) if result else None
         ),
@@ -5077,6 +5120,67 @@ def _remember_retrieval(
 
 WINDOW_REFERENCE_LIMIT = 32
 WINDOW_BODY_BYTES_LIMIT = 4096
+RENDER_UNIT_LIMIT = 32
+
+
+def _render_coverage(entry: Any, items: dict[str, Any], turn: int) -> dict[str, Any]:
+    """Optional bounded full-unit exposure, independent of legacy receipts."""
+    companion = entry.get('render_coverage') if isinstance(entry, dict) else None
+    if (not isinstance(companion, dict) or type(companion.get('version')) is not int
+            or companion['version'] != 1 or not isinstance(companion.get('receipts'), dict)):
+        return {}
+    live = {_window_key(key): value for key, value in items.items()}
+    result = {}
+    for index, (key, value) in enumerate(companion['receipts'].items()):
+        if index >= WINDOW_REFERENCE_LIMIT:
+            break
+        if (not _window_digest(key) or not isinstance(value, dict)
+                or set(value) != {'revision', 'source_sha256', 'exposures'}
+                or key not in live or value['revision'] != live[key][0]
+                or not isinstance(value['revision'], str)
+                or re.fullmatch(r'(?:[0-9a-f]{16}|[0-9a-f]{64})', value['revision']) is None
+                or not _window_digest(value['source_sha256'])
+                or not isinstance(value['exposures'], list)
+                or not 1 <= len(value['exposures']) <= SESSION_NOVELTY_TURNS):
+            continue
+        exposures = []
+        turns = set()
+        valid = True
+        for exposure in value['exposures']:
+            if (not isinstance(exposure, dict) or set(exposure) != {'turn', 'units'}
+                    or type(exposure['turn']) is not int or not 1 <= exposure['turn'] <= turn
+                    or exposure['turn'] in turns):
+                valid = False
+                break
+            turns.add(exposure['turn'])
+            units = exposure['units']
+            if (units is not None and (not isinstance(units, list) or len(units) > RENDER_UNIT_LIMIT
+                    or any(not _window_digest(unit) for unit in units) or len(set(units)) != len(units))):
+                valid = False
+                break
+            if turn - exposure['turn'] < SESSION_NOVELTY_TURNS:
+                exposures.append({'turn': exposure['turn'], 'units': None if units is None else list(units)})
+        if valid and exposures and max(item['turn'] for item in exposures) == live[key][1]:
+            result[key] = {**value, 'exposures': exposures}
+    return result
+
+
+def _unseen_render_unit(entry: dict[str, Any], item: dict[str, Any], key: str,
+                        turn: int, proposal: Any) -> bool:
+    if (not isinstance(proposal, dict) or set(proposal) != {'units', 'matched'}
+            or not isinstance(proposal['units'], list) or not isinstance(proposal['matched'], list)
+            or not proposal['matched'] or len(proposal['units']) > RENDER_UNIT_LIMIT
+            or len(proposal['matched']) > RENDER_UNIT_LIMIT
+            or any(not _window_digest(unit) for unit in proposal['units'])
+            or any(not _window_digest(unit) for unit in proposal['matched'])
+            or any(unit not in proposal['units'] for unit in proposal['matched'])):
+        return False
+    prior = _render_coverage(entry, entry.get('items', {}), turn).get(_window_key(key))
+    if (prior is None or prior['source_sha256'] != item.get('source_hash')
+            or any(exposure['units'] is None for exposure in prior['exposures'])):
+        return False
+    known = {unit for exposure in prior['exposures'] for unit in exposure['units']}
+    return any(unit not in known for unit in proposal['matched'])
 
 
 def _window_digest(value: Any) -> bool:
@@ -5163,6 +5267,9 @@ def _normalize_session_deliveries(stored: Any) -> dict[str, Any]:
         refs = _window_references(entry, clean["items"])
         if refs:
             clean["window_observation"] = {"version": 1, "receipts": refs}
+        coverage = _render_coverage(entry, clean['items'], clean['turn'])
+        if coverage:
+            clean['render_coverage'] = {'version': 1, 'receipts': coverage}
         normalized[session] = clean
     return normalized
 
@@ -5198,6 +5305,7 @@ def _remember_session_deliveries(
 def _session_delivery_projection(
     entry: Optional[dict[str, Any]], turn: int, delivered: dict[str, Any],
     transcript: Optional[dict[str, Any]], *, reset: bool, window_receipts: Any,
+    render_coverage: Any = None,
 ) -> dict[str, Any]:
     items = entry.get("items") if isinstance(entry, dict) and not reset else None
     items = {
@@ -5216,6 +5324,18 @@ def _session_delivery_projection(
     if refs:
         refs = dict(sorted(refs.items(), key=lambda pair: -pair[1]["handed_turn"])[:WINDOW_REFERENCE_LIMIT])
         projected["window_observation"] = {"version": 1, "receipts": refs}
+    previous_items = entry.get('items', {}) if isinstance(entry, dict) else {}
+    coverage = {} if reset else _render_coverage(entry, previous_items, turn)
+    if isinstance(render_coverage, dict):
+        for key, value in render_coverage.items():
+            previous = coverage.get(key)
+            if (previous is not None and previous['revision'] == value['revision']
+                    and previous['source_sha256'] == value['source_sha256']):
+                value = {**value, 'exposures': previous['exposures'] + value['exposures']}
+            coverage[key] = value
+    coverage = _render_coverage({'render_coverage': {'version': 1, 'receipts': coverage}}, items, turn)
+    if coverage:
+        projected['render_coverage'] = {'version': 1, 'receipts': coverage}
     if transcript is not None:
         projected["transcript"] = transcript
     return projected
@@ -5230,12 +5350,13 @@ def _receipt_expectation(stored: dict[str, Any], key: str) -> tuple[bool, str]:
 def _ordinary_session_plan(
     session_id: str, turn: int, delivered: dict[str, Any], stored: dict[str, Any],
     transcript: Optional[dict[str, Any]] = None, *, reset: bool = False,
-    window_receipts: Any = None, exact_next_turn: bool = False,
+    window_receipts: Any = None, render_coverage: Any = None, exact_next_turn: bool = False,
 ) -> dict[str, Any]:
     return {"id": session_id, "turn": turn,
             "expected": _receipt_expectation(_normalize_session_deliveries(stored), session_id),
             "delivered": copy.deepcopy(delivered), "transcript": copy.deepcopy(transcript),
             "reset": reset, "window_receipts": copy.deepcopy(window_receipts),
+            "render_coverage": copy.deepcopy(render_coverage),
             "exact_next_turn": exact_next_turn}
 
 
@@ -5338,7 +5459,8 @@ def _commit_ordinary_receipts(
                 sessions.pop(identifier, None)
                 sessions[identifier] = _session_delivery_projection(
                     entry, turn, session["delivered"], session["transcript"],
-                    reset=session["reset"], window_receipts=session["window_receipts"])
+                    reset=session["reset"], window_receipts=session["window_receipts"],
+                    render_coverage=session.get('render_coverage'))
                 for stale in list(sessions)[:max(0, len(sessions) - SESSION_DELIVERIES_RETENTION)]:
                     sessions.pop(stale, None)
                 payloads[SESSION_DELIVERIES_KEY] = json.dumps(sessions, separators=(",", ":"))
@@ -7775,6 +7897,7 @@ def retrieve(
     trace_paths: Optional[list[str]] = None,
     prepare_excerpts: Optional[Callable[[sqlite3.Connection, list[dict[str, Any]], str], None]] = None,
     describe_windows: Optional[Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any]]] = None,
+    describe_units: Optional[Callable[[sqlite3.Connection, dict[str, Any], bool], dict[str, Any]]] = None,
     delivery_profile: str = 'ordinary',
     source_provenance_sink: Optional[dict[str, Any]] = None,
     admit_delivery: Optional[Callable[[], None]] = None,
@@ -7857,16 +7980,19 @@ def retrieve(
     except sqlite3.Error:
         # A failed observational lookup must not prevent the existing search.
         pass
-    trace.search_limit = max(20, limit * 10)
-    candidates, diagnostics = _candidates(connection, query, max(20, limit * 10), trace=trace)
+    candidates, diagnostics = _candidates(
+        connection, query, max(20, limit * 10), trace=trace, layer_windows=True,
+        allowed_authority=config['allowed_authority'],
+        allowed_privacy=config['allowed_privacy'],
+    )
     # Recorded history has its own search over the whole request: events and
     # local episodes share one slot beside the changelog's.
     history = history_query(connection, query if history_text is None else history_text)
     event_candidates, episode_candidates = (
         _history_candidates(connection, history, trace=trace) if history else ([], [])
     )
-    # Taken before any filter runs, so "nothing matched" cannot be confused
-    # with "everything that matched was withheld".
+    # Taken before live source/custody filters. Configured metadata admission
+    # already defines the bounded lexical window; this is not global absence.
     matched_layers = {item["layer"] for item in candidates}
     if event_candidates or episode_candidates:
         matched_layers.add("episodic")
@@ -8164,6 +8290,16 @@ def retrieve(
     session_deliveries = _load_session_deliveries(connection) if session else {}
     session_expected = _receipt_expectation(session_deliveries, session) if session else None
     window_proposals: dict[str, Any] = {}
+    unit_proposals: dict[str, Any] = {}
+    if session and describe_units is not None:
+        try:
+            proposed_units = describe_units(connection, copy.deepcopy(_with_index_images({
+                'query': query, **_capsule_projection(capsule_selected, local_episode_selected)},
+                _selected_index_images(capsule_selected))), False)
+            if isinstance(proposed_units, dict):
+                unit_proposals = proposed_units
+        except Exception:
+            unit_proposals = {}
     if session and describe_windows is not None:
         try:
             proposed = describe_windows(connection, copy.deepcopy(_with_index_images({
@@ -8210,13 +8346,18 @@ def retrieve(
             key, revision = delivery_identity(connection, item, query)
             delivery_keys[item["path"]] = (key, revision)
             if handed(key, revision):
-                repeated.append(item)
                 if describe_windows is not None:
                     try:
                         _observe_repeat_window(trace, repository, item, key, revision, recent[key],
                                                session_turn, previous_entry, window_proposals)
                     except Exception:
                         pass
+                if _unseen_render_unit(previous_entry, item, key, session_turn,
+                                       unit_proposals.get(item['path'])):
+                    still_handed.pop(key, None)
+                    fresh_selection.append(item)
+                else:
+                    repeated.append(item)
             else:
                 fresh_selection.append(item)
         capsule_selected = fresh_selection
@@ -8355,10 +8496,9 @@ def retrieve(
         "semantic": semantic,
         "episodic": episodic,
         "selected": [_public_item(item) for item in selected],
-        # A layer with no candidate at all is a different fact from a layer
-        # whose candidates were filtered out downstream, and only the first
-        # one means "memory has nothing here". Recorded before any budget or
-        # policy filter runs; `excluded` in the manifest explains the rest.
+        # No metadata-admitted lexical proposal differs from proposals later
+        # withheld by live source checks or budgets. This describes bounded
+        # windows, not global corpus absence; the manifest explains live losses.
         "no_match": no_match,
         # Relevant items left out because this conversation was handed them
         # in its last few turns; the rendered capsule says they still apply.
@@ -8532,6 +8672,15 @@ def retrieve(
             key, revision = _episode_signature(episode)
             handed_now[key] = [revision, session_turn]
         window_receipts = {}
+        render_coverage = {}
+        final_units = {}
+        if describe_units is not None:
+            try:
+                described = describe_units(connection, result, True)
+                if isinstance(described, dict):
+                    final_units = described
+            except Exception:
+                pass
         for item in selected:
             if item["path"] not in delivery_keys or not trace._eligible(item):
                 continue
@@ -8539,6 +8688,15 @@ def retrieve(
             window_receipts[_window_key(key)] = {
                 "revision": revision, "handed_turn": session_turn,
                 "manifest_id": manifest_id, "doc_ref": _window_key(item["path"])}
+            if _window_digest(item.get('source_hash')):
+                description = final_units.get(item['path'])
+                units = description.get('units') if isinstance(description, dict) else None
+                if (not isinstance(units, list) or len(units) > RENDER_UNIT_LIMIT
+                        or any(not _window_digest(unit) for unit in units) or len(set(units)) != len(units)):
+                    units = None
+                render_coverage[_window_key(key)] = {
+                    'revision': revision, 'source_sha256': item['source_hash'],
+                    'exposures': [{'turn': session_turn, 'units': units}]}
         session_plan = _ordinary_session_plan(
             session,
             session_turn,
@@ -8547,6 +8705,7 @@ def retrieve(
             transcript_position,
             reset=compacted,
             window_receipts=window_receipts,
+            render_coverage=render_coverage,
             exact_next_turn=True,
         )
         # The expectation predates callbacks/packing, not the later projection.

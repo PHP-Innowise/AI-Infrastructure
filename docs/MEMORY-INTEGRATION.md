@@ -213,6 +213,45 @@ or writes outside a read-only scope.
 
 ## Verify
 
+Governed retrieval uses a separate bounded candidate window for procedural,
+semantic and episodic knowledge. At the default output limit it reads up to
+30 candidates per layer (90 in total), so host-listed skills cannot consume
+the project-document window. This increases bounded ranking work; it does not
+increase the delivered capsule budget. Existing corpus statistics, per-layer
+score floors and source/privacy checks still apply. Direct candidate callers
+retain their global window; recorded events keep their separate history search.
+
+Governed windows apply configured authority and privacy allowlists before
+bounded SQL selection. An `observed` Brain answer can survive a cohort of
+excluded `verified` documents in an observed-only profile; a team Brain answer
+can survive excluded public documents in a team-only profile.
+The complete FTS corpus still determines BM25 scores and
+term coverage; live source, privacy, ownership and final custody checks remain.
+For a custom metadata profile, candidate ranks, relative floors, `no_match`
+and bounded funnel observations describe metadata-admitted lexical proposals
+before those live checks. They do not establish global corpus absence. The
+default observed+verified/public+team profile and direct callers' raw windows retain their
+existing behavior. Documents admitted by both lists remain real competition.
+
+Within a previously quoted section, a rendered session can receive a new full
+query-bearing sentence/list unit. Coverage records hashes of all complete source
+units that survived the final sanitized render, including incidental answers.
+The strongest visible query-bearing unit must be absent from the recent coverage;
+a changed window or new background prose alone does not release the section.
+Earlier windows remain covered, so A→B→A does not repeat A before its expiry.
+Coverage is lexical delivery evidence, not proof that a task used the answer.
+
+Coverage shares the existing atomic SQLite session receipt and its CAS/rollback.
+It retains at most 32 section references, four recent exposures per section and
+32 unit hashes per exposure; no source prose is stored. Four-turn expiry, 50
+sessions, compaction reset and the 3600-character rendered ceiling remain.
+Whole-unit source spans must survive rendering; oversized sentence fragments
+cannot masquerade as complete units. Sanitizer changes, unknown/legacy/malformed
+coverage and overflow conservatively retain section suppression. Final source
+admission still runs before coverage is recorded. Structured-only callers do not
+claim rendered coverage. This adds bounded local parsing and metadata work;
+token or task savings require a separate measurement.
+
 Confirm all four tools appear in each configured client. Retrieve for a fresh task,
 checkpoint with a goal, record a source-backed result, then replay the same ID/content
 and confirm no duplicates. Inspect Harness **Knowledge → Memory use**, run

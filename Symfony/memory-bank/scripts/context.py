@@ -120,6 +120,9 @@ from context_retrieval import (
     excerpt_weights,
     excerpt_section,
     excerpt_window,
+    _excerpt_score,
+    RENDER_UNIT_LIMIT,
+    WINDOW_BODY_BYTES_LIMIT,
     _unmarked,
     is_relevant,
     linked_documents,
@@ -3319,6 +3322,8 @@ def assemble_capsule(
         trace_paths=trace_paths,
         delivery_profile=delivery_profile,
         describe_windows=describe_excerpt_windows,
+        describe_units=(lambda conn, value, final: describe_excerpt_units(
+            conn, value, final, delivery_profile=delivery_profile)) if render else None,
         source_provenance_sink=source_provenance_sink,
         admit_delivery=delivery_admission,
     )
@@ -3831,6 +3836,7 @@ class Excerpt(str):
     the length it was allowed."""
 
     heading = ""
+    units = None
     limit = None
     cut = False
 
@@ -3863,7 +3869,7 @@ def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> 
 
 
 def capsule_excerpts(
-    connection: sqlite3.Connection, capsule: dict[str, object]
+    connection: sqlite3.Connection, capsule: dict[str, object], *, include_units: bool = False,
 ) -> dict[str, str]:
     """Answer-bearing text for the capsule's project knowledge, by path,
     the best-ranked excerpts grown into the room the capsule leaves.
@@ -3875,9 +3881,10 @@ def capsule_excerpts(
     EXCERPT_GROWTH_CAPS. The renderer still holds the whole text to the
     ceiling, shrinking the last excerpts first.
     """
-    excerpts = _capsule_excerpts(connection, capsule)
+    excerpts = _capsule_excerpts(connection, capsule, include_units=include_units)
     grown = _excerpt_growth(capsule, excerpts)
-    return _capsule_excerpts(connection, capsule, limits=grown) if grown else excerpts
+    return (_capsule_excerpts(connection, capsule, include_units=include_units, limits=grown)
+            if grown else excerpts)
 
 
 def _excerpt_growth(capsule: dict[str, object], excerpts: dict[str, str]) -> dict[str, int]:
@@ -3902,7 +3909,7 @@ def _excerpt_growth(capsule: dict[str, object], excerpts: dict[str, str]) -> dic
 
 def _capsule_excerpts(
     connection: sqlite3.Connection, capsule: dict[str, object],
-    *, limits: Optional[dict[str, int]] = None,
+    *, include_units: bool = False, limits: Optional[dict[str, int]] = None,
 ) -> dict[str, str]:
     """Answer-bearing text for the capsule's project knowledge, by path.
 
@@ -3980,7 +3987,8 @@ def _capsule_excerpts(
                 if marked
                 else None
             )
-            text = excerpt_window(section["units"], limit, weights) if section else ""
+            spans = [] if include_units else None
+            text = excerpt_window(section["units"], limit, weights, coverage=spans) if section else ""
             if not text and isinstance(item.get("snippet"), str):
                 text = _bounded(item["snippet"].replace("[", "").replace("]", ""), limit)
             if text:
@@ -3988,6 +3996,9 @@ def _capsule_excerpts(
                 excerpt.heading = section["shown"] if section else ""
                 excerpt.limit = limit
                 excerpt.cut = bool(section) and sum(len(_unmarked(unit)) + 1 for unit in section["units"]) > limit
+                if include_units and section is not None:
+                    excerpt.units = [(span['text'], _excerpt_score([span['marked']], weights)[0],
+                                      span['start'], span['end']) for span in spans]
                 excerpts[item["path"]] = excerpt
     return excerpts
 
@@ -4116,6 +4127,12 @@ def _screen_capsule_excerpts(capsule: dict[str, object], excerpts: dict[str, str
             )
             excerpt = Excerpt(_bounded(safe, limit))
             excerpt.limit = getattr(raw, "limit", None)
+            units = getattr(raw, 'units', None)
+            # A changed sanitized quote may still show later units at shifted
+            # offsets. A partial mapping cannot prove their absence, so keep
+            # the whole exposure unknown unless the quote is unchanged.
+            if isinstance(units, list) and str(excerpt) == str(raw):
+                excerpt.units = units
             try:
                 excerpt.heading = sanitize_automatic_query(str(getattr(raw, "heading", "")))
             except ContextError:
@@ -4123,6 +4140,40 @@ def _screen_capsule_excerpts(capsule: dict[str, object], excerpts: dict[str, str
             excerpts[path] = excerpt
 
     return excerpts
+
+
+def _visible_excerpt_units(body: str, units: object) -> dict[str, object]:
+    """Hash complete canonical units surviving the sanitized final body.
+
+    Never split a truncated quote into apparent source sentences: oversized
+    excerpt pieces have no complete canonical unit unless the whole unit
+    actually survives. Hashes cover incidental answers too, not just query hits.
+    """
+    unknown = {'units': None, 'matched': []}
+    if not isinstance(units, list) or len(body.encode('utf-8')) > WINDOW_BODY_BYTES_LIMIT:
+        return unknown
+    covered = {}
+    for text, score, start, end in units:
+        if text and end <= len(body) and body[start:end] == text:
+            digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
+            covered[digest] = max(score, covered.get(digest, 0))
+            if len(covered) > RENDER_UNIT_LIMIT:
+                return unknown
+    strongest = max(covered.values(), default=0)
+    return {'units': sorted(covered),
+            'matched': sorted(key for key, score in covered.items() if score > 0 and score == strongest)}
+
+
+def describe_excerpt_units(connection: sqlite3.Connection, capsule: dict[str, object], final: bool,
+                           *, delivery_profile: str = 'ordinary') -> dict[str, object]:
+    excerpts = capsule_excerpts(connection, capsule, include_units=True)
+    if final:
+        coverage = {}
+        _render_capsule(capsule, excerpts, delivery_profile=delivery_profile, unit_coverage=coverage)
+        return coverage
+    screened = _screen_capsule_excerpts(capsule, excerpts)
+    return {path: _visible_excerpt_units(str(excerpt), getattr(excerpt, 'units', None))
+            for path, excerpt in screened.items()}
 
 
 def describe_excerpt_windows(connection: sqlite3.Connection, capsule: dict[str, object]) -> dict[str, object]:
@@ -4147,6 +4198,7 @@ def describe_excerpt_windows(connection: sqlite3.Connection, capsule: dict[str, 
 def _render_capsule(
     capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None,
     *, trace: Optional[dict[str, object]] = None, delivery_profile: str = 'ordinary',
+    unit_coverage: Optional[dict[str, object]] = None,
 ) -> tuple[list[str], list[dict[str, object]]]:
     """The rendered lines, and the items they show."""
     excerpts = dict(excerpts or {})
@@ -4258,6 +4310,7 @@ def _render_capsule(
         key: getattr(text, "heading", "") for key, text in excerpt_of.items()
     }
     initial_excerpts = {key: str(text or "") for key, text in excerpt_of.items()} if trace is not None else {}
+    units_of = {key: getattr(text, 'units', None) for key, text in excerpt_of.items()}
 
     def assemble() -> list[str]:
         lines = [*head, *([compaction] if compaction else []), *tail]
@@ -4320,6 +4373,11 @@ def _render_capsule(
         else:
             break
         lines = assemble()
+    if unit_coverage is not None:
+        for _, item, _ in entries:
+            path = str(item.get('path', f"episode {item.get('id')}"))
+            unit_coverage[path] = _visible_excerpt_units(str(excerpt_of.get(id(item)) or ''),
+                                                       units_of.get(id(item)))
     if trace is not None:
         encoded = "\n".join(lines).encode("utf-8")
         records = []

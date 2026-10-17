@@ -45,6 +45,21 @@ edition's own files remain in that edition's changelog.
   documents longer than it marks whole (64 KB). On the labelled sets every
   existing passage was reachable.
 
+### Metadata-admitted candidate windows — 2026-10-16
+
+- Apply configured authority/privacy admission before filling governed lexical windows: eligible observed or team Brain answers survive documents excluded by an observed-only or team-only project profile. Keep the full BM25 corpus, default/direct behavior, existing ceilings and final source/custody checks.
+- Scope custom-profile ranks, score floors, no-match and bounded diagnostics to metadata-admitted proposals before live checks. Add public CLI starvation/negative/default-competition regressions and score, deterministic-order, bounds and direct-caller controls; the default privacy/owner hypothesis was not reproduced.
+
+### Same-section answer coverage — 2026-10-16
+
+- A session can receive a new query-bearing sentence or list unit from a previously quoted section. Bounded hashes of complete source units surviving the final rendered quote retain incidental answers and earlier windows, so changing rank/window alone does not repeat known answers.
+- Commit coverage with the existing atomic session receipt, retaining four-turn expiry, compaction reset, source custody and output ceilings. Truncated source pieces, changed sanitizer offsets, malformed/legacy coverage and metadata overflow retain conservative section suppression. Add real CLI and render-boundary regressions.
+
+### Independent capsule candidate windows — 2026-10-16
+
+- Governed retrieval ranks bounded procedural, semantic and episodic windows independently, so host-listed skills cannot evict a matching project document before source admission. Existing score floors, history search, source/privacy checks and capsule budgets still apply; direct candidate callers retain the global window. Diagnostics report the combined bound (90 candidates at the default output limit).
+- Add regression coverage for the exact delivered project answer, absent subjects, warm ignored sources, deterministic ties, per-layer bounds and legacy direct search; run it in Linux and native Windows memory CI.
+
 ### Memory suites on native Windows — 2026-10-16
 
 - The 23 memory regression suites that failed on their first native Windows
