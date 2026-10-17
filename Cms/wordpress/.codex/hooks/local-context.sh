@@ -134,9 +134,56 @@ cache_write() {
   printf '%s\n' "$2" > "$VALIDATION_CACHE_DIR/$1-$VALIDATION_CACHE_KEY" 2>/dev/null || true
 }
 
-if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
-  CONTEXT_STATUS=$(python3 "$CONTEXT_CLI" status --json 2>/dev/null || true)
-  STATUS_FIELDS=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print("{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("database", "")))' "$CONTEXT_STATUS" 2>/dev/null || true)
+# Python 3.9+ by whichever name this shell knows it. Native Windows (Git Bash)
+# often has no working python3: the python.org installer provides python and
+# py, and the python3 found there may be the Microsoft Store stub, which only
+# offers to install Python. Elsewhere python3 is taken without a probe.
+resolve_python() {
+  PYTHON=()
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 > /dev/null 2>&1; then
+    PYTHON=(python3)
+    return 0
+  fi
+  # On Windows the name found is remembered per user, and taken again while
+  # the shell finds it at the same path (the hash table, no process): every
+  # hook otherwise started an interpreter just to ask its version.
+  local name path remembered="${TMPDIR:-/tmp}/ai-accelerator-python-${UID:-0}"
+  if [ "${OS:-}" = "Windows_NT" ] && [ -f "$remembered" ] && [ ! -L "$remembered" ] \
+      && IFS=$'\t' read -r name path < "$remembered" && [ -n "$path" ]; then
+    case "$name" in
+      python|py|python3)
+        if hash "$name" 2> /dev/null && [ "${BASH_CMDS[$name]:-}" = "$path" ]; then
+          PYTHON=("$name")
+          [ "$name" = py ] && PYTHON+=(-3)
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  for name in python py python3; do
+    PYTHON=("$name")
+    [ "$name" = py ] && PYTHON+=(-3)
+    if "${PYTHON[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      if [ "${OS:-}" = "Windows_NT" ] && [ ! -L "$remembered" ] && hash "$name" 2> /dev/null; then
+        printf '%s\t%s\n' "$name" "${BASH_CMDS[$name]:-}" > "$remembered" 2> /dev/null
+      fi
+      return 0
+    fi
+  done
+  PYTHON=()
+  return 1
+}
+resolve_python
+# The policy names the memory CLI as `python3 memory-bank/scripts/context.py`,
+# which fails where python3 is not Python - native Windows with the
+# python.org installer. The session hears the name that works here.
+if [ -n "${PYTHON[0]:-}" ] && [ "${PYTHON[*]}" != python3 ] && [ -f "$CONTEXT_CLI" ]; then
+  echo "Python here is \`${PYTHON[*]}\`, not python3: run the memory CLI commands the policy names with \`${PYTHON[*]}\` in place of \`python3\`."
+fi
+
+if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ]; then
+  CONTEXT_STATUS=$("${PYTHON[@]}" "$CONTEXT_CLI" status --json 2>/dev/null || true)
+  STATUS_FIELDS=$("${PYTHON[@]}" -c 'import json,sys; d=json.loads(sys.argv[1]); print("{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("database", "")))' "$CONTEXT_STATUS" 2>/dev/null || true)
   if [ -n "$STATUS_FIELDS" ]; then
     IFS=$'\t' read -r CONTEXT_MODE ACTIVE_BINDINGS INDEX_DOCUMENTS INDEX_DB <<< "$STATUS_FIELDS"
     INDEX_HEALTH="healthy"
@@ -152,9 +199,9 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
     fi
     VALIDATION_STATUS=$(cache_read brain-validation)
     if [ -z "$VALIDATION_STATUS" ]; then
-      VALIDATION_JSON=$(python3 "$CONTEXT_CLI" validate --json 2>/dev/null || true)
+      VALIDATION_JSON=$("${PYTHON[@]}" "$CONTEXT_CLI" validate --json 2>/dev/null || true)
       # The CLI emits {"valid": true|false, ...}; a substring test replaces a
-      # third python3 startup just to read one boolean.
+      # third Python startup just to read one boolean.
       case "$VALIDATION_JSON" in
         *'"valid": true'*|*'"valid":true'*) VALIDATION_STATUS="valid" ;;
         *'"valid"'*) VALIDATION_STATUS="invalid" ;;
@@ -166,13 +213,17 @@ if command -v python3 >/dev/null 2>&1 && [ -f "$CONTEXT_CLI" ]; then
   else
     echo "Context governance: mode/index/bindings/validation unavailable."
   fi
+elif [ -f "$CONTEXT_CLI" ]; then
+  # The memory hooks stay silent without Python, prompt after prompt; this is
+  # the one place a session hears why memory is neither read nor written.
+  echo "Context governance: unavailable - no Python 3.9+ found (python3, python or py -3), so memory is neither read nor written."
 fi
 
 if [ -f "$ROOT_DIR/memory-bank/README.md" ] && [ -f "$STATE_DIR/memory-bank/INDEX.md" ]; then
-  if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
+  if [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/validate.py" ]; then
     MEMORY_SUMMARY=$(cache_read memory-summary)
     if [ -z "$MEMORY_SUMMARY" ]; then
-      MEMORY_SUMMARY=$(python3 "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "$STATE_DIR/memory-bank" 2>/dev/null)
+      MEMORY_SUMMARY=$("${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "$STATE_DIR/memory-bank" 2>/dev/null)
       [ -n "$MEMORY_SUMMARY" ] && cache_write memory-summary "$MEMORY_SUMMARY"
     fi
     if [ "$STATE_DIR" = "$ROOT_DIR" ]; then

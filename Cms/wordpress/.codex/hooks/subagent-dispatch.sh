@@ -10,7 +10,7 @@
 # channel (msg-dispatch) so the dispatch journal records the finish without
 # relying on the orchestrating conversation to remember, and release the
 # write-agent lock the subagent gate took for a write-capable agent. Both
-# steps degrade to no-ops without python3, without the context runtime, or
+# steps degrade to no-ops without Python, without the context runtime, or
 # without a resolvable task. A completion write that fails for any other
 # reason is reported on stdout and stderr, never swallowed.
 
@@ -32,15 +32,60 @@ if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${
   PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
   STATE_DIR=$ACCELERATOR_STATE_DIR
 fi
-CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
+# context_cli.py runs context.py from its cached bytecode - run as a script,
+# context.py is compiled again on every start. An older runtime has only
+# context.py.
+CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context_cli.py"
+[ -f "$CONTEXT_CLI" ] || CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
+
+# Python 3.9+ by whichever name this shell knows it. Native Windows (Git Bash)
+# often has no working python3: the python.org installer provides python and
+# py, and the python3 found there may be the Microsoft Store stub, which only
+# offers to install Python. Elsewhere python3 is taken without a probe.
+resolve_python() {
+  PYTHON=()
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 > /dev/null 2>&1; then
+    PYTHON=(python3)
+    return 0
+  fi
+  # On Windows the name found is remembered per user, and taken again while
+  # the shell finds it at the same path (the hash table, no process): every
+  # hook otherwise started an interpreter just to ask its version.
+  local name path remembered="${TMPDIR:-/tmp}/ai-accelerator-python-${UID:-0}"
+  if [ "${OS:-}" = "Windows_NT" ] && [ -f "$remembered" ] && [ ! -L "$remembered" ] \
+      && IFS=$'\t' read -r name path < "$remembered" && [ -n "$path" ]; then
+    case "$name" in
+      python|py|python3)
+        if hash "$name" 2> /dev/null && [ "${BASH_CMDS[$name]:-}" = "$path" ]; then
+          PYTHON=("$name")
+          [ "$name" = py ] && PYTHON+=(-3)
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  for name in python py python3; do
+    PYTHON=("$name")
+    [ "$name" = py ] && PYTHON+=(-3)
+    if "${PYTHON[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      if [ "${OS:-}" = "Windows_NT" ] && [ ! -L "$remembered" ] && hash "$name" 2> /dev/null; then
+        printf '%s\t%s\n' "$name" "${BASH_CMDS[$name]:-}" > "$remembered" 2> /dev/null
+      fi
+      return 0
+    fi
+  done
+  PYTHON=()
+  return 1
+}
+resolve_python
 
 extract_string() {  # $1 = key; first string value found walking the payload
   key=$1
-  if command -v python3 > /dev/null 2>&1; then
+  if [ -n "${PYTHON[0]:-}" ]; then
     # Structure-aware, top-down: a key quoted inside message TEXT can never
     # shadow the real payload field.
-    printf '%s' "$INPUT" | python3 -c 'import json, sys
+    printf '%s' "$INPUT" | "${PYTHON[@]}" -c 'import json, sys
 key = sys.argv[1]
 try:
     payload = json.load(sys.stdin)
@@ -63,7 +108,7 @@ def walk(value):
 print(walk(payload), end="")' "$key" 2>/dev/null
   else
     # Degraded fallback (lock release only - the journal write below needs
-    # python3 anyway): greedy, may match a quoted key inside message text.
+    # Python anyway): greedy, may match a quoted key inside message text.
     printf '%s' "$INPUT" \
       | sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\(\(\\.\|[^"\\]\)*\)".*/\1/p' \
       | head -n 1
@@ -93,13 +138,13 @@ if [ "$EVENT" = "PostToolUse" ]; then
   # already ran. At most the last 20 reports, taken whole: a report written
   # while this runs lands in a new file for the next relay.
   [ -f "$UNRECORDED" ] && unrecorded_path_safe || exit 0
-  command -v python3 > /dev/null 2>&1 || exit 0
+  [ -n "${PYTHON[0]:-}" ] || exit 0
   TAKEN="$UNRECORDED.relay.$$"
   mv -f "$UNRECORDED" "$TAKEN" 2>/dev/null || exit 0
   REPORT=$(tail -n 20 "$TAKEN" 2>/dev/null)
   rm -f "$TAKEN" 2>/dev/null
   [ -n "$REPORT" ] || exit 0
-  printf '%s' "$REPORT" | python3 -c 'import json, sys
+  printf '%s' "$REPORT" | "${PYTHON[@]}" -c 'import json, sys
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": sys.stdin.read()}}))' 2>/dev/null
   exit 0
 fi
@@ -124,7 +169,7 @@ case "$LOCK_DIR" in
     ;;
 esac
 
-command -v python3 > /dev/null 2>&1 || exit 0
+[ -n "${PYTHON[0]:-}" ] || exit 0
 [ -f "$CONTEXT_CLI" ] || exit 0
 
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
@@ -137,11 +182,11 @@ NOTE=$(extract_string last_assistant_message)
 NOTE=$(printf '%s' "$NOTE" | tr '\n\t' '  ' | sed 's/\\[nt]/ /g; s/  */ /g; s/^ //; s/ $//' | cut -c1-160)
 
 if command -v timeout > /dev/null 2>&1; then
-  DISPATCH_ERROR=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" --root "$STATE_DIR" \
+  DISPATCH_ERROR=$(timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" --root "$STATE_DIR" \
     msg-dispatch --task-id "$TASK_ID" --agent "$AGENT" --event complete \
     ${NOTE:+--note "$NOTE"} 2>&1 > /dev/null)
 else
-  DISPATCH_ERROR=$(python3 "$CONTEXT_CLI" --root "$STATE_DIR" \
+  DISPATCH_ERROR=$("${PYTHON[@]}" "$CONTEXT_CLI" --root "$STATE_DIR" \
     msg-dispatch --task-id "$TASK_ID" --agent "$AGENT" --event complete \
     ${NOTE:+--note "$NOTE"} 2>&1 > /dev/null)
 fi

@@ -915,6 +915,15 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(self.calls[-1]["prompt"].startswith("Inspect the project and produce an implementation plan"))
         self.assertEqual(manager.session_commands(planned)["commands"], [])
 
+    def test_unlinked_launch_does_not_inherit_the_servers_memory_identity(self):
+        manager = self.manager()
+        with patch.dict(os.environ, {'CONTEXT_TASK_ID': 'FOREIGN-LANTERN-TASK',
+                                     'CONTEXT_CAPSULE_DELIVERED': '1'}):
+            sid = self.create(manager)
+            self.assertEqual('completed', self.settled(manager, sid)['status'])
+        self.assertEqual({'CONTEXT_TASK_ID': None, 'CONTEXT_CAPSULE_DELIVERED': None},
+                         json.loads(Path(self.calls[-1]['pid_path'] + '.env').read_text()))
+
     def test_a_claude_command_leaves_memory_to_the_project_hooks_and_a_reviewed_session_refuses_it(self):
         self.native_commands("php-review")
         manager = self.manager()

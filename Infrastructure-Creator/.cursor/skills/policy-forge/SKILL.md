@@ -45,8 +45,12 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    and source-backed reusable findings/decisions at finalization when writes are
    authorized. Support Harness `memory-draft` and an available Harness Memory MCP
    without requiring either for an otherwise self-contained target; the fallback
-   is the installed context CLI's `record-result`, whose replay of the same
-   result ID finishes a save that stopped half way. Report failed saves and
+   is the installed context CLI's `record-result`. An exact completed result ID
+   replays passively. An interrupted attempt repeated with the same result ID
+   resumes at an unchanged frontier or runs again with idempotent effects.
+   Use the current task revision (CLI `auto` is locked); deliberate learning
+   correction can provide its original CAS. A protected learning stays intact
+   while independent progress and valid facts save. Report failed saves and
    distinguish delivered context from agent-reported use.
 3. **Author `DOD.md`** as the Definition of Done: exact non-mutating
    test/lint-check/format-check/static-analysis commands plus affected confirmed

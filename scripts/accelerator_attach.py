@@ -487,6 +487,9 @@ def prepare_state(edition: str, project: Path, state: Path) -> None:
 
 def preamble(edition: str, project: Path, state: Path, repository: Path = REPOSITORY) -> str:
     home = edition_directory(edition, repository)
+    # Native Windows with the python.org installer has Python as `python`;
+    # its `python3`, if any, is the Microsoft Store stub.
+    python = "python" if os.name == "nt" else "python3"
     return f"""# {edition} accelerator: attached, not installed
 
 The {edition} accelerator is attached to this project from its own clone at
@@ -499,7 +502,7 @@ The {edition} accelerator is attached to this project from its own clone at
   `memory-bank/scripts/` - are relative to ACCELERATOR_HOME. Never edit them.
 - The accelerator's state for this project - Project Brain records, Memory Bank
   chunks, the local index - is in `{state}` (ACCELERATOR_STATE_DIR). Change it
-  only through the context runtime: `python3 "$ACCELERATOR_HOME/memory-bank/scripts/context.py" ...`,
+  only through the context runtime: `{python} "$ACCELERATOR_HOME/memory-bank/scripts/context.py" ...`,
   run from the project; it finds the state and the project by itself.
 - Work products a workflow asks for - `specs/`, `tasks/TASK-NNN/`, `codebase/` -
   belong to the project and are written into it as usual.

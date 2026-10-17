@@ -1341,12 +1341,12 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
                 first, _ = retrieval._runtime_filter(
                     self.repository,
                     retrieval._candidates(connection, case["query"])[0],
-                    config,
+                    config, connection=connection,
                 )
                 second, _ = retrieval._runtime_filter(
                     self.repository,
                     retrieval._candidates(connection, case["query"])[0],
-                    config,
+                    config, connection=connection,
                 )
                 first_paths = [item["path"] for item in first[:5]]
                 self.assertEqual(
@@ -2660,6 +2660,30 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         index.write_text("[]\n", encoding="utf-8")
         errors = brain.validate_repository(self.repository)
         self.assertTrue(any("deterministic index" in error for error in errors))
+
+    def test_a_conflicted_index_is_named_and_compaction_rebuilds_it(self) -> None:
+        # Two branches that both added records leave conflict markers in the
+        # derived index after a merge. Validation said only "indexes:
+        # Expecting value", and compaction refused as if a record were invalid.
+        self.start("TASK-MERGE")
+        index = self.repository / "project-brain/indexes/active.json"
+        index.write_text("<<<<<<< HEAD\n[]\n=======\n[1]\n>>>>>>> other\n", encoding="utf-8")
+        errors = brain.validate_repository(self.repository)
+        [error] = [error for error in errors if "deterministic index" in error]
+        self.assertTrue(error.startswith(
+            "project-brain/indexes/active.json: deterministic index is not valid JSON"), error)
+        self.assertIn("conflict markers", error)
+        self.assertIn("the next Brain write rebuilds it", error)
+        self.assertNotIn(str(self.repository), error)
+        self.assertEqual({"moved": 0}, brain.compact(self.repository))
+        self.assertEqual([], brain.validate_repository(self.repository))
+        # An invalid record still stops compaction.
+        index.write_text("[]\n", encoding="utf-8")
+        task = next(self.repository.glob("project-brain/dynamic/tasks/*.md"))
+        task.write_text(task.read_text(encoding="utf-8").replace('"status": "active"', '"status": "bogus"'),
+                        encoding="utf-8")
+        with self.assertRaisesRegex(brain.BrainError, "active records are invalid"):
+            brain.compact(self.repository)
 
     def test_contract_json_is_strict_and_telemetry_is_disabled_metadata_only(self) -> None:
         schemas = EDITION / "project-brain" / "schemas"
@@ -4550,7 +4574,8 @@ class SharedSourceExpansionTest(BankFixture):
                 with mock.patch.dict(os.environ, {"ACCELERATOR_HOME": str(EDITION),
                         "ACCELERATOR_STATE_DIR": str(self.repository), "ACCELERATOR_PROJECT_DIR": str(project)}):
                     candidates, _ = retrieval._candidates(connection, self.QUERY)
-                    anchors, _ = retrieval._runtime_filter(self.repository, candidates, brain.load_config(self.repository))
+                    anchors, _ = retrieval._runtime_filter(self.repository, candidates, brain.load_config(self.repository),
+                                                           connection=connection)
                     neighbours, _ = retrieval._source_link_candidates(
                         connection, self.repository, brain.load_config(self.repository), anchors,
                         {item["path"] for item in anchors},
@@ -4608,7 +4633,8 @@ class SharedSourceExpansionTest(BankFixture):
         original_lstat = Path.lstat
         try:
             candidates, _ = retrieval._candidates(connection, self.QUERY)
-            anchors, _ = retrieval._runtime_filter(self.repository, candidates, brain.load_config(self.repository))
+            anchors, _ = retrieval._runtime_filter(self.repository, candidates, brain.load_config(self.repository),
+                                                   connection=connection)
             anchor = next(item for item in anchors if item["path"] == self.first.relative_to(self.repository).as_posix())
             for tag in retrieval.workspace_roots.LINK_REPARSE_TAGS:
                 def linked_status(candidate: Path):
@@ -4949,7 +4975,7 @@ class GraphExpansionTest(DocumentLinkTest):
         try:
             config = brain.load_config(self.repository)
             candidates, _ = retrieval._candidates(connection, self.SOURCE_WORDS)
-            anchors, _ = retrieval._runtime_filter(self.repository, candidates, config)
+            anchors, _ = retrieval._runtime_filter(self.repository, candidates, config, connection=connection)
             linked, stats = retrieval._source_link_candidates(
                 connection, self.repository, config, anchors, set(),
             )
@@ -5251,6 +5277,9 @@ class ChunkSourceDigestTest(BankFixture):
         self.assertEqual(0, self.run_cli("index", "--json").returncode)
         chunk_path = "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md"
         self.repository.joinpath("specs/authority.md").unlink()
+        # The filter checks the indexed image it admits, so it reads the index.
+        connection = context_cli.connect(context_cli.default_database(self.repository))
+        self.addCleanup(connection.close)
         filtered, excluded = retrieval._runtime_filter(
             self.repository,
             [
@@ -5266,6 +5295,7 @@ class ChunkSourceDigestTest(BankFixture):
             ],
             {"allowed_privacy": ["team"], "allowed_authority": ["verified"],
              "owners": ["*"]},
+            connection=connection,
         )
         self.assertEqual([], filtered)
         self.assertEqual(
@@ -6713,10 +6743,16 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("working: not recorded yet", result.stdout)
 
-    def test_explicit_retrieve_still_requires_the_task(self) -> None:
+    def test_explicit_retrieve_answers_before_the_task_exists(self) -> None:
+        # AGENTS.md has an agent retrieve at the start of a complex request,
+        # often before the first checkpoint provisions the branch's task: it
+        # gets the knowledge and the warming state, as the prompt hook does.
         result = self.run_cli("retrieve", "cobalt", "--task-id", "TASK-ABSENT")
-        self.assertNotEqual(0, result.returncode)
-        self.assertIn("Working task not found", result.stderr)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("working: not recorded yet", result.stdout)
+        # Still no governed history for a task that does not exist.
+        governed = self.repository / "project-brain" / "control" / "retrieval-manifests"
+        self.assertEqual([], sorted(governed.glob("*.json")) if governed.is_dir() else [])
 
     def test_subagent_completion_provisions_the_branch_task(self) -> None:
         result = self.run_cli(
@@ -6730,21 +6766,22 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             ["completion"], [message["type"] for message in json.loads(listed.stdout)]
         )
 
-    def test_refresh_reports_failed_layers_instead_of_silently_serving_stale(
-        self,
-    ) -> None:
+    def test_refresh_excludes_invalid_utf8_file_without_breaking_healthy_layers(self) -> None:
+        broken = self.repository / "specs/broken.md"
+        healthy = self.repository / "specs/opal-healthy.md"
+        broken.write_text("# Former valid source\n\nOld Opal fact.\n", encoding="utf-8")
+        healthy.write_text("# Healthy source\n\nCurrent Opal fact.\n", encoding="utf-8")
         self.run_cli("refresh")
-        self.repository.joinpath("specs/broken.md").write_bytes(b"# \xff\xfe invalid\n")
-
+        broken.write_bytes(b"# \xff\xfe invalid\n")
         result = self.run_cli("refresh", "--json")
-        self.assertEqual(1, result.returncode)
+        self.assertEqual(0, result.returncode, result.stderr)
         report = json.loads(result.stdout)
         for layer in ("procedural", "semantic", "episodic"):
-            self.assertEqual("failed", report[layer], layer)
-        self.assertTrue(
-            any("Index refresh failed" in item for item in report["warnings"]),
-            report["warnings"],
-        )
+            self.assertEqual("updated", report[layer], layer)
+        with sqlite3.connect(self.repository / "memory-bank/local/context.db") as connection:
+            indexed = {row[0] for row in connection.execute("SELECT path FROM documents")}
+        self.assertNotIn("specs/broken.md", indexed)
+        self.assertIn("specs/opal-healthy.md", indexed)
 
     def test_refresh_requires_a_task_for_a_capsule(self) -> None:
         result = self.run_cli("refresh", "--query", "cobalt")
@@ -8916,6 +8953,81 @@ class MultiMachineContinuityTest(RuntimeHarness):
             json.loads(self.report_path().read_text(encoding="utf-8"))["rebound"]
         )
 
+    def twin(self, task_id: str) -> dict:
+        """A second active record for the task ID, as a merge of two copies
+        of a branch that each started its task leaves it."""
+        copy = brain.create_task(self.repository, task_id + "-copy", "Apply the cobalt authority rule.",
+                                 [], [], owner="local")
+        location, metadata, body = brain.find_record(self.repository, copy["id"])
+        metadata["external_id"] = task_id
+        location.write_text(brain.render_markdown_record(metadata, body), encoding="utf-8")
+        brain.rebuild_indexes(self.repository)
+        return metadata
+
+    def test_two_records_for_one_branch_settle_on_the_earliest(self) -> None:
+        # A clone without a binding failed every checkpoint as ambiguous -
+        # the Stop hook hides that - and its prompts said "not recorded yet".
+        first = self.start("feature/shared")
+        second = self.twin("feature/shared")
+        self.simulate_second_machine()
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(first["task_uuid"], capsule["task_uuid"])
+        self.assertTrue(any(second["id"] in warning and "also claims feature/shared" in warning
+                            for warning in capsule["warnings"]), capsule["warnings"])
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", "feature/shared", "--flush", "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        self.assertEqual(first["task_uuid"], json.loads(turn.stdout)["rebound"])
+        # What the warning says to do clears it.
+        cancel = self.run_cli("brain-update", "--record-id", second["id"], "--revision", "auto",
+                              "--transition", "cancelled")
+        self.assertEqual(0, cancel.returncode, cancel.stderr)
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(first["task_uuid"], capsule["task_uuid"])
+        self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
+
+    def test_a_second_machine_reads_the_task_before_its_first_checkpoint(self) -> None:
+        # Until the first checkpoint rebound it, the branch's existing task
+        # read as "not recorded yet" - prompt and session capsule alike.
+        task = self.start("feature/second-read")
+        self.simulate_second_machine()
+        for command in (["refresh", "--query", "cobalt authority"], ["hook-context"]):
+            with self.subTest(command=command[0]):
+                result = self.run_cli(*command, "--task-id", "feature/second-read", "--ephemeral", "--json") \
+                    if command[0] == "refresh" else self.run_cli(*command, "--task-id", "feature/second-read", "--json")
+                self.assertEqual(0, result.returncode, result.stderr)
+                payload = json.loads(result.stdout)
+                capsule = payload.get("capsule", payload)
+                self.assertEqual(task["task_uuid"], capsule["task_uuid"])
+                self.assertNotEqual("warming", capsule.get("kind"))
+        # Reading binds nothing; the first checkpoint does.
+        self.assertNotEqual(0, self.run_cli("get", "--task-id", "feature/second-read").returncode)
+
+    def test_a_binding_to_a_cancelled_twin_follows_the_task_id(self) -> None:
+        # The duplicate this machine works with was cancelled elsewhere: its
+        # turns were dropped as work on a closed task, and rebind refused to
+        # repoint the binding.
+        mine = self.start("feature/shared")
+        kept = self.twin("feature/shared")
+        brain.update_record(self.repository, mine["task_uuid"], expected_revision=mine["revision"],
+                            progress=None, next_steps=[], files=[], sources=[], actor="local",
+                            transition_to="cancelled", reason="Duplicate")
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(kept["id"], capsule["task_uuid"])
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        turn = json.loads(self.run_cli("turn", "--task-id", "feature/shared", "--flush", "--json").stdout)
+        self.assertEqual(kept["id"], turn["rebound"])
+        self.assertTrue(turn["flushed"])
+        record = json.loads(self.run_cli("get", "--task-id", "feature/shared", "--json").stdout)
+        self.assertEqual(kept["id"], record["task_uuid"])
+        self.assertIn("app.txt", record["files"])
+
     def test_rebind_restores_the_binding_for_an_explicit_record(self) -> None:
         task = self.start("TASK-REBIND")
         self.simulate_second_machine()
@@ -9030,6 +9142,198 @@ class MultiMachineContinuityTest(RuntimeHarness):
         )
         self.assertEqual(0, text.returncode, text.stderr)
         self.assertIn("Last turn: this branch's task is closed", text.stdout)
+
+
+class AnyScriptTaskIdTest(RuntimeHarness):
+    """The task ID is usually the branch name, and a branch may be named in
+    any script: feature/счёт-экспорт had no memory at all - its prompts got
+    "Capsule unavailable: Task ID must use letters, digits..." and its turns
+    were never recorded."""
+
+    def test_a_branch_named_in_cyrillic_gets_memory(self) -> None:
+        branch = "feature/счёт-экспорт"
+        subprocess.run(["git", "-C", str(self.repository), "symbolic-ref", "HEAD", "refs/heads/" + branch],
+                       check=True, capture_output=True)
+        refresh = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", branch,
+                               "--expected-branch", branch, "--ephemeral", "--sanitize", "--json")
+        self.assertEqual(0, refresh.returncode, refresh.stderr)
+        payload = json.loads(refresh.stdout)
+        self.assertIsNotNone(payload["capsule"])
+        self.assertFalse(any("Task ID" in warning for warning in payload["warnings"]), payload["warnings"])
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", branch, "--flush", "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        self.assertTrue(json.loads(turn.stdout)["provisioned"])
+        record = json.loads(self.run_cli("get", "--task-id", branch, "--json").stdout)
+        self.assertEqual(branch, record["task_id"])
+        self.assertIn("app.txt", record["files"])
+
+    def test_an_issue_number_or_plus_sign_is_part_of_the_name(self) -> None:
+        for name in ("fix/#123-crash", "feature/c++-parser", "feature/e\u0301clair"):
+            with self.subTest(name=name):
+                result = self.run_cli("start", "--task-id", name, "--goal", "Accepted", "--json")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(name, json.loads(result.stdout)["task_id"])
+
+    def test_a_branch_the_grammar_refuses_gets_a_task_of_its_own(self) -> None:
+        # Git takes an apostrophe, `@`, parentheses and names past 128
+        # characters; such a branch had no capsule and no recorded turn.
+        names = ("fix/user's-login", "fix/user@s-login", "feature/(api)-cleanup",
+                 "feature/PROJ-1234-" + "very-long-description-" * 6 + "x")
+        tasks = set()
+        for branch in names:
+            with self.subTest(branch=branch):
+                subprocess.run(["git", "-C", str(self.repository), "symbolic-ref", "HEAD", "refs/heads/" + branch],
+                               check=True, capture_output=True)
+                refresh = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", branch,
+                                       "--expected-branch", branch, "--ephemeral", "--sanitize", "--json")
+                self.assertEqual(0, refresh.returncode, refresh.stderr)
+                payload = json.loads(refresh.stdout)
+                self.assertIsNotNone(payload["capsule"])
+                self.assertFalse(any("Task ID" in warning for warning in payload["warnings"]), payload["warnings"])
+                self.repository.joinpath("app.txt").write_text(branch + "\n", encoding="utf-8")
+                turn = self.run_cli("turn", "--task-id", branch, "--flush", "--json")
+                self.assertEqual(0, turn.returncode, turn.stderr)
+                task = json.loads(turn.stdout)["task_id"]
+                self.assertRegex(task, r"^[^\W_][\w./#+-]*-[0-9a-f]{8}$")
+                self.assertLessEqual(len(task), 128)
+                tasks.add(task)
+                # The branch name reaches the same task again.
+                record = json.loads(self.run_cli("get", "--task-id", branch, "--json").stdout)
+                self.assertEqual(task, record["task_id"])
+                self.assertIn("app.txt", record["files"])
+                status = json.loads(self.run_cli("status", "--json").stdout)
+                self.assertEqual(task, status["automatic_memory"]["task_identity"]["task_id"])
+        # Names that differ only in refused characters stay apart.
+        self.assertEqual(len(names), len(tasks))
+
+    def test_whitespace_and_other_punctuation_stay_refused(self) -> None:
+        for name in ("bad task id", "_hidden", ".leading", "tab\tname", "scope:name", "user@topic"):
+            with self.subTest(name=name):
+                result = self.run_cli("start", "--task-id", name, "--goal", "Refused")
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("Task ID must use", result.stderr)
+
+
+class WordlessPromptTest(RuntimeHarness):
+    """A reply of "?" or an emoji passed the sanitizer and failed the word
+    check later: its turn got the operator's layer report and "Capsule
+    unavailable" instead of nothing."""
+
+    def test_a_prompt_without_a_word_is_withheld_quietly(self) -> None:
+        self.start("TASK-NOD")
+        for prompt in ("?", "\U0001F44D", "!!! ..."):
+            with self.subTest(prompt=prompt):
+                result = self.run_cli("refresh", "--query", prompt, "--task-id", "TASK-NOD",
+                                      "--ephemeral", "--sanitize")
+                self.assertEqual((0, ""), (result.returncode, result.stdout), result.stderr)
+                payload = json.loads(self.run_cli("refresh", "--query", prompt, "--task-id", "TASK-NOD",
+                                                  "--ephemeral", "--sanitize", "--json").stdout)
+                self.assertTrue(payload["query_withheld"])
+                self.assertFalse(any("Capsule unavailable" in warning for warning in payload["warnings"]))
+        self.assertIn("working: TASK-NOD", self.run_cli("refresh", "--query", "cobalt authority?", "--task-id",
+                                                        "TASK-NOD", "--ephemeral", "--sanitize").stdout)
+
+
+class ClosedBranchTaskTest(RuntimeHarness):
+    """Work went on after a branch's task was completed: its prompts said
+    "working: not recorded yet (the task starts at the 5-turn checkpoint)",
+    though no checkpoint would start one, and the advice to start a new task
+    was refused: the finished record kept the ID until compaction."""
+
+    def test_a_finished_branch_says_so_and_how_to_go_on(self) -> None:
+        subprocess.run(["git", "-C", str(self.repository), "-c", "user.email=h@example.invalid", "-c", "user.name=H",
+                        "commit", "-q", "--allow-empty", "-m", "base"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.repository), "checkout", "-q", "-b", "feature/refund-export"],
+                       check=True, capture_output=True)
+        started = self.run_cli("start", "--task-id", "feature/refund-export", "--goal", "Refund export", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+        completed = self.run_cli("complete", "--task-id", "feature/refund-export", "--outcome", "completed",
+                                 "--summary", "Shipped.", "--revision", str(json.loads(started.stdout)["revision"]))
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.repository.joinpath("app.txt").write_text("review fix\n", encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", "feature/refund-export", "--flush")
+        self.assertIn("start a new task: `context.py start --task-id feature/refund-export", turn.stdout)
+        read = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "feature/refund-export",
+                            "--expected-branch", "feature/refund-export", "--ephemeral", "--sanitize")
+        self.assertIn("working: closed (this branch's task is finished;", read.stdout)
+        self.assertNotIn("not recorded yet", read.stdout)
+        self.assertNotIn("warming:", read.stdout)
+        # The advice works, and moves only that finished record.
+        other = self.run_cli("start", "--task-id", "TASK-OTHER", "--goal", "Other work", "--json")
+        self.assertEqual(0, other.returncode, other.stderr)
+        self.assertEqual(0, self.run_cli("complete", "--task-id", "TASK-OTHER", "--outcome", "completed",
+                                         "--summary", "Done.", "--revision",
+                                         str(json.loads(other.stdout)["revision"])).returncode)
+        restarted = self.run_cli("start", "--task-id", "feature/refund-export", "--goal", "Review fixes", "--json")
+        self.assertEqual(0, restarted.returncode, restarted.stderr)
+        archived = [path.stem for path in self.repository.glob("project-brain/archive/task/*.md")]
+        self.assertEqual([json.loads(started.stdout)["task_uuid"]], archived)
+        self.assertTrue(self.repository.joinpath("project-brain/dynamic/tasks",
+                                                 json.loads(other.stdout)["task_uuid"] + ".md").is_file())
+        read = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "feature/refund-export",
+                            "--expected-branch", "feature/refund-export", "--ephemeral", "--sanitize")
+        self.assertIn("working: feature/refund-export — Review fixes", read.stdout)
+
+
+class RenamedBranchTaskTest(RuntimeHarness):
+    """A branch renamed with `git branch -m` started over: "working: not
+    recorded yet" on its prompts, and a second task at its fifth turn."""
+
+    def git(self, *arguments: str) -> None:
+        subprocess.run(["git", "-C", str(self.repository), "-c", "user.email=h@example.invalid",
+                        "-c", "user.name=H", *arguments], check=True, capture_output=True)
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+        self.git("checkout", "-q", "-b", "feature/ledger-sync")
+        started = self.run_cli("start", "--task-id", "feature/ledger-sync", "--goal", "Ledger sync",
+                               "--source", "specs/authority.md", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+        self.record = json.loads(started.stdout)["task_uuid"]
+        updated = self.run_cli("update", "--task-id", "feature/ledger-sync", "--progress",
+                               "Parser done; retries left", "--revision", "auto")
+        self.assertEqual(0, updated.returncode, updated.stderr)
+
+    def prompt(self, branch: str) -> subprocess.CompletedProcess[str]:
+        return self.run_cli("refresh", "--query", "cobalt authority", "--task-id", branch,
+                            "--expected-branch", branch, "--ephemeral", "--sanitize")
+
+    def test_a_renamed_branch_keeps_its_task(self) -> None:
+        self.git("branch", "-m", "feature/ledger-sync", "feature/ledger-sync-v2")
+        self.git("branch", "-m", "feature/ledger-sync-v2", "feature/ledger-sync-v3")
+        read = self.prompt("feature/ledger-sync-v3")
+        self.assertEqual(0, read.returncode, read.stderr)
+        self.assertIn("working: feature/ledger-sync — Ledger sync", read.stdout)
+        self.assertIn("Parser done; retries left", read.stdout)
+        self.assertIn("This branch was renamed from feature/ledger-sync; its task continues here.", read.stdout)
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", "feature/ledger-sync-v3", "--flush", "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        self.assertFalse(json.loads(turn.stdout)["provisioned"])
+        tasks = list(self.repository.glob("project-brain/dynamic/tasks/*.md"))
+        self.assertEqual([self.record], [path.stem for path in tasks])
+        record = json.loads(self.run_cli("get", "--task-id", "feature/ledger-sync", "--json").stdout)
+        self.assertIn("app.txt", record["files"])
+
+    def test_a_copied_branch_or_a_finished_task_starts_its_own(self) -> None:
+        # A copy is new work; so is a branch whose earlier task is finished.
+        self.git("checkout", "-q", "-b", "feature/ledger-copy")
+        self.assertIn("not recorded yet", self.prompt("feature/ledger-copy").stdout)
+        self.git("checkout", "-q", "feature/ledger-sync")
+        revision = json.loads(self.run_cli("get", "--task-id", "feature/ledger-sync", "--json").stdout)["revision"]
+        completed = self.run_cli("complete", "--task-id", "feature/ledger-sync", "--outcome", "completed",
+                                 "--summary", "Shipped.", "--revision", str(revision))
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.git("branch", "-m", "feature/ledger-sync", "feature/ledger-sync-v2")
+        self.assertIn("not recorded yet", self.prompt("feature/ledger-sync-v2").stdout)
+
+    def test_an_explicit_start_names_the_new_branch(self) -> None:
+        self.git("branch", "-m", "feature/ledger-sync", "feature/ledger-sync-v2")
+        started = self.run_cli("start", "--task-id", "feature/ledger-sync-v2", "--goal", "Next", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+        self.assertEqual("feature/ledger-sync-v2", json.loads(started.stdout)["task_id"])
 
 
 class AutoCheckpointFieldTest(RuntimeHarness):
@@ -9189,7 +9493,7 @@ class ExportBundleTest(RuntimeHarness):
             "tags": tags or [],
             "created": "2026-01-01",
             "last_verified": "2026-01-02",
-            "review_after": "2027-01-02",
+            "review_after": "2099-01-02",
             "sources": ["specs/authority.md"],
             "supersedes": [],
             "superseded_by": None,
@@ -10013,6 +10317,25 @@ class DeliveryTest(RuntimeHarness):
         self.assertIn("specs/auth.md § Sessions", text)
         self.assertIn("SessionStore::purge after the password reset", text)
 
+    def test_a_short_capsule_lets_the_best_excerpt_run_on(self) -> None:
+        # The section's answer sat past its 800-character window while the
+        # capsule used a fraction of its room: the best excerpt takes it.
+        filler = " ".join(["Each line of the export is written in the order the entries were booked."] * 12)
+        self.repository.joinpath("specs/ledger.md").write_text(
+            "# Ledger\n\nThe ledger export writes refunds and ledger totals. "
+            f"{filler} Refunds older than ninety days move to the archive ledger.\n",
+            encoding="utf-8",
+        )
+        for index in range(6):
+            self.repository.joinpath(f"specs/other-{index}.md").write_text(
+                f"# Other {index}\n\nunrelated text {index}.\n", encoding="utf-8"
+            )
+        self.start("TASK-DELIVER")
+        text = self.refresh("where do old refunds in the ledger export go")["capsule_text"]
+        self.assertIn("specs/ledger.md", text)
+        self.assertIn("Refunds older than ninety days move to the archive ledger", text)
+        self.assertLessEqual(len(text), context_cli.RENDERED_CAPSULE_LIMIT)
+
     def test_the_excerpt_matches_words_as_the_index_does(self) -> None:
         # The request says "session", the answering section "Sessions": the
         # index matched them, the excerpt counted them as different words.
@@ -10464,12 +10787,13 @@ class RecordResultTest(RuntimeHarness):
         self.assertTrue(self.record("run-1", self.result())["replayed"])
         self.assertEqual(revision, self.task()["revision"])
 
-    def test_a_save_that_stopped_after_writing_a_learning_is_finished_by_its_replay(self) -> None:
+    def test_explicit_original_cas_can_repair_an_open_learning_without_historical_adoption(self) -> None:
         identifier = memory_results.learning_id(self.task()["id"], self.LEARNING)
         brain.create_record(self.repository, "finding", identifier, self.LEARNING["title"], [],
                             self.LEARNING["sources"], owner="local", authority="observed",
                             goal=self.LEARNING["consequence"])
-        saved = self.record("run-1", self.result())
+        record = brain.find_record(self.repository, identifier)[1]
+        saved = self.record("run-1", self.result(learnings=[{**self.LEARNING, "expected_revision": record["revision"]}]))
         self.assertEqual(["completed"], [item["state"] for item in saved["records"]])
         self.assertEqual([("resolved", "verified")], [(r["status"], r["authority"]) for r in self.records()])
         self.assertEqual("Authority checked.", self.task()["progress"])
@@ -10555,6 +10879,208 @@ class RecordResultTest(RuntimeHarness):
         self.assertEqual(1, len(replay["promotion"]["promoted"]))
         self.assertEqual(1, len(list((self.repository / "memory-bank/chunks").glob("MEM-*.md"))))
 
+    def failed_promotion_on_clean_tree(self, *, multiple=False, stalled=False, separate_sources=False):
+        learnings = [self.LEARNING]
+        if multiple:
+            learnings.append({"type": "finding", "title": "Bounded retry scheduling",
+                "consequence": "Retry the durable promotion after a transient storage failure without duplicating records.",
+                "sources": ["specs/authority.md"]})
+            if separate_sources:
+                self.repository.joinpath('specs/secondary.md').write_text('# Retry policy\n', encoding='utf-8')
+                learnings[-1]['sources'] = ['specs/secondary.md']
+        with mock.patch.object(brain.time, 'time', return_value=1800000000), \
+             mock.patch.object(brain, 'apply_promotion' if stalled else 'create_promotion',
+                               side_effect=brain.BrainError('temporary storage failure')):
+            first = self.record('retry-clean-result', self.result(learnings=learnings))
+        self.assertEqual(len(learnings), len(first['promotion']['failed']))
+        self.repository.joinpath('.gitignore').write_text('project-brain/local/\nmemory-bank/local/\n', encoding='utf-8')
+        subprocess.run(['git', '-C', str(self.repository), 'add', '.'], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(self.repository), '-c', 'user.email=retry@example.invalid',
+                        '-c', 'user.name=Retry', 'commit', '-qm', 'Public retry fixture'],
+                       check=True, capture_output=True)
+        return self.task()['revision']
+
+    def clean_turn_at(self, instant, *, lightweight=False, expect_clean=True):
+        prefix = ['--mode', 'lightweight'] if lightweight else []
+        with mock.patch.object(brain.time, 'time', return_value=instant):
+            code, output, error = self.run_main(*prefix, 'turn', '--task-id', 'UNRELATED-CLEAN', '--json')
+        self.assertEqual(0, code, error)
+        result = json.loads(output)
+        if expect_clean:
+            self.assertIsNone(result['delta_id'])
+        self.assertFalse(result['flushed'])
+        self.assertFalse(result['provisioned'])
+        return result
+
+    def test_clean_turn_retries_promotion_without_creating_or_updating_task(self):
+        revision = self.failed_promotion_on_clean_tree()
+        result = self.clean_turn_at(1800000031)
+        self.assertEqual(1, len(result['promoted']))
+        self.assertEqual(1, len(list((self.repository / 'memory-bank/chunks').glob('MEM-*.md'))))
+        self.assertEqual(revision, self.task()['revision'])
+        with self.assertRaises(brain.BrainRecordNotFound):
+            brain.find_record(self.repository, 'UNRELATED-CLEAN', record_type='task')
+
+    def test_clean_retry_waits_between_failed_attempts(self):
+        self.failed_promotion_on_clean_tree()
+        self.assertEqual([], self.clean_turn_at(1800000001)['promoted'])
+        with mock.patch.object(brain, 'create_promotion', side_effect=brain.BrainError('storage still unavailable')):
+            failed = self.clean_turn_at(1800000031)
+        self.assertEqual(1, len(failed['promotion_failed']))
+        self.assertEqual([], self.clean_turn_at(1800000032)['promoted'])
+        self.assertEqual(1, len(self.clean_turn_at(1800000062)['promoted']))
+
+    def test_clean_retry_limits_work_and_does_not_repeat_success(self):
+        self.failed_promotion_on_clean_tree(multiple=True)
+        self.assertEqual(1, len(self.clean_turn_at(1800000031)['promoted']))
+        # The promotion itself changed authoritative Git files; subsequent
+        # non-flushing turns still obey the independent recovery schedule.
+        self.assertEqual([], self.clean_turn_at(1800000032, expect_clean=False)['promoted'])
+        self.assertEqual(1, len(self.clean_turn_at(1800000062, expect_clean=False)['promoted']))
+        self.assertEqual([], self.clean_turn_at(1800000093, expect_clean=False)['promoted'])
+        self.assertEqual(2, len(list((self.repository / 'memory-bank/chunks').glob('MEM-*.md'))))
+
+    def test_lightweight_clean_turn_does_not_retry_promotion(self):
+        self.failed_promotion_on_clean_tree()
+        self.assertEqual([], self.clean_turn_at(1800000031, lightweight=True)['promoted'])
+        self.assertEqual([], list((self.repository / 'memory-bank/chunks').glob('MEM-*.md')))
+        self.assertEqual(1, len(self.clean_turn_at(1800000062)['promoted']))
+
+    def test_disabled_promotion_stays_disabled_during_clean_retry(self):
+        self.failed_promotion_on_clean_tree()
+        config = self.repository / 'project-brain/config/runtime.json'
+        config.write_text(json.dumps({'mode': 'governed', 'automatic_promotion': False}), encoding='utf-8')
+        with mock.patch.object(brain.time, 'time', return_value=1800000031):
+            code, output, error = self.run_main('turn', '--task-id', 'UNRELATED-CLEAN', '--json')
+        self.assertEqual(0, code, error)
+        self.assertEqual([], json.loads(output)['promoted'])
+        self.assertEqual([], list((self.repository / 'memory-bank/chunks').glob('MEM-*.md')))
+
+    def test_clean_retry_caps_stalled_promotion_attempts(self):
+        self.failed_promotion_on_clean_tree(multiple=True, stalled=True)
+        self.assertEqual(1, len(self.clean_turn_at(1800000031)['promoted']))
+        self.assertEqual(1, len(brain.stalled_automatic_promotions(self.repository)))
+        self.assertEqual(1, len(self.clean_turn_at(1800000062, expect_clean=False)['promoted']))
+        self.assertEqual([], brain.stalled_automatic_promotions(self.repository))
+
+    def test_failed_stalled_record_does_not_starve_an_independent_retry(self):
+        self.failed_promotion_on_clean_tree(multiple=True, stalled=True, separate_sources=True)
+        first_stalled = brain.stalled_automatic_promotions(self.repository)[0][1]
+        failed_id = first_stalled['source_records'][0]['id']
+        source = brain.find_record(self.repository, failed_id)[1]['sources'][0]
+        self.repository.joinpath(source).unlink()
+        first = self.clean_turn_at(1800000031, expect_clean=False)
+        second = self.clean_turn_at(1800000062, expect_clean=False)
+        self.assertEqual(1, len(first['promoted']) + len(second['promoted']))
+        self.assertNotIn(failed_id, [item['record_id'] for result in (first, second) for item in result['promoted']])
+        self.assertEqual(1, len(list((self.repository / 'memory-bank/chunks').glob('MEM-*.md'))))
+
+    def test_concurrent_clean_retries_share_one_due_batch(self):
+        self.failed_promotion_on_clean_tree(multiple=True)
+        results, errors = [], []
+        def retry():
+            try:
+                results.append(brain.retry_pending_auto_promotion(self.repository, owner='local'))
+            except Exception as error:
+                errors.append(error)
+        with mock.patch.object(brain.time, 'time', return_value=1800000031):
+            threads = [threading.Thread(target=retry) for _ in range(2)]
+            for worker in threads:
+                worker.start()
+            for worker in threads:
+                worker.join(timeout=10)
+        self.assertFalse(any(worker.is_alive() for worker in threads))
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        self.assertEqual(1, sum(len(result['promoted']) for result in results))
+        self.assertEqual(1, len(list((self.repository / 'memory-bank/chunks').glob('MEM-*.md'))))
+
+    def test_scoped_success_does_not_clear_an_earlier_failed_retry(self):
+        self.failed_promotion_on_clean_tree(multiple=True)
+        record_id = self.records()[0]['id']
+        with mock.patch.object(brain.time, 'time', return_value=1800000001):
+            scoped = brain.auto_promote(self.repository, owner='local', only={record_id})
+        self.assertEqual(1, len(scoped['promoted']))
+        self.assertEqual(1, len(self.clean_turn_at(1800000032, expect_clean=False)['promoted']))
+        self.assertEqual(2, len(list((self.repository / 'memory-bank/chunks').glob('MEM-*.md'))))
+
+    def test_another_owner_cannot_consume_the_local_retry(self):
+        self.failed_promotion_on_clean_tree()
+        with mock.patch.object(brain.time, 'time', return_value=1800000031):
+            other = brain.retry_pending_auto_promotion(self.repository, owner='other-owner')
+        self.assertEqual([], other['promoted'])
+        self.assertEqual([], list((self.repository / 'memory-bank/chunks').glob('MEM-*.md')))
+        self.assertEqual(1, len(self.clean_turn_at(1800000032)['promoted']))
+
+    def test_retry_does_not_scan_when_its_schedule_cannot_be_saved(self):
+        self.failed_promotion_on_clean_tree()
+        retry_file = brain._promotion_retry_file(self.repository, 'local')
+        before = retry_file.read_bytes()
+        atomic = brain.atomic_json
+        def unavailable(destination, value):
+            if destination == retry_file:
+                raise OSError('Retry schedule storage unavailable')
+            return atomic(destination, value)
+        with mock.patch.object(brain.time, 'time', return_value=1800000031), \
+             mock.patch.object(brain, 'atomic_json', side_effect=unavailable):
+            result = brain.retry_pending_auto_promotion(self.repository, owner='local')
+        self.assertTrue(result.get('retry_unavailable'))
+        self.assertEqual([], result['promoted'])
+        self.assertEqual([], list((self.repository / 'memory-bank/chunks').glob('MEM-*.md')))
+        self.assertEqual(before, retry_file.read_bytes())
+
+    def test_unavailable_retry_schedule_survives_silenced_stop_output(self):
+        self.failed_promotion_on_clean_tree()
+        retry_file = brain._promotion_retry_file(self.repository, 'local')
+        atomic = brain.atomic_json
+        def unavailable(destination, value):
+            if destination == retry_file:
+                raise OSError('Retry schedule storage unavailable')
+            return atomic(destination, value)
+        with mock.patch.object(brain, 'atomic_json', side_effect=unavailable):
+            result = self.clean_turn_at(1800000031)
+        self.assertTrue(result['promotion_retry_unavailable'])
+        report = context_cli.load_last_turn_report(self.repository)
+        self.assertTrue(report.get('promotion_retry_unavailable'))
+        self.assertIn('promotion retry unavailable', context_cli.summarize_last_turn(report, routine=False))
+        self.assertIsNone(context_cli.summarize_last_turn({'promotion_retry_unavailable': 'true'}, routine=False))
+
+    def test_blocked_only_retry_drains_after_bank_duplicates_are_identified(self):
+        learnings = [{**self.LEARNING, 'title': 'Cobalt authority is canonical first'},
+                     {**self.LEARNING, 'title': 'Cobalt authority is canonical second'}]
+        with mock.patch.object(brain.time, 'time', return_value=1800000000), \
+             mock.patch.object(brain, 'create_promotion', side_effect=brain.BrainError('initial failure')):
+            first = self.record('blocked-rotation', self.result(learnings=learnings))
+        self.assertEqual(2, len(first['promotion']['failed']))
+        reference = brain.create_record(self.repository, 'finding', 'REFERENCE', 'Cobalt authority is canonical',
+            [], ['specs/authority.md'], owner='alice', goal=self.LEARNING['consequence'])
+        reference = self.resolve_verified_finding(reference, progress=self.LEARNING['consequence'])
+        proposal = brain.create_promotion(self.repository, [reference['id']], reference['title'],
+                                         brain.promotion_content(reference), proposer='local')
+        brain.review_promotion(self.repository, proposal['id'], reviewer='human', approve=True)
+        brain.apply_promotion(self.repository, proposal['id'])
+        with mock.patch.object(brain.time, 'time', return_value=1800000031):
+            result = brain.retry_pending_auto_promotion(self.repository, owner='local')
+        self.assertEqual([], result['promoted'])
+        self.assertEqual(2, len(result['blocked']))
+        self.assertEqual(0, result['skipped'])
+        self.assertFalse(brain._promotion_retry_file(self.repository, 'local').exists())
+        self.assertEqual(1, len(list((self.repository / 'memory-bank/chunks').glob('MEM-*.md'))))
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX symlink control')
+    def test_retry_state_symlink_is_not_read_or_replaced(self):
+        self.failed_promotion_on_clean_tree()
+        retry_file = brain._promotion_retry_file(self.repository, 'local')
+        sentinel = self.repository / 'unrelated-local-sentinel'
+        sentinel.write_bytes(b'Unrelated local bytes')
+        retry_file.unlink()
+        retry_file.symlink_to(sentinel)
+        with mock.patch.object(brain.time, 'time', return_value=1800000031):
+            result = brain.retry_pending_auto_promotion(self.repository, owner='local')
+        self.assertEqual([], result['promoted'])
+        self.assertEqual(b'Unrelated local bytes', sentinel.read_bytes())
+        self.assertTrue(retry_file.is_symlink())
+
     def test_an_archived_agent_attested_record_keeps_its_mark_when_promoted(self) -> None:
         config = self.repository / "project-brain/config/runtime.json"
         config.write_text(json.dumps({"mode": "governed", "automatic_promotion": False}), encoding="utf-8")
@@ -10615,7 +11141,7 @@ class RecordResultTest(RuntimeHarness):
 
     def test_a_revised_consequence_updates_what_an_agent_attested(self) -> None:
         self.record("run-1", self.result())
-        revised = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        revised = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop.", "expected_revision": self.records()[0]["revision"]}]))
         self.assertEqual(["updated"], [item["state"] for item in revised["records"]])
         self.assertFalse(revised["replayed"])
         self.assertEqual(1, len(self.records()))
@@ -10625,9 +11151,11 @@ class RecordResultTest(RuntimeHarness):
         memory_results.record_result(self.repository, "TASK-RESULT", "run-1", self.task()["revision"],
                                      self.result(), owner="local", reason="Reviewed by a person",
                                      attestation="person")
-        revised = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
-        self.assertEqual(["differs"], [item["state"] for item in revised["records"]])
-        self.assertFalse(revised["replayed"])
+        held = self.record("run-2", self.result(progress="Independent task progress",
+            learnings=[{**self.LEARNING, "consequence": "Retry once, then stop.",
+                       "expected_revision": self.records()[0]["revision"]}]))
+        self.assertEqual(["differs"], [item["state"] for item in held["records"]])
+        self.assertEqual("Independent task progress", self.task()["progress"])
         self.assertEqual(self.LEARNING["consequence"], self.records()[0]["progress"])
         brain.compact(self.repository)
         archived = self.record("run-3", self.result(learnings=[{**self.LEARNING, "consequence": "Retry twice."}]))
@@ -10673,7 +11201,7 @@ class RecordResultTest(RuntimeHarness):
 
     def test_a_delayed_replay_of_an_older_result_leaves_the_later_revision(self) -> None:
         self.record("run-1", self.result())
-        self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop.", "expected_revision": self.records()[0]["revision"]}]))
         revised = self.records()[0]
         replay = self.record("run-1", self.result())
         self.assertTrue(replay["replayed"])
@@ -10683,7 +11211,7 @@ class RecordResultTest(RuntimeHarness):
 
     def test_a_persons_correction_is_theirs_and_no_agent_overwrites_it(self) -> None:
         self.record("run-1", self.result())
-        corrected = {**self.LEARNING, "consequence": "Retry once, then stop."}
+        corrected = {**self.LEARNING, "consequence": "Retry once, then stop.", "expected_revision": self.records()[0]["revision"]}
         person = memory_results.record_result(
             self.repository, "TASK-RESULT", "run-2", self.task()["revision"],
             self.result(learnings=[corrected]), owner="local", reason="Corrected by a person",
@@ -10692,14 +11220,17 @@ class RecordResultTest(RuntimeHarness):
         finding = self.records()[0]
         self.assertEqual("person", brain.record_attestation(finding))
         brain.validate_record(finding)
-        later = self.record("run-3", self.result(learnings=[{**self.LEARNING, "consequence": "Retry forever."}]))
-        self.assertEqual(["differs"], [item["state"] for item in later["records"]])
+        held = self.record("run-3", self.result(progress="Independent follow-up",
+            learnings=[{**self.LEARNING, "consequence": "Retry forever.",
+                       "expected_revision": self.records()[0]["revision"]}]))
+        self.assertEqual(["differs"], [item["state"] for item in held["records"]])
+        self.assertEqual("Independent follow-up", self.task()["progress"])
         self.assertEqual("Retry once, then stop.", self.records()[0]["progress"])
 
     def test_a_revised_learning_supersedes_the_chunk_promoted_before(self) -> None:
         self.record("run-1", self.result())
         [first] = self.chunks()
-        revised = {**self.LEARNING,
+        revised = {**self.LEARNING, "expected_revision": self.records()[0]["revision"],
                    "consequence": "Retry once, then stop; only after that does the cobalt rule decide allocation."}
         saved = self.record("run-2", self.result(learnings=[revised]))
         self.assertEqual(1, len(saved["promotion"]["promoted"]), saved["promotion"])
@@ -10725,7 +11256,7 @@ class RecordResultTest(RuntimeHarness):
         brain.review_promotion(self.repository, proposal["id"], reviewer="human-reviewer", approve=True)
         brain.apply_promotion(self.repository, proposal["id"])
         self.automatic(True)
-        saved = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        saved = self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop.", "expected_revision": self.records()[0]["revision"]}]))
         self.assertEqual([], saved["promotion"]["promoted"])
         self.assertTrue(any("person's review" in item["reason"] for item in saved["promotion"]["blocked"]),
                         saved["promotion"]["blocked"])
@@ -10761,7 +11292,7 @@ class RecordResultTest(RuntimeHarness):
         self.automatic(False)
         self.record("run-1", self.result())
         proposal = self.stalled(self.records()[0])
-        self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop."}]))
+        self.record("run-2", self.result(learnings=[{**self.LEARNING, "consequence": "Retry once, then stop.", "expected_revision": self.records()[0]["revision"]}]))
         self.automatic(True)
         first = brain.auto_promote(self.repository, owner="local")
         self.assertEqual([], first["failed"])
@@ -11120,8 +11651,16 @@ class LinkedMemoryExcerptTest(unittest.TestCase):
                 "snippet": "# Safety boundary\n\n" + self.RULE, "source_hash": "a" * 64}
         if selection:
             item["selection"] = selection
-        return {"working": None, "warnings": [], "omitted": {}, "query": query,
-                "semantic": [item], "episodic": [], "procedural": []}
+        capsule = {"working": None, "warnings": [], "omitted": {}, "query": query,
+                   "semantic": [item], "episodic": [], "procedural": []}
+        # An assembled capsule carries the indexed image it admitted; the
+        # renderer quotes from that image, never from a fresh live read.
+        row = self.connection.execute("SELECT title, summary, content FROM documents WHERE path=?",
+                                      (self.PATH,)).fetchone()
+        images = {self.PATH: tuple(str(row[key] or "") for key in ("title", "summary", "content"))} if row else {}
+        if row:
+            item["_indexed_policy_image"] = images[self.PATH]
+        return retrieval._with_index_images(capsule, images)
 
     def test_linked_rule_survives_filename_matches_in_sources(self) -> None:
         self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
@@ -11283,9 +11822,13 @@ class CitationDigestCacheTest(unittest.TestCase):
         config={'allowed_privacy':['team'],'allowed_authority':['verified']};instances=[];real=retrieval._CitationDigestCache
         def build():
             value=real();instances.append(value);return value
+        # The filter checks the indexed image it admits; a one-row index holds it.
+        index=sqlite3.connect(':memory:');index.row_factory=sqlite3.Row;self.addCleanup(index.close)
+        context_cli.create_document_table(index);retrieval.ensure_metadata_tables(index)
+        index.execute('INSERT INTO documents(path,layer,kind,title,summary,content) VALUES(?,?,?,?,?,?)',('record.md','semantic','memory','Record','','body\n'))
         with mock.patch.object(retrieval,'_CitationDigestCache',side_effect=build):
-            first=retrieval._runtime_filter(self.root,[copy.deepcopy(row)],config)
-            second=retrieval._runtime_filter(self.root,[copy.deepcopy(row)],config)
+            first=retrieval._runtime_filter(self.root,[copy.deepcopy(row)],config,connection=index)
+            second=retrieval._runtime_filter(self.root,[copy.deepcopy(row)],config,connection=index)
         self.assertEqual(first,second);self.assertEqual(first[0][0]['adjusted_score'],2)
         self.assertEqual(len(instances),2);self.assertEqual([item.misses for item in instances],[1,1]);self.assertEqual(row['adjusted_score'],4)
 
@@ -11846,7 +12389,15 @@ class PassiveFunnelContractTest(unittest.TestCase):
             rows = [good, {**good, 'source_hash': 'b' * 64}, {**good, 'privacy': 'restricted', 'owner': 'bob'}, {**good, 'authority': 'proposed'}]
             config = {'allowed_privacy': ['public', 'restricted'], 'owners': ['alice'], 'allowed_authority': ['observed', 'verified']}
             trace = retrieval.RetrievalTrace(config)
-            selected, excluded = retrieval._runtime_filter(repository, rows, config, trace=trace)
+            # The filter checks the indexed image it admits; a one-row index holds it.
+            index = sqlite3.connect(':memory:')
+            index.row_factory = sqlite3.Row
+            self.addCleanup(index.close)
+            context_cli.create_document_table(index)
+            retrieval.ensure_metadata_tables(index)
+            index.execute('INSERT INTO documents(path,layer,kind,title,summary,content) VALUES(?,?,?,?,?,?)',
+                          ('specs/good.md', 'semantic', 'spec', 'Cobalt canonical', '', '# Cobalt canonical\n'))
+            selected, excluded = retrieval._runtime_filter(repository, rows, config, trace=trace, connection=index)
             trace.funnel_boundary('queue_after_runtime', selected)
             self.assertEqual([good], selected)
             self.assertEqual(['stale', 'owner', 'authority'], [entry['reason'] for entry in excluded])
@@ -12998,18 +13549,34 @@ class OrdinaryReceiptObservationTest(RuntimeHarness):
         import weakref
         self.start('TASK-OBS')
         references = []
+        published = []
         def returned(*args, **kwargs):
+            # Delivery receipts follow a confirmed manifest publication, so a
+            # receipt never names a publication that then failed.
+            self.assertEqual([True], validated)
+            self.assertEqual([True], published)
             latest = Hostile()
             references.append(weakref.ref(latest))
             return 'committed', latest
+        validated = []
         validate = retrieval.validate_schema_file
+        publish = retrieval.atomic_json
         def validation(*args, **kwargs):
             if len(args) > 1 and args[1] == 'retrieval-manifest.schema.json':
-                self.assertIsNone(references[-1]())
+                self.assertEqual([], references)
+                validated.append(True)
             return validate(*args, **kwargs)
+        def publication(*args, **kwargs):
+            self.assertEqual([True], validated)
+            self.assertEqual([], references)
+            outcome = publish(*args, **kwargs)
+            published.append(True)
+            return outcome
         with mock.patch.object(retrieval, '_commit_ordinary_receipts', side_effect=returned) as owner, \
-                mock.patch.object(retrieval, 'validate_schema_file', side_effect=validation):
+                mock.patch.object(retrieval, 'validate_schema_file', side_effect=validation), \
+                mock.patch.object(retrieval, 'atomic_json', side_effect=publication) as publication_mock:
             out, _ = self.request()
+        self.assertEqual(1, publication_mock.call_count)
         self.assertEqual(1, owner.call_count)
         self.assertEqual(self.child(), json.loads(out)['ordinary_receipt'])
         self.assertIsNone(references[-1]())

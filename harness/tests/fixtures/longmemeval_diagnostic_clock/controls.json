@@ -1,0 +1,4045 @@
+{
+  "context": [
+    {
+      "type": "text",
+      "value": "Public reference data:\nThe revised unit rate is 17."
+    }
+  ],
+  "invalid_numeric_kinds": [
+    "nan",
+    "positive_infinity",
+    "negative_infinity",
+    "negative",
+    "bool",
+    "wrong_type",
+    "float_subclass",
+    "int_subclass"
+  ],
+  "limits": {
+    "actor_calls": 0,
+    "methods": 14,
+    "native_query_calls": 14,
+    "provider_calls": 0
+  },
+  "native": [
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": 0.375,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "normal",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "valid",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "ordinary_end_error",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "ordinary",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 0,
+        "context_chars": 0,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "failed",
+        "trajectories": 3
+      },
+      "name": "end_abort",
+      "outward": "end_abort",
+      "outward_context": null,
+      "result": null,
+      "timer": "abort",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": true,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 0,
+        "context_chars": 0,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "failed",
+        "trajectories": 3
+      },
+      "name": "body_and_timer_abort",
+      "outward": "body_error",
+      "outward_context": null,
+      "result": null,
+      "timer": "abort",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": true,
+      "metadata": {
+        "context_bytes": 0,
+        "context_chars": 0,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "cleanup_failed",
+        "trajectories": 3
+      },
+      "name": "cleanup_and_timer_abort",
+      "outward": "cleanup_error",
+      "outward_context": null,
+      "result": null,
+      "timer": "abort",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": true,
+      "close_error": true,
+      "metadata": {
+        "context_bytes": 0,
+        "context_chars": 0,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "cleanup_failed",
+        "trajectories": 3
+      },
+      "name": "body_cleanup_timer_abort",
+      "outward": "cleanup_error",
+      "outward_context": "body_error",
+      "result": null,
+      "timer": "abort",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_nan",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "nan",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_positive_infinity",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "positive_infinity",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_negative_infinity",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "negative_infinity",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_negative",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "negative",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_bool",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "bool",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_wrong_type",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "wrong_type",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_float_subclass",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "float_subclass",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    },
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_int_subclass",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "int_subclass",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    }
+  ],
+  "observers": [
+    {
+      "absent": false,
+      "bridge": false,
+      "cleanup_error": false,
+      "clock_reads": 4,
+      "close_attempts": 1,
+      "end_abort": false,
+      "failures": {
+        "cleanup": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "initialization": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "insert": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "query": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        }
+      },
+      "name": "start_abort_success",
+      "outward": "start_abort",
+      "outward_context": null,
+      "snapshot": {
+        "ledger": {
+          "attempt_limit": 4096,
+          "attempts": 0,
+          "duplicates": 0,
+          "experiment": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "frozen": true,
+          "grading": {
+            "complete": false,
+            "conflicting": 0,
+            "correct": null,
+            "known_correct": 0,
+            "observed": 0
+          },
+          "horizon": 3,
+          "observation_errors": 0,
+          "overflow": false,
+          "phases": {
+            "build": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 1,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 1,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "judge": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "query": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "reader": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            }
+          },
+          "product": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "profile": "memory-benchmark-ledger-v1",
+          "usage_profile": "inclusive-input-output-v1"
+        },
+        "observed": {
+          "build_component_ns": null,
+          "cleanup_outcome": "succeeded",
+          "images_ingested": 0,
+          "initialization_attempted": true,
+          "initialization_outcome": "succeeded",
+          "insert_calls": 0,
+          "insert_cancelled": 0,
+          "insert_failed": 0,
+          "insert_ingress_bytes": 0,
+          "inserted": 0,
+          "local_token_profile": "unknown",
+          "observation_incomplete": true,
+          "query_calls": 0,
+          "query_cancelled": 0,
+          "query_component_ns": 0,
+          "query_failed": 0,
+          "query_ingress_bytes": 0,
+          "query_receipts": [],
+          "replayed": 0,
+          "returned_context_bytes": 0,
+          "status": "finalized",
+          "unique_projection_bytes": 0,
+          "unlaunched_queries": 3
+        },
+        "profile": "native-fts5/observed-local-operations-v1"
+      },
+      "start_abort": true
+    },
+    {
+      "absent": false,
+      "bridge": false,
+      "cleanup_error": true,
+      "clock_reads": 4,
+      "close_attempts": 1,
+      "end_abort": false,
+      "failures": {
+        "cleanup": {
+          "observation_state": "unmeasured",
+          "phase": "cleanup",
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": "unclassified",
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "initialization": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "insert": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "query": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        }
+      },
+      "name": "start_abort_cleanup_error",
+      "outward": "cleanup_error",
+      "outward_context": null,
+      "snapshot": {
+        "ledger": {
+          "attempt_limit": 4096,
+          "attempts": 0,
+          "duplicates": 0,
+          "experiment": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "frozen": true,
+          "grading": {
+            "complete": false,
+            "conflicting": 0,
+            "correct": null,
+            "known_correct": 0,
+            "observed": 0
+          },
+          "horizon": 3,
+          "observation_errors": 0,
+          "overflow": false,
+          "phases": {
+            "build": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 1,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 1,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "judge": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "query": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "reader": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            }
+          },
+          "product": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "profile": "memory-benchmark-ledger-v1",
+          "usage_profile": "inclusive-input-output-v1"
+        },
+        "observed": {
+          "build_component_ns": null,
+          "cleanup_outcome": "failed",
+          "images_ingested": 0,
+          "initialization_attempted": true,
+          "initialization_outcome": "succeeded",
+          "insert_calls": 0,
+          "insert_cancelled": 0,
+          "insert_failed": 0,
+          "insert_ingress_bytes": 0,
+          "inserted": 0,
+          "local_token_profile": "unknown",
+          "observation_incomplete": true,
+          "query_calls": 0,
+          "query_cancelled": 0,
+          "query_component_ns": 0,
+          "query_failed": 0,
+          "query_ingress_bytes": 0,
+          "query_receipts": [],
+          "replayed": 0,
+          "returned_context_bytes": 0,
+          "status": "cleanup_failed",
+          "unique_projection_bytes": 0,
+          "unlaunched_queries": 3
+        },
+        "profile": "native-fts5/observed-local-operations-v1"
+      },
+      "start_abort": true
+    },
+    {
+      "absent": false,
+      "bridge": false,
+      "cleanup_error": false,
+      "clock_reads": 4,
+      "close_attempts": 1,
+      "end_abort": true,
+      "failures": {
+        "cleanup": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "initialization": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "insert": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "query": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        }
+      },
+      "name": "start_and_end_abort",
+      "outward": "start_abort",
+      "outward_context": null,
+      "snapshot": {
+        "ledger": {
+          "attempt_limit": 4096,
+          "attempts": 0,
+          "duplicates": 0,
+          "experiment": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "frozen": true,
+          "grading": {
+            "complete": false,
+            "conflicting": 0,
+            "correct": null,
+            "known_correct": 0,
+            "observed": 0
+          },
+          "horizon": 3,
+          "observation_errors": 0,
+          "overflow": false,
+          "phases": {
+            "build": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 1,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 1,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "judge": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "query": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "reader": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            }
+          },
+          "product": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "profile": "memory-benchmark-ledger-v1",
+          "usage_profile": "inclusive-input-output-v1"
+        },
+        "observed": {
+          "build_component_ns": null,
+          "cleanup_outcome": "succeeded",
+          "images_ingested": 0,
+          "initialization_attempted": true,
+          "initialization_outcome": "succeeded",
+          "insert_calls": 0,
+          "insert_cancelled": 0,
+          "insert_failed": 0,
+          "insert_ingress_bytes": 0,
+          "inserted": 0,
+          "local_token_profile": "unknown",
+          "observation_incomplete": true,
+          "query_calls": 0,
+          "query_cancelled": 0,
+          "query_component_ns": 0,
+          "query_failed": 0,
+          "query_ingress_bytes": 0,
+          "query_receipts": [],
+          "replayed": 0,
+          "returned_context_bytes": 0,
+          "status": "finalized",
+          "unique_projection_bytes": 0,
+          "unlaunched_queries": 3
+        },
+        "profile": "native-fts5/observed-local-operations-v1"
+      },
+      "start_abort": true
+    },
+    {
+      "absent": true,
+      "bridge": false,
+      "cleanup_error": false,
+      "clock_reads": 2,
+      "close_attempts": 0,
+      "end_abort": false,
+      "failures": {
+        "cleanup": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "initialization": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "insert": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "query": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        }
+      },
+      "name": "absent_start_abort",
+      "outward": "start_abort",
+      "outward_context": null,
+      "snapshot": {
+        "ledger": {
+          "attempt_limit": 4096,
+          "attempts": 0,
+          "duplicates": 0,
+          "experiment": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "frozen": true,
+          "grading": {
+            "complete": false,
+            "conflicting": 0,
+            "correct": null,
+            "known_correct": 0,
+            "observed": 0
+          },
+          "horizon": 3,
+          "observation_errors": 0,
+          "overflow": false,
+          "phases": {
+            "build": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 1,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 1,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "judge": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "query": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "reader": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            }
+          },
+          "product": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "profile": "memory-benchmark-ledger-v1",
+          "usage_profile": "inclusive-input-output-v1"
+        },
+        "observed": {
+          "build_component_ns": null,
+          "cleanup_outcome": "not_needed",
+          "images_ingested": 0,
+          "initialization_attempted": false,
+          "initialization_outcome": "not_attempted",
+          "insert_calls": 0,
+          "insert_cancelled": 0,
+          "insert_failed": 0,
+          "insert_ingress_bytes": 0,
+          "inserted": 0,
+          "local_token_profile": "unknown",
+          "observation_incomplete": true,
+          "query_calls": 0,
+          "query_cancelled": 0,
+          "query_component_ns": 0,
+          "query_failed": 0,
+          "query_ingress_bytes": 0,
+          "query_receipts": [],
+          "replayed": 0,
+          "returned_context_bytes": 0,
+          "status": "finalized",
+          "unique_projection_bytes": 0,
+          "unlaunched_queries": 3
+        },
+        "profile": "native-fts5/observed-local-operations-v1"
+      },
+      "start_abort": true
+    },
+    {
+      "absent": false,
+      "bridge": false,
+      "cleanup_error": false,
+      "clock_reads": 4,
+      "close_attempts": 1,
+      "end_abort": true,
+      "failures": {
+        "cleanup": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "initialization": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "insert": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "query": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        }
+      },
+      "name": "end_abort_success",
+      "outward": "end_abort",
+      "outward_context": null,
+      "snapshot": {
+        "ledger": {
+          "attempt_limit": 4096,
+          "attempts": 0,
+          "duplicates": 0,
+          "experiment": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "frozen": true,
+          "grading": {
+            "complete": false,
+            "conflicting": 0,
+            "correct": null,
+            "known_correct": 0,
+            "observed": 0
+          },
+          "horizon": 3,
+          "observation_errors": 0,
+          "overflow": false,
+          "phases": {
+            "build": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 1,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 1,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "judge": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "query": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            },
+            "reader": {
+              "attempts": 0,
+              "cached_input_tokens": null,
+              "closed_units": 0,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "conflicting_attempts": 0,
+              "constructed_bytes": null,
+              "expected_units": 3,
+              "finished_attempts": 0,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "outcomes": {
+                "cancelled": 0,
+                "conflict": 0,
+                "failed": 0,
+                "pending": 0,
+                "succeeded": 0
+              },
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null
+            }
+          },
+          "product": {
+            "cached_input_tokens": null,
+            "complete": {
+              "billing": false,
+              "bytes": false,
+              "cache": false,
+              "coverage": false,
+              "reasoning": false,
+              "timing": false,
+              "tokens": false
+            },
+            "component_ns": null,
+            "constructed_bytes": null,
+            "input_tokens": null,
+            "known_component_ns": 0,
+            "known_constructed_bytes": 0,
+            "known_input_tokens": 0,
+            "known_output_tokens": 0,
+            "known_tokens": 0,
+            "known_usd_micros": 0,
+            "output_tokens": null,
+            "overflow": false,
+            "reasoning_output_tokens": null,
+            "tokens": null,
+            "tokens_per_correct": null,
+            "tokens_per_planned_query": null,
+            "uncached_input_tokens": null,
+            "usd_micros": null,
+            "usd_micros_per_correct": null,
+            "usd_micros_per_planned_query": null
+          },
+          "profile": "memory-benchmark-ledger-v1",
+          "usage_profile": "inclusive-input-output-v1"
+        },
+        "observed": {
+          "build_component_ns": null,
+          "cleanup_outcome": "succeeded",
+          "images_ingested": 0,
+          "initialization_attempted": true,
+          "initialization_outcome": "succeeded",
+          "insert_calls": 0,
+          "insert_cancelled": 0,
+          "insert_failed": 0,
+          "insert_ingress_bytes": 0,
+          "inserted": 0,
+          "local_token_profile": "unknown",
+          "observation_incomplete": true,
+          "query_calls": 0,
+          "query_cancelled": 0,
+          "query_component_ns": 0,
+          "query_failed": 0,
+          "query_ingress_bytes": 0,
+          "query_receipts": [],
+          "replayed": 0,
+          "returned_context_bytes": 0,
+          "status": "finalized",
+          "unique_projection_bytes": 0,
+          "unlaunched_queries": 3
+        },
+        "profile": "native-fts5/observed-local-operations-v1"
+      },
+      "start_abort": false
+    },
+    {
+      "absent": false,
+      "bridge": true,
+      "cleanup_error": false,
+      "clock_reads": 4,
+      "close_attempts": 1,
+      "end_abort": false,
+      "failures": {
+        "cleanup": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "initialization": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "insert": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "query": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        }
+      },
+      "name": "bridge_start_abort",
+      "outward": "start_abort",
+      "outward_context": null,
+      "snapshot": {
+        "closed": true,
+        "contexts_admitted": 0,
+        "contexts_cleared": 0,
+        "hook_replays": 0,
+        "hooks_verified": 0,
+        "local_observation": {
+          "ledger": {
+            "attempt_limit": 4096,
+            "attempts": 0,
+            "duplicates": 0,
+            "experiment": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "frozen": true,
+            "grading": {
+              "complete": false,
+              "conflicting": 0,
+              "correct": null,
+              "known_correct": 0,
+              "observed": 0
+            },
+            "horizon": 3,
+            "observation_errors": 0,
+            "overflow": false,
+            "phases": {
+              "build": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 1,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 1,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 0,
+                "known_constructed_bytes": 0,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "judge": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 0,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 3,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 0,
+                "known_constructed_bytes": 0,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "query": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 0,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 3,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 0,
+                "known_constructed_bytes": 0,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "reader": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 0,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 3,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 0,
+                "known_constructed_bytes": 0,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              }
+            },
+            "product": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1"
+          },
+          "observed": {
+            "build_component_ns": null,
+            "cleanup_outcome": "succeeded",
+            "images_ingested": 0,
+            "initialization_attempted": true,
+            "initialization_outcome": "succeeded",
+            "insert_calls": 0,
+            "insert_cancelled": 0,
+            "insert_failed": 0,
+            "insert_ingress_bytes": 0,
+            "inserted": 0,
+            "local_token_profile": "unknown",
+            "observation_incomplete": true,
+            "query_calls": 0,
+            "query_cancelled": 0,
+            "query_component_ns": 0,
+            "query_failed": 0,
+            "query_ingress_bytes": 0,
+            "query_receipts": [],
+            "replayed": 0,
+            "returned_context_bytes": 0,
+            "status": "finalized",
+            "unique_projection_bytes": 0,
+            "unlaunched_queries": 3
+          },
+          "profile": "native-fts5/observed-local-operations-v1"
+        },
+        "pending_contexts": 0,
+        "prework_cancelled": 0,
+        "profile": "longmemeval/native-fts5-registration-v1",
+        "queries_attempted": 0,
+        "runtime_overrides_ignored": false
+      },
+      "start_abort": true
+    },
+    {
+      "absent": false,
+      "bridge": true,
+      "cleanup_error": true,
+      "clock_reads": 4,
+      "close_attempts": 1,
+      "end_abort": false,
+      "failures": {
+        "cleanup": {
+          "observation_state": "unmeasured",
+          "phase": "cleanup",
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": "unclassified",
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "initialization": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "insert": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        },
+        "query": {
+          "observation_state": "unobserved",
+          "phase": null,
+          "profile": "longmemeval/projection-body-failure-v1",
+          "provider_tokens": null,
+          "reported_exception": null,
+          "reported_guard": null,
+          "root_cause": null,
+          "scope": "last_operation_body_exception_only",
+          "usd_micros": null
+        }
+      },
+      "name": "bridge_start_abort_cleanup_error",
+      "outward": "cleanup_error",
+      "outward_context": null,
+      "snapshot": {
+        "closed": true,
+        "contexts_admitted": 0,
+        "contexts_cleared": 0,
+        "hook_replays": 0,
+        "hooks_verified": 0,
+        "local_observation": {
+          "ledger": {
+            "attempt_limit": 4096,
+            "attempts": 0,
+            "duplicates": 0,
+            "experiment": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "frozen": true,
+            "grading": {
+              "complete": false,
+              "conflicting": 0,
+              "correct": null,
+              "known_correct": 0,
+              "observed": 0
+            },
+            "horizon": 3,
+            "observation_errors": 0,
+            "overflow": false,
+            "phases": {
+              "build": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 1,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 1,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 0,
+                "known_constructed_bytes": 0,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "judge": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 0,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 3,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 0,
+                "known_constructed_bytes": 0,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "query": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 0,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 3,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 0,
+                "known_constructed_bytes": 0,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "reader": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 0,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 3,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 0,
+                "known_constructed_bytes": 0,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              }
+            },
+            "product": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 0,
+              "known_constructed_bytes": 0,
+              "known_input_tokens": 0,
+              "known_output_tokens": 0,
+              "known_tokens": 0,
+              "known_usd_micros": 0,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1"
+          },
+          "observed": {
+            "build_component_ns": null,
+            "cleanup_outcome": "failed",
+            "images_ingested": 0,
+            "initialization_attempted": true,
+            "initialization_outcome": "succeeded",
+            "insert_calls": 0,
+            "insert_cancelled": 0,
+            "insert_failed": 0,
+            "insert_ingress_bytes": 0,
+            "inserted": 0,
+            "local_token_profile": "unknown",
+            "observation_incomplete": true,
+            "query_calls": 0,
+            "query_cancelled": 0,
+            "query_component_ns": 0,
+            "query_failed": 0,
+            "query_ingress_bytes": 0,
+            "query_receipts": [],
+            "replayed": 0,
+            "returned_context_bytes": 0,
+            "status": "cleanup_failed",
+            "unique_projection_bytes": 0,
+            "unlaunched_queries": 3
+          },
+          "profile": "native-fts5/observed-local-operations-v1"
+        },
+        "pending_contexts": 0,
+        "prework_cancelled": 0,
+        "profile": "longmemeval/native-fts5-registration-v1",
+        "queries_attempted": 0,
+        "runtime_overrides_ignored": false
+      },
+      "start_abort": true
+    }
+  ],
+  "profile": "new-public-diagnostic-clock-oracles-v1",
+  "public_query": "What is the revised unit rate?",
+  "public_root": "/public/new-clock-fixture-6201"
+}

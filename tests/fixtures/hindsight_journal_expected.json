@@ -1,0 +1,236 @@
+{
+  "scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+  "bank_id": "harness-d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+  "tag": "harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+  "generations": [
+    {
+      "manifest": "{\"profile\":\"hindsight-ingestion-journal-v1\",\"journal_id\":\"4e5f25b1-6b85-4c23-b614-0d603e545538\",\"scope\":\"d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\",\"generation\":\"85dcf6e0-5690-4f0f-a6f5-b6e7199b1c96\",\"revision\":1,\"export_sha256\":\"5623219bf194166ab92139482284e8477093467b5d5a66d72625bdc965128f86\",\"current\":[{\"document_id\":\"source-51fee69d4e10d742147ff08c7e9924741c731ac64c5bd2aea0e4e6fecc8fbcbc\",\"path\":\"docs/lantern.md\",\"source_sha256\":\"0e58029c8155e78199dba72671e9a326840eca9d4b914ebf505093c0ff6bcfa4\",\"source_id\":\"logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8\",\"body_sha256\":\"b3019c60e1a3ba55949290abea36a166fbe605d267d861a9b7f43eede7c2b844\",\"body_bytes\":764,\"intent_id\":\"intent-d6dc6c34ca541eda15fcd1546669ad31ec010eebe78d2b8bc108c5495602f107\"},{\"document_id\":\"source-53e94d6694e9dacce748c72aec27490f55d8ebca6fa4ce63594aac1c1e83b5a8\",\"path\":\"src/mariner.py\",\"source_sha256\":\"b7d94170e4bd3e094de1004ace165c410fa4ed6a69ed523da2bcb454f599c723\",\"source_id\":\"logical-6b1adefd4e1fe1cd884e3cb113b469e56904b788234230962c3059f6e1dae918\",\"body_sha256\":\"49106ffe0b8a8f541252a6366bed0a72e6613d6a64c75796226c9866d184204b\",\"body_bytes\":745,\"intent_id\":\"intent-297440a38096d212feac218f781b31c9c464104b871d15c41397710943517187\"},{\"document_id\":\"source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34\",\"path\":\"docs/fog.md\",\"source_sha256\":\"1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c\",\"source_id\":\"logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e\",\"body_sha256\":\"15beeda946e4929fab1371a8cc351997658d83cecc8bffbd055986775c325ffd\",\"body_bytes\":771,\"intent_id\":\"intent-297619823eb7749a47f4750457394a00b65f9d27a0c9b6dcc4c9d5030682de06\"}],\"previous\":[]}",
+      "manifest_sha256": "360c44f3c53da59b9aaf8bbc56af3f9bf61f86b34d7feba31997943dc86c98b1",
+      "documents": [
+        {
+          "descriptor": {
+            "document_id": "source-51fee69d4e10d742147ff08c7e9924741c731ac64c5bd2aea0e4e6fecc8fbcbc",
+            "path": "docs/lantern.md",
+            "source_sha256": "0e58029c8155e78199dba72671e9a326840eca9d4b914ebf505093c0ff6bcfa4",
+            "source_id": "logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8",
+            "body_sha256": "b3019c60e1a3ba55949290abea36a166fbe605d267d861a9b7f43eede7c2b844",
+            "body_bytes": 764,
+            "intent_id": "intent-d6dc6c34ca541eda15fcd1546669ad31ec010eebe78d2b8bc108c5495602f107"
+          },
+          "binding": {
+            "document_id": "source-51fee69d4e10d742147ff08c7e9924741c731ac64c5bd2aea0e4e6fecc8fbcbc",
+            "path": "docs/lantern.md",
+            "source_sha256": "0e58029c8155e78199dba72671e9a326840eca9d4b914ebf505093c0ff6bcfa4"
+          },
+          "body": "{\"items\":[{\"content\":\"# Lantern harbor\\nThe night gate closes at bell four.\\n\",\"document_id\":\"source-51fee69d4e10d742147ff08c7e9924741c731ac64c5bd2aea0e4e6fecc8fbcbc\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\",\"source_sha256\":\"0e58029c8155e78199dba72671e9a326840eca9d4b914ebf505093c0ff6bcfa4\",\"source_id\":\"logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"]}",
+          "observation": {
+            "id": "source-51fee69d4e10d742147ff08c7e9924741c731ac64c5bd2aea0e4e6fecc8fbcbc",
+            "bank_id": "harness-d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+            "original_text": "# Lantern harbor\nThe night gate closes at bell four.\n",
+            "content_hash": "upstream-algorithm-unassumed",
+            "document_metadata": {
+              "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+              "source_sha256": "0e58029c8155e78199dba72671e9a326840eca9d4b914ebf505093c0ff6bcfa4",
+              "source_id": "logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "retain_params": {
+              "metadata": {
+                "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+                "source_sha256": "0e58029c8155e78199dba72671e9a326840eca9d4b914ebf505093c0ff6bcfa4",
+                "source_id": "logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8",
+                "export_profile": "hindsight-public-export-v1"
+              }
+            },
+            "tags": [
+              "harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26"
+            ]
+          }
+        },
+        {
+          "descriptor": {
+            "document_id": "source-53e94d6694e9dacce748c72aec27490f55d8ebca6fa4ce63594aac1c1e83b5a8",
+            "path": "src/mariner.py",
+            "source_sha256": "b7d94170e4bd3e094de1004ace165c410fa4ed6a69ed523da2bcb454f599c723",
+            "source_id": "logical-6b1adefd4e1fe1cd884e3cb113b469e56904b788234230962c3059f6e1dae918",
+            "body_sha256": "49106ffe0b8a8f541252a6366bed0a72e6613d6a64c75796226c9866d184204b",
+            "body_bytes": 745,
+            "intent_id": "intent-297440a38096d212feac218f781b31c9c464104b871d15c41397710943517187"
+          },
+          "binding": {
+            "document_id": "source-53e94d6694e9dacce748c72aec27490f55d8ebca6fa4ce63594aac1c1e83b5a8",
+            "path": "src/mariner.py",
+            "source_sha256": "b7d94170e4bd3e094de1004ace165c410fa4ed6a69ed523da2bcb454f599c723"
+          },
+          "body": "{\"items\":[{\"content\":\"def mooring_limit():\\n    return 7\\n\",\"document_id\":\"source-53e94d6694e9dacce748c72aec27490f55d8ebca6fa4ce63594aac1c1e83b5a8\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\",\"source_sha256\":\"b7d94170e4bd3e094de1004ace165c410fa4ed6a69ed523da2bcb454f599c723\",\"source_id\":\"logical-6b1adefd4e1fe1cd884e3cb113b469e56904b788234230962c3059f6e1dae918\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"]}",
+          "observation": {
+            "id": "source-53e94d6694e9dacce748c72aec27490f55d8ebca6fa4ce63594aac1c1e83b5a8",
+            "bank_id": "harness-d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+            "original_text": "def mooring_limit():\n    return 7\n",
+            "content_hash": "upstream-algorithm-unassumed",
+            "document_metadata": {
+              "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+              "source_sha256": "b7d94170e4bd3e094de1004ace165c410fa4ed6a69ed523da2bcb454f599c723",
+              "source_id": "logical-6b1adefd4e1fe1cd884e3cb113b469e56904b788234230962c3059f6e1dae918",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "retain_params": {
+              "metadata": {
+                "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+                "source_sha256": "b7d94170e4bd3e094de1004ace165c410fa4ed6a69ed523da2bcb454f599c723",
+                "source_id": "logical-6b1adefd4e1fe1cd884e3cb113b469e56904b788234230962c3059f6e1dae918",
+                "export_profile": "hindsight-public-export-v1"
+              }
+            },
+            "tags": [
+              "harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26"
+            ]
+          }
+        },
+        {
+          "descriptor": {
+            "document_id": "source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34",
+            "path": "docs/fog.md",
+            "source_sha256": "1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c",
+            "source_id": "logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e",
+            "body_sha256": "15beeda946e4929fab1371a8cc351997658d83cecc8bffbd055986775c325ffd",
+            "body_bytes": 771,
+            "intent_id": "intent-297619823eb7749a47f4750457394a00b65f9d27a0c9b6dcc4c9d5030682de06"
+          },
+          "binding": {
+            "document_id": "source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34",
+            "path": "docs/fog.md",
+            "source_sha256": "1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c"
+          },
+          "body": "{\"items\":[{\"content\":\"# Fog signals\\r\\nUse the silver pennant during the Δ fog.\\r\\n\",\"document_id\":\"source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\",\"source_sha256\":\"1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c\",\"source_id\":\"logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"]}",
+          "observation": {
+            "id": "source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34",
+            "bank_id": "harness-d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+            "original_text": "# Fog signals\r\nUse the silver pennant during the Δ fog.\r\n",
+            "content_hash": "upstream-algorithm-unassumed",
+            "document_metadata": {
+              "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+              "source_sha256": "1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c",
+              "source_id": "logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "retain_params": {
+              "metadata": {
+                "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+                "source_sha256": "1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c",
+                "source_id": "logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e",
+                "export_profile": "hindsight-public-export-v1"
+              }
+            },
+            "tags": [
+              "harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "manifest": "{\"profile\":\"hindsight-ingestion-journal-v1\",\"journal_id\":\"4e5f25b1-6b85-4c23-b614-0d603e545538\",\"scope\":\"d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\",\"generation\":\"a9dcb0b5-5653-4b7c-8a54-063a9f98e768\",\"revision\":2,\"export_sha256\":\"5b40fb7c88556636fd6b0a4291847a73947827fab93f8ddd7e42049804cc7a1c\",\"current\":[{\"document_id\":\"source-853751ad549662406bb7f4b2c89a1853fc35a7487552a6fc8dda330b5c97cfa4\",\"path\":\"docs/lantern.md\",\"source_sha256\":\"87e84921c86d07fc60e1591b388bb4917bf56aae4d1d8996568120c684cd3512\",\"source_id\":\"logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8\",\"body_sha256\":\"17a6f58a17b0bc443afc82f7eafd81d961b0f44e1b464ebb8dd5a750844e1878\",\"body_bytes\":763,\"intent_id\":\"intent-2649c04ea4587fb60157eab801ff2a75c47a3a79f37ab6d7c75324e4545a238f\"},{\"document_id\":\"source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34\",\"path\":\"docs/fog.md\",\"source_sha256\":\"1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c\",\"source_id\":\"logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e\",\"body_sha256\":\"15beeda946e4929fab1371a8cc351997658d83cecc8bffbd055986775c325ffd\",\"body_bytes\":771,\"intent_id\":\"intent-8b74fed7495ee899a80969e51a4474fb7244269d33e4572206c9efac37df0508\"}],\"previous\":[{\"document_id\":\"source-51fee69d4e10d742147ff08c7e9924741c731ac64c5bd2aea0e4e6fecc8fbcbc\",\"path\":\"docs/lantern.md\",\"source_sha256\":\"0e58029c8155e78199dba72671e9a326840eca9d4b914ebf505093c0ff6bcfa4\"},{\"document_id\":\"source-53e94d6694e9dacce748c72aec27490f55d8ebca6fa4ce63594aac1c1e83b5a8\",\"path\":\"src/mariner.py\",\"source_sha256\":\"b7d94170e4bd3e094de1004ace165c410fa4ed6a69ed523da2bcb454f599c723\"},{\"document_id\":\"source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34\",\"path\":\"docs/fog.md\",\"source_sha256\":\"1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c\"}]}",
+      "manifest_sha256": "df04bdfcde586a4a02016d40b830e83c72508c457d940cf99d9f9cfe9757c2b0",
+      "documents": [
+        {
+          "descriptor": {
+            "document_id": "source-853751ad549662406bb7f4b2c89a1853fc35a7487552a6fc8dda330b5c97cfa4",
+            "path": "docs/lantern.md",
+            "source_sha256": "87e84921c86d07fc60e1591b388bb4917bf56aae4d1d8996568120c684cd3512",
+            "source_id": "logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8",
+            "body_sha256": "17a6f58a17b0bc443afc82f7eafd81d961b0f44e1b464ebb8dd5a750844e1878",
+            "body_bytes": 763,
+            "intent_id": "intent-2649c04ea4587fb60157eab801ff2a75c47a3a79f37ab6d7c75324e4545a238f"
+          },
+          "binding": {
+            "document_id": "source-853751ad549662406bb7f4b2c89a1853fc35a7487552a6fc8dda330b5c97cfa4",
+            "path": "docs/lantern.md",
+            "source_sha256": "87e84921c86d07fc60e1591b388bb4917bf56aae4d1d8996568120c684cd3512"
+          },
+          "body": "{\"items\":[{\"content\":\"# Lantern harbor\\nThe night gate closes at bell six.\\n\",\"document_id\":\"source-853751ad549662406bb7f4b2c89a1853fc35a7487552a6fc8dda330b5c97cfa4\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\",\"source_sha256\":\"87e84921c86d07fc60e1591b388bb4917bf56aae4d1d8996568120c684cd3512\",\"source_id\":\"logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"]}",
+          "observation": {
+            "id": "source-853751ad549662406bb7f4b2c89a1853fc35a7487552a6fc8dda330b5c97cfa4",
+            "bank_id": "harness-d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+            "original_text": "# Lantern harbor\nThe night gate closes at bell six.\n",
+            "content_hash": "upstream-algorithm-unassumed",
+            "document_metadata": {
+              "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+              "source_sha256": "87e84921c86d07fc60e1591b388bb4917bf56aae4d1d8996568120c684cd3512",
+              "source_id": "logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "retain_params": {
+              "metadata": {
+                "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+                "source_sha256": "87e84921c86d07fc60e1591b388bb4917bf56aae4d1d8996568120c684cd3512",
+                "source_id": "logical-be331a14eb009e57f6173060db7930f3ecd72ce3dc69ab5d6478e5867f9560c8",
+                "export_profile": "hindsight-public-export-v1"
+              }
+            },
+            "tags": [
+              "harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26"
+            ]
+          }
+        },
+        {
+          "descriptor": {
+            "document_id": "source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34",
+            "path": "docs/fog.md",
+            "source_sha256": "1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c",
+            "source_id": "logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e",
+            "body_sha256": "15beeda946e4929fab1371a8cc351997658d83cecc8bffbd055986775c325ffd",
+            "body_bytes": 771,
+            "intent_id": "intent-8b74fed7495ee899a80969e51a4474fb7244269d33e4572206c9efac37df0508"
+          },
+          "binding": {
+            "document_id": "source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34",
+            "path": "docs/fog.md",
+            "source_sha256": "1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c"
+          },
+          "body": "{\"items\":[{\"content\":\"# Fog signals\\r\\nUse the silver pennant during the Δ fog.\\r\\n\",\"document_id\":\"source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\",\"source_sha256\":\"1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c\",\"source_id\":\"logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\"]}",
+          "observation": {
+            "id": "source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34",
+            "bank_id": "harness-d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+            "original_text": "# Fog signals\r\nUse the silver pennant during the Δ fog.\r\n",
+            "content_hash": "upstream-algorithm-unassumed",
+            "document_metadata": {
+              "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+              "source_sha256": "1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c",
+              "source_id": "logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "retain_params": {
+              "metadata": {
+                "harness_scope": "d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26",
+                "source_sha256": "1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c",
+                "source_id": "logical-5572653156bfb8d6a1e65e3bd324a0db7792c3f9f7983a8a8b301de8f1fa652e",
+                "export_profile": "hindsight-public-export-v1"
+              }
+            },
+            "tags": [
+              "harness-scope:d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "manifest": "{\"profile\":\"hindsight-ingestion-journal-v1\",\"journal_id\":\"4e5f25b1-6b85-4c23-b614-0d603e545538\",\"scope\":\"d1b453099759ac558013718216697ea64db45c2cc738cd3f84499ee55c8a1f26\",\"generation\":\"5b8ead0d-38f2-49a9-9509-2e875e8c9a2f\",\"revision\":3,\"export_sha256\":\"e8975d58ff7ab02af1d82d54f24099b3d467a4495ca5bed5870f236589d534fe\",\"current\":[],\"previous\":[{\"document_id\":\"source-853751ad549662406bb7f4b2c89a1853fc35a7487552a6fc8dda330b5c97cfa4\",\"path\":\"docs/lantern.md\",\"source_sha256\":\"87e84921c86d07fc60e1591b388bb4917bf56aae4d1d8996568120c684cd3512\"},{\"document_id\":\"source-87b38a1e32272e10e77050a686594bc784cea5201f963f50c69a2ed129fc8e34\",\"path\":\"docs/fog.md\",\"source_sha256\":\"1677a00513b9f1e78a8988989a8556defd1f63760abb56fd37cc7bc9e45d530c\"}]}",
+      "manifest_sha256": "1df3502409ce2ceabc2914919848cc47dcede4caeb02fe55bd0878ec4703de91",
+      "documents": []
+    }
+  ],
+  "states": {
+    "initial": "prepared",
+    "reserved": "recorded",
+    "matching": "supplied_selection_current",
+    "missing": "missing_source_images",
+    "old_present": "cleanup_required",
+    "unknown_or_conflict": "incomplete",
+    "unsettled_or_no_attestation": "incomplete",
+    "authorized_mutations": 0,
+    "actual_remote_noop": null
+  },
+  "empty_frontier_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+}

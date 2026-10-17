@@ -1,0 +1,78 @@
+{
+  "cases": [
+    {
+      "action": "file_open",
+      "capture": "normal",
+      "capture_calls": 0,
+      "expected_record": {
+        "observation_state": "unobserved",
+        "profile": "longmemeval/custody-failure-stage-v1",
+        "provider_tokens": null,
+        "root_cause": null,
+        "scope": "last_caught_custody_body_failure",
+        "stage": null,
+        "usd_micros": null
+      },
+      "expected_trace": [
+        "lstat:root",
+        "fstat:10",
+        "lstat:specs",
+        "fstat:11",
+        "lstat:source",
+        "fstat:12",
+        "path:expected",
+        "scandir:12",
+        "scan_enter",
+        "scan_item",
+        "scan_end",
+        "scan_exit",
+        "path:open",
+        "open:20"
+      ],
+      "fenced": true,
+      "metadata_write_attempts": 2,
+      "name": "metadata_setter_error",
+      "outcome": "source_changed",
+      "prior": null,
+      "setter_failure": "error"
+    },
+    {
+      "action": "file_open",
+      "capture": "normal",
+      "capture_calls": 0,
+      "expected_record": {
+        "observation_state": "unobserved",
+        "profile": "longmemeval/custody-failure-stage-v1",
+        "provider_tokens": null,
+        "root_cause": null,
+        "scope": "last_caught_custody_body_failure",
+        "stage": null,
+        "usd_micros": null
+      },
+      "expected_trace": [
+        "lstat:root",
+        "fstat:10",
+        "lstat:specs",
+        "fstat:11",
+        "lstat:source",
+        "fstat:12",
+        "path:expected",
+        "scandir:12",
+        "scan_enter",
+        "scan_item",
+        "scan_end",
+        "scan_exit",
+        "path:open",
+        "open:20"
+      ],
+      "fenced": true,
+      "metadata_write_attempts": 2,
+      "name": "metadata_setter_abort",
+      "outcome": "source_changed",
+      "prior": null,
+      "setter_failure": "abort"
+    }
+  ],
+  "profile": "independent-write-unavailable-oracles-v1",
+  "scope": "blocked private diagnostic write leaves unobserved state; not noerrors/currentcallfreshness; taskprimary preserved"
+}

@@ -8,23 +8,27 @@ reviews each capsule before its turn; the run's draft is saved the same way.
 from __future__ import annotations
 
 import json
+import hashlib
+import math
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 import re
 import time
 import uuid
 
-from . import cost_observation, memory_draft
+from . import cost_observation, memory_draft, memory_attempts
 from .automatic_query import AutomaticQueryError, sanitize_automatic_query
-from .knowledge import OLDER_RUNTIME, STALE_RECORD, KnowledgeBusy, _path, _text
+from .knowledge import OLDER_RUNTIME, STALE_RECORD, KnowledgeBusy, KnowledgeRefusal, _path, _text
 from .sessions import CAPSULE_LIMIT, SessionError, read_context, normalize_funnel_diagnosis, normalize_ordinary_receipt
 
 UUID4 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
-TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}')
+TASK_ID = re.compile(r'[^\W_][\w\u0300-\u036f./#+-]{0,199}')  # letters and digits of any script
 FIELDS = ('bank', 'task_id', 'query', 'create', 'goal', 'record_id', 'review', 'auto')
 SCOPED_ACTIONS = {'brain-update', 'rebind', 'complete', 'brain-create',
                   'promote-propose', 'promote-review', 'promote-apply'}
 # The Harness's own bookkeeping beside the options, which preparing a turn keeps.
 KEPT = ('remembered',)
+SOURCE_PROVENANCE_PROFILE = 'local-source-provenance-v1'
 QUERY_BYTES = 4000
 GOAL_CHARACTERS = 200
 
@@ -87,6 +91,26 @@ class TaskContext:
                     time.sleep(.2)
         finally:
             cost_observation.safe(measured, 'finish', result)
+
+    def retire_cursor_rule(self, session):
+        """A host capsule supersedes only a prospectively proven local rule."""
+        try:
+            response = self._knowledge('run', session['project_id'],
+                {'action': 'cursor-rule-retire', 'bank': session['brain']['bank']},
+                _root=self.sessions._workspace(session))
+            value = response.get('result') if isinstance(response, dict) and response.get('ok') is True else None
+            if not isinstance(value, dict) or value.get('profile') != 'cursor-rule-custody-v1':
+                return {'state': 'unavailable', 'bytes_removed': None}
+            state = value.get('state')
+            removed = value.get('bytes_removed')
+            if state not in ('removed', 'preserved', 'absent', 'attached', 'incomplete') or type(removed) is not int or not 0 <= removed <= 16384:
+                return {'state': 'unavailable', 'bytes_removed': None}
+            if (state in ('preserved', 'absent', 'attached') and removed != 0) or (state == 'removed' and removed == 0):
+                return {'state': 'unavailable', 'bytes_removed': None}
+            return {'state': state, 'bytes_removed': removed}
+        except (SessionError, OSError, ValueError, TypeError, KeyError):
+            # No raw error/rule body enters the session or native prompt.
+            return {'state': 'unavailable', 'bytes_removed': None}
 
     @staticmethod
     def validate_options(data, prompt=None):
@@ -151,7 +175,8 @@ class TaskContext:
         result = self._knowledge('run', session['project_id'], {'bank': options['bank'], 'action': action, **fields},
                                  _root=workspace, **({'_guard': _guard} if _guard is not None else {}))
         if not result.get('ok') or not isinstance(result.get('result'), dict):
-            raise SessionError(result.get('error') or 'The Brain runtime did not complete this operation.')
+            raise KnowledgeRefusal(result.get('error') or 'The Brain runtime did not complete this operation.',
+                                   result.get('error_code'))
         return result['result']
 
     @staticmethod
@@ -162,7 +187,12 @@ class TaskContext:
                 or capsule['task_revision'] != task.get('revision')
                 or not isinstance(capsule.get('working'), dict)
                 or capsule['working'].get('task_id') != task.get('external_id')):
-            raise SessionError('Retrieved context does not match the linked task and revision. Prepare it again.')
+            # A capsule served without the task's state says why in its
+            # warnings - the task's record gone or unreadable, say.
+            warnings = capsule.get('warnings') if isinstance(capsule, dict) else None
+            reasons = ' '.join(item for item in warnings if isinstance(item, str)) if isinstance(warnings, list) else ''
+            raise SessionError('Retrieved context does not match the linked task and revision. '
+                               + (reasons[:400] + ' ' if reasons else '') + 'Prepare it again.')
         for layer, limit in (('procedural', 2), ('semantic', 3), ('episodic', 2)):
             values = capsule.get(layer)
             if not isinstance(values, list) or len(values) > limit or any(not isinstance(item, dict) for item in values):
@@ -172,7 +202,7 @@ class TaskContext:
         try:
             encoded = json.dumps(capsule, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
             encoded.encode('utf-8')
-        except (ValueError, RecursionError) as error:
+        except (ValueError, TypeError, UnicodeError, RecursionError) as error:
             raise SessionError('The runtime returned an invalid task capsule.') from error
         if len(encoded) > CAPSULE_LIMIT:
             raise SessionError(f'The task capsule exceeds the native {CAPSULE_LIMIT}-character limit.')
@@ -202,8 +232,10 @@ class TaskContext:
         return _path(value)
 
     @staticmethod
-    def _source_hashes(root, capsule, home=None):
+    def _source_hashes(root, capsule, home=None, *, provenance=None, allow_local=False):
         manifest = capsule.get('manifest')
+        if manifest is None and allow_local:
+            return TaskContext._inline_source_hashes(capsule, provenance, home)
         if not isinstance(manifest, str) or not re.fullmatch(
             r'(?:project-brain/control|memory-bank/local)/retrieval-manifests/'
             r'[0-9a-f-]{36}\.json', manifest,
@@ -239,6 +271,109 @@ class TaskContext:
             raise SessionError('The source manifest does not cover the approved context.')
         return hashes
 
+    @staticmethod
+    def _inline_source_hashes(capsule, provenance, home=None):
+        """Explicit local transport consistency; never adopt/rehash later files."""
+        required = {'schema_version', 'profile', 'scope', 'publication', 'task_uuid',
+                    'task_revision', 'capsule_sha256', 'selected'}
+        if (type(provenance) is not dict or set(provenance) != required
+                or type(provenance['schema_version']) is not int or provenance['schema_version'] != 1
+                or provenance['profile'] != SOURCE_PROVENANCE_PROFILE
+                or provenance['scope'] != 'local' or provenance['publication'] != 'unconfirmed'
+                or capsule.get('manifest_scope') != 'local'
+                or not isinstance(capsule.get('task_uuid'), str) or not UUID4.fullmatch(capsule['task_uuid'])
+                or provenance['task_uuid'] != capsule['task_uuid']
+                or type(capsule.get('task_revision')) is not int or capsule['task_revision'] < 1
+                or type(provenance['task_revision']) is not int or provenance['task_revision'] != capsule['task_revision']
+                or not isinstance(provenance['capsule_sha256'], str)
+                or not re.fullmatch(r'[0-9a-f]{64}', provenance['capsule_sha256'])
+                or type(provenance['selected']) is not list or len(provenance['selected']) > 32):
+            raise SessionError('The local source provenance is unavailable or invalid.')
+        try:
+            encoded = json.dumps(provenance, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+            frame = json.dumps(capsule, ensure_ascii=False, separators=(',', ':'), sort_keys=True, allow_nan=False).encode('utf-8')
+        except (ValueError, TypeError, UnicodeError, RecursionError) as error:
+            raise SessionError('The local source provenance is invalid.') from error
+        if len(encoded) > 65536 or hashlib.sha256(frame).hexdigest() != provenance['capsule_sha256']:
+            raise SessionError('The local source provenance does not match the capsule.')
+        visible = set()
+        for layer in ('procedural', 'semantic', 'episodic', 'selected'):
+            values = capsule.get(layer, [])
+            if type(values) is not list:
+                raise SessionError('The local source provenance has invalid capsule coverage.')
+            for item in values:
+                if isinstance(item, dict) and isinstance(item.get('path'), str):
+                    visible.add(TaskContext._visible_path(item['path'], home))
+        hashes = {}
+        for item in provenance['selected']:
+            if type(item) is not dict or set(item) != {'path', 'source_hash'}:
+                raise SessionError('The local source provenance has invalid selected sources.')
+            leaf = TaskContext._visible_path(item['path'], home)
+            digest = item['source_hash']
+            if (leaf in hashes or not isinstance(digest, str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+                raise SessionError('The local source provenance has invalid selected sources.')
+            hashes[leaf] = digest
+        if set(hashes) != visible:
+            raise SessionError('The local source provenance does not cover the approved context.')
+        return hashes
+
+    def _provider_hints(self, session, options, workspace, info):
+        """Once before KnowledgeBusy retries; trusted operator callback only."""
+        provider = getattr(self.knowledge, 'source_hint_provider', None)
+        if provider is None:
+            return None
+        from .hindsight_recall import ReferenceOutcome
+        started, calls, outcome, references, transport = time.monotonic(), 0, 'unavailable', 0, None
+        def active():
+            if getattr(self.observation, 'final', None) is not None:
+                return False
+            if self.guard is not None:
+                try:
+                    self.guard()
+                except SessionError:
+                    return False
+            return True
+        try:
+            if not active():
+                outcome = 'cancelled'
+                raise SessionError('The memory generation is no longer active.')
+            if not self.knowledge._supports_source_hints(session['project_id'], info, workspace):
+                outcome = 'unsupported'
+                return None
+            if not active():
+                outcome = 'cancelled'
+                raise SessionError('The memory generation is no longer active.')
+            calls = 1
+            try:
+                value = provider(options['query'], active=active, project_id=session['project_id'],
+                                 bank=options['bank'], workspace=str(workspace))
+            except Exception:
+                value = None
+            if type(value) is ReferenceOutcome and type(value.diagnostics) is dict:
+                transport = value.diagnostics
+            # A raising generation guard cannot be converted to local fallback.
+            if not active():
+                outcome = 'cancelled'
+                raise SessionError('The memory generation is no longer active.')
+            if type(value) is not ReferenceOutcome:
+                outcome = 'invalid'
+                return None
+            try:
+                payload = value.native_payload()
+                if self.knowledge._source_hints_json(payload) is None:
+                    outcome = 'invalid'
+                    return None
+            except (ValueError, TypeError, UnicodeError):
+                outcome = 'invalid'
+                return None
+            references = len(payload['references'])
+            outcome = 'resolved' if references else 'empty'
+            return payload if references else None
+        finally:
+            cost_observation.safe(self.observation, 'source_hints', provider_calls=calls, outcome=outcome,
+                                  seconds=time.monotonic() - started, references=references, transport=transport)
+
     def _retrieve(self, session, options, workspace, task, info, ephemeral, diagnosis=None):
         # Every retrieval here is one a person or the session asked for. Bypass only
         # the repeat-skip heuristic; native privacy, lifecycle and freshness filters stay.
@@ -246,14 +381,27 @@ class TaskContext:
         # message rather than its first words and leaves out the instruction files
         # the provider loads by itself.
         automatic = not options.get('review')
+        hints = self._provider_hints(session, options, workspace, info) if automatic else None
+        capability = getattr(self.knowledge, 'supports_provenance_response', None)
+        transport = bool(ephemeral and callable(capability)
+                         and capability(session['project_id'], info, _root=workspace))
         response = self._knowledge('run', session['project_id'], {
             'action': 'refresh' if automatic else 'retrieve', 'bank': options['bank'],
             'task_id': options['task_id'], 'query': options['query'],
         }, _root=workspace, _ephemeral=ephemeral, _gate='off',
-            _host=session.get('provider') if automatic else None)
+            _host=session.get('provider') if automatic else None,
+            **({'_provenance_response': True} if transport else {}),
+            **({'_source_hints': hints} if hints is not None else {}))
         if not response.get('ok'):
             raise SessionError(response.get('error') or 'Task context could not be retrieved.')
         capsule = response.get('result')
+        provenance = None
+        if transport:
+            if not isinstance(capsule, dict) or capsule.get('response_profile') != SOURCE_PROVENANCE_PROFILE:
+                raise SessionError('The runtime returned an unsupported source provenance response.')
+            provenance = capsule.get('source_provenance')
+            if not automatic:
+                capsule = capsule.get('capsule')
         text = None
         if automatic:
             result = capsule if isinstance(capsule, dict) else {}
@@ -268,7 +416,8 @@ class TaskContext:
         # are absolute paths into the clone.
         layout = self.knowledge.layout(session['project_id'], workspace)
         home = layout['attached']['home'] if layout['attached'] else None
-        hashes = self._source_hashes(layout['folder'] / info['root'], capsule, home)
+        hashes = self._source_hashes(layout['folder'] / info['root'], capsule, home,
+                                     provenance=provenance, allow_local=transport and ephemeral)
         if automatic and type(diagnosis) is dict:
             for key, normalizer in (('funnel_diagnosis', normalize_funnel_diagnosis),
                                     ('ordinary_receipt', normalize_ordinary_receipt)):
@@ -337,7 +486,86 @@ class TaskContext:
         return {**result, 'context_id': brain.get('context_id'), 'approved': brain.get('approved') is True,
                 'memory_draft': memory_draft.latest(self.sessions, session['id'])}
 
-    def save_memory(self, session, data, *, automatic=False, known=(), generation=None):
+    def save_memory(self, session, data, *, automatic=False, known=(), generation=None, origin_event_id=None):
+        """Freeze safe automatic requests; an existing attempt needs exact receipt proof."""
+        old = memory_attempts.lookup(self.sessions, session['id'], generation) if generation is not None else None
+        owner = getattr(self.observation, 'memory_owner', None)
+        if automatic and owner is not None and (
+                generation is None or owner != (session['id'], generation)
+                or getattr(self.observation, 'final', True) is not None
+                or origin_event_id is None):
+            raise SessionError(memory_attempts.INCOMPLETE)
+        owned = (automatic and generation is not None and origin_event_id is not None
+                 and getattr(self.observation, 'memory_owner', None) == (session['id'], generation)
+                 and getattr(self.observation, 'final', True) is None)
+        if old is not None and not owned:
+            raise SessionError(memory_attempts.INCOMPLETE)
+        if not owned:
+            return self._save_memory_unbound(session, data, automatic=automatic, known=known, generation=generation)
+        _, options, workspace, _ = self._bound(session)
+        alias_task = None
+        if not isinstance(options.get('record_id'), str) or not UUID4.fullmatch(options['record_id']):
+            if old is not None:
+                stored_scope = old['identity'].get('scope')
+                alias_task = stored_scope.get('task') if isinstance(stored_scope, dict) else None
+            else:
+                task = self._knowledge('inspect', session['project_id'], options['bank'],
+                    _root=workspace, task_id=options['task_id'], task_only=True)['task']
+                alias_task = task.get('id')
+            if not isinstance(alias_task, str) or not UUID4.fullmatch(alias_task):
+                raise SessionError(memory_attempts.INCOMPLETE)
+        def scope(current, current_options, current_workspace):
+            value = memory_attempts.scope(self.knowledge, current, current_options, current_workspace)
+            if not isinstance(value['task'], str) or not UUID4.fullmatch(value['task']):
+                # Freeze the canonical lookup before guarded operations. A
+                # nested inspect would contend with that same knowledge lock.
+                # The original UUID and alias selector own every later repeat.
+                if alias_task is None:
+                    raise SessionError(memory_attempts.INCOMPLETE)
+                value['task'] = alias_task
+                value['task_alias'] = current_options['task_id']
+            return value
+        with self.sessions.lock:
+            memory_attempts.guard(self.sessions, session['id'], generation, self.observation)
+            identity = memory_attempts.identity(self.sessions, session['id'], generation, origin_event_id, data,
+                scope(session, options, workspace))
+        def guard():
+            with self.sessions.lock:
+                memory_attempts.guard(self.sessions, session['id'], generation, self.observation)
+                current = self.sessions.get(session['id'])
+                _, current_options, current_workspace, _ = self._bound(current)
+                checked = memory_attempts.identity(self.sessions, session['id'], generation, origin_event_id, data,
+                    scope(current, current_options, current_workspace))
+                if checked != identity:
+                    raise SessionError(memory_attempts.CONFLICT)
+        if old is not None:
+            if old['identity'] != identity:
+                raise SessionError(memory_attempts.CONFLICT)
+            return self._replay_memory(session, options, workspace, old, guard)
+        return self._save_memory_unbound(session, data, automatic=automatic, known=known,
+                                          generation=generation, _binding=(identity, guard))
+
+    def _replay_memory(self, session, options, workspace, binding, guard):
+        value = binding['prepared']
+        # Validate even retained local data before any runtime call; corruption is incomplete.
+        value = memory_attempts.prepared(value, binding['identity']['scope']['task'], value.get('result_id'),
+                                         value.get('revision'), binding['identity']['scope']['owner'],
+                                         memory_draft.AUTOMATIC_REASON)
+        skipped = [{'reason': 'An omission from the original automatic draft was retained.'}
+                   for _ in range(binding['skipped_count'])]
+        try:
+            outcome = self._call(session, options, workspace, 'replay-result', _guard=guard,
+                task_id=value['task_id'], result_id=value['result_id'], revision=value['revision'],
+                request=value['request'], reason=value['reason'], attestation=value['attestation'],
+                prepared_scope=value['scope'])
+        except SessionError:
+            # Unsupported/absent/corrupt proof can never become a fresh write or legacy chain.
+            return {'ok': False, 'saved': {'task': None, 'records': [], 'promotion': None},
+                    'skipped': skipped, 'error': memory_attempts.INCOMPLETE}
+        return self._memory_outcome(outcome, skipped)
+
+    def _save_memory_unbound(self, session, data, *, automatic=False, known=(), generation=None, _binding=None,
+                             _compat_guard=None):
         """Record a memory draft through the runtime's own `record-result`.
 
         One call carries the task's progress and next steps and each kept
@@ -360,12 +588,29 @@ class TaskContext:
         `automatic_promotion` setting.
         """
         _, options, workspace, info = self._bound(session)
+        if _binding is not None:
+            identity, bound_guard = _binding
+            with self.sessions.lock:
+                bound_guard()
+                concurrent = memory_attempts.lookup(self.sessions, session['id'], generation)
+            if concurrent is not None:
+                if concurrent['identity'] != identity:
+                    raise SessionError(memory_attempts.CONFLICT)
+                return self._replay_memory(session, options, workspace, concurrent, bound_guard)
         root = Path(workspace) / info['root']
         original = data
         skipped = []
         if automatic:
             data, skipped = memory_draft.usable(root, data, known)
             if not (data['progress'] or data['next_steps'] or data['learnings']):
+                if _binding is not None:
+                    with self.sessions.lock:
+                        bound_guard()
+                        concurrent = memory_attempts.lookup(self.sessions, session['id'], generation)
+                    if concurrent is not None:
+                        if concurrent['identity'] != identity:
+                            raise SessionError(memory_attempts.CONFLICT)
+                        return self._replay_memory(session, options, workspace, concurrent, bound_guard)
                 return {'ok': True, 'saved': {'task': None, 'records': [], 'promotion': None},
                         'skipped': skipped, 'error': None}
         draft = memory_draft.submission(data)
@@ -381,8 +626,12 @@ class TaskContext:
                     or self.sessions.generations.get(sid) != generation):
                 raise SessionError('Memory save was cancelled; no further writes were started.')
         checked = {'_guard': guard} if generation is not None else {}
+        if _compat_guard is not None:
+            checked = {'_guard': _compat_guard}
         request = {'learnings': [{'type': item['type'], 'title': item['title'], 'consequence': item['consequence'],
-                                  'sources': item['sources']} for item in draft['learnings']],
+                                  'sources': item['sources'],
+                                  **({'expected_revision': item['expected_revision']}
+                                     if 'expected_revision' in item else {})} for item in draft['learnings']],
                    'verified': True}
         if draft['progress'] or draft['next_steps']:
             # The draft is the current plan, including an empty completed
@@ -392,22 +641,63 @@ class TaskContext:
                 request['progress'] = draft['progress']
         # One run, one result: a replay of this save is recognised as such.
         result_id = f"harness-{session['id']}-{generation if generation is not None else uuid.uuid4().hex[:12]}"[:64]
+        task_id = options['task_id']
+        extra = {}
+        bound_retries = 0
+        if _binding is not None:
+            identity, bound_guard = _binding
+            for preparation in range(2):
+                try:
+                    value = self._call(session, options, workspace, 'prepare-result', _guard=bound_guard,
+                        task_id=task['id'], result_id=result_id, revision=task['revision'], request=request,
+                        attestation='agent', reason=reason)
+                    value = memory_attempts.prepared(value, identity['scope']['task'], result_id,
+                                                     task['revision'], identity['scope']['owner'], reason)
+                    with self.sessions.lock:
+                        bound_guard()
+                        binding, first_owner = memory_attempts.insert(self.sessions, identity, value, len(skipped))
+                    if not first_owner:
+                        return self._replay_memory(session, options, workspace, binding, bound_guard)
+                    request, task_id = value['request'], value['task_id']
+                    checked = {'_guard': bound_guard}
+                    extra = {'prepared_scope': value['scope']}
+                    break
+                except KnowledgeRefusal as error:
+                    if str(error) == OLDER_RUNTIME:
+                        # A fresh old-runtime attempt retains the original guarded save path.
+                        def compatibility_guard():
+                            bound_guard()
+                            if memory_attempts.lookup(self.sessions, session['id'], generation) is not None:
+                                raise SessionError(memory_attempts.INCOMPLETE)
+                        with self.sessions.lock:
+                            compatibility_guard()
+                        _compat_guard = compatibility_guard
+                        checked = {'_guard': compatibility_guard}
+                        _binding = None
+                        break
+                    if error.code == 'prepared_stale_no_write' and preparation == 0:
+                        bound_retries += 1
+                        cost_observation.safe(self.observation, 'note', 'stale_revision_retries')
+                        task = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
+                            task_id=task['id'], task_only=True)['task']
+                        continue
+                    raise
         outcome = None
         for attempt in range(2):
             try:
                 outcome = self._call(session, options, workspace, 'record-result', **checked,
-                                     task_id=options['task_id'], result_id=result_id, revision=task['revision'],
-                                     request=request, attestation='agent' if automatic else 'person', reason=reason)
+                                     task_id=task_id, result_id=result_id, revision=task['revision'],
+                                     request=request, attestation='agent' if automatic else 'person', reason=reason, **extra)
                 break
             except SessionError as error:
-                if str(error) == OLDER_RUNTIME:
+                if _binding is None and str(error) == OLDER_RUNTIME:
                     return self._save_memory_chain(session, original, automatic=automatic, known=known,
-                                                   generation=generation)
-                if attempt == 0 and str(error) == STALE_RECORD:
+                                                   generation=generation, _guard=_compat_guard)
+                no_write_stale = (isinstance(error, KnowledgeRefusal) and error.code == 'prepared_stale_no_write')
+                if attempt == 0 and no_write_stale and bound_retries == 0:
+                    bound_retries += 1
                     cost_observation.safe(self.observation, 'note', 'stale_revision_retries')
-                    # A Stop hook's checkpoint moved the task on between reading
-                    # it and saving; the learnings are already saved, and the
-                    # replay with the current revision finishes the task update.
+                    # The bound lane's unique refusal proves no result writes started.
                     task = self._knowledge('inspect', session['project_id'], options['bank'], _root=workspace,
                                            task_id=options.get('record_id') or options['task_id'],
                                            task_only=True)['task']
@@ -417,15 +707,23 @@ class TaskContext:
             except (KeyError, TypeError):
                 return {'ok': False, 'saved': {'task': None, 'records': [], 'promotion': None},
                         'skipped': skipped, 'error': 'The runtime returned an unexpected record.'}
+        return self._memory_outcome(outcome, skipped)
+
+    @staticmethod
+    def _memory_outcome(outcome, skipped):
         records = [{'id': item.get('id'), 'type': item.get('type'), 'title': item.get('title'),
-                    'status': item.get('status'), 'state': item.get('state')}
+                    'status': item.get('status'), 'state': item.get('state'),
+                    **({'revision': item['revision']} if type(item.get('revision')) is int and item['revision'] > 0 else {}),
+                    **({'reason': item['reason']} if item.get('reason') in
+                       ('archived', 'kind-conflict', 'revision-conflict', 'not-authorized', 'person-or-unknown-attestation',
+                        'original-image-unproven') else {})}
                    for item in outcome.get('records') or [] if isinstance(item, dict)]
         promotion = outcome.get('promotion') if isinstance(outcome.get('promotion'), dict) else None
         saved = {'task': outcome.get('task') if isinstance(outcome.get('task'), dict) else None,
                  'records': records, 'promotion': promotion}
         return {'ok': True, 'saved': saved, 'skipped': skipped, 'error': None}
 
-    def _save_memory_chain(self, session, data, *, automatic=False, known=(), generation=None):
+    def _save_memory_chain(self, session, data, *, automatic=False, known=(), generation=None, _guard=None):
         """The command-by-command save, for a runtime older than `record-result`.
 
         Each command is atomic, the chain is not: a failure reports what was
@@ -454,6 +752,8 @@ class TaskContext:
                     or self.sessions.generations.get(sid) != generation):
                 raise SessionError('Memory save was cancelled; no further writes were started.')
         checked = {'_guard': guard} if generation is not None else {}
+        if _guard is not None:
+            checked = {'_guard': _guard}
         try:
             if draft['progress'] or draft['next_steps']:
                 fields = {'record_id': task['id'], 'revision': task['revision'], 'reason': reason}
@@ -496,18 +796,27 @@ class TaskContext:
     def checkpoint(self, session, since=None):
         """Run the turn checkpoint for a provider whose headless mode fires no Stop hook.
 
-        `since` is when the run started: a turn report written after it means a
-        Stop hook did fire and ran the checkpoint, and a second one would count
-        the turn twice. Returns None then.
+        A current report for this task means a Stop hook checkpointed it.
+        Filesystem mtime alone cannot bind a shared report to this task.
         """
         _, options, workspace, info = self._bound(session)
         if since is not None:
             layout = self.knowledge.layout(session['project_id'], workspace)
-            report = layout['folder'] / info['root'] / 'memory-bank' / 'local' / 'last-turn-report.json'
             try:
-                if report.stat().st_mtime >= since:
-                    return None
-            except OSError:
+                report = read_context(layout['folder'],
+                    str(PurePosixPath(info['root']) / 'memory-bank/local/last-turn-report.json'), 65537)
+                if report is not None and report[0] <= 65536 and '\ufffd' not in report[1]:
+                    value = json.loads(report[1])
+                    if (isinstance(value, dict) and type(value.get('schema_version')) is int
+                            and value['schema_version'] == 1 and value.get('task_id') == options['task_id']
+                            and isinstance(value.get('timestamp'), str)):
+                        written = datetime.fromisoformat(value['timestamp'])
+                        if written.tzinfo is None:
+                            written = written.replace(tzinfo=timezone.utc)
+                        stamp = written.timestamp()
+                        if math.isfinite(since) and since <= stamp <= time.time():
+                            return None
+            except (OSError, ValueError, TypeError, OverflowError, RecursionError):
                 pass
         return self._call(session, options, workspace, 'turn', task_id=options['task_id'])
 

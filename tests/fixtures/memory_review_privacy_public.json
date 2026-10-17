@@ -1,0 +1,12 @@
+{
+  "task_alias": "tern-output-privacy",
+  "task_title": "Verify Tern route policy",
+  "source_path": "specs/tern.md",
+  "source": "# Tern routing\n\nA Tern route has one keeper and expires after nine minutes.\n",
+  "learning": {"type": "finding", "title": "Tern route expiry", "consequence": "A Tern route expires after nine minutes.", "sources": ["specs/tern.md"]},
+  "private_title": "Tern internal custody marker withheld from shared outputs",
+  "progress": "Tern public route verification complete",
+  "next_steps": ["Check the Tern keeper assignment"],
+  "new_learning": {"type": "decision", "title": "Tern keeper assignment", "consequence": "Assign one keeper per Tern route.", "sources": ["specs/tern.md"]},
+  "expected_protected_record": {"id": null, "type": "finding", "title": "Tern route expiry", "status": null, "revision": null, "state": "differs", "reason": "not-authorized"}
+}

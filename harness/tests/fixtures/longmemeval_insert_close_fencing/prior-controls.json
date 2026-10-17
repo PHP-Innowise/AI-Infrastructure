@@ -1,0 +1,613 @@
+{
+  "cases": {
+    "close_abort": {
+      "close_calls": 1,
+      "context": null,
+      "fault": "close_abort",
+      "primary": "close_abort",
+      "state": {
+        "bytes": 45,
+        "closed": false,
+        "custody_failure": [
+          "unobserved",
+          null
+        ],
+        "documents": {
+          "new-close-Opal729": {
+            "body_utf8": "# New control source\n\nOpal pump setting: 42.\n",
+            "input_sha256": "cff08dba8fc825b85022b1f841fb2cee313d74666c5183fb69fdfc7a6fac390c",
+            "relative": "specs/longmemeval/trajectory-fence-729.md",
+            "sha256": "5024ed3afdec28ded6b86c75066c854adf51591349dfe6564fc4a7894cb65d13",
+            "states": 1,
+            "trajectory_id": "new-close-Opal729"
+          }
+        },
+        "fds": [
+          701,
+          702,
+          703
+        ],
+        "fenced": true,
+        "file_ids": {
+          "new-close-Opal729": [
+            2117,
+            7289
+          ]
+        },
+        "last": {
+          "context_bytes": 0,
+          "context_chars": 0,
+          "elapsed_seconds": 0.25,
+          "images_ingested": 0,
+          "profile": "native-fts5/public-states-text-projection-v1",
+          "projection_bytes": 0,
+          "provider_tokens": null,
+          "provider_tokens_complete": false,
+          "queries": 2,
+          "query_image_ignored": false,
+          "state": "no_evidence",
+          "trajectories": 0
+        },
+        "queries": 2,
+        "source_fd": 703
+      },
+      "trace": [
+        {
+          "call": "project",
+          "input": {
+            "supplied_fixture": "close-Opal729"
+          }
+        },
+        {
+          "call": "custody_ready"
+        },
+        {
+          "call": "open",
+          "dir_fd": 703,
+          "flags": 131265,
+          "mode": 384,
+          "name": "trajectory-fence-729.md"
+        },
+        {
+          "call": "write",
+          "fd": 744,
+          "payload_hex": "23204e657720636f6e74726f6c20736f757263650a0a4f70616c2070756d702073657474696e673a2034322e0a"
+        },
+        {
+          "call": "fsync",
+          "fd": 744
+        },
+        {
+          "call": "fsync",
+          "fd": 703
+        },
+        {
+          "call": "identity",
+          "fd": 744
+        },
+        {
+          "call": "close",
+          "fd": 744
+        }
+      ]
+    },
+    "close_error": {
+      "close_calls": 1,
+      "context": null,
+      "fault": "close_error",
+      "primary": "close_error",
+      "state": {
+        "bytes": 45,
+        "closed": false,
+        "custody_failure": [
+          "unobserved",
+          null
+        ],
+        "documents": {
+          "new-close-Opal729": {
+            "body_utf8": "# New control source\n\nOpal pump setting: 42.\n",
+            "input_sha256": "cff08dba8fc825b85022b1f841fb2cee313d74666c5183fb69fdfc7a6fac390c",
+            "relative": "specs/longmemeval/trajectory-fence-729.md",
+            "sha256": "5024ed3afdec28ded6b86c75066c854adf51591349dfe6564fc4a7894cb65d13",
+            "states": 1,
+            "trajectory_id": "new-close-Opal729"
+          }
+        },
+        "fds": [
+          701,
+          702,
+          703
+        ],
+        "fenced": true,
+        "file_ids": {
+          "new-close-Opal729": [
+            2117,
+            7289
+          ]
+        },
+        "last": {
+          "context_bytes": 0,
+          "context_chars": 0,
+          "elapsed_seconds": 0.25,
+          "images_ingested": 0,
+          "profile": "native-fts5/public-states-text-projection-v1",
+          "projection_bytes": 0,
+          "provider_tokens": null,
+          "provider_tokens_complete": false,
+          "queries": 2,
+          "query_image_ignored": false,
+          "state": "no_evidence",
+          "trajectories": 0
+        },
+        "queries": 2,
+        "source_fd": 703
+      },
+      "trace": [
+        {
+          "call": "project",
+          "input": {
+            "supplied_fixture": "close-Opal729"
+          }
+        },
+        {
+          "call": "custody_ready"
+        },
+        {
+          "call": "open",
+          "dir_fd": 703,
+          "flags": 131265,
+          "mode": 384,
+          "name": "trajectory-fence-729.md"
+        },
+        {
+          "call": "write",
+          "fd": 744,
+          "payload_hex": "23204e657720636f6e74726f6c20736f757263650a0a4f70616c2070756d702073657474696e673a2034322e0a"
+        },
+        {
+          "call": "fsync",
+          "fd": 744
+        },
+        {
+          "call": "fsync",
+          "fd": 703
+        },
+        {
+          "call": "identity",
+          "fd": 744
+        },
+        {
+          "call": "close",
+          "fd": 744
+        }
+      ]
+    },
+    "double_fault": {
+      "close_calls": 1,
+      "context": "write_error",
+      "fault": "double_fault",
+      "primary": "close_error",
+      "state": {
+        "bytes": 0,
+        "closed": false,
+        "custody_failure": [
+          "unobserved",
+          null
+        ],
+        "documents": {},
+        "fds": [
+          701,
+          702,
+          703
+        ],
+        "fenced": true,
+        "file_ids": {},
+        "last": {
+          "context_bytes": 0,
+          "context_chars": 0,
+          "elapsed_seconds": 0.25,
+          "images_ingested": 0,
+          "profile": "native-fts5/public-states-text-projection-v1",
+          "projection_bytes": 0,
+          "provider_tokens": null,
+          "provider_tokens_complete": false,
+          "queries": 2,
+          "query_image_ignored": false,
+          "state": "no_evidence",
+          "trajectories": 0
+        },
+        "queries": 2,
+        "source_fd": 703
+      },
+      "trace": [
+        {
+          "call": "project",
+          "input": {
+            "supplied_fixture": "close-Opal729"
+          }
+        },
+        {
+          "call": "custody_ready"
+        },
+        {
+          "call": "open",
+          "dir_fd": 703,
+          "flags": 131265,
+          "mode": 384,
+          "name": "trajectory-fence-729.md"
+        },
+        {
+          "call": "write",
+          "fd": 744,
+          "payload_hex": "23204e657720636f6e74726f6c20736f757263650a0a4f70616c2070756d702073657474696e673a2034322e0a"
+        },
+        {
+          "call": "close",
+          "fd": 744
+        }
+      ]
+    },
+    "fsync_error": {
+      "close_calls": 1,
+      "context": null,
+      "fault": "fsync_error",
+      "primary": "fsync_error",
+      "state": {
+        "bytes": 0,
+        "closed": false,
+        "custody_failure": [
+          "unobserved",
+          null
+        ],
+        "documents": {},
+        "fds": [
+          701,
+          702,
+          703
+        ],
+        "fenced": true,
+        "file_ids": {},
+        "last": {
+          "context_bytes": 0,
+          "context_chars": 0,
+          "elapsed_seconds": 0.25,
+          "images_ingested": 0,
+          "profile": "native-fts5/public-states-text-projection-v1",
+          "projection_bytes": 0,
+          "provider_tokens": null,
+          "provider_tokens_complete": false,
+          "queries": 2,
+          "query_image_ignored": false,
+          "state": "no_evidence",
+          "trajectories": 0
+        },
+        "queries": 2,
+        "source_fd": 703
+      },
+      "trace": [
+        {
+          "call": "project",
+          "input": {
+            "supplied_fixture": "close-Opal729"
+          }
+        },
+        {
+          "call": "custody_ready"
+        },
+        {
+          "call": "open",
+          "dir_fd": 703,
+          "flags": 131265,
+          "mode": 384,
+          "name": "trajectory-fence-729.md"
+        },
+        {
+          "call": "write",
+          "fd": 744,
+          "payload_hex": "23204e657720636f6e74726f6c20736f757263650a0a4f70616c2070756d702073657474696e673a2034322e0a"
+        },
+        {
+          "call": "fsync",
+          "fd": 744
+        },
+        {
+          "call": "close",
+          "fd": 744
+        }
+      ]
+    },
+    "open_error": {
+      "close_calls": 0,
+      "context": null,
+      "fault": "open_error",
+      "primary": "open_error",
+      "state": {
+        "bytes": 0,
+        "closed": false,
+        "custody_failure": [
+          "unobserved",
+          null
+        ],
+        "documents": {},
+        "fds": [
+          701,
+          702,
+          703
+        ],
+        "fenced": true,
+        "file_ids": {},
+        "last": {
+          "context_bytes": 0,
+          "context_chars": 0,
+          "elapsed_seconds": 0.25,
+          "images_ingested": 0,
+          "profile": "native-fts5/public-states-text-projection-v1",
+          "projection_bytes": 0,
+          "provider_tokens": null,
+          "provider_tokens_complete": false,
+          "queries": 2,
+          "query_image_ignored": false,
+          "state": "no_evidence",
+          "trajectories": 0
+        },
+        "queries": 2,
+        "source_fd": 703
+      },
+      "trace": [
+        {
+          "call": "project",
+          "input": {
+            "supplied_fixture": "close-Opal729"
+          }
+        },
+        {
+          "call": "custody_ready"
+        },
+        {
+          "call": "open",
+          "dir_fd": 703,
+          "flags": 131265,
+          "mode": 384,
+          "name": "trajectory-fence-729.md"
+        }
+      ]
+    },
+    "success": {
+      "close_calls": 1,
+      "context": null,
+      "fault": null,
+      "primary": null,
+      "state": {
+        "bytes": 45,
+        "closed": false,
+        "custody_failure": [
+          "unobserved",
+          null
+        ],
+        "documents": {
+          "new-close-Opal729": {
+            "body_utf8": "# New control source\n\nOpal pump setting: 42.\n",
+            "input_sha256": "cff08dba8fc825b85022b1f841fb2cee313d74666c5183fb69fdfc7a6fac390c",
+            "relative": "specs/longmemeval/trajectory-fence-729.md",
+            "sha256": "5024ed3afdec28ded6b86c75066c854adf51591349dfe6564fc4a7894cb65d13",
+            "states": 1,
+            "trajectory_id": "new-close-Opal729"
+          }
+        },
+        "fds": [
+          701,
+          702,
+          703
+        ],
+        "fenced": false,
+        "file_ids": {
+          "new-close-Opal729": [
+            2117,
+            7289
+          ]
+        },
+        "last": {
+          "context_bytes": 0,
+          "context_chars": 0,
+          "elapsed_seconds": 0.25,
+          "images_ingested": 0,
+          "profile": "native-fts5/public-states-text-projection-v1",
+          "projection_bytes": 0,
+          "provider_tokens": null,
+          "provider_tokens_complete": false,
+          "queries": 2,
+          "query_image_ignored": false,
+          "state": "no_evidence",
+          "trajectories": 0
+        },
+        "queries": 2,
+        "source_fd": 703
+      },
+      "trace": [
+        {
+          "call": "project",
+          "input": {
+            "supplied_fixture": "close-Opal729"
+          }
+        },
+        {
+          "call": "custody_ready"
+        },
+        {
+          "call": "open",
+          "dir_fd": 703,
+          "flags": 131265,
+          "mode": 384,
+          "name": "trajectory-fence-729.md"
+        },
+        {
+          "call": "write",
+          "fd": 744,
+          "payload_hex": "23204e657720636f6e74726f6c20736f757263650a0a4f70616c2070756d702073657474696e673a2034322e0a"
+        },
+        {
+          "call": "fsync",
+          "fd": 744
+        },
+        {
+          "call": "fsync",
+          "fd": 703
+        },
+        {
+          "call": "identity",
+          "fd": 744
+        },
+        {
+          "call": "close",
+          "fd": 744
+        }
+      ]
+    },
+    "write_error": {
+      "close_calls": 1,
+      "context": null,
+      "fault": "write_error",
+      "primary": "write_error",
+      "state": {
+        "bytes": 0,
+        "closed": false,
+        "custody_failure": [
+          "unobserved",
+          null
+        ],
+        "documents": {},
+        "fds": [
+          701,
+          702,
+          703
+        ],
+        "fenced": true,
+        "file_ids": {},
+        "last": {
+          "context_bytes": 0,
+          "context_chars": 0,
+          "elapsed_seconds": 0.25,
+          "images_ingested": 0,
+          "profile": "native-fts5/public-states-text-projection-v1",
+          "projection_bytes": 0,
+          "provider_tokens": null,
+          "provider_tokens_complete": false,
+          "queries": 2,
+          "query_image_ignored": false,
+          "state": "no_evidence",
+          "trajectories": 0
+        },
+        "queries": 2,
+        "source_fd": 703
+      },
+      "trace": [
+        {
+          "call": "project",
+          "input": {
+            "supplied_fixture": "close-Opal729"
+          }
+        },
+        {
+          "call": "custody_ready"
+        },
+        {
+          "call": "open",
+          "dir_fd": 703,
+          "flags": 131265,
+          "mode": 384,
+          "name": "trajectory-fence-729.md"
+        },
+        {
+          "call": "write",
+          "fd": 744,
+          "payload_hex": "23204e657720636f6e74726f6c20736f757263650a0a4f70616c2070756d702073657474696e673a2034322e0a"
+        },
+        {
+          "call": "close",
+          "fd": 744
+        }
+      ]
+    }
+  },
+  "custody_observation": {
+    "observation_state": "unobserved",
+    "profile": "longmemeval/custody-failure-stage-v1",
+    "provider_tokens": null,
+    "root_cause": null,
+    "scope": "last_caught_custody_body_failure",
+    "stage": null,
+    "usd_micros": null
+  },
+  "initial_state": {
+    "bytes": 0,
+    "closed": false,
+    "custody_failure": [
+      "unobserved",
+      null
+    ],
+    "documents": {},
+    "fds": [
+      701,
+      702,
+      703
+    ],
+    "fenced": false,
+    "file_ids": {},
+    "last": {
+      "context_bytes": 0,
+      "context_chars": 0,
+      "elapsed_seconds": 0.25,
+      "images_ingested": 0,
+      "profile": "native-fts5/public-states-text-projection-v1",
+      "projection_bytes": 0,
+      "provider_tokens": null,
+      "provider_tokens_complete": false,
+      "queries": 2,
+      "query_image_ignored": false,
+      "state": "no_evidence",
+      "trajectories": 0
+    },
+    "queries": 2,
+    "source_fd": 703
+  },
+  "input": {
+    "supplied_fixture": "close-Opal729"
+  },
+  "later_query": "Is the Opal pump ready?",
+  "later_refusal": {
+    "additional_io_calls": 0,
+    "args": [
+      "instance_unavailable"
+    ],
+    "clock_calls": 0,
+    "exception_type": "ProjectionError",
+    "last": {
+      "context_bytes": 0,
+      "context_chars": 0,
+      "elapsed_seconds": 0.25,
+      "images_ingested": 0,
+      "profile": "native-fts5/public-states-text-projection-v1",
+      "projection_bytes": 0,
+      "provider_tokens": null,
+      "provider_tokens_complete": false,
+      "queries": 2,
+      "query_image_ignored": false,
+      "state": "no_evidence",
+      "trajectories": 0
+    },
+    "native_calls": 0,
+    "queries": 2
+  },
+  "prior_scope": "supplied coherent prior no-evidence query metadata; notactual query/provider/latency measurement",
+  "profile": "independent-new-insert-close-nonzero-prior-v1",
+  "projection": {
+    "body_utf8": "# New control source\n\nOpal pump setting: 42.\n",
+    "input_sha256": "cff08dba8fc825b85022b1f841fb2cee313d74666c5183fb69fdfc7a6fac390c",
+    "relative": "specs/longmemeval/trajectory-fence-729.md",
+    "sha256": "5024ed3afdec28ded6b86c75066c854adf51591349dfe6564fc4a7894cb65d13",
+    "states": 1,
+    "trajectory_id": "new-close-Opal729"
+  },
+  "scope": "supplied canonical owner/Projection/projector/custody/OScallbacks; no kerneldescriptor/corpus/native/provider proof",
+  "transport_utf8": "{\"supplied_fixture\":\"close-Opal729\"}"
+}

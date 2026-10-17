@@ -1,0 +1,141 @@
+{
+  "chronology": "source-only independent review, beforeidentityguardfix/addedassertion/execution; no runtimeoutcomes",
+  "expected_numeric_touches": [],
+  "invalid_numeric_kinds": [
+    "foreign_metaclass"
+  ],
+  "methods_final": 16,
+  "native": [
+    {
+      "body_error": false,
+      "close_error": false,
+      "metadata": {
+        "context_bytes": 51,
+        "context_chars": 51,
+        "elapsed_seconds": null,
+        "images_ingested": 0,
+        "profile": "native-fts5/public-states-text-projection-v1",
+        "projection_bytes": 177,
+        "provider_tokens": null,
+        "provider_tokens_complete": false,
+        "queries": 6,
+        "query_image_ignored": false,
+        "state": "delivered",
+        "trajectories": 3
+      },
+      "name": "invalid_foreign_metaclass",
+      "outward": null,
+      "outward_context": null,
+      "result": [
+        {
+          "type": "text",
+          "value": "Public reference data:\nThe revised unit rate is 17."
+        }
+      ],
+      "timer": "foreign_metaclass",
+      "trace": [
+        [
+          "custody"
+        ],
+        [
+          "sanitize",
+          "What is the revised unit rate?"
+        ],
+        [
+          "reject_secrets",
+          "Task Capsule",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "reject_privacy",
+          "Task Capsule request",
+          [
+            "safe-rate-query"
+          ]
+        ],
+        [
+          "mode",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "gate",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "connect",
+          "/public/new-clock-fixture-6201/memory-bank/local/context.db"
+        ],
+        [
+          "refresh",
+          "/public/new-clock-fixture-6201"
+        ],
+        [
+          "distill",
+          "safe-rate-query"
+        ],
+        [
+          "assemble",
+          {
+            "allow_unprovisioned": true,
+            "automatic_links": true,
+            "entry_point": "refresh",
+            "ephemeral": true,
+            "gate_mode": "auto",
+            "host": "cli",
+            "index_warnings": [],
+            "limit": 3,
+            "mode": "governed",
+            "phase_seconds": {
+              "index": 0.0
+            },
+            "prompt": "safe-rate-query",
+            "query": "rate-distilled",
+            "query_source": "prompt",
+            "refresh_index": false,
+            "render": true,
+            "task_id": "BENCH-0006"
+          }
+        ],
+        [
+          "excerpts",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          }
+        ],
+        [
+          "render",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          [
+            "literal excerpt"
+          ]
+        ],
+        [
+          "record_trace",
+          "/public/new-clock-fixture-6201",
+          {
+            "episodic": [],
+            "semantic": [
+              "public-rate"
+            ]
+          },
+          {}
+        ],
+        [
+          "connection_close"
+        ]
+      ]
+    }
+  ],
+  "native_cases_final": 15,
+  "profile": "new-clock-metaclass-no-dispatch-oracle-v1"
+}

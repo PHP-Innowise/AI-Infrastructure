@@ -1,0 +1,37 @@
+{
+  "query": "KestrelSignal731 amethyst latch",
+  "marker": "KestrelSignal731",
+  "source": "docs/kestrel-ledger.md",
+  "source_text": "# Kestrel ledger\n\nKestrelSignal731 uses the amethyst latch.\n",
+  "progress": "KestrelProgress913 verified the amethyst latch.",
+  "task": "kestrel/local-731",
+  "ignore": "docs/kestrel-ledger.md\n",
+  "chunk": "memory-bank/chunks/MEM-0731-kestrel-latch.md",
+  "git_error": "Git source context unavailable",
+  "unknown_cli": {
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "context: Git source context unavailable\n"
+  },
+  "empty_search": {
+    "query": "KestrelSignal731 amethyst latch",
+    "documents": [],
+    "episodes": []
+  },
+  "configuration": {
+    "mode": "governed",
+    "allowed_privacy": [
+      "public",
+      "team"
+    ],
+    "owners": [
+      "*"
+    ],
+    "allowed_authority": [
+      "verified",
+      "observed",
+      "hypothesis"
+    ],
+    "automatic_promotion": false
+  }
+}

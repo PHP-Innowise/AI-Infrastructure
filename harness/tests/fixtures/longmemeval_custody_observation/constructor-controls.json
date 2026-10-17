@@ -1,0 +1,34 @@
+{
+  "expected_configuration_checks": [
+    "/public-new-init-stage-911/project-brain/config/runtime.json"
+  ],
+  "expected_fd_population": 0,
+  "expected_guard": "native_configuration",
+  "expected_metadata_write_attempts": 1,
+  "expected_record": {
+    "observation_state": "unobserved",
+    "profile": "longmemeval/custody-failure-stage-v1",
+    "provider_tokens": null,
+    "root_cause": null,
+    "scope": "last_caught_custody_body_failure",
+    "stage": null,
+    "usd_micros": null
+  },
+  "native_methods": [
+    "connect",
+    "refresh_layers",
+    "sanitize_automatic_query",
+    "distill_capsule_query",
+    "assemble_capsule",
+    "capsule_excerpts",
+    "render_capsule_lines",
+    "record_render_trace",
+    "configured_mode",
+    "reject_secrets",
+    "reject_capsule_privacy",
+    "configured_retrieval_gate"
+  ],
+  "profile": "independent-constructor-storage-unavailable-v1",
+  "root": "/public-new-init-stage-911",
+  "scope": "metadata setter abort during genuine __init__, controlled missing configuration before any nativeFS/helper calls"
+}

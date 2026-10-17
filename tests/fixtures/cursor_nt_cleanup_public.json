@@ -1,0 +1,33 @@
+{
+  "profile": "source-extracted-NT-cleanup-v1",
+  "actual_windows_API_calls": 0,
+  "raw_handle": 101,
+  "root_fd": 11,
+  "child_fd": 201,
+  "cases": [
+    {
+      "name": "relative_metadata_abort",
+      "expected_raw_closed": [
+        101
+      ],
+      "expected_fd_closed": []
+    },
+    {
+      "name": "root_walk_abort",
+      "expected_raw_closed": [],
+      "expected_fd_closed": [
+        11
+      ]
+    },
+    {
+      "name": "root_previous_close_failure",
+      "expected_raw_closed": [],
+      "expected_fd_closed": [
+        11,
+        201
+      ]
+    }
+  ],
+  "error_identity_preserved": true,
+  "prechange_control": "same exact two installed functions under fresh mocked API shapes, no ctypes native calls"
+}

@@ -28,6 +28,1227 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Excerpts grow into the capsule's room — 2026-10-17
+
+- The first and second delivered excerpts whose section runs on past their
+  window grow into the room the capsule leaves, up to 1,800 and 1,200
+  characters; the rendered capsule still stays within 3,600. On the labelled
+  prompts a capsule used 600-2,200 of its characters while a delivered
+  document's answer sat just past the window. Answer passages delivered rose
+  from 9 to 11 of 33 and from 3 to 5 of 7, with the same useful, noise-only
+  and silent turns; the median capsule grew from about 880 to 1,570-1,830
+  characters. The room is reckoned from a fixed reserve for the head, so a
+  document's window for a request is the same on every turn and repeat
+  detection still recognises it.
+- `memory_eval.py` also counts the answer passages the runtime can reach -
+  present in the text the index holds for the document - and those in
+  documents longer than it marks whole (64 KB). On the labelled sets every
+  existing passage was reachable.
+
+### Memory suites on native Windows — 2026-10-16
+
+- The 23 memory regression suites that failed on their first native Windows
+  run pass there, in a new `windows-memory` job: with them `windows-harness`
+  took 12 to 14.5 of its 15 minutes. Where a Windows user hit the same
+  failure, the runtime is fixed:
+  - Python 3.12+ on Windows gives `os.stat()` and `os.lstat()` the creation
+    time as `st_ctime_ns` and `os.fstat()` the last change time, so every
+    check that an open file is still the one its path names refused the same
+    unchanged file: learning images were never recorded, and the save
+    frontier and the Cursor continuation topic were always unavailable. Those
+    checks compare `workspace_roots.change_time_ns()`.
+  - `validate.py` compared each Memory Bank index row (`chunks/<file>`) with a
+    backslash path: on Windows every chunk failed validation and every
+    automatic promotion was refused.
+  - The memory MCP server and its registration script refused a project root
+    spelled with 8.3 short names (`C:\Users\RUNNER~1\...`) as a symlink
+    root. Short names are now expanded with `GetLongPathNameW`, which keeps
+    links, before the check.
+  - Source hints abstained on Windows, which has no `O_NOFOLLOW` or `dir_fd`;
+    they now read through the NT handles the Cursor rule already uses.
+  - `workspace_roots.key_for` no longer files `\\srv\a.md` - the share `a.md`
+    on the server `srv` - under `\\srv`.
+- Where only the tests were not portable, the tests are fixed: resolved
+  temporary roots, hooks run by Git Bash (`tests/hook_shell.py`: a bare
+  `bash` is WSL's launcher in System32), POSIX manifest keys and Git config
+  paths, LF fixture bytes, closed SQLite connections, runtime modules from a
+  temporary copy removed from `sys.modules` (the Windows jobs run their
+  suites in one process), and a churn and a branch-race fixture that hold
+  with Windows' coarse file times and Git Bash's own `PATH`.
+
+### Native Windows CI — 2026-10-16
+
+- The Windows hook test gives Git Bash each hook command in a file. Passed as
+  `bash -c` from Python, `"${CLAUDE_PROJECT_DIR}"/...` reached Git Bash without
+  its quotes and failed to parse, so the test stopped before any hook ran.
+- `windows-harness` runs the memory suites that pass on native Windows. The 23
+  that failed on their first native run - 8.3 short temp paths (`RUNNER~1`,
+  which the memory MCP server then refuses as a symlink root), SQLite files
+  still open at cleanup, Cursor rule custody, generator lint paths - run on
+  Linux only, named in `scripts/check.py`, until they are ported.
+
+### Automatic structured native results — 2026-10-16
+
+- Native prompt/Stop hooks coordinate one same-agent structured save, including clean research tasks without Git edits, through the existing guarded result contract. No raw transcript is adopted; task completion and person review stay explicit.
+- Challenges pin owner/session/task revision, checkout and runtime; repeats are idempotent, recovery checkpoints are suppressed, conflicts/partial outcomes remain held and the next capsule reports failures. Cursor follow-ups are capped at one.
+- Add real-hook roundtrip, replay, schema/source/privacy, stale scope, corrupt metadata and interruption regressions; include them in the standard check runner.
+
+### Memory fixes after the assessment — 2026-10-16
+
+- Automatic memory preserves manual corrections when a learning-image proof
+  is missing or could not be written; deliberate corrections still accept an
+  explicit current revision. Promotion duplicate checks retain Unicode words,
+  so independent Cyrillic findings from one source both reach the bank.
+  Native Stop hooks use the branch being rebased for checkpoints, consistently
+  with prompt reads, across Claude Code, Cursor and Codex.
+- Failed or interrupted automatic promotion leaves an owner-scoped ignored
+  retry marker. A due governed turn retries one record after a 30-second delay,
+  without requiring a Git delta or creating a task. Retries rotate past failed
+  records, obey existing source/owner/configuration guards, and drain blocked
+  duplicate work; schedule-write failures do not trigger repeated full scans.
+  Source traversal retains the existing promotion implementation and hook
+  timeout. Markerless failures from older runtimes still need a normal flush
+  or an explicit replay. Regression coverage exercises save conflicts,
+  Unicode promotion, rebase adapters and bounded clean-turn recovery.
+
+### Memory reliability round — 2026-10-15/16
+
+- A reply with no word in it - `?`, an emoji - no longer fills the turn with
+  the operator's report. It passed the sanitizer, failed the word check
+  later, and its prompt got four lines of layer report and `Capsule
+  unavailable: Search query must contain a word`, often on the turn that
+  approves a plan. Such a prompt is now withheld like one the sanitizer left
+  empty: the turn is silent, and Cursor keeps its rule. Tests:
+  `project-brain/tests/test_runtime.py` (`WordlessPromptTest`).
+
+- A branch whose task is finished says so, and the way on works. Work that
+  went on after the task was completed - review fixes, say - is not recorded,
+  by design, yet its prompts read `working: not recorded yet (the task starts
+  at the 5-turn checkpoint)`, though no checkpoint would start one, and the
+  advice to start a new task was refused: the finished record keeps the ID
+  until compaction archives it, and automatic compaction waits for five
+  finished records. The capsule now opens with `working: closed (this
+  branch's task is finished; turns are not recorded until a new one starts:
+  start a new task: context.py start --task-id <id> --goal "...")`, without
+  the warming line, and the turn report says the same; `start`, refused only
+  by finished records of that ID, now moves those to the archive - no other
+  record - and creates the task (`compact(only_external_id=...)`). Tests:
+  `project-brain/tests/test_runtime.py` (`ClosedBranchTaskTest`).
+
+- Knowledge that stops being retrieved because its cited file moved is no
+  longer silent. A Memory Bank chunk citing a file renamed with `git mv` (or
+  deleted) is left out of every capsule, while the session banner went on
+  counting it as active. The summary now adds `N active chunk(s) cite a file
+  that is gone and are not retrieved; memory-bank/scripts/validate.py names
+  them.`, and `validate.py` follows Git's renames to say where each such file
+  went (`source path does not exist: AGENTS.md - Git moved it to POLICY.md`);
+  the checks on every prompt start no Git for it. Tests:
+  `memory-bank/tests/test_validate.py`.
+
+- A branch renamed with `git branch -m` keeps its task. Its prompts read
+  `working: not recorded yet`, and its fifth turn recorded a second task
+  beside the one holding the branch's progress and next steps. Git moves the
+  reflog with the branch and notes `Branch: renamed refs/heads/<old> to
+  refs/heads/<new>`; when the branch the checkout is on has no active task
+  and an earlier name has one, the commands the hooks run (refresh,
+  hook-context, turn, cursor-rule, msg-dispatch) work with that task, and the
+  capsule says `This branch was renamed from <old>; its task continues here.`
+  The reflog is read as a file, so a branch never renamed costs nothing
+  more; a copy of a branch and a finished earlier task start their own, the
+  record keeps its ID, and an explicit `start` for the new name still
+  records a new task. Tests: `project-brain/tests/test_runtime.py`
+  (`RenamedBranchTaskTest`).
+
+- Several sessions on one checkout no longer cost each other the working
+  state. A prompt's capsule reads the task record, retrieves, and checks
+  before delivery that the record is still the one it read; another
+  session's turn checkpoint rewriting it in between withdrew the working
+  state, and the capsule said only `working: unavailable`. With four sessions
+  checkpointing every turn, 22 of 48 prompts lost it. The record is now read
+  again just before the capsule is signed and packed, and its newest state is
+  delivered (a query derived from the task keeps the state it came from); a
+  rewrite in the last moments still withdraws it, and the capsule then says
+  so and names the record to read. 47 of 48 such prompts keep their working
+  state. Tests: `tests/test_memory_brain_scale.py`
+  (`ConcurrentCheckpointTests`).
+
+- A large Brain no longer costs every prompt a read of every record. Each
+  prompt is a new process, and each one read, parsed and validated every
+  Brain record again - with 3,133 records most of the prompt. The images the
+  runtime already kept for one process are now carried to the next in the
+  ignored `project-brain/local/record-images.cache`: keyed as before by each
+  file's identity (device, inode, size, modification and change times), tied
+  to the validator's file and the Python that wrote them, and holding only
+  this project's records. A record changed since is read again; one changed
+  within two seconds of a save is left out, since a coarse clock could give a
+  second edit the same times; anything unreadable is a miss, never an error;
+  and a refresh that promises no filesystem writes (read-only or degraded)
+  writes none. A prompt on 3,133 records went from 441 to 325 ms, on 524
+  records from 222 to 204 ms; a turn checkpoint is unchanged. Tests:
+  `tests/test_memory_brain_scale.py` (`BrainScaleTests`).
+
+- A rebase no longer leaves the turn without memory. It detaches HEAD on the
+  commits it replays, so the prompt hook found no branch and named no task -
+  exactly while a turn asks about the conflict the rebase stopped on. The
+  read hook now falls back to the branch being rebased (Git's
+  `rebase-merge/head-name`, or `rebase-apply/` for the apply backend, in the
+  worktree's own Git directory), and the runtime admits that branch as the
+  inferred one only while the rebase is in progress: another branch's name
+  there, or a detached HEAD with no rebase, is still refused. The capsule
+  then carries the task and the conflicted passage. Turn checkpoints still
+  wait for the symbolic branch. Checked in a checkout and a linked worktree;
+  the generator's hook contract admits the one fallback line. Tests:
+  `tests/test_memory_git_reuse.py`, `memory-bank/tests/test_hooks.py`
+  (`RebaseIdentityTest`).
+
+- A branch whose name Git takes but a task ID does not - an apostrophe
+  (`fix/user's-login`), `@`, parentheses, more than 128 characters - no
+  longer turns memory off. Every prompt there said `Capsule unavailable: Task
+  ID must use letters, digits...` and no turn was ever recorded. The branch
+  the checkout is on now gets a task ID derived from its name
+  (`fix/user-s-login-b813ac24`: refused characters become `-`, the name is cut
+  to fit, eight hex digits of its SHA-256 keep such branches apart), wherever
+  the hooks or a person name the branch: reads, checkpoints, Cursor's rule,
+  subagent dispatch and the readiness report. Any other ID the grammar
+  refuses is still refused. Tests: `project-brain/tests/test_runtime.py`
+  (`AnyScriptTaskIdTest`).
+
+- Memory works on native Windows with the python.org installer. The hooks
+  ran only `python3`, which that installer does not provide: Git Bash then
+  finds nothing, or the Microsoft Store stub that only offers to install
+  Python, so memory was neither read nor written - silently, or with the
+  stub's message on every prompt. Every hook that runs Python
+  (`working-memory-read.sh`, `working-memory-write.sh`,
+  `context-continuity.sh`, `subagent-dispatch.sh`, `local-context.sh` and
+  Cursor's rule maintenance) now finds it with one `resolve_python`
+  function: on Windows it tries `python`, `py -3` and `python3` and takes the
+  first that is Python 3.9+, the order the memory MCP launcher already uses;
+  elsewhere a `python3` on `PATH` is taken without a probe, so the common
+  case starts no extra interpreter. On Windows the name found is remembered
+  per user (`$TMPDIR/ai-accelerator-python-<uid>`) and taken again while the
+  shell finds it at the same path - read from bash's own lookup table, no
+  process - so the probe runs once, not in every hook. With no Python at all the prompt hooks
+  stay silent as before, and the session banner now says memory is off
+  (`Context governance: unavailable - no Python 3.9+ found`) instead of
+  nothing. The memory CLI the policy has the agent run as `python3
+  memory-bank/scripts/context.py` failed there too, and under `claude -p`
+  (the Harness runs it so) a `python ...` retry was refused as not allowed:
+  `.claude/settings.json` now allows the CLI under `python` and `py -3` as
+  well, `.cursor/cli.json` under `python`, and where Python has another name
+  the session banner says which (``Python here is `py -3`, not python3``).
+  Attached on Windows, the policy preamble names the runtime as `python`.
+  The generator's hook contract (hook-forge,
+  `validate_generated.py`) takes the resolved call and still accepts hooks
+  that call `python3`. Tests: `memory-bank/tests/test_hooks.py`
+  (`PythonResolutionTest`); checked live on an installed project with
+  `OS=Windows_NT`, a Store-stub `python3` and the interpreter answering only
+  to `python`, then only to `py -3`. On native Windows,
+  `tests/test_windows_memory_hooks.py` (CI job `windows-harness`) installs
+  PHP Core and runs the session, prompt and Stop hooks through Git Bash,
+  with a real `python.exe` and no `python3` on `PATH`.
+
+- A large Memory Bank no longer slows every prompt. Each prompt checks the
+  chunks again, since a citation can go away while a chunk stays, and it
+  also screened every unchanged chunk for secrets (two dozen patterns over
+  the whole file, about 0.4 ms a chunk) and resolved every citation again
+  chunk by chunk: with 2,045 chunks a prompt took 1.8 s, 1.5 s of it in that
+  pass, and auto-promotion keeps adding chunks. A chunk whose text still
+  hashes to what an index screened and stored under the same secret policy
+  is no longer screened again - other text is, even behind an unchanged
+  stat, and a changed policy rebuilds the index - and within one pass each
+  cited source is looked at once; citations are still checked on every
+  prompt. That prompt now takes 0.35 s, and an ordinary project's prompt
+  went from 260 to 221 ms. Tests: `tests/test_memory_brain_scale.py`
+  (`MemoryBankScaleTests`).
+
+- A damaged local database no longer stops memory for good. When SQLite
+  reported `memory-bank/local/context.db` damaged ("database disk image is
+  malformed", "file is not a database") every prompt and every checkpoint
+  failed until a person moved the file. In governed mode, where all it holds
+  is derived, the hook commands now move it and its journals aside to
+  `context.db.quarantine-<UTC time>`, build a new one and run once more; the
+  capsule says so, the branch's task is read from the Brain at once and bound
+  again at the next checkpoint, and only the turns buffered since the last
+  checkpoint are lost. Lightweight mode, whose working tasks live only in
+  that file, keeps the manual recovery in `docs/TROUBLESHOOTING.md`. Tests:
+  `tests/test_memory_orphaned_task.py`.
+
+- A prompt with a pasted log keeps its memory. The read hook passes the
+  prompt to the CLI as one argument, and Linux refuses one over 128 KiB
+  (Windows a whole command line over 32,767 characters): a prompt past that
+  failed the refresh with "Argument list too long" and the turn got no
+  memory. The hook now keeps the first 16,000 and the last 8,000 characters
+  of a prompt over 24,000 - the question usually stands at one end - and
+  the query is distilled from those as before. Test:
+  `tests/test_memory_prompt_read.py`.
+
+- Tests: `tests/test_memory_onnx.py` no longer fails when a worker process is
+  reaped between the open and the read of its `/proc/<pid>/stat` (the read
+  raises ESRCH); a full check hit that race once.
+
+- Claude Code and Codex: on a checkout that names no branch - a detached
+  HEAD in a rebase or a bisect - the prompt hook has no task to read and
+  only keeps the index current, and the refresh's operator report ("procedural:
+  updated (94 documents)", the phase timings) reached the model as noise on
+  every prompt. A hook's refresh without a task and a query now prints
+  nothing when every layer refreshed; a failure still prints, and `/memory`
+  (`refresh` without `--host`) keeps its report. Test:
+  `tests/test_memory_prompt_read.py`.
+
+- A project with tens of thousands of documents keeps its memory. The ignore
+  check asked `git check-ignore` about every candidate document, and Git
+  looks each path up against the index - about a tenth of a millisecond a
+  path in a 20,000-file checkout - so 20,000 Markdown files outlasted the
+  check's two seconds and every refresh failed with "Git source context
+  unavailable": no capsule, no knowledge, on every prompt. Above 256 paths
+  the rules are now asked without the index (`--no-index`, milliseconds),
+  and the tracked files among the paths they name - which Git never counts
+  as ignored - are taken out with `ls-files`, only when there are any: one
+  call for the directories they lie in when they are many (generated pages
+  under an ignored folder), not a call per batch of paths.
+  The answer is the same; on that project a prompt's refresh takes 0.44 s
+  warm and 2.0 s cold. Tests: `tests/test_memory_git_reuse.py`
+  (`ManyDocumentsIgnoreTests`).
+
+- A long document no longer holds the prompt. FTS5 marked the whole of a
+  delivered document - about a third of a second a megabyte - and a prompt
+  marked each delivered item several times (its identity, its excerpt, the
+  render), so a question that matched a 20 MB reference under `docs/` held
+  the prompt hook for minutes: past its five seconds the turn got no memory
+  at all, and a 2 MB document took about 7 s. A document longer than 65,536
+  characters is now marked only in its answering stretch - the section, from its
+  heading, where most distinct words of the query meet, or within a longer
+  section the window where they do - and one command marks a document for a
+  query once. The document is still matched and ranked over all of its text.
+  Such a prompt now takes about 1.6 s with the 20 MB document and 0.3 s with
+  the 2 MB one. Tests: `tests/test_memory_brain_scale.py`
+  (`LongDocumentTests`).
+
+- A branch named in any script gets memory. The task ID is the branch name,
+  and it had to be ASCII: on `feature/счёт-экспорт` every prompt said
+  "Capsule unavailable: Task ID must use letters, digits, '.', '_', '/', or
+  '-'" and delivered nothing, and no turn was recorded; so did
+  `fix/#123-crash` and `feature/c++-parser`. Task IDs now take letters and
+  digits of any script (and combining marks) with `.`, `_`, `/`, `#`, `+`
+  and `-`, in the runtime, the memory MCP server, the Cursor rule's receipt
+  and the Harness; whitespace and other punctuation stay refused. Test:
+  `PHP Core/project-brain/tests/test_runtime.py` (`AnyScriptTaskIdTest`).
+
+- Two task records for one branch no longer stop that branch's memory.
+  Two copies of a branch that each started its task - two people, or one
+  person on two machines - leave two active records with one task ID once
+  they merge. A clone without a binding for it failed every checkpoint as
+  ambiguous, which the Stop hook hides, and its prompts showed the task as
+  not recorded. Now a machine without a binding reads, and binds to at its
+  next checkpoint, the earliest-created active record, so every clone settles
+  on the same one; the capsule names the other record on every prompt with
+  the command that keeps one (`brain-update --record-id <other> --revision
+  auto --transition cancelled`); and a machine whose bound record was
+  cancelled that way follows the task ID to the record that is left instead
+  of dropping its turns as work on a closed task. A finished task with no
+  active record beside it keeps its binding, as before. A fresh clone or a
+  second machine also reads the branch's existing task from its first prompt
+  and in Cursor's session rule (`hook-context`), where it showed "working:
+  not recorded yet" until its first checkpoint; reading binds nothing.
+  The index pass notes such task IDs (`task-twins` in the index state), so
+  the check costs no extra pass over the Brain. `docs/TROUBLESHOOTING.md`
+  has the steps. Tests: `PHP Core/project-brain/tests/test_runtime.py`
+  (`MultiMachineContinuityTest`).
+
+- After a merge of two branches that both added Project Brain records,
+  `project-brain/indexes/active.json` holds conflict markers or one side's
+  list. `validate` said "/abs/path/project-brain/indexes: Expecting value:
+  line 1 column 1" and `compact` refused, claiming that "active records are
+  invalid". Validation now names the index file by its repository path, says
+  what is wrong with it and that the next Brain write rebuilds it, and
+  compaction - which rebuilds the indexes - goes ahead when they are the only
+  problem; an invalid record still stops it. Test:
+  `PHP Core/project-brain/tests/test_runtime.py`.
+
+- The automatic checkpoint names when its first turn began to the minute
+  ("Auto-checkpoint: 5 turn(s) since 2026-10-15 20:02 UTC"), not as
+  `2026-10-15T20:02:04.002114+00:00`: the capsule repeats the line on every
+  prompt of the task, and the seconds, microseconds and offset told a reader
+  nothing more.
+
+- Harness: a capsule that does not match the session's linked task now says
+  why when the runtime said it - "Retrieved context does not match the
+  linked task and revision" carries the capsule's warnings, such as the task
+  record that cannot be read. Test: `tests/test_harness_task_context.py`.
+
+- A prompt no longer rewrites the index when the Project Brain did not
+  change. The Brain rows are rebuilt from the records on every refresh, and
+  every refresh used to delete and insert all of them again and stamp a new
+  index generation, which also threw away the token frequencies cached
+  against it; now a digest of the rows is stored with them and an unchanged
+  set leaves the tables and the generation as they are. Within one pass
+  over the records each cited file is looked up once, however many records
+  cite it. A document's key is cut from the path string instead of by
+  `pathlib` (half of the source walk), and `workspace_roots` no longer
+  imports `dataclasses`, which brought `inspect`, `ast` and `dis` into every
+  runtime start for one class. On a 524-record Brain the index phase of a
+  prompt went from about 67 to 55 ms, and the prompt hook, measured
+  interleaved over 31 prompts each, from 257 to 239 ms on Python 3.14 and
+  from 301 to 270 ms on 3.9. Tests: `tests/test_memory_brain_scale.py`
+  (`BrainIndexStabilityTests`, `SourceKeyTests`).
+
+- Cursor: a `.cursor` or `.cursor/rules` that is a symbolic link - a rules
+  folder shared between projects - is still never written through, since the
+  capsule would reach every project sharing it, but the hooks now say so:
+  "Cursor memory rule was not updated: linked_directory." instead of the
+  generic `custom_or_unavailable`, and `cursor-rule` reports the reason in its
+  JSON. Keep `.cursor/rules` a directory and link shared rule files inside it.
+
+- Cursor: a rule written by the releases of 2026-08-03..05 - frontmatter
+  "Task Capsule as of end of previous turn" or "warming up, no Task Capsule
+  rendered yet" - is generated output, not a person's rule: it is copied to
+  `memory-bank/local/cursor-rule-edits/` like an edited rule and the slot is
+  written again. Before, such a file stayed in the slot after an upgrade and
+  Cursor sent its August capsule with every request.
+
+- Claude Code and Codex: a refresh stopped at its budget now adds "If this
+  repeats on every prompt, build the index once outside the hook: python3
+  memory-bank/scripts/context.py index" in an installed project. A first
+  index of a large documentation tree (about 19 MB of Markdown on a loaded
+  machine) does not fit a prompt's five seconds, and an index stopped there
+  starts over on the next prompt.
+
+- Cursor: a prompt whose capsule selected nothing no longer becomes the
+  topic a "yes", "да" or "go on" continues. A short reply ("thanks, looks
+  good") took the topic's place, and every whitelisted continuation after it
+  searched by that reply and delivered nothing. Such a prompt - a reply or a
+  question nothing matched - now clears the topic without reviving the one
+  before it, and the next prompt that selects something sets it again. Test:
+  `tests/test_cursor_continuation_state.py`.
+
+- Cursor: a `safe.directory` in `$XDG_CONFIG_HOME/git/config` trusts the
+  project for the rule's custody as it does for Git. The trust check read
+  `git config --global`, which reads only `~/.gitconfig` when that file
+  exists; it now reads every file with its scope and keeps the system and
+  global values, so the rule was neither written nor retired on such setups.
+
+- A working task whose record is unreadable (bytes that are not UTF-8, say)
+  keeps its binding: the lookup now says "invalid" - the file's name is the
+  record's UUID - instead of "not found", which would have let the next
+  checkpoint record a duplicate beside it. The read serves the turn's other
+  memory with a warning that names the record by its repository-relative path
+  and cause, and the capsule says "working: unavailable (the task's record
+  cannot be read)" rather than "not recorded yet"; an invalid record cost the
+  turn its whole capsule before. An invalid record's absolute path no longer
+  reaches prompts or messages.
+- `check.py` drops Git's repository selectors (`GIT_DIR`, `GIT_INDEX_FILE`,
+  `GIT_WORK_TREE`, ...) from the commands it runs: from a pre-commit hook they
+  name the commit being made, and a test's `git add` in its own temporary
+  repository wrote into that index. The Cursor rule tests prepare their
+  fixtures in a clean environment too.
+
+- CI: the memory runtime's regression steps left the `installation` job for a
+  `memory` job of their own, which runs beside it on Python 3.9 - the floor the
+  runtime is declared for, where no memory test ran before - and on the
+  current release. `installation` had reached about 1000 s of its 20 minutes.
+  The memory job also runs eight test modules no workflow ran: the Harness
+  capsule economy, cost observation, memory metadata, native diagnostics,
+  reviewed and unattended capsule JSON and SDD modules, and promotion
+  admission. All 1322 tests of the job pass on Python 3.9.
+
+- Windows: the Brain refuses only reparse points that redirect a path - a
+  symbolic link or a junction, or one whose tag cannot be read. A OneDrive
+  placeholder or a deduplicated file is the file itself with its storage
+  elsewhere; any reparse attribute used to make the whole Brain unavailable on
+  such volumes. Save evidence (receipts, attempts, learning images, the save
+  frontier) follows the same rule; the Cursor rule's custody stays strict.
+
+- A result saved before the runtime keyed everything by task UUID replays
+  after an upgrade instead of being refused for good (`receipt_unavailable`).
+  Those local receipts named the task as the caller did, usually by its
+  branch alias; they sit under the same UUID key with the same digest, so the
+  task's current alias is accepted there and the replay rewrites the receipt
+  with the UUID.
+
+- A project under a directory whose name is not UTF-8 (a Latin-1 home or
+  share) keeps its memory. Brain paths are checked from `project-brain` down
+  - they become record keys and index entries - and handoffs check the paths
+  below the repository they store; the machine's own directories above the
+  project are never stored and are no longer checked. The Git frame is read
+  with the filesystem's own codec. Before, one such directory name switched
+  the Brain and handoffs off for every command and the prompt hook answered
+  "Git source context unavailable". A handoff transcript's file name, which
+  is never stored, is no longer refused either.
+
+- A working task whose uncommitted record `git stash -u` or `git clean` swept
+  away comes back. Every later Stop failed with "record not found" while
+  `status` reported memory as active, and the prompt hook delivered nothing at
+  all. The read now serves the turn as for a task not recorded yet - knowledge
+  included - with a warning naming the gone record, and the next checkpoint
+  drops the dead binding and records the task again with the turns buffered
+  meanwhile. A record that is only invalid keeps its binding and its refusal.
+
+- Git starts per prompt: 12 became 6 on a prompt that delivers a project
+  document (5 when it delivers none). The inferred branch is asked once; the
+  two checks before delivery compare the checkout's HEAD - and the reftable
+  list - with the snapshot taken before that answer and ask Git again only
+  when either is a new file. The first ignore check of a command still
+  confirms its frame with Git before and after its query; later checks in the
+  same command reuse that frame while every file that decides it (the
+  directories from the project to its top, each `.git` marker, the admin
+  directory, its config and commondir) keeps its identity, and confirm it
+  with Git again when one moved. A branch switched mid-refresh and a
+  repository retargeted during a reused check are refused as before. On
+  Windows, where each Git start costs tens of milliseconds, this is most of a
+  prompt's Git time.
+
+- Cursor: the Stop hook no longer prints "Cursor memory rule was not updated:
+  custom_or_unavailable." on every turn that replaces a session or turn rule.
+  Its check for a held prompt rule is a question - "preserved" there means
+  another rule is in place for the write that follows - and the write, keep
+  or retire after it reports the rule's real outcome. TOOL-INTEGRATIONS gives
+  the maintenance budget the hooks use, three seconds, not one.
+
+### Memory repairs and resumable saves — 2026-10-15
+
+- Brain reads at scale: a command reads each Project Brain record once. The
+  runtime keeps every valid record's image for the rest of the process, keyed
+  by the file's identity (device, inode, size, modification and change
+  times), and hands each pass its own copy; the save frontier's file hashes
+  and the Memory Bank's secret scan are remembered the same way, and listing
+  works on strings rather than Path objects. A `record-result` with two new
+  learnings on a 500-record Brain went from about 820 to 300 ms - it walked
+  every record thirty times. A directory a writer changes while it is being
+  listed is listed again (up to six times) instead of failing the reader with
+  "Project Brain inventory unavailable", and a writer's temporary file that
+  disappears before it is looked at is no longer an error.
+
+- Memory saves: a save interrupted at any point and repeated with the same
+  `result_id` now finishes. It resumes at an unchanged frontier, or runs
+  again from the start with every effect idempotent against the current
+  records - a learning is created only when absent, finished only when it is
+  exactly this save's open record, revised only under the usual proofs, and
+  the task takes only progress it does not already hold. Harness
+  `replay-result` finishes a started attempt the same way; without one a
+  replay is still never a first write. `attempt_incomplete` is left for stage
+  records that disagree with the records. MCP texts, `MCP.md`,
+  `MEMORY-INTEGRATION.md` and policy-forge say so.
+- Save evidence in the shared Brain: `control/result-attempts/<task UUID>/`
+  holds one file per task, result ID and request content, so a teammate's
+  clone that reuses a result ID for other content makes its own save instead
+  of being refused, and two clones' files never meet in a merge. A finished
+  save keeps a proof under 400 bytes (the whole attempt was kept, 3.5 times
+  the size), the newest 64 per task; compaction removes an archived task's
+  folder, the `control/result-learning-images/` of archived learnings and
+  files of the earlier flat layout. MCP names the `result_id_reused` and
+  `stale_task_revision` refusals. Both folders are documented in the Brain
+  README, `MCP.md`, `MEMORY-INTEGRATION.md` and the generator's runtime
+  contract.
+- A Cursor rule a person edited is preserved: before the rule is regenerated
+  or retired, an edited generation is copied to
+  `memory-bank/local/cursor-rule-edits/` (newest 20), and temporary files an
+  interrupted write left are swept.
+- Prompt hook cost on a 500-record Brain is back to the evening level (221 ms
+  against 225 ms; it was 23% slower). The Brain is read once per pass -
+  `iter_record_images` hands the index the very image it validated, and the
+  archive test no longer walks `path.parents`; the metadata Unicode check
+  runs only for frontmatter with a `\u` escape, as one `json.dumps` instead
+  of a Python walk; the hooks run the new `memory-bank/scripts/context_cli.py`,
+  which runs `context.py` from cached bytecode (run as a script it was
+  compiled again on every prompt). `context.py` names itself in usage text.
+- The Harness runs the installed runtime through `context_cli.py` too,
+  falling back to `context.py` in a runtime without it: each message makes
+  several runtime calls (rebind, refresh, Cursor's checkpoint and rule
+  retirement), and each compiled `context.py` again. With the runtime cached
+  (next entry), a refresh on a 500-record Brain, with the Harness's arguments
+  and environment, takes 226 ms instead of 258 ms. Behind the process guard,
+  which looked for the runtime's exit every 50 ms, one call gained 0 or 50 ms;
+  the guard now waits for the exit itself (see the process guard entry below).
+  Infrastructure-Creator's generated hooks take the same entry (see its
+  changelog).
+- `context_cli.py` writes the runtime's bytecode cache even when the caller
+  asks Python for none. Claude Desktop starts Claude Code with
+  `PYTHONDONTWRITEBYTECODE=1`, which every hook inherits, and the Harness sets
+  it on each runtime call, so neither ever wrote the cache and the whole
+  runtime was compiled again on every call. A path hook now gives the
+  loader's own directory Python's finder with a loader that caches; every
+  other import keeps the caller's setting. `memory-bank/scripts/__pycache__/`
+  is ignored in installed projects (the editions' `.gitignore`), in the clone
+  the Harness attaches and in generated projects (memory-seed's root-ignore
+  requirement). Under `PYTHONDONTWRITEBYTECODE=1` on a 500-record Brain the
+  Claude prompt hook takes 305 ms instead of 429 ms from the second call on
+  (faster in 60 of 60 paired runs; the first call, which writes the cache,
+  costs what every call did) - as much as where bytecode is allowed, where
+  both loaders take 304-306 ms - and a Harness refresh through
+  `KnowledgeManager.run` 300 ms instead of 422 ms (40 of 40). A runtime
+  without the loader, which the Harness calls directly, still writes nothing.
+  `test_context.py` and the Harness loader test check that the cache appears,
+  in the runtime's directory only.
+
+### Harness process guard — 2026-10-15/16
+
+- The Harness process guard (POSIX) waits for its native process's exit as an
+  event instead of looking every 50 ms: a pidfd in the selector that already
+  holds the owner's watchdog on Linux 5.3+, elsewhere (macOS, older kernels,
+  a sandbox that refuses pidfds) SIGCHLD through Python's signal wakeup pipe,
+  which carries SIGTERM and SIGINT too - a handled signal alone resumes a
+  blocking select. The owner reads EOF only when the guard exits, so every
+  guarded call (each memory-runtime call of a message, guarded Git, commands,
+  skills) waited up to 50 ms after the native process had finished. A short
+  call's EOF now reaches the owner 3.5 ms after the native exit instead of
+  48 ms (what is left is the guard interpreter's own exit), and the whole call
+  takes 26 ms instead of 70 ms. A refresh on a 500-record Brain through
+  `KnowledgeManager.run` costs 23 ms over the same call without a guard
+  instead of 44 ms, 21 ms less per call (paired medians of 60 interleaved
+  runs), and no longer lands on the 50 ms grid. Owner loss and cancel keep
+  SIGTERM to the group, `TERMINATION_GRACE`, then SIGKILL, and still never
+  return while a stubborn descendant may live in the group; they end at the
+  deadline, not at the next tick. Exit statuses (128+N for a signal) and the
+  Windows Job Object path are unchanged. `test_harness_process_guard` counts
+  the guard's wakeups while its child sleeps (8 in 0.4 s before, none now)
+  and runs the exit, signal-status and stop tests with and without a pidfd.
+- The Harness process guard (POSIX) also starts and exits faster. Every
+  guarded call waits for the guard's interpreter twice: before its native
+  process starts, and after it ends, since the owner reads EOF only once the
+  guard is gone. `process_runtime.launch_guarded` starts the guard with `-S`
+  (it needs only the standard library), the guard imports `ctypes` only in
+  its Windows functions, and once its native process has ended it flushes
+  stdout/stderr and leaves through `os._exit` instead of interpreter
+  finalization. Paired medians of 120 interleaved runs on Python 3.14: `-S`
+  saves 1.1 ms a call, `ctypes` 2.0 ms, `os._exit` 2.9 ms (EOF reaches the
+  owner 0.9 ms after the native exit instead of 4.1 ms). A short guarded call
+  takes 22.1 ms instead of 27.9 ms (6.4 ms without a guard), on Python 3.9
+  20.2 instead of 24.5 ms. A refresh on a 500-record Brain through
+  `KnowledgeManager.run` costs 15.9 ms over the same call without a guard
+  instead of 21.5 ms (100 runs). `-I` was left out: it ignores
+  `PYTHONCOERCECLOCALE`, so under the C locale the guard would hand its native
+  process an `LC_CTYPE` the owner did not give it. The Windows launch and
+  exit, waiting, stopping and exit statuses are unchanged. The guard tests
+  start it with `-S` as the Harness does; new tests check that a start
+  failure still exits 127 with its one line, that the POSIX guard imports no
+  `ctypes`, and that a `sitecustomize` on `PYTHONPATH` runs in the native
+  process but not in the guard.
+- The Harness process guard (POSIX) starts its native process with
+  `os.posix_spawn` and waits with `select.poll` instead of importing
+  `subprocess` and `selectors`, which with what they pull in (`threading`,
+  `collections`, `contextlib`, `warnings`, and `locale` on Python 3.14) were
+  about a third of the guard's start; every guarded call waits for it. The
+  native process gets what `Popen(close_fds=True, pass_fds=(lock,))` gave it:
+  stdin, stdout, stderr and the runner lock and nothing else (posix_spawn
+  closes only close-on-exec descriptors, so the guard marks every other one
+  it holds, listed from `/proc/self/fd`, on macOS `/dev/fd`); SIGPIPE and
+  SIGXFSZ, which Python ignores, at default; and the executable Popen would
+  find on PATH - past an entry it cannot run and never through a shell,
+  where `posix_spawnp` gives up on glibc and runs `/bin/sh` on macOS. A
+  `stat` skips an absent PATH entry before a spawn is tried (each refused
+  spawn costs ~0.05-0.1 ms; 0.6 ms a call for the 12 entries ahead of
+  `/usr/bin` on the test machine). A start failure still exits 127 with its
+  one line. Where posix_spawn might not report a failed exec - anything but
+  macOS and Linux with glibc 2.24+, as `subprocess` itself decides - or
+  `/proc` is not mounted, Popen still starts it. Waiting, stopping, exit
+  statuses, `-S`, `os._exit` and the Windows path are unchanged. Paired
+  medians of 150 interleaved runs on Python 3.14: a short guarded call takes
+  17.3 ms instead of 22.2 ms (6.3 ms without a guard), 17.7 instead of 22.5
+  when its executable is looked up on PATH (120 runs); on Python 3.9 16.1
+  instead of 19.4 ms (120 runs). A refresh on a 500-record Brain through
+  `KnowledgeManager.run` costs 11.0 ms over the same call without a guard
+  instead of 15.9 ms (100 runs; on Python 3.9 9.6 instead of 11.8, 80 runs).
+  New tests compare the guard with Popen on PATH lookups and their failures,
+  and check that the native process holds only descriptors 0-2 and the lock
+  (also one the guard got non-inheritable), starts with SIGPIPE and SIGXFSZ
+  at default, and that a whole POSIX run imports none of `subprocess`,
+  `selectors`, `threading` and `ctypes`. The start-failure, PATH, descriptor
+  and signal tests run both through posix_spawn and through the Popen
+  fallback.
+- The Harness process guard (POSIX) starts in half the time.
+  `process_runtime.launch_guarded` starts it through the new
+  `harness/src/harness/process_guard_cli.py`, which runs `process_guard.py`
+  from cached bytecode: run as a script, the guard, its Windows code
+  included, was compiled again on every guarded call. As `context_cli.py`
+  does for the memory runtime, the launcher writes that cache even under
+  `PYTHONDONTWRITEBYTECODE=1`, which the Harness sets for its runtime, setup
+  and result calls - for `process_guard.py` only; what the guard imports
+  keeps the caller's setting (`harness/.gitignore` ignores `__pycache__/`).
+  The guard imports `_signal` instead of `signal`, whose IntEnum wrappers
+  brought in `enum`; `posix` instead of `os`, whose `os.py` brought in `abc`,
+  `_collections_abc` and `posixpath` (PATH is searched in bytes, as Popen
+  searches it); and no `__future__` (annotations Python 3.9 cannot evaluate
+  are strings). The launcher takes `SourceFileLoader` from the importlib
+  module Python loaded at startup: importing `importlib` cost 0.1-0.5 ms,
+  and `from importlib.machinery import ...` alone imported `warnings` on
+  Python 3.14, through that module's `__getattr__`. Beyond the interpreter's
+  own start the guard now imports `stat` and `select`. Paired medians of 200
+  interleaved runs on Python 3.14: a short guarded call takes 10.8 ms
+  instead of 15.5 ms (5.6 ms without a guard; the guard's own start 4.8 ms
+  instead of 9.5), 11.0 instead of 15.7 when its executable is looked up on
+  PATH (150 runs); on Python 3.9 10.9 instead of 14.4 ms (150 runs). Each
+  change taken back alone (300 runs on Python 3.14): the cache is worth
+  2.1 ms, `signal` 1.7, `os` 1.3, `importlib` 0.1, `__future__` under 0.1.
+  A refresh on a 500-record Brain through `KnowledgeManager.run` costs
+  5.7 ms over the same call without a guard instead of 11.2 ms (100 runs;
+  on Python 3.9 4.7 instead of 8.8, 80 runs).
+  Windows still starts `process_guard.py` itself, and its code is
+  unchanged, as are waiting, stopping, exit statuses, `-S`, `os._exit` and
+  what posix_spawn or Popen hands the native process. New tests check that
+  the launcher caches the guard under `PYTHONDONTWRITEBYTECODE` and nothing
+  else, and runs it from the cache (after an edit of the same size and
+  modification time it still prints the line it was compiled with), that
+  `launch_guarded` starts it that way, that the guard imports none of `os`,
+  `signal`, `enum`, `importlib`, `warnings` and `__future__`, and that a
+  non-ASCII executable in a non-ASCII PATH entry is found as Popen finds
+  it. The guard tests start it through the launcher, as the Harness does,
+  and the in-process import test counts only what the guard adds: on
+  Python 3.11 `runpy` itself imports `threading`, which failed it before.
+- The Harness process guard starts from cached bytecode on Windows too:
+  `process_runtime` starts `process_guard_cli.py` there as well, instead of
+  `process_guard.py`, which run as a script was compiled again on every
+  guarded call. The launcher now finds the guard beside itself whichever
+  slash ends its folder: Windows hands it a path with backslashes, and the
+  launcher, which does without `os.path`, looked only for a slash, so it
+  would have looked for `process_guard.py` in the working directory.
+  Through the launcher the guard is the same script - `__main__`, the same
+  argv, `sys.argv[0]` naming `process_guard.py`, its folder first on
+  `sys.path` (where the Windows guard imports `windows_commands`) - and its
+  `sys.exit` still ends the interpreter normally, so the final close of the
+  Job Object handle still ends the tree. The guard's Windows code, the
+  duplicated watchdog and lock handles in the `STARTUPINFO` handle list,
+  `CREATE_NEW_PROCESS_GROUP` and the start without `-S` are unchanged;
+  under `PYTHONDONTWRITEBYTECODE` only the guard's own cache is written, as
+  on POSIX. Not measured on Windows (no machine at hand). In the Windows
+  launch shape on Linux - no `-S`, the same failing start for both - paired
+  medians of 300 interleaved runs: the launcher saves 1.85 ms a call on
+  Python 3.14, 1.81 on 3.12, 1.43 on 3.11 and 1.33 on 3.9 (within 0.1 ms
+  under `PYTHONDONTWRITEBYTECODE=1`; faster in 297-300 of 300 runs).
+  Compiling the guard takes 2.4 ms on 3.14 (2.0 on 3.12, 1.5 on 3.9), the
+  launcher 0.2 ms, reading the guard from its cache 0.1 ms. These figures
+  leave out what Windows file access adds: one more stat (the guard) and
+  one more open (its cache) per call. Where the cache cannot be written - a
+  read-only folder; the Harness's own clone, which it updates in place, is
+  writable - a call costs 0.7-1.1 ms more than before, on POSIX too: the
+  guard is still compiled, now through `compile()`, whose first call in a
+  process builds the AST node types (~0.6 ms; a script run skips that).
+  `test_guard_runs_from_cached_bytecode_the_caller_did_not_ask_for` now
+  runs in the windows-harness job too (exactly one cache file, the guard's,
+  not `windows_commands`), and a new test on every platform checks that the
+  launcher names the guard beside it for a `__file__` whose folders end
+  with backslashes, slashes or both; the previous launcher fails it.
+
+### Fixes after the third memory review — 2026-10-15
+
+- Harness Hindsight/LongMemEval: the export screen refuses camel and kebab
+  credential keys, `token`, `pass`, `pwd`, `passphrase`, `salt`, `APP_KEY`,
+  `encryption_key`, unquoted `.env`/YAML values, literal `env()` and
+  `os.getenv` defaults and SQL `IDENTIFIED BY`/`PASSWORD '...'`; the forward
+  scanner decodes `\u{...}` code points, keeps an unknown `\u` literal in
+  PHP, Markdown, text and SQL sources and never pairs a quote across a line
+  break. The LongMemEval projection rewinds its directory descriptor before
+  each scan: btrfs returned the previous scan's list and the instance fenced
+  itself with `source_changed`. Recall counts `socket.timeout` as a timeout on
+  Python 3.9, and the journal test removes its SQLite authorizer the way
+  Python before 3.11 needs.
+- Tests and CI: `test_memory_result_evidence` and `test_hindsight_export_gaps`
+  run in CI and `check.py`; `test_memory_optional_publication` no longer
+  leaves its temporary runtime modules in `sys.modules`, which failed 39 tests
+  of the Windows harness job. The root `tasks/` (agent journals with absolute
+  paths) is ignored, and the installer inventories carry `context_cli.py`.
+
+- Remove the Claude/Codex prompt supervisor from the read hooks; they call
+  `context.py refresh` directly again under the one `CONTEXT_HOOK_BUDGET`.
+  The supervisor refused any budget above 5 seconds and any prompt above
+  8 KB, so a pasted log or a raised budget left the turn with no memory at
+  all, not even working state; it hid the runtime's own error behind its
+  JSON report, gave the refresh only 70% of the budget and cost an
+  interpreter start per prompt, while its read-only fallback rarely
+  delivered. The hook now drops a capsule cut off at the budget (status 124)
+  instead. `workspace_roots.py prompt-supervise`, `context.py --prompt-wire`,
+  their tests and the generator's supervised profile go with it; generated
+  hooks that still call the supervisor are rejected.
+- An ignored file a record cites no longer withholds the record or the task's
+  working state. Ignore rules still decide what is indexed and served from
+  the cache (a document's own path); a task citing `vendor/...` lost its
+  progress and next steps for good, and knowledge citing the accelerator's
+  own ignored specs or skills left every capsule.
+- One unreadable or schema-invalid Project Brain record is skipped, as before
+  the overnight change, instead of stopping memory for every task, `get` of
+  unrelated tasks and `validate`'s own report. `validate` names each skipped
+  record and its cause; a lookup whose identifier only an invalid record
+  claims refuses by name (or as ambiguous) rather than reporting absence, so
+  no duplicate is created beside it.
+- Git source checks: a GIT_DIR, GIT_INDEX_FILE or discovery variable in the
+  environment is dropped from the probe instead of disabling memory; a `.git`
+  directory without HEAD, objects and refs (an empty `~/.git` or `/tmp/.git`)
+  is skipped as Git itself skips it; the inferred-branch check is one Git
+  start instead of three, so a prompt starts 7 Git processes rather than 13,
+  and the probes allow 2 seconds instead of 0.1-1.
+- Refresh waits for SQLite write admission (2 s, or a quarter of the hook
+  budget under a hook) and then for busy writers (5 s, or half the budget)
+  instead of 50 ms for the whole refresh, which lost a parallel session's
+  knowledge in a third of turns.
+- Delivery: a Memory Bank chunk citing a directory (`src/Billing`) is no
+  longer withheld as source-missing; `retrieve`/`context` answer with the
+  knowledge on a branch the first checkpoint has not provisioned yet; the
+  degraded read-only refresh keeps working state for an edited or ignored
+  citation, as the full refresh does. Repeated record validation and
+  frontmatter text checks are remembered per exact file text within a run.
+- Record results: an `expected_revision` on a learning that does not exist yet
+  creates it instead of holding it as a "kept" conflict; a person's attested
+  correction of a closed learning applies; an agent may revise its own
+  learning recorded before learning images were kept; an open learning that
+  an interrupted save created with exactly this content is finished by the
+  next result instead of staying open and unpromoted. MCP errors name the
+  typed result code and ask for current, not original, revisions. File-image
+  checks compare identity fields without st_atime, which reading the file
+  itself moves.
+- Cursor: a generated rule is recognized as registered when Git ignores the
+  slot through `.git/info/exclude` or a global excludes file, not only a
+  root `.gitignore` line; retire never unlinks `cursor-rule.json` relative to
+  the process directory and no longer reports a false incomplete; an
+  unreadable receipt with no rule no longer blocks the next write; short
+  acknowledgements ("sure", "go ahead", "давай") keep the rule's topic.
+- `install_accelerator.py --sync` identifies a PHP Core installation (its file
+  names tie with Laravel and Symfony; the larger share of the edition's own
+  inventory now decides), so the update path - and the Harness's own sync on
+  opening a project - reaches PHP Core projects. A project holding only a copy
+  of the memory runtime, with no tool's files, is not an installation and is
+  no longer filled with one.
+- Tests: fixtures updated to the image-carrying capsule contract and to the
+  receipts-after-publication order; a fixed 2026-11-13 review date that would
+  have failed CI from 14 November moved to 2099; imported temporary runtimes
+  leave `sys.modules`; the stale Hindsight case for unescaped JSON strings is
+  dropped (the forward screen no longer decodes them).
+
+### Memory review remediation — 2026-10-14/15
+
+- Aggregate allowlisted omitted-source notice occurrences in health JSON/text after windowing, with explicit journal-record counts and no source identities; preserve legacy output when notices are absent.
+
+- Add fresh actual CLI/MCP save-to-promotion-to-recall integration with complete chunk/digest/INDEX oracles, source presence lifecycle, ordinary decode isolation, private request refusal and byte-identical Claude/Codex hook delivery. Keep provider/token claims unmeasured.
+
+- Request Cursor refresh JSON after the prompt-query conditional, including empty/missing/non-string inputs, so native rule publication cannot silently keep a same-task stale rule after parsing operator text. Remove the generator native-profile exception; preserve Claude/Codex text output and native custom/link custody.
+
+- Refuse malformed Brain inventory paths before lookup/yield, direct reads and held-text parsing; pre-admit managed handoff paths outside per-file catches. Guard portable handoff paths before affected reads, writes and projection. Add fresh preservation, no-false-absence and complete Unicode roundtrip controls.
+
+- Reject malformed UTF-8 policy keys in direct/supplied fingerprints and light/full/cross-edition parity. Validate reverse inventories before partial-install shortcuts; preserve normal Unicode digests, drift shapes, ignored files and valid partial installs. Add fresh fail-closed and actual CLI controls.
+
+- Isolate ordinary invalid UTF-8 document contents and path keys before Git/SQLite; retain healthy Unicode neighbors and report count-only, nonfatal source notices through refresh, capsules and health records. Keep malformed skill policy paths strict. Turn Memory Bank INDEX/chunk decode errors into fixed diagnostics, including second-read races, and keep summaries available.
+
+- Keep rich memory rendering, section identities and window proposals on admitted indexed bodies through packing, printing and refresh. Carry immutable images outside public JSON, including lightweight packets; detached capsules use admitted snippets. A moved cache is highlighted through isolated in-memory FTS over held bytes, and shared sinks match first-row dedup ownership.
+
+- Keep verified existing cost bookings idempotent after unit closure and before final freeze. New reservations remain refused; malformed stored tickets cannot be repaired by replay. Add independent supplied-observation arithmetic and concurrency controls.
+
+- Bind candidate policy images to the same SQL row as their highlighted/plain excerpt. Missing or changed row identities cannot be rebound by a later cache read; path/hint/source-graph excerpts reuse their already-admitted body. Add fresh native policy-refresh race and supplied channel controls.
+
+- Reapply the current secret-recognition policy to full indexed images and returned paths at cached search and governed delivery, including after packing. Preserve safe masked/template records and the five-field raw-search contract; retain the source-hint byte cap before image hydration.
+
+- Recheck declared Memory Bank expiry in cached FTS search and governed delivery after packing; boundary-day knowledge remains valid, expired chunks leave manifests and receipt identities without waiting for refresh.
+
+### Final memory source-image custody — 2026-10-15
+
+- Recheck delivered ordinary/Brain content and full local citation existence
+  after packing, with fresh privacy/owner/authority configuration. Preserve
+  initial citation-drift warnings and original scores; withhold newly changed
+  or restored drift sets rather than expand already packed text.
+- Revalidate full semantic working-record images and withdraw dependent
+  queries/views when tasks change or disappear. Read final working records
+  through admitted regular descriptors; POSIX FIFO replacement cannot block
+  open. Preserve active cancellation through single-attempt cleanup failures.
+- Recompute receipts after ordinary packing omissions. Add fresh Wren/Lark/
+  Swan controls with native temporary CLI setup, assembly/proof checks and
+  supplied dual-faults. This is point-in-time custody, not atomic filesystem
+  stability, complete eligibility rescreening, client or provider validation.
+
+### Cached memory source admission — 2026-10-15
+
+- Recheck current project Git ignore policy for cached CLI/Harness search,
+  governed candidates and all declared local citations, including legacy
+  chunks without digests. Preserve lexical Git names, attached roots,
+  protected configuration and ordinary accelerator document exemptions.
+- Batch citation/hint admission and recheck selected views after packing.
+  Check full working citations before display clipping; withdraw dependent
+  automatic queries/history and all packed episode views when sources close.
+  Unknown Git policy remains a typed failure, including read-only refresh.
+- Add fresh CLI, MCP, SQLite, global-ignore, symlink, working and interruption
+  boundary controls. Local bytes/receipts are not measured provider savings;
+  real Windows, live clients, remote CI and semantic benchmarks remain unrun.
+
+### Generated memory task identity — 2026-10-15
+
+- Specify inferred-only branch markers in generated prompt, Cursor turn and
+  session readers. Explicit tasks remain unmarked. Add a manifest-owned
+  canonical fragment lint for identity, relay and both renderer call arms;
+  reject missing guards, data-only spoofs and unsupported array rewrites.
+- Reject delimiter-prefix, arithmetic/data, Unicode-comment, quote-adjacency
+  and selector-mutation spoofing; preserve literal-data continuations and
+  require Cursor JSON before dispatch. Admit the finite installed hook profile
+  without relaxing inference guards.
+- Add fresh structural and trusted argv-recorder fixtures. Structural lint
+  does not execute generated hooks or prove arbitrary shell control flow,
+  actual AI generation, live delivery or whole-hook deadlines.
+
+### Portable memory CLI streams — 2026-10-15
+
+- Configure standard stdout/stderr wrappers for UTF-8 and untranslated LF,
+  including diagnostic paths. Preserve explicit CR characters and buffered
+  bytes written before startup. Custom streams retain the two-keyword API;
+  ordinary configuration errors are best effort and cancellation propagates.
+- Add fresh exact-byte stream and actual CLI diagnostic controls to local
+  checks and both CI platform mappings. Supplied CRLF profiles on Linux do
+  not establish a native Windows or live-client pass.
+
+### Inferred task branch identity — 2026-10-15
+
+- Preserve whether automatic read hooks inferred their task from a branch or
+  received an explicit task ID. Mark inferred prompt and Cursor session/Stop
+  reads with a private expected-branch value; explicit cross-branch recall
+  remains supported, including requests without a committed HEAD.
+- Revalidate the protected full symbolic branch before state work, after
+  packing/schema work before manifest and delivery receipt publication, and
+  before output. Read-only delivery checks after rendering; branch failures
+  stay explicit rather than becoming warnings or valid no-context outcomes.
+- Add fresh native Claude/Codex branch-movement reproductions, positive saved
+  recall and callback/transport controls. Checks are point observations:
+  write attribution, atomic branch epochs, downstream Cursor publication and
+  whole-hook deadline guarantees remain separate work.
+
+### Protected project source-ignore context — 2026-10-15
+
+- Reject inherited repository/index/object/discovery selectors in source-ignore
+  checks and read entry points. Strip Git command-environment overrides while
+  preserving ordinary global exclusions and Git's protected trust policy.
+- Observe the actual project top, prefix and Git directory, pin the ignore
+  query to that frame and rediscover afterward. Unknown markers, failed probes
+  and malformed responses refuse delivery instead of becoming empty ignores.
+- Apply one deadline across each operation and propagate source-policy failure
+  through refresh. Early read admission precedes state creation; ordinary
+  accelerator exemptions remain separate from working-source citations.
+- Add fresh Git, transport and real CLI/Claude/Codex hook controls. These are
+  local finite profiles; no atomic filesystem snapshot, general branch
+  authority, hard capture-memory bound or whole-hook deadline is established.
+
+### Strict optional runtime configuration — 2026-10-15
+
+- Distinguish ordinary missing configuration from an unobservable or invalid
+  entry. Directories, special files, dangling links, failed reads and invalid
+  UTF-8 no longer enable defaults or produce an `absent` fingerprint.
+- Share strict configuration text observation between the loader and index
+  fingerprint. Preserve valid dictionary overlays, readable links and exact
+  newline hashes; close the owned descriptor once on errors and cancellation.
+  Resolve known Windows link/reparse targets before accepting parent absence.
+- Add fresh full-value and fingerprint controls plus real governed CLI/hook
+  refusal checks. POSIX FIFO replacement is guarded; native Windows,
+  cross-call snapshots and general cold-refresh deadlines remain unproved.
+
+### Assigned credential prefix search — 2026-10-15
+
+- Avoid repeatedly searching underscore-prefix suffixes for the exact known
+  assigned-credential pattern. Preserve the full key grammar, original value
+  validation, consumed spans, masking passes and policy fingerprint; changed
+  patterns and string subclasses retain the original search methods.
+- Add fresh complete mask/span oracles and actual lightweight CLI-save,
+  Claude cold-hook and Codex warm-hook checks. A fixed public 192 KiB lookup
+  corpus that timed out now delivers saved progress and a complete index.
+  Value lookahead and general cold-refresh liveness remain separate limits.
+
+### Cold document screening cost — 2026-10-15
+
+- Skip secret-pattern scans only when an exact known pattern cannot match:
+  its mandatory literal is absent. Keep masking outputs, privacy checks,
+  policy fingerprints and whole-index publication unchanged; unknown or
+  replaced patterns retain full scanning.
+- Add fresh complete masking and native hook/index assertions, including
+  Unicode and custom pattern compatibility. This reduces screening work;
+  oversized or slow cold refreshes still have no durable scan checkpoint.
+
+### Public OpenAPI declaration export — 2026-10-15
+
+- Recognize a narrow whole-JSON OpenAPI 3.1.1 HTTP bearer declaration by its
+  actual structural source position. Keep credential maps, unrelated objects,
+  nested decoded documents, duplicate keys and unknown syntax refused.
+- Preserve original approved source, request, packet and journal bytes. Add
+  fresh complete byte oracles and offline constructor, planner, SQLite journal
+  and protected-file capture checks; remote ingestion remains unavailable.
+
+### Retained memory citation admission — 2026-10-14
+
+- Revalidate current chunk eligibility before retaining cached durable memory.
+  An unchanged legacy or partially fingerprinted chunk is removed from the
+  index when any local citation disappears or escapes the supported roots.
+  Preserve ordinary document reuse and declared historical hashes. Add fresh
+  CLI/SQLite eviction, surviving citation and UTF-8 regression coverage.
+
+### Optional local memory publication — 2026-10-14
+
+- Confirm a retrieval manifest before recording its delivery. A failed local
+  publication preserves fresh context without a manifest reference or new
+  ordinary receipt pair; required governed publication still fails closed.
+- Allow supported Harness helpers to return bounded source provenance from
+  that same invocation, with exact task, capsule and visible-source bindings.
+  Keep required approval/result journals and physical-manifest checks.
+- Retire trace descriptor ownership before cleanup, drain remaining handles
+  once and preserve primary errors. Add fresh actual CLI/Harness, privacy,
+  partial-write and controlled descriptor regressions.
+
+### Read-only memory startup — 2026-10-14
+
+- Bound refresh SQLite busy waits and preserve freshly validated working task
+  delivery when startup writes are unavailable. Existing compatible rollback
+  state is read without cached search or delivery publication; unsupported or
+  unknown state remains explicitly incomplete. Add temporary CLI, hook,
+  schema, identity, privacy and real permission regression coverage.
+
+### Hindsight forward screening and cancellation — 2026-10-14
+
+- Discover JSON string spans in one forward pass; ordinary strings no longer
+  consume decoded-view capacity. Keep raw credential refusal, valid Unicode,
+  changed-view/depth/byte ceilings and exact retained source/request bytes.
+- Propagate cooperative cancellation through public export/plan revalidation
+  and current journal admission before commit. Init-only callbacks remain
+  unstored; manual validation and dataclass replacement retain current guards.
+- Add fresh byte oracles, indexed-inspection/decoder controls, a fixed standalone
+  hang guard and actual SQLite rollback regressions. Remaining regex/decoder
+  work is nonpreemptible; no whole-screen linearity or hard-deadline claim.
+
+### Hindsight historical integrity and current admission — 2026-10-14
+
+- Keep intact ingestion history readable for diagnostics, terminal settlement
+  and supplied reconciliation after current content/path rules tighten.
+  Preserve canonical envelopes, identities, source/body/packet hashes, bounds
+  and manifest correspondence independently of mutable admission rules.
+- Re-admit only the selected frozen request before body access or a new attempt;
+  public export/prepare remain screened. Clean replacements retain blocked
+  prior bindings for reconciliation without authorizing remote mutations.
+- Add fresh public whole-byte oracles and SQLite regressions for policy drift,
+  selected dispatch, unchanged frontiers, forged exports and rehashed corruption.
+  Remote transport, provider costs and source authority remain unmeasured.
+
+### Native memory source resilience — 2026-10-14
+
+- Report native UTF-8, JSON, metadata and inventory failures without treating
+  unknown governance as an absent task. Creation, result, promotion and MCP
+  callers use typed absence from a complete validated catalogue.
+- Isolate invalid derived handoffs while preserving independent valid memory;
+  abort native authority failures before publishing a partial index. Validate
+  the captured second image and Unicode metadata, retain actual task paths,
+  and render fallback warnings once.
+- Add fresh copied-helper CLI and stdio MCP regressions for corruption,
+  incomplete scans, archival, save/recall and Unicode. Synchronize edition and
+  generator runtime assets. Local validation does not establish Windows,
+  live-client behavior or provider-token savings.
+
+### Cursor persistent-rule continuity — 2026-10-14
+
+- Keep a bounded, policy/task/branch-scoped query-only topic for referential Cursor replies; refresh current canonical sources on every delivery and transfer only to an internally created checkpoint generation. Ordinary CLI/Claude/Codex/Harness profiles keep their previous behavior.
+- Use one stable persistent-rule render through selection, manifest and final text/JSON; suppress routine checkpoint/report counts while retaining substantive progress and failures.
+- Bound optional cache UTF-8 transport, reject malformed timestamps/JSON and abstain immediately on SQLite write contention without committing caller work. Add fresh local continuation, source-change, failure, projection and ownership regressions; native clients/Windows/provider-token savings remain unmeasured.
+
+- Run session-hook cache/counter/validator tests from disposable copied
+  runtimes. A temporary cwd alone does not isolate hooks that derive their
+  root from the script location; actual private health writes are asserted.
+
+### Memory result saves, Cursor custody and Harness bindings — 2026-10
+
+- Suppress current metadata and mutations for existing learnings outside the
+  public/team save privacy scope, including archived restatements and completed
+  replay. Return only the sanitized incoming learning and a fixed held outcome;
+  preserve independent progress and facts through CLI/MCP/Harness.
+- Restore automatic result saving for hook-updated tasks and ordinary rewording
+  of an unchanged runtime-owned learning. Protect manual/person/archived/type
+  conflicts individually while saving independent progress and facts; resume
+  only new, exactly observed source/scope/domain frontiers after interruption.
+- Recover Cursor's registered generated rule after copy, touch, cache loss and
+  an older branch writer. Keep physical identities as current-operation guards,
+  honor protected Git trust narrowly, reconcile the old exact two-link window,
+  and use Linux no-clobber rename when supported. Generated hooks delegate to
+  native maintenance with fixed diagnostics; custom deviations remain intact.
+- Add actual copied-helper Harness interruption/recovery controls and portable
+  UTF-8/root-rename tests. Local checks do not establish native Windows runtime,
+  AI provider tokens, client rule-loading order or semantic-quality savings.
+- Fence native memory result attempts before shared effects and retain complete
+  proof outside disposable local receipts; refuse unknown partial retries, stale
+  implicit corrections and generic retry rebasing. Deliberate corrections carry
+  their original learning revision through CLI/MCP/Harness.
+- Reconcile recorded Cursor custody after a physical checkout rename, preserving
+  held capsule bytes and refusing copied/foreign/orphan custody. Add fresh Opal
+  result-fence/rename regressions and exclude project attempt metadata from install.
+
+- Cursor continuation prompts now re-query current governed task context, preferring an explicit goal while rendering fresh progress and next steps. Privacy-modified/withheld requests and meaningful new queries retain their ordinary behavior. Known empty enforced selections replace stale selected facts with current working state; repeat/legacy skips preserve the owned rule. Added fresh actual-helper CLI regressions and matching local/Linux/Windows CI entries; unknown legacy ownership still requires exact-image operator approval.
+
+- Cursor working-memory rules now use prospective local custody receipts:
+  exact byte/identity and Git checks protect custom, edited, tracked and linked
+  files; installed POSIX maintenance shares a nonblocking anchored Brain lock.
+  Harness capsule delivery attempts guarded retirement before Cursor startup.
+  Identical complete renders remain unchanged; changed excerpts refresh even
+  under the same document labels. Fixed partial-failure metadata and runtime
+  I/O accounting distinguish successful retirement from incomplete custody.
+  Attached clones and unsupported platforms preserve their rule files; no
+  native loading, cache or provider-token benefit is claimed.
+
+- Invalidate cached task-file membership on the effective Git index, shared index,
+  worktree/prefix and supported object-resolution generation. Preserve warm
+  batched-probe reuse; unavailable or changed captures clear cached proof without
+  changing citation links or ordinary document writes. Add index-only staging,
+  removal, split/alternate index and full capsule/manifest regressions.
+
+- Freeze native-validated automatic Harness memory requests in a separate private
+  table for their original session/generation/event. Add explicit prepare/replay
+  CLI operations, receipt-only retries, immutable omissions, current scope guards
+  and complete transient request-file cleanup. Keep manual and unsupported fresh
+  saves compatible; unknown partial writes and post-final replay stay incomplete.
+
+- Preserve exact receipted result replay through CLI and MCP after task
+  archival or citation deletion, with current owner/privacy checks and no
+  rewrite of later corrections. New writes retain live-source validation;
+  archived tasks require a matching receipt. Resolve CLI auto revisions
+  under the mutation lock and keep MCP revisions strictly numeric.
+
+- Build Project Brain retrieval rows from one coherent text image: content,
+  privacy, lifecycle and source hash now describe the same record or handoff.
+  Failed index refreshes deliver only fresh working state, retain diagnostics,
+  and skip stale retrieval, frequency lookup and delivery receipts.
+- Honor the explicit trailing verification attestation even when its reason
+  quotes another marker; keep Memory MCP serving after escaped surrogate IDs
+  while preserving ordinary Unicode output.
+- Isolate each Harness launch from inherited memory task IDs. Validate the
+  task and embedded timestamp of bounded Cursor checkpoint reports instead
+  of file mtime, using portable paths. Observe recovery compaction before
+  event normalization so the context history records its divider once.
+
+### LongMemEval and Hindsight evaluation pilots — 2026-10
+
+- Keep the pinned LongMemEval API test image byte-identical while explicitly
+  deferring its newer annotations in offline compiler controls on Python 3.9.
+  This selected-source test profile does not certify the official environment.
+
+- Memory: strengthen offline public Hindsight export screening for literal
+  PHP/WordPress/Composer credentials and escaped JSON tokens; accompany pinned
+  LongMemEval source fixtures with their upstream license and extraction notices.
+  Cursor installed runtimes now include rooted NT handle maintenance and
+  no-clobber publication, with native Windows acceptance in CI and abort cleanup
+  controls. Linux validation does not certify Windows kernel behavior.
+
+- Harness: add fixed two-slot memory-accounting controls for cancelled and
+  unlaunched queries, preserving known subtotals, incomplete quality denominators
+  and null full provider costs through construction and repeated finalization.
+
+- Harness: add isolated real temporary descriptor ownership controls for
+  LongMemEval adapter cleanup, including retained original handles and immediate
+  descriptor reuse. Supplied faults are not actual OS-failure or token evidence.
+
+- Harness: retain privacy-safe fixed projection guard labels per failed local
+  operation through a detached optional accessor; preserve task exceptions and
+  existing snapshot/receipt/cost schemas. Unknown labels, root causes and provider
+  costs remain unmeasured.
+
+- Fix memory regression boundaries: isolate LongMemEval test output in temporary
+  projects, retain private Harness bindings without a lifetime admission quota,
+  sanitize fixed Cursor Git probes, preserve enforced skipped context, recover
+  owned absent rules, and exclude invalid UTF-8 documents per source. Restore
+  CI/local gate parity and receipt privacy assertions after manifest validation.
+
+- Classify isolated LongMemEval controller errors by their actual exception type,
+  without consulting a supplied `__class__` property. Preserve cancellation and
+  primary errors across queries, callback dispatch, construction and finalization;
+  keep ordinary failure and partial-construction semantics unchanged.
+
+- Keep isolated LongMemEval diagnostic clock failures from replacing query or
+  cleanup errors. Clear delivery metadata when a new timer abort prevents return,
+  retain unknown elapsed time, and attempt owned teardown before propagating an
+  observer start-clock interruption. Repeated close stays once-only.
+
+- Drain registered directory-descriptor close attempts in the isolated LongMemEval
+  adapter after individual cleanup errors. Preserve construction primary errors,
+  report the first owner-close error, and never retry retired descriptors or adopt
+  an already-closed ambiguous registry. Attempt bookkeeping does not prove closure.
+
+- Fence further insert/query work in the isolated LongMemEval adapter when a
+  final inserted-file close fails. Retain already-published state and the same
+  exception; do not retry an uncertain descriptor or change teardown behavior.
+
+- Forward optional custody-failure stage metadata through the isolated
+  LongMemEval observer and registered bridge. Canonical bounded dispatch works
+  after close without changing query hooks, frozen views or cost accounting;
+  missing/unsupported observations do not imply source validity or freshness.
+
+- Add optional fixed custody-failure stage metadata to the isolated LongMemEval
+  adapter. Existing guards, fencing and I/O remain unchanged; detached metadata
+  identifies a source region, with root causes and provider costs unmeasured.
+
+- Add an isolated selected-upstream async reader/synchronous judge controller,
+  binding actual SDK argument proxies and supplied usage to owned tickets across
+  awaits, errors and cancellations. Legacy zero-filled reader counters are kept
+  only for compatibility; physical/provider coverage and full costs stay unknown.
+  Fresh offline controls leave automatic production memory unchanged.
+
+- Add a separate isolated Chat receipt controller: budget and seal exact injected
+  request bodies, preserve captured usage through decoder/validation failures,
+  bind attempts to owned tickets, and keep judge requests in a post-gate journal.
+  Physical/provider/SDK coverage and billing remain unknown; fresh offline
+  controls do not claim token savings or change automatic production memory.
+
+- Add bounded supplied ChatCompletion usage capture before answer decoding for the
+  isolated memory benchmark. Missing counters stay unknown; paid supplied usage
+  survives decoder failures/cancellation, without provider/attempt/billing claims.
+  Fresh offline controls include pinned selected reader/judge code with fake SDK
+  values; production memory, defaults and the closed lifecycle remain unchanged.
+
+- Add a local LongMemEval lifecycle controller with fixed-to-native query binding,
+  one-use reader/judge callback tickets, whole-envelope byte selection and an
+  immutable construction gate before evaluator lookup. Frozen native scalar
+  observations join once; retries, cancellation and missing horizon remain
+  accounted. Fresh public controls keep hidden provider coverage/full cost unknown;
+  this modified text reader is separate from the official multimodal runtime.
+
+- Register the isolated FTS5 states adapter through a pinned LongMemEval Memory
+  API contract with strict direct configuration, invocation-bound ordinal hooks,
+  bounded replay, pre-work cancellation and explicit cleanup/persistence refusal.
+  Fresh public controls execute the unchanged stdlib API prefix and native FTS5;
+  the full official environment, reader/judge costs and token benefit remain pending.
+
+- Add a separate fixed-horizon local observation wrapper for the LongMemEval
+  text-projection pilot, connecting native FTS5 operations to the cost ledger.
+  Ordinal receipts retain failure/cancellation and unknown usage; disjoint local
+  timings and exact JSON byte proxies include insertion replay and teardown.
+  Fresh public integration controls keep reader/judge, billing and provider token
+  benefit unmeasured; production automatic memory and runtime defaults unchanged.
+
+- Add an experimental fixed-horizon build/query/reader/judge cost ledger with
+  private physical-attempt identities, independent completeness, inclusive cache
+  accounting and conservative unknown/conflict handling. Fresh literal oracles
+  test full scopes and cost-per-correct arithmetic; runtime/provider integration
+  and actual token benefit remain pending.
+
+- Add an isolated LongMemEval-V2 public-states text projection with exclusive
+  corpus ownership, strict admission and native automatic FTS5 refresh/packing/
+  rendering. Fresh synthetic tests keep evaluator labels and image bodies out;
+  upstream registration, multimodal accuracy and full provider costs are pending.
+
+- Add a private offline Hindsight ingestion journal: frozen public request
+  bodies, monotonic desired generations, committed one-owner reservations and
+  cross-version ambiguous-attempt barriers. Supplied document observations bind
+  a fresh local challenge and complete history; HTTP404 never proves global
+  absence. Suggestions authorize no upload/delete/retry and retain unknown costs.
+  No service executor, default wiring or provider-token benefit is claimed.
+
+- Add an offline operator-approved public-source export and Hindsight ingestion
+  draft planner. Exact scoped approvals, anchored POSIX custody, raw UTF-8 hashes,
+  privacy screening and whole-payload limits precede returned images. Version
+  changes retire current catalogue membership; prior input never proves upload
+  or remote no-op. All current request bodies remain available for reconciliation.
+  No executor, live upload or provider-token savings are claimed.
+
+- Add bounded internal source hints for optional remote recall: native exact
+  indexed-source hydration, raw-byte and normalized hash checks, POSIX custody,
+  ordinary guards and final packing own delivery. Explicit local project/bank/
+  workspace routes prevent cross-project outbound queries. Separate remote
+  diagnostics retain unknown costs on local failure; FTS5 and provider defaults
+  remain unchanged. Fresh public whole-caller tests cover guards, cancellation,
+  history priority and delivered-only manifests/receipts. No live service or
+  provider-token benefit is claimed.
+
+- Add an isolated stdlib Hindsight recall pilot with registered team/project
+  scopes, bounded direct HTTP transport, locally admitted source-byte evidence,
+  whole-envelope budgets and exact local fallback. Remote prose and arbitrary
+  diagnostics cannot enter context; unknown costs remain null. New public
+  offline/loopback controls cover corrections, deletion, isolation and failures.
+  Automatic Harness/native routing, ingestion and live token savings remain
+  pending; local FTS5 defaults and Python runtime requirements are unchanged.
+
+### Earlier unreleased changes
+
 - Keep uppercase `Task/` client applications, specifications and project work
   local instead of versioning them in the accelerator repository. Regenerate
   source inventories without changing installed payloads; use synthetic client

@@ -1,0 +1,45 @@
+{
+  "profile": "teal-startup-working-only-v1",
+  "task_id": "feature/teal-reservoir",
+  "goal": "Inspect Teal reservoir spillway schedule",
+  "progress": "Teal spillway inspection is ready for the eastern crew.",
+  "next": [
+    "Measure the bronze sluice clearance."
+  ],
+  "source": "specs/teal-reservoir.md",
+  "source_text": "# Teal reservoir\n\nThe bronze sluice is inspected every twenty-seven days.\n",
+  "query": "Teal reservoir bronze sluice schedule",
+  "forbidden_fact": "The bronze sluice is inspected every twenty-seven days.",
+  "updated_progress": "The eastern crew completed the Teal gate inspection.",
+  "changed_source": "# Teal reservoir\n\nThe bronze sluice is now inspected every sixty-one days.\n",
+  "expected": {
+    "exit": 1,
+    "layers": "failed",
+    "startup_profile": "read-only-working-v1",
+    "documents": null,
+    "reused": null,
+    "counts": {},
+    "selected": [],
+    "manifest": null,
+    "cached_layers": [],
+    "last_turn": null,
+    "no_match": [],
+    "diagnosis": null,
+    "persisted": false,
+    "working_progress": "Teal spillway inspection is ready for the eastern crew.",
+    "safe_warning": "Memory refresh incomplete: SQLite writes unavailable; retrieval was not consulted.",
+    "unavailable_warning": "Memory refresh incomplete: local state unavailable; retrieval was not consulted."
+  },
+  "cases": [
+    "actual BEGIN IMMEDIATE reservation: CLI returns JSON with fresh task before 1s hook ceiling, no old semantic fact",
+    "actual EXCLUSIVE reservation: honest unknown, no positive output",
+    "explicit read-only: no mkdir/DDL/SQL or filesystem publication, DB byte identity",
+    "missing/old-schema/bad-tokenizer/corrupt: fixed incomplete and no creation/migration",
+    "fresh updated task, revision from canonical record not old binding",
+    "private/terminal/policy-disallowed/changed-source/deleted-source/new-gitignore/private-source/bodysecret/config-malformed/ambiguous task: no working positive",
+    "bound UUID request alias mismatch: no other task context",
+    "lightweight current SQL task projection, no history/doc positives",
+    "actual Claude and Codex one-second hooks same canonical working output",
+    "actual managed Cursor rule drops previous facts on degraded output and custom rule preserved"
+  ]
+}

@@ -14,3 +14,6 @@ infrastructure-creator/tasks/
 # Keep the assignment in Git; implementation and generated work stay local.
 **/Task/app/
 **/Task/project-work/
+# Agent work journals at the repository root are local and temporary: they
+# hold absolute paths of the machine they ran on.
+/tasks/

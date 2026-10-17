@@ -1,0 +1,27 @@
+{
+  "profile": "memory-final-remediation-public-v1",
+  "source": "# Opal routes\n\nOpal routing uses the current verified route.\n",
+  "task_alias": "OPAL-RECEIPT",
+  "task_title": "Verify Opal routes",
+  "result_id": "opal-run-a",
+  "result": {
+    "progress": "Opal routing verified.",
+    "next_steps": [],
+    "verified": true,
+    "learnings": [
+      {
+        "type": "finding",
+        "title": "Opal route boundary",
+        "consequence": "Use the current verified Opal route.",
+        "sources": [
+          "specs/opal.md"
+        ]
+      }
+    ]
+  },
+  "later_progress": "Opal follow-up now uses the revised plan.",
+  "later_consequence": "Opal routing now checks two reviewers.",
+  "cursor_task": "OPAL-CURSOR",
+  "cursor_capsule": "working: OPAL-CURSOR — Opal route verification\n- memory specs/opal.md — Opal routes\n  Use the current verified route.",
+  "cursor_changed": "working: OPAL-CURSOR — Opal route verification\n- memory specs/opal.md — Opal routes\n  Require two current reviewers."
+}

@@ -1,0 +1,38 @@
+{
+  "profile": "native-fts5/public-states-text-projection-v1",
+  "documents": [
+    {
+      "id": "keel-lantern",
+      "path": "specs/longmemeval/trajectory-b72f55f4aa5737aa3a00a05f3bd012d96169d24cf45099fba359865e50a831f1.md",
+      "text": "# Recorded trajectory b72f55f4aa5737aa3a00a05f3bd012d96169d24cf45099fba359865e50a831f1\n\nGoal: \"Inspect the public ferry safety board\"\nStart URL: \"https://training.invalid/ferry\"\nOutcome: \"Board inspected\"\n\n## Recorded state 0 (step 2)\nURL: \"https://training.invalid/ferry\"\nArrival action: null\nThought: null\nScreenshot reference (not ingested): \"screenshots/keel-lantern/2.png\"\n\nRecorded text:\n\nKeel lantern ferry boarding uses the amber ramp.\n\n## Recorded state 1 (step 7)\nURL: \"https://training.invalid/ferry/safety\"\nArrival action: \"open safety panel\"\nThought: \"Check the storm rule\"\nScreenshot reference (not ingested): \"screenshots/keel-lantern/7.png\"\n\nRecorded text:\n\nKeel lantern ferry storm closure requires the silver bell.\n",
+      "sha256": "62c509ff878ea70c0bcda88ea3fe38ac032c4935a7a4d35e726c2ed84d7a8a98",
+      "state_count": 2,
+      "input_sha256": "ba30eb2374e4a462c13c5b7a76f99e74a363246bb585ba243ac9dac151ede603"
+    },
+    {
+      "id": "copper-gear",
+      "path": "specs/longmemeval/trajectory-d45a7a6b62271f158d827bd5d787b7db29948f5b267fdda9e4fe3cb4a36e65a5.md",
+      "text": "# Recorded trajectory d45a7a6b62271f158d827bd5d787b7db29948f5b267fdda9e4fe3cb4a36e65a5\n\nGoal: \"Inspect the public calibration station\"\nStart URL: \"https://training.invalid/gear\"\nOutcome: null\n\n## Recorded state 0 (step 0)\nURL: \"https://training.invalid/gear\"\nArrival action: null\nThought: null\nScreenshot reference (not ingested): \"screenshots/copper-gear/0.png\"\n\nRecorded text:\n\nCopper gear station calibration uses the cobalt pin.\n",
+      "sha256": "2d69582f1604d6a199bb28f5c6791f055d2277e19eb65afb7080f4e07b868182",
+      "state_count": 1,
+      "input_sha256": "77af82474acb63d405f9de5db3fdc712c027bfedaad3a8382c86c7e9336e9f24"
+    },
+    {
+      "id": "sable-tide",
+      "path": "specs/longmemeval/trajectory-9d6132ee73fd39eb5ab001b13c3a48e435c38235b598ade345587b958d71865f.md",
+      "text": "# Recorded trajectory 9d6132ee73fd39eb5ab001b13c3a48e435c38235b598ade345587b958d71865f\n\nGoal: \"Inspect the public tide timetable\"\nStart URL: \"https://training.invalid/tides\"\nOutcome: null\n\n## Recorded state 0 (step 9)\nURL: \"https://training.invalid/tides\"\nArrival action: null\nThought: null\nScreenshot reference (not ingested): \"screenshots/sable-tide/9.png\"\n\nRecorded text:\n\nSable tide timetable maintenance occurs during the violet interval.\n",
+      "sha256": "0831a5c6c3e1285696311a2d79e051260c2f7780c6bf3b8333c7d8cf741dbe2a",
+      "state_count": 1,
+      "input_sha256": "7dde89a80ad4ac98f55f27e8d70162b24b44603f58289f9dc6a72cd96da894fa"
+    }
+  ],
+  "support": {
+    "ferry": "Keel lantern ferry storm closure requires the silver bell.",
+    "gear": "Copper gear station calibration uses the cobalt pin."
+  },
+  "no_match_context": [],
+  "model_calls": 0,
+  "images_ingested": 0,
+  "published_benchmark_results": false,
+  "precall_correction": "Neutral opaque title avoids the native unsanitized title channel. Original literal oracle is retained separately; this complete supplement precedes implementation change and all calls."
+}

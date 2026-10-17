@@ -1,0 +1,53 @@
+{
+  "profile": "NEW_memory_regression_fix_controls",
+  "history_rows": 300,
+  "utf8": {
+    "valid_path": "specs/compass.md",
+    "valid_text": "# Compass\n\nCompass navigation follows amber beacons.\n",
+    "bad_path": "docs/legacy.md",
+    "before_text": "# Orchid\n\nOrchid navigation uses coral bearings.\n",
+    "invalid_cp1251_hex": "d2e5f1f2",
+    "expected_excluded": {
+      "path": "docs/legacy.md",
+      "reason": "invalid-utf8"
+    },
+    "expected_invalid_index_rows": 0,
+    "expected_valid_index_rows": 1
+  },
+  "isolation": [
+    {
+      "name": "fixedroot_export",
+      "source": "from pathlib import Path\nART = Path('/synthetic/.codex/visualizations/experiment')\nif (ART / 'RUN-CURRENT.json').exists():\n    (ART / 'NATIVE.json').write_text('synthetic')\n",
+      "expected_private_literals": [
+        "/synthetic/.codex/visualizations/experiment",
+        "RUN-CURRENT.json"
+      ]
+    },
+    {
+      "name": "split_literal_export",
+      "source": "marker = 'RUN-' + 'CURRENT.json'\n",
+      "expected_private_literals": [
+        "RUN-CURRENT.json"
+      ]
+    },
+    {
+      "name": "temporary_export",
+      "source": "from tempfile import TemporaryDirectory\nfrom pathlib import Path\nwith TemporaryDirectory() as directory:\n    (Path(directory) / 'construction.json').write_text('synthetic')\n",
+      "expected_private_literals": []
+    }
+  ],
+  "cursor_env": {
+    "GIT_EDITOR": "true",
+    "GIT_SSH_COMMAND": "uninvoked-placeholder",
+    "GIT_ASKPASS": "uninvoked-placeholder",
+    "GIT_OPTIONAL_LOCKS": "0"
+  },
+  "cursor_oracles": [
+    "same-task-enforce-skip-kept",
+    "other-task-skip-retires-provenrule",
+    "oldforeignrule-diagnostic-notadopted",
+    "ownedabsent-rule-recreated",
+    "samebytes-sameinode-ctime-reconciled",
+    "replacedinode-notadopted"
+  ]
+}

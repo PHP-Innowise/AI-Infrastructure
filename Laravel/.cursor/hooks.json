@@ -14,7 +14,7 @@
     "beforeSubmitPrompt": [
       {
         "command": ".cursor/hooks/working-memory-read.sh",
-        "timeout": 8
+        "timeout": 10
       },
       {
         "command": ".cursor/hooks/context-continuity.sh",
@@ -59,7 +59,8 @@
     "stop": [
       {
         "command": ".cursor/hooks/working-memory-write.sh",
-        "timeout": 15
+        "timeout": 20,
+        "loop_limit": 1
       }
     ]
   }

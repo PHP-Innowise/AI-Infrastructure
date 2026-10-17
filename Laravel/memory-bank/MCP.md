@@ -87,15 +87,37 @@ Use `CONTEXT_TASK_ID`, otherwise the branch task. On detached HEAD, use an expli
 existing task ID. Do not create another task for the same work. Saving runs promotion
 under the existing setting. A learning's record is named by its content, so a retry,
 or a later result restating it, finds that record instead of writing a second one.
-Replaying the same `result_id` and content finishes a save that stopped half way and
-never rolls back what was saved since; a lost local receipt is covered by the task
-already holding the result. A learning a person corrected is theirs: no agent
-overwrites it, and a revised learning's chunk supersedes the one promoted before. Different
-content under an existing result ID, stale revisions (refused before anything is
-written), unauthorized actors and private sources are refused. Without MCP,
-`python3 memory-bank/scripts/context.py record-result --task-id ID --result-id RID
---revision auto --input result.json` is the same write path, and so is the
-Harness's save at the end of a run. Completion remains explicit.
+A shared metadata-only result-attempt fence precedes record changes. Exact
+completed proof permits passive replay and preserves later task/learning edits,
+even when the disposable local receipt is missing. A new v2 started attempt
+resumes at its exact positively observed record/task frontier when source,
+policy, owner and runtime scope are unchanged. Any other interrupted attempt with
+the same result ID, digest, owner and attestation runs again from the start:
+a learning is created only when absent, finished only when it is exactly this
+save's open record, revised only under the usual proofs, and the task takes only
+progress it does not already hold. Losing both proofs does not prove historical
+ownership or authorize adoption; preserve result-attempt metadata with the
+shared Brain state. It lives in `project-brain/control/result-attempts/<task UUID>/`,
+one file per task, result ID and request content: another clone that reuses a
+result ID for other content makes its own save, and the two clones' files merge
+without a conflict. A finished save keeps only a small proof, the newest 64 per
+task; compaction removes an archived task's folder and the
+`control/result-learning-images/` of archived learnings. The installer excludes another project's attempts.
+This is consistency/application ordering, not authentication or a power-loss transaction.
+
+New writes use the current positive task revision. CLI `--revision auto` captures
+it under lock, including tasks already updated by hooks; it never rebases an
+ambiguous prior attempt. Unchanged runtime-owned agent knowledge can be reworded
+automatically using its exact saved UUID/revision/byte image. A manual/person
+change invalidates that proof. Deliberate correction may supply the original
+positive learning `expected_revision`; never invent one. A protected, archived,
+wrong-kind or conflicting learning is retained individually with revision/reason;
+independent progress, next steps and valid facts still save. Stale numeric task
+CAS, privacy, source and request-identity violations remain hard refusals.
+Without MCP: `python3 memory-bank/scripts/context.py record-result --task-id ID
+--result-id RID --revision auto --input result.json`. Harness captures
+the native task identity and original safe request automatically; generic stale
+errors never authorize rebasing an uncertain retry. Completion remains explicit.
 
 Without MCP use the installed context CLI and Project Brain protocol. `/memory`
 refreshes layers; `/checkpoint` saves working continuity; reusable knowledge needs

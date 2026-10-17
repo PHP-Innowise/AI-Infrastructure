@@ -1,0 +1,19 @@
+{
+  "query": "Juniper porcelain wheel",
+  "task": "juniper-memory",
+  "source": "src/JuniperWheel.php",
+  "valid": "docs/juniper-桜-é.md",
+  "title": "Juniper porcelain wheel",
+  "summary": "Juniper porcelain wheel",
+  "text": "---\ndescription: Juniper porcelain wheel\n---\n# Juniper porcelain wheel\n\nThe porcelain wheel keeps a linen washer.\n",
+  "fact": "The porcelain wheel keeps a linen washer.",
+  "invalid_basename_hex": "6a756e697065722dff2d6e6f74652e6d64",
+  "invalid_body_path": "docs/juniper-corrupt.md",
+  "invalid_body_hex": "fffe4a554e495045525f5055424c49435f4445434f44455f43414e415259",
+  "old_valid": "docs/juniper-before-rename.md",
+  "path_notice": "sources omitted: invalid UTF-8 paths 1",
+  "body_notice": "sources omitted: invalid UTF-8 content 1",
+  "chunk_path": "memory-bank/chunks/MEM-1684-juniper-wheel.md",
+  "chunk_metadata": {"id": "MEM-1684", "title": "Juniper public wheel", "type": "constraint", "status": "active", "scope": ["public"], "tags": ["juniper"], "created": "2026-10-01", "last_verified": "2026-10-01", "review_after": "2032-10-01", "sources": ["src/JuniperWheel.php"], "supersedes": [], "superseded_by": null},
+  "provider_usage": null
+}

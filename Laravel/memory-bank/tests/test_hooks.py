@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -44,12 +45,66 @@ def hook_path(tool: str, name: str) -> Path:
     return EDITION_ROOT / MIRRORS[tool][0] / name
 
 
+def install_session_fixture(root: Path) -> Path:
+    """Copy executable inputs, never the edition's records or ignored state.
+
+    Session hooks derive their runtime from BASH_SOURCE, not cwd. A throwaway
+    Git cwd/TMPDIR alone therefore does not isolate their memory writes.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    for relative in ('memory-bank/scripts', 'memory-bank/templates',
+                     'project-brain/config', 'project-brain/schemas', 'project-brain/templates'):
+        source = EDITION_ROOT / relative
+        if source.is_dir():
+            shutil.copytree(source, root / relative,
+                            ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    for relative in ('AGENTS.md', 'README.md', 'VERSION', '.accelerator-policy-lock.json',
+                     '.gitignore', 'memory-bank/README.md', 'project-brain/README.md',
+                     'project-brain/PROTOCOL.md'):
+        source = EDITION_ROOT / relative
+        if source.is_file():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, root / relative)
+    for hooks, _, _ in MIRRORS.values():
+        (root / hooks).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(EDITION_ROOT / hooks / 'local-context.sh', root / hooks / 'local-context.sh')
+    (root / 'memory-bank/chunks').mkdir(parents=True)
+    (root / 'memory-bank/INDEX.md').write_text('# Memory Index\n', encoding='utf-8')
+    (root / 'project-brain/indexes').mkdir(parents=True)
+    (root / 'project-brain/indexes/active.json').write_text('{}\n', encoding='utf-8')
+    return root
+
+
+def cursor_stub_cli(cli: Path, body: str, encoding="utf-8") -> None:
+    """Fake retrieval only; rule custody uses a real runtime in this fixture."""
+    real = cli.with_name("context-real.py")
+    if not real.exists():
+        for source in (EDITION_ROOT / "memory-bank/scripts").glob("*.py"):
+            shutil.copy2(source, cli.parent / source.name)
+        cli.rename(real)
+        subprocess.run(["git", "init", "--quiet", str(cli.parents[2])], check=True, capture_output=True)
+    cli.write_text("import pathlib, runpy, sys\n"
+        "if sys.argv[1:2] and sys.argv[1] in ('cursor-rule', 'cursor-rule-retire'):\n"
+        "    runpy.run_path(str(pathlib.Path(__file__).with_name('context-real.py')), run_name='__main__')\n"
+        "    sys.exit(0)\n" + body, encoding=encoding)
+
+
+def cursor_owned_rule(cli: Path, task: str, phase="session") -> str:
+    result = subprocess.run([sys.executable, str(cli), "cursor-rule", "--action", "write",
+        "--task-id", task, "--phase", phase], input="working: " + task + " - owned fixture",
+        capture_output=True, text=True, timeout=HOOK_TIMEOUT)
+    if result.returncode or json.loads(result.stdout).get("state") not in ("written", "unchanged"):
+        raise AssertionError("Fixture failed to establish prospective rule custody: " + result.stdout)
+    return (cli.parents[2] / ".cursor/rules/working-memory.mdc").read_text(encoding="utf-8")
+
+
 def run_hook(
     tool: str,
     name: str,
     payload,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
+    edition_root: Path | None = None,
 ):
     """Run a hook the way the harness does: bash, JSON payload on stdin."""
     stdin = payload if isinstance(payload, str) else json.dumps(payload)
@@ -58,7 +113,7 @@ def run_hook(
         merged_env = dict(os.environ)
         merged_env.update(env)
     return subprocess.run(
-        [BASH, str(hook_path(tool, name))],
+        [BASH, str((edition_root / MIRRORS[tool][0] / name) if edition_root else hook_path(tool, name))],
         input=stdin,
         capture_output=True,
         text=True,
@@ -336,6 +391,7 @@ class BashValidatorTest(FakeRepoMixin, unittest.TestCase):
         base = Path(self._tmp.name) / "tmpdir"
         base.mkdir()
         env = {"TMPDIR": str(base)}
+        session_root = install_session_fixture(base / 'edition')
 
         def run(tool: str, session: str):
             payload = dict(self.payload("vendor/bin/phpunit --filter Shared"), session_id=session)
@@ -353,6 +409,7 @@ class BashValidatorTest(FakeRepoMixin, unittest.TestCase):
                 started = run_hook(
                     tool, "local-context.sh", {"session_id": "session-c", "hook_event_name": "SessionStart"},
                     cwd=self.repo_a, env=env,
+                    edition_root=session_root,
                 )
                 self.assertEqual(0, started.returncode, started.stderr)
                 sixth = run(tool, "session-a")
@@ -749,13 +806,17 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
         self._cache_tmp = tempfile.TemporaryDirectory(prefix="hook-cache-")
         self.cache_root = Path(self._cache_tmp.name)
         self.addCleanup(self._cache_tmp.cleanup)
+        self.session_root = install_session_fixture(self.cache_root / 'edition')
 
-    @staticmethod
-    def edition_key() -> str:
+    def edition_key(self) -> str:
         # EDITION_KEY exactly as the hook computes it (edition root -> cksum).
         return shell_line(
-            'printf %s "$1" | cksum | cut -d" " -f1', str(EDITION_ROOT)
+            'printf %s "$1" | cksum | cut -d" " -f1', str(self.session_root)
         )
+
+    def run_session(self, tool, payload, *, env):
+        return run_hook(tool, self.HOOK, payload, cwd=self.repo_a, env=env,
+                        edition_root=self.session_root)
 
     def cache_entries(self, tmp_root: Path, kind: str) -> list[Path]:
         cache_dir = tmp_root / "ai-accelerator-session-cache-{}".format(
@@ -776,14 +837,14 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
                 tmp_root.mkdir(exist_ok=True)
                 env = {"TMPDIR": str(tmp_root)}
 
-                first = run_hook(tool, self.HOOK, "", cwd=self.repo_a, env=env)
+                first = self.run_session(tool, "", env=env)
                 self.assertEqual(first.returncode, 0, first.stderr)
                 self.assertIn("brain-validation=", first.stdout)
                 self.assertEqual(len(self.cache_entries(tmp_root, "brain-validation")), 1)
 
                 # Unchanged repository state: the cached result is served and
                 # the banner is byte-identical.
-                second = run_hook(tool, self.HOOK, "", cwd=self.repo_a, env=env)
+                second = self.run_session(tool, "", env=env)
                 self.assertEqual(second.returncode, 0, second.stderr)
                 self.assertEqual(second.stdout, first.stdout)
                 self.assertEqual(len(self.cache_entries(tmp_root, "brain-validation")), 1)
@@ -793,7 +854,7 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
                 marker = self.repo_a / "invalidate-cache.txt"
                 marker.write_text("state change", encoding="utf-8")
                 try:
-                    third = run_hook(tool, self.HOOK, "", cwd=self.repo_a, env=env)
+                    third = self.run_session(tool, "", env=env)
                 finally:
                     marker.unlink()
                 self.assertEqual(third.returncode, 0, third.stderr)
@@ -815,7 +876,7 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
                 self.assertEqual(len(counter_files(dir_a)), 1)
                 self.assertEqual(len(counter_files(dir_b)), 1)
 
-                result = run_hook(tool, self.HOOK, "", cwd=self.repo_a, env=env)
+                result = self.run_session(tool, "", env=env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(counter_files(dir_a), [])
                 self.assertEqual(len(counter_files(dir_b)), 1)
@@ -840,9 +901,8 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
                 (stale,) = [p for p in counter_files(directory) if p.name.startswith("edit-stale-")]
                 old = time.time() - 2 * 86400
                 os.utime(stale, (old, old))
-                result = run_hook(
-                    tool, self.HOOK, {"session_id": "starting", "hook_event_name": "SessionStart"},
-                    cwd=self.repo_a, env=env,
+                result = self.run_session(
+                    tool, {"session_id": "starting", "hook_event_name": "SessionStart"}, env=env,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(
@@ -872,8 +932,10 @@ class WorkingMemoryRuleTest(unittest.TestCase):
             with self.subTest(hook=hook):
                 cursor_text = hook_path("cursor", hook).read_text(encoding="utf-8")
                 self.assertIn("working-memory.mdc", cursor_text)
-                self.assertIn("alwaysApply: true", cursor_text)
-                self.assertIn("current-branch session context", cursor_text)
+                self.assertIn("cursor-rule", cursor_text)
+                runtime = (EDITION_ROOT / "memory-bank/scripts/context_retrieval.py").read_text(encoding="utf-8")
+                self.assertIn("alwaysApply: true", runtime)
+                self.assertIn("current-branch session context", runtime)
                 for tool in ("claude", "codex"):
                     text = hook_path(tool, hook).read_text(encoding="utf-8")
                     self.assertNotIn("working-memory.mdc", text)
@@ -1160,6 +1222,8 @@ class ReadHookInputTest(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("exceeded its 1s budget", result.stdout)
+            self.assertIn("build the index once outside the hook: "
+                          "python3 memory-bank/scripts/context.py index", result.stdout)
             self.assertIn("NOT consulted this turn", result.stdout)
 
     def test_a_quiet_successful_refresh_stays_silent(self) -> None:
@@ -1171,6 +1235,342 @@ class ReadHookInputTest(unittest.TestCase):
                     self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
 
 
+@unittest.skipUnless(os.name == "posix", "POSIX stand-ins for Windows interpreters")
+class PythonResolutionTest(unittest.TestCase):
+    """The hooks find Python 3.9+ by whichever name the shell has it.
+
+    Native Windows (Git Bash) often has no working python3: the python.org
+    installer provides python and py, and the python3 found there may be the
+    Microsoft Store stub, which only offers to install Python. The hooks
+    named only python3, so there memory was neither read nor written.
+    """
+
+    STORE_STUB = (
+        "#!/bin/sh\n"
+        "echo 'Python was not found; run without arguments to install from the Microsoft Store, "
+        "or disable this shortcut from Settings > Manage App Execution Aliases.' >&2\n"
+        "exit 49\n"
+    )
+    HOOKS = ("working-memory-read.sh", "working-memory-write.sh", "context-continuity.sh",
+             "subagent-dispatch.sh", "local-context.sh")
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="python-names-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+
+    def stand_in(self, name: str, body: str) -> None:
+        path = self.bin / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+
+    def without_python(self) -> str:
+        """This PATH's programs, every Python interpreter left out."""
+        tools = self.root / "tools"
+        if not tools.is_dir():
+            tools.mkdir()
+            for directory in os.environ.get("PATH", "").split(os.pathsep):
+                try:
+                    entries = list(os.scandir(directory or "."))
+                except OSError:
+                    continue
+                for entry in entries:
+                    if entry.name.startswith("python") or entry.name == "py":
+                        continue
+                    if not (tools / entry.name).exists() and os.access(entry.path, os.X_OK):
+                        (tools / entry.name).symlink_to(entry.path)
+        return str(tools)
+
+    def windows(self, *names: str) -> dict:
+        """python3 is the Store stub; the interpreter answers to ``names``."""
+        self.stand_in("python3", self.STORE_STUB)
+        for name in names:
+            if name == "py":
+                # The launcher picks a Python 3 with -3 and passes the rest on.
+                self.stand_in("py", '#!/bin/sh\n[ "$1" = -3 ] || exit 9\nshift\n'
+                              f'exec {shlex.quote(sys.executable)} "$@"\n')
+            else:
+                self.stand_in(name, f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+        return {"OS": "Windows_NT", "PATH": str(self.bin) + os.pathsep + self.without_python()}
+
+    def run_hook(self, tool: str, name: str, env: dict, payload=None, runtime="context.py"):
+        """``name`` against a runtime stand-in that records its arguments."""
+        project = self.root / tool
+        hooks = project / MIRRORS[tool][0]
+        hooks.mkdir(parents=True, exist_ok=True)
+        shutil.copy(hook_path(tool, name), hooks)
+        argv_file = project / "argv.json"
+        script = project / "memory-bank/scripts" / runtime
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(
+            "import json, pathlib, sys\n"
+            f"pathlib.Path({str(argv_file)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+            "if sys.argv[1:2] == ['status']:\n"
+            "    print(json.dumps({'mode': 'governed', 'working': 0, 'documents': 3, 'database': ''}))\n"
+            "else:\n"
+            "    print('working: TASK-INPUT')\n",
+            encoding="utf-8",
+        )
+        lock_dir = self.root / "locks"
+        lock_dir.mkdir(exist_ok=True)
+        result = subprocess.run(
+            [BASH, str(hooks / name)],
+            input=json.dumps(payload if payload is not None else {"prompt": "cobalt allocation"}),
+            capture_output=True,
+            text=True,
+            cwd=str(project),
+            env={**os.environ, "CONTEXT_TASK_ID": "TASK-INPUT", "CONTEXT_CAPSULE_DELIVERED": "",
+                 "SUBAGENT_WRITE_LOCK_DIR": str(lock_dir), **env},
+            timeout=HOOK_TIMEOUT,
+        )
+        argv = json.loads(argv_file.read_text(encoding="utf-8")) if argv_file.exists() else None
+        return result, argv
+
+    def test_the_prompt_hook_reads_memory_through_python_or_py(self) -> None:
+        for names in (("python",), ("py",)):
+            for tool in ("claude", "codex"):
+                with self.subTest(names=names, tool=tool):
+                    self.setUp()
+                    result, argv = self.run_hook(tool, "working-memory-read.sh", self.windows(*names))
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual("working: TASK-INPUT\n", result.stdout)
+                    self.assertEqual("cobalt allocation", argv[argv.index("--query") + 1])
+
+    def test_the_turn_continuity_and_dispatch_hooks_reach_their_runtime(self) -> None:
+        env = self.windows("python")
+        _, argv = self.run_hook("claude", "working-memory-write.sh", env, {})
+        self.assertEqual(["turn", "--task-id", "TASK-INPUT"], argv[:3])
+        _, argv = self.run_hook("codex", "context-continuity.sh", env,
+                                {"hook_event_name": "UserPromptSubmit", "prompt": "cobalt allocation"},
+                                runtime="context_continuity.py")
+        self.assertEqual(["--host", "codex", "--event", "hook"], argv[2:])
+        result, argv = self.run_hook("claude", "subagent-dispatch.sh", env,
+                                     {"hook_event_name": "SubagentStop", "agent_type": "reviewer",
+                                      "last_assistant_message": "done"})
+        self.assertEqual("", result.stdout)
+        self.assertEqual(["msg-dispatch", "--task-id", "TASK-INPUT", "--agent", "reviewer"],
+                         argv[argv.index("msg-dispatch"):argv.index("msg-dispatch") + 5])
+
+    def test_the_session_banner_reads_status_and_names_a_missing_python(self) -> None:
+        result, _ = self.run_hook("claude", "local-context.sh", self.windows("python"), {})
+        self.assertIn("Context governance: mode=governed", result.stdout)
+        self.setUp()
+        result, _ = self.run_hook("claude", "local-context.sh", self.windows(), {})
+        self.assertIn("Context governance: unavailable - no Python 3.9+ found", result.stdout)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_the_session_names_the_interpreter_where_python3_is_not_python(self) -> None:
+        # The policy names the CLI as python3; the agent needs the name that
+        # works here, and permission to run it.
+        result, _ = self.run_hook("claude", "local-context.sh", self.windows("py"), {})
+        self.assertIn("Python here is `py -3`, not python3", result.stdout)
+        self.setUp()
+        result, _ = self.run_hook("codex", "local-context.sh", {}, {})
+        self.assertNotIn("Python here is", result.stdout)
+        allowed = json.loads((EDITION_ROOT / ".claude/settings.json").read_text(encoding="utf-8"))["permissions"]["allow"]
+        for interpreter in ("python3", "python", "py -3"):
+            self.assertIn(f"Bash({interpreter} memory-bank/scripts/context.py:*)", allowed)
+        cursor = json.loads((EDITION_ROOT / ".cursor/cli.json").read_text(encoding="utf-8"))["permissions"]["allow"]
+        for interpreter in ("python3", "python"):
+            self.assertIn(f"Shell({interpreter}:memory-bank/scripts/context.py*)", cursor)
+
+    def test_windows_remembers_the_python_it_found(self) -> None:
+        # Every hook started an interpreter just to ask its version: two to
+        # four a turn on Windows, where a start is slowest.
+        probes = self.root / "probes.log"
+        self.stand_in("python3", self.STORE_STUB)
+        counting = (f'#!/bin/sh\ncase "$*" in *"-I -S -c"*) echo probe >> {shlex.quote(str(probes))};; esac\n'
+                    f'exec {shlex.quote(sys.executable)} "$@"\n')
+        self.stand_in("python", counting)
+        env = {"OS": "Windows_NT", "TMPDIR": str(self.root),
+               "PATH": str(self.bin) + os.pathsep + self.without_python()}
+        for _ in range(3):
+            result, _ = self.run_hook("claude", "working-memory-read.sh", env)
+            self.assertEqual("working: TASK-INPUT\n", result.stdout)
+        self.assertEqual(1, probes.read_text(encoding="utf-8").count("probe"))
+        # Found at another path - reinstalled, or first on PATH now: asked again.
+        moved = self.root / "moved"
+        moved.mkdir()
+        (moved / "python").write_text(counting, encoding="utf-8")
+        (moved / "python").chmod(0o755)
+        env["PATH"] = str(moved) + os.pathsep + env["PATH"]
+        result, _ = self.run_hook("claude", "working-memory-read.sh", env)
+        self.assertEqual("working: TASK-INPUT\n", result.stdout)
+        self.assertEqual(2, probes.read_text(encoding="utf-8").count("probe"))
+
+    def test_no_python_leaves_the_prompt_alone(self) -> None:
+        # Nothing to run memory with: silent, as without python3 before.
+        result, argv = self.run_hook("claude", "working-memory-read.sh", self.windows())
+        self.assertEqual((0, ""), (result.returncode, result.stdout))
+        self.assertIsNone(argv)
+
+    def test_python3_elsewhere_is_taken_without_a_probe(self) -> None:
+        # Off Windows the found python3 is trusted: no interpreter start is
+        # spent on every hook. A python3 that is not Python fails the turn
+        # visibly instead of silently, as it always did.
+        self.stand_in("python3", self.STORE_STUB)
+        self.stand_in("python", f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+        env = {"OS": "", "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", "")}
+        result, argv = self.run_hook("claude", "working-memory-read.sh", env)
+        self.assertIsNone(argv)
+        self.assertIn("Memory refresh unavailable: it exited 49", result.stdout)
+
+    def test_every_hook_runs_python_through_one_resolver(self) -> None:
+        resolver = None
+        for tool in MIRRORS:
+            for name in self.HOOKS:
+                with self.subTest(tool=tool, hook=name):
+                    text = hook_path(tool, name).read_text(encoding="utf-8")
+                    start = text.index("resolve_python() {\n")
+                    end = text.index("\n}\n", start) + 3
+                    resolver = resolver or text[start:end]
+                    self.assertEqual(resolver, text[start:end])
+                    rest = text[:start] + text[end:]
+                    # A python3 or python standing as a command, not named in text.
+                    call = re.compile(r"(?:^|[;&|(]|\$\(|\btimeout\s+\S+|\brun|\bexec)\s*python3?\b")
+                    bare = [line for line in rest.splitlines()
+                            if not line.lstrip().startswith(("#", "echo ")) and call.search(line.strip())]
+                    self.assertEqual([], bare)
+
+
+@unittest.skipUnless(shutil.which("git"), "Git")
+class RebaseIdentityTest(unittest.TestCase):
+    """A rebase detaches HEAD on the commits it replays, and the branch being
+    rebased is still the work in hand - often the conflict a turn asks about.
+    The read hook named no task there, so the turn read no memory."""
+
+    def run_read_hook(self, tool: str, state: str | None = None):
+        with tempfile.TemporaryDirectory(prefix="rebase-identity-") as directory:
+            root = Path(directory)
+            hooks = root / MIRRORS[tool][0]
+            hooks.mkdir(parents=True)
+            shutil.copy(hook_path(tool, "working-memory-read.sh"), hooks)
+            argv_file = root / "argv.json"
+            cli = root / "memory-bank/scripts/context.py"
+            cli.parent.mkdir(parents=True)
+            cli.write_text("import json, pathlib, sys\n"
+                           f"pathlib.Path({str(argv_file)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+                           "print('working: rebased')\n", encoding="utf-8")
+            env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "CONTEXT_"))}
+            env.update(HOME=directory, GIT_CONFIG_NOSYSTEM="1")
+            for arguments in (("init", "-q", "-b", "feature/rebased"),
+                              ("-c", "user.email=r@example.invalid", "-c", "user.name=R",
+                               "commit", "-q", "--allow-empty", "-m", "base"),
+                              ("checkout", "-q", "--detach")):
+                subprocess.run(["git", "-C", directory, *arguments], env=env, check=True,
+                               capture_output=True, timeout=HOOK_TIMEOUT)
+            if state is not None:
+                (root / ".git" / state).mkdir()
+                (root / ".git" / state / "head-name").write_text("refs/heads/feature/rebased\n", encoding="utf-8")
+            result = subprocess.run([BASH, str(hooks / "working-memory-read.sh")],
+                                    input=json.dumps({"prompt": "resolve the ledger conflict"}),
+                                    capture_output=True, text=True, env=env, timeout=HOOK_TIMEOUT)
+            argv = json.loads(argv_file.read_text(encoding="utf-8")) if argv_file.exists() else None
+            return result, argv
+
+    def test_a_rebase_reads_the_branch_it_rewrites(self) -> None:
+        for tool in ("claude", "codex"):
+            for state in ("rebase-merge", "rebase-apply"):
+                with self.subTest(tool=tool, state=state):
+                    result, argv = self.run_read_hook(tool, state)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual("feature/rebased", argv[argv.index("--task-id") + 1])
+                    self.assertEqual("feature/rebased", argv[argv.index("--expected-branch") + 1])
+
+    def test_any_other_detached_head_names_no_task(self) -> None:
+        _, argv = self.run_read_hook("claude")
+        self.assertNotIn("--task-id", argv)
+
+    def run_write_hook(self, tool, state=None, *, ref="refs/heads/feature/rebased",
+                       explicit=None, attached=False, linked=False):
+        with tempfile.TemporaryDirectory(prefix="rebase stop identity ") as directory:
+            base = Path(directory)
+            root = base / "tooling" if attached else base / "project"
+            root.mkdir()
+            project = base / "source project" if attached else root
+            project.mkdir(exist_ok=True)
+            hooks = root / MIRRORS[tool][0]
+            hooks.mkdir(parents=True)
+            shutil.copy(hook_path(tool, "working-memory-write.sh"), hooks)
+            argv_file = base / "argv.ndjson"
+            cli = root / "memory-bank/scripts/context.py"
+            cli.parent.mkdir(parents=True)
+            cli.write_text("import json, pathlib, sys\n"
+                           f"with pathlib.Path({str(argv_file)!r}).open('a') as out:\n"
+                           "    out.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                           "print('working: rebased')\n", encoding="utf-8")
+            env = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_"))}
+            env.update(GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0")
+            def git(*args):
+                return subprocess.run(["git", "-C", str(project), *args], env=env,
+                    check=True, capture_output=True, text=True, timeout=HOOK_TIMEOUT)
+            git("init", "-q", "-b", "feature/rebased")
+            git("-c", "user.email=r@example.invalid", "-c", "user.name=R",
+                "commit", "-q", "--allow-empty", "-m", "base")
+            if linked:
+                worktree = base / "linked project"
+                git("worktree", "add", "-q", "--detach", str(worktree))
+                project = worktree
+            else:
+                git("checkout", "-q", "--detach")
+            git_dir = Path(git("rev-parse", "--absolute-git-dir").stdout.strip())
+            if state:
+                (git_dir / state).mkdir()
+                (git_dir / state / "head-name").write_text(ref + "\n", encoding="utf-8")
+            if attached or linked:
+                env.update(ACCELERATOR_HOME=str(root), ACCELERATOR_PROJECT_DIR=str(project),
+                           ACCELERATOR_STATE_DIR=str(base / "local state"))
+            if explicit:
+                env["CONTEXT_TASK_ID"] = explicit
+            result = subprocess.run([BASH, str(hooks / "working-memory-write.sh")], input="{}",
+                capture_output=True, text=True, env=env, timeout=HOOK_TIMEOUT)
+            calls = [json.loads(line) for line in argv_file.read_text().splitlines()] if argv_file.exists() else []
+            self.assertEqual(0, result.returncode, result.stderr)
+            return [args for args in calls if args and args[0] == "turn"]
+
+    def test_stop_checkpoints_the_rebased_branch_for_each_host_and_backend(self):
+        for tool in MIRRORS:
+            for state in ("rebase-merge", "rebase-apply"):
+                with self.subTest(tool=tool, state=state):
+                    calls = self.run_write_hook(tool, state)
+                    self.assertEqual(1, len(calls))
+                    self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
+                    self.assertEqual("5", calls[0][calls[0].index("--flush-after") + 1])
+
+    def test_stop_without_rebase_keeps_detached_head_unbound(self):
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                self.assertEqual([], self.run_write_hook(tool))
+
+    def test_stop_rejects_non_branch_rebase_names(self):
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                self.assertEqual([], self.run_write_hook(tool, "rebase-merge", ref="refs/tags/rebased"))
+
+    def test_explicit_stop_task_overrides_rebase_identity(self):
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                calls = self.run_write_hook(tool, "rebase-merge", explicit="TASK-EXPLICIT")
+                self.assertEqual(1, len(calls))
+                self.assertEqual("TASK-EXPLICIT", calls[0][calls[0].index("--task-id") + 1])
+
+    def test_attached_stop_uses_source_project_rebase_with_spaces(self):
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                calls = self.run_write_hook(tool, "rebase-apply", attached=True)
+                self.assertEqual(1, len(calls))
+                self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
+
+    def test_stop_uses_linked_worktree_rebase_state(self):
+        calls = self.run_write_hook("codex", "rebase-merge", linked=True)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
+
+
+@unittest.skipUnless(os.name == "posix", "Anchored Cursor custody requires POSIX")
 class CursorPromptHookTest(unittest.TestCase):
     """Cursor's beforeSubmitPrompt hook: the prompt's capsule goes into the rule.
 
@@ -1204,7 +1604,7 @@ class CursorPromptHookTest(unittest.TestCase):
              status: int = 0) -> None:
         # Like the real CLI: JSON only when asked for, and a capsule only for
         # a query; without one, refresh prints its layer report.
-        self.cli.write_text(
+        cursor_stub_cli(self.cli,
             "import json, pathlib, sys\n"
             f"pathlib.Path({str(self.argv)!r}).write_text(json.dumps(sys.argv[1:]))\n"
             "if '--json' in sys.argv and '--query' in sys.argv:\n"
@@ -1243,9 +1643,9 @@ class CursorPromptHookTest(unittest.TestCase):
         # left out as "handed earlier".
         self.assertNotIn("--session-id", argv)
 
-    def test_the_rule_changes_only_when_a_prompt_brings_a_new_item(self) -> None:
-        # Cursor puts rules at the start of the context: a rule rewritten for
-        # every prompt would cost the conversation its cached prefix each time.
+    def test_the_rule_changes_when_the_full_prompt_capsule_changes(self) -> None:
+        # Item labels cannot certify freshness: the excerpt and selected set
+        # can change while the cited document/section remains the same.
         first = "working: TASK-P - fix rounding\n- memory a.md \u2014 A\n  first excerpt"
         self.stub(first)
         self.run_prompt_hook(self.PAYLOAD)
@@ -1258,7 +1658,8 @@ class CursorPromptHookTest(unittest.TestCase):
                 self.stub(capsule)
                 result = self.run_prompt_hook(self.PAYLOAD)
                 self.assertEqual({"continue": True}, json.loads(result.stdout))
-                self.assertEqual(rendered, self.rule.read_text(encoding="utf-8"))
+                self.assertNotEqual(rendered, self.rule.read_text(encoding="utf-8"))
+                rendered = self.rule.read_text(encoding="utf-8")
         self.stub("working: TASK-P - fix rounding\n- memory b.md \u2014 B\n  new excerpt")
         self.run_prompt_hook(self.PAYLOAD)
         self.assertIn("new excerpt", self.rule.read_text(encoding="utf-8"))
@@ -1280,6 +1681,7 @@ class CursorPromptHookTest(unittest.TestCase):
         ):
             with self.subTest(case=name):
                 self.rule.unlink(missing_ok=True)
+                self.root.joinpath("memory-bank/local/cursor-rule.json").unlink(missing_ok=True)
                 setup()
                 result = self.run_prompt_hook(payload, **env)
                 self.assertEqual(0, result.returncode, result.stderr)
@@ -1296,13 +1698,8 @@ class CursorPromptHookTest(unittest.TestCase):
         ):
             for owner, kept in (("TASK-OTHER", False), ("TASK-P", True)):
                 with self.subTest(case=name, rule_of=owner):
-                    self.rule.parent.mkdir(parents=True, exist_ok=True)
-                    held = (
-                        "Session context retrieved for a recent prompt (task: {}).\n"
-                        "```\nworking: {} - its goal\n```\n".format(owner, owner)
-                    )
-                    self.rule.write_text(held, encoding="utf-8")
                     setup()
+                    held = cursor_owned_rule(self.cli, owner, phase="prompt")
                     result = self.run_prompt_hook(self.PAYLOAD)
                     self.assertEqual({"continue": True}, json.loads(result.stdout))
                     self.assertEqual(kept, self.rule.exists())
@@ -1315,7 +1712,7 @@ class CursorPromptHookTest(unittest.TestCase):
         # must not rebuild it from the task alone.
         for name in ("working-memory-write.sh", "local-context.sh"):
             shutil.copy2(hook_path("cursor", name), self.root / ".cursor/hooks")
-        self.cli.write_text(
+        cursor_stub_cli(self.cli,
             "import json, sys\n"
             "if '--json' in sys.argv and '--query' in sys.argv:\n"
             "    print(json.dumps({'capsule_text': 'working: TASK-P - prompt capsule'}))\n"
@@ -1345,7 +1742,7 @@ class CursorPromptHookTest(unittest.TestCase):
         for name in ("working-memory-read.sh", "working-memory-write.sh"):
             shutil.copy2(hook_path("claude", name), claude)
         marker = self.root / "cli-ran"
-        self.cli.write_text(
+        cursor_stub_cli(self.cli,
             f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\nprint('working: X')\n",
             encoding="utf-8",
         )
@@ -1371,6 +1768,7 @@ class CursorPromptHookTest(unittest.TestCase):
         self.assertTrue(marker.exists())
 
 
+@unittest.skipUnless(os.name == "posix", "Anchored Cursor custody requires POSIX")
 class CursorCapsuleRenderTest(unittest.TestCase):
     """Functional render tests against a throwaway edition tree.
 
@@ -1458,8 +1856,36 @@ class CursorCapsuleRenderTest(unittest.TestCase):
     def rule_file(self) -> Path:
         return self.rules_dir / "working-memory.mdc"
 
+    def test_a_turn_replacing_another_rule_reports_nothing(self) -> None:
+        # The turn-end check for a held prompt rule answers "preserved" when a
+        # session or turn rule is there; that is no failure, and the hook used
+        # to print "not updated: custom_or_unavailable" on every Stop.
+        cursor_stub_cli(self.cli, self.STUB_CAPSULE, encoding="utf-8")
+        cursor_owned_rule(self.cli, self.TASK_ID, phase="session")
+        result = self.run_cursor_hook("working-memory-write.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual("", result.stderr)
+        self.assertIn("Session context as of end of previous turn", self.rule_file().read_text(encoding="utf-8"))
+
+    def test_a_linked_rules_folder_is_named_and_left_alone(self) -> None:
+        # Shared between projects through a link, the folder would carry this
+        # project's capsule to all of them; the hook says why none was written.
+        cursor_stub_cli(self.cli, self.STUB_CAPSULE, encoding="utf-8")
+        shared = Path(self._tmp.name) / "shared-rules"
+        shared.mkdir()
+        (shared / "team.mdc").write_text("Team rule.\n", encoding="utf-8")
+        self.rules_dir.rmdir()
+        try:
+            self.rules_dir.symlink_to(shared, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are unavailable here")
+        result = self.run_cursor_hook("working-memory-write.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual("Cursor memory rule was not updated: linked_directory.\n", result.stderr)
+        self.assertEqual(["team.mdc"], sorted(path.name for path in shared.iterdir()))
+
     def test_stop_hook_renders_alwaysapply_rule(self) -> None:
-        self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_CAPSULE, encoding="utf-8")
         result = self.run_cursor_hook("working-memory-write.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "")
@@ -1473,7 +1899,7 @@ class CursorCapsuleRenderTest(unittest.TestCase):
 
     def test_repeat_render_is_byte_identical(self) -> None:
         """Same context in, same rule out - across turns and across hooks."""
-        self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_CAPSULE, encoding="utf-8")
         renders = []
         for hook in ("working-memory-write.sh", "local-context.sh",
                      "working-memory-write.sh"):
@@ -1486,7 +1912,7 @@ class CursorCapsuleRenderTest(unittest.TestCase):
     def test_no_rule_is_rendered_when_the_host_delivered_the_capsule(self) -> None:
         # The Harness put this turn's capsule into the prompt; a rule built from
         # the branch would deliver a second, staler one.
-        self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_CAPSULE, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 env = dict(os.environ, CONTEXT_TASK_ID=self.TASK_ID, CONTEXT_CAPSULE_DELIVERED="1")
@@ -1498,14 +1924,14 @@ class CursorCapsuleRenderTest(unittest.TestCase):
                 self.assertFalse(self.rule_file().exists())
 
     def test_session_start_renders_rule_without_printing_it(self) -> None:
-        self.cli.write_text(self.STUB_CAPSULE, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_CAPSULE, encoding="utf-8")
         result = self.run_cursor_hook("local-context.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("stub goal", result.stdout)
         self.assertIn("stub goal", self.rule_file().read_text(encoding="utf-8"))
 
     def test_first_four_turns_warm_and_fifth_atomically_governs(self) -> None:
-        self.cli.write_text(self.STUB_SEQUENCE, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_SEQUENCE, encoding="utf-8")
         for turn in range(1, 5):
             result = self.run_cursor_hook("working-memory-write.sh")
             self.assertEqual(0, result.returncode, result.stderr)
@@ -1534,7 +1960,7 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         # The previous rule is this task's: a failed render keeps it.
         previous = self.labelled_rule(self.TASK_ID)
         self.rule_file().write_text(previous, encoding="utf-8")
-        self.cli.write_text(self.STUB_FAILURE, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_FAILURE, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 result = self.run_cursor_hook(hook)
@@ -1561,8 +1987,8 @@ class CursorCapsuleRenderTest(unittest.TestCase):
         ):
             for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
                 with self.subTest(case=name, hook=hook):
-                    self.rule_file().write_text(foreign, encoding="utf-8")
-                    self.cli.write_text(stub, encoding="utf-8")
+                    cursor_stub_cli(self.cli, stub, encoding="utf-8")
+                    cursor_owned_rule(self.cli, "feature/a")
                     result = self.run_cursor_hook(hook, "fix/issue-42")
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertFalse(self.rule_file().exists())
@@ -1570,7 +1996,7 @@ class CursorCapsuleRenderTest(unittest.TestCase):
     def test_a_withheld_render_keeps_this_tasks_rule(self) -> None:
         # An enforce-mode skip must never empty Cursor's only memory channel.
         previous = self.labelled_rule(self.TASK_ID)
-        self.cli.write_text(self.STUB_GATE_SKIP, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_GATE_SKIP, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 self.rule_file().write_text(previous, encoding="utf-8")
@@ -1581,24 +2007,24 @@ class CursorCapsuleRenderTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("timeout"), "native timeout unavailable")
     def test_a_timed_out_render_removes_another_tasks_rule(self) -> None:
         foreign = self.labelled_rule("feature/a", "working: feature/a - rewrite billing")
-        self.cli.write_text(self.STUB_TIMEOUT, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_TIMEOUT, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
-                self.rule_file().write_text(foreign, encoding="utf-8")
+                cursor_owned_rule(self.cli, "feature/a")
                 result = self.run_cursor_hook(hook, "fix/issue-42", budget="0.05")
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertFalse(self.rule_file().exists())
 
     def test_valid_empty_branch_context_removes_foreign_rule(self) -> None:
-        self.rule_file().write_text("foreign branch capsule\n", encoding="utf-8")
-        self.cli.write_text(self.STUB_EMPTY, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_EMPTY, encoding="utf-8")
+        cursor_owned_rule(self.cli, "feature/a")
         result = self.run_cursor_hook("local-context.sh", "feature/new-branch")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertFalse(self.rule_file().exists())
 
     def test_no_branch_removes_foreign_rule_on_session_start(self) -> None:
-        self.rule_file().write_text("foreign branch capsule\n", encoding="utf-8")
-        self.cli.write_text(self.STUB_FAILURE, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_FAILURE, encoding="utf-8")
+        cursor_owned_rule(self.cli, "feature/a")
         result = self.run_cursor_hook("local-context.sh", "")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertFalse(self.rule_file().exists())
@@ -1606,7 +2032,7 @@ class CursorCapsuleRenderTest(unittest.TestCase):
     def test_malformed_render_preserves_previous_rule(self) -> None:
         previous = self.labelled_rule(self.TASK_ID)
         self.rule_file().write_text(previous, encoding="utf-8")
-        self.cli.write_text(self.STUB_MALFORMED, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_MALFORMED, encoding="utf-8")
         for hook in WorkingMemoryRuleTest.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 result = self.run_cursor_hook(hook)
@@ -1620,7 +2046,7 @@ class CursorCapsuleRenderTest(unittest.TestCase):
     def test_timed_out_render_preserves_previous_rule(self) -> None:
         previous = self.labelled_rule(self.TASK_ID)
         self.rule_file().write_text(previous, encoding="utf-8")
-        self.cli.write_text(self.STUB_TIMEOUT, encoding="utf-8")
+        cursor_stub_cli(self.cli, self.STUB_TIMEOUT, encoding="utf-8")
         result = self.run_cursor_hook(
             "local-context.sh", budget="0.05"
         )
@@ -2044,6 +2470,28 @@ class FixtureIsolationTest(unittest.TestCase):
     scripts/check.py runs this suite beside the mirror, parity and route
     gates in one checkout, and those read `.claude/agents/` from disk.
     """
+
+    def test_session_hook_uses_owned_runtime_instead_of_live_edition(self) -> None:
+        live = EDITION_ROOT / 'memory-bank/local/refresh-health.ndjson'
+        before = live.read_bytes() if live.exists() else None
+        with tempfile.TemporaryDirectory(prefix='session-hook-isolation-') as temporary:
+            root = install_session_fixture(Path(temporary) / 'edition')
+            command = root / 'memory-bank/scripts/context.py'
+            self.assertEqual((EDITION_ROOT / 'memory-bank/scripts/context.py').read_bytes(), command.read_bytes())
+            initialized = subprocess.run([sys.executable, str(command), '--root', str(root),
+                'start', '--task-id', 'session-fixture-proof', '--goal', 'Verify isolated session observation', '--json'],
+                capture_output=True, text=True, timeout=HOOK_TIMEOUT)
+            self.assertEqual(0, initialized.returncode, initialized.stderr)
+            result = run_hook('cursor', 'local-context.sh', {}, cwd=root,
+                              env={'CONTEXT_TASK_ID': 'session-fixture-proof', 'TMPDIR': temporary},
+                              edition_root=root)
+            self.assertEqual(0, result.returncode, result.stderr)
+            health = root / 'memory-bank/local/refresh-health.ndjson'
+            self.assertTrue(health.exists(), 'the real private hook-context boundary was bypassed')
+            rows = [json.loads(row) for row in health.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(1, len(rows))
+            self.assertEqual('hook-context', rows[0]['source'])
+        self.assertEqual(before, live.read_bytes() if live.exists() else None)
 
     def test_parser_trap_fixture_is_written_outside_the_edition(self) -> None:
         written: list[Path] = []

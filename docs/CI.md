@@ -39,10 +39,12 @@ jobs are listed and skipped on Linux and macOS.
 | `parity` | Mirror parity and cross-edition core parity for Laravel, Symfony, PHP Core, and WordPress; on the Laravel leg also generator-asset parity (`scripts/asset_parity.py --check`) and its regression tests. |
 | `mirrors` | Every per-tool mirror matches its canon (`scripts/build_mirrors.py --check`), plus the mirror executor's regression tests. Also that every hook script and root launcher that must be executable is 100755 in the Git index (`tests/test_file_modes.py`); that every shipped `bash-validator.sh` copy blocks and allows the shared corpus (`tests/fixtures/bash-validator-corpus.json`) and keeps its generic section byte-identical (`tests/test_bash_validator_corpus.py`); and that every hook wiring, command/agent/flow route and skill reachability resolves (`scripts/check_routes.py`, exceptions in `scripts/check_routes_allowlist.json`), with its regression tests. |
 | `infrastructure-creator-reliability` | Under Python 3.9, the floor: the complete Infrastructure-Creator suite (`unittest discover`), the canonical reference-catalog contracts, and the Infrastructure-Creator mirrors. |
-| `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core/WordPress × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. Also that framework-specific skill semantics survive; that Claude Code and Codex hook wiring reaches its scripts from any working directory (`tests/test_hook_wiring.py`); that the memory evaluation stand rebuilds a project as of a prompt, overlays an edition without touching project-owned state, scores, reports and parses transcripts (`tests/test_memory_eval.py`, one real refresh on a synthetic project); that the optional context-collection tool stays out of the editions and the installer; that the Kit 3 admission registry is well-formed, with the registry and catalog regression tests; and the native browser harness regression tests, among them the desktop application installer (`tests/test_desktop_app.py`: icon containers, the XDG entry, the macOS bundle, the Windows shortcut and Installed apps entry, all written into temporary folders). |
+| `installation` | Exact versioned inventories match the repository, and every Laravel/Symfony/PHP Core/WordPress × Claude/Cursor/Codex selected-tool install passes isolated validate/status/index smoke tests without application, `.env`, or application-database access. Also that framework-specific skill semantics survive; that Claude Code and Codex hook wiring reaches its scripts from any working directory (`tests/test_hook_wiring.py`); that the optional context-collection tool stays out of the editions and the installer; that the Kit 3 admission registry is well-formed, with the registry and catalog regression tests; and the native browser harness regression tests, among them the desktop application installer (`tests/test_desktop_app.py`: icon containers, the XDG entry, the macOS bundle, the Windows shortcut and Installed apps entry, all written into temporary folders). |
+| `memory` | The memory runtime's regression steps, split from `installation` to run beside it: the memory evaluation stand (`tests/test_memory_eval.py`, one real refresh on a synthetic project), refresh, delivery and Git source boundaries, UTF-8 isolation, Cursor rule custody, result saves with their replay and evidence, the Brain read once per command, Git starts per prompt, a swept working task, the Harness memory delivery and accounting modules, promotion admission, and the offline Hindsight and LongMemEval pilots, on Python 3.9 and the current release. |
 | `harness-fleet` | Python 3.11: builds `harness/.venv` with the optional graph runtime, runs its offline graph and checkpoint tests, then the browser Fleet integration without model calls. |
 | `system-orchestration` | Python 3.9 and 3.x: universal system planning and execution tests behind a working bubblewrap sandbox, and the synthetic service catalog (`scripts/ai_system.py validate`). |
-| `windows-harness` | `windows-latest`, Python 3.13: native Windows Harness acceptance and boundary tests; the merged-chat archive's files through NT handles (`tests/test_harness_merge_archive.py`: written, read, refused once changed or given a second name, removed with its folder, orphans recovered, never through a junction); and the desktop application's Start menu shortcut as PowerShell writes it (into a temporary folder; the registry is faked). The whole merge flow (`tests/test_harness_merge.py`) builds an in-process Harness store and runs on Linux only. |
+| `windows-harness` | `windows-latest`, Python 3.13: native Windows Harness acceptance and boundary tests; the merged-chat archive's files through NT handles (`tests/test_harness_merge_archive.py`: written, read, refused once changed or given a second name, removed with its folder, orphans recovered, never through a junction); the memory hooks as Claude Code starts them there (`tests/test_windows_memory_hooks.py`: PHP Core installed by the installer, the session, prompt and Stop hooks run by Git Bash with `python` or `py -3` and no `python3`, the interpreter found once and remembered); and the desktop application's Start menu shortcut as PowerShell writes it (into a temporary folder; the registry is faked). Some memory regression suites run here too; the rest run in `windows-memory`. The whole merge flow (`tests/test_harness_merge.py`) builds an in-process Harness store and runs on Linux only. |
+| `windows-memory` | `windows-latest`, Python 3.13: the rest of the memory regression suites, in one process, on a runner of its own so that neither Windows job nears its 15 minutes: Cursor rule custody, rename recovery and continuation; read-only startup, Git source scope and inferred branch identity through the hooks as Git Bash runs them; the generated-hook validator; retained, quoted and secret-policy source images and source hints; result saves, fences and evidence, and promotion through the CLI and the memory MCP server under an 8.3 short temporary path; the Brain read once per command. |
 | `lint` | `bash -n` and `shellcheck -S error` on all tracked shell scripts, including the extension-less `collect`, `kit3`, `harness-server` and `accelerator-app` launchers; `python3 -m json.tool` on tracked JSON; no clock/random invalidator in Cursor working-memory render hooks; every complete PHP snippet in tracked Markdown parses (`scripts/check_php_snippets.py --require-php`); startup context budget within ceilings (`scripts/context_budget.py --check`); stabilization rules are well-formed (`scripts/check_stabilization.py`); the policy lock matches the model-facing surface (`scripts/policy_lock.py --check`); the regression tests of the stabilization validator, the policy lock and the routing-eval scoring; and that `scripts/check.py` still matches the workflows (`tests/test_check.py`). |
 | `core-changelog` (job `changelog`) | Pull requests only: a diff that touches shared-core files (memory/context core, Project Brain, hooks, `scripts/`) must also change the root `CHANGELOG.md` (`scripts/check_core_changelog.sh`). |
 | `links` | All relative markdown links in tracked `.md` files resolve (`scripts/check_links.py`). |
@@ -177,9 +179,6 @@ python3 -m unittest tests.test_framework_semantics
 # and Codex treat as non-blocking: the guard fails open.
 python3 -m unittest tests.test_hook_wiring
 
-# The memory evaluation stand (docs/MEMORY-EVAL.md) on a synthetic project.
-python3 -m unittest tests.test_memory_eval
-
 python3 -m unittest tests.test_collect_context
 python3 scripts/validate_registry.py --check
 python3 -m unittest tests.test_registry tests.test_open_source_kit tests.test_kit_fetcher tests.test_kit3 tests.test_kit3_catalog
@@ -188,8 +187,26 @@ python3 scripts/check.py --group installation   # adds the native browser harnes
 
 The job's `timeout-minutes` is 20. It took 577 s of the former 600 on a hosted
 runner, and its harness step alone ranges from about 340 to 470 s between
-runs. `check.py` flags a group that ran longer than its job's limit, and
-`tests/test_check.py` keeps each group's limit equal to the workflow's.
+runs; with the memory runtime's steps it came to about 1000 s, so those moved
+to the `memory` job, which runs beside it. `check.py` flags a group that ran
+longer than its job's limit, and `tests/test_check.py` keeps each group's
+limit equal to the workflow's.
+
+### memory
+
+```bash
+python3 scripts/check.py --group memory
+```
+
+The memory runtime's own regression steps: the memory evaluation stand
+(docs/MEMORY-EVAL.md) on a synthetic project, refresh and delivery
+boundaries, Git source scope and branch identity, UTF-8 isolation, Cursor rule
+custody, result saves and their replay and evidence, the Brain read once per
+command, Git starts per prompt, a working task swept away by `git stash -u`,
+the Harness memory delivery and accounting modules, promotion admission, and
+the offline Hindsight and LongMemEval pilots. It runs on Python 3.9 - the
+floor the runtime is declared for - and on the current release, as two legs.
+`timeout-minutes` is 15; a leg took about 400 s locally.
 
 The synthetic matrix installs each PHP edition once for each selected AI tool
 into a path containing spaces. It verifies required Memory Bank and Project

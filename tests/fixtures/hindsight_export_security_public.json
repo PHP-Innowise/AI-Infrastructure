@@ -1,0 +1,93 @@
+{
+  "profile": "fresh-export-secret-screen-v1",
+  "scope": {
+    "team": "aaaaaaaa-1111-4111-8111-111111111111",
+    "project": "bbbbbbbb-2222-4222-8222-222222222222"
+  },
+  "path": "docs/crane-source.md",
+  "denied": [
+    {
+      "name": "php_array",
+      "text": "<?php return ['password' => 'SYNTHETIC_EXPORT_CREDENTIAL_9'];\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "php_define",
+      "text": "<?php define('DB_PASSWORD', 'SYNTHETIC_EXPORT_CREDENTIAL_9');\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "wordpress_salt",
+      "text": "<?php define('SECURE_AUTH_SALT', 'SYNTHETIC_EXPORT_CREDENTIAL_9');\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "php_index",
+      "text": "<?php $settings['api_key'] = 'SYNTHETIC_EXPORT_CREDENTIAL_9';\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "json_quoted_password",
+      "text": "{\"connection\": {\"password\": \"SYNTHETIC_EXPORT_CREDENTIAL_9\"}}\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "composer_oauth",
+      "text": "{\"github-oauth\": {\"github.com\": \"SYNTHETIC_EXPORT_CREDENTIAL_9\"}}\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "composer_basic",
+      "text": "{\"http-basic\": {\"packages.example.invalid\": {\"username\": \"build-bot\", \"password\": \"SYNTHETIC_EXPORT_CREDENTIAL_9\"}}}\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "markdown_composer",
+      "text": "```json\n{\"gitlab-token\": {\"gitlab.example.invalid\": \"SYNTHETIC_EXPORT_CREDENTIAL_9\"}}\n```\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "multiline_define",
+      "text": "<?php define(\n 'AUTH_KEY',\n 'SYNTHETIC_EXPORT_CREDENTIAL_9'\n);\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "escaped_json_key",
+      "text": "{\"github-\\u006fauth\":{\"github.com\":\"SYNTHETIC_EXPORT_CREDENTIAL_9\"}}\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "escaped_json_password",
+      "text": "{\"pass\\u0077ord\":\"SYNTHETIC_EXPORT_CREDENTIAL_9\"}\n",
+      "reason": "private_content"
+    }
+  ],
+  "accepted": [
+    {
+      "name": "plain_public",
+      "text": "# Public crane routing\n\nEach crane lift requires two operators.\n",
+      "expected_raw_utf8_hex": "23205075626c6963206372616e6520726f7574696e670a0a45616368206372616e65206c6966742072657175697265732074776f206f70657261746f72732e0a",
+      "expected_sha256": "aec4019283c1576571fcae99bb83299e9bc341854cc0cf25ae4dad9bffca11dd"
+    },
+    {
+      "name": "php_runtime_reference",
+      "text": "<?php return ['password' => getenv('CRANE_PASSWORD')];\n",
+      "expected_raw_utf8_hex": "3c3f7068702072657475726e205b2770617373776f726427203d3e20676574656e7628274352414e455f50415353574f524427295d3b0a",
+      "expected_sha256": "a21f71ef9293213cc6a85c76dcf8dcc067418304d0bb6b640ca2deadbb85b455"
+    },
+    {
+      "name": "empty_composer_block",
+      "text": "{\"github-oauth\":{},\"http-basic\":{}}\n",
+      "expected_raw_utf8_hex": "7b226769746875622d6f61757468223a7b7d2c22687474702d6261736963223a7b7d7d0a",
+      "expected_sha256": "c65f6d6f9a4c76e02cc49f3bcdbba3295d37070106feb1b09163bf1e78cb9b25"
+    },
+    {
+      "name": "benign_json",
+      "text": "{\"policy\":{\"authentication\":\"required\",\"enabled\":true},\"retries\":3}\n",
+      "expected_raw_utf8_hex": "7b22706f6c696379223a7b2261757468656e7469636174696f6e223a227265717569726564222c22656e61626c6564223a747275657d2c2272657472696573223a337d0a",
+      "expected_sha256": "d1193f6c0ab75042ac58ac30e2af9264c5b9482d2fd51caaeaf99064d1aa7147"
+    }
+  ],
+  "opaque_secret_marker": "SYNTHETIC_EXPORT_CREDENTIAL_9",
+  "all_transport_calls": 0
+}

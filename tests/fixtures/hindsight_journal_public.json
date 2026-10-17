@@ -1,0 +1,25 @@
+{
+  "fixture": "public-lantern-journal-20261013",
+  "team_id": "c278e61e-29c2-4af3-aace-5e337d9ef16b",
+  "project_id": "66d91550-2f3e-4e1d-a2d6-55a419fcac75",
+  "journal_id": "4e5f25b1-6b85-4c23-b614-0d603e545538",
+  "generations": ["85dcf6e0-5690-4f0f-a6f5-b6e7199b1c96", "a9dcb0b5-5653-4b7c-8a54-063a9f98e768", "5b8ead0d-38f2-49a9-9509-2e875e8c9a2f"],
+  "nonces": ["969e5801-283e-4bf5-9d0e-830262342364", "f28f63be-d664-48bf-9835-4c690672182b", "c06ae0c1-b0d7-4610-aec0-b2f25e3f07be", "fc640ca2-2e69-4b43-980e-628be657ea11"],
+  "sources": [
+    {"path": "docs/lantern.md", "text": "# Lantern harbor\nThe night gate closes at bell four.\n", "changed_text": "# Lantern harbor\nThe night gate closes at bell six.\n"},
+    {"path": "src/mariner.py", "text": "def mooring_limit():\n    return 7\n"},
+    {"path": "docs/fog.md", "text": "# Fog signals\r\nUse the silver pennant during the Δ fog.\r\n"}
+  ],
+  "stress": {"sources_per_generation": 22, "generations": 3, "expected_union": 66},
+  "expected_states": {
+    "initial": "prepared",
+    "reserved": "recorded",
+    "matching": "supplied_selection_current",
+    "missing": "missing_source_images",
+    "old_present": "cleanup_required",
+    "unknown_or_conflict": "incomplete",
+    "unsettled_or_no_attestation": "incomplete",
+    "authorized_mutations": 0,
+    "actual_remote_noop": null
+  }
+}

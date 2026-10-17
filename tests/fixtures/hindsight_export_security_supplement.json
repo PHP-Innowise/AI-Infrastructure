@@ -1,0 +1,20 @@
+{
+  "profile": "fresh-export-review-supplement-v1",
+  "denied": [
+    {
+      "name": "composer_scalar_oauth",
+      "text": "{\"github-oauth\":\"SYNTHETIC_MAP_CREDENTIAL_7\"}\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "composer_scalar_basic",
+      "text": "{\"http-basic\":\"SYNTHETIC_MAP_CREDENTIAL_7\"}\n",
+      "reason": "private_content"
+    },
+    {
+      "name": "escaped_provider_value",
+      "text": "{\"note\":\"gh\\u0070_123456789012345678901234\"}\n",
+      "reason": "private_content"
+    }
+  ]
+}

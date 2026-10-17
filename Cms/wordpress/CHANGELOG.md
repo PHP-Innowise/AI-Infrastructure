@@ -5,6 +5,24 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- `.cursor/hooks/README.md` says why a `.cursor/rules` that is a symbolic
+  link gets no memory rule (`linked_directory`), and that a rule the first
+  releases wrote is upgraded. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- The hooks start the memory CLI through the new
+  `memory-bank/scripts/context_cli.py`, which runs `context.py` from cached
+  bytecode, and `project-brain/README.md` describes `control/result-attempts/`
+  and `control/result-learning-images/`. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
+- Raise the Cursor hook timeouts in `.cursor/hooks.json` to what the inner
+  calls can take: `beforeSubmitPrompt` working-memory-read 10 s (refresh 5 s,
+  rule write 3 s, interpreter starts) and `stop` working-memory-write 20 s
+  (5 + 3 + 5 + 3). At 8 s and 15 s Cursor could stop a hook that was still
+  inside its own budgets. The prompt read hooks call the runtime directly
+  again; see the root changelog for the removed prompt supervisor.
+
 - The Task Capsule carries no skill pointer: hosts list skills themselves and agents took none a capsule named. `AGENTS.md`, the `project-brain` skill, `PROTOCOL.md` and the READMEs say so. Details in the root [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
 
 - The Task Capsule's episodic layer carries two items: the changelog and one recorded event or local episode, found by its own search. `AGENTS.md`, the `project-brain` skill, `PROTOCOL.md` and the READMEs say so. Details in the root [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.

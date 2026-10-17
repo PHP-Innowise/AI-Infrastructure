@@ -9,6 +9,76 @@ For mode selection and switching, see [Context Modes](CONTEXT-MODES.md). For a
 step-by-step task narrative, see the
 [User Task Workflow Example](examples/USER-TASK-WORKFLOW-EXAMPLE.md).
 
+Automatic read hooks distinguish an explicit `CONTEXT_TASK_ID` from a task
+inferred from the branch. Only inferred reads carry a private expected-branch
+marker. The helper checks the full symbolic branch before creating state and
+again at delivery boundaries; named branches do not need a first commit.
+Explicit requests may recall another task while on a different branch.
+
+Governed retrieval checks admission after packing and schema validation,
+before publishing its manifest and delivery receipts. Read-only working
+context checks after rendering; marked hook-context failures cannot become
+valid no-context or gate-skip return codes. Marked output is checked again
+before printing. The branch is asked once per command - one `symbolic-ref`
+with a two-second deadline; the checks at delivery boundaries compare the
+checkout's HEAD file (and the reftable list) with the snapshot taken before
+that answer, and ask Git again only when one of them is a new file.
+These are point checks, with no atomic branch epoch or publication lock: a
+later refusal may follow earlier metadata writes and does not imply rollback.
+Legacy unmarked invocations cannot prove inference retrospectively. Stop
+checkpoint attribution, raw cached search policy and downstream Cursor rule
+publication retain their separate contracts.
+
+Source-ignore checks use the project's observed Git top, relative prefix and
+Git directory. Inherited Git repository, index, object and discovery selectors
+(`GIT_DIR`, `GIT_INDEX_FILE`, `GIT_CEILING_DIRECTORIES`, ...) are dropped from
+the probe's environment with the other command-environment overrides: the probe
+runs `git -C <project>`, which finds the project's own repository, and ordinary
+global exclusions and protected trust settings stay. A `.git` directory without
+HEAD, objects and refs - an empty `~/.git` or `/tmp/.git` some tool left - is
+skipped as Git itself skips it. Unknown `.git` entries (special files, dangling
+links) and failed or malformed probes refuse source admission. The first
+ignore check of a command confirms the frame with Git before and after its
+query; later checks in the same command reuse it while the directories from
+the project to its top, each `.git` marker, the admin directory, its config
+and its commondir keep their file identities, and confirm it with Git again
+when one changed.
+Read entry points observe the Git frame before creating local state. Later
+ignore failures stop publication and cannot become index warnings that still
+expose progress; that later check does not promise zero local mutations.
+Ordinary accelerator-source exemptions do not apply to working citations.
+
+Each ordinary ignore operation shares one second across its preflight, query
+and postflight; working-source checks share 0.1 seconds. Read entry admission
+adds a separate one-second frame check. Output admission occurs after capture,
+so these limits do not bound producer allocation, cleanup, filesystem races or
+the complete hook. Branch inference and other Git evidence paths retain their
+own contracts; this source check is not a new current-branch certificate.
+
+Cold refresh screens source documents before publishing the complete index.
+Exact known secret patterns skip full scans when a mandatory literal is
+absent; the original regular expressions still decide every match and
+replacement. This reduces work on ordinary prose without changing source
+admission or masking. It does not provide a scan checkpoint: a large or slow
+project can still exceed the hook's five-second budget and remain incomplete.
+Deleting the disposable local index leaves the canonical sources intact.
+
+The exact assigned-credential pattern finds key-and-separator positions before
+checking their complete underscore prefixes with the original expression.
+This avoids retrying every prefix suffix when a long prefixed lookup contains
+no literal secret. Masked text, match spans and privacy decisions stay the
+same; changed patterns retain their original search. Value lookahead and other
+refresh stages can still be slow, so this is not a general deadline guarantee.
+
+An optional Project Brain runtime configuration uses defaults only after
+ordinary absence is observed. A directory, special file, dangling link,
+unreadable file or invalid UTF-8 produces an explicit configuration error.
+The loader and configuration fingerprint share the same strict text reader;
+readable links, all valid object fields and the existing newline hash remain
+supported. POSIX nonblocking open rejects a file replaced by a FIFO before
+reading. This does not provide a filesystem deadline, a coherent snapshot
+across separate calls, or the same FIFO race guarantee on Windows.
+
 ## The Core Principle
 
 Context helps an agent find and continue work; it does not redefine the
@@ -403,8 +473,36 @@ likely secret is still excluded whole), and requires UTF-8. The stored source
 hash of a masked document is the file's, so governed retrieval does not call it
 stale; `index --json` lists masked documents under `redacted` with a count of
 values, never the values. A change to the secret patterns re-reads every
-document once. Invalid UTF-8 aborts the refresh without replacing the prior
-index.
+document once. Ordinary documents with invalid UTF-8 contents or non-UTF-8
+path keys are omitted individually, before Git probes and SQLite writes for
+those paths. Valid Unicode names remain supported. Index/refresh JSON reports
+fixed reasons and opaque labels for malformed paths; refresh capsules and
+health records expose only nonzero `source_notices` counts. These notices do
+not disable retrieval and do not contain names or contents. A later successful
+scan removes the notice; a renamed invalid source cannot retain its old row.
+Malformed skill paths still fail strict policy inventory checks. Direct and
+supplied-stat fingerprints, skill parity, full canonical/reverse inventories
+and cross-edition parity reject malformed admitted keys with a fixed error,
+before producing a digest or a clean parity result. Full mirror checks admit
+reverse keys before the partial-install shortcut. Valid Unicode names, normal
+digest serialization and drift shapes remain unchanged; documented ignored
+suffixes and symlinks retain their existing treatment. Brain dynamic/archive
+inventories reject malformed path keys before their first yield, preserving
+strict lookup and duplicate admission. Direct record reads and held-text parses
+also refuse them. Managed handoff discovery/validation admits each path list
+before per-file error handling, so a malformed path cannot become a harmless
+exclusion. Active handoffs are not a global preflight on every task lookup.
+Portable handoff input/output/transcript/citation paths fail with a fixed error
+before their affected reads/writes or returned-path construction. These are
+effective absolute-path checks for file arguments as well as spelling checks;
+an unrelated malformed current directory does not reject valid absolute paths.
+Shared curated file-reference validation also rejects escaped-surrogate paths
+before loaded handoff bodies are encoded or provenance probes run. These are
+UTF-8 admission checks, not atomic filesystem or all-control-store validation;
+valid non-ASCII paths retain their prior semantics and canonical-path rules.
+Memory Bank validation reports invalid UTF-8 INDEX/chunks
+as fixed, bank-relative errors; its summary skips invalid chunk metadata and
+does not constitute successful validation.
 
 For Brain records, eligibility is checked before insertion. Private,
 disallowed-privacy, disallowed-authority, terminal, superseded, or invalid
@@ -456,7 +554,10 @@ no `stat` can see. The cache therefore stores `min(review_after, valid_to)`
 alongside `(mtime_ns, size)`, and the day after that boundary the row is
 re-validated instead of reused. Project Brain records are always rebuilt,
 because their eligibility depends on configuration, lifecycle, and
-cross-record conflict state rather than on the record file alone. A change
+cross-record conflict state rather than on the record file alone; the rows
+are written only when they come out different from the stored ones (a digest
+is kept with them), so an unchanged Brain leaves the tables, the index
+generation and the token frequencies cached against it as they are. A change
 that somehow reproduced its predecessor's stat is not served as truth in
 governed mode: retrieval re-hashes every candidate and excludes the content
 mismatch as stale.
@@ -1599,6 +1700,24 @@ too unless the rule holds the prompt's capsule for the same task. See
 `docs/TOOL-INTEGRATIONS.md` for the mechanism and its MIRROR_RULES
 declaration.
 
+Cursor requests JSON after the query conditional, including empty, missing or
+non-string prompts. Rule publication therefore receives the current fixed
+unavailable render when no capsule was assembled, rather than misreading an
+operator text report and silently keeping same-task old facts. Whitespace and
+privacy-withheld prompts do not use a stored task goal as replacement search.
+The generator verifier enforces this placement for native and generated hook
+profiles. Custom, linked and tracked-rule custody remains unchanged; local
+native-hook checks do not establish live Cursor loading behavior.
+
+Fresh isolated integration controls exercise actual CLI/MCP save, automatic
+promotion and recall through copied stdlib runtimes. They verify full chunk
+bytes, metadata, citation digests and INDEX rows, source deletion/restoration,
+invalid ordinary-source notices, private-request refusal and identical saved
+context from native Claude/Codex read hooks. Those checks use fixed query
+horizons and public fixture facts. They establish local contract behavior;
+provider tokens, semantic generalization, live clients and remote CI remain
+separate measurements.
+
 The read hook runs `refresh`, which re-indexes procedural, semantic, and
 episodic memory in one incremental pass and reports each layer as `updated` or
 `failed`:
@@ -1613,6 +1732,77 @@ Episodic    CHANGELOG.md, plus local episodes at query time
 Working memory is deliberately not in that list. It is not refreshed from
 sources; it is written by the turn hook, and in governed mode Project Brain
 remains its only authority.
+
+`refresh` limits each SQLite busy wait to 50 ms. If startup cannot acquire a
+writer or pass its zero-row SQLite write-admission probe, it attempts an
+existing compatible rollback-journal database in
+read-only mode. This degraded path returns only freshly validated working
+state, with an explicit incomplete warning; it does not search the old index,
+read history, update Cursor topic state, publish a manifest or record delivery
+receipts. Canonical task identity, lifecycle, privacy and authority must still
+pass, and a deleted citation makes the record ineligible here as on the full
+refresh; an edited or ignored citation keeps the working state, as it does
+there. Unknown document counts remain `null`, and refresh exits 1.
+
+`refresh --read-only` uses that path directly and creates no missing state.
+WAL, incompatible schema and unavailable reads produce a fixed unavailable
+report. The rollback-journal profile does not certify a concurrent filesystem
+snapshot or an adversarial journal-mode switch. SQLite can create sidecars on
+a read-only WAL open ([SQLite documentation](https://sqlite.org/wal.html#read_only_databases)),
+so WAL is refused before opening. The outer hook timeout still applies:
+bounded busy waits are not a whole-refresh deadline. Cold indexing, regular
+retrieval and Harness acceptance of incomplete results are separate contracts.
+
+Incremental refresh revalidates current eligibility for each retained Memory
+Bank chunk. Matching chunk stat and calendar bounds do not prove that its
+cited paths still exist or remain inside supported roots. Invalid chunks are
+omitted from the keep set; the existing transaction removes their FTS,
+metadata, outgoing links and source-state rows together. Ordinary cached
+documents retain their existing reuse path. This adds chunk parsing, secret
+screening and citation resolution on warm refreshes; it is a correctness check,
+not evidence of faster refresh or token savings.
+
+Legacy chunks can still omit historical `source_digests` or contain a subset,
+as allowed by the existing validator. The runtime does not create missing
+historical hashes or refresh declared ones during this check. Existing HTTP(S)
+claims need no network lookup; local provenance and anchored citations follow
+the same current existence/containment rules. Existence without an original
+content digest does not establish historical content correspondence. This
+check preserves the existing privacy contracts rather than certifying a new
+privacy or concurrent filesystem snapshot profile.
+
+A normal retrieval confirms its manifest before committing ordinary delivery
+receipts. If optional local publication raises an I/O error, fresh context is
+still returned with `manifest: null` and `manifest_publication: unconfirmed`;
+no new ordinary receipt pair or trace is claimed. The write may have taken
+effect before returning an error, so this does not assert absence, delete a
+possible file or adopt it on retry. Failure to prune older local manifests
+does not invalidate a successfully confirmed current manifest. Governed
+manifest publication remains mandatory, as do result, attempt and approval
+journals.
+
+For ephemeral JSON reads, a supported helper accepts the internal
+`--provenance-response` flag. Its `local-source-provenance-v1` response carries
+source hashes from the final validated selection in the same invocation;
+the capsule itself retains its 8,000-character limit. The separate sidecar
+is limited to 32 unique rows and 65,536 UTF-8 bytes. Harness requires exact
+task UUID/revision, capsule SHA-256 and complete visible-source coverage.
+It does not rehash later files or downgrade a missing or corrupt claimed
+physical manifest to this transport. The interface marker is not source
+authentication or a filesystem snapshot. It adds a helper metadata read and
+up to 8,192 header bytes outside the knowledge I/O observer; those costs are
+not currently included in that observer's totals. Platforms without the
+required protected-open flags, including native Windows, retain the existing
+physical-manifest path; optional-failure transport there remains unsupported.
+Initial reviewed preparation still requires its governed manifest. Later
+ephemeral checks can use the new transport when supported.
+
+Trace cleanup attempts each owned descriptor once and continues through the
+remaining handles. Ordinary close errors cannot replace fresh context or a
+primary failure; closure is then uncertain and the fd number is not retried.
+Otherwise unmasked cancellation propagates after cleanup attempts. Controlled
+local descriptor tests do not certify actual kernel close failure or crash
+recovery.
 
 The three layers come from one indexing pass and therefore succeed or fail
 together, but they are reported separately so a stale layer is visible rather
@@ -1718,3 +1908,130 @@ per-run cap does not lose the remainder to the archive.
 This distinction matters: a healthy status line means the tools are available;
 it does not mean an agent has loaded, verified, or acted on the relevant
 context.
+
+### CLI stream encoding and newlines
+
+At startup the memory CLI configures exact standard Python `TextIOWrapper`
+stdout/stderr instances for UTF-8, replacement encoding errors and untranslated
+LF. This applies to subsequent writes; it preserves explicit CR content and
+does not transcode bytes buffered before startup. Buffers and stream ownership
+are unchanged. Custom streams, including subclasses, retain the existing
+encoding/errors-only call, once per stream; their newline behavior is not
+certified. Unsupported configuration is best effort and cancellation propagates.
+Fresh controls use real supplied CRLF/CR/LF wrappers and an actual CLI error
+path. Native Windows, separate MCP/continuity entry points and live clients
+require their own evidence.
+
+### Generated read-hook identity
+
+Infrastructure-Creator preserves explicit versus branch-inferred task origin
+with the canonical fragments in hook-forge. The generated structural verifier
+checks only manifest-owned prompt readers and Cursor turn/session readers.
+Missing or unsupported fragments fail with a fixed contract diagnostic;
+comments, quoted programs and heredoc data do not satisfy it. The check
+protects the admitted identity/argv fragments and does not execute hooks or
+prove arbitrary Bash control flow, sourced code, runtime redefinition, atomic
+branch epochs or whole-hook budgets. Trusted fixture argv controls are separate
+from actual AI generation and live-client memory delivery.
+
+The lexical contract accepts only LF physical records, code/double-quote
+continuations and simple quoted literal heredocs (one at a time; exact
+delimiter word, optional tab stripping). Unquoted/concatenated delimiters,
+arithmetic-shift ambiguity and unsupported quoted tails fail closed. Both
+resolved task and explicit selector writes invalidate the contract. Alongside
+the preferred ROOT_DIR/symbolic-ref fragment, the gate accepts the finite
+installed PROJECT_DIR/branch-show-current fragment with its existing forwarding
+relay, budget variable and guarded Cursor JSON append. Both profiles retain
+the inferred-only marker. Cursor needs exactly one JSON append before dispatch;
+other hosts cannot append it. These checks do not prove arbitrary shell code.
+
+Redirection operators assembled across code continuations are unsupported.
+The explicit selector may appear only in canonical fallback/guard lines;
+named prefix increments and default-parameter assignments cannot rewrite
+resolved task identities.
+
+
+### Current ignore policy for cached memory
+
+Cached search and governed recall re-admit project documents against the current
+Git ignore policy by their own path: a document the project now ignores is not
+served from the cache. A file a record cites being ignored withholds neither the
+record nor the task's working state. The record is already shared through
+Project Brain or the Memory Bank, and citing `vendor/...`, `.env` or the
+accelerator's own ignored specs and skills is how framework work gets described;
+holding such knowledge back protected nothing and cost the answer. The shared
+probe retains protected Git configuration (including global excludes and
+safe.directory), uses lexical working-tree names and normal tracked-file
+semantics (`check-ignore`, without `--no-index`). Attached tooling/state roots
+keep their own custody. Ordinary accelerator document exemptions remain. HTTP(S)
+citations are not local file names. Citations still drive the existence check: a
+deleted cited file withholds the record (`source-missing`), a cited directory
+inside the project counts as present.
+
+Runtime metadata channels are batched before file hydration; optional unsafe or
+unindexed source hints abstain before policy admission. Raw search filters its
+bounded ranking pool (at most ten times the requested limit) before returning the
+limit; it does not promise arbitrary refill beyond that pool. Internal Python
+`search_documents` callers must supply `repository` for source-policy admission;
+all CLI/capsule runtime callers do so. A bare connection remains the legacy raw
+index helper and is not a runtime authority check.
+
+Final admission prunes all delivered views of a document whose own path became
+ignored and recomputes signatures, usage and receipts, including episode-only
+capsules. These are point-in-time
+checks, not an atomic snapshot of the whole filesystem. Unknown Git policy fails
+with `Git source context unavailable`; it is never an empty ignore set or an
+ordinary read-only warning.
+
+Fresh local controls exercise actual temporary-project CLI/MCP and supplied
+SQLite/packing boundaries. Native Windows symlink cases require symlink privileges;
+only those individual cases are skipped when Windows reports error1314. Native
+Windows, live clients, remote CI, actor readiness, model quality and full lifecycle
+provider-token savings require separate evidence and are not established here.
+
+
+### Final source images and working records
+
+After packing, governed recall rechecks only the delivered document rows using
+fresh privacy/owner/authority config and current normalized UTF-8 content hashes.
+Changed/deleted/unreadable ordinary or Brain content is removed from every packed
+view before manifest, receipts and proof. Packed-out documents are not hydrated
+again, and callbacks are never repeated or refilled. Full declared local citation
+existence includes legacy undigested links; remote HTTP(S) content remains unknown.
+
+Final checks do not rerank. Existing admitted citation drift retains its original
+score and warning when its changed-path set stays equal. Newly changed/restored
+sets are withheld so already packed warning text cannot expand. This does not prove
+that an already-drifted citation's bytes stayed identical; unchanged-byte review
+expiry and changes to secret-screen policy require their existing indexing and
+eligibility paths, beyond this content-image check.
+
+Working equality binds the full parsed record plus body from the original read,
+its path/UUID and current eligibility. It is semantic equality, not a raw-byte
+whitespace seal. Changed/missing/invalid/out-of-scope working state is withheld;
+new fields are not adopted without packing. Derived queries and dependent views
+withdraw together. A final working descriptor uses nonblocking/no-follow flags
+where supported and regular-file admission. Single-attempt cleanup preserves an
+active abort against ordinary close failure; cleanup cancellation propagates.
+Failed closes remain uncertain and are never retried. These checks do not impose
+a whole-operation deadline or an atomic snapshot of regular/network file reads.
+
+Fresh controls assert boundary membership, canaries, hashes, scores, accounting,
+receipts and native assembly proof consistency. They do not establish byte-for-byte
+complete ordered outputs, full live-client CLI delivery, real Windows, actor
+readiness, remote CI, model quality or provider-token savings. A POSIX FIFO control
+retains its fixed2s bound and records started-helper timeouts as censored failures.
+
+
+Current Memory Bank expiry is reapplied at delivery. Cached raw search checks the indexed review/validity boundary; governed retrieval checks the declared dates in the current source image, including after packing. The boundary day is inclusive. This temporal check does not certify a legacy manually inserted SQL row with no declared bounds or revalidate all chunk metadata; normal discovery still owns full chunk validation.
+
+Cached delivery also reapplies the current secret-recognition grammar to full unhighlighted indexed title, summary and content, plus the returned path/title/snippet. A changed or refused masking result withholds the row; already-safe masked documents and template expressions retain their bytes. Raw search gets its checked image and snippet from the same SQL statement and preserves its five public fields. Governed retrieval retains the first admitted image through packing and rechecks it under the current grammar. Optional source hints enforce their cached-content byte bound before image hydration. Structured Brain/Memory Bank source records remain subject to strict whole-record checks, never masking metadata into authority. These checks do not establish an atomic prequote-to-prime database/filesystem epoch. Local manifest exclusion diagnostics may retain rejected identifiers; this is not a promise that every local artifact is free of such identifiers.
+
+
+Claude Code and Codex automatic prompt reads call `context.py refresh` directly, bounded by the hook's own `timeout` and its single `CONTEXT_HOOK_BUDGET` (default 5 seconds). Whatever budget the person sets is honoured, and the prompt reaches the CLI whole, whatever its length. A refresh stopped at the budget (status 124) delivers nothing - a cut capsule reads like a whole one - and the turn is told memory was not consulted. A refresh that fails names its cause with the CLI's own last stderr line; one that exits 1 after printing its layer report delivers that report. Cursor keeps its persistent-rule path. The hooks start the CLI through `memory-bank/scripts/context_cli.py`, which runs `context.py` as the same script from its cached bytecode: started directly, the 8,000-line module is compiled again on every prompt (about 30 ms); a runtime without the launcher falls back to `context.py`. The launcher writes that cache even when the caller asks Python for none - Claude Desktop starts Claude Code with `PYTHONDONTWRITEBYTECODE=1`, the hooks inherit it, and the Harness sets it - for the runtime's own directory only: `memory-bank/scripts/__pycache__/` is ignored wherever the runtime is installed, and nothing else the runtime imports is cached. A cold index too large for the budget still restarts on every prompt; this path does not implement resumable indexing, and in an installed project the budget message says to build the index once outside the hook (`python3 memory-bank/scripts/context.py index`).
+
+Candidate construction now holds the unhighlighted indexed image in the same SQL statement as its highlighted/plain quote. Missing rows and changed path/layer/kind/title identities remain unavailable rather than adopting a later cache image. Conflict/automatic-link rows capture the image with their body; path, hint and source-graph snippets reuse the already-admitted body, including the hint UTF-8 byte cap. This closes the quote-to-first-prime substitution gap.
+
+Native governed and lightweight packets also carry immutable admitted images outside their public dictionary keys through budget copies, window proposals, packing and final return. Rich rendering and section novelty identities use those bodies. The normal FTS highlight is accepted only alongside an exactly matching unhighlighted image from the same statement; if the cache moved, isolated in-memory FTS marks the held body with the same tokenizer. Failure uses held plain text rather than a replacement body. Detached JSON/dict copies use bounded admitted snippets; a missing entry in a bound packet never enables a live-body read. Shared image sinks preserve the first public row, matching deduplication. No private image is added to JSON, manifests or provider input. Ordinary body byte sizes retain their existing profile; this is not a hard operation memory cap or one atomic snapshot across earlier ranking/admission metadata, corpus weights, citation reads and filesystem state.
+
+Refresh health summaries expose `source_notices` only when retained records contain accepted counts: `records` counts journal records with notices and `totals` sums reported invalid UTF-8 content/path occurrences after the requested window. Repeated observations may describe the same source or turn. Unknown keys, nonpositive values, booleans, strings and floats are excluded; source identities/content are never included. Text health uses fixed labels. Missing counts remain absent and do not establish that all sources were valid.

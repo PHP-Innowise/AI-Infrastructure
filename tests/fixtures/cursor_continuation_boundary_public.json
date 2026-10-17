@@ -1,0 +1,31 @@
+{
+  "raw_128": "                                                                                                                              ok",
+  "raw_129": "                                                                                                                               ok",
+  "auto_goal": "JUNIPER RELAY (auto-provisioned from JUNIPER-RELAY)",
+  "terminal_statuses": [
+    "completed",
+    "cancelled"
+  ],
+  "expected_raw_128_source": "task",
+  "expected_raw_129_source": "prompt",
+  "expected_terminal_source_not": "task",
+  "legacy_skip_report": {
+    "capsule": {
+      "gate": {
+        "mode": "enforce",
+        "decision": "skip"
+      }
+    },
+    "capsule_text": "working: JUNIPER-RELAY — Juniper relay ownership\n"
+  },
+  "repeat_skip_report": {
+    "capsule": {
+      "gate": {
+        "mode": "enforce",
+        "decision": "skip",
+        "reason": "repeat-retrieval"
+      }
+    },
+    "capsule_text": "working: JUNIPER-RELAY — Juniper relay ownership\n"
+  }
+}

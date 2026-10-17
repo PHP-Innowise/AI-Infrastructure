@@ -31,6 +31,24 @@ class HandoffError(Exception):
     """A safe, user-facing portable-handoff contract violation."""
 
 
+def _require_utf8_path(value: str | Path) -> None:
+    try:
+        str(value).encode('utf-8')
+    except UnicodeError as error:
+        raise HandoffError('handoff path must be valid UTF-8') from error
+
+
+def _require_utf8_below(repository: Path, value: str | Path) -> None:
+    """The part of a path below the repository is UTF-8; the directories
+    above it are this machine's and are never stored in a handoff."""
+    path = Path(value)
+    try:
+        relative = path.absolute().relative_to(repository.absolute())
+    except ValueError:
+        relative = path
+    _require_utf8_path(relative)
+
+
 SCHEMA_VERSION = 1
 ENCODED_SCHEMA_VERSION = 2
 DETAIL_LIMITS = {"summary": 8_000, "topic": 16_000, "full": 64_000}
@@ -148,6 +166,8 @@ def validate_curated_context(decoded: dict[str, object], detail: str) -> dict[st
             ):
                 raise HandoffError("files must be a list of non-empty strings")
             context[field] = list(raw)
+            for value in context[field]:
+                _require_utf8_path(value)
         else:
             context[field] = _require_string_list(raw, field)
     if not context["next_steps"]:
@@ -182,6 +202,9 @@ def _git_value(repository: Path, arguments: list[str]) -> str | None:
 
 
 def _safe_relative_path(repository: Path, value: str) -> tuple[str, Path]:
+    # The repository-relative path is what a handoff stores; the directories
+    # above the repository are this machine's and never leave it.
+    _require_utf8_path(value)
     if not value or value != value.strip() or "\\" in value or any(ord(char) < 32 for char in value):
         raise HandoffError("file path must be a non-empty, trimmed repository-relative path")
     pure = PurePosixPath(value)
@@ -447,6 +470,10 @@ def save_handoff(
     transcript_path: Path | None,
     state_root: Path | None = None,
 ) -> dict[str, object]:
+    # The transcript is read for its bytes; its path is never stored.
+    for path in (input_json, output):
+        if path is not None:
+            _require_utf8_below(repository, path)
     if source_client not in SOURCE_CLIENTS:
         raise HandoffError(f"source client must be one of: {', '.join(sorted(SOURCE_CLIENTS))}")
     if detail == "topic" and (not isinstance(topic, str) or not topic.strip()):
@@ -464,6 +491,7 @@ def save_handoff(
     fingerprints = fingerprint_files(repository, context["files"])  # type: ignore[arg-type]
     _reject_symlink_parents(output, include_leaf=True)
     output = output.resolve()
+    _require_utf8_below(repository, output)
     if output.suffix != ".md":
         raise HandoffError("handoff output must use a .md extension")
     if output.exists():
@@ -524,6 +552,8 @@ def save_handoff(
 
 
 def load_handoff(repository: Path, input_path: Path, *, include_transcript: bool = False) -> dict[str, object]:
+    _require_utf8_below(repository, input_path)
+    resolved_input = input_path.resolve()
     metadata, context, transcript = _parse_handoff(_read_handoff(input_path))
     source = metadata["repository"]
     assert isinstance(source, dict)
@@ -542,7 +572,7 @@ def load_handoff(repository: Path, input_path: Path, *, include_transcript: bool
         if current is None or saved["sha256"] != current:
             drift.append({"kind": "file", "path": relative, "saved": saved["sha256"], "current": current})
     result: dict[str, object] = {
-        "input": str(input_path.resolve()),
+        "input": str(resolved_input),
         "metadata": {key: value for key, value in metadata.items() if key != "context"},
         "context": context,
         "drift": drift,

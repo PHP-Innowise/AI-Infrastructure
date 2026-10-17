@@ -1,0 +1,8 @@
+{
+  "stage": "before_affected_test_call",
+  "held_before_seal": 414,
+  "whole_construction": "{\"horizon\":2,\"profile\":\"longmemeval/local-text-callback-construction-v1\",\"slots\":[{\"local_ordinal\":0,\"ordinal\":0,\"query_outcome\":\"succeeded\",\"question\":\"buoy cadence\",\"reader_answer\":\"answer\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nMaple buoy emits every 17 seconds.\"}],\"question\":\"buoy cadence\",\"system\":\"Use reference memory; verify canonical sources.\"}},{\"local_ordinal\":null,\"ordinal\":1,\"query_outcome\":\"unlaunched\",\"question\":\"amber slate\",\"reader_answer\":null,\"reader_outcome\":\"unlaunched\",\"reader_request\":null}]}",
+  "construction_bytes": 612,
+  "test_cap": 613,
+  "expected": "each existing held subtotal and new body fits individually; combinedheld exceeds cap and controller_held_bound refuses; no gate"
+}

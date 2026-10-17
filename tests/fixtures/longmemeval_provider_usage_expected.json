@@ -1,0 +1,146 @@
+{
+  "paid": {
+    "profile": "supplied-chat-completion-usage-v1",
+    "response_bytes": 468,
+    "usage_state": "complete",
+    "usage": {
+      "input_tokens": 37,
+      "output_tokens": 12,
+      "total_tokens": 49,
+      "cached_input_tokens": 8,
+      "reasoning_output_tokens": 4
+    },
+    "usage_scope": "supplied_response_only",
+    "provider_coverage": "UNKNOWN",
+    "physical_attempts": null,
+    "usd_micros": null,
+    "billing": "unknown",
+    "usage_verified": false
+  },
+  "zero": {
+    "profile": "supplied-chat-completion-usage-v1",
+    "response_bytes": 190,
+    "usage_state": "complete",
+    "usage": {
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "cached_input_tokens": 0,
+      "reasoning_output_tokens": 0
+    },
+    "usage_scope": "supplied_response_only",
+    "provider_coverage": "UNKNOWN",
+    "physical_attempts": null,
+    "usd_micros": null,
+    "billing": "unknown",
+    "usage_verified": false
+  },
+  "partial": {
+    "profile": "supplied-chat-completion-usage-v1",
+    "response_bytes": 152,
+    "usage_state": "partial",
+    "usage": {
+      "input_tokens": 19,
+      "output_tokens": null,
+      "total_tokens": 24,
+      "cached_input_tokens": 3,
+      "reasoning_output_tokens": null
+    },
+    "usage_scope": "supplied_response_only",
+    "provider_coverage": "UNKNOWN",
+    "physical_attempts": null,
+    "usd_micros": null,
+    "billing": "unknown",
+    "usage_verified": false
+  },
+  "missing": {
+    "profile": "supplied-chat-completion-usage-v1",
+    "response_bytes": 96,
+    "usage_state": "missing",
+    "usage": {
+      "input_tokens": null,
+      "output_tokens": null,
+      "total_tokens": null,
+      "cached_input_tokens": null,
+      "reasoning_output_tokens": null
+    },
+    "usage_scope": "supplied_response_only",
+    "provider_coverage": "UNKNOWN",
+    "physical_attempts": null,
+    "usd_micros": null,
+    "billing": "unknown",
+    "usage_verified": false
+  },
+  "null": {
+    "profile": "supplied-chat-completion-usage-v1",
+    "response_bytes": 41,
+    "usage_state": "missing",
+    "usage": {
+      "input_tokens": null,
+      "output_tokens": null,
+      "total_tokens": null,
+      "cached_input_tokens": null,
+      "reasoning_output_tokens": null
+    },
+    "usage_scope": "supplied_response_only",
+    "provider_coverage": "UNKNOWN",
+    "physical_attempts": null,
+    "usd_micros": null,
+    "billing": "unknown",
+    "usage_verified": false
+  },
+  "no_details": {
+    "profile": "supplied-chat-completion-usage-v1",
+    "response_bytes": 97,
+    "usage_state": "complete",
+    "usage": {
+      "input_tokens": 14,
+      "output_tokens": 5,
+      "total_tokens": 19,
+      "cached_input_tokens": null,
+      "reasoning_output_tokens": null
+    },
+    "usage_scope": "supplied_response_only",
+    "provider_coverage": "UNKNOWN",
+    "physical_attempts": null,
+    "usd_micros": null,
+    "billing": "unknown",
+    "usage_verified": false
+  },
+  "chunk": {
+    "profile": "supplied-chat-completion-usage-v1",
+    "response_bytes": 104,
+    "usage_state": "unsupported",
+    "usage": {
+      "input_tokens": null,
+      "output_tokens": null,
+      "total_tokens": null,
+      "cached_input_tokens": null,
+      "reasoning_output_tokens": null
+    },
+    "usage_scope": "supplied_response_only",
+    "provider_coverage": "UNKNOWN",
+    "physical_attempts": null,
+    "usd_micros": null,
+    "billing": "unknown",
+    "usage_verified": false
+  },
+  "error": {
+    "profile": "supplied-chat-completion-usage-v1",
+    "response_bytes": 119,
+    "usage_state": "unsupported",
+    "usage": {
+      "input_tokens": null,
+      "output_tokens": null,
+      "total_tokens": null,
+      "cached_input_tokens": null,
+      "reasoning_output_tokens": null
+    },
+    "usage_scope": "supplied_response_only",
+    "provider_coverage": "UNKNOWN",
+    "physical_attempts": null,
+    "usd_micros": null,
+    "billing": "unknown",
+    "usage_verified": false
+  }
+}

@@ -26,6 +26,26 @@ targeted manual checks.
 
 Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write into the target, with two sanctioned exceptions: safe auto-fixes (e.g. restoring an executable bit) and the manifest hash refresh those auto-fixes may require (recipe below).
 
+## Inferred task identity verification
+
+The structural hook check enforces hook-forge's canonical inferred-branch
+fragments in manifest-owned prompt reads for Claude/Codex/Cursor and in Cursor
+turn/session readers. Check explicit override versus inferred fallback,
+quoted array forwarding, the prompt relay and both Cursor timeout arms. No
+expected-branch marker belongs on a write or rule-maintenance operation.
+Missing, unconditional, mismatched or data-only markers fail with the fixed
+`lacks canonical inferred-branch read contract` diagnostic. Unowned hooks must
+never be read to perform this check.
+
+Use the documented variable names and fragments; comments, multiline quoted
+programs and literal heredocs are data, and later mutations invalidate the
+contract. The limited lexical check rejects unsupported forms. It does not
+prove arbitrary shell control flow, sourced/eval code, runtime redefinition or
+live delivery. Do not execute unchecked target hooks inside this validator.
+Trusted isolated fixtures may capture actual CLI argv against independent
+public expected lists; distinguish those tests from AI generation, real
+clients, Windows, remote CI and full memory semantic/token-cost evaluation.
+
 ## Process
 
 1. **Determine the selected editions** from the profile (section 1) and the generate report.
@@ -209,12 +229,12 @@ Writes a report to `tasks/TASK-{N}/bootstrap-verifier-report.md`. Does not write
    - Every selected edition root exists and every unselected edition root is absent (`.claude`; `.cursor`; `.agents` + `.codex` for Codex).
    - Frontmatter validity across every generated `SKILL.md`, agent, and command.
    - Every `flow-next`/`flow-alternatives`/`related`/`invokes`/`spawns` reference resolves to a skill/agent that exists in that edition.
-   - Every generated hook passes `bash -n` and carries the executable bit, and the per-edition hook set is complete (nine hooks - seven shared, the tool-owned `subagent-gate.sh` variant, and `subagent-dispatch.sh`; `context-continuity.sh` calls `memory-bank/scripts/context_continuity.py` with its edition's `--host` and `--event hook`; Cursor's `working-memory-read.sh` answers `{"continue": true}` to `beforeSubmitPrompt` and renders the working-memory rule, and Codex ships the dispatch observer unregistered).
+   - Every generated hook passes `bash -n` and carries the executable bit, and the per-edition hook set is complete (nine hooks - seven shared, the tool-owned `subagent-gate.sh` variant, and `subagent-dispatch.sh`; `context-continuity.sh` calls `memory-bank/scripts/context_continuity.py` with its edition's `--host` and `--event hook`; Cursor's `working-memory-read.sh` answers `{"continue": true}` to `beforeSubmitPrompt` and renders the working-memory rule, and Codex ships the dispatch observer unregistered). Verify all Cursor `refresh`/`hook-context` calls use `--delivery-profile cursor-rule` without session/transcript suppression, follow the canonical templates, and preserve current warnings and fresh source checks; Claude/Codex use the ordinary profile.
    - Orchestration parity, when the run generated flows: every `stages` entry in a flow command names an agent that exists in that edition, no `parallel: true` stage contains more than one agent carrying `writes: true`, and each multi-stage flow declares at least one checkpoint (a single-stage read-only flow needs none). A generated accelerator whose flows name absent agents is a failed generation, not a warning.
    - Every hook wiring file (`.claude/settings.json`, `.cursor/hooks.json`, `.codex/hooks.json` + `config.toml`) references only hook scripts that exist and are executable - no dead hooks. Every command that names a hook (a `.sh` script or a `hooks/` path) must be exactly hook-forge's step 9 form for its edition - `"${CLAUDE_PROJECT_DIR}"/.claude/hooks/<script>.sh` (or the unbraced `"$CLAUDE_PROJECT_DIR"`), the verbatim Codex root-finding launcher ending in `sh <script>.sh`, bare `.cursor/hooks/<script>.sh` - matched in full, never token by token: anything else is an error, not a skip. A bare Claude/Codex path exits 127 from a subdirectory (both hosts run hooks from the session's cwd and let the call through); `|| true` or `; exit 0` swallows the blocking exit 2; a quoted path, a `bash -c` wrapper or a launcher given a name without `.sh` hides a dead hook. A bare-path error names the anchored command to write instead. Every hook hook-forge registers (all nine on Claude and on Cursor, eight on Codex without `subagent-dispatch.sh`) must also be wired in that form - an unwired guard never runs - and `context-continuity.sh`, with no argument, on each event it serves: `SessionStart`, `UserPromptSubmit` and `Stop` (Claude, Codex), `sessionStart`, `beforeSubmitPrompt` and `afterAgentResponse` (Cursor). Cursor runs project hooks from the project root and keeps bare paths.
    - The seeded `memory-bank/` passes its own `scripts/validate.py`, run against `--evidence-target` as the source root: the chunks cite the target's files, and during generation the bank is staged apart from them.
    - The seeded chunks pass `scripts/validate_memory_content.py --bank <generation-root>/memory-bank --target <evidence-target>`: every body states a rule with concrete anchors, no two bodies share a skeleton, no known boilerplate phrase survives, every cited source is explained with a range its file can contain, and contradiction chunks record both claims as `needs-review`. The structural validator proves shape; this gate proves the bank preserves knowledge.
-   - The context-brain runtime is complete (`context.py`, `context_handoff.py`, `context_continuity.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py` under `memory-bank/scripts/`), the `project-brain/` skeleton exists, and `config/runtime.json` parses with a substituted, non-empty framework slug and a `canonical_edition` whose skills tree actually exists in the target (otherwise `context.py parity` would report false total drift).
+   - The context-brain runtime is complete (`context.py`, `context_cli.py`, `context_handoff.py`, `context_continuity.py`, `brain_runtime.py`, `context_retrieval.py`, `validate.py` under `memory-bank/scripts/`), the `project-brain/` skeleton exists, and `config/runtime.json` parses with a substituted, non-empty framework slug and a `canonical_edition` whose skills tree actually exists in the target (otherwise `context.py parity` would report false total drift).
    - Smoke: `python3 memory-bank/scripts/context.py status` and `python3 memory-bank/scripts/context.py validate` both exit 0 inside the generated tree.
    - Every selected edition contains the six memory-continuity skills (`memory-bank`, `project-brain`, `checkpoint`, `memory`, `context-save`, `context-load`) and their agent/command wrappers where applicable. A manual `context-save full --transcript` artifact is never an automatic-retrieval input or a Project Brain, Memory Bank, SQLite, or hook store. Chat snapshots are separate local ignored `.context-handoff/` state, holding only visible text from the hook payload or the transcript it names - never private client storage or hidden reasoning.
    - The upgrade contract: `.infra-manifest.json` exists at the target root, parses, carries a semver `generator_version`, a `TASK-{N}` reference, a valid mode (`full`/`merge`), valid selected editions, and a well-formed optional `decisions` map whose legacy `decision`, `rejected_sha256`, and `task` fields remain valid. Optional shared-file metadata (`origin`, `strategy`, proposal/resolved hashes, requirements) must be internally consistent; unknown future additive fields are tolerated. It lists no runtime state or itself, and every listed file exists with a matching sha256. Manifest membership exclusively defines ownership in both modes; unlisted target files are not opened or reported. A manifest-owned `AGENTS.md` carries the matching version/task stamp; an untracked team `AGENTS.md` is ignored.
@@ -374,3 +394,22 @@ A non-empty `STILL MISSING` list means a tracked file vanished - that is an esca
 ## Final Output
 
 Return PASS/FAIL, the per-check results, what was auto-fixed, and what needs human attention. On PASS, `infra-generate` may report success.
+
+The lexical contract accepts only LF physical records, code/double-quote
+continuations and simple quoted literal heredocs (one at a time; exact
+delimiter word, optional tab stripping). Unquoted/concatenated delimiters,
+arithmetic-shift ambiguity and unsupported quoted tails fail closed. Both
+resolved task and explicit selector writes invalidate the contract. Alongside
+the preferred ROOT_DIR/symbolic-ref fragment, the gate accepts the finite
+installed PROJECT_DIR/branch-show-current fragment with its existing forwarding
+relay, budget variable and guarded Cursor JSON append. Both profiles retain
+the inferred-only marker. Cursor needs exactly one JSON append before dispatch;
+other hosts cannot append it. These checks do not prove arbitrary shell code.
+
+Redirection operators assembled across code continuations are unsupported.
+The explicit selector may appear only in canonical fallback/guard lines;
+named prefix increments and default-parameter assignments cannot rewrite
+resolved task identities.
+
+
+For generated prompt readers, verify the direct `REPORT=$(run python3 "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>"$ERROR_FILE")` call from hook-forge, preceded by the relay and followed by the status capture. Cursor appends `--json` after the conditional and delivers through its rule arm. Reject any `prompt-supervise` call (the runtime no longer ships one) and post-dispatch array mutations. `CONTEXT_CLI` is assigned only as hook-forge's runtime entry - `memory-bank/scripts/context_cli.py` followed at once by its `[ -f "$CONTEXT_CLI" ] ||` fallback to `context.py` - or, in hooks generated before the loader, as `context.py` alone; any other assignment fails the read contract, because a path that names no file skips memory silently. Continue manifest membership-before-read and syntax-only analysis; never execute an untrusted target hook to validate this grammar.

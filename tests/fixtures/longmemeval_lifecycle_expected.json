@@ -1,0 +1,77 @@
+{
+  "reader_requests": [
+    "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nMaple buoy emits every 17 seconds.\"}],\"question\":\"buoy cadence\",\"system\":\"Use reference memory; verify canonical sources.\"}",
+    "{\"memory_context\":[],\"question\":\"amber slate\",\"system\":\"Use reference memory; verify canonical sources.\"}"
+  ],
+  "reader_request_bytes": [
+    209,
+    105
+  ],
+  "construction": "{\"horizon\":2,\"profile\":\"longmemeval/local-text-callback-construction-v1\",\"slots\":[{\"local_ordinal\":0,\"ordinal\":0,\"query_outcome\":\"succeeded\",\"question\":\"buoy cadence\",\"reader_answer\":\"17 seconds\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nMaple buoy emits every 17 seconds.\"}],\"question\":\"buoy cadence\",\"system\":\"Use reference memory; verify canonical sources.\"}},{\"local_ordinal\":1,\"ordinal\":1,\"query_outcome\":\"succeeded\",\"question\":\"amber slate\",\"reader_answer\":\"Unknown; no evidence.\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[],\"question\":\"amber slate\",\"system\":\"Use reference memory; verify canonical sources.\"}}]}",
+  "construction_sha256": "3d3833c32cf894b5304755f6eba245f59e2603ac40a6ad4470746c6840eabd37",
+  "construction_bytes": 731,
+  "judge_requests": [
+    "{\"answer\":\"17 seconds\",\"construction_sha256\":\"3d3833c32cf894b5304755f6eba245f59e2603ac40a6ad4470746c6840eabd37\",\"question\":\"buoy cadence\"}",
+    "{\"answer\":\"Unknown; no evidence.\",\"construction_sha256\":\"3d3833c32cf894b5304755f6eba245f59e2603ac40a6ad4470746c6840eabd37\",\"question\":\"amber slate\"}"
+  ],
+  "judge_request_bytes": [
+    138,
+    148
+  ],
+  "local_query_input_bytes": [
+    43,
+    42
+  ],
+  "local_query_output_bytes": [
+    105,
+    2
+  ],
+  "known_product": {
+    "known_input_tokens": 18,
+    "known_output_tokens": 4,
+    "known_tokens": 22,
+    "known_usd_micros": 15,
+    "known_component_ns": 52,
+    "known_constructed_bytes": 888
+  },
+  "known_experiment": {
+    "known_input_tokens": 26,
+    "known_output_tokens": 7,
+    "known_tokens": 33,
+    "known_usd_micros": 21,
+    "known_component_ns": 66,
+    "known_constructed_bytes": 1174
+  },
+  "full_scopes": {
+    "tokens": null,
+    "usd_micros": null,
+    "component_ns": null,
+    "constructed_bytes": null,
+    "tokens_per_correct": null
+  },
+  "grades": {
+    "observed": 2,
+    "known_correct": 1,
+    "correct": 1,
+    "complete": true,
+    "conflicting": 0
+  },
+  "callback_entries": 5,
+  "attempts": 5,
+  "planned_to_local": [
+    0,
+    1
+  ],
+  "after_planned0_prework_failure": [
+    null,
+    0
+  ],
+  "prework_gap_full_tokens": null,
+  "default_local_no_model_upgrade": false,
+  "old_test_reruns": 0,
+  "native_document": {
+    "text": "# Recorded trajectory d616c5f8fb18d8639cbfb6032d182708a2b3dc4de72d9308273faf3e935f8372\n\nGoal: \"Record the Maple buoy beacon interval\"\nStart URL: \"https://maple.example.invalid/buoy\"\nOutcome: \"Beacon interval recorded\"\n\n## Recorded state 0 (step 12)\nURL: \"https://maple.example.invalid/buoy/panel\"\nArrival action: \"open beacon cadence\"\nThought: null\nScreenshot reference (not ingested): \"public-images/maple-82.png\"\n\nRecorded text:\n\nMaple buoy emits every 17 seconds. The configuration key is buoy_beacon_interval.\n",
+    "bytes": 514,
+    "sha256": "bcd5693dab0a03b99688f0d5ad21dd7e92eb987050837deacc07d2de64196020"
+  }
+}

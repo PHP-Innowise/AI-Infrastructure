@@ -1,0 +1,7 @@
+{
+  "dict_subclass_iterations": 0,
+  "native_subclass_property_reads": 0,
+  "observer_subclass_property_reads": 0,
+  "profile": "independent-new-negative-dispatch-touch-oracles-v1",
+  "scope": "explicit negative-trap touches; exceptions swallowed by optional fallback alone cannot prove zero dispatch"
+}

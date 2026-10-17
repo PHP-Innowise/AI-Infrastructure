@@ -1,0 +1,36 @@
+{
+  "profile": "observed-public-saffron-v1",
+  "horizon": 2,
+  "trajectory": {
+    "id": "public-saffron-beacon-17",
+    "goal": "Configure the Saffron observatory beacon retry delay",
+    "start_url": "https://observatory.example.invalid/beacon",
+    "outcome": "Retry delay recorded",
+    "states": [
+      {
+        "url": "https://observatory.example.invalid/beacon/settings",
+        "action": "open beacon settings",
+        "thought": null,
+        "accessibility_tree": "Saffron beacon retry delay is 23 seconds. The setting is named beacon_retry_delay.",
+        "screenshot": "public-images/saffron-17.png",
+        "step": 4
+      }
+    ]
+  },
+  "queries": [
+    {
+      "text": "Saffron beacon retry delay",
+      "query_image": null
+    },
+    {
+      "text": "unrelated glacier molybdenum",
+      "query_image": "public-images/query-88.png"
+    }
+  ],
+  "controlled_context": [
+    {
+      "type": "text",
+      "value": "Reference data; verify canonical sources.\nSaffron beacon retry delay is 23 seconds."
+    }
+  ]
+}

@@ -642,6 +642,46 @@ class ScoringTest(unittest.TestCase):
             self.assertEqual(1, scored["answer_passages_existed"])
             self.assertEqual(1, scored["answer_passages_delivered"])
 
+    def test_deliverable_ceiling_is_what_the_index_holds(self) -> None:
+        # The runtime quotes the text its index holds, not the file: an answer
+        # the index entry lacks is not a retrieval miss. An answer in a
+        # document longer than the runtime marks whole stays reachable, but is
+        # counted apart.
+        with tempfile.TemporaryDirectory() as temporary:
+            corpus = Path(temporary)
+            write(corpus, "docs/a.md", "First answer. Hidden answer.")
+            write(corpus, "docs/long.md", "Long answer.")
+            database = corpus / "memory-bank/local/context.db"
+            database.parent.mkdir(parents=True)
+            with contextlib.closing(sqlite3.connect(database)) as connection:
+                connection.execute("CREATE VIRTUAL TABLE documents USING fts5("
+                                   "path UNINDEXED, layer UNINDEXED, kind UNINDEXED, title, summary, content)")
+                connection.execute("INSERT INTO documents VALUES ('docs/a.md', 'semantic', 'doc', 'A', '', 'First answer.')")
+                connection.execute("INSERT INTO documents VALUES ('docs/long.md', 'semantic', 'doc', 'L', '', ?)",
+                                   ("Long answer. " + "x" * memory_eval.RUNTIME_MARKED_CHARACTERS,))
+                connection.commit()
+            passages = {"docs/a.md": {"passages": ["First answer.", "Hidden answer."]},
+                        "docs/long.md": {"passages": ["Long answer."]}}
+            paths = ["docs/a.md", "docs/long.md"]
+            expected = memory_eval.existing_answer_passages(corpus, paths, passages)
+            reachable, long_documents = memory_eval.indexed_answer_passages(corpus, paths, expected)
+            self.assertEqual(3, len(expected))
+            self.assertEqual({memory_eval.flatten("First answer."), memory_eval.flatten("Long answer.")}, reachable)
+            self.assertEqual({memory_eval.flatten("Long answer.")}, long_documents)
+            result = refresh_result({"semantic": paths})
+            result["capsule_text"] = "First answer. Hidden answer."
+            scored = memory_eval.score(result, {"docs/a.md": 2, "docs/long.md": 2}, passages, paths, paths,
+                                       expected_passages=expected, deliverable_passages=reachable)
+            self.assertEqual(3, scored["answer_passages_existed"])
+            self.assertEqual(2, scored["answer_passages_delivered"])
+            self.assertEqual(2, scored["answer_passages_deliverable"])
+            self.assertEqual(1, scored["answer_passages_delivered_deliverable"])
+            scored.update(status="ok", answer_passages_long_document=len(long_documents))
+            summary = memory_eval.summarize({"one": scored})
+            self.assertEqual(0.5, summary["deliverable_passage_recall"])
+            self.assertEqual(1, summary["answer_passages_long_document"])
+            self.assertEqual("50.0%", memory_eval.row_cell(summary, "deliverable_passage_recall"))
+
     def test_keeps_only_bounded_safe_graph_manifest_counters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             corpus = Path(temporary)

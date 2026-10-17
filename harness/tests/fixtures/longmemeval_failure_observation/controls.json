@@ -1,0 +1,231 @@
+{
+  "automatic_cleanup_expected": {
+    "observation_state": "unmeasured",
+    "phase": "cleanup",
+    "profile": "longmemeval/projection-body-failure-v1",
+    "provider_tokens": null,
+    "reported_exception": "unclassified",
+    "reported_guard": null,
+    "root_cause": null,
+    "scope": "last_operation_body_exception_only",
+    "usd_micros": null
+  },
+  "automatic_init_expected": {
+    "observation_state": "fixed_guard_reported",
+    "phase": "initialization",
+    "profile": "longmemeval/projection-body-failure-v1",
+    "provider_tokens": null,
+    "reported_exception": "ProjectionError",
+    "reported_guard": "native_profile",
+    "root_cause": null,
+    "scope": "last_operation_body_exception_only",
+    "usd_micros": null
+  },
+  "automatic_insert_expected": {
+    "observation_state": "fixed_guard_reported",
+    "phase": "insert",
+    "profile": "longmemeval/projection-body-failure-v1",
+    "provider_tokens": null,
+    "reported_exception": "ProjectionError",
+    "reported_guard": "corpus_bound",
+    "root_cause": null,
+    "scope": "last_operation_body_exception_only",
+    "usd_micros": null
+  },
+  "automatic_query_expected": {
+    "observation_state": "fixed_guard_reported",
+    "phase": "query",
+    "profile": "longmemeval/projection-body-failure-v1",
+    "provider_tokens": null,
+    "reported_exception": "ProjectionError",
+    "reported_guard": "input_schema",
+    "root_cause": null,
+    "scope": "last_operation_body_exception_only",
+    "usd_micros": null
+  },
+  "capture_failure_expected": {
+    "observation_state": "unmeasured",
+    "phase": "insert",
+    "profile": "longmemeval/projection-body-failure-v1",
+    "provider_tokens": null,
+    "reported_exception": "unclassified",
+    "reported_guard": null,
+    "root_cause": null,
+    "scope": "last_operation_body_exception_only",
+    "usd_micros": null
+  },
+  "cases": [
+    {
+      "args": [
+        "input_schema"
+      ],
+      "expected": {
+        "observation_state": "fixed_guard_reported",
+        "phase": "insert",
+        "profile": "longmemeval/projection-body-failure-v1",
+        "provider_tokens": null,
+        "reported_exception": "ProjectionError",
+        "reported_guard": "input_schema",
+        "root_cause": null,
+        "scope": "last_operation_body_exception_only",
+        "usd_micros": null
+      },
+      "kind": "owned",
+      "phase": "insert"
+    },
+    {
+      "args": [
+        "source_changed"
+      ],
+      "expected": {
+        "observation_state": "fixed_guard_reported",
+        "phase": "query",
+        "profile": "longmemeval/projection-body-failure-v1",
+        "provider_tokens": null,
+        "reported_exception": "ProjectionError",
+        "reported_guard": "source_changed",
+        "root_cause": null,
+        "scope": "last_operation_body_exception_only",
+        "usd_micros": null
+      },
+      "kind": "owned",
+      "phase": "query"
+    },
+    {
+      "args": [
+        "input_bound"
+      ],
+      "expected": {
+        "observation_state": "fixed_guard_reported",
+        "phase": "cleanup",
+        "profile": "longmemeval/projection-body-failure-v1",
+        "provider_tokens": null,
+        "reported_exception": "ProjectionError",
+        "reported_guard": "input_bound",
+        "root_cause": null,
+        "scope": "last_operation_body_exception_only",
+        "usd_micros": null
+      },
+      "kind": "owned",
+      "phase": "cleanup"
+    },
+    {
+      "args": [
+        "native_profile"
+      ],
+      "expected": {
+        "observation_state": "fixed_guard_reported",
+        "phase": "initialization",
+        "profile": "longmemeval/projection-body-failure-v1",
+        "provider_tokens": null,
+        "reported_exception": "ProjectionError",
+        "reported_guard": "native_profile",
+        "root_cause": null,
+        "scope": "last_operation_body_exception_only",
+        "usd_micros": null
+      },
+      "kind": "owned",
+      "phase": "initialization"
+    },
+    {
+      "args": [
+        "private-untrusted-string"
+      ],
+      "expected": {
+        "observation_state": "unmeasured",
+        "phase": "insert",
+        "profile": "longmemeval/projection-body-failure-v1",
+        "provider_tokens": null,
+        "reported_exception": "ProjectionError",
+        "reported_guard": null,
+        "root_cause": null,
+        "scope": "last_operation_body_exception_only",
+        "usd_micros": null
+      },
+      "kind": "owned",
+      "phase": "insert"
+    },
+    {
+      "args": [
+        true
+      ],
+      "expected": {
+        "observation_state": "unmeasured",
+        "phase": "query",
+        "profile": "longmemeval/projection-body-failure-v1",
+        "provider_tokens": null,
+        "reported_exception": "ProjectionError",
+        "reported_guard": null,
+        "root_cause": null,
+        "scope": "last_operation_body_exception_only",
+        "usd_micros": null
+      },
+      "kind": "owned",
+      "phase": "query"
+    },
+    {
+      "args": [
+        "source_changed"
+      ],
+      "expected": {
+        "observation_state": "unmeasured",
+        "phase": "cleanup",
+        "profile": "longmemeval/projection-body-failure-v1",
+        "provider_tokens": null,
+        "reported_exception": "unclassified",
+        "reported_guard": null,
+        "root_cause": null,
+        "scope": "last_operation_body_exception_only",
+        "usd_micros": null
+      },
+      "kind": "foreign",
+      "phase": "cleanup"
+    },
+    {
+      "args": [
+        "input_bound"
+      ],
+      "expected": {
+        "observation_state": "unmeasured",
+        "phase": "insert",
+        "profile": "longmemeval/projection-body-failure-v1",
+        "provider_tokens": null,
+        "reported_exception": "unclassified",
+        "reported_guard": null,
+        "root_cause": null,
+        "scope": "last_operation_body_exception_only",
+        "usd_micros": null
+      },
+      "kind": "subclass",
+      "phase": "insert"
+    }
+  ],
+  "empty": {
+    "observation_state": "unobserved",
+    "phase": null,
+    "profile": "longmemeval/projection-body-failure-v1",
+    "provider_tokens": null,
+    "reported_exception": null,
+    "reported_guard": null,
+    "root_cause": null,
+    "scope": "last_operation_body_exception_only",
+    "usd_micros": null
+  },
+  "guards": [
+    "ambiguous_alias",
+    "conflicting_identity",
+    "context_bound",
+    "corpus_bound",
+    "duplicate_key",
+    "input_bound",
+    "input_encoding",
+    "input_schema",
+    "instance_unavailable",
+    "native_configuration",
+    "native_profile",
+    "query_bound",
+    "screenshot_reference",
+    "source_changed"
+  ],
+  "invalid_phase_expected": "failure_phase_profile"
+}

@@ -1,0 +1,54 @@
+{
+  "questions": [
+    {
+      "question": "Cobalt coolant limit?",
+      "query_image": null
+    },
+    {
+      "question": "Cobalt coolant limit?",
+      "query_image": null
+    }
+  ],
+  "memory": {
+    "context": [
+      {
+        "type": "text",
+        "value": "Reference data; verify canonical sources.\nCobalt coolant limit is 48 C."
+      }
+    ],
+    "build_ns": 7,
+    "insert_bytes": 131,
+    "query_ns": [
+      2,
+      4
+    ]
+  },
+  "reader_model": "public-cobalt-reader",
+  "judge_model": "public-cobalt-judge",
+  "reader_max": 61,
+  "judge_max": 17,
+  "reader_timeout": 12.0,
+  "judge_timeout": 9.0,
+  "responses": [
+    "{\"choices\":[{\"message\":{\"content\":\"\"}}],\"id\":\"PUBLIC-COBALT-ID\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":14,\"completion_tokens_details\":{\"reasoning_tokens\":5},\"prompt_tokens\":53,\"prompt_tokens_details\":{\"cached_tokens\":12},\"total_tokens\":67}}",
+    "{\"choices\":[{\"message\":{\"content\":\"48 C\"}}],\"id\":\"PUBLIC-COBALT-ID\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":16,\"completion_tokens_details\":{\"reasoning_tokens\":6},\"prompt_tokens\":59,\"prompt_tokens_details\":{\"cached_tokens\":13},\"total_tokens\":75}}",
+    "{\"choices\":[{\"message\":{\"content\":\"48 C\"}}],\"id\":\"PUBLIC-COBALT-ID\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":17,\"completion_tokens_details\":{\"reasoning_tokens\":7},\"prompt_tokens\":61,\"prompt_tokens_details\":{\"cached_tokens\":14},\"total_tokens\":78}}",
+    "{\"choices\":[{\"message\":{\"content\":\"true\"}}],\"id\":\"PUBLIC-COBALT-ID\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":3,\"completion_tokens_details\":{\"reasoning_tokens\":1},\"prompt_tokens\":23,\"prompt_tokens_details\":{\"cached_tokens\":4},\"total_tokens\":26}}",
+    "{\"choices\":[{\"message\":{\"content\":\"false\"}}],\"id\":\"PUBLIC-COBALT-ID\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":4,\"completion_tokens_details\":{\"reasoning_tokens\":2},\"prompt_tokens\":29,\"prompt_tokens_details\":{\"cached_tokens\":5},\"total_tokens\":33}}"
+  ],
+  "answer": "48 C",
+  "clock_points": [
+    10,
+    20,
+    30,
+    42,
+    50,
+    64,
+    70,
+    75,
+    80,
+    86
+  ],
+  "partial_response": "{\"choices\":[{\"message\":{\"content\":\"48 C\"}}],\"object\":\"chat.completion\",\"usage\":{\"prompt_tokens\":31,\"prompt_tokens_details\":{\"cached_tokens\":7},\"total_tokens\":40}}",
+  "reasoning_response": "{\"choices\":[{\"message\":{\"content\":\"\",\"reasoning\":\"public reasoning fallback\"}}],\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":14,\"completion_tokens_details\":{\"reasoning_tokens\":5},\"prompt_tokens\":53,\"prompt_tokens_details\":{\"cached_tokens\":12},\"total_tokens\":67}}"
+}

@@ -39,6 +39,24 @@ class ConfigError(ValueError):
     pass
 
 
+def long_path(path):
+    """`path` with any Windows 8.3 short name spelled long; elsewhere `path`.
+
+    resolve() spells RUNNER~1 long as it resolves links; GetLongPathNameW
+    expands short names only, so a short root is not mistaken for a link.
+    """
+    if os.name != 'nt':
+        return path
+    import ctypes
+    from ctypes import wintypes
+    expand = ctypes.WinDLL('kernel32', use_last_error=True).GetLongPathNameW
+    expand.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+    expand.restype = wintypes.DWORD
+    size = expand(str(path), None, 0)
+    buffer = ctypes.create_unicode_buffer(size or 1)
+    return Path(buffer.value) if size and expand(str(path), buffer, size) else path
+
+
 def python_command():
     candidates = [('python', []), ('py', ['-3']), ('python3', [])] if os.name == 'nt' else [('python3', []), ('python', [])]
     probe = 'import sys,sqlite3; assert sys.version_info >= (3,9); sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE probe USING fts5(value)")'
@@ -400,7 +418,7 @@ def main():
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
     try:
-        root = args.root.absolute()
+        root = long_path(args.root.absolute())
         if root != root.resolve() or root != Path(__file__).resolve().parents[2]:
             raise ConfigError('Run the installed registration script in its own project')
         python = python_command()

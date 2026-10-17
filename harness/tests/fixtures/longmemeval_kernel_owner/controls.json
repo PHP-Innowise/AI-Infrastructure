@@ -1,0 +1,716 @@
+{
+  "cases": [
+    {
+      "after_owner": {
+        "closed": true,
+        "registry": []
+      },
+      "after_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "api_actions": [
+        {
+          "label": "gamma",
+          "operation": "close",
+          "returned": true
+        },
+        {
+          "label": "beta",
+          "operation": "close",
+          "returned": true
+        },
+        {
+          "label": "alpha",
+          "operation": "close",
+          "returned": true
+        }
+      ],
+      "assertions_completed": true,
+      "before_owner": {
+        "closed": false,
+        "registry": [
+          "alpha",
+          "beta",
+          "gamma"
+        ]
+      },
+      "before_probes": {
+        "alpha": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "beta": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "gamma": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "callback_refusals": {
+        "count": 0,
+        "overflow": false
+      },
+      "callbacks": [
+        {
+          "label": "gamma",
+          "owner_closed": true,
+          "remaining": [
+            "alpha",
+            "beta"
+          ]
+        },
+        {
+          "label": "beta",
+          "owner_closed": true,
+          "remaining": [
+            "alpha"
+          ]
+        },
+        {
+          "label": "alpha",
+          "owner_closed": true,
+          "remaining": []
+        }
+      ],
+      "cleanup_actions": [
+        {
+          "action": "already_closed",
+          "label": "alpha"
+        },
+        {
+          "action": "already_closed",
+          "label": "beta"
+        },
+        {
+          "action": "already_closed",
+          "label": "gamma"
+        },
+        {
+          "action": "closed_matching_identity",
+          "label": "source"
+        }
+      ],
+      "cleanup_issues": [],
+      "cleanup_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "source": {
+          "errno": 9,
+          "state": "closed"
+        }
+      },
+      "distinct_fixture_handles": 4,
+      "held_source_before_drain": true,
+      "injected_faults": [],
+      "name": "success_three_directory_handles",
+      "outward": null,
+      "outward_context": null,
+      "repeat_new_callbacks": 0,
+      "repeat_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "repeat_return": null
+    },
+    {
+      "after_owner": {
+        "closed": true,
+        "registry": []
+      },
+      "after_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "replacement_file"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "api_actions": [
+        {
+          "label": "gamma",
+          "operation": "close_then_dup2",
+          "returned": true,
+          "source": "source"
+        },
+        {
+          "label": "beta",
+          "operation": "close",
+          "returned": true
+        },
+        {
+          "label": "alpha",
+          "operation": "close",
+          "returned": true
+        }
+      ],
+      "assertions_completed": true,
+      "before_owner": {
+        "closed": false,
+        "registry": [
+          "alpha",
+          "beta",
+          "gamma"
+        ]
+      },
+      "before_probes": {
+        "alpha": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "beta": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "gamma": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "callback_refusals": {
+        "count": 0,
+        "overflow": false
+      },
+      "callbacks": [
+        {
+          "label": "gamma",
+          "owner_closed": true,
+          "remaining": [
+            "alpha",
+            "beta"
+          ]
+        },
+        {
+          "label": "beta",
+          "owner_closed": true,
+          "remaining": [
+            "alpha"
+          ]
+        },
+        {
+          "label": "alpha",
+          "owner_closed": true,
+          "remaining": []
+        }
+      ],
+      "cleanup_actions": [
+        {
+          "action": "already_closed",
+          "label": "alpha"
+        },
+        {
+          "action": "already_closed",
+          "label": "beta"
+        },
+        {
+          "action": "closed_matching_identity",
+          "label": "gamma"
+        },
+        {
+          "action": "closed_matching_identity",
+          "label": "source"
+        }
+      ],
+      "cleanup_issues": [],
+      "cleanup_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "source": {
+          "errno": 9,
+          "state": "closed"
+        }
+      },
+      "distinct_fixture_handles": 4,
+      "held_source_before_drain": true,
+      "injected_faults": [
+        {
+          "kind": "postclose_first_error",
+          "label": "gamma"
+        }
+      ],
+      "name": "postclose_reuse_error",
+      "outward": "first_error",
+      "outward_context": null,
+      "repeat_new_callbacks": 0,
+      "repeat_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "replacement_file"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "repeat_return": null
+    },
+    {
+      "after_owner": {
+        "closed": true,
+        "registry": []
+      },
+      "after_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "api_actions": [
+        {
+          "label": "beta",
+          "operation": "close",
+          "returned": true
+        },
+        {
+          "label": "alpha",
+          "operation": "close",
+          "returned": true
+        }
+      ],
+      "assertions_completed": true,
+      "before_owner": {
+        "closed": false,
+        "registry": [
+          "alpha",
+          "beta",
+          "gamma"
+        ]
+      },
+      "before_probes": {
+        "alpha": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "beta": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "gamma": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "callback_refusals": {
+        "count": 0,
+        "overflow": false
+      },
+      "callbacks": [
+        {
+          "label": "gamma",
+          "owner_closed": true,
+          "remaining": [
+            "alpha",
+            "beta"
+          ]
+        },
+        {
+          "label": "beta",
+          "owner_closed": true,
+          "remaining": [
+            "alpha"
+          ]
+        },
+        {
+          "label": "alpha",
+          "owner_closed": true,
+          "remaining": []
+        }
+      ],
+      "cleanup_actions": [
+        {
+          "action": "already_closed",
+          "label": "alpha"
+        },
+        {
+          "action": "already_closed",
+          "label": "beta"
+        },
+        {
+          "action": "closed_matching_identity",
+          "label": "gamma"
+        },
+        {
+          "action": "closed_matching_identity",
+          "label": "source"
+        }
+      ],
+      "cleanup_issues": [],
+      "cleanup_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "source": {
+          "errno": 9,
+          "state": "closed"
+        }
+      },
+      "distinct_fixture_handles": 4,
+      "held_source_before_drain": true,
+      "injected_faults": [
+        {
+          "kind": "preclose_first_error",
+          "label": "gamma"
+        }
+      ],
+      "name": "preclose_error_retains_uncertain_handle",
+      "outward": "first_error",
+      "outward_context": null,
+      "repeat_new_callbacks": 0,
+      "repeat_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "repeat_return": null
+    },
+    {
+      "after_owner": {
+        "closed": true,
+        "registry": []
+      },
+      "after_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "gamma": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "api_actions": [
+        {
+          "label": "gamma",
+          "operation": "close",
+          "returned": true
+        },
+        {
+          "label": "alpha",
+          "operation": "close",
+          "returned": true
+        }
+      ],
+      "assertions_completed": true,
+      "before_owner": {
+        "closed": false,
+        "registry": [
+          "alpha",
+          "beta",
+          "gamma"
+        ]
+      },
+      "before_probes": {
+        "alpha": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "beta": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "gamma": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "callback_refusals": {
+        "count": 0,
+        "overflow": false
+      },
+      "callbacks": [
+        {
+          "label": "gamma",
+          "owner_closed": true,
+          "remaining": [
+            "alpha",
+            "beta"
+          ]
+        },
+        {
+          "label": "beta",
+          "owner_closed": true,
+          "remaining": [
+            "alpha"
+          ]
+        },
+        {
+          "label": "alpha",
+          "owner_closed": true,
+          "remaining": []
+        }
+      ],
+      "cleanup_actions": [
+        {
+          "action": "already_closed",
+          "label": "alpha"
+        },
+        {
+          "action": "closed_matching_identity",
+          "label": "beta"
+        },
+        {
+          "action": "already_closed",
+          "label": "gamma"
+        },
+        {
+          "action": "closed_matching_identity",
+          "label": "source"
+        }
+      ],
+      "cleanup_issues": [],
+      "cleanup_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "gamma": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "source": {
+          "errno": 9,
+          "state": "closed"
+        }
+      },
+      "distinct_fixture_handles": 4,
+      "held_source_before_drain": true,
+      "injected_faults": [
+        {
+          "kind": "postclose_first_error",
+          "label": "gamma"
+        },
+        {
+          "kind": "preclose_later_abort",
+          "label": "beta"
+        }
+      ],
+      "name": "mixed_postclose_error_preclose_abort",
+      "outward": "first_error",
+      "outward_context": null,
+      "repeat_new_callbacks": 0,
+      "repeat_probes": {
+        "alpha": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "beta": {
+          "directory": true,
+          "identity_match": true,
+          "state": "original_directory"
+        },
+        "gamma": {
+          "errno": 9,
+          "state": "closed"
+        },
+        "source": {
+          "bytes": 29,
+          "identity_match": true,
+          "regular": true,
+          "sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64",
+          "state": "source_file"
+        }
+      },
+      "repeat_return": null
+    }
+  ],
+  "close_then_dup2_constraint": "adjacent saved C API calls, no intervening descriptor-opening/allocation/pathIO",
+  "failures": "actualunexpected/ambiguous=>incomplete, no retry/relaunch/guardraise",
+  "finalizer_authority": "knownfixedhandle matching originalcaptured image, or gamma known sourcealias image; no foreign adoption",
+  "labels": [
+    "alpha",
+    "beta",
+    "gamma",
+    "source"
+  ],
+  "max_methods": 4,
+  "max_persistent_fixture_handles": 4,
+  "profile": "new-root-owned-kernel-fd-oracles-v1",
+  "runtime_profile": "Linux pinned errnoEBADF9/Python3.14/actualROOTtempIO, not actor/nativeconstructor/corpus",
+  "source_bytes": 29,
+  "source_literal": "public replacement reference\n",
+  "source_sha256": "1257ca971bfd54278e9a02e4b30fa6b494f54545a411ebeab5a517119a7ffd64"
+}
