@@ -3716,6 +3716,20 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
+def _skill_named_for(item: dict[str, Any], query: str) -> bool:
+    """Whether the request names the skill, rather than merely matching it.
+
+    Every host loads its own skill catalogue and picks from it; a pointer the
+    request never asked for costs a slot and answers nothing.
+    """
+    title_words = {
+        word.casefold()
+        for word in re.findall(r"\w+", str(item.get("title") or ""))
+        if len(word) >= 4
+    }
+    return bool(title_words & {word.casefold() for word in re.findall(r"\w+", query)})
+
+
 def retrieve(
     connection: sqlite3.Connection,
     repository: Path,
@@ -3932,6 +3946,22 @@ def retrieve(
         for item in selected
         if item["category"] == "policy" and item.get("match") != "distinctive"
     ]
+    # A skill reaches the capsule only when the request names it: hosts
+    # load their own catalogue, and one pointer per turn that nobody asked
+    # for is the most expensive kind of noise. What is left goes out with
+    # its reason, so the manifest still accounts for it.
+    named = [
+        item
+        for item in procedural_ranked
+        if item.get("kind") != "skill" or _skill_named_for(item, query)
+    ]
+    kept_skills = {id(item) for item in named}
+    filter_excluded.extend(
+        {"path": item["path"], "reason": "name-mismatch"}
+        for item in procedural_ranked
+        if id(item) not in kept_skills
+    )
+    procedural_ranked = named
     # The semantic layer is built from categories and the episodic layer from
     # the layer column, and the two taxonomies overlap: `category_for` has no
     # `changelog` branch, so CHANGELOG.md is category 'evidence' AND layer

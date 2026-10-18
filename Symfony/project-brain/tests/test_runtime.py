@@ -5452,12 +5452,22 @@ class CapsuleNoiseTest(RuntimeHarness):
         self.assertEqual("cobalt authority", capsule["working"]["goal"])
         self.assertFalse(any(capsule[layer] for layer in context_cli.DOCUMENT_LAYERS), capsule)
 
-    def test_only_one_strong_skill_is_delivered(self) -> None:
+    def test_a_skill_is_delivered_only_when_the_request_names_it(self) -> None:
         for name in ("first", "second"):
             skill = self.repository / f".agents/skills/{name}/SKILL.md"
             skill.parent.mkdir(parents=True)
             skill.write_text(f"---\nname: {name}\ndescription: cobalt allocation\n---\n# {name}\n\ncobalt allocation\n")
-        self.assertEqual(1, len(self.capsule("cobalt allocation")["procedural"]))
+        # Matching a skill's body is not a reason to hand its pointer over.
+        self.assertEqual(0, len(self.capsule("cobalt allocation")["procedural"]))
+        named = self.repository / ".agents/skills/cobalt/SKILL.md"
+        named.parent.mkdir(parents=True)
+        named.write_text(
+            "---\nname: cobalt\ndescription: allocation rules\n---\n# Cobalt\n\ncobalt allocation\n"
+        )
+        payload = self.capsule("cobalt allocation")["procedural"]
+        self.assertEqual(
+            [".agents/skills/cobalt/SKILL.md"], [item["path"] for item in payload]
+        )
 
     def test_relative_floor_is_per_layer_and_keeps_the_best_memory(self) -> None:
         rows = []

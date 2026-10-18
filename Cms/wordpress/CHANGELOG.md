@@ -26,6 +26,8 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ### Changed
 
+- A skill reaches the capsule only when the request names it (a word of its name of four letters or more); every host loads its own catalogue. Others are recorded as name-mismatch exclusions.
+
 - A corpus-wide document (a changelog, a large reference file) has its relevance scaled by (1,000/length)^0.20 above 1,000 characters, so a scoped record naming the same ticket outranks the file that merely mentions it.
 
 - A document naming the request's ticket or identifier (CMS-741, EntityArrayDenormalizer, snake_case names) ranks above one that only shares its prose: the anchor is matched as an adjacent FTS phrase and scales the score by 1.35. Query distillation keeps anchor terms inside the 24-term limit. No manifest key is added, so existing schemas keep validating.

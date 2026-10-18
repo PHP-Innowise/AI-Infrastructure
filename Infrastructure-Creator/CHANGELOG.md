@@ -6,6 +6,8 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`memory-seed` hands a skill over only when the request names it.** The copied runtime gates the procedural slot by the skill's name; the policy lock is re-recorded.
+
 - **`memory-seed` carries the document-length prior.** The copied runtime scales relevance down for corpus-wide documents; the policy lock is re-recorded.
 
 - **`memory-seed` keeps the anchor ranking.** The copied runtime matches a request's ticket or identifier as an adjacent phrase and scales a document that names one; distillation keeps anchor terms inside the 24-term limit. The policy lock is re-recorded.

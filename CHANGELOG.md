@@ -28,6 +28,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A skill is handed over only when the request names it.** Every host loads its own skill catalogue, and on 25 measured turns the procedural slot carried one pointer per turn that the request never asked for. A skill now qualifies only when a word of its name (four letters or more) appears in the request; the rest are recorded as name-mismatch exclusions. On those prompts skill delivery falls from 25 to 3, the per-turn token estimate drops from 276 to 223, and knowledge delivery is unchanged (65 records, 23 ticket-naming documents).
+
+## Unreleased
+
 - **A corpus-wide document yields to a scoped one.** Relevance is scaled by (1,000/length)^0.20 for documents above 1,000 characters, so a changelog that contains every word of the request stops outranking the record that names the same ticket. On 25 real prompts the changelog falls from 24 turns to 22, Project Brain records rise from 31 to 40, and ticket-naming delivery rises from 22 to 23, at 1,535 rendered characters per turn.
 
 ## Unreleased
