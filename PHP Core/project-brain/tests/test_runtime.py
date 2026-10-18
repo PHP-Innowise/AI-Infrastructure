@@ -208,6 +208,32 @@ class RuntimeHarness(unittest.TestCase):
 
 
 class ProjectBrainRuntimeTest(RuntimeHarness):
+    def test_a_document_naming_the_ticket_outranks_one_sharing_its_words(self) -> None:
+        self.start("TASK-ANCHOR")
+        specs = self.repository / "specs"
+        specs.mkdir(exist_ok=True)
+        specs.joinpath("cobalt-overview.md").write_text(
+            "# Cobalt overview\n\n"
+            + "cobalt capsule ranking bound deterministic context "
+            + "bounding " * 40
+            + "\n",
+            encoding="utf-8",
+        )
+        specs.joinpath("cms-999.md").write_text(
+            "# CMS-999 fix\n\ncobalt capsule ranking repaired the CMS-999 bound.\n",
+            encoding="utf-8",
+        )
+        result = self.run_cli(
+            "retrieve", "CMS-999 cobalt capsule ranking", "--task-id", "TASK-ANCHOR",
+            "--ephemeral", "--json",
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        paths = [item["path"] for item in payload["semantic"]]
+        # The overview repeats every word of the request; the ticket note
+        # names the one thing the request names, and that comes first.
+        self.assertEqual("specs/cms-999.md", paths[0])
+
     def test_governed_capsule_enforces_layer_and_character_contract_deterministically(
         self,
     ) -> None:

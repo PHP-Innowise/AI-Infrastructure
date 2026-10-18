@@ -69,6 +69,7 @@ from brain_runtime import (
 )
 from context_retrieval import (
     CAPSULE_SAFETY_LIMITS,
+    is_anchor,
     DocumentRow,
     EVIDENCE_STOPWORDS,
     RetrievalError,
@@ -1123,7 +1124,15 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
     if not pool:
         return " ".join(tokens[:CAPSULE_PROMPT_TERM_LIMIT])
     rarest = sorted(pool, key=lambda item: (item[2], item[0]))
-    kept = sorted(rarest[:CAPSULE_PROMPT_TERM_LIMIT])
+    # A ticket or identifier the prompt names is the query's own anchor:
+    # it earns a slot even when twenty-four common words would outrank it.
+    anchored = [item for item in rarest if is_anchor(item[1])]
+    chosen = anchored[:CAPSULE_PROMPT_TERM_LIMIT]
+    chosen_positions = {item[0] for item in chosen}
+    chosen += [item for item in rarest if item[0] not in chosen_positions][
+        : CAPSULE_PROMPT_TERM_LIMIT - len(chosen)
+    ]
+    kept = sorted(chosen)
     return " ".join(token for _, token, _ in kept)
 
 
@@ -1511,7 +1520,8 @@ def capsule_render_budget(capsule: dict[str, object]) -> int:
         top_score = float(signals.get("top_score") or 0.0)
     except (TypeError, ValueError):
         top_score = 0.0
-    if distinctive >= 3 or top_score >= 12.0:
+    anchors = signals.get("anchors") or []
+    if anchors or distinctive >= 3 or top_score >= 12.0:
         budget = CAPSULE_RENDER_BUDGETS[2]
     elif distinctive >= 1 or informative >= 8:
         budget = CAPSULE_RENDER_BUDGETS[1]

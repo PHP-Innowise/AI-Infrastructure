@@ -2571,6 +2571,50 @@ def ranking_weight(
     return weight
 
 
+# A document that names the ticket or identifier the request names is
+# answering it, not merely sharing prose with it.
+ANCHOR_BOOST = 1.35
+_RANKING_ANCHOR = re.compile(
+    r"\b[A-Z]{2,6}[- ]\d{1,5}\b"
+    r"|\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b"
+    r"|\b[a-z][a-z0-9]*(?:[A-Z][a-z0-9]+)+\b"
+)
+
+
+def anchor_phrases(query: str) -> list[str]:
+    """The query's ticket ids and identifier names, as FTS phrases.
+
+    A ticket id tokenizes into two words ("CMS", "741"), so the phrase keeps
+    them adjacent; a camelCase or snake_case name stays one token. A document
+    either names one or it does not, which is a sharper signal than sharing
+    words with the request.
+    """
+    phrases: list[str] = []
+    for match in _RANKING_ANCHOR.finditer(query):
+        words = re.findall(r"\w+", match.group(0))
+        if words:
+            phrases.append(" ".join(words))
+    return list(dict.fromkeys(phrases))
+
+
+def _anchor_hits(
+    connection: sqlite3.Connection, phrases: list[str]
+) -> dict[str, list[str]]:
+    """Which indexed documents carry each anchor phrase."""
+    hits: dict[str, list[str]] = {}
+    for phrase in phrases:
+        try:
+            rows = connection.execute(
+                "SELECT path FROM documents WHERE documents MATCH ?",
+                (f'"{phrase}"',),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for row in rows:
+            hits.setdefault(row[0], []).append(phrase)
+    return hits
+
+
 def _candidates(
     connection: sqlite3.Connection, query: str, limit: int = 100
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -2622,6 +2666,16 @@ def _candidates(
             item["authority"], item["confidence"], item["updated_at"]
         )
         result.append(item)
+    anchors = anchor_phrases(query)
+    if anchors and result:
+        hits = _anchor_hits(connection, anchors)
+        for item in result:
+            matched = hits.get(item["path"])
+            if matched:
+                item["anchors"] = matched
+                item["adjusted_score"] = (
+                    float(item["adjusted_score"]) * ANCHOR_BOOST
+                )
     # Re-rank the BM25 window: the raw score breaks adjusted ties so the
     # ordering stays deterministic even when every weight is neutral.
     result.sort(key=lambda item: (-item["adjusted_score"], item["score"], item["path"]))
