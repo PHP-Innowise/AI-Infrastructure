@@ -242,6 +242,7 @@ is what `report` prints.
 - **existed_useful / could help** - judged-useful paths present in the
   reconstructed corpus (skills always count as present): the turn could have
   been helped.
+- **ticket in the capsule text** - every ticket id the prompt names appears, separator-normalised, in the text a model reads. This needs no judgments: a prompt naming CMS-741 and a capsule that never says CMS-741 answered a different request. The row above it counts the prompts that name a ticket.
 - **answer in the capsule text** - a passage of a useful delivered document
   is, whitespace-normalised and case-folded, a substring of `capsule_text`,
   the text a model reads. Delivering a pointer is not delivering the answer.

@@ -28,6 +28,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **The memory stand reports whether the ticket a prompt names reached the text.** Each scored turn now records the ticket ids the prompt names and whether they appear, separator-normalised, in the rendered capsule; the report shows the count of ticket-naming prompts and how many of them put the ticket in front of the model. The metric needs no judgments and no network, so a retrieval change can be checked on real prompts before anyone labels them.
+
+## Unreleased
+
 - **An anchored turn may carry two more episodic items.** The episodic bound was four, so on requests naming three or four records about the same ticket the rest left as episodic-layer exclusions while the capsule used half its rendered channel. The bound is now six, and the per-turn character budget still decides what is delivered. On 25 real prompts ticket-naming delivery rises from 25 of 30 to 29 of 30, at 1,686 rendered characters per turn.
 
 ## Unreleased

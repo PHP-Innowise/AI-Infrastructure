@@ -1208,5 +1208,39 @@ class RealizedUseTest(unittest.TestCase):
         self.assertNotIn(self.PROMPT, json.dumps(with_paths))
 
 
+
+class AnchorMetricTest(unittest.TestCase):
+    def test_prompt_anchors_normalise_hyphen_and_space(self) -> None:
+        self.assertEqual(
+            ["CMS-741", "PR-1"], memory_eval.prompt_anchors("CMS-741 and PR 1")
+        )
+
+    def test_an_anchor_must_reach_the_rendered_text(self) -> None:
+        self.assertTrue(
+            memory_eval.anchors_in_text(["CMS-741"], "- fix CMS-741 the move")
+        )
+        self.assertTrue(memory_eval.anchors_in_text(["CMS-741"], "… CMS 741 …"))
+        self.assertFalse(memory_eval.anchors_in_text(["CMS-741"], "- fix CMS-742"))
+        self.assertFalse(memory_eval.anchors_in_text([], "anything"))
+
+    def test_score_records_the_anchor_and_the_text(self) -> None:
+        result = {
+            "capsule_text": "- fix CMS-741 the move",
+            "capsule": {"selected": [{"path": "CHANGELOG.md"}]},
+        }
+        scored = memory_eval.score(result, {}, {}, [], prompt="CMS-741")
+        self.assertEqual(["CMS-741"], scored["anchors"])
+        self.assertTrue(scored["anchor_in_text"])
+        missed = memory_eval.score(result, {}, {}, [], prompt="CMS-999")
+        self.assertFalse(missed["anchor_in_text"])
+
+    def test_summary_counts_anchor_turns(self) -> None:
+        summary = memory_eval.summarize({
+            "a": {"status": "ok", "anchors": ["CMS-741"], "anchor_in_text": True},
+            "b": {"status": "ok", "anchors": [], "anchor_in_text": False},
+        })
+        self.assertEqual(1, summary["anchor_turns"])
+        self.assertEqual(1, summary["anchors_in_text"])
+
 if __name__ == "__main__":
     unittest.main()

@@ -322,6 +322,30 @@ def flatten(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
+ANCHOR = re.compile(r"\b([A-Z]{2,6})[- ](\d{1,5})\b")
+
+
+def prompt_anchors(prompt: str) -> List[str]:
+    """The ticket ids a prompt names, normalised with their hyphen."""
+    return list(
+        dict.fromkeys(
+            f"{prefix}-{number}" for prefix, number in ANCHOR.findall(prompt or "")
+        )
+    )
+
+
+def _compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", flatten(text))
+
+
+def anchors_in_text(anchors: Sequence[str], text: str) -> bool:
+    """Whether the text a model reads carries every ticket the prompt named."""
+    if not anchors:
+        return False
+    haystack = _compact(text)
+    return all(_compact(anchor) in haystack for anchor in anchors)
+
+
 def safe_name(value: str) -> str:
     """A file and branch name for a prompt id: [A-Za-z0-9._-], short, never empty."""
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", value)
@@ -1250,6 +1274,7 @@ def score(
     answer_existed: Sequence[str] = (),
     *,
     expected_passages: Optional[Set[str]] = None,
+    prompt: str = "",
 ) -> Dict[str, Any]:
     """Score one refresh result. Paths and counts only: no capsule text."""
     result = result if isinstance(result, dict) else {}
@@ -1263,8 +1288,11 @@ def score(
                 else labelled_passages(answer_existed, passages))
     delivered_answers = labelled_passages(useful, passages) & expected
     haystack = flatten(text)
+    anchors = prompt_anchors(prompt)
     return {
         "class": classify(delivered, useful, noise, withheld),
+        "anchors": anchors,
+        "anchor_in_text": anchors_in_text(anchors, text),
         "delivered": delivered,
         "useful_delivered": useful,
         "noise_delivered": noise,
@@ -1410,6 +1438,8 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             1 for item in evaluated if item.get("could_help") and item.get("class") == "useful"
         ),
         "answer_in_text": sum(1 for item in evaluated if item.get("answer_in_text")),
+        "anchor_turns": sum(1 for item in evaluated if item.get("anchors")),
+        "anchors_in_text": sum(1 for item in evaluated if item.get("anchor_in_text")),
         "answer_could_help": sum(1 for item in evaluated if item.get("answer_could_help")),
         "answer_passages_existed": passage_total,
         "answer_passages_delivered": passage_delivered,
@@ -1661,6 +1691,7 @@ class Run:
             item.update(score(
                 result, grades, prompt_passages, existed, answered,
                 expected_passages=existing_answer_passages(corpus, answered, prompt_passages),
+                prompt=prompt["prompt"],
             ))
             item["status"] = "ok"
         except Skip as skip:
@@ -1737,6 +1768,8 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("useful turns", "useful"),
     ("could help (a useful document existed)", "could_help"),
     ("useful among could-help", "useful_among_could_help"),
+    ("prompts naming a ticket", "anchor_turns"),
+    ("ticket in the capsule text", "anchors_in_text"),
     ("answer in the capsule text", "answer_in_text"),
     ("answer passages existed", "answer_passages_existed"),
     ("answer passages delivered", "answer_passages_delivered"),
@@ -1753,10 +1786,10 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("latency p50 (s)", "latency_p50"),
     ("latency p95 (s)", "latency_p95"),
 )
-SHARED_ROWS = {"useful", "answer_in_text", "noise_only", "unjudged_only", "silent", "could_help",
-               "answer_could_help", "contaminated"}
+SHARED_ROWS = {"useful", "answer_in_text", "anchors_in_text", "noise_only", "unjudged_only",
+               "silent", "could_help", "answer_could_help", "contaminated"}
 # Rows about a run's coverage; every other row measures its evaluated prompts.
-COVERAGE_ROWS = {"prompts", "evaluated", "skipped_total"}
+COVERAGE_ROWS = {"prompts", "evaluated", "skipped_total", "anchor_turns"}
 
 
 def row_value(summary: Dict[str, Any], key: str) -> Optional[float]:
