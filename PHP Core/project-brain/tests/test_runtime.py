@@ -265,7 +265,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         left, right = json.loads(first.stdout), json.loads(second.stdout)
         self.assertLessEqual(len(left["procedural"]), 1)
         self.assertLessEqual(len(left["semantic"]), 6)
-        self.assertLessEqual(len(left["episodic"]), 4)
+        self.assertLessEqual(len(left["episodic"]), 6)
         content = json.dumps(
             {
                 key: left.get(key)

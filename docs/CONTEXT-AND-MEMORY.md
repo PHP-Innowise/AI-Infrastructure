@@ -971,7 +971,7 @@ The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
 policy filtering, the delivered capsule is independently capped at 1
-procedural, 6 semantic and 4 episodic candidates, within 8,000 characters of
+procedural, 6 semantic and 6 episodic candidates, within 8,000 characters of
 content and 20,000 of serialized payload.
 Snippets are deterministically shortened as needed.
 

@@ -28,6 +28,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **An anchored turn may carry two more episodic items.** The episodic bound was four, so on requests naming three or four records about the same ticket the rest left as episodic-layer exclusions while the capsule used half its rendered channel. The bound is now six, and the per-turn character budget still decides what is delivered. On 25 real prompts ticket-naming delivery rises from 25 of 30 to 29 of 30, at 1,686 rendered characters per turn.
+
+## Unreleased
+
 - **The ticket the request names stays in the text, not only in the index.** The automatic sanitizer splits CMS-736 into two words, and rarity kept the number while dropping the common prefix, so the phrase reached retrieval half named. The ticket is now rebuilt at the head of the distilled query, and a document's excerpt prefers the line that names it. On 25 real prompts the ticket appears in the rendered capsule text on all 8 ticket-bearing prompts (it was 6), and 25 of 30 ticket-naming documents are delivered.
 
 ## Unreleased

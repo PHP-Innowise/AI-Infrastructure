@@ -67,7 +67,7 @@ CAPSULE_EPISODIC_LIMIT = 2
 # How many candidates a layer may offer the turn. Delivery is bounded by
 # the rendered-text budget, spent after this conversation's repeats are
 # gone, so a candidate held back here never gets its turn.
-CAPSULE_SAFETY_LIMITS = {"procedural": 1, "semantic": 6, "episodic": 4}
+CAPSULE_SAFETY_LIMITS = {"procedural": 1, "semantic": 6, "episodic": 6}
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
 # Skills whose body documents the host tool itself rather than a workflow this
 # repository owns. `skill-creator` instructs the agent to drive its own product

@@ -60,7 +60,7 @@ carry the citations.
 |---|---|---|
 | Flow graph | Every spawning Claude command carried `spawns` / `phase` / `flow-next` / `flow-alternatives` frontmatter — a machine-readable suggested-next-command graph | There was no executor: all 31 spawning commands were single-agent wrappers and the user was the scheduler. Fan-out, join, and condition vocabulary had not been added. |
 | Phase map | `SKILL FLOW.md` Main Flow / Phase Map | It was presentation-only and transitions were user-driven. Phase names differed from PROTOCOL.md's five-value enum (an alias table existed in `brain_runtime.normalize_phase`). |
-| Handoff discipline | Task Capsule (8,000 chars, 1 procedural / 3 semantic / 2 episodic) + one schema-validated, CAS-guarded handoff file per task | The baseline had one rewritten handoff per task, no mailbox or per-agent identity, poll-only completion, and no parallel-writer awareness beyond stale-revision errors. |
+| Handoff discipline | Task Capsule (8,000 chars of content, 1 procedural / 6 semantic / 6 episodic) + one schema-validated, CAS-guarded handoff file per task | The baseline had one rewritten handoff per task, no mailbox or per-agent identity, poll-only completion, and no parallel-writer awareness beyond stale-revision errors. |
 | State store | project-brain: locked, revisioned records; retrieval manifests already gave who-read-what-when auditing | It was state-based rather than message-based; two agents in one task communicated by rewriting and reading the same handoff. |
 
 Precedent inside the repo: Infrastructure-Creator's **Orchestration

@@ -54,7 +54,7 @@
     ".agents/skills/memory-bank/SKILL.md": "69d42e308cbb362de9b8b8e0f01371e8354d637acc48da3e25936a9c04b1264c",
     ".agents/skills/memory/SKILL.md": "522b72ecc502d650a0df356138f804a2cdbc2c8c41b2422dfdcdc7c64d280e58",
     ".agents/skills/performance-optimization/SKILL.md": "cdb584b9f508e247240a1acec566f63f01caa083de3935c831d0c08c821527d2",
-    ".agents/skills/project-brain/SKILL.md": "3508382f6eb43cde0e17e2251d193df64c86971dcba7957c3f88c5294d660c7c",
+    ".agents/skills/project-brain/SKILL.md": "a4e6af952ba7569d96b8cf5795602106c8cdad10b4fc33c76dcb339f06dc434a",
     ".agents/skills/refactorer/SKILL.md": "5e7ba5fe06f738080ed14407139a5155dad9f2f7ee54c6a95806e425a6386f9f",
     ".agents/skills/reflect/SKILL.md": "d1061773b9861c8a705ed7c5ef96c34b5675c4000be1a315ddd375af38b47994",
     ".agents/skills/release/SKILL.md": "fe02543d87d14773fb93c973b8e6f5917de6dc9de76c937c350260f94a9d97b1",
@@ -215,7 +215,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "e005c8c9ce8091db363c24de5d4ef24e1d694950e83366f087e86ec537827493"
   },
-  "policy_digest": "b541dc9a304cc8d1a9812cd6e69976da9c513e238bb4c562909f0dfef00fbcc2",
+  "policy_digest": "2473dcfb409669ffb2759b761e0d5c2ac7f36a29bb5ee7c50ec0319aa833d0d7",
   "release": "2.0.0",
   "schema_version": 1
 }

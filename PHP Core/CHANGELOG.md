@@ -32,6 +32,8 @@ it at the top of every session.
 
 ### Changed
 
+- The episodic bound rises from four to six, so an anchored request can carry the records about the ticket it names; the per-turn character budget still decides what is delivered.
+
 - A ticket the request names is rebuilt at the head of the distilled query (the sanitizer splits CMS-736 in two, and rarity dropped the prefix), and an excerpt prefers the line that names it, so the anchor reaches the rendered text.
 
 - A skill reaches the capsule only when the request names it (a word of its name of four letters or more); every host loads its own catalogue. Others are recorded as name-mismatch exclusions.
