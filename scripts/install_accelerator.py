@@ -37,6 +37,10 @@ ADDITIVE_FILES = {".gitattributes", ".gitignore"}
 # has its own CLAUDE.md, and an existing `.claude/CLAUDE.md` keeps its
 # content with the import appended.
 MANAGED_POLICY_FILES = {"AGENTS.md", ".claude/CLAUDE.md"}
+# Where `--merge-existing` installs the edition README beside a project's own
+# README.md, which stays untouched; `--sync` keeps it current
+# (SYNC_RELOCATED_FILES).
+ACCELERATOR_README = "ACCELERATOR.md"
 # Files the accelerator seeds once and the project owns from then on: the
 # runtime rewrites the indexes and the task counter, and the team edits the
 # spec manifest and the runtime configuration. A reinstall over a project that
@@ -675,7 +679,7 @@ def install(
                 resolutions[path] = (action, destination, merged)
                 continue
             if merge_existing and path == "README.md":
-                alternate = target / "ACCELERATOR.md"
+                alternate = target / ACCELERATOR_README
                 if alternate.is_symlink() or (alternate.exists() and not alternate.is_file()):
                     collisions.append((component, path, "accelerator-readme-obstruction"))
                 elif alternate.exists() and alternate.read_bytes() != source.read_bytes():
@@ -843,9 +847,21 @@ TRACKED_REASON = "tracked by the project's Git: take it with --sync --update-tra
 # own definitions right after (the Harness, `rewire_codex=True`); otherwise it
 # is reported and left alone.
 TRUST_BOUND_FILES = {".codex/hooks.json"}
-# Documentation an install copied as ACCELERATOR.md when the project had its
-# own README; not worth a write into the project.
-SYNC_SKIPPED_FILES = {"README.md"}
+# Files an install puts somewhere other than their inventory path: the edition
+# README goes beside a project's own README.md as ACCELERATOR.md
+# (`--merge-existing`). The sync used to skip it as documentation not worth a
+# write, and never recorded it: once a release changed the README, adding a
+# tool to a synced project with `--merge-existing` was refused
+# (`accelerator-readme-exists`). The sync now follows it there by the rules of
+# every other file: recorded once it holds the release, updated while it holds
+# a README the edition shipped or the bytes last recorded, and kept, reported,
+# once the team edits it. A copy no record names yet - every install synced
+# before this - is recognised from the clone's history of the README; without
+# that history (a source from an archive) an older copy is kept as edited. It
+# is never added - an absent one was removed, or the project had no README and
+# the edition's went in as README.md - and the project's README.md is never
+# written.
+SYNC_RELOCATED_FILES = {"README.md": ACCELERATOR_README}
 # The fewest inventory files a folder must hold to count as an install of an
 # edition: one stray AGENTS.md is not an installation.
 SYNC_MINIMUM_PRESENT = 10
@@ -1847,19 +1863,21 @@ def sync_installation(
 
     Runs with no question asked, so it only writes what is safe without one:
     files nobody edited (the bytes of some released version, or of what the
-    last sync wrote), files the release added to a component the project
-    has, the managed blocks of AGENTS.md and .claude/CLAUDE.md, and the
-    memory server's own entry in an MCP configuration that also holds the
-    project's servers. The runtime is also replaced over a local edit, which
-    is backed up first under memory-bank/local. Never written: anything the
-    project's Git tracks, seeded state the project owns, any path - backups
-    and the sync's own record included - that a symbolic link or a
-    non-folder inside the project stands on, including one swapped in while
-    the sync runs (read_confined, write_confined), anything at all on a
-    platform that can walk a path neither by folder descriptors nor by
-    handles (NO_SAFE_WRITE), and - unless `rewire_codex` says the caller
-    re-approves it - the Codex hook wiring, whose trust is a hash of its
-    definitions. Each of those is reported instead. `update_tracked` is a
+    last sync wrote) - the edition README among them, as ACCELERATOR.md
+    beside the project's own README.md, which is never written
+    (SYNC_RELOCATED_FILES) - files the release added to a component the
+    project has, the managed blocks of AGENTS.md and .claude/CLAUDE.md, and
+    the memory server's own entry in an MCP configuration that also holds
+    the project's servers. The runtime is also replaced over a local edit,
+    which is backed up first under memory-bank/local. Never written:
+    anything the project's Git tracks, seeded state the project owns, any
+    path - backups and the sync's own record included - that a symbolic
+    link or a non-folder inside the project stands on, including one
+    swapped in while the sync runs (read_confined, write_confined), anything
+    at all on a platform that can walk a path neither by folder descriptors
+    nor by handles (NO_SAFE_WRITE), and - unless `rewire_codex` says the
+    caller re-approves it - the Codex hook wiring, whose trust is a hash of
+    its definitions. Each of those is reported instead. `update_tracked` is a
     person asking for the files the project's Git tracks too, by the same
     rules (an edited file still stays), to review and commit: the way a
     project that commits its accelerator takes a release. Nothing that runs
@@ -2060,13 +2078,15 @@ def sync_installation(
         # replacing it with the release's file.
         write(path, merged, action, executable, record=not merged_into_project, durable=merged_into_project)
 
-    for component, path in selected_files(data, [c for c in TOOLS if c in present]):
-        if path in SEED_ONLY_PATHS or path in SYNC_SKIPPED_FILES:
+    for component, listed in selected_files(data, [c for c in TOOLS if c in present]):
+        if listed in SEED_ONLY_PATHS:
             continue
-        source_path = data["source_overrides"].get(path, path)
+        source_path = data["source_overrides"].get(listed, listed)
         source = root / edition_path(edition) / PurePosixPath(source_path)
         payload = source.read_bytes()
-        executable = installs_executable(path, source, source_path, executable_bits)
+        executable = installs_executable(listed, source, source_path, executable_bits)
+        # The project's path for the file; the report and the record use it.
+        path = SYNC_RELOCATED_FILES.get(listed, listed)
         try:
             found = _read_confined(target, path)
         except UnsafePathError as error:
@@ -2076,6 +2096,8 @@ def sync_installation(
         current = None if found is None else found[0]
         exists = current is not None
         if not exists:
+            if path != listed:
+                continue
             absent.add(path)
         if current == payload:
             written[path] = git_blob_id(payload)

@@ -1144,6 +1144,19 @@ class InstallSyncTest(unittest.TestCase):
         self.assertFalse((self.target / ".cursor/hooks.json").exists())
         self.assertFalse((self.target / ".cursor/skills").exists())
 
+    def test_a_readme_installed_as_readme_md_is_left_alone(self) -> None:
+        # Without a README of its own the project got the edition's as
+        # README.md: the sync writes no README.md and adds no ACCELERATOR.md.
+        self.sync()
+        readme = self.target / "README.md"
+        before = readme.read_bytes()
+        self.release("README.md", "\nRelease note.\n")
+        report = self.sync()
+        self.assertEqual(before, readme.read_bytes())
+        self.assertFalse((self.target / "ACCELERATOR.md").exists())
+        reported = {item["path"] for item in (*report["changed"], *report["kept"])}
+        self.assertEqual(set(), reported & {"README.md", "ACCELERATOR.md"})
+
     def test_a_dry_run_writes_nothing(self) -> None:
         runtime = self.target / "memory-bank/scripts/context.py"
         runtime.write_text("# edited\n", encoding="utf-8")
@@ -1317,6 +1330,10 @@ class SyncOfAnOlderReleaseTest(unittest.TestCase):
             (edition / path).unlink()
         runtime = edition / "memory-bank/scripts/context.py"
         runtime.write_text(runtime.read_text(encoding="utf-8") + "\n# the release before the handoff\n", encoding="utf-8")
+        # Its README too, which an install beside a project's own README
+        # wrote as ACCELERATOR.md.
+        readme = edition / "README.md"
+        readme.write_text(readme.read_text(encoding="utf-8") + "\nThe release before the handoff.\n", encoding="utf-8")
         for wiring in (".claude/settings.json", ".codex/hooks.json"):
             path = edition / wiring
             hooks = json.loads(path.read_text(encoding="utf-8"))
@@ -1445,6 +1462,8 @@ class SyncOfAnOlderReleaseTest(unittest.TestCase):
         for path in (*expected, runtime, ".claude/settings.json"):
             self.assertEqual(self.released(path), (target / path).read_bytes(), path)
         self.assertEqual("# My project\n", (target / "README.md").read_text(encoding="utf-8"))
+        # The edition README beside it is the accelerator's, committed or not.
+        self.assertEqual(self.released("README.md"), (target / "ACCELERATOR.md").read_bytes())
         ignored = (target / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn("vendor/", ignored)
         self.assertIn(".env", ignored)
@@ -1466,6 +1485,47 @@ class SyncOfAnOlderReleaseTest(unittest.TestCase):
             self.assertEqual(self.released(path), (target / path).read_bytes(), path)
         for path in self.new_files:
             self.assertEqual("added", changed.get(path), path)
+
+    def test_a_tool_added_after_the_sync_finds_the_accelerator_readme_current(self) -> None:
+        # Four client projects: Codex installed beside the project's own
+        # README, so the edition README went in as ACCELERATOR.md, and syncs
+        # whose record never named it. The sync left it at the release it was
+        # installed from, and adding Claude with --merge-existing was refused
+        # (accelerator-readme-exists) until someone moved it aside by hand.
+        target = Path(self._tmp.name) / "a tool added later"
+        target.mkdir()
+        (target / "README.md").write_text("# Client app\n", encoding="utf-8")
+        self.git(target, "init", "--quiet")
+        installed = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.older), "--edition", "Symfony",
+            "--tool", "codex", "--merge-existing", "--target", str(target),
+        )
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        accelerator = target / "ACCELERATOR.md"
+        older = (self.older / "Symfony/README.md").read_bytes()
+        self.assertEqual(older, accelerator.read_bytes())
+        self.assertNotEqual(older, self.released("README.md"))
+
+        report = self.sync(target)
+        # Nothing records the copy yet: the clone's history knows the older README.
+        changed = {item["path"]: item["action"] for item in report["changed"]}
+        self.assertEqual("updated", changed.get("ACCELERATOR.md"), report["kept"])
+        self.assertEqual(self.released("README.md"), accelerator.read_bytes())
+        record = json.loads((target / "memory-bank/local/accelerator-install.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            install_accelerator.git_blob_id(self.released("README.md")), record["files"].get("ACCELERATOR.md")
+        )
+        self.assertNotIn("README.md", changed)
+        self.assertNotIn("README.md", record["files"])
+
+        added = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone), "--edition", "Symfony",
+            "--tool", "claude", "--merge-existing", "--target", str(target),
+        )
+        self.assertEqual(0, added.returncode, added.stderr)
+        self.assertIn("UNCHANGED\tshared\tREADME.md\n", added.stdout)
+        self.assertTrue((target / ".claude/settings.json").is_file())
+        self.assertEqual("# Client app\n", (target / "README.md").read_text(encoding="utf-8"))
 
     def test_new_hooks_wait_for_the_wiring_that_runs_them(self) -> None:
         # Codex: the wiring stays until it can be approved again.
@@ -1521,6 +1581,132 @@ class SyncOfAnOlderReleaseTest(unittest.TestCase):
         self.assertTrue(report["partial"].startswith("1 file(s) of release "), report["partial"])
         # Codex's side has no such link and follows the release.
         self.assertEqual(self.released(".codex/hooks.json"), (target / ".codex/hooks.json").read_bytes())
+
+
+class AcceleratorReadmeSyncTest(unittest.TestCase):
+    """The edition README an install put beside a project's own follows the release.
+
+    `--merge-existing` writes it as ACCELERATOR.md when the project has a
+    README.md. The sync skipped it and never recorded it, so after a release
+    changed the README, adding a tool with `--merge-existing` was refused
+    (accelerator-readme-exists). This clone has no Git history: only the
+    sync's record tells an untouched copy from an edited one.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="accelerator readme sync ")
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        self.clone = base / "clone"
+        shutil.copytree(ROOT / "install" / "inventories", self.clone / "install" / "inventories")
+        shutil.copytree(ROOT / "Symfony", self.clone / "Symfony")
+        self.target = base / "project"
+        self.target.mkdir()
+        (self.target / "README.md").write_text("# Client app\n", encoding="utf-8")
+        run("git", "init", "--quiet", str(self.target))
+        installed = self.install("codex")
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        self.accelerator = self.target / "ACCELERATOR.md"
+        self.assertEqual((self.clone / "Symfony/README.md").read_bytes(), self.accelerator.read_bytes())
+
+    def install(self, tool: str) -> subprocess.CompletedProcess:
+        return run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone), "--edition", "Symfony",
+            "--tool", tool, "--merge-existing", "--target", str(self.target),
+        )
+
+    def sync(self, *extra: str) -> dict:
+        result = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--sync", "--target", str(self.target), *extra,
+        )
+        self.assertEqual((0, ""), (result.returncode, result.stderr), result.stdout)
+        return json.loads(result.stdout)
+
+    def release(self, text: str) -> bytes:
+        """Publish a README with `text` appended, and return it."""
+        readme = self.clone / "Symfony/README.md"
+        readme.write_bytes(readme.read_bytes() + text.encode("utf-8"))
+        return readme.read_bytes()
+
+    def recorded(self) -> str | None:
+        record = self.target / "memory-bank/local/accelerator-install.json"
+        return json.loads(record.read_text(encoding="utf-8"))["files"].get("ACCELERATOR.md")
+
+    @staticmethod
+    def actions(report: dict) -> dict:
+        return {item["path"]: item["action"] for item in report["changed"]}
+
+    @staticmethod
+    def kept(report: dict) -> dict:
+        return {item["path"]: item["reason"] for item in report["kept"]}
+
+    def test_the_sync_records_the_copy_and_takes_it_to_each_release(self) -> None:
+        report = self.sync()
+        self.assertEqual([], report["changed"])
+        self.assertEqual(install_accelerator.git_blob_id(self.accelerator.read_bytes()), self.recorded())
+
+        released = self.release("\nRelease note.\n")
+        dry = self.sync("--dry-run")
+        self.assertEqual("updated", self.actions(dry).get("ACCELERATOR.md"))
+        self.assertNotEqual(released, self.accelerator.read_bytes())
+
+        report = self.sync()
+        self.assertEqual("updated", self.actions(report).get("ACCELERATOR.md"))
+        self.assertEqual(released, self.accelerator.read_bytes())
+        self.assertEqual(install_accelerator.git_blob_id(released), self.recorded())
+        # The project's own README is neither written nor recorded.
+        self.assertEqual("# Client app\n", (self.target / "README.md").read_text(encoding="utf-8"))
+        self.assertNotIn("README.md", self.actions(report))
+
+        added = self.install("claude")
+        self.assertEqual(0, added.returncode, added.stderr)
+        self.assertIn("UNCHANGED\tshared\tREADME.md\n", added.stdout)
+
+    def test_an_edited_copy_stays_and_is_reported(self) -> None:
+        self.sync()
+        written = self.recorded()
+        edited = self.accelerator.read_text(encoding="utf-8") + "\nTeam note: deploys go through the release board.\n"
+        self.accelerator.write_text(edited, encoding="utf-8")
+        self.release("\nRelease note.\n")
+        for extra in (("--dry-run",), ()):
+            with self.subTest(dry_run=bool(extra)):
+                report = self.sync(*extra)
+                self.assertEqual("edited in the project", self.kept(report).get("ACCELERATOR.md"))
+                self.assertNotIn("ACCELERATOR.md", self.actions(report))
+                self.assertEqual(edited, self.accelerator.read_text(encoding="utf-8"))
+        # The record still names what the sync wrote, not the team's edit.
+        self.assertEqual(written, self.recorded())
+
+    def test_a_copy_nothing_identifies_is_not_overwritten(self) -> None:
+        # No record names it, and without the clone's history (a source from
+        # an archive) nothing says these bytes are a release's README.
+        released = self.release("\nRelease note.\n")
+        report = self.sync()
+        self.assertEqual("edited in the project", self.kept(report).get("ACCELERATOR.md"))
+        self.assertNotEqual(released, self.accelerator.read_bytes())
+        self.assertIsNone(self.recorded())
+
+    def test_a_copy_the_projects_git_tracks_waits_for_update_tracked(self) -> None:
+        self.sync()
+        run("git", "-C", str(self.target), "add", "--", "ACCELERATOR.md")
+        released = self.release("\nRelease note.\n")
+        report = self.sync()
+        self.assertIn("tracked by the project's Git", self.kept(report).get("ACCELERATOR.md", ""))
+        self.assertNotEqual(released, self.accelerator.read_bytes())
+        report = self.sync("--update-tracked")
+        self.assertEqual("updated", self.actions(report).get("ACCELERATOR.md"))
+        self.assertEqual(released, self.accelerator.read_bytes())
+
+    def test_a_removed_copy_is_not_added_back(self) -> None:
+        self.sync()
+        self.accelerator.unlink()
+        self.release("\nRelease note.\n")
+        report = self.sync()
+        self.assertFalse(self.accelerator.exists())
+        self.assertNotIn("ACCELERATOR.md", self.actions(report))
+        self.assertNotIn("ACCELERATOR.md", self.kept(report))
+        self.assertEqual("# Client app\n", (self.target / "README.md").read_text(encoding="utf-8"))
 
 
 class McpConfigSyncTest(unittest.TestCase):

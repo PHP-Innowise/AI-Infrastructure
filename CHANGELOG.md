@@ -28,6 +28,28 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The sync keeps ACCELERATOR.md at the release — 2026-10-18
+
+- `scripts/install_accelerator.py --sync` follows the edition README that
+  `--merge-existing` installed as `ACCELERATOR.md` beside a project's own
+  `README.md`, by the rules of every other accelerator file: it records the
+  copy in `memory-bank/local/accelerator-install.json`, updates it while it
+  holds a README the edition shipped or what the last sync wrote, and keeps
+  one the team edited, listed under `kept` (a copy the project's Git tracks
+  waits for `--update-tracked`). The sync used to skip it and never record
+  it, so once a release changed the README, adding a tool to a synced
+  project (`--edition Symfony --tool claude --merge-existing`) was refused
+  with `accelerator-readme-exists`. On four client projects synced to
+  Symfony 2.0.0 that was the only collision left, and their copy was the
+  README the edition shipped from 2026-08-12 to 2026-10-06. Copies from
+  syncs before this change have no record and are recognised from the
+  clone's Git history of the edition README; without that history (a source
+  from an archive) an older copy stays, reported as edited. The sync writes
+  no `README.md` and adds no `ACCELERATOR.md`: an absent one was removed,
+  or the project had no README and got the edition's as `README.md`.
+  `tests/test_installation.py::AcceleratorReadmeSyncTest`,
+  `SyncOfAnOlderReleaseTest::test_a_tool_added_after_the_sync_finds_the_accelerator_readme_current`.
+
 ### Excerpts grow into the capsule's room — 2026-10-17
 
 - The first and second delivered excerpts whose section runs on past their
