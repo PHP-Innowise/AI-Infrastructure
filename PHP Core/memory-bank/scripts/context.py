@@ -14,13 +14,14 @@ import math
 import json
 import os
 import re
+import shlex
 import sqlite3
 import stat as stat_module
 import subprocess
 import sys
 import time
 from datetime import date, datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 import brain_runtime
@@ -239,6 +240,24 @@ RENDERED_FILE_LIMIT = 5
 # Any one line of the rendered head. The path lines stop at a whole path below
 # it rather than end in half of one.
 RENDERED_LINE_LIMIT = 500
+# The project's files an agent read or changed on its latest turns, newest
+# first, so a new session starts where the work was. On 1,940 real turns ten
+# such files named a file the agent then read or changed in 75% of new
+# sessions' first turns, against 58% for the task's five changed files; the
+# reads came almost wholly through shell commands, not the Read tool.
+RECENT_FILES_LIMIT = 10
+# Kept beyond the ten shown, so a file touched again moves back up.
+RECENT_FILES_KEPT = 64
+# Ten paths ran to 557 characters at the median and 692 at the 90th
+# percentile; the line stops at a whole path past this.
+RECENT_FILES_LINE_LIMIT = 720
+RECENT_FILES_STATE_KEY = "recent_files"
+# The end of the transcript the Stop hook reads for its turn.
+RECENT_FILES_TRANSCRIPT_BYTES = 4 * 1024 * 1024
+# Dependencies, caches and the runtime's own state are not where the work is,
+# and prose reaches the capsule through the memory layers.
+RECENT_FILES_SKIPPED_PREFIXES = ("vendor/", "node_modules/", "var/", ".git/", "memory-bank/local/")
+RECENT_FILES_SKIPPED_SUFFIXES = (".md", ".mdx", ".rst", ".txt", ".adoc")
 # Defined beside SECRET_PATTERNS in validate.py, so the Project Brain write
 # path (brain_runtime) refuses the same personal data the capsule does.
 CAPSULE_PRIVATE_PATTERNS = tuple(PRIVATE_PATTERNS.values())
@@ -3256,6 +3275,7 @@ def assemble_capsule(
                 result["task_closed"] = True
         if source_notices:
             result['source_notices'] = source_notices
+        attach_recent_files(connection, repository, result)
         result = enforce_governed_capsule_contract(result)
         if delivery_admission is not None:
             delivery_admission()
@@ -3292,6 +3312,7 @@ def assemble_capsule(
             if closed:
                 result["task_closed"] = True
             result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
+        attach_recent_files(connection, repository, result)
         capsule = enforce_governed_capsule_contract(result)
         if render:
             shown_in_render(connection, capsule, delivery_profile=delivery_profile)
@@ -3740,7 +3761,7 @@ def _bounded(text: object, limit: int) -> str:
     return _bounded_cut(text, limit)[0]
 
 
-def _whole_paths(label: str, paths: list[str]) -> list[str]:
+def _whole_paths(label: str, paths: list[str], limit: int = RENDERED_LINE_LIMIT) -> list[str]:
     """The leading ``paths`` that fit one rendered line after ``label``.
 
     Whole paths only: a path cut in half names no file. Even the first is
@@ -3750,13 +3771,31 @@ def _whole_paths(label: str, paths: list[str]) -> list[str]:
     width = len(label)
     for path in paths:
         width += len(path) + (2 if kept else 0)
-        if width > RENDERED_LINE_LIMIT:
+        if width > limit:
             if kept:
                 break
             width = len(label)
             continue
         kept.append(path)
     return kept
+
+
+def recent_files_line(
+    project: list[str], task_files: list[str]
+) -> tuple[Optional[str], int, int]:
+    """The rendered "recent files" line, newest first: the project's recent
+    files, then the task's changed files they do not name, ten at most and
+    whole paths only. Returns the line, how many paths it shows and how many
+    it meant to show."""
+    candidates = list(dict.fromkeys(project))
+    for path in reversed(task_files):
+        if path not in candidates:
+            candidates.append(path)
+    candidates = candidates[:RECENT_FILES_LIMIT]
+    kept = _whole_paths("recent files: ", candidates, RECENT_FILES_LINE_LIMIT)
+    if not kept:
+        return None, 0, len(candidates)
+    return "recent files: " + ", ".join(kept), len(kept), len(candidates)
 
 
 def working_state_lines(capsule: dict[str, object]) -> list[str]:
@@ -3805,7 +3844,15 @@ def rendered_working_state(
         cuts["working_next_step_characters"] += lost
         lines.append(f"next: {text}")
     files = [str(path) for path in working.get("files") or []]
-    if files:
+    project = [path for path in capsule.get("recent_files") or [] if isinstance(path, str)]
+    if project:
+        # The project's recent files lead; the task's own changed files
+        # follow where the project's do not already name them.
+        line, shown, wanted = recent_files_line(project, files)
+        cuts["working_files"] = wanted - shown
+        if line:
+            lines.append(line)
+    elif files:
         # Newest last in the task, so the tail is the work in hand: the
         # newest that fit, shown in the task's order.
         recent = _whole_paths(
@@ -4187,7 +4234,19 @@ def _render_capsule(
         head.append(f"working: {_bounded(working['task_id'], 200)} — {goal}")
         state, state_cuts = rendered_working_state(capsule)
         cuts.update(state_cuts)
-        head.extend(_bounded(line, RENDERED_LINE_LIMIT) for line in state)
+        head.extend(
+            _bounded(line, RECENT_FILES_LINE_LIMIT if line.startswith("recent files: ") else RENDERED_LINE_LIMIT)
+            for line in state
+        )
+    if working is None and capsule.get("recent_files"):
+        # Before the task is recorded - a new branch, a closed task - the
+        # project still says where the work was.
+        line, shown, wanted = recent_files_line(
+            [path for path in capsule["recent_files"] if isinstance(path, str)], []
+        )
+        cuts["working_files"] = wanted - shown
+        if line:
+            head.append(line)
     if capsule.get("kind") == "warming" and not capsule.get("task_closed"):
         head.append('warming: task checkpoint pending' if delivery_profile == 'cursor-rule'
                     else f"warming: {capsule['pending_turns']} turn(s) pending")
@@ -5898,6 +5957,330 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
     return allowed, excluded
 
+# What one shell segment does to the files it names. Measured reads: a turn's
+# files were named far more often through cat, sed -n, grep and git diff than
+# through the Read tool. A segment that only runs something names none.
+_SHELL_READ_VERBS = frozenset((
+    "cat", "head", "tail", "sed", "awk", "nl", "less", "more", "bat", "grep", "egrep",
+    "fgrep", "rg", "ag", "ack", "wc", "diff", "cmp", "jq", "yq", "xxd", "od", "strings",
+    "cut", "sort", "uniq", "column",
+))
+_SHELL_WRITE_VERBS = frozenset(("tee", "cp", "mv", "rm", "touch", "truncate", "chmod", "ln", "perl"))
+_GIT_READ_SUBCOMMANDS = frozenset(("show", "diff", "log", "blame", "grep", "cat-file"))
+_GIT_WRITE_SUBCOMMANDS = frozenset((
+    "add", "commit", "mv", "rm", "checkout", "restore", "apply", "stash", "reset", "switch",
+))
+_SHELL_SEGMENT_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+_SHELL_REDIRECT_TARGET = re.compile(r"(?<![<>&\d])>{1,2}\s*([^\s;|&]+)")
+_PATCH_FILE_LINE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$", re.M)
+_RECENT_RUNTIME_OWNED = re.compile(rf"^project-brain/({'|'.join(TURN_RUNTIME_DIRECTORIES)})/")
+
+
+def _shell_segment_kind(words: list[str]) -> str:
+    """read, write or other: what one shell segment does to its files."""
+    words = [word for word in words if not re.match(r"^[A-Z_][A-Z0-9_]*=", word)]
+    while words and words[0] in ("sudo", "time", "nice", "command", "env", "xargs", "timeout"):
+        words = words[1:]
+        while words and (words[0].startswith("-") or re.fullmatch(r"\d+[smh]?", words[0])):
+            words = words[1:]
+    if not words:
+        return "other"
+    verb = words[0].rsplit("/", 1)[-1]
+    if verb == "git":
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
+        subcommand = rest[0] if rest else ""
+        if subcommand in _GIT_READ_SUBCOMMANDS:
+            return "read"
+        return "write" if subcommand in _GIT_WRITE_SUBCOMMANDS else "other"
+    if verb == "sed" and any(word.startswith("-i") for word in words[1:]):
+        return "write"
+    if verb in _SHELL_READ_VERBS:
+        return "read"
+    return "write" if verb in _SHELL_WRITE_VERBS else "other"
+
+
+def _shell_file_words(command: str) -> list[tuple[str, bool]]:
+    """(word, changed) for the words of a shell command that may name a file
+    it reads or changes."""
+    found: list[tuple[str, bool]] = []
+    for segment in _SHELL_SEGMENT_SPLIT.split(command):
+        if not segment.strip():
+            continue
+        match = _SHELL_REDIRECT_TARGET.search(segment)
+        target = match.group(1).strip("'\"") if match else None
+        try:
+            words = shlex.split(segment, comments=False, posix=True)
+        except ValueError:
+            words = segment.split()
+        kind = _shell_segment_kind(words)
+        for word in words:
+            changed = kind == "write" or (target is not None and word.strip("'\"") == target)
+            if kind != "other" or changed:
+                found.append((word, changed))
+    return found
+
+
+def _shell_text(command: object) -> Optional[str]:
+    """A recorded shell command as one script: Codex records an argv."""
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list) and command and all(isinstance(word, str) for word in command):
+        if (len(command) >= 3 and command[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh")
+                and command[1] in ("-c", "-lc")):
+            return command[-1]
+        return shlex.join(command)
+    return None
+
+
+def _transcript_prompt(record: dict[str, object]) -> bool:
+    """A person's prompt: where the transcript's latest turn begins."""
+    if record.get("type") == "user":
+        if (record.get("isMeta") or record.get("toolUseResult")
+                or record.get("isCompactSummary") or record.get("isSidechain")):
+            return False
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        content = message.get("content")
+        if isinstance(content, list):
+            if any(isinstance(part, dict) and part.get("type") == "tool_result" for part in content):
+                return False
+            content = "".join(
+                part["text"] for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+        return (isinstance(content, str) and bool(content.strip())
+                and not content.lstrip().startswith(("<", "[Request interrupted")))
+    if record.get("type") == "response_item":
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        if payload.get("type") != "message" or payload.get("role") != "user":
+            return False
+        text = "".join(
+            part["text"] for part in payload.get("content") or []
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+        return bool(text.strip()) and not text.lstrip().startswith("<")
+    return False
+
+
+def _transcript_calls(record: dict[str, object], root: str) -> list[tuple[str, dict[str, object], str]]:
+    """(tool, arguments, working directory) for the calls one record makes:
+    Claude Code main-thread tool uses, Codex shell and patch calls."""
+    calls: list[tuple[str, dict[str, object], str]] = []
+    if record.get("type") == "assistant" and not record.get("isSidechain"):
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        base = record.get("cwd") if isinstance(record.get("cwd"), str) else root
+        for part in message.get("content") or []:
+            if (isinstance(part, dict) and part.get("type") == "tool_use"
+                    and isinstance(part.get("input"), dict)):
+                calls.append((str(part.get("name") or ""), part["input"], base))
+    elif record.get("type") == "response_item":
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        kind = payload.get("type")
+        if kind == "function_call":
+            try:
+                arguments = json.loads(payload.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                arguments = {}
+            arguments = arguments if isinstance(arguments, dict) else {}
+            base = arguments.get("workdir") if isinstance(arguments.get("workdir"), str) else root
+            if payload.get("name") == "apply_patch":
+                calls.append(("apply_patch", {"patch": arguments.get("input")}, base))
+            else:
+                text = _shell_text(arguments.get("cmd") or arguments.get("command"))
+                if text:
+                    calls.append(("Bash", {"command": text}, base))
+        elif kind == "local_shell_call":
+            action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+            base = action.get("working_directory") if isinstance(action.get("working_directory"), str) else root
+            text = _shell_text(action.get("command"))
+            if text:
+                calls.append(("Bash", {"command": text}, base))
+        elif kind == "custom_tool_call" and payload.get("name") == "apply_patch":
+            calls.append(("apply_patch", {"patch": payload.get("input")}, root))
+    return calls
+
+
+def _call_file_words(name: str, data: dict[str, object]) -> list[tuple[str, bool]]:
+    if name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+        value = data.get("file_path") or data.get("notebook_path")
+        return [(value, True)] if isinstance(value, str) else []
+    if name in ("Read", "Grep"):
+        value = data.get("file_path" if name == "Read" else "path")
+        return [(value, False)] if isinstance(value, str) else []
+    if name == "Bash" and isinstance(data.get("command"), str):
+        return _shell_file_words(data["command"])
+    if name == "apply_patch" and isinstance(data.get("patch"), str):
+        return [((update or moved).strip(), True) for update, moved in _PATCH_FILE_LINE.findall(data["patch"])]
+    return []
+
+
+def _transcript_project_file(word: str, base: str, root: str) -> Optional[str]:
+    """The project file a transcript word names, project-relative, or None.
+
+    It must exist inside the project after symlinks resolve; ``git show
+    REV:path``, ``path:12`` and ``path#L3`` forms name their path."""
+    word = word.strip().strip("'\"`,;()[]{}<>")
+    if not word or word.startswith("-") or len(word) > 400 or "\0" in word:
+        return None
+    candidates = [word]
+    if ":" in word and not os.path.isabs(word):
+        candidates.append(word.split(":", 1)[1])
+    candidates.append(re.sub(r"(:\d+(:\d+)?|#L\d+(-L?\d+)?)$", "", word))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            joined = candidate if os.path.isabs(candidate) else os.path.join(base, candidate)
+            resolved = os.path.realpath(joined)
+        except (OSError, ValueError):
+            continue
+        if resolved.startswith(root + os.sep) and os.path.isfile(resolved):
+            return Path(os.path.relpath(resolved, root)).as_posix()
+    return None
+
+
+def _recent_file_kept(path: str) -> bool:
+    pure = PurePosixPath(path)
+    return not (
+        pure.is_absolute() or ".." in pure.parts
+        or path.startswith(RECENT_FILES_SKIPPED_PREFIXES)
+        or path.lower().endswith(RECENT_FILES_SKIPPED_SUFFIXES)
+        or TURN_PATH_DENYLIST.search(path) or _RECENT_RUNTIME_OWNED.match(path)
+    )
+
+
+def _without_ignored(repository: Path, paths: list[str]) -> list[str]:
+    """Drop what the project's ignore rules exclude; tracked files stay."""
+    if not paths:
+        return paths
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_roots.project_root(repository)), "check-ignore", "--stdin", "-z"],
+            input=b"\0".join(os.fsencode(path) for path in paths) + b"\0",
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return paths
+    if result.returncode not in (0, 1):
+        return paths
+    ignored = {os.fsdecode(item) for item in result.stdout.split(b"\0") if item}
+    return [path for path in paths if path not in ignored]
+
+
+def transcript_turn_files(transcript: Optional[str], repository: Path) -> list[str]:
+    """The project files the agent read or changed in the transcript's latest
+    turn: changed first, then read, each in call order.
+
+    Only call metadata is read - the file paths a call names and the words of
+    a shell command that name an existing project file. Tool results, file
+    contents and the commands themselves are never kept. The transcript must
+    be an absolute regular file; only its last few megabytes are read."""
+    if not transcript:
+        return []
+    path = Path(transcript)
+    try:
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            return []
+        size = path.stat().st_size
+        start = max(0, size - RECENT_FILES_TRANSCRIPT_BYTES)
+        with path.open("rb") as handle:
+            handle.seek(start)
+            chunk = handle.read(size - start)
+    except (OSError, ValueError):
+        return []
+    lines = chunk.split(b"\n")
+    if start:
+        # The window began inside a record.
+        lines = lines[1:]
+    records: list[dict[str, object]] = []
+    for raw in lines:
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    begin = 0
+    for index in range(len(records) - 1, -1, -1):
+        if _transcript_prompt(records[index]):
+            begin = index + 1
+            break
+    root = os.path.realpath(str(workspace_roots.project_root(repository)))
+    changed: list[str] = []
+    read: list[str] = []
+    for record in records[begin:]:
+        for name, data, base in _transcript_calls(record, root):
+            for word, is_change in _call_file_words(name, data):
+                relative = _transcript_project_file(word, base, root)
+                if relative is not None and _recent_file_kept(relative):
+                    (changed if is_change else read).append(relative)
+    return _without_ignored(repository, list(dict.fromkeys(changed + read)))
+
+
+def load_recent_files(connection: sqlite3.Connection) -> list[str]:
+    """The project's recent files, newest first, as the Stop hook kept them."""
+    try:
+        row = connection.execute(
+            "SELECT value FROM index_state WHERE key = ?", (RECENT_FILES_STATE_KEY,)
+        ).fetchone()
+    except sqlite3.Error:
+        return []
+    if row is None:
+        return []
+    try:
+        state = json.loads(row[0])
+    except (TypeError, ValueError):
+        return []
+    paths = state.get("paths") if isinstance(state, dict) and state.get("version") == 1 else None
+    if not isinstance(paths, list):
+        return []
+    return [path for path in paths if isinstance(path, str)][:RECENT_FILES_KEPT]
+
+
+def record_recent_files(connection: sqlite3.Connection, paths: list[str]) -> int:
+    """Move this turn's files to the front of the project's recent files."""
+    if not paths:
+        return 0
+    began = not connection.in_transaction
+    if began:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        merged = list(dict.fromkeys([*paths, *load_recent_files(connection)]))[:RECENT_FILES_KEPT]
+        connection.execute(
+            "INSERT INTO index_state(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (RECENT_FILES_STATE_KEY, json.dumps({"version": 1, "paths": merged}, ensure_ascii=False)),
+        )
+        if began:
+            connection.commit()
+    except BaseException:
+        if began:
+            connection.rollback()
+        raise
+    return len(paths)
+
+
+def attach_recent_files(
+    connection: sqlite3.Connection, repository: Path, capsule: dict[str, object]
+) -> None:
+    """Name the project's recent files that are still there in a capsule."""
+    root = workspace_roots.project_root(repository)
+    shown: list[str] = []
+    for path in load_recent_files(connection):
+        try:
+            present = _recent_file_kept(path) and (root / path).is_file()
+        except (OSError, ValueError):
+            present = False
+        if present:
+            shown.append(path)
+        if len(shown) >= RECENT_FILES_LIMIT:
+            break
+    if shown:
+        capsule["recent_files"] = shown
+
 
 def head_commit(repository: Path) -> Optional[str]:
     try:
@@ -6182,6 +6565,15 @@ def run_turn(
         raise ContextError("--max-files must be a positive integer")
     task_id = validate_task_id(arguments.task_id)
     files, path_excluded = changed_paths(repository)
+    # The project's recent files are a convenience for the next session's
+    # capsule: a transcript that cannot be read never fails the turn.
+    recent = 0
+    try:
+        recent = record_recent_files(
+            connection, transcript_turn_files(getattr(arguments, "transcript", None), repository)
+        )
+    except (OSError, ValueError, sqlite3.Error):
+        recent = 0
     # A turn that ended in a commit leaves a clean tree and is still work.
     committed = head_advanced(connection, repository, task_id)
     delta_id = (
@@ -6245,6 +6637,7 @@ def run_turn(
         "delta_id": delta_id,
         "files": len(files),
         "excluded": path_excluded,
+        "recent_files": recent,
         "pending": 0 if flushed else buffered,
         "flushed": flushed is not None and not flushed.get("closed_task"),
         "revision": flushed.get("revision") if flushed else None,
@@ -6754,6 +7147,10 @@ def build_parser() -> argparse.ArgumentParser:
     turn.add_argument("--task-id", required=True)
     turn.add_argument(
         "--flush", action="store_true", help="flush regardless of the threshold"
+    )
+    turn.add_argument(
+        "--transcript",
+        help="the host's transcript, for the files this turn read or changed (paths only)",
     )
     turn.add_argument(
         "--flush-after",

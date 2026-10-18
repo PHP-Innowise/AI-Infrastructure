@@ -1837,6 +1837,20 @@ loads by itself as `host-loaded` — `CLAUDE.md` and its `@path` imports for
 Claude Code, `AGENTS.md` for Codex. On two real installations `CLAUDE.md` had
 held a procedural slot on most Claude Code turns.
 
+`recent files:` names the files the work is in. The Stop hook hands the turn
+its host transcript (`turn --transcript`), and the runtime keeps from it only
+the project files the turn read or changed: tool-call paths, and the words of
+shell commands - `cat`, `sed -n`, `grep`, `git diff`, `git add`, a redirection
+- that name an existing project file, changed first. The project's newest 64
+stay in local state (`index_state`), newest first; the capsule shows ten, then
+the task's own changed files, whole paths only, and shows them before the task
+is recorded too, on a new branch's first turns. Dependencies (`vendor/`,
+`node_modules/`, `var/`), prose, ignored and secret-looking paths are left out,
+and commands, tool results and file contents are never kept. On 1,940 real
+Claude Code turns ten such files named a file the agent then read or changed on
+75% of new sessions' first turns, against 58% for the task's five changed
+files; the reads came almost wholly through shell commands, not the Read tool.
+
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.
 

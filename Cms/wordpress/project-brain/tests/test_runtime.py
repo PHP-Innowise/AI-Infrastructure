@@ -13760,5 +13760,158 @@ class OrdinaryReceiptObservationTest(RuntimeHarness):
         self.assertEqual(retrieval.unknown_ordinary_receipt(), sink['ordinary_receipt'])
 
 
+class RecentProjectFilesTest(RuntimeHarness):
+    """The project's recently read and changed files, from the host transcript
+    the Stop hook names, as the next session's capsule shows them."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        for name in ("Export", "Ledger", "Refund", "Guard", "Query", "Reader", "Writer"):
+            path = self.repository / "src" / f"{name}.php"
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(f"<?php // {name}\n", encoding="utf-8")
+        (self.repository / "vendor").mkdir()
+        (self.repository / "vendor/lib.php").write_text("<?php\n", encoding="utf-8")
+        (self.repository / ".env").write_text("APP_SECRET=1\n", encoding="utf-8")
+        self.outside = tempfile.TemporaryDirectory(prefix="other-project-")
+        self.addCleanup(self.outside.cleanup)
+        Path(self.outside.name, "Elsewhere.php").write_text("<?php\n", encoding="utf-8")
+
+    def claude(self, *records: dict) -> Path:
+        transcript = Path(self.temporary.name) / "transcript.jsonl"
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        return transcript
+
+    def prompt(self, text: str) -> dict:
+        return {"type": "user", "cwd": str(self.repository), "message": {"role": "user", "content": text}}
+
+    def call(self, name: str, data: dict, *, sidechain: bool = False) -> dict:
+        return {"type": "assistant", "isSidechain": sidechain, "cwd": str(self.repository),
+                "message": {"id": f"m-{name}-{len(json.dumps(data))}",
+                            "content": [{"type": "tool_use", "id": "t", "name": name, "input": data}]}}
+
+    def turn(self, transcript: Path) -> dict:
+        result = self.run_cli("turn", "--task-id", "TASK-RECENT", "--transcript", str(transcript), "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)
+
+    def recent_line(self, session: str = "next-session") -> Optional[str]:
+        rendered = self.run_cli("refresh", "--task-id", "TASK-RECENT", "--query", "continue the export",
+                                "--session-id", session, "--ephemeral")
+        self.assertIn(rendered.returncode, (0, 1), rendered.stderr)
+        return next((line for line in rendered.stdout.splitlines() if line.startswith("recent files: ")), None)
+
+    def test_a_turn_keeps_what_the_agent_changed_then_read_and_nothing_else(self) -> None:
+        source = lambda name: str(self.repository / "src" / f"{name}.php")
+        transcript = self.claude(
+            self.prompt("an earlier request"),
+            self.call("Read", {"file_path": source("Writer")}),
+            self.prompt("fix the export rounding"),
+            self.call("Read", {"file_path": source("Export")}),
+            self.call("Bash", {"command": "sed -n '1,40p' src/Ledger.php && rg -n round src/Refund.php"}),
+            self.call("Bash", {"command": "git add src/Guard.php"}),
+            self.call("Edit", {"file_path": source("Query"), "old_string": "a", "new_string": "b"}),
+            # Prose, a command run, a subagent, another project, a dependency
+            # and a secret: none of them is the work in hand.
+            self.call("Bash", {"command": "cat specs/authority.md; php bin/console app:sync src/Reader.php"}),
+            self.call("Read", {"file_path": source("Reader")}, sidechain=True),
+            self.call("Read", {"file_path": str(Path(self.outside.name, "Elsewhere.php"))}),
+            self.call("Read", {"file_path": str(self.repository / "vendor/lib.php")}),
+            self.call("Bash", {"command": "cat .env"}),
+            self.call("Read", {"file_path": str(self.repository / "src/Missing.php")}),
+        )
+        self.assertEqual(5, self.turn(transcript)["recent_files"])
+        self.assertEqual(
+            "recent files: src/Guard.php, src/Query.php, src/Export.php, src/Ledger.php, src/Refund.php",
+            self.recent_line(),
+        )
+
+    def test_a_new_session_sees_them_beside_the_task_and_newest_first(self) -> None:
+        self.start("TASK-RECENT")
+        update = self.run_cli("update", "--task-id", "TASK-RECENT", "--revision", "auto",
+                              "--progress", "Export rounding traced.", "--file", "src/Writer.php", "--json")
+        self.assertEqual(0, update.returncode, update.stderr)
+        first = self.claude(self.prompt("look at the ledger"),
+                            self.call("Bash", {"command": "cat src/Ledger.php src/Refund.php"}))
+        self.turn(first)
+        second = self.claude(self.prompt("now the export"),
+                             self.call("Bash", {"command": "grep -n total src/Export.php src/Refund.php"}))
+        self.turn(second)
+        # The file read again moves up; the task's own file follows the project's.
+        self.assertEqual(
+            "recent files: src/Export.php, src/Refund.php, src/Ledger.php, src/Writer.php",
+            self.recent_line(),
+        )
+
+    def test_ten_are_shown_whole_and_sixty_four_kept(self) -> None:
+        names = [f"src/Module{index:02d}/{'Long' * 12}Handler{index:02d}.php" for index in range(70)]
+        for name in names:
+            path = self.repository / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("<?php\n", encoding="utf-8")
+        reads = " && ".join(f"cat {name}" for name in names)
+        self.turn(self.claude(self.prompt("survey the handlers"), self.call("Bash", {"command": reads})))
+        line = self.recent_line()
+        shown = line[len("recent files: "):].split(", ")
+        self.assertLessEqual(len(line), context_cli.RECENT_FILES_LINE_LIMIT)
+        self.assertEqual(names[:len(shown)], shown)
+        self.assertTrue(all(name in names for name in shown))
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        self.addCleanup(connection.close)
+        self.assertEqual(names[:context_cli.RECENT_FILES_KEPT], context_cli.load_recent_files(connection))
+
+    def test_a_removed_file_drops_out_of_the_line(self) -> None:
+        self.turn(self.claude(self.prompt("compare"),
+                              self.call("Bash", {"command": "diff src/Export.php src/Ledger.php"})))
+        (self.repository / "src/Export.php").unlink()
+        self.assertEqual("recent files: src/Ledger.php", self.recent_line())
+
+    def test_codex_shell_and_patch_calls_name_their_files(self) -> None:
+        def item(payload: dict) -> dict:
+            return {"type": "response_item", "payload": payload}
+        transcript = Path(self.temporary.name) / "rollout.jsonl"
+        records = [
+            item({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the refund"}]}),
+            item({"type": "function_call", "name": "shell",
+                  "arguments": json.dumps({"command": ["bash", "-lc", "cat src/Refund.php"],
+                                           "workdir": str(self.repository)})}),
+            item({"type": "function_call", "name": "exec_command",
+                  "arguments": json.dumps({"cmd": "rg -n settle src/Ledger.php", "workdir": str(self.repository)})}),
+            item({"type": "custom_tool_call", "name": "apply_patch",
+                  "input": "*** Begin Patch\n*** Update File: src/Guard.php\n@@\n-a\n+b\n*** End Patch\n"}),
+        ]
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        self.assertEqual(3, self.turn(transcript)["recent_files"])
+        self.assertEqual("recent files: src/Guard.php, src/Refund.php, src/Ledger.php", self.recent_line())
+
+    def test_an_unreadable_transcript_never_fails_the_turn(self) -> None:
+        broken = Path(self.temporary.name) / "broken.jsonl"
+        broken.write_bytes(b'{"type": "user", "message": {"content": "fix"}}\n{not json\n\xff\xfe\n')
+        link = Path(self.temporary.name) / "link.jsonl"
+        link.symlink_to(broken)
+        for transcript in (broken, link, Path("relative.jsonl"), Path(self.temporary.name) / "absent.jsonl"):
+            with self.subTest(transcript=str(transcript)):
+                self.assertEqual(0, self.turn(transcript)["recent_files"])
+        self.assertIsNone(self.recent_line())
+        # A damaged record of the list is read as empty and replaced.
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        self.addCleanup(connection.close)
+        with connection:
+            connection.execute("INSERT INTO index_state(key, value) VALUES (?, ?) "
+                               "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                               (context_cli.RECENT_FILES_STATE_KEY, "{broken"))
+        self.assertEqual([], context_cli.load_recent_files(connection))
+        self.turn(self.claude(self.prompt("read"), self.call("Read", {"file_path": str(self.repository / "src/Query.php")})))
+        self.assertEqual(["src/Query.php"], context_cli.load_recent_files(connection))
+
+    def test_without_a_transcript_the_capsule_keeps_the_task_files(self) -> None:
+        result = self.run_cli("turn", "--task-id", "TASK-RECENT", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(0, json.loads(result.stdout)["recent_files"])
+        capsule = json.loads(self.run_cli("refresh", "--task-id", "TASK-RECENT", "--query", "export",
+                                          "--json").stdout)
+        self.assertNotIn("recent_files", capsule)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,27 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Recent files from what the agent read and changed — 2026-10-18
+
+- The Stop hook hands `turn --transcript` the transcript the host names. The
+  runtime keeps the project files the turn read or changed - tool-call paths
+  and the words of shell commands (`cat`, `sed -n`, `grep`, `git diff`,
+  `git add`, redirections) that name an existing project file, changed
+  first - as the project's recent files in local state, newest first, 64 at
+  most. Commands, tool results and file contents are never kept;
+  dependencies, prose, ignored and secret-looking paths are left out; an
+  unreadable transcript records nothing and never fails the turn. Claude Code
+  and Codex transcripts are read; a host that names none keeps the old line.
+- The capsule's `recent files:` line shows ten - the project's, then the
+  task's changed files they do not name, whole paths within 720 characters -
+  and shows them before the task is recorded too. On 1,940 real Claude Code
+  turns of four projects, ten such files named at least one file the agent
+  then read or changed on 75% of new sessions' first turns (held-out, 140),
+  against 58% for the task's five changed files (+17 points, 95% CI 10-24);
+  the share of the needed files named rose from 31% to 54%. The reads came
+  almost wholly through shell commands: the Read tool's paths alone named
+  56%, no better than before.
+
 ### Excerpts grow into the capsule's room — 2026-10-17
 
 - The first and second delivered excerpts whose section runs on past their

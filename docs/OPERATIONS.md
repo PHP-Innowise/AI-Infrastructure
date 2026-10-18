@@ -472,7 +472,9 @@ Claude Code, Codex, and Cursor — opens with `working: <task> — <goal>` and
 then the task's state, each line bounded and left out when empty: `phase:`,
 `progress:` (manual progress, then the automatic checkpoint, at most 400
 characters, keeping its opening and its end), one `next:` line per step,
-`recent files:` (the five newest, whole paths only), `sources:` (the task's
+`recent files:` (the ten files an agent most recently read or changed in the
+project, newest first, then the task's changed files they do not name, whole
+paths only), `sources:` (the task's
 cited sources), and in governed mode `task record:`, the path of the full
 record. Selected project knowledge/history also carries its already-filtered
 excerpt. The complete text is capped at 3,600 characters; excerpts shrink

@@ -50,7 +50,7 @@
     ".agents/skills/content-reviewer/SKILL.md": "e3a251e3e17b2ba071e19e4e2b4effb6436914b976f97bb72a06417cdd29ae09",
     ".agents/skills/conventions-scanner/SKILL.md": "119cba519974503387230005f7b675a3538087954b48a5f99098745764588c3b",
     ".agents/skills/domain-behavior-scanner/SKILL.md": "9eabf86c922b5234fcb47c1ab6e2563e9935f9a7b382a75fe66347a997b738e6",
-    ".agents/skills/hook-forge/SKILL.md": "01a97c587e222769ef71bd4b35f4d45622ff1dee233d40779bd1b0209931c396",
+    ".agents/skills/hook-forge/SKILL.md": "bdd0e756efda62c12e525c64f0fc4dc2523962a70baa73c6df24297fb1cc5df0",
     ".agents/skills/infra-build/SKILL.md": "8f9b505b3bf22b742e83a897de2b12457371e8cec9f90551ce487351d11e8856",
     ".agents/skills/infra-generate/SKILL.md": "ce862c37391a5a27d4c8d5f43306465f687d25b888bfe9583c6cfbe9ae5fb559",
     ".agents/skills/infra-ops-scanner/SKILL.md": "1248ce50011d346ed1c05ddaf5493550b8146619ac151849d0702ab89c55fe93",
@@ -99,7 +99,7 @@
     ".agents/skills/memory-seed/assets/runtime-contract.json": "64522a0fa2fab417e806fc4be611e3f25e97a844256607f449f5d911f2684e4a",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "13e09d26050f26bf4ba15af6c034ea236c1b2ee85c0fa7937f399f27e1987933",
     ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "5fec9b5cddb9fa28b57bbc3aa6621b88e16c0053abe29dce26b0614d22d2b93e",
-    ".agents/skills/memory-seed/assets/scripts/context.py": "2f0cadce421d3e2bd21e358efb26696189ff29c376feb1b41b53a20b1d68bb0f",
+    ".agents/skills/memory-seed/assets/scripts/context.py": "964039af1097a1625956cbf93fc7ddbb8777967b9252a935154f993558194ba8",
     ".agents/skills/memory-seed/assets/scripts/context_cli.py": "ec874c9312133eafae8f16bc298fc011fb55579cb4b300453e81e3f31a4d0123",
     ".agents/skills/memory-seed/assets/scripts/context_continuity.py": "70c8f134f2374225829d14aa6935262b60b0329b9bfc27251637867981befee5",
     ".agents/skills/memory-seed/assets/scripts/context_handoff.py": "eb0ba874c162091a696aeb4658bfc1680bf22618536416290c56c86a80d46306",
@@ -174,7 +174,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "a7f433179383153ecb1271d20dea27391f422c1baab609bc0ec6ae9786f5a5a8",
+  "policy_digest": "208d920c96d26d13b80726ee9bb2ebd6a0cf190309fabd58cbdd2103e6359340",
   "release": "2.5.0",
   "schema_version": 1
 }

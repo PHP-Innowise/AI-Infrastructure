@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Recent files in generated projects — 2026-10-18
+
+- hook-forge tells generated Stop hooks to hand `turn` the validated
+  transcript path, as the editions' hooks now do, and memory-seed carries the
+  runtime that keeps the project's recently read and changed files for the
+  capsule's `recent files:` line.
+
 ### Generated projects on native Windows — 2026-10-16
 
 - bootstrap-verifier checks hook syntax with Git Bash on Windows -
