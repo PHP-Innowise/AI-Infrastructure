@@ -1,0 +1,25 @@
+{
+  "cases": [
+    {
+      "name": "missing-mount-target",
+      "tag": 2684354563,
+      "target": "missing",
+      "expected": "BrainError"
+    },
+    {
+      "name": "missing-symlink-target",
+      "tag": 2684354572,
+      "target": "missing",
+      "expected": "BrainError"
+    },
+    {
+      "name": "existing-mount-directory",
+      "tag": 2684354563,
+      "target": "directory",
+      "expected": "defaults"
+    }
+  ],
+  "metadata": "NEW supplied stat-shape controls; not native Windows execution",
+  "expected_missing_leaf": "absent",
+  "known_link_tag_scope_only": true
+}

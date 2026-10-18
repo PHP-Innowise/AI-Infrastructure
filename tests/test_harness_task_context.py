@@ -176,6 +176,84 @@ class TaskContextTests(unittest.TestCase):
         self.addCleanup(builder.stop)
         self.addCleanup(self.close_managers)
 
+    def iris_cursor_run(self, edited=False):
+        """Fresh Iris custody; fake provider observes files at process entry."""
+        capsule = "working: BIRCH-BRANCH — Iris transfer\nEach iris transfer records one owner."
+        source = self.project / "specs/iris-ledger.md"
+        source.write_text("# Iris ledger\nEach iris transfer records one owner.\n", encoding="utf-8")
+        cli = self.project / "memory-bank/scripts/context.py"
+        created = subprocess.run([sys.executable, str(cli), "cursor-rule", "--action", "write",
+            "--task-id", "BIRCH-BRANCH"], input=capsule, text=True, capture_output=True, timeout=5)
+        self.assertEqual("written", json.loads(created.stdout)["state"], created.stderr)
+        rule = self.project / ".cursor/rules/working-memory.mdc"
+        if edited:
+            rule.write_bytes(rule.read_bytes() + b" User edit.")
+        original = rule.read_bytes()
+        fake = FAKE_CURSOR.replace('"cwd": os.getcwd(),',
+            '"rule_present": pathlib.Path(".cursor/rules/working-memory.mdc").exists(), "cwd": os.getcwd(),')
+        self.fake.write_text(fake)
+        with patch.object(sessions.providers, "discover_providers", return_value=[
+                {"id": "cursor", "name": "Offline Iris fixture", "available": True, "executable": str(self.fake)}]):
+            store = self.manager()
+        options = self.options(store, provider="cursor", prompt="Check the Iris transfer owner")
+        options["brain"].update(task_id="BIRCH-BRANCH", query="Iris transfer owner", goal="Verify the Iris transfer owner")
+        sid = store.create(options)["id"]
+        waiting = self.wait_status(store, sid, "awaiting_context")
+        # Reviewed retrieval has no text render; real launch uses lossless compact JSON.
+        self.iris_capsule = json.dumps(waiting["brain"]["capsule"], ensure_ascii=False, separators=(",", ":"))
+        store.run_context(sid, waiting["brain"]["context_id"])
+        self.wait_status(store, sid, "completed")
+        receipt = json.loads(self.calls[0]["receipt"].read_text())
+        return store, sid, rule, original, receipt
+
+    @unittest.skipUnless(os.name == "posix", "Anchored Cursor custody requires POSIX")
+    def test_cursor_host_capsule_retires_owned_rule_before_fake_provider_entry(self):
+        store, sid, rule, original, receipt = self.iris_cursor_run()
+        self.assertFalse(receipt["rule_present"])
+        self.assertFalse(rule.exists())
+        self.assertEqual("1", receipt["delivered"])
+        assembled = self.calls[0]["prompt"]
+        self.assertIn(sessions.BRAIN_CONTEXT_HEADER + self.iris_capsule + "\n\n", assembled)
+        self.assertNotIn("cursor-rule-custody-v1", assembled)
+        saved = self.cost_receipt(store, sid)
+        with store.lock:
+            row = store.db.execute("SELECT context FROM launches WHERE session_id=? ORDER BY rowid DESC LIMIT 1", (sid,)).fetchone()
+        context = json.loads(row["context"])
+        self.assertEqual({"state": "removed", "bytes_removed": len(original)}, context["cursor_rule_retirement"])
+        self.assertEqual({"installed": False, "measured": False, "bytes": None}, context["hooks"])
+        operations = saved["full_cost"]["local_operations"]
+        self.assertTrue(any(item["operation"] == "cursor-rule-retire" for item in operations))
+
+    @unittest.skipUnless(os.name == "posix", "Anchored Cursor custody requires POSIX")
+    def test_cursor_host_capsule_preserves_modified_rule_and_still_launches(self):
+        store, sid, rule, original, receipt = self.iris_cursor_run(edited=True)
+        self.assertTrue(receipt["rule_present"])
+        self.assertEqual(original, rule.read_bytes())
+        self.assertEqual("1", receipt["delivered"])
+        with store.lock:
+            row = store.db.execute("SELECT context FROM launches WHERE session_id=? ORDER BY rowid DESC LIMIT 1", (sid,)).fetchone()
+        context = json.loads(row["context"])
+        self.assertEqual({"state": "preserved", "bytes_removed": 0}, context["cursor_rule_retirement"])
+        self.assertEqual(len(original), context["hooks"]["bytes"])
+
+    def test_a_capsule_without_the_task_says_why_it_does_not_match(self):
+        # The runtime serves a turn whose task record cannot be read with its
+        # other memory and a warning naming the record; the Harness said only
+        # that the context did not match.
+        task = {'id': '7f3c2c4e-0d7b-4f6c-9a51-3a1d1b2c4d5e', 'external_id': 'feature/heron', 'revision': 3}
+        capsule = {'task_id': 'feature/heron', 'task_uuid': None, 'task_revision': None, 'working': None,
+                   'kind': 'warming', 'task_record_unreadable': True,
+                   'warnings': ['The working task has no state this turn: Project Brain record invalid: '
+                                'project-brain/dynamic/tasks/heron.md: invalid Unicode metadata.']}
+        with self.assertRaises(sessions.SessionError) as raised:
+            TaskContext._validate_capsule(capsule, task)
+        self.assertIn('does not match the linked task', str(raised.exception))
+        self.assertIn('project-brain/dynamic/tasks/heron.md: invalid Unicode metadata', str(raised.exception))
+        for malformed in (None, {'warnings': 'not a list'}, {'warnings': [3, None]}):
+            with self.subTest(capsule=malformed):
+                with self.assertRaisesRegex(sessions.SessionError, r'revision\. Prepare it again\.$'):
+                    TaskContext._validate_capsule(malformed, task)
+
     def test_a_capsule_with_a_changelog_and_an_event_is_valid(self):
         task = {'external_id': 'TASK-H', 'id': 'uuid-h', 'revision': 2}
         capsule = {'task_id': 'TASK-H', 'task_uuid': 'uuid-h', 'task_revision': 2,
@@ -535,9 +613,13 @@ class TaskContextTests(unittest.TestCase):
         self.assertEqual(2, len(self.calls))
         self.assertEqual('NEW progress', store.brain_info(sid)['task']['progress'])
         self.assertEqual(['NEW claim'], [item['title'] for item in store.brain_info(sid)['records'] if item['type'] == 'finding'])
-        old_writes = [row for row in old['local_operations'] if row['operation'] == 'record-result']
-        self.assertEqual(1, len(old_writes))
-        self.assertFalse(old_writes[0]['runtime_io'][0]['started'])
+        # The immutable-attempt guard now rejects superseded ownership before
+        # even launching preparation, rather than reaching a blocked mutator.
+        old_writes = [row for row in old['local_operations']
+                      if row['operation'] in ('prepare-result', 'record-result', 'replay-result')]
+        self.assertEqual([], old_writes)
+        self.assertIsNone(store.db.execute('SELECT 1 FROM memory_result_attempts WHERE generation=?',
+                                          (old_generation,)).fetchone())
         self.assertGreater(old['stage_seconds']['save'], 0)
 
     def test_one_automatic_draft_preserves_distinct_source_identities(self):
@@ -628,7 +710,8 @@ class TaskContextTests(unittest.TestCase):
         store._save_brain(sid, {**brain, "remembered": [["finding", "cobalt allocation needs one owner"]]})
         consequence = "Every cobalt allocation names two accountable owners."
         (self.project / "specs/authority.md").write_text("# Cobalt authority\n\n" + consequence + "\n")
-        self.fake.write_text(FAKE_DRAFT.replace(self.LEARNING["consequence"], consequence))
+        self.fake.write_text(FAKE_DRAFT.replace(self.LEARNING["consequence"], consequence)
+            .replace('"sources":', '"expected_revision": ' + str(initial["revision"]) + ', "sources":', 1))
         store.send(sid, "Check the updated cobalt authority")
         self.wait_status(store, sid, "completed")
         findings = self.findings(store, sid)
@@ -643,6 +726,8 @@ class TaskContextTests(unittest.TestCase):
         self.assertIn(consequence, active[0].read_text())
         self.assertTrue(any(metadata(path)["status"] == "superseded" for path in chunks))
         task_revision = store.brain_info(sid)["task"]["revision"]
+        self.fake.write_text(FAKE_DRAFT.replace(self.LEARNING["consequence"], consequence)
+            .replace('"sources":', '"expected_revision": ' + str(corrected["revision"]) + ', "sources":', 1))
         store.send(sid, "Recheck the unchanged cobalt authority")
         self.wait_status(store, sid, "completed")
         self.assertEqual(corrected["revision"], self.findings(store, sid)[0]["revision"])
@@ -697,7 +782,8 @@ class TaskContextTests(unittest.TestCase):
         saved = store.save_memory(sid, {"learnings": [self.LEARNING], "verified": True})
         self.assertTrue(saved["ok"], saved)
         finding = self.findings(store, sid)[0]
-        self.fake.write_text(FAKE_DRAFT.replace(self.LEARNING["consequence"], "Every cobalt allocation needs two owners."))
+        self.fake.write_text(FAKE_DRAFT.replace(self.LEARNING["consequence"], "Every cobalt allocation needs two owners.")
+            .replace("The cobalt rule is checked at allocation.", "Independent protected-claim follow-up recorded."))
         store.send(sid, "Check a revised cobalt allocation claim")
         self.wait_status(store, sid, "completed")
         current = self.findings(store, sid)[0]
@@ -705,7 +791,9 @@ class TaskContextTests(unittest.TestCase):
                          (current["id"], current["revision"], current["progress"]))
         notice = self.memory_events(store, sid)[-1]
         self.assertTrue(notice["ok"], notice)
-        self.assertIn("different consequence than this run", notice["text"])
+        self.assertIn("person-or-unknown-attestation", notice["text"])
+        self.assertIn("Saved to project memory: the task's progress and next steps.",notice["text"])
+        self.assertEqual("Independent protected-claim follow-up recorded.",store.brain_info(sid)["task"]["progress"])
 
     def test_legacy_chain_keeps_corrections_without_claiming_idempotence(self):
         from harness import knowledge
@@ -728,7 +816,7 @@ class TaskContextTests(unittest.TestCase):
         self.assertEqual({self.LEARNING["consequence"], changed["consequence"]},
                          {record["progress"] for record in findings})
 
-    def test_a_task_moved_on_since_it_was_read_is_saved_on_the_second_try(self):
+    def test_unbound_generic_stale_save_never_rebases_original_task_revision(self):
         # A Stop hook's checkpoint can land between reading the task and saving.
         store = self.manager(); sid = self.linked_run(store)
         context = store._task_context()
@@ -746,9 +834,9 @@ class TaskContextTests(unittest.TestCase):
         with patch.object(context, "_knowledge", side_effect=first_read_is_stale):
             result = context.save_memory(store.get(sid), {"progress": "Saved after the checkpoint.", "next_steps": [],
                                                           "learnings": [self.LEARNING], "verified": True}, automatic=True)
-        self.assertTrue(result["ok"], result)
-        self.assertEqual("Saved after the checkpoint.", store.brain_info(sid)["task"]["progress"])
-        self.assertEqual(1, len(self.findings(store, sid)))
+        self.assertFalse(result["ok"], result)
+        self.assertEqual("A checkpoint moved the task on.", store.brain_info(sid)["task"]["progress"])
+        self.assertEqual(0, len(self.findings(store, sid)))
 
     def test_a_runtime_without_record_result_saves_command_by_command(self):
         from harness import knowledge
@@ -858,6 +946,89 @@ class TaskContextTests(unittest.TestCase):
         with self.assertRaisesRegex(sessions.SessionError, "for each message by itself"):
             store.prepare_context(sid, "cobalt allocation")
 
+    def test_checkpoint_requires_its_own_current_report_instead_of_file_mtime(self):
+        from datetime import datetime, timezone
+        from unittest.mock import Mock
+        report = self.project / 'memory-bank/local/last-turn-report.json'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        context = TaskContext(Mock())
+        context.knowledge.layout.return_value = {'folder': self.project}
+        since = time.time() - 1
+        current = datetime.now(timezone.utc).isoformat()
+        cases = [
+            ({'schema_version': 1, 'task_id': 'LANTERN-B', 'timestamp': current}, False),
+            ({'schema_version': 1, 'task_id': 'LANTERN-A', 'timestamp': '2001-01-01T00:00:00+00:00'}, False),
+            ({'schema_version': 1, 'task_id': 'LANTERN-A', 'timestamp': '2999-01-01T00:00:00+00:00'}, False),
+            ({'schema_version': 1, 'task_id': 'LANTERN-A', 'timestamp': 'invalid'}, False),
+            ({'schema_version': 1, 'task_id': 'LANTERN-A', 'timestamp': current}, True),
+        ]
+        for payload, skip in cases:
+            with self.subTest(payload=payload), \
+                    patch.object(context, '_bound', return_value=(None, {'task_id': 'LANTERN-A'}, self.project, {'root': ''})), \
+                    patch.object(context, '_call', return_value={'checkpoint': 'LANTERN-A'}) as call:
+                report.write_text(json.dumps(payload), encoding='utf-8')
+                result = context.checkpoint({'project_id': 'fixture'}, since=since)
+                self.assertEqual(None if skip else {'checkpoint': 'LANTERN-A'}, result)
+                self.assertEqual(0 if skip else 1, call.call_count)
+
+    def test_checkpoint_report_paths_are_portable_and_unsafe_reports_do_not_skip(self):
+        from datetime import datetime, timezone
+        from pathlib import PureWindowsPath
+        from unittest.mock import Mock
+        context = TaskContext(Mock())
+        context.knowledge.layout.return_value = {'folder': self.project}
+        report = self.project / 'memory-bank/local/last-turn-report.json'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({'schema_version': 1, 'task_id': 'LANTERN-A',
+                              'timestamp': datetime.now(timezone.utc).isoformat()})
+        bound = (None, {'task_id': 'LANTERN-A'}, self.project, {'root': ''})
+        with patch.object(context, '_bound', return_value=bound), \
+                patch('harness.task_context.Path', PureWindowsPath), \
+                patch('harness.task_context.read_context', return_value=(len(payload), payload)) as read, \
+                patch.object(context, '_call') as call:
+            self.assertIsNone(context.checkpoint({'project_id': 'fixture'}, since=time.time() - 1))
+            self.assertEqual('memory-bank/local/last-turn-report.json', read.call_args.args[1])
+            call.assert_not_called()
+        foreign = self.root / 'foreign-report.json'
+        foreign.write_text(payload, encoding='utf-8')
+        for kind in ('oversized', 'symlink', 'malformed'):
+            with self.subTest(kind=kind), patch.object(context, '_bound', return_value=bound), \
+                    patch.object(context, '_call', return_value={'checkpoint': True}) as call:
+                if report.exists() or report.is_symlink():
+                    report.unlink()
+                if kind == 'symlink':
+                    try:
+                        report.symlink_to(foreign)
+                    except OSError:
+                        continue  # Windows hosts may deny creating a symlink.
+                else:
+                    report.write_text(payload + (' ' * 65536 if kind == 'oversized' else '{'), encoding='utf-8')
+                self.assertEqual({'checkpoint': True}, context.checkpoint({'project_id': 'fixture'}, since=time.time() - 1))
+                self.assertEqual(1, call.call_count)
+
+    def test_claude_recovery_observes_raw_compaction_once(self):
+        self.fake.write_text('''import json, os
+recovery = bool(os.environ.get("CONTEXT_MEMORY_RECOVERY"))
+print(json.dumps({"type":"system","subtype":"init","session_id":"native-lantern-recovery"}))
+if recovery:
+    print(json.dumps({"type":"system","subtype":"compact_boundary","compact_metadata":{"pre_tokens":90000,"post_tokens":9000}}))
+print(json.dumps({"type":"assistant","message":{"id":"lantern-recovery" if recovery else "lantern-main","model":"fixture-model","content":[],"usage":{"input_tokens":9000 if recovery else 80000,"output_tokens":2}}}))
+reply = "No draft" if not recovery else "```memory-draft\\n" + json.dumps({"progress":"Lantern checked", "next_steps":[], "learnings":[]}) + "\\n```"
+print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":reply,"session_id":"native-lantern-recovery","usage":{"input_tokens":9000 if recovery else 80000,"output_tokens":2}}))
+''')
+        with patch.object(sessions.providers, 'discover_providers', return_value=[
+                {'id':'claude', 'name':'Fixture', 'available':True, 'executable':str(self.fake)}]):
+            store = self.manager()
+            sid = store.create(self.automatic(store, provider='claude'))['id']
+            self.wait_status(store, sid, 'completed')
+        self.assertEqual(2, len(self.calls))
+        fill = store.results.history(sid)['launches'][0]['context']['fill']
+        self.assertEqual([{'pre': 90000, 'post': 9000, 'call': 1}], fill['compactions'])
+        self.assertEqual(2, fill['calls'])
+        self.assertEqual(9000, fill['end'])
+        self.assertEqual([{'pre': 90000, 'post': 9000}],
+                         [e['compaction'] for e in store.events(sid) if 'compaction' in e])
+
     def test_a_cursor_turn_gets_the_checkpoint_its_headless_mode_skips(self):
         # cursor-agent --print fires no stop hook, so nothing else would record
         # the turn the agent just worked.
@@ -871,10 +1042,12 @@ class TaskContextTests(unittest.TestCase):
         self.assertEqual(session["brain"]["task_id"], json.loads(report.read_text(encoding="utf-8"))["task_id"])
         # When the hook did fire this run, its checkpoint stands.
         written = report.stat().st_mtime
+        from datetime import datetime
+        reported = datetime.fromisoformat(json.loads(report.read_text())['timestamp']).timestamp()
         context = store._task_context(wait=5)
-        self.assertIsNone(context.checkpoint(session, since=written))
+        self.assertIsNone(context.checkpoint(session, since=reported))
         self.assertEqual(written, report.stat().st_mtime)
-        self.assertEqual(session["brain"]["task_id"], context.checkpoint(session, since=written + 1)["task_id"])
+        self.assertEqual(session["brain"]["task_id"], context.checkpoint(session, since=reported + 1)["task_id"])
 
     def test_a_codex_turn_leaves_the_checkpoint_to_its_stop_hook(self):
         report = self.project / "memory-bank/local/last-turn-report.json"

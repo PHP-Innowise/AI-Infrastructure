@@ -43,6 +43,8 @@ Contains records that coordinate Project Brain operations.
 | `control/handoffs/` | Compact continuation summaries for active tasks and future sessions. |
 | `control/retrieval-manifests/` | Metadata describing a governed query, selected/excluded sources, filters, and token estimates. |
 | `control/promotions/` | Proposals and independent human reviews for moving reusable knowledge into Memory Bank. |
+| `control/result-attempts/` | One folder per task UUID with a file per memory save (task, result ID and request content): the attempt while it runs, then a small completion proof an exact replay checks. The newest 64 proofs per task are kept; compaction removes an archived task's folder. |
+| `control/result-learning-images/` | The exact image of each learning an agent last wrote, which lets a later agent save revise that learning without naming its revision. Compaction removes the images of archived learnings. |
 
 Handoffs and manifests do not contain raw prompts, responses, hidden
 reasoning, or complete source bodies.
@@ -145,11 +147,16 @@ compaction, promotion, and telemetry defaults.
 ## `local/`
 
 Contains ignored machine-local Brain runtime state, currently including the
-repository-wide mutation lock:
+repository-wide mutation lock and the record images one process hands the
+next, so a prompt does not read, parse and validate every record again:
 
 ```text
 local/runtime.lock
+local/record-images.cache
 ```
+
+The cache is disposable: each entry is used only while the record file has
+the identity it was read with, and deleting it costs one full read.
 
 This directory is not shared authority. The disposable SQLite context database
 is stored separately at:

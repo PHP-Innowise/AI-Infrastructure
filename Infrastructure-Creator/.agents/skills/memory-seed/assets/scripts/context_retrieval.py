@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import copy
+import contextlib
+import threading
 import hashlib
 from bisect import bisect_left, bisect_right
 import json
@@ -14,14 +16,18 @@ import re
 import sqlite3
 import stat
 import subprocess
+import sys
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 import workspace_roots
+import brain_runtime
 from brain_runtime import (
     BrainError,
+    BrainRecordReadError,
     _CitationDigestCache,
     LIFECYCLES,
     atomic_json,
@@ -30,10 +36,14 @@ from brain_runtime import (
     fingerprint,
     handoff_path,
     iter_records,
+    is_uuid4,
     load_config,
+    read_runtime_config_text,
     mutation_lock,
     new_uuid,
     parse_markdown_record,
+    read_record_text,
+    _require_utf8_record_path,
     record_attestation,
     record_is_eligible,
     render_current_state,
@@ -44,7 +54,7 @@ from brain_runtime import (
     validate_schema_file,
 )
 from automatic_query import SECRET_PATTERNS, source_path_problem
-from validate import secret_policy_fingerprint
+from validate import indexed_secret_policy_reason, memory_temporal_reason, secret_policy_fingerprint
 
 
 BUDGETS = {
@@ -252,19 +262,13 @@ _GUARD_WARNING_CURSOR = r'''  # Cursor documents no channel that shows the agent
   exit 1
 '''
 
-# Working-memory delivery: Claude and Codex receive the Task Capsule at
-# prompt time through working-memory-read.sh (UserPromptSubmit); Cursor has
-# no equivalent event, so its mirrors of the Stop and sessionStart hooks
-# render the freshest capsule into .cursor/rules/working-memory.mdc - an
-# alwaysApply rule Cursor attaches to every prompt. The rendered file is one
-# turn stale by design, says so in its header, and lives in ignored local
-# state (the edition .gitignore lists it). The canonical hooks carry the
-# short marker comments below; the Cursor mirror swaps in the render steps.
-# The render is silent on stdout and replaces the previous rule only when a
-# fresh render succeeds. On any failure it renders nothing and keeps the
-# previous rule only when that rule's header names the current task: a rule
-# another task left behind (a switched branch) is removed instead of being
-# sent as this task's working memory.
+# Cursor's beforeSubmitPrompt cannot inject context through hook output.
+# Native hooks therefore maintain an ignored alwaysApply rule, while a
+# Harness capsules retire only the registered generated slot.
+# Exact managed bytes and whole historical envelopes recover automatically;
+# custom deviations/tracked/foreign-linked files are preserved. Full body
+# equality avoids gratuitous rewrites without hiding changed excerpts.
+# Loading order remains a native-client measurement, not a hook guarantee.
 #
 # The rule is the one surface in this product that is re-sent on every prompt,
 # so its content must vary only when the context genuinely varies. Two former
@@ -283,76 +287,76 @@ _WM_DELIVERY_STOP = r'''# Capsule delivery: this client receives the Task Capsul
 # through working-memory-read.sh, so the turn checkpoint above is all that
 # runs here.
 '''
-_WM_DELIVERY_STOP_CURSOR = r'''# Capsule delivery: Cursor's prompt-time event (beforeSubmitPrompt) cannot
-# add context to a prompt, so Cursor reads the Task Capsule from an
-# alwaysApply rule, which it sends with every request. working-memory-read.sh
-# renders the rule for each prompt; here, after the turn checkpoint, the
-# branch's capsule replaces any rule that hook did not render for this task
-# (an install without it, a prompt without a task, a switched branch). The
-# file is ignored local state, replaced only when a fresh render succeeds.
-# Attached, .cursor/rules is the shared clone's own rule folder, which every
-# project using the clone reads; the attaching launcher delivers the capsule
-# in the prompt instead. A host that put the capsule into the prompt itself
-# (the Harness) gets no second, branch-built one.
+_WM_DELIVERY_STOP_CURSOR = r'''# Cursor keeps working-memory.mdc, a generated alwaysApply rule, for direct-host delivery.
+# Attached rules belong to the shared clone and are never maintained here.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
-[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
-RULES_DIR="$ROOT_DIR/.cursor/rules"
-RULE_FILE="$RULES_DIR/working-memory.mdc"
-# The prompt hook's rule for this task holds what was retrieved for the
-# conversation's latest prompt. Rebuilt here from the task alone it would lose
-# that, and when Cursor reads its rules before the prompt hook has run, it is
-# what the next request carries.
-grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null && exit 0
+cursor_rule_run() {
+  local CURSOR_MAINTENANCE_STATUS=0 CURSOR_MAINTENANCE_REPORT CURSOR_PROJECTION_STATUS=0
+  if command -v timeout >/dev/null 2>&1; then
+    CURSOR_MAINTENANCE_REPORT=$(timeout 3 "${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  else
+    CURSOR_MAINTENANCE_REPORT=$("${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  fi
+  if [ "$CURSOR_MAINTENANCE_STATUS" -ne 0 ]; then
+    printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2
+    return "$CURSOR_MAINTENANCE_STATUS"
+  fi
+  # 4096 limits projection admission, not the shell capture of trusted CLI
+  # stdout. Both subprocess stderr streams are discarded before fixed reports.
+  printf '%s' "$CURSOR_MAINTENANCE_REPORT" | "${PYTHON[@]}" -I -S -c '
+import json,sys
+try:
+    raw=sys.stdin.buffer.read(4097)
+    if len(raw)>4096: raise ValueError("bounded outcome required")
+    value=json.loads(raw)
+    state=value.get("state") if isinstance(value,dict) else None
+    if state not in ("written","unchanged","kept","removed","absent","attached","preserved","incomplete"):
+        raise ValueError("known state required")
+    print(json.dumps({"state":state}))
+    sys.exit(5 if state=="preserved" and value.get("reason")=="linked_directory"
+             else 3 if state=="preserved" else 4 if state=="incomplete" else 0)
+except (ValueError,TypeError,RecursionError):
+    sys.exit(1)
+' 2>/dev/null || CURSOR_PROJECTION_STATUS=$?
+  case "$CURSOR_PROJECTION_STATUS" in
+    0) return 0 ;;
+    3) printf '%s\n' 'Cursor memory rule was not updated: custom_or_unavailable.' >&2 ;;
+    5) printf '%s\n' 'Cursor memory rule was not updated: linked_directory.' >&2 ;;
+    4) printf '%s\n' 'Cursor memory rule was not updated: maintenance_incomplete.' >&2 ;;
+    *) printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2; return 1 ;;
+  esac
+  return 0
+}
+if [ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ]; then
+  cursor_rule_run cursor-rule-retire >/dev/null || true
+  exit 0
+fi
+# Preserve this task's proven prompt rule after checkpointing. Task alias is
+# not chat ownership or current canonical-source authority. This only asks:
+# "preserved" means another rule is there, which the write below replaces, so
+# it reports nothing - the write, keep or retire that follows says what
+# happened to the rule.
+HELD_RULE=$(cursor_rule_run cursor-rule --action prompt-held --task-id "$TASK_ID" 2>/dev/null || true)
+case "$HELD_RULE" in *'"state": "kept"'*) exit 0 ;; esac
+CAPSULE_IDENTITY_ARGUMENTS=()
+if [ -z "${CONTEXT_TASK_ID:-}" ] && [ -n "$TASK_ID" ]; then
+  CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch "$TASK_ID")
+fi
 CAPSULE_STATUS=1
 if command -v timeout > /dev/null 2>&1; then
-  CAPSULE=$(timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-    --host cursor --task-id "$TASK_ID" 2>/dev/null)
+  CAPSULE=$(timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$TASK_ID" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)
   CAPSULE_STATUS=$?
 else
-  CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-    --host cursor --task-id "$TASK_ID" 2>/dev/null)
+  CAPSULE=$("${PYTHON[@]}" "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$TASK_ID" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)
   CAPSULE_STATUS=$?
 fi
-# The rendered capsule always opens with the working line. Anything else is a
-# broken render and must not replace a good rule. This guard replaces the JSON
-# parse that protected the --json form.
-#
-# Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
-# this turn" - renders nothing. The rule in place then stays only when its
-# header names this task: an enforce-mode skip must never replace Cursor's
-# only memory channel with an empty capsule, and another task's capsule (a
-# switched branch whose render keeps failing) must never be sent with this
-# task's prompts as their working memory.
-if [ "$CAPSULE_STATUS" -eq 0 ]; then
-  case "$CAPSULE" in
-    working:*) ;;
-    *) CAPSULE_STATUS=1 ;;
-  esac
-fi
 if [ "$CAPSULE_STATUS" -eq 3 ]; then
-  rm -f "$RULE_FILE" 2>/dev/null
-elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
-  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$TMP_RULE" ]; then
-    {
-      printf -- '---\n'
-      printf 'description: Working memory - current-branch session context\n'
-      printf 'alwaysApply: true\n'
-      printf -- '---\n\n'
-      printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Session context as of end of previous turn (task: %s).\n' "$TASK_ID"
-      printf 'Retrieved context is not authoritative - verify the source.\n\n'
-      printf '%s\n' '```'
-      printf '%s\n' "$CAPSULE"
-      printf '%s\n' '```'
-    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
-    rm -f "$TMP_RULE" 2>/dev/null
-  fi
+  cursor_rule_run cursor-rule-retire >/dev/null || true
+elif [ "$CAPSULE_STATUS" -eq 0 ]; then
+  printf '%s' "$CAPSULE" | cursor_rule_run cursor-rule --action write --phase turn --task-id "$TASK_ID" >/dev/null || true
+else
+  cursor_rule_run cursor-rule --action keep --task-id "$TASK_ID" >/dev/null || true
 fi
-grep -qxF "Session context as of end of previous turn (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
-  || grep -qxF "Session context retrieved for a recent prompt (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null \
-  || rm -f "$RULE_FILE" 2>/dev/null
 '''
 # Cursor runs the Claude Code hooks it finds as well as its own. The two
 # working-memory hooks of the Claude copy recognize Cursor's payload (it
@@ -383,9 +387,9 @@ trap 'printf "{\"continue\": true}\n"' EXIT
 _WM_PROMPT_SESSION = r'''  [ -n "$SESSION_ID" ] && ARGUMENTS+=(--session-id "$SESSION_ID")
   [ -n "$SESSION_ID" ] && [ -n "$TRANSCRIPT" ] && ARGUMENTS+=(--transcript "$TRANSCRIPT")
 '''
-_WM_PROMPT_SESSION_CURSOR = r'''  # The rule is re-sent whole with every request, so nothing may be left out
-  # of it as "handed earlier": no --session-id. JSON, for capsule_text.
-  ARGUMENTS+=(--json)
+_WM_PROMPT_SESSION_CURSOR = r'''# The rule is re-sent whole with every request, so nothing may be left out
+# of it as "handed earlier": no --session-id. JSON, even without a query.
+ARGUMENTS+=(--json)
 '''
 _WM_DELIVERY_PROMPT = r'''if [ -z "$REPORT" ]; then
   # A refresh that succeeded with nothing to say - a prompt the sanitizer
@@ -394,6 +398,11 @@ _WM_DELIVERY_PROMPT = r'''if [ -z "$REPORT" ]; then
   [ "$HOOK_STATUS" -eq 0 ] && exit 0
   if [ "$HOOK_STATUS" -eq 124 ]; then
     echo "Memory refresh unavailable: it exceeded its ${BUDGET_SECONDS}s budget."
+    # The first index of a large project can take longer than a prompt's
+    # budget, and an index stopped there starts over on the next prompt.
+    if [ "$STATE_DIR" = "$ROOT_DIR" ]; then
+      echo "If this repeats on every prompt, build the index once outside the hook: ${PYTHON[*]} memory-bank/scripts/context.py index"
+    fi
   else
     echo "Memory refresh unavailable: it exited $HOOK_STATUS${DETAIL:+ — $DETAIL}."
   fi
@@ -405,143 +414,167 @@ fi
 # data to check against the cited file, so no banner precedes it.
 echo "$REPORT"
 '''
-_WM_DELIVERY_PROMPT_CURSOR = r'''# Capsule delivery: the rule is rendered from this prompt before the request
-# leaves - in the same turn when Cursor reads its rules after this hook, on
-# the next prompt otherwise. Cursor puts rules at the start of the model's
-# context, so every change costs the conversation its cached prefix: the rule
-# is replaced only when this prompt retrieved an item it does not hold yet.
-# Attached, .cursor/rules is the shared clone's own folder; the launcher
-# delivers the capsule in the prompt instead.
+_WM_DELIVERY_PROMPT_CURSOR = r'''# All rule publication/removal uses native registered-slot maintenance.
+# Custom deviations, tracked files and foreign links remain untouched.
 [ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
-RULES_DIR="$ROOT_DIR/.cursor/rules"
-RULE_FILE="$RULES_DIR/working-memory.mdc"
-RULE_HEADER="Session context retrieved for a recent prompt (task: $TASK_ID)."
-CAPSULE=""
-[ -n "$REPORT" ] && CAPSULE=$(printf '%s' "$REPORT" | python3 -c '
-import json
-import sys
-
-try:
-    text = json.load(sys.stdin).get("capsule_text") or ""
-except (AttributeError, ValueError):
-    text = ""
-if not isinstance(text, str) or not text.startswith("working:"):
-    sys.exit(0)
-
-
-def items(capsule):
-    return {line.split(" \u2014 ")[0] for line in capsule.splitlines() if line.startswith("- ")}
-
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        held = handle.read()
-except (OSError, UnicodeError):
-    held = ""
-# The rule this hook wrote for the task already holds every item this prompt
-# retrieved - or the prompt retrieved none.
-if sys.argv[2] in held.splitlines() and items(text) <= items(held):
-    sys.exit(0)
-sys.stdout.write(text)
-' "$RULE_FILE" "$RULE_HEADER" 2>/dev/null)
-if [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
-  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$TMP_RULE" ]; then
-    {
-      printf -- '---\n'
-      printf 'description: Working memory - current-branch session context\n'
-      printf 'alwaysApply: true\n'
-      printf -- '---\n\n'
-      printf '# Working Memory (auto-rendered)\n\n'
-      printf '%s\n' "$RULE_HEADER"
-      printf 'Retrieved context is not authoritative - verify the source.\n\n'
-      printf '%s\n' '```'
-      printf '%s\n' "$CAPSULE"
-      printf '%s\n' '```'
-    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
-    rm -f "$TMP_RULE" 2>/dev/null
+cursor_rule_run() {
+  local CURSOR_MAINTENANCE_STATUS=0 CURSOR_MAINTENANCE_REPORT CURSOR_PROJECTION_STATUS=0
+  if command -v timeout >/dev/null 2>&1; then
+    CURSOR_MAINTENANCE_REPORT=$(timeout 3 "${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  else
+    CURSOR_MAINTENANCE_REPORT=$("${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
   fi
+  if [ "$CURSOR_MAINTENANCE_STATUS" -ne 0 ]; then
+    printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2
+    return "$CURSOR_MAINTENANCE_STATUS"
+  fi
+  # 4096 limits projection admission, not the shell capture of trusted CLI
+  # stdout. Both subprocess stderr streams are discarded before fixed reports.
+  printf '%s' "$CURSOR_MAINTENANCE_REPORT" | "${PYTHON[@]}" -I -S -c '
+import json,sys
+try:
+    raw=sys.stdin.buffer.read(4097)
+    if len(raw)>4096: raise ValueError("bounded outcome required")
+    value=json.loads(raw)
+    state=value.get("state") if isinstance(value,dict) else None
+    if state not in ("written","unchanged","kept","removed","absent","attached","preserved","incomplete"):
+        raise ValueError("known state required")
+    print(json.dumps({"state":state}))
+    sys.exit(5 if state=="preserved" and value.get("reason")=="linked_directory"
+             else 3 if state=="preserved" else 4 if state=="incomplete" else 0)
+except (ValueError,TypeError,RecursionError):
+    sys.exit(1)
+' 2>/dev/null || CURSOR_PROJECTION_STATUS=$?
+  case "$CURSOR_PROJECTION_STATUS" in
+    0) return 0 ;;
+    3) printf '%s\n' 'Cursor memory rule was not updated: custom_or_unavailable.' >&2 ;;
+    5) printf '%s\n' 'Cursor memory rule was not updated: linked_directory.' >&2 ;;
+    4) printf '%s\n' 'Cursor memory rule was not updated: maintenance_incomplete.' >&2 ;;
+    *) printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2; return 1 ;;
+  esac
+  return 0
+}
+printf '%s' "$REPORT" | cursor_rule_run cursor-rule --action write --phase prompt --task-id "$TASK_ID" --report-json >/dev/null || true
+'''
+# Cursor still acknowledges the prompt exactly once on the early exit.
+_WM_HOST_DELIVERED = '[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0\n'
+_WM_HOST_DELIVERED_CURSOR = r'''if [ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ]; then
+  ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+  # The CLI returns before SQLite/attached-state setup. Unknown custody keeps
+  # the rule. Harness also attempts retirement before the Cursor process starts.
+  if resolve_python; then
+    CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
+cursor_rule_run() {
+  local CURSOR_MAINTENANCE_STATUS=0 CURSOR_MAINTENANCE_REPORT CURSOR_PROJECTION_STATUS=0
+  if command -v timeout >/dev/null 2>&1; then
+    CURSOR_MAINTENANCE_REPORT=$(timeout 3 "${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  else
+    CURSOR_MAINTENANCE_REPORT=$("${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  fi
+  if [ "$CURSOR_MAINTENANCE_STATUS" -ne 0 ]; then
+    printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2
+    return "$CURSOR_MAINTENANCE_STATUS"
+  fi
+  # 4096 limits projection admission, not the shell capture of trusted CLI
+  # stdout. Both subprocess stderr streams are discarded before fixed reports.
+  printf '%s' "$CURSOR_MAINTENANCE_REPORT" | "${PYTHON[@]}" -I -S -c '
+import json,sys
+try:
+    raw=sys.stdin.buffer.read(4097)
+    if len(raw)>4096: raise ValueError("bounded outcome required")
+    value=json.loads(raw)
+    state=value.get("state") if isinstance(value,dict) else None
+    if state not in ("written","unchanged","kept","removed","absent","attached","preserved","incomplete"):
+        raise ValueError("known state required")
+    print(json.dumps({"state":state}))
+    sys.exit(5 if state=="preserved" and value.get("reason")=="linked_directory"
+             else 3 if state=="preserved" else 4 if state=="incomplete" else 0)
+except (ValueError,TypeError,RecursionError):
+    sys.exit(1)
+' 2>/dev/null || CURSOR_PROJECTION_STATUS=$?
+  case "$CURSOR_PROJECTION_STATUS" in
+    0) return 0 ;;
+    3) printf '%s\n' 'Cursor memory rule was not updated: custom_or_unavailable.' >&2 ;;
+    5) printf '%s\n' 'Cursor memory rule was not updated: linked_directory.' >&2 ;;
+    4) printf '%s\n' 'Cursor memory rule was not updated: maintenance_incomplete.' >&2 ;;
+    *) printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2; return 1 ;;
+  esac
+  return 0
+}
+    cursor_rule_run cursor-rule-retire >/dev/null || true
+  fi
+  exit 0
 fi
-# A prompt that rendered nothing - the refresh failed, timed out or carried no
-# capsule, or the rule already held everything it retrieved - keeps the rule in
-# place only when its header names this task. Another task's rule (a switched
-# branch whose refresh keeps failing) would otherwise go out with this prompt
-# as its working memory.
-[ -n "$TASK_ID" ] && {
-  grep -qxF "$RULE_HEADER" "$RULE_FILE" 2>/dev/null \
-    || grep -qxF "Session context as of end of previous turn (task: $TASK_ID)." "$RULE_FILE" 2>/dev/null
-} || rm -f "$RULE_FILE" 2>/dev/null
 '''
 _WM_DELIVERY_SESSION = r'''# Capsule delivery: this client receives the Task Capsule at prompt time
 # through working-memory-read.sh; session start reports metadata only.
 '''
-_WM_DELIVERY_SESSION_CURSOR = r'''# Capsule delivery: Cursor reads the Task Capsule from
-# .cursor/rules/working-memory.mdc, which the prompt and stop hooks maintain
-# (the documented exception to the metadata-only session banner - see
-# docs/TOOL-INTEGRATIONS.md). Re-render it here so a fresh session or a
-# branch switch does not serve the previous session's capsule. Nothing is
-# printed: the rule file is the only output.
+_WM_DELIVERY_SESSION_CURSOR = r'''# Cursor's direct-host channel is the owned local working-memory.mdc rule.
+[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
+cursor_rule_run() {
+  local CURSOR_MAINTENANCE_STATUS=0 CURSOR_MAINTENANCE_REPORT CURSOR_PROJECTION_STATUS=0
+  if command -v timeout >/dev/null 2>&1; then
+    CURSOR_MAINTENANCE_REPORT=$(timeout 3 "${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  else
+    CURSOR_MAINTENANCE_REPORT=$("${PYTHON[@]}" "$CONTEXT_CLI" "$@" --diagnostic 2>/dev/null) || CURSOR_MAINTENANCE_STATUS=$?
+  fi
+  if [ "$CURSOR_MAINTENANCE_STATUS" -ne 0 ]; then
+    printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2
+    return "$CURSOR_MAINTENANCE_STATUS"
+  fi
+  # 4096 limits projection admission, not the shell capture of trusted CLI
+  # stdout. Both subprocess stderr streams are discarded before fixed reports.
+  printf '%s' "$CURSOR_MAINTENANCE_REPORT" | "${PYTHON[@]}" -I -S -c '
+import json,sys
+try:
+    raw=sys.stdin.buffer.read(4097)
+    if len(raw)>4096: raise ValueError("bounded outcome required")
+    value=json.loads(raw)
+    state=value.get("state") if isinstance(value,dict) else None
+    if state not in ("written","unchanged","kept","removed","absent","attached","preserved","incomplete"):
+        raise ValueError("known state required")
+    print(json.dumps({"state":state}))
+    sys.exit(5 if state=="preserved" and value.get("reason")=="linked_directory"
+             else 3 if state=="preserved" else 4 if state=="incomplete" else 0)
+except (ValueError,TypeError,RecursionError):
+    sys.exit(1)
+' 2>/dev/null || CURSOR_PROJECTION_STATUS=$?
+  case "$CURSOR_PROJECTION_STATUS" in
+    0) return 0 ;;
+    3) printf '%s\n' 'Cursor memory rule was not updated: custom_or_unavailable.' >&2 ;;
+    5) printf '%s\n' 'Cursor memory rule was not updated: linked_directory.' >&2 ;;
+    4) printf '%s\n' 'Cursor memory rule was not updated: maintenance_incomplete.' >&2 ;;
+    *) printf '%s\n' 'Cursor memory rule was not updated: maintenance_unavailable.' >&2; return 1 ;;
+  esac
+  return 0
+}
+if [ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ]; then
+  cursor_rule_run cursor-rule-retire >/dev/null || true
+  exit 0
+fi
 CAPSULE_BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 CAPSULE_TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
-# Attached, the rule folder is the shared clone's; see the stop hook. Nor
-# when the host delivered the capsule in the prompt.
-[ "$STATE_DIR" = "$ROOT_DIR" ] || exit 0
-[ "${CONTEXT_CAPSULE_DELIVERED:-}" = "1" ] && exit 0
-RULES_DIR="$ROOT_DIR/.cursor/rules"
-RULE_FILE="$RULES_DIR/working-memory.mdc"
-CAPSULE=""
+CAPSULE_IDENTITY_ARGUMENTS=()
+if [ -z "${CONTEXT_TASK_ID:-}" ] && [ -n "$CAPSULE_TASK_ID" ]; then
+  CAPSULE_IDENTITY_ARGUMENTS=(--expected-branch "$CAPSULE_TASK_ID")
+fi
 CAPSULE_STATUS=3
-if command -v python3 > /dev/null 2>&1 && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
-  if command -v timeout > /dev/null 2>&1; then
-    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" python3 "$CONTEXT_CLI" hook-context \
-      --host cursor --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ] && [ -n "$CAPSULE_TASK_ID" ]; then
+  if command -v timeout >/dev/null 2>&1; then
+    CAPSULE=$(timeout "$CAPSULE_BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$CAPSULE_TASK_ID" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)
     CAPSULE_STATUS=$?
   else
-    CAPSULE=$(python3 "$CONTEXT_CLI" hook-context \
-      --host cursor --task-id "$CAPSULE_TASK_ID" 2>/dev/null)
+    CAPSULE=$("${PYTHON[@]}" "$CONTEXT_CLI" hook-context --host cursor --delivery-profile cursor-rule --task-id "$CAPSULE_TASK_ID" "${CAPSULE_IDENTITY_ARGUMENTS[@]}" 2>/dev/null)
     CAPSULE_STATUS=$?
   fi
 fi
-# See the stop hook: the working line is the render marker that replaces the
-# JSON parse.
-#
-# Statuses: 0 renders, 3 removes a foreign branch's rule, and everything else
-# - a failure, a timeout, a broken render, or 4, "the retrieval gate withheld
-# this turn" - renders nothing. The rule in place then stays only when its
-# header names this task: an enforce-mode skip must never replace Cursor's
-# only memory channel with an empty capsule, and a fresh session on a switched
-# branch whose render fails must not start with the previous branch's capsule.
-if [ "$CAPSULE_STATUS" -eq 0 ]; then
-  case "$CAPSULE" in
-    working:*) ;;
-    *) CAPSULE_STATUS=1 ;;
-  esac
-fi
 if [ "$CAPSULE_STATUS" -eq 3 ]; then
-  rm -f "$RULE_FILE" 2>/dev/null
-elif [ "$CAPSULE_STATUS" -eq 0 ] && [ -n "$CAPSULE" ] && mkdir -p "$RULES_DIR" 2>/dev/null; then
-  TMP_RULE=$(mktemp "$RULES_DIR/.working-memory.XXXXXX" 2>/dev/null || true)
-  if [ -n "$TMP_RULE" ]; then
-    {
-      printf -- '---\n'
-      printf 'description: Working memory - current-branch session context\n'
-      printf 'alwaysApply: true\n'
-      printf -- '---\n\n'
-      printf '# Working Memory (auto-rendered)\n\n'
-      printf 'Session context as of end of previous turn (task: %s).\n' \
-        "$CAPSULE_TASK_ID"
-      printf 'Retrieved context is not authoritative - verify the source.\n\n'
-      printf '%s\n' '```'
-      printf '%s\n' "$CAPSULE"
-      printf '%s\n' '```'
-    } > "$TMP_RULE" 2>/dev/null && mv -f "$TMP_RULE" "$RULE_FILE" 2>/dev/null
-    rm -f "$TMP_RULE" 2>/dev/null
-  fi
+  cursor_rule_run cursor-rule-retire >/dev/null || true
+elif [ "$CAPSULE_STATUS" -eq 0 ]; then
+  printf '%s' "$CAPSULE" | cursor_rule_run cursor-rule --action write --phase session --task-id "$CAPSULE_TASK_ID" >/dev/null || true
+else
+  cursor_rule_run cursor-rule --action keep --task-id "$CAPSULE_TASK_ID" >/dev/null || true
 fi
-[ -n "$CAPSULE_TASK_ID" ] && {
-  grep -qxF "Session context as of end of previous turn (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null \
-    || grep -qxF "Session context retrieved for a recent prompt (task: $CAPSULE_TASK_ID)." "$RULE_FILE" 2>/dev/null
-} || rm -f "$RULE_FILE" 2>/dev/null
 '''
 
 MIRROR_RULES: dict[str, Any] = {
@@ -623,9 +656,11 @@ MIRROR_RULES: dict[str, Any] = {
                             "# Cursor hook event: beforeSubmitPrompt",
                         ],
                         ["--host claude", "--host cursor"],
+                        ["ARGUMENTS=(refresh --host cursor", "ARGUMENTS=(refresh --host cursor --delivery-profile cursor-rule"],
                         [_WM_PROMPT_PREAMBLE, _WM_PROMPT_PREAMBLE_CURSOR],
-                        [_WM_PROMPT_SESSION, _WM_PROMPT_SESSION_CURSOR],
+                        [_WM_PROMPT_SESSION + "fi\n", "fi\n" + _WM_PROMPT_SESSION_CURSOR],
                         [_WM_DELIVERY_PROMPT, _WM_DELIVERY_PROMPT_CURSOR],
+                        [_WM_HOST_DELIVERED, _WM_HOST_DELIVERED_CURSOR],
                         [_WM_THIRD_PARTY, ""],
                     ],
                 },
@@ -838,7 +873,7 @@ MANIFEST_SCHEMA_VERSION = 4
 # own request, `task` the goal and state of the active task, `task-id` a bare
 # identifier or branch name with no task text behind it, and `explicit` an
 # operator-supplied query on the CLI.
-QUERY_SOURCES = ("prompt", "task", "task-id", "explicit")
+QUERY_SOURCES = ("prompt", "task", "task-id", "explicit", "continuation")
 RETRIEVAL_HOSTS = ("cli", "claude", "codex", "cursor")
 RETRIEVAL_ENTRY_POINTS = ("context", "retrieve", "refresh", "hook-context")
 # Instruction files a host loads into the model's context by itself, before
@@ -858,7 +893,7 @@ CLAUDE_INSTRUCTION_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # Claude Code also loads what CLAUDE.md imports with `@path`, recursively and
 # at most five hops deep; an import inside a code span or block is not one.
 CLAUDE_IMPORT_DEPTH = 5
-CLAUDE_IMPORT_PATTERN = re.compile(r"(?<![\w@])@((?:\.{1,2}/)?[\w-][\w./-]*)")
+CLAUDE_IMPORT_PATTERN = re.compile(r"(?<![\w@])@((?:\.{1,2}/)?[\w-][\w\u0300-\u036f./#+-]*)")
 CODE_FENCE_PATTERN = re.compile(r"^\s*(```|~~~)")
 CODE_SPAN_PATTERN = re.compile(r"`+[^`]*`+")
 # Whether a turn retrieves at all. `off` never decides; `shadow` decides and
@@ -986,6 +1021,14 @@ INDEX_PARITY_KEY = "skill-parity-drift"
 # tell at a glance whether it still describes the current index.
 INDEX_GENERATION_KEY = "index-generation"
 TOKEN_FREQUENCY_KEY = "token-frequency-cache"
+# The digest of the Brain rows the tables hold. Brain rows are rebuilt from
+# the records on every refresh; when they come out the same, the tables are
+# not written and the generation stands.
+INDEX_BRAIN_ROWS_KEY = "brain-rows-digest"
+# Task IDs that more than one active task record claims, each with its
+# records, earliest created first: two copies of a branch that each started
+# its task and were merged. Kept by the index pass, read by the capsule.
+TASK_TWINS_KEY = "task-twins"
 TOKEN_FREQUENCY_LIMIT = 4096
 
 # Porter wraps unicode61 so "rounding" matches "round" and "review" matches
@@ -1229,14 +1272,22 @@ def store_index_state(connection: sqlite3.Connection, state: dict[str, str]) -> 
 
 
 def config_fingerprint(repository: Path) -> str:
-    path = brain_root(repository) / "config" / "runtime.json"
-    try:
-        return _content_hash(path.read_text(encoding="utf-8"))
-    except OSError:
-        return "absent"
+    text = read_runtime_config_text(repository)
+    return "absent" if text is None else _content_hash(text)
 
 
 SkillStat = tuple[str, str, int, int]
+
+
+def _policy_source_key(key: str) -> str:
+    """A malformed policy inventory is unknown, never clean parity."""
+    if not isinstance(key, str):
+        raise RetrievalError('Policy source invalid-utf8-path')
+    try:
+        str.encode(key, 'utf-8')
+    except UnicodeError as error:
+        raise RetrievalError('Policy source invalid-utf8-path') from error
+    return key
 
 
 def skill_tree_fingerprint(
@@ -1272,13 +1323,17 @@ def skill_tree_fingerprint(
                 entries.append(
                     (
                         edition,
-                        path.relative_to(root).as_posix(),
+                        _policy_source_key(path.relative_to(root).as_posix()),
                         status.st_mtime_ns,
                         status.st_size,
                     )
                 )
     else:
         entries = list(skill_stats)
+    # Validate supplied entries too, before sorting or publishing any digest.
+    for edition, relative, _, _ in entries:
+        _policy_source_key(edition)
+        _policy_source_key(relative)
     digest = hashlib.sha256()
     for edition, relative, mtime_ns, size in sorted(entries):
         digest.update(
@@ -1354,7 +1409,7 @@ def skill_mirror_drift(repository: Path, canonical_edition: str) -> list[dict[st
             continue
         for path in sorted(root.glob("**/*.md")):
             if path.is_file() and not path.is_symlink():
-                key = path.relative_to(root).as_posix()
+                key = _policy_source_key(path.relative_to(root).as_posix())
                 if key == "SKILL FLOW.md" or key.split("/")[0] in EDITION_OWNED_SKILLS:
                     continue
                 logical.setdefault(key, {})[edition] = path
@@ -1528,6 +1583,7 @@ def _mirror_class_skips(
 def _mirror_iter_canonical(canonical: Path, only: Optional[list[str]]):
     if only is not None:
         for rel in only:
+            _policy_source_key(rel)
             path = canonical / rel
             if path.is_file():
                 yield rel, path
@@ -1538,7 +1594,7 @@ def _mirror_iter_canonical(canonical: Path, only: Optional[list[str]]):
         rel_parts = path.relative_to(canonical).parts
         if _mirror_is_ignored(rel_parts):
             continue
-        yield "/".join(rel_parts), path
+        yield _policy_source_key("/".join(rel_parts)), path
 
 
 def full_mirror_drift(repository: Path) -> list[dict[str, str]]:
@@ -1575,6 +1631,10 @@ def full_mirror_drift(repository: Path) -> list[dict[str, str]]:
                 for rel, path in _mirror_iter_canonical(canonical, cls.get("only"))
                 if not _mirror_is_skipped(rel, skips)
             ]
+            # Admit the whole reverse inventory before the partial-install
+            # shortcut or any content transform. Reuse it for the reverse pass.
+            reverse = (list(_mirror_iter_canonical(mirror, None))
+                       if cls.get("only") is None else [])
             if sources and not any((mirror / rel).is_file() for rel, _ in sources):
                 continue
             expected: set[str] = set()
@@ -1611,13 +1671,7 @@ def full_mirror_drift(repository: Path) -> list[dict[str, str]]:
                 )
             if cls.get("only") is None:
                 # Reverse pass: a file only the mirror carries is drift too.
-                for path in sorted(mirror.rglob("*")):
-                    if not path.is_file() or path.is_symlink():
-                        continue
-                    rel_parts = path.relative_to(mirror).parts
-                    if _mirror_is_ignored(rel_parts):
-                        continue
-                    rel = "/".join(rel_parts)
+                for rel, path in reverse:
                     if rel in expected or _mirror_is_skipped(rel, skips):
                         continue
                     drift.append(
@@ -1680,7 +1734,7 @@ def cross_edition_drift(repository: Path) -> Optional[list[dict[str, object]]]:
                 rel_parts = path.relative_to(base).parts
                 if _mirror_is_ignored(rel_parts):
                     continue
-                rel = "/".join(rel_parts)
+                rel = _policy_source_key("/".join(rel_parts))
                 if _cross_edition_allowed(rel):
                     continue
                 digests.setdefault(rel, {})[name] = hashlib.sha256(
@@ -1792,6 +1846,1386 @@ def _file_link_problem(path: object) -> Optional[str]:
     return None
 
 
+def _cursor_nt_backend():
+    """Installed lazy NT operations adapted from scripts/portable_fs.py.
+
+    Handles never follow reparse points; held parents deny delete sharing.
+    st_ctime_ns is Windows creation time, not a POSIX change-time token.
+    """
+    import errno
+    import stat as stat_module
+    from types import SimpleNamespace
+    WINDOWS = True
+    O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK = 0x20000000, 0x40000000, 0x08000000
+    def _component(name):
+        if not isinstance(name, (str, bytes)):
+            raise TypeError('A path component must be text or bytes.')
+        text = os.fsdecode(name)
+        if (not text or text in ('.', '..') or '/' in text or '\\' in text or ':' in text
+                or '\x00' in text or text[-1:] in (' ', '.') or any(ord(c) < 32 for c in text)):
+            raise ValueError('A filesystem component is unsafe.')
+        if WINDOWS and text.rstrip(' .').upper().split('.')[0] in {
+                'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}:
+            raise ValueError('Windows device names are not filesystem components.')
+        return text
+
+    import ctypes
+
+    import msvcrt
+
+    import ntpath
+
+    from ctypes import wintypes
+
+    ULONG = wintypes.ULONG
+
+    USHORT = wintypes.USHORT
+
+    NTSTATUS = ctypes.c_long
+
+    HANDLE = wintypes.HANDLE
+
+    ACCESS_MASK = wintypes.DWORD
+
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [('Length', USHORT), ('MaximumLength', USHORT), ('Buffer', wintypes.LPWSTR)]
+
+    class OBJECT_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [('Length', ULONG), ('RootDirectory', HANDLE),
+                    ('ObjectName', ctypes.POINTER(UNICODE_STRING)), ('Attributes', ULONG),
+                    ('SecurityDescriptor', wintypes.LPVOID), ('SecurityQualityOfService', wintypes.LPVOID)]
+
+    class IO_STATUS_BLOCK(ctypes.Structure):
+        _fields_ = [('Status', NTSTATUS), ('Information', ctypes.c_size_t)]
+
+    class FILE_ATTRIBUTE_TAG_INFO(ctypes.Structure):
+        _fields_ = [('FileAttributes', wintypes.DWORD), ('ReparseTag', wintypes.DWORD)]
+
+    class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+        _fields_ = [('dwFileAttributes', wintypes.DWORD), ('ftCreationTime_dwLowDateTime', wintypes.DWORD),
+                    ('ftCreationTime_dwHighDateTime', wintypes.DWORD), ('ftLastAccessTime_dwLowDateTime', wintypes.DWORD),
+                    ('ftLastAccessTime_dwHighDateTime', wintypes.DWORD), ('ftLastWriteTime_dwLowDateTime', wintypes.DWORD),
+                    ('ftLastWriteTime_dwHighDateTime', wintypes.DWORD), ('dwVolumeSerialNumber', wintypes.DWORD),
+                    ('nFileSizeHigh', wintypes.DWORD), ('nFileSizeLow', wintypes.DWORD),
+                    ('nNumberOfLinks', wintypes.DWORD), ('nFileIndexHigh', wintypes.DWORD),
+                    ('nFileIndexLow', wintypes.DWORD)]
+
+    _ntdll = ctypes.WinDLL('ntdll', use_last_error=True)
+
+    _kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+    _nt_create = _ntdll.NtCreateFile
+
+    _nt_create.argtypes = [ctypes.POINTER(HANDLE), ACCESS_MASK, ctypes.POINTER(OBJECT_ATTRIBUTES),
+                                ctypes.POINTER(IO_STATUS_BLOCK), wintypes.LPVOID, ULONG, ULONG, ULONG,
+                                ULONG, wintypes.LPVOID, ULONG]
+
+    _nt_create.restype = NTSTATUS
+
+    _nt_set = _ntdll.NtSetInformationFile
+
+    _nt_set.argtypes = [HANDLE, ctypes.POINTER(IO_STATUS_BLOCK), wintypes.LPVOID, ULONG, ULONG]
+
+    _nt_set.restype = NTSTATUS
+
+    _status_to_error = _ntdll.RtlNtStatusToDosError
+
+    _status_to_error.argtypes = [NTSTATUS]
+
+    _status_to_error.restype = ULONG
+
+    _get_info = _kernel32.GetFileInformationByHandle
+
+    _get_info.argtypes = [HANDLE, ctypes.POINTER(BY_HANDLE_FILE_INFORMATION)]
+
+    _get_info.restype = wintypes.BOOL
+
+    _get_info_ex = _kernel32.GetFileInformationByHandleEx
+
+    _get_info_ex.argtypes = [HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+
+    _get_info_ex.restype = wintypes.BOOL
+
+    _close = _kernel32.CloseHandle
+
+    _close.argtypes = [HANDLE]
+
+    _close.restype = wintypes.BOOL
+
+    FILE_READ_DATA = FILE_LIST_DIRECTORY = 0x0001
+
+    FILE_WRITE_DATA = 0x0002
+
+    FILE_APPEND_DATA = 0x0004
+
+    FILE_READ_ATTRIBUTES = 0x0080
+
+    FILE_WRITE_ATTRIBUTES = 0x0100
+
+    FILE_TRAVERSE = 0x0020
+
+    DELETE = 0x00010000
+
+    SYNCHRONIZE = 0x00100000
+
+    FILE_SHARE_READ, FILE_SHARE_WRITE = 0x1, 0x2
+
+    FILE_OPEN, FILE_CREATE, FILE_OPEN_IF = 1, 2, 3
+
+    FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE = 0x1, 0x40
+
+    FILE_SYNCHRONOUS_IO_NONALERT, FILE_OPEN_REPARSE_POINT = 0x20, 0x00200000
+
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT = 0x80, 0x400
+
+    OBJ_CASE_INSENSITIVE = 0x40
+
+    FileAttributeTagInfo = 9
+
+    FileNamesInformation = 12
+
+    FileRenameInformation, FileLinkInformation, FileDispositionInformation = 10, 11, 13
+
+    def _raise(status):
+        code = _status_to_error(NTSTATUS(status))
+        raise ctypes.WinError(code or errno.EIO)
+
+    def raw_handle(fd):
+        return int(msvcrt.get_osfhandle(fd))
+
+    def _unicode(text):
+        buffer = ctypes.create_unicode_buffer(text)
+        size = len(text.encode('utf-16-le'))
+        if size > 0xffff:
+            raise ValueError('A filesystem component is too long.')
+        return buffer, UNICODE_STRING(size, size, ctypes.cast(buffer, wintypes.LPWSTR))
+
+    def _metadata(handle):
+        tag = FILE_ATTRIBUTE_TAG_INFO()
+        if not _get_info_ex(HANDLE(handle), FileAttributeTagInfo, ctypes.byref(tag), ctypes.sizeof(tag)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise OSError('A reparse point is unsafe.')
+        info = BY_HANDLE_FILE_INFORMATION()
+        if not _get_info(HANDLE(handle), ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return info
+
+    def _stat_result(handle):
+        info = _metadata(handle)
+        is_dir = bool(info.dwFileAttributes & 0x10)
+        permissions = 0o777 if is_dir else 0o444 if info.dwFileAttributes & 1 else 0o666
+        mode = (stat_module.S_IFDIR if is_dir else stat_module.S_IFREG) | permissions
+        size = (info.nFileSizeHigh << 32) | info.nFileSizeLow
+        index = (info.nFileIndexHigh << 32) | info.nFileIndexLow
+        def timestamp(high, low):
+            value = (high << 32) | low
+            return max(0, (value - 116444736000000000) * 100)
+        ctime_ns = timestamp(info.ftCreationTime_dwHighDateTime, info.ftCreationTime_dwLowDateTime)
+        atime_ns = timestamp(info.ftLastAccessTime_dwHighDateTime, info.ftLastAccessTime_dwLowDateTime)
+        mtime_ns = timestamp(info.ftLastWriteTime_dwHighDateTime, info.ftLastWriteTime_dwLowDateTime)
+        # FILETIME is 100ns since 1601.  The exact timestamp is less important than
+        # stable identity and size checks; retain nanosecond resolution where possible.
+        return os.stat_result((mode, index, info.dwVolumeSerialNumber, info.nNumberOfLinks,
+                               0, 0, size, atime_ns // 1_000_000_000,
+                               mtime_ns // 1_000_000_000, ctime_ns // 1_000_000_000),
+                              {'st_atime_ns': atime_ns, 'st_mtime_ns': mtime_ns, 'st_ctime_ns': ctime_ns})
+
+    def _open_relative(parent_fd, name, access, disposition=FILE_OPEN, options=0,
+                       attributes=FILE_ATTRIBUTE_NORMAL, share=None, security_descriptor=None):
+        text = _component(name)
+        buffer, unicode = _unicode(text)
+        attributes_object = OBJECT_ATTRIBUTES(ctypes.sizeof(OBJECT_ATTRIBUTES), HANDLE(raw_handle(parent_fd)),
+                                               ctypes.pointer(unicode), OBJ_CASE_INSENSITIVE,
+                                               security_descriptor, None)
+        output, status = HANDLE(), IO_STATUS_BLOCK()
+        result = _nt_create(ctypes.byref(output), access, ctypes.byref(attributes_object), ctypes.byref(status),
+                            None, attributes, FILE_SHARE_READ | FILE_SHARE_WRITE if share is None else share, disposition,
+                            options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, None, 0)
+        if result < 0:
+            _raise(result)
+        try:
+            _metadata(output.value)
+            crt_flags = os.O_BINARY
+            if access & FILE_WRITE_DATA:
+                crt_flags |= os.O_RDWR if access & FILE_READ_DATA else os.O_WRONLY
+            if access & FILE_APPEND_DATA:
+                crt_flags |= os.O_APPEND
+            return msvcrt.open_osfhandle(output.value, crt_flags)
+        except BaseException:
+            try:
+                _close(output)
+            except BaseException:
+                pass  # Preserve abort; no retry after an uncertain close.
+            raise
+
+    def _open_root(path, security=False):
+        text = os.fspath(path)
+        if isinstance(text, bytes):
+            text = os.fsdecode(text)
+        drive, tail = ntpath.splitdrive(text)
+        if not drive or drive.startswith('\\\\') or not ntpath.isabs(text):
+            raise ValueError('Use an absolute local Windows path.')
+        root = drive + '\\'
+        # CreateFileW is used only for the volume root; untrusted components are
+        # then opened one-by-one relative to that rooted handle.
+        create = _kernel32.CreateFileW
+        create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                           wintypes.DWORD, wintypes.DWORD, HANDLE]
+        create.restype = HANDLE
+        handle = create('\\\\?\\' + root, FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE, None, 3,
+                        0x02000000 | 0x00200000, None)
+        if handle in (None, ctypes.c_void_p(-1).value):
+            raise ctypes.WinError(ctypes.get_last_error())
+        fd = None
+        try:
+            _metadata(handle)
+            fd = msvcrt.open_osfhandle(handle, os.O_BINARY)
+            handle = None
+            parts = [item for item in tail.replace('/', '\\').split('\\') if item]
+            for index, part in enumerate(parts):
+                access = FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+                if security and index == len(parts) - 1:
+                    access |= 0x00020000 | 0x00040000 | 0x00080000
+                previous = fd
+                fd = _open_relative(previous, part, access,
+                                    options=FILE_DIRECTORY_FILE)
+                os.close(previous)
+            return fd
+        except BaseException:
+            try:
+                if fd is not None:
+                    os.close(fd)
+                elif handle is not None:
+                    _close(HANDLE(handle))
+            except BaseException:
+                pass  # Unknown close result: preserve abort, never retry an old fd.
+            raise
+
+    def open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            # Absolute paths are walked from the drive root.  A direct file open
+            # uses the verified parent handle rather than a path-based fallback.
+            text = os.fspath(path)
+            parent, name = ntpath.split(text)
+            root = _open_root(parent)
+            try:
+                return open(name, flags, mode, dir_fd=root)
+            finally:
+                os.close(root)
+        want_dir = bool(flags & O_DIRECTORY)
+        writing = bool(flags & (os.O_WRONLY | os.O_RDWR))
+        creating = bool(flags & os.O_CREAT)
+        exclusive = bool(flags & os.O_EXCL)
+        if creating and exclusive:
+            disposition = FILE_CREATE
+        elif creating:
+            disposition = FILE_OPEN_IF
+        else:
+            disposition = FILE_OPEN
+        access = SYNCHRONIZE | FILE_READ_ATTRIBUTES
+        if want_dir:
+            access |= FILE_LIST_DIRECTORY | FILE_TRAVERSE
+        elif writing:
+            access |= FILE_WRITE_DATA | FILE_READ_DATA
+        else:
+            access |= FILE_READ_DATA
+        if flags & os.O_APPEND:
+            access |= FILE_APPEND_DATA
+        options = FILE_DIRECTORY_FILE if want_dir else FILE_NON_DIRECTORY_FILE
+        return _open_relative(dir_fd, path, access, disposition, options)
+
+    close = os.close
+
+    dup = os.dup
+
+    def fstat(fd):
+        return _stat_result(raw_handle(fd))
+
+    def stat(path, *, dir_fd=None, follow_symlinks=True):
+        if follow_symlinks:
+            raise ValueError('Portable rooted stat never follows links.')
+        if dir_fd is None:
+            text = os.fspath(path)
+            parent, name = ntpath.split(text)
+            root = _open_root(parent)
+            try:
+                fd = _open_relative(root, name, FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            finally:
+                os.close(root)
+        else:
+            fd = _open_relative(dir_fd, path, FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        try:
+            return fstat(fd)
+        finally:
+            os.close(fd)
+
+    def mkdir(name, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            raise ValueError('mkdir requires a trusted parent descriptor on Windows.')
+        fd = _open_relative(dir_fd, name, FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                            FILE_CREATE, FILE_DIRECTORY_FILE)
+        os.close(fd)
+
+    def _disposition(parent_fd, name, directory=False):
+        access = DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES
+        options = FILE_DIRECTORY_FILE if directory else FILE_NON_DIRECTORY_FILE
+        fd = _open_relative(parent_fd, name, access, FILE_OPEN, options)
+        try:
+            deleting = ctypes.c_ubyte(1)
+            status = IO_STATUS_BLOCK()
+            result = _nt_set(HANDLE(raw_handle(fd)), ctypes.byref(status), ctypes.byref(deleting), 1,
+                             FileDispositionInformation)
+            if result < 0:
+                _raise(result)
+        finally:
+            os.close(fd)
+
+    def unlink(name, *, dir_fd=None):
+        if dir_fd is None:
+            raise ValueError('unlink requires a trusted parent descriptor on Windows.')
+        _disposition(dir_fd, name)
+
+    def _rename_information(parent_fd, name, replace):
+        text = _component(name)
+        encoded = text.encode('utf-16-le')
+        # BOOLEAN ReplaceIfExists; padding; HANDLE RootDirectory; ULONG length; WCHAR[]
+        root_offset = ctypes.sizeof(HANDLE)
+        name_length_offset = root_offset + ctypes.sizeof(HANDLE)
+        offset = name_length_offset + ctypes.sizeof(ULONG)
+        body = ctypes.create_string_buffer(offset + len(encoded))
+        body[0] = b'\x01' if replace else b'\x00'
+        ctypes.c_void_p.from_address(ctypes.addressof(body) + root_offset).value = raw_handle(parent_fd)
+        ctypes.c_ulong.from_address(ctypes.addressof(body) + name_length_offset).value = len(encoded)
+        ctypes.memmove(ctypes.addressof(body) + offset, encoded, len(encoded))
+        return body
+
+    def atomic_replace_open(source_fd, destination_dir_fd, destination):
+        body = _rename_information(destination_dir_fd, destination, True)
+        status = IO_STATUS_BLOCK()
+        result = _nt_set(HANDLE(raw_handle(source_fd)), ctypes.byref(status), body, len(body), FileRenameInformation)
+        if result < 0:
+            _raise(result)
+
+    def replace(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        if src_dir_fd is None or dst_dir_fd is None:
+            raise ValueError('replace requires trusted source and destination directories on Windows.')
+        fd = _open_relative(src_dir_fd, source, DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+                            FILE_OPEN, FILE_NON_DIRECTORY_FILE)
+        try:
+            atomic_replace_open(fd, dst_dir_fd, destination)
+        finally:
+            os.close(fd)
+
+    def publish_absent(source, destination, *, src_dir_fd, dst_dir_fd):
+        fd = _open_relative(src_dir_fd, source, DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+                            FILE_OPEN, FILE_NON_DIRECTORY_FILE)
+        try:
+            info = _rename_information(dst_dir_fd, destination, False)
+            status = IO_STATUS_BLOCK()
+            result = _nt_set(HANDLE(raw_handle(fd)), ctypes.byref(status), info, len(info), FileRenameInformation)
+            if result < 0:
+                _raise(result)
+        finally:
+            os.close(fd)
+
+    return SimpleNamespace(WINDOWS=True, open=open, fstat=fstat, stat=stat,
+                           mkdir=mkdir, unlink=unlink, replace=replace,
+                           publish_absent=publish_absent, open_root=_open_root,
+                           O_DIRECTORY=O_DIRECTORY, O_NOFOLLOW=O_NOFOLLOW,
+                           O_NONBLOCK=O_NONBLOCK)
+
+
+def _cursor_backend():
+    if os.name == "posix":
+        return os
+    if os.name == "nt":
+        return _cursor_nt_backend()
+    return None
+
+
+CURSOR_RULE_LIMIT = 16384
+CURSOR_RECEIPT_LIMIT = 4096
+CURSOR_RULE_PROFILE = "cursor-rule-custody-v1"
+
+
+def _cursor_identity(image: os.stat_result) -> list[int]:
+    return [image.st_dev, image.st_ino, image.st_size, image.st_mtime_ns, image.st_ctime_ns]
+
+
+def _cursor_safe_directory(path: Path, *, files=None) -> list[int]:
+    if files is None or files is os:
+        image = path.lstat()
+    else:
+        descriptor = files.open_root(path)
+        try:
+            image = files.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+    if (not stat.S_ISDIR(image.st_mode) or stat.S_ISLNK(image.st_mode)
+            or getattr(image, "st_reparse_tag", 0) in workspace_roots.LINK_REPARSE_TAGS):
+        raise OSError("unsupported directory custody")
+    return [image.st_dev, image.st_ino]
+
+
+def _cursor_directory(parent: int, name: str, *, create: bool = False, files=None) -> int:
+    files = os if files is None else files
+    if create:
+        try:
+            files.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+    descriptor = files.open(name, os.O_RDONLY | files.O_DIRECTORY | files.O_NOFOLLOW, dir_fd=parent)
+    try:
+        image = files.fstat(descriptor)
+        named = files.stat(name, dir_fd=parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(named.st_mode)
+                or (named.st_dev, named.st_ino) != (image.st_dev, image.st_ino)):
+            raise OSError("directory custody changed")
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _cursor_linked_entry(parent: int, name: str, files) -> bool:
+    """Whether a directory entry is a link or a junction, not a directory."""
+    try:
+        image = files.stat(name, dir_fd=parent, follow_symlinks=False)
+    except OSError:
+        return False
+    return (stat.S_ISLNK(image.st_mode)
+            or getattr(image, "st_reparse_tag", 0) in workspace_roots.LINK_REPARSE_TAGS)
+
+
+def _cursor_image(parent: Optional[int], name: str, limit: int, *, files=None, links: int = 1) -> Optional[tuple[bytes, list[int]]]:
+    files = os if files is None else files
+    if parent is None:
+        return None
+    try:
+        named = files.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(named.st_mode) or named.st_nlink != links or named.st_size > limit:
+        raise OSError("unsupported file custody")
+    descriptor = files.open(name, os.O_RDONLY | files.O_NOFOLLOW | files.O_NONBLOCK, dir_fd=parent)
+    try:
+        opened = files.fstat(descriptor)
+        if _cursor_identity(opened) != _cursor_identity(named):
+            raise OSError("file custody changed")
+        raw = b""
+        while len(raw) <= limit:
+            part = os.read(descriptor, min(4096, limit + 1 - len(raw)))
+            if not part:
+                break
+            raw += part
+        final = files.fstat(descriptor)
+        if (len(raw) != opened.st_size or final.st_nlink != links
+                or _cursor_identity(final) != _cursor_identity(opened)
+                or _cursor_identity(files.stat(name, dir_fd=parent, follow_symlinks=False)) != _cursor_identity(final)):
+            raise OSError("file custody changed")
+        raw.decode("utf-8", "strict")
+        return raw, _cursor_identity(final)
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def _cursor_lock(root: Path, parent: int, *, files=None):
+    """Use the native cooperative lock, with anchored I/O and no lock wait.
+
+    The in-process lock/depth registry is the one used by mutation_lock.
+    Windows uses the same byte-zero lock as native Brain, with one attempt.
+    """
+    files = os if files is None else files
+    windows = getattr(files, "WINDOWS", False)
+    if windows:
+        import msvcrt
+    else:
+        import fcntl
+    key = str((root / "project-brain/local/runtime.lock").resolve())
+    if not brain_runtime._LOCKS_GUARD.acquire(blocking=False):
+        raise OSError("busy")
+    try:
+        process_lock = brain_runtime._LOCKS.setdefault(key, threading.RLock())
+    finally:
+        brain_runtime._LOCKS_GUARD.release()
+    if not process_lock.acquire(blocking=False):
+        raise OSError("busy")
+    descriptor = None
+    locked = False
+    depths = getattr(brain_runtime._LOCK_STATE, "depths", {})
+    brain_runtime._LOCK_STATE.depths = depths
+    depth = depths.get(key, 0)
+    try:
+        descriptor = files.open("runtime.lock", os.O_RDWR | os.O_CREAT | files.O_NOFOLLOW | files.O_NONBLOCK,
+                             0o600, dir_fd=parent)
+        opened = files.fstat(descriptor)
+        named = files.stat("runtime.lock", dir_fd=parent, follow_symlinks=False)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
+                or _cursor_identity(named) != _cursor_identity(opened)):
+            raise OSError("unsupported lock custody")
+        if not depth:
+            if windows:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        depths[key] = depth + 1
+        try:
+            yield
+        finally:
+            if depth:
+                depths[key] = depth
+            else:
+                depths.pop(key, None)
+    finally:
+        try:
+            if descriptor is not None:
+                try:
+                    if locked:
+                        if windows:
+                            os.lseek(descriptor, 0, os.SEEK_SET)
+                            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                        else:
+                            fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
+        finally:
+            process_lock.release()
+
+
+def _cursor_publish_absent(parent: int, temporary: str, name: str) -> None:
+    """Use a no-clobber rename when supported, otherwise the link fallback.
+
+    Failure never means that no effect occurred. The caller observes the named
+    image and the next invocation reconciles only a validated reserved slot.
+    """
+    import ctypes
+    import errno
+    if sys.platform.startswith("linux"):
+        library = ctypes.CDLL(None, use_errno=True)
+        rename = getattr(library, "renameat2", None)
+        if rename is not None:
+            rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                               ctypes.c_char_p, ctypes.c_uint]
+            rename.restype = ctypes.c_int
+            if rename(parent, os.fsencode(temporary), parent, os.fsencode(name), 1) == 0:
+                return
+            failure = ctypes.get_errno()
+            if failure not in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+                raise OSError(failure, os.strerror(failure))
+    os.link(temporary, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+
+
+def _cursor_publish(parent: int, name: str, payload: bytes, expected, limit: int, *, files=None) -> None:
+    files = os if files is None else files
+    if len(payload) > limit:
+        raise OSError("publication admission bound")
+    temporary = ".cursor-rule-" + new_uuid() + ".tmp"
+    descriptor = files.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | files.O_NOFOLLOW,
+                         0o600, dir_fd=parent)
+    try:
+        try:
+            pending = memoryview(payload)
+            while pending:
+                count = os.write(descriptor, pending)
+                if count <= 0:
+                    raise OSError("incomplete write")
+                pending = pending[count:]
+        finally:
+            os.close(descriptor)
+        if _cursor_image(parent, name, limit, **({} if files is os else {"files": files})) != expected:
+            raise OSError("file custody changed")
+        if expected is None:
+            if getattr(files, "WINDOWS", False):
+                files.publish_absent(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+            else:
+                _cursor_publish_absent(parent, temporary, name)
+        else:
+            files.replace(temporary, name, src_dir_fd=parent, dst_dir_fd=parent)
+    finally:
+        try:
+            files.unlink(temporary, dir_fd=parent)
+        except FileNotFoundError:
+            pass  # replace consumed our temporary name
+
+
+def _cursor_receipt(raw: bytes) -> dict[str, Any]:
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate receipt field")
+            result[key] = value
+        return result
+    value = json.loads(raw, object_pairs_hook=unique)
+    fields = {"profile", "root", "root_identity", "rules_identity", "file_identity",
+              "sha256", "task", "phase"}
+    if (not isinstance(value, dict) or set(value) != fields
+            or value["profile"] != CURSOR_RULE_PROFILE
+            or not isinstance(value["root"], str)
+            or not isinstance(value["task"], str)
+            or not re.fullmatch(r"[^\W_][\w\u0300-\u036f./#+-]{0,199}", value["task"])
+            or value["phase"] not in ("prompt", "turn", "session")
+            or not isinstance(value["sha256"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", value["sha256"])):
+        raise ValueError("unsupported receipt")
+    for name, width in (("root_identity", 2), ("rules_identity", 2), ("file_identity", 5)):
+        image = value[name]
+        if (not isinstance(image, list) or len(image) != width
+                or any(type(item) is not int or item < 0 for item in image)):
+            raise ValueError("unsupported identity")
+    return value
+
+
+def _cursor_git_config_read(arguments: list[str], environment: dict[str, str]) -> Optional[tuple[int, bytes]]:
+    """One fixed protected config query with bounded pipe read and cleanup."""
+    import queue
+    import threading
+    process = None
+    reader = None
+    started = False
+    output = queue.Queue(maxsize=1)
+    try:
+        process = subprocess.Popen(arguments, env=environment, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        def read():
+            try:
+                output.put_nowait(process.stdout.read(65537))
+            except (OSError, ValueError):
+                output.put_nowait(None)
+            finally:
+                process.stdout.close()  # reader owns its buffered stream lock
+        reader = threading.Thread(target=read, daemon=True)
+        reader.start()
+        started = True
+        raw = output.get(timeout=1)
+        if raw is None or len(raw) > 65536:
+            return None
+        code = process.wait(timeout=1)
+        return code, raw
+    except (OSError, ValueError, RuntimeError, queue.Empty, subprocess.TimeoutExpired):
+        return None
+    finally:
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass  # unavailable; no claim about a helper's descendants
+            if not started and process.stdout is not None:
+                process.stdout.close()
+        if started:
+            reader.join(timeout=1)
+
+
+def _cursor_protected_safe_root(repository: Path) -> bool:
+    """Project trusted system/global policy into one fixed root exception.
+
+    Inherited command/environment config and repository-local values are not
+    consulted. A protected wildcard is operator policy, never added by us.
+    """
+    environment = {k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
+    environment.update(GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0')
+    target = os.path.normcase(str(repository.resolve()))
+    # Every file Git reads, each value with its scope, in Git's own order:
+    # `config --global` reads only ~/.gitconfig when it exists, and missed a
+    # safe.directory that $XDG_CONFIG_HOME/git/config gave - which Git itself
+    # honours. Only the protected scopes count, as for Git.
+    observed = _cursor_git_config_read(['git','--no-optional-locks','--no-pager', '-C', str(repository),
+        'config','--show-scope','--includes','--null','--get-all','safe.directory'], environment)
+    if observed is None or observed[0] not in (0,1):
+        return False
+    raw = observed[1]
+    if len(raw)>131072 or raw.count(b'\0')>512 or (raw and not raw.endswith(b'\0')):
+        return False
+    allowed = False
+    try:
+        fields = raw.decode('utf-8','strict').split('\0')[:-1] if raw else []
+        if len(fields) % 2:
+            return False
+        for scope, value in zip(fields[0::2], fields[1::2]):
+            if scope not in ('system', 'global'):
+                continue
+            if value == '':
+                allowed = False
+                continue
+            if value == '*':
+                allowed = True
+                continue
+            if any(c in value for c in ('\r','\n','\x00')) or value.startswith('%(prefix)'):
+                continue
+            subtree = value.endswith('/*')
+            candidate = value[:-2] if subtree else value
+            if candidate.startswith('~/'):
+                candidate = str(Path(candidate).expanduser())
+            path = Path(candidate)
+            if not path.is_absolute():
+                continue
+            named = os.path.normcase(str(path.resolve()))
+            if named == target or (subtree and target.startswith(named.rstrip(os.sep)+os.sep)):
+                allowed = True
+    except (OSError, ValueError, UnicodeError, RuntimeError):
+        return False
+    return allowed
+
+
+def _cursor_git_untracked(repository: Path, *, extra: tuple[str, ...] = ()) -> bool:
+    # An explicitly selected alternate repository/index makes custody ambiguous.
+    # Preserve rather than silently ignore that operator-selected authority.
+    selectors = {"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+                 "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                 "GIT_SHALLOW_FILE", "GIT_NAMESPACE"}
+    if any(name in os.environ for name in selectors):
+        return False
+    # Otherwise use the selected root's ordinary index in a private environment.
+    # Editor/SSH/askpass/config settings neither redirect this read nor disable
+    # maintenance. Never mutate ambient env.
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+    environment.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
+                       GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    trust = []
+    for name in (".cursor/rules/working-memory.mdc", "memory-bank/local/cursor-rule.json", *extra):
+        # Discard even a directory-shaped index match: no unbounded output buffer.
+        result = subprocess.run(
+            ["git", "--no-optional-locks", "--no-pager", "--literal-pathspecs", *trust,
+             "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
+             "-C", str(repository), "ls-files", "--error-unmatch", "--", name],
+            env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=1,
+        )
+        if result.returncode == 128 and not trust and _cursor_protected_safe_root(repository):
+            trust = ['-c', 'safe.directory='+str(repository.resolve())]
+            result = subprocess.run(
+                ['git','--no-optional-locks','--no-pager','--literal-pathspecs', *trust,
+                 '-c','core.hooksPath='+os.devnull,'-c','core.fsmonitor=false',
+                 '-C',str(repository),'ls-files','--error-unmatch','--',name],
+                env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,check=False,timeout=1)
+        if result.returncode != 1:
+            return False
+    return True
+
+
+def _same_file_image(left, right) -> bool:
+    """Same file and bytes by stat, without atime.
+
+    Comparing whole stat results compared st_atime too, and reading the
+    file - which this very check does - moves atime on strictatime mounts and
+    often on relatime ones, so the image never matched and recovery failed.
+    The change time is the one a path's stat and an open file's fstat agree
+    on: Windows gives them different ones.
+    """
+    keys = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+    return (all(getattr(left, key) == getattr(right, key) for key in keys)
+            and workspace_roots.change_time_ns(left) == workspace_roots.change_time_ns(right))
+
+
+def _cursor_registered_slot(root: Path) -> bool:
+    """An explicit project ignore directive registers this generated slot.
+
+    A whole machine envelope classifies a reserved output, never its author.
+    Ordinary custom rules belong in another path; deviations are preserved.
+    """
+    try:
+        listed = False
+        path = root / '.gitignore'
+        try:
+            image = path.lstat()
+        except FileNotFoundError:
+            image = None
+        if image is not None:
+            if (not stat.S_ISREG(image.st_mode) or image.st_nlink != 1 or image.st_size > 65536
+                    or getattr(image, 'st_file_attributes', 0) & 0x400):
+                return False
+            with path.open('rb') as stream:
+                if not _same_file_image(os.fstat(stream.fileno()), image):
+                    return False
+                raw = stream.read(65537)
+            if len(raw) > 65536 or not _same_file_image(path.stat(), image):
+                return False
+            listed = any(line.strip() in ('.cursor/rules/working-memory.mdc', '/.cursor/rules/working-memory.mdc')
+                         for line in raw.decode('utf-8', 'strict').splitlines())
+        if not listed:
+            # Ignored another way - .git/info/exclude, a global excludes file:
+            # the same explicit registration, as long as Git ignores exactly
+            # this slot. Without it such a rule stayed frozen for good.
+            try:
+                ignored = workspace_roots._source_git_ignored(root, ['.cursor/rules/working-memory.mdc'], 2.0)
+            except workspace_roots.SourceGitError:
+                return False
+            if b'.cursor/rules/working-memory.mdc' not in ignored:
+                return False
+        return _cursor_git_untracked(root)
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        return False
+
+
+def _cursor_machine_envelope(raw: bytes) -> Optional[tuple[str, str]]:
+    """Recognize the complete historical producer grammar, not a header."""
+    try:
+        text = raw.decode('utf-8', 'strict')
+    except UnicodeError:
+        return None
+    prefix = ('---\ndescription: Working memory - current-branch session context\n'
+              'alwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\n')
+    warning = 'Retrieved context is not authoritative - verify the source.\n\n```\n'
+    if not text.startswith(prefix) or '\x00' in text or not text.endswith('\n```\n'):
+        return None
+    rest = text[len(prefix):]
+    header, separator, tail = rest.partition('\n')
+    match = re.fullmatch(
+        r'(Session context retrieved for a recent prompt|Session context as of end of previous turn) '
+        r'\(task: ([A-Za-z0-9][A-Za-z0-9._/-]{0,199})\)\.', header)
+    if not separator or match is None or not tail.startswith(warning):
+        return None
+    body = tail[len(warning):-len('\n```\n')]
+    if not body.startswith('working:') or '\n```\n' in body or body.endswith('\n```'):
+        return None
+    return match[2], 'prompt' if match[1].startswith('Session context retrieved') else 'turn'
+
+
+_CURSOR_RULE_HEADER = ('---\ndescription: Working memory - current-branch session context\n'
+                       'alwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\n').encode('utf-8')
+# Edits a person made to the generated rule are kept here, newest last, before
+# the slot is written again. The directory lives in ignored local state.
+CURSOR_RULE_EDITS = 'cursor-rule-edits'
+CURSOR_RULE_EDITS_KEPT = 20
+_CURSOR_TEMPORARY = re.compile(r'\.cursor-rule-[0-9a-f-]{36}\.tmp')
+_CURSOR_EDIT_NAME = re.compile(r'[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}\.mdc')
+
+
+# The releases of 2026-08-03..05 wrote the slot under frontmatter of their
+# own. Taken for a person's rule, such a file stayed in the slot after an
+# upgrade, and Cursor sent its August capsule with every request.
+_CURSOR_EARLY_HEADERS = (
+    b'---\ndescription: Working memory - Task Capsule as of end of previous turn\n'
+    b'alwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\n',
+    b'---\ndescription: Working memory - warming up, no Task Capsule rendered yet\n'
+    b'alwaysApply: true\n---\n\n# Working Memory (warming up)\n\n',
+)
+
+
+def _cursor_edited_generation(raw: bytes) -> bool:
+    """A generated rule this release did not write as it stands, as opposed
+    to a rule nobody generated.
+
+    The file still opens with a header only this producer writes - the
+    current auto-rendered one or a first release's - so a person changed the
+    generator's output (typically a note appended below it), or an early
+    release rendered it. A file without such a header is someone's own rule,
+    whatever the slot held before, and stays untouched.
+    """
+    return raw.startswith((_CURSOR_RULE_HEADER, *_CURSOR_EARLY_HEADERS))
+
+
+def _cursor_preserve_edit(edits_fd: int, raw: bytes, *, files=None) -> str:
+    """Save an edited generated rule before the slot is regenerated.
+
+    Returns the saved file's project-relative path. Raises on any failure, so
+    the caller writes nothing over edits it could not keep. Only the newest
+    CURSOR_RULE_EDITS_KEPT copies stay.
+    """
+    files = os if files is None else files
+    name = (time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '-'
+            + hashlib.sha256(raw).hexdigest()[:12] + '.mdc')
+    options = {} if files is os else {'files': files}
+    existing = _cursor_image(edits_fd, name, CURSOR_RULE_LIMIT, **options)
+    if existing is None:
+        _cursor_publish(edits_fd, name, raw, None, CURSOR_RULE_LIMIT, **options)
+    elif existing[0] != raw:
+        raise OSError('edit copy custody changed')
+    if files is os:
+        saved = sorted(entry for entry in os.listdir(edits_fd) if _CURSOR_EDIT_NAME.fullmatch(entry))
+        for entry in saved[:-CURSOR_RULE_EDITS_KEPT]:
+            try:
+                if stat.S_ISREG(os.stat(entry, dir_fd=edits_fd, follow_symlinks=False).st_mode):
+                    os.unlink(entry, dir_fd=edits_fd)
+            except FileNotFoundError:
+                pass
+    return 'memory-bank/local/' + CURSOR_RULE_EDITS + '/' + name
+
+
+def _cursor_sweep_temporaries(parent: Optional[int], *, files=None, age: float = 60.0) -> None:
+    """Remove publication temporaries a killed writer left behind.
+
+    A writer stopped between writing its temporary and renaming it left
+    `.cursor-rule-<uuid>.tmp` beside the rule - not ignored, so `git add -A`
+    picked it up. Only stale regular files of exactly that name go.
+    """
+    files = os if files is None else files
+    if parent is None or files is not os:
+        return
+    cutoff = time.time() - age
+    for entry in os.listdir(parent):
+        if not _CURSOR_TEMPORARY.fullmatch(entry):
+            continue
+        try:
+            image = os.stat(entry, dir_fd=parent, follow_symlinks=False)
+            if stat.S_ISREG(image.st_mode) and image.st_mtime < cutoff:
+                os.unlink(entry, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+
+
+def _cursor_reconcile_link(root: Path, parent: int, name: str, limit: int,
+                           relative: str, intact, publishing) -> bool:
+    """Reconcile only the old producer's exact two-name publication window.
+
+    Caller holds the native lock and anchored directories. Generic hard links,
+    unknown aliases and custom rules remain outside this finite profile.
+    """
+    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if named.st_nlink != 2 or not _cursor_registered_slot(root) or not intact():
+        return False
+    current = _cursor_image(parent, name, limit, links=2)
+    if current is None:
+        return False
+    if name == 'working-memory.mdc':
+        if _cursor_machine_envelope(current[0]) is None:
+            return False
+    else:
+        _cursor_receipt(current[0])
+    alias = None
+    with os.scandir(parent) as entries:
+        for count, entry in enumerate(entries, 1):
+            if count > 1024:
+                return False
+            if not re.fullmatch(r'\.cursor-rule-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp', entry.name):
+                continue
+            image = entry.stat(follow_symlinks=False)
+            if (image.st_dev, image.st_ino) == tuple(current[1][:2]):
+                if alias is not None or not stat.S_ISREG(image.st_mode) or image.st_nlink != 2:
+                    return False
+                alias = entry.name
+    if alias is None or not _cursor_git_untracked(root, extra=(relative + '/' + alias,)):
+        return False
+    if (not intact() or _cursor_image(parent, name, limit, links=2) != current
+            or _cursor_image(parent, alias, limit, links=2) != current or not intact()):
+        return False
+    publishing()
+    os.unlink(alias, dir_fd=parent)
+    observed = _cursor_image(parent, name, limit)
+    return (observed is not None and observed[0] == current[0]
+            and observed[1][:4] == current[1][:4] and intact())
+
+
+
+def cursor_rule(repository: Path, action: str, *, task: str = "", phase: str = "prompt",
+                capsule: str = "", approved_sha256: Optional[str] = None) -> dict[str, Any]:
+    """Maintain the registered generated slot; preserve custom deviations.
+
+    Directory descriptors prevent parent-link redirection. Participating
+    writers share the native lock without waiting. Leaf checks are not an
+    atomic CAS against unsynchronized foreign writers, and the rule/receipt
+    pair is not a crash-durable transaction. Unsupported custody preserves.
+    """
+    result: dict[str, Any] = {"profile": CURSOR_RULE_PROFILE, "state": "preserved",
+                              "bytes_removed": 0}
+    if action not in ("write", "keep", "retire", "prompt-held", "migrate"):
+        return result
+    linked: list[str] = []
+    try:
+        if workspace_roots.configuration_error() is not None:
+            return {**result, "reason": "configuration_unavailable"}
+        if workspace_roots.is_attached(repository):
+            return {**result, "state": "attached"}
+        try:
+            files = _cursor_backend()
+        except (OSError, ImportError, AttributeError):
+            return {**result, "reason": "unsupported_custody"}
+        if (files is None or (files is os and (not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
+                or not all(operation in os.supports_dir_fd for operation in
+                           (os.open, os.stat, os.mkdir, os.unlink, os.rename))))):
+            return {**result, "reason": "unsupported_custody"}
+        options = {} if files is os else {"files": files}
+        root_identity = _cursor_safe_directory(repository, **options)
+        root = repository.resolve()
+        if (root != workspace_roots.TOOLING_ROOT or workspace_roots.project_root(repository).resolve() != root
+                or workspace_roots.linked_state_entry(root) is not None):
+            return result
+        with contextlib.ExitStack() as stack:
+            root_fd = (os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) if files is os
+                       else files.open_root(root))
+            stack.callback(os.close, root_fd)
+            root_image = files.fstat(root_fd)
+            if [root_image.st_dev, root_image.st_ino] != root_identity:
+                return result
+            directories = {}
+            def directory(parent, name, create=False):
+                if parent is None:
+                    return None
+                try:
+                    fd = _cursor_directory(parent, name, create=create, **options)
+                except FileNotFoundError:
+                    return None
+                except OSError:
+                    # A rules folder shared between projects through a link
+                    # would carry this project's capsule to all of them: it
+                    # is never written through, and the refusal says why.
+                    if name in (".cursor", "rules") and _cursor_linked_entry(parent, name, files):
+                        linked.append(name)
+                    raise
+                stack.callback(os.close, fd)
+                directories[(parent, name)] = fd
+                return fd
+            def intact():
+                if _cursor_safe_directory(root, **options) != root_identity:
+                    return False
+                for (parent, name), fd in directories.items():
+                    named = files.stat(name, dir_fd=parent, follow_symlinks=False)
+                    opened = files.fstat(fd)
+                    if (not stat.S_ISDIR(named.st_mode)
+                            or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)):
+                        return False
+                return True
+            cursor_fd = directory(root_fd, ".cursor")
+            rules_fd = directory(cursor_fd, "rules")
+            bank_fd = directory(root_fd, "memory-bank")
+            local_fd = directory(bank_fd, "local")
+            def initial_image(parent, name, limit, relative):
+                def publishing():
+                    result['state'] = 'incomplete'
+                try:
+                    return _cursor_image(parent, name, limit, **options)
+                except OSError:
+                    if files is not os or parent is None:
+                        raise
+                    # A crash in an old link-based producer can leave its one
+                    # temporary alias. Recovery remains in the reserved slot.
+                    brain = directory(root_fd, 'project-brain', True)
+                    brain_local = directory(brain, 'local', True)
+                    with _cursor_lock(root, brain_local):
+                        if not _cursor_reconcile_link(root, parent, name, limit, relative, intact, publishing):
+                            raise OSError('unsupported file custody')
+                    return _cursor_image(parent, name, limit)
+            current = initial_image(rules_fd, "working-memory.mdc", CURSOR_RULE_LIMIT, '.cursor/rules')
+            proof = initial_image(local_fd, "cursor-rule.json", CURSOR_RECEIPT_LIMIT, 'memory-bank/local')
+            approved_migration = False
+            if action == "migrate":
+                # Explicit operator approval binds this one current image,
+                # never its header or a digest supplied by the repository.
+                if (current is None
+                        or not isinstance(approved_sha256, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", approved_sha256)
+                        or hashlib.sha256(current[0]).hexdigest() != approved_sha256):
+                    return {**result, "reason": "migration_unapproved"}
+                approved_migration = True
+                action = "write"
+            if current is None and proof is None and action != "write":
+                return {**result, "state": "absent"}
+            note = None
+            relocated = False
+            reconcile_state = None
+            recovered = False
+            if proof is not None and not approved_migration:
+                try:
+                    note = _cursor_receipt(proof[0])
+                except (ValueError, UnicodeError, RecursionError):
+                    note = None
+            matches = note is not None and (current is None or note['sha256'] == hashlib.sha256(current[0]).hexdigest())
+            edited = False
+            if current is not None and not matches and not approved_migration:
+                machine = _cursor_machine_envelope(current[0])
+                if machine is None and _cursor_edited_generation(current[0]):
+                    # A person edited the generated rule. Left alone it froze
+                    # with one task's capsule on every branch; it is saved to
+                    # memory-bank/local/cursor-rule-edits/ before the slot is
+                    # written or retired, never discarded.
+                    machine, edited = ('', ''), True
+                if machine is None or not _cursor_registered_slot(root):
+                    return {**result, 'reason': 'custody_changed' if proof is not None else 'ownership_unverified'}
+                rules_image = files.fstat(rules_fd)
+                note = {'profile': CURSOR_RULE_PROFILE, 'root': str(root), 'root_identity': root_identity,
+                    'rules_identity': [rules_image.st_dev, rules_image.st_ino], 'file_identity': current[1],
+                    'sha256': hashlib.sha256(current[0]).hexdigest(), 'task': machine[0], 'phase': machine[1]}
+                recovered = True
+            if (current is None and proof is not None and note is None and not approved_migration
+                    and action != 'write'):
+                # With no rule there is nothing an unreadable receipt could
+                # prove or protect: a write replaces it below instead of
+                # leaving the slot blocked for good.
+                return {**result, 'reason': 'receipt_unavailable'}
+            if note is not None:
+                rules_image = files.fstat(rules_fd) if rules_fd is not None else None
+                relocated = (recovered or note['root'] != str(root) or note['root_identity'] != root_identity
+                    or rules_image is None or note['rules_identity'] != [rules_image.st_dev, rules_image.st_ino]
+                    or (current is not None and note['file_identity'] != current[1]))
+            valid_task = isinstance(task, str) and re.fullmatch(r"[^\W_][\w\u0300-\u036f./#+-]{0,199}", task)
+            if action == "prompt-held":
+                held = ("kept" if current is not None and note and valid_task
+                        and note["task"] == task and note["phase"] == "prompt" else
+                        "absent" if current is None else "preserved")
+                if not relocated or held != "kept":
+                    return {**result, "state": held}
+                action, reconcile_state = "reconcile", held
+            if action == "keep" or (action == "write" and not valid_task):
+                if note is None:
+                    return result
+                if current is not None and valid_task and note["task"] == task:
+                    if not relocated:
+                        return {**result, "state": "kept"}
+                    action, reconcile_state = "reconcile", "kept"
+                else:
+                    action = "retire"
+            if action == "write":
+                if phase not in ("prompt", "turn", "session"):
+                    return result
+                if not isinstance(capsule, str) or not capsule.startswith("working:") or "\x00" in capsule:
+                    return cursor_rule(repository, "keep", task=task)
+                if current is not None and note and phase == "turn" and note["task"] == task and note["phase"] == "prompt":
+                    if not relocated:
+                        return {**result, "state": "kept"}
+                    action, reconcile_state = "reconcile", "kept"
+                marker = ("Session context retrieved for a recent prompt" if phase == "prompt"
+                          else "Session context as of end of previous turn")
+                text = ("---\ndescription: Working memory - current-branch session context\n"
+                        "alwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\n"
+                        + marker + " (task: " + task + ").\n"
+                        "Retrieved context is not authoritative - verify the source.\n\n```\n"
+                        + capsule.rstrip("\n") + "\n```\n")
+                try:
+                    payload = text.encode("utf-8", "strict")
+                except UnicodeError:
+                    return cursor_rule(repository, "keep", task=task)
+                if len(payload) > CURSOR_RULE_LIMIT:
+                    return cursor_rule(repository, "keep", task=task)
+                if (current is not None and current[0] == payload
+                        and note is not None and (relocated or note["file_identity"] == current[1])):
+                    if not relocated:
+                        return {**result, "state": "unchanged"}
+                    if reconcile_state is None:
+                        action, reconcile_state = "reconcile", "unchanged"
+            if not _cursor_git_untracked(root) or not intact():
+                return result
+            # Anchor the existing Brain lock's directory chain as well.
+            brain_fd = directory(root_fd, "project-brain", True)
+            brain_local_fd = directory(brain_fd, "local", True)
+            with _cursor_lock(root, brain_local_fd, **options):
+                if (not intact() or not _cursor_git_untracked(root)
+                        or _cursor_image(rules_fd, "working-memory.mdc", CURSOR_RULE_LIMIT, **options) != current
+                        or _cursor_image(local_fd, "cursor-rule.json", CURSOR_RECEIPT_LIMIT, **options) != proof
+                        or not intact()):
+                    return result
+                if action == "reconcile":
+                    # Preserve the proven capsule, task and phase, including
+                    # a prompt held over a turn. Only repair its stale locator.
+                    result = {**result, "state": "incomplete"}
+                    if bank_fd is None:
+                        bank_fd = directory(root_fd, 'memory-bank', True)
+                    if local_fd is None:
+                        local_fd = directory(bank_fd, 'local', True)
+                    if not intact():
+                        return result
+                    rules_image = files.fstat(rules_fd)
+                    receipt = json.dumps({**note, "root": str(root), 'root_identity': root_identity,
+                                          'rules_identity': [rules_image.st_dev, rules_image.st_ino],
+                                          "file_identity": current[1]}).encode("utf-8")
+                    if (not intact() or _cursor_image(rules_fd, "working-memory.mdc", CURSOR_RULE_LIMIT, **options) != current):
+                        return result
+                    _cursor_publish(local_fd, "cursor-rule.json", receipt, proof,
+                                    CURSOR_RECEIPT_LIMIT, **options)
+                    published_proof = _cursor_image(local_fd, "cursor-rule.json", CURSOR_RECEIPT_LIMIT, **options)
+                    if (not intact() or _cursor_image(rules_fd, "working-memory.mdc", CURSOR_RULE_LIMIT, **options) != current
+                            or published_proof is None or published_proof[0] != receipt):
+                        return result
+                    return {**result, "state": reconcile_state}
+                if action == "retire":
+                    if current is not None and edited:
+                        if bank_fd is None:
+                            bank_fd = directory(root_fd, 'memory-bank', True)
+                        if local_fd is None:
+                            local_fd = directory(bank_fd, 'local', True)
+                        if not intact():
+                            return result
+                        result = {**result, "preserved_edit": _cursor_preserve_edit(
+                            directory(local_fd, CURSOR_RULE_EDITS, True), current[0], **options)}
+                    if current is not None:
+                        files.unlink("working-memory.mdc", dir_fd=rules_fd)
+                        result = {**result, "state": "incomplete", "bytes_removed": len(current[0])}
+                    # Only a receipt this operation proved, in the directory it
+                    # opened: with no memory-bank/local the descriptor is None,
+                    # and unlink(dir_fd=None) would resolve against the process
+                    # working directory - a recovered rule has no receipt at all.
+                    if local_fd is not None and proof is not None:
+                        try:
+                            files.unlink("cursor-rule.json", dir_fd=local_fd)
+                        except FileNotFoundError:
+                            pass
+                    return {**result, "state": "removed" if current is not None else "absent"}
+                if cursor_fd is None:
+                    cursor_fd = directory(root_fd, ".cursor", True)
+                if rules_fd is None:
+                    rules_fd = directory(cursor_fd, "rules", True)
+                if bank_fd is None:
+                    bank_fd = directory(root_fd, "memory-bank", True)
+                if local_fd is None:
+                    local_fd = directory(bank_fd, "local", True)
+                if not intact():
+                    return result
+                _cursor_sweep_temporaries(rules_fd, **options)
+                _cursor_sweep_temporaries(local_fd, **options)
+                # Errors after an attempted publication are incomplete, not preserved.
+                result = {**result, "state": "incomplete"}
+                same_body = current is not None and current[0] == payload
+                if not same_body:
+                    if edited:
+                        result["preserved_edit"] = _cursor_preserve_edit(
+                            directory(local_fd, CURSOR_RULE_EDITS, True), current[0], **options)
+                    _cursor_publish(rules_fd, "working-memory.mdc", payload, current, CURSOR_RULE_LIMIT, **options)
+                published = _cursor_image(rules_fd, "working-memory.mdc", CURSOR_RULE_LIMIT, **options)
+                if published is None or published[0] != payload or not intact():
+                    return result
+                if same_body and published != current:
+                    return result
+                rules_image = files.fstat(rules_fd)
+                receipt = json.dumps({"profile": CURSOR_RULE_PROFILE, "root": str(root),
+                    "root_identity": root_identity, "rules_identity": [rules_image.st_dev, rules_image.st_ino],
+                    "file_identity": published[1], "sha256": hashlib.sha256(payload).hexdigest(),
+                    "task": task, "phase": phase}).encode("utf-8")
+                _cursor_publish(local_fd, "cursor-rule.json", receipt, proof, CURSOR_RECEIPT_LIMIT, **options)
+                return {**result, "state": "unchanged" if same_body else "written"}
+    except (OSError, ValueError, UnicodeError, RecursionError, BrainError, subprocess.TimeoutExpired):
+        return {**result, "reason": "linked_directory"} if linked else result
+
+
+FILE_LINK_INDEX_PROFILE = "file-link-index-v1"
+FILE_LINK_GIT_TIMEOUT = 3
+
+
+def _git_stat_token(image: os.stat_result) -> tuple[int, ...]:
+    return (image.st_dev, image.st_ino, image.st_size,
+            image.st_mtime_ns, image.st_ctime_ns)
+
+
+def _git_index_image(path: Path, hash_bytes: int, *, shared: bool = False) -> Optional[tuple[Any, ...]]:
+    """Bounded generation hint for Git-managed index writes, not hash verification.
+
+    Shared indexes may be timestamp-freshened by an ordinary Git read. Their
+    timestamps must be coherent within this read, but are not a reuse key.
+    """
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                             | getattr(os, "O_NOFOLLOW", 0))
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size < 12 + hash_bytes:
+            return None
+        header = os.read(descriptor, 12)
+        if (len(header) != 12 or header[:4] != b"DIRC"
+                or int.from_bytes(header[4:8], "big") not in (2, 3, 4)):
+            return None
+        os.lseek(descriptor, -hash_bytes, os.SEEK_END)
+        footer = os.read(descriptor, hash_bytes)
+        after = os.fstat(descriptor)
+        if (len(footer) != hash_bytes or not any(footer)
+                or _git_stat_token(before) != _git_stat_token(after)):
+            return None
+        identity = _git_stat_token(after)
+        return (str(path), identity[:3] if shared else identity, header.hex(), footer.hex())
+    except OSError:
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _file_link_index_signature(repository: Path) -> Optional[tuple[Any, ...]]:
+    """Actual Git-selected index/frame and supported object-resolution context.
+
+    Unknown disables reuse, leaving the ordinary batched membership probe in
+    charge. There is no Git/SQLite atomic snapshot or object-store integrity
+    guarantee. Loose replacement refs and reftables are outside this profile;
+    native packed-ref generations are included without parsing their bodies.
+    """
+    if any(name in os.environ for name in (
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+        "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS", "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+    )):
+        return None
+    try:
+        project = workspace_roots.project_root(repository).resolve()
+        result = subprocess.run(
+            ["git", "-C", str(project), "rev-parse", "--path-format=absolute",
+             "--git-path", "index", "--git-path", "refs/replace",
+             "--git-path", "packed-refs", "--git-path", "reftable",
+             "--show-toplevel", "--show-prefix",
+             "--show-object-format=storage", "--shared-index-path"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+            timeout=FILE_LINK_GIT_TIMEOUT,
+        )
+        if result.returncode != 0 or len(result.stdout) > 16384:
+            return None
+        lines = result.stdout.decode("utf-8", "strict").splitlines()
+        if (len(lines) not in (7, 8) or lines[6] not in ("sha1", "sha256")
+                or any((not line and index != 5) or "\x00" in line or "\r" in line
+                       for index, line in enumerate(lines))):
+            return None
+        paths = [Path(line) for line in lines[:4]]
+        if not Path(lines[4]).is_absolute():
+            return None
+        if not all(path.is_absolute() for path in paths):
+            return None
+        # Presence, including a symlink, is unsupported; errors are unknown.
+        for path in (paths[1], paths[3]):
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            return None
+        try:
+            packed_stat = paths[2].lstat()
+        except FileNotFoundError:
+            packed = (str(paths[2]), None)
+        else:
+            if not stat.S_ISREG(packed_stat.st_mode):
+                return None
+            packed = (str(paths[2]), _git_stat_token(packed_stat))
+        width = 20 if lines[6] == "sha1" else 32
+        active = _git_index_image(paths[0], width)
+        shared = None
+        if len(lines) == 8:
+            shared_path = Path(lines[7])
+            if not shared_path.is_absolute():
+                return None
+            shared = _git_index_image(shared_path, width, shared=True)
+            if shared is None:
+                return None
+        if active is None:
+            return None
+        return (FILE_LINK_INDEX_PROFILE, str(project), lines[6], active, shared, packed,
+                lines[4], lines[5])
+    except (OSError, ValueError, UnicodeError, subprocess.TimeoutExpired):
+        return None
+
+
+def _cached_tracked_paths(raw: str, key: str, union: list[str]) -> Optional[set[str]]:
+    # A reusable value cannot be bigger than the full candidate union. Reject
+    # malformed/legacy caches instead of treating a scalar or missing list as
+    # authoritative absence. No cache body is emitted to diagnostics.
+    maximum = len(json.dumps({"key": key, "tracked": union}))
+    if not isinstance(raw, str) or len(raw) > maximum:
+        return None
+    try:
+        cached = json.loads(raw or "{}")
+    except (ValueError, RecursionError):
+        return None
+    if (not isinstance(cached, dict) or set(cached) != {"key", "tracked"}
+            or cached["key"] != key or not isinstance(cached["tracked"], list)
+            or len(cached["tracked"]) > len(union)
+            or any(not isinstance(path, str) for path in cached["tracked"])):
+        return None
+    tracked = set(cached["tracked"])
+    if len(tracked) != len(cached["tracked"]) or not tracked <= set(union):
+        return None
+    return tracked
+
+
 def _tracked_paths(repository: Path, paths: list[str]) -> Optional[set[str]]:
     """The paths Git's index holds as files, project-relative; None when Git
     cannot say (no checkout, no git): then no file edge is written.
@@ -1857,6 +3291,12 @@ def _brain_documents(
 ]:
     """The eligible Brain records and handoffs as index rows, their links, and
     index-state entries to store with them (the tracked-file cache)."""
+    # Many records cite the same few files; each is looked up once per pass.
+    with brain_runtime.cited_file_memo():
+        return _brain_rows(repository, config, stored)
+
+
+def _brain_rows(repository: Path, config: dict[str, Any], stored: Optional[dict[str, str]]):
     file_candidates: dict[str, tuple[str, int, list[str]]] = {}
     state_updates: dict[str, str] = {}
     documents: list[tuple[str, str, str, str, str]] = []
@@ -1864,10 +3304,17 @@ def _brain_documents(
     excluded: list[dict[str, str]] = []
     links: list[tuple[str, str, str]] = []
     eligible_tasks: dict[str, dict[str, Any]] = {}
-    for path, record, body in iter_records(repository):
-        relative = path.relative_to(repository).as_posix()
+    problems: list[dict[str, Any]] = []
+    claims: dict[str, list[tuple[str, str]]] = {}
+    for path, record, body, source_text in brain_runtime.iter_record_images(repository, problems=problems):
+        if record["type"] == "task" and record.get("status") not in brain_runtime.TERMINAL_STATES:
+            claims.setdefault(str(record["external_id"]), []).append(
+                (str(record.get("created_at") or ""), str(record["id"])))
+        # Eligibility, content and hash all describe the one image the
+        # iterator read and validated; a record it skipped is reported as
+        # invalid below, and every other record keeps its memory.
+        relative = brain_runtime._relative_posix(path, repository)
         try:
-            validate_record(record)
             eligible, reason = record_is_eligible(repository, record, config)
         except BrainError:
             eligible, reason = False, "invalid"
@@ -1897,7 +3344,7 @@ def _brain_documents(
             (
                 relative, "dynamic", record["privacy"], record["owner"], record["authority"],
                 record["status"],
-                _content_hash(path.read_text(encoding="utf-8")),
+                _content_hash(source_text),
                 record["id"],
                 json.dumps(record["conflicts"], sort_keys=True),
                 json.dumps(record["source_fingerprints"], sort_keys=True),
@@ -1916,15 +3363,22 @@ def _brain_documents(
             files = [file for file in files if _file_link_problem(file) is None]
             if files:
                 file_candidates[relative] = (record["id"], int(record["revision"]), files)
-    handoffs = brain_root(repository) / "control" / "handoffs"
+    handoffs = _require_utf8_record_path(brain_root(repository) / "control" / "handoffs")
     if handoffs.is_dir():
-        for path in sorted(handoffs.glob("*.md")):
+        for path in [_require_utf8_record_path(p) for p in sorted(handoffs.glob("*.md"))]:
             relative = path.relative_to(repository).as_posix()
             try:
-                handoff, body = parse_markdown_record(path)
+                source_text = read_record_text(path)
+                handoff, body = parse_markdown_record(path, text=source_text)
+                if not is_uuid4(handoff.get('task_id')):
+                    raise BrainError('Handoff task identity is invalid')
                 task = eligible_tasks[handoff["task_id"]]
                 validate_handoff(handoff, task)
-            except (BrainError, KeyError):
+            except BrainRecordReadError as error:
+                excluded.append({'path': relative, 'reason': 'invalid-utf8'
+                    if error.reason == 'invalid-utf8' else 'task-filter-or-invalid'})
+                continue
+            except (BrainError, KeyError, OSError):
                 excluded.append({"path": relative, "reason": "task-filter-or-invalid"})
                 continue
             documents.append(
@@ -1938,7 +3392,7 @@ def _brain_documents(
                 (
                     relative, "handoff", task["privacy"], task["owner"], task["authority"],
                     handoff["status"],
-                    _content_hash(path.read_text(encoding="utf-8")),
+                    _content_hash(source_text),
                     handoff["id"],
                     "[]",
                     json.dumps(task["source_fingerprints"], sort_keys=True),
@@ -1952,26 +3406,49 @@ def _brain_documents(
             links.extend(_link_rows(relative, handoff.get("sources")))
     if file_candidates:
         union = sorted({file for _, _, files in file_candidates.values() for file in files})
-        key = hashlib.sha256(json.dumps(
-            [union, sorted((identifier, revision) for identifier, revision, _ in file_candidates.values())]
-        ).encode("utf-8")).hexdigest()
-        try:
-            cached = json.loads((stored or {}).get(FILE_LINK_TRACKED_KEY) or "{}")
-        except ValueError:
-            cached = {}
-        tracked: Optional[set[str]]
-        if isinstance(cached, dict) and cached.get("key") == key:
-            # Asked once per change of the tasks' files, never per prompt.
-            tracked = set(cached.get("tracked") or []) & set(union)
-        else:
+        signature = _file_link_index_signature(repository)
+        key = hashlib.sha256(json.dumps([
+            signature, union,
+            sorted((identifier, revision) for identifier, revision, _ in file_candidates.values()),
+        ]).encode("utf-8")).hexdigest()
+        tracked = (_cached_tracked_paths((stored or {}).get(FILE_LINK_TRACKED_KEY) or "{}", key, union)
+                   if signature is not None else None)
+        if tracked is None:
+            # Clear old proof on unavailable/failed/unstable capture. Fresh
+            # successful membership is usable when no signature was known,
+            # but can be cached only after a stable before/after comparison.
+            state_updates[FILE_LINK_TRACKED_KEY] = "{}"
             tracked = _tracked_paths(repository, union)
-            if tracked is not None:
-                state_updates[FILE_LINK_TRACKED_KEY] = json.dumps(
-                    {"key": key, "tracked": sorted(tracked)}
-                )
+            if signature is not None and tracked is not None:
+                if _file_link_index_signature(repository) == signature:
+                    state_updates[FILE_LINK_TRACKED_KEY] = json.dumps(
+                        {"key": key, "tracked": sorted(tracked)}
+                    )
+                else:
+                    tracked = None
         for relative, (_, _, files) in file_candidates.items():
             links.extend(_file_link_rows(relative, files, tracked or set()))
+    for problem in problems:
+        try:
+            relative = problem["path"].relative_to(repository).as_posix()
+        except ValueError:
+            continue
+        excluded.append({"path": relative, "reason": "invalid"})
+    state_updates[TASK_TWINS_KEY] = json.dumps(
+        {external: [identifier for _, identifier in sorted(ids)]
+         for external, ids in claims.items() if len(ids) > 1}, sort_keys=True)
     return documents, metadata_rows, excluded, links, state_updates
+
+
+def _brain_rows_digest(documents, metadata, links, state_updates) -> str:
+    """One digest of every Brain row a refresh would write, state included."""
+    digest = hashlib.sha256()
+    for rows in (documents, metadata, sorted(links), sorted(state_updates.items())):
+        digest.update(b"\x1e")
+        for row in rows:
+            digest.update(repr(tuple(row)).encode("utf-8", "surrogatepass"))
+            digest.update(b"\x1f")
+    return digest.hexdigest()
 
 
 def _layer_counts(connection: sqlite3.Connection) -> tuple[int, dict[str, int]]:
@@ -2044,6 +3521,7 @@ def index_documents(
     brain_documents, brain_metadata, excluded, brain_links, state_updates = _brain_documents(
         repository, config, stored
     )
+    brain_digest = _brain_rows_digest(brain_documents, brain_metadata, brain_links, state_updates)
     documents = [*legacy_documents, *brain_documents]
     metadata = [
         _legacy_metadata(path, kind, content, (source_hashes or {}).get(path))
@@ -2078,14 +3556,17 @@ def index_documents(
     ).fetchone()[0]
     if (
         retained is not None
-        and not documents
-        and existing == keep
+        and not legacy_documents
+        and existing == keep | {row[0] for row in brain_documents}
+        and (not brain_documents or stored.get(INDEX_BRAIN_ROWS_KEY) == brain_digest)
         and cached_rows == len(keep)
         and fingerprints is not None
         and INDEX_PARITY_KEY in stored
         and all(stored.get(key) == value for key, value in fingerprints.items())
     ):
-        # Nothing observable changed, so a per-request refresh costs reads only.
+        # Nothing observable changed, so a per-request refresh costs reads only:
+        # the Brain rows rebuilt from the records match the stored ones, and the
+        # generation - with every cache derived from it - stands.
         total, layers = _layer_counts(connection)
         return {
             "documents": total,
@@ -2093,7 +3574,7 @@ def index_documents(
             "reused": len(keep),
             "incremental": True,
             "layers": layers,
-            "brain": 0,
+            "brain": len(brain_documents),
             "excluded": excluded,
             "canonical_edition": config["canonical_edition"],
             "parity_drift": parity_drift,
@@ -2146,6 +3627,7 @@ def index_documents(
                 # The index content changed, so every cache derived from it
                 # (token frequencies) is invalid from this point on.
                 INDEX_GENERATION_KEY: new_uuid(),
+                INDEX_BRAIN_ROWS_KEY: brain_digest,
                 **state_updates,
             },
         )
@@ -2668,20 +4150,166 @@ def _unmarked(text: str) -> str:
     return _EXCERPT_MARKED.sub(r"\1", text)
 
 
+_NO_HELD_INDEX_IMAGE = object()
+# FTS5 marks a document by tokenizing all of it, about a third of a second a
+# megabyte, and a prompt marks each item it delivers more than once: a 20 MB
+# reference under docs/ that a question matched held the prompt for minutes,
+# and every such prompt lost its memory to the hook's budget. A document
+# longer than this is marked only in the stretch where the query's words
+# cluster; it is still matched and ranked over all of its text.
+MARKED_DOCUMENT_CHARACTERS = 65536
+
+
+def _answering_stretch(text: str, tokens: list[str], limit: int = MARKED_DOCUMENT_CHARACTERS) -> str:
+    """The part of a long document a query's words point at: the section
+    (from its heading) where most distinct words, then most occurrences,
+    fall, cut to `limit` characters around its first match."""
+    forms = term_forms(tokens)
+    stems = sorted({stem for value in forms.values() for stem in value.split() if stem}
+                   | {token.casefold() for token in tokens}, key=len, reverse=True)
+    if not stems:
+        return text[:limit]
+    words = re.compile(r"\b(?:" + "|".join(re.escape(stem) for stem in stems) + r")\w*", re.IGNORECASE)
+    headings = [0] + [match.start() for match in re.finditer(r"(?m)^#{1,6}[ \t]", text)]
+    best = None
+    for index, start in enumerate(headings):
+        end = headings[index + 1] if index + 1 < len(headings) else len(text)
+        if end <= start:
+            continue
+        found = words.findall(text, start, end)
+        if not found:
+            continue
+        score = (len({word.casefold() for word in set(found)}), len(found), -start)
+        if best is None or score > best[0]:
+            best = (score, start, end)
+    if best is None:
+        return text[:limit]
+    _, start, end = best
+    if end - start <= limit:
+        return text[start:end]
+    # A section longer than the limit: its heading, then the window where the
+    # most distinct words of the query meet.
+    heading = text[start:text.find("\n", start) + 1] if text.startswith("#", start) else ""
+    body, span = start + len(heading), limit - len(heading)
+    found = [(match.start(), match.group(0).casefold())
+             for _, match in zip(range(50000), words.finditer(text, body, end))]
+    if not found:
+        return heading + text[body:body + span]
+    counts: dict[str, int] = {}
+    best_score, best_begin, tail = (0, 0), found[0][0], 0
+    for index, (position, word) in enumerate(found):
+        counts[word] = counts.get(word, 0) + 1
+        while found[tail][0] < position - span // 2:
+            counts[found[tail][1]] -= 1
+            if not counts[found[tail][1]]:
+                del counts[found[tail][1]]
+            tail += 1
+        score = (len(counts), index - tail + 1)
+        if score > best_score:
+            best_score, best_begin = score, found[tail][0]
+    begin = max(body, best_begin - span // 4)
+    return heading + text[begin:begin + span]
+
+
+def _marked_stretch(image, tokens) -> str:
+    """Marks over the answering stretch of a long document, found once per
+    command for its text and words."""
+    title, summary, content = image
+    memo = workspace_roots.command_memo("answering-stretches")
+    key = (hash(content), len(content), tuple(tokens))
+    stretch = memo.get(key) if memo is not None else None
+    if stretch is None:
+        stretch = _answering_stretch(content, tokens)
+        if memo is not None:
+            memo[key] = stretch
+    return _held_marked_document((title, summary, stretch), tokens)
+
+
+def _held_marked_document(image, tokens):
+    """FTS marks over admitted bytes when the disposable cache has moved."""
+    local = None
+    primary = None
+    try:
+        local = sqlite3.connect(':memory:')
+        local.execute("CREATE VIRTUAL TABLE held USING fts5(path UNINDEXED,layer UNINDEXED,kind UNINDEXED,title,summary,content,tokenize='porter unicode61')")
+        local.execute('INSERT INTO held VALUES(?,?,?,?,?,?)', ('', '', '', *image))
+        row = local.execute('SELECT highlight(held,5,?,?) FROM held WHERE held MATCH ?',
+            (EXCERPT_MARK_OPEN, EXCERPT_MARK_CLOSE, ' OR '.join('"'+token+'"' for token in tokens))).fetchone()
+        return str(row[0]) if row is not None else image[2]
+    except sqlite3.Error:
+        return image[2]
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if local is not None:
+            try:
+                local.close()
+            except BaseException:
+                if primary is None:
+                    raise
+
+
 def marked_document(
-    connection: sqlite3.Connection, path: str, query: str
+    connection: sqlite3.Connection, path: str, query: str,
+    *, indexed_image=_NO_HELD_INDEX_IMAGE,
 ) -> Optional[str]:
     """The document's text with every match of the query marked, or None.
 
     FTS5 marks the matches with the same tokenizer retrieval matched them by,
     so the excerpt is chosen by exactly the words that selected the document.
     """
+    held = indexed_image is not _NO_HELD_INDEX_IMAGE
+    if held and (not isinstance(indexed_image, tuple) or len(indexed_image) != 3
+                 or not all(isinstance(value, str) for value in indexed_image)):
+        return None
     try:
         tokens = evidence_tokens(informative_tokens(connection, query_tokens(query)))
     except RetrievalError:
         return None
     if not tokens:
         return None
+    # One command marks the same document for the same words several times
+    # (identity, excerpt, render); the answer cannot change within it.
+    memo = workspace_roots.command_memo("marked-documents")
+    key = (path, tuple(tokens), indexed_image if held else None)
+    if memo is not None and key in memo:
+        return memo[key]
+    marked = _marked_document(connection, path, tokens, indexed_image if held else None)
+    if memo is not None:
+        memo[key] = marked
+    return marked
+
+
+def _marked_document(connection, path, tokens, indexed_image) -> Optional[str]:
+    held = indexed_image is not None
+    if held and len(indexed_image[2]) > MARKED_DOCUMENT_CHARACTERS:
+        return _marked_stretch(indexed_image, tokens)
+    if not held:
+        try:
+            # MATCH first: `path` is not indexed, and a bare path filter reads
+            # every row of the table.
+            row = connection.execute(
+                "SELECT title, summary, content, length(content) FROM documents "
+                "WHERE documents MATCH ? AND path = ?",
+                (" OR ".join(f'"{token}"' for token in tokens), path),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row is not None and row[3] is not None and row[3] > MARKED_DOCUMENT_CHARACTERS:
+            return _marked_stretch(tuple(str(value or "") for value in row[:3]), tokens)
+    if held:
+        try:
+            row = connection.execute(
+                'SELECT title,summary,content,highlight(documents,5,?,?) FROM documents '
+                'WHERE documents MATCH ? AND path=?',
+                (EXCERPT_MARK_OPEN, EXCERPT_MARK_CLOSE, ' OR '.join('"'+token+'"' for token in tokens), path),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row is not None and tuple(str(value or '') for value in row[:3]) == indexed_image:
+            return str(row[3]) if row[3] is not None else indexed_image[2]
+        return _held_marked_document(indexed_image, tokens)
     try:
         row = connection.execute(
             "SELECT highlight(documents, 5, ?, ?) FROM documents "
@@ -2886,7 +4514,7 @@ def excerpt_section(
     under Sources, source-only records, or unavailable citation metadata.
     """
     title = str(item.get("title") or "")
-    if item.get("selection") in ("path-link", "source-link", *AUTOMATIC_LINK_SELECTIONS) and item.get("kind") != "brain-task":
+    if item.get("selection") in ("path-link", "source-link", "source-hint", *AUTOMATIC_LINK_SELECTIONS) and item.get("kind") != "brain-task":
         requested = {
             heading for heading in ("sources", "references")
             if re.search(r"(?<![\w/\\.-])" + heading + r"(?![\w/\\.-])", query, re.IGNORECASE)
@@ -3030,7 +4658,8 @@ def delivery_identity(
         or item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("kind") == "brain-task"
     ):
         return path, revision
-    marked = marked_document(connection, path, query)
+    marked = marked_document(connection, path, query,
+                             indexed_image=item.get('_indexed_policy_image'))
     section = (
         excerpt_section(connection, item, marked, excerpt_weights(connection, query), query=query)
         if marked
@@ -3287,35 +4916,48 @@ def _quote_candidates(
     survivors replaces a snippet() that ran over every match.
     """
     rowids = [item.pop("document_rowid") for item in items]
-    texts: dict[int, str] = {}
+    quoted: dict[int, tuple[Any, ...]] = {}
     expression = " OR ".join(f'"{token}"' for token in evidence)
     # In batches that stay inside SQLite's parameter limit, as deletes do.
     for start in range(0, len(rowids), DELETE_CHUNK):
         chunk = rowids[start : start + DELETE_CHUNK]
         placeholders = ", ".join("?" for _ in chunk)
         try:
+            # A long document is not marked here (see MARKED_DOCUMENT_CHARACTERS);
+            # its answering stretch is, below.
             rows = connection.execute(
-                "SELECT rowid, highlight(documents, 5, ?, ?) FROM documents "
-                f"WHERE documents MATCH ? AND rowid IN ({placeholders})",
-                (EXCERPT_MARK_OPEN, EXCERPT_MARK_CLOSE, expression, *chunk),
+                "SELECT d.rowid, CASE WHEN length(d.content) <= ? THEN highlight(documents, 5, ?, ?) END, "
+                "d.path,d.layer,d.kind,d.title,d.summary,d.content FROM documents AS d "
+                f"WHERE documents MATCH ? AND d.rowid IN ({placeholders})",
+                (MARKED_DOCUMENT_CHARACTERS, EXCERPT_MARK_OPEN, EXCERPT_MARK_CLOSE, expression, *chunk),
             ).fetchall()
         except sqlite3.Error:
             rows = []
-        texts.update((row[0], str(row[1] or "")) for row in rows)
+        quoted.update((row[0], tuple(row[1:]) if row[1] is not None else
+                       (_marked_stretch(tuple(str(value or "") for value in row[5:8]), evidence),
+                        *row[2:]))
+                      for row in rows)
         # A candidate the evidence words do not mark is quoted from its plain
         # text, which gives its opening prose.
-        missing = [rowid for rowid in chunk if rowid not in texts]
+        missing = [rowid for rowid in chunk if rowid not in quoted]
         if missing:
             rows = connection.execute(
-                "SELECT rowid, content FROM documents WHERE rowid IN ("
+                "SELECT d.rowid,d.content,d.path,d.layer,d.kind,d.title,d.summary,d.content "
+                "FROM documents AS d WHERE d.rowid IN ("
                 + ", ".join("?" for _ in missing)
                 + ")",
                 missing,
             ).fetchall()
-            texts.update((row[0], str(row[1] or "")) for row in rows)
+            quoted.update((row[0], tuple(row[1:])) for row in rows)
     weights = excerpt_weights(connection, query) if items else {}
     for rowid, item in zip(rowids, items):
-        text = texts.get(rowid, "")
+        row = quoted.get(rowid)
+        identity = tuple(item[key] for key in ('path', 'layer', 'kind', 'title'))
+        same = row is not None and tuple(row[1:5]) == identity
+        # Hold the unhighlighted image from the SAME statement as the quote.
+        # A missing/reused/changed row cannot be rebound by a later prime.
+        item['_indexed_policy_image'] = tuple(str(value or '') for value in row[4:7]) if same else None
+        text = str(row[0] or '') if same else ''
         section = (
             quoted_section(text, str(item.get("title") or ""), weights) if text else None
         )
@@ -3355,8 +4997,9 @@ def _retrieval_signature(
     }
 
 
-def _retrieval_baseline_key(task_uuid: str, host: str, entry_point: str) -> str:
-    return f"{task_uuid}:{host}:{entry_point}"
+def _retrieval_baseline_key(task_uuid: str, host: str, entry_point: str, delivery_profile: str = 'ordinary') -> str:
+    key = f"{task_uuid}:{host}:{entry_point}"
+    return key + ':cursor-rule' if delivery_profile == 'cursor-rule' else key
 
 
 def _episode_signature(episode: dict[str, Any]) -> tuple[str, str]:
@@ -3751,6 +5394,7 @@ def gate_decision(
     matched_count: int,
     selected_count: int,
     conversation: bool = False,
+    delivery_profile: str = 'ordinary',
 ) -> dict[str, Any]:
     """Decide whether this turn was worth retrieving for, and say why.
 
@@ -3796,6 +5440,8 @@ def gate_decision(
         reason = "no-relevant-match" if matched_count == 0 else "empty-after-filter"
         return {"decision": "skip", "mode": mode, "reason": reason, "signals": signals}
     if query_unchanged and selection_identical and task_revision_unchanged:
+        if delivery_profile == 'cursor-rule':
+            return {'decision':'retrieve', 'mode':mode, 'reason':'persistent-rule-repeat', 'signals':signals}
         if conversation:
             return {
                 "decision": "retrieve", "mode": mode,
@@ -3834,7 +5480,7 @@ def _conflict_candidates(
     rows = connection.execute(
         f"""
         SELECT
-            d.path, d.layer, d.kind, d.title, d.content,
+            d.path, d.layer, d.kind, d.title, d.summary, d.content,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
             m.source_fingerprints, m.updated_at, m.confidence, m.attestation,
@@ -3849,7 +5495,9 @@ def _conflict_candidates(
     result = []
     for row in rows:
         item = dict(row)
-        item["snippet"] = _body_snippet(str(item.pop("content")))
+        content = str(item.pop('content') or '')
+        item['_indexed_policy_image'] = (str(item['title'] or ''), str(item.pop('summary') or ''), content)
+        item["snippet"] = _body_snippet(content)
         item["conflicts"] = json.loads(item["conflicts"])
         item["source_fingerprints"] = json.loads(item["source_fingerprints"])
         # A conflict partner is pulled in by record id, not by the query, so
@@ -3868,12 +5516,362 @@ def _conflict_candidates(
     return result
 
 
+SOURCE_HINT_PROFILE = "source-hints-v1"
+SOURCE_HINT_LIMIT = 8
+SOURCE_HINT_BYTES = 8192
+SOURCE_HINT_FILE_BYTES = 131072
+
+
+def normalize_source_hints(value: Any) -> tuple[list[dict[str, str]], str]:
+    """Plain bounded references only; malformed optional input is unavailable."""
+    def pairs(entries):
+        result = {}
+        for key, child in entries:
+            if key in result:
+                raise ValueError("Duplicate hint field")
+            result[key] = child
+        return result
+
+    try:
+        if type(value) is str:
+            if len(value) > SOURCE_HINT_BYTES or len(value.encode("utf-8")) > SOURCE_HINT_BYTES:
+                return [], "invalid"
+            value = json.loads(value, object_pairs_hook=pairs,
+                               parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+        if type(value) is not dict or set(value) != {"schema_version", "references"}:
+            return [], "invalid"
+        if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+            return [], "invalid"
+        references = value["references"]
+        if type(references) is not list or len(references) > SOURCE_HINT_LIMIT:
+            return [], "invalid"
+        clean = []
+        for reference in references:
+            if type(reference) is not dict or set(reference) != {"path", "source_sha256"}:
+                return [], "invalid"
+            name, digest = reference["path"], reference["source_sha256"]
+            if (type(name) is not str or not name or len(name) > 512
+                    or len(name.encode("utf-8")) > 512
+                    or name.startswith("/") or any(mark in name for mark in ("\\", ":", "#"))
+                    or any(unicodedata.category(char).startswith("C") for char in name)
+                    or any(part in ("", ".", "..") for part in name.split("/"))
+                    # A discovery hint may name shared derived knowledge too;
+                    # canonical citation restrictions are not its authority.
+                    or source_path_problem("hints/" + name) is not None
+                    or type(digest) is not str or re.fullmatch(r"[0-9a-f]{64}", digest) is None):
+                return [], "invalid"
+            clean.append({"path": name, "source_sha256": digest})
+        encoded = json.dumps({"schema_version": 1, "references": clean}, ensure_ascii=False,
+                             separators=(",", ":"), allow_nan=False).encode("utf-8")
+        return (clean, "ready") if len(encoded) <= SOURCE_HINT_BYTES else ([], "invalid")
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return [], "invalid"
+
+
+def _source_hint_read(repository: Path, name: str, expected: str) -> Optional[str]:
+    """Contained current raw image, then the native universal-newline digest text.
+
+    No Path.resolve/read_text fallback: unsupported secure primitives abstain.
+    Windows reads through the Cursor rule's NT handles, which follow no reparse
+    point; every stat compared here comes from that one backend.
+    This is a point-in-time check, not a filesystem snapshot or source authority.
+    """
+    try:
+        files = _cursor_backend()
+    except (OSError, ImportError, AttributeError):
+        return None
+    if files is None or (files is os and (
+            not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")
+            or os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd)):
+        return None
+    descriptors = []
+    directories = []
+    try:
+        root = workspace_roots.project_root(repository)
+        parent = (os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) if files is os
+                  else files.open_root(root))
+        root_fd = parent
+        descriptors.append(parent)
+        parts = name.split("/")
+        for part in parts[:-1]:
+            child = files.open(part, os.O_RDONLY | files.O_DIRECTORY | files.O_NOFOLLOW, dir_fd=parent)
+            directories.append((parent, part, child))
+            parent = child
+            descriptors.append(parent)
+        fd = files.open(parts[-1], os.O_RDONLY | files.O_NOFOLLOW | files.O_NONBLOCK, dir_fd=parent)
+        descriptors.append(fd)
+        before = files.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > SOURCE_HINT_FILE_BYTES:
+            return None
+        raw = bytearray()
+        while len(raw) <= SOURCE_HINT_FILE_BYTES:
+            chunk = os.read(fd, min(8192, SOURCE_HINT_FILE_BYTES + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = files.fstat(fd)
+        named = files.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if (len(raw) > SOURCE_HINT_FILE_BYTES or identity(before) != identity(after)
+                or identity(after) != identity(named) or hashlib.sha256(raw).hexdigest() != expected):
+            return None
+        def directory_identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode)
+        if directory_identity(files.fstat(root_fd)) != directory_identity(files.stat(root, follow_symlinks=False)):
+            return None
+        for parent_fd, part, child_fd in directories:
+            if directory_identity(files.fstat(child_fd)) != directory_identity(files.stat(part, dir_fd=parent_fd, follow_symlinks=False)):
+                return None
+        return bytes(raw).decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    finally:
+        for fd in reversed(descriptors):
+            os.close(fd)
+
+
+def _source_hint_schema_supported(repository: Path) -> bool:
+    try:
+        schema_file = brain_root(repository) / "schemas" / "retrieval-manifest.schema.json"
+        if not schema_file.is_file():
+            schema_file = brain_root(workspace_roots.tooling_root(repository)) / "schemas" / "retrieval-manifest.schema.json"
+        schema = json.loads(schema_file.read_text(encoding="utf-8"))
+        properties = schema["properties"]
+        if ("source-hint" not in properties["selected"]["items"]["properties"]["selection"]["enum"]
+                or properties["source_hints"]["properties"]["profile"]["const"] != SOURCE_HINT_PROFILE):
+            return False
+        # Partial upgrades can accept the marker while rejecting its counters
+        # or selected-item fields. Abstain before native receipt planning.
+        for state in ("ready", "invalid", "unsupported"):
+            for count in (0, SOURCE_HINT_LIMIT):
+                brain_runtime.validate_schema_value(
+                    {"profile": SOURCE_HINT_PROFILE, "state": state, "supplied": count,
+                     "admitted": count, "delivered": count}, properties["source_hints"])
+        brain_runtime.validate_schema_value(
+            {"path": "specs/source.md", "category": "evidence", "estimated_tokens": 1,
+             "source_hash": "a" * 64, "selection": "source-hint", "score": 0.0, "rank": None},
+            properties["selected"]["items"])
+        return True
+    except (OSError, ValueError, TypeError, KeyError, BrainError):
+        return False
+
+
+def _source_hint_candidates(connection, repository, config, references, seen, *, trace=None):
+    candidates = []
+    policy = _current_source_policy(connection, repository, trace)
+    admitted = []
+    for reference in references:
+        name = reference["path"]
+        if name in seen:
+            continue
+        # Metadata first, before hydrating a potentially large indexed body.
+        rows = connection.execute("""
+            SELECT d.path, d.layer, d.kind, d.title,
+                   m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+                   m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
+                   m.updated_at, m.confidence, m.attestation
+            FROM documents d JOIN document_metadata m ON m.path=d.path
+            WHERE d.path=? LIMIT 2""", (name,)).fetchall()
+        if len(rows) != 1:
+            continue
+        item = dict(rows[0])
+        # Initial additive profile cannot take the ordinary history/policy slots.
+        if item["layer"] != "semantic" or item["category"] == "policy":
+            continue
+        item.update(selection="source-hint", match=None, adjusted_score=0.0, score=0.0, rank=None,
+                    _hint_raw_sha256=reference["source_sha256"])
+        item["conflicts"] = json.loads(item["conflicts"])
+        item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+        if item["conflicts"] or _has_incoming_conflict(connection, item.get("record_id")):
+            continue
+        # Reject unadmitted/unsafe hints before policy lookup. Their symlink
+        # or absent metadata must not turn optional hints into a global error.
+        if _source_hint_read(repository, name, item["_hint_raw_sha256"]) is None:
+            continue
+        admitted.append(item)
+    policy.prime(admitted)
+    eligible, _ = _runtime_filter(repository, admitted, config, trace=trace,
+                                    connection=connection, source_policy=policy)
+    for item in eligible:
+        name = item["path"]
+        item["snippet"] = _body_snippet(item['_indexed_policy_image'][2])
+        item["estimated_tokens"] = _estimate_tokens(item["title"] + item["snippet"])
+        seen.add(name)
+        candidates.append(item)
+    return candidates
+
+
+def _cited_directory(repository, name) -> bool:
+    """A citation naming a directory inside the project, such as `src/Billing`.
+
+    Memory Bank chunks cite whole modules this way, and the bank validator and
+    `bank-reverify` accept it; the delivery-time existence check must too, or
+    such a chunk silently leaves every capsule.
+    """
+    try:
+        relative = name.split("#", 1)[0]
+        path = workspace_roots.resolve(repository, relative)
+        if path.is_symlink():
+            return False
+        resolved = path.resolve()
+        return workspace_roots.contains(repository, resolved) and resolved.is_dir()
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+class _CurrentSourcePolicy:
+    """One operation's bounded metadata batches, never a persistent permit.
+
+    Ignore rules decide what is indexed and quoted: a document whose own path
+    the project now ignores is withheld, cached or not. A cited file's ignore
+    status withholds nothing. The record citing it is already shared through
+    Project Brain or the Memory Bank, and citing `vendor/...`, `.env` or the
+    accelerator's own ignored specs is how framework work gets described, so
+    holding such knowledge back protected nothing and cost the answer.
+    Citation edges still drive the existence check (missing_source).
+    """
+    def __init__(self, connection, repository):
+        self.connection = connection
+        self.repository = Path(repository).resolve()
+        self.rows = {}
+        self.observed = {}
+        self.local_sources = {}
+        self._source_exists = {}
+        self.memory_boundaries = {}
+        self.indexed_images = {}
+        self.policy_checks = {}
+
+    def prime(self, candidates, *, indexed_images=None):
+        candidates = list(candidates)
+        hinted = {item['path'] for item in candidates
+                  if 'selection' in item.keys() and item['selection'] == 'source-hint'}
+        for item in candidates:
+            if '_indexed_policy_image' in item.keys():
+                self.indexed_images.setdefault(item['path'], item['_indexed_policy_image'])
+        for name, image in (indexed_images or {}).items():
+            self.indexed_images.setdefault(name, image)
+        names = sorted({item["path"] for item in candidates} - self.rows.keys())
+        pending = {}
+        for offset in range(0, len(names), 400):
+            batch = names[offset:offset + 400]
+            markers = ",".join("?" for _ in batch)
+            refs = {name: set() for name in batch}
+            local_sources = {name: set() for name in batch}
+            missing_images = [name for name in batch if name not in self.indexed_images]
+            # Optional hints retain their byte cap before any cached body is
+            # hydrated, including stale rows whose current source is small.
+            for bounded in (False, True):
+                image_names = [name for name in missing_images if (name in hinted) == bounded]
+                if not image_names:
+                    continue
+                image_markers = ','.join('?' for _ in image_names)
+                bound = ' AND length(CAST(content AS BLOB))<=?' if bounded else ''
+                parameters = image_names + ([SOURCE_HINT_FILE_BYTES] if bounded else [])
+                for row in self.connection.execute(
+                        f'SELECT path,title,summary,content FROM documents WHERE path IN ({image_markers}){bound}', parameters):
+                    self.indexed_images[row['path']] = tuple(str(row[key] or '') for key in ('title','summary','content'))
+            for row in self.connection.execute(
+                    f"SELECT path,eligible_until FROM document_source_state WHERE path IN ({markers})", batch):
+                self.memory_boundaries[row["path"]] = row["eligible_until"]
+            for row in self.connection.execute(
+                    f"SELECT path,ref_path FROM document_links WHERE ref_kind='source' AND path IN ({markers})", batch):
+                if not row["ref_path"].startswith(("http://", "https://")):
+                    local_sources[row["path"]].add(row["ref_path"])
+            for row in self.connection.execute(
+                    f"SELECT path,source_fingerprints FROM document_metadata WHERE path IN ({markers})", batch):
+                for entry in json.loads(row["source_fingerprints"]):
+                    if not entry["path"].startswith(("http://", "https://")):
+                        local_sources[row["path"]].add(entry["path"])
+            for name in batch:
+                own = None
+                if not (workspace_roots.accelerator_owned_source(name) or name.startswith("project-brain/")):
+                    own = workspace_roots.project_source_key(self.repository, name)
+                pending[name] = (own, refs[name])
+                self.local_sources[name] = local_sources[name]
+        keys = {key for own, refs in pending.values() for key in ([own] if own is not None else []) + list(refs)}
+        delta = sorted(keys - self.observed.keys())
+        ignored = workspace_roots._source_git_ignored(workspace_roots.project_root(self.repository), delta, 2.0)
+        self.observed.update((key, os.fsencode(key) in ignored) for key in delta)
+        self.rows.update(pending)
+
+    def missing_source(self, candidate):
+        # The full edge set, not just optional legacy digests. One final
+        # existence observation per local citation; remote URLs stay unknown.
+        for name in self.local_sources[candidate["path"]]:
+            if name not in self._source_exists:
+                try:
+                    brain_runtime._cited_file(self.repository, name)
+                    self._source_exists[name] = True
+                except (BrainError, OSError, ValueError, RuntimeError):
+                    self._source_exists[name] = _cited_directory(self.repository, name)
+            if not self._source_exists[name]:
+                return True
+        return False
+
+    def image_reason(self, image):
+        if not isinstance(image, tuple) or len(image) != 3:
+            return 'stale'
+        # Cache an immutable image under the current grammar, never an
+        # operation-long permit when patterns change during a callback.
+        key = (secret_policy_fingerprint(), image)
+        if key not in self.policy_checks:
+            self.policy_checks[key] = indexed_secret_policy_reason(*image)
+        return self.policy_checks[key]
+
+    def reason(self, candidate, *, temporal=True):
+        own, _ = self.rows[candidate["path"]]
+        if own is not None and self.observed[own]:
+            return "ignored"
+        image = (candidate['_indexed_policy_image'] if '_indexed_policy_image' in candidate.keys()
+                 else self.indexed_images.get(candidate['path']))
+        if 'selection' in candidate.keys() and candidate['selection'] == 'source-hint':
+            # Also bound images already held through another candidate lane;
+            # the SQL cap above governs newly loaded images only.
+            if not isinstance(image, tuple) or len(image) != 3 or not isinstance(image[2], str):
+                return 'stale'
+            if len(image[2]) > SOURCE_HINT_FILE_BYTES or len(image[2].encode('utf-8')) > SOURCE_HINT_FILE_BYTES:
+                return 'stale'
+        problem = self.image_reason(image)
+        if problem is not None:
+            return problem
+        problem = indexed_secret_policy_reason(str(candidate['path']),
+                                               str(candidate['title'] or '') if 'title' in candidate.keys() else '',
+                                               str(candidate['snippet'] or '') if 'snippet' in candidate.keys() else '')
+        if problem is not None:
+            return problem
+        # Cache the boundary, never its admission decision: a single retrieval
+        # may cross midnight. Raw search has no held source body; governed
+        # retrieval below rechecks its exact freshly read frontmatter instead.
+        boundary = self.memory_boundaries.get(candidate["path"])
+        if temporal and candidate["kind"] == "memory" and boundary is not None:
+            return memory_temporal_reason({"review_after": boundary})
+        return None
+
+
+def _current_source_policy(connection, repository, trace=None):
+    policy = getattr(trace, "_current_source_policy", None) if trace is not None else None
+    if policy is None:
+        if connection is None:
+            raise workspace_roots.SourceGitError("Git source context unavailable")
+        policy = _CurrentSourcePolicy(connection, repository)
+    if ((connection is not None and policy.connection is not connection)
+            or policy.repository != Path(repository).resolve()):
+        raise workspace_roots.SourceGitError("Git source context unavailable")
+    return policy
+
+
 def _runtime_filter(
     repository: Path,
     candidates: Iterable[dict[str, Any]],
     config: dict[str, Any],
-    *, trace: Optional[RetrievalTrace] = None,
+    *, trace: Optional[RetrievalTrace] = None, connection=None, source_policy=None,
+    custody_only: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    candidates = list(candidates)
+    policy = source_policy or _current_source_policy(connection, repository, trace)
+    policy.prime(candidates)
     # Cache exact freshly read bytes only; path and live-read checks still run.
     # Each invocation, including the final recheck, owns a new bounded cache.
     normalization_cache = _CitationDigestCache()
@@ -3881,6 +5879,9 @@ def _runtime_filter(
     excluded = []
     owners = set(config.get("owners", ["*"]))
     for candidate in candidates:
+        # The first pre-pack image survives copies and final policy refresh.
+        # A safe replacement cache row must not certify older packed content.
+        candidate.setdefault('_indexed_policy_image', policy.indexed_images.get(candidate['path']))
         reason: Optional[str] = None
         if candidate["privacy"] not in config["allowed_privacy"]:
             reason = "privacy"
@@ -3901,17 +5902,32 @@ def _runtime_filter(
                 or candidate["lifecycle"] in LIFECYCLES[record_type]["terminal"]
             ):
                 reason = "lifecycle"
+        if reason is None:
+            reason = policy.reason(candidate, temporal=False)
         content: Optional[str] = None
         if reason is None:
-            path = workspace_roots.resolve(repository, candidate["path"])
-            try:
-                content = path.read_text(encoding="utf-8") if path.is_file() else None
-            except OSError:
-                content = None
+            if candidate.get("selection") == "source-hint":
+                content = _source_hint_read(repository, candidate["path"], candidate["_hint_raw_sha256"])
+            else:
+                path = workspace_roots.resolve(repository, candidate["path"])
+                try:
+                    content = path.read_text(encoding="utf-8") if path.is_file() else None
+                except (OSError, UnicodeError):
+                    content = None
             # `source_hash` is the file's digest even when the indexed text is
             # masked, so this compares the file with the file it was indexed from.
             if content is None or _content_hash(content) != candidate["source_hash"]:
                 reason = "stale"
+        if (reason is None and content is not None
+                and (candidate['kind'] == 'memory' or candidate['kind'].startswith('brain-'))):
+            # Protected authority remains a whole-record profile: a masked
+            # cached projection cannot make unsafe structured metadata valid.
+            reason = indexed_secret_policy_reason(content)
+        if reason is None and candidate["kind"] == "memory" and content is not None:
+            # Reapply known temporal bounds to the image already hash-checked,
+            # including the final custody pass after pack. No second file read,
+            # reranking, refill, or reliance on a warm index refresh is needed.
+            reason = memory_temporal_reason(_chunk_frontmatter(content))
         if reason is None and candidate["kind"] == "codebase" and content is not None:
             # A map that no longer describes the code is worse than no map:
             # an agent acts on it instead of reading the source.
@@ -3937,10 +5953,11 @@ def _runtime_filter(
                 # It stays, marked for checking and ranked below fresh
                 # knowledge; the reader decides whether it still holds.
                 candidate["source_changed"] = changed
-                candidate["adjusted_score"] = (
-                    float(candidate.get("adjusted_score") or 0.0)
-                    * SOURCE_CHANGED_WEIGHT
-                )
+                if not custody_only:
+                    candidate["adjusted_score"] = (
+                        float(candidate.get("adjusted_score") or 0.0)
+                        * SOURCE_CHANGED_WEIGHT
+                    )
         if reason:
             excluded.append({"path": candidate["path"], "reason": reason})
         else:
@@ -3993,17 +6010,8 @@ def _path_candidates(
     for item in candidates[PATH_LINK_LIMIT:]:
         excluded.append({"path": item["path"], "reason": "path-link-limit"})
     candidates = candidates[:PATH_LINK_LIMIT]
-    content = {
-        row["path"]: row["content"]
-        for row in connection.execute(
-            "SELECT path, content FROM documents WHERE path IN ("
-            + ", ".join("?" for _ in candidates)
-            + ")",
-            [item["path"] for item in candidates],
-        )
-    } if candidates else {}
     for item in candidates:
-        item["snippet"] = _body_snippet(str(content.get(item["path"], "")))
+        item["snippet"] = _body_snippet(item['_indexed_policy_image'][2])
         item["match"] = None
         item["selection"] = "path-link"
         item["adjusted_score"] = 0.0
@@ -4078,7 +6086,8 @@ def linked_documents(
         candidates.append(item)
         if trace is not None:
             trace.observe(item, "source-link", "hydrated")
-    return _runtime_filter(repository, candidates, config, trace=trace)
+    return _runtime_filter(repository, candidates, config, trace=trace, connection=connection,
+                           source_policy=_CurrentSourcePolicy(connection, repository))
 
 
 _PROMPT_PATH = re.compile(
@@ -4249,7 +6258,7 @@ def _automatic_link_candidates(
     rows = connection.execute(
         f"""
         SELECT
-            d.path, d.layer, d.kind, d.title, d.content,
+            d.path, d.layer, d.kind, d.title, d.summary, d.content,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
             m.updated_at, m.confidence, m.attestation
@@ -4263,6 +6272,7 @@ def _automatic_link_candidates(
     for row in rows:
         item = dict(row)
         content = str(item.pop("content") or "")
+        item['_indexed_policy_image'] = (str(item['title'] or ''), str(item.pop('summary') or ''), content)
         if trace is not None:
             trace.observe(item, "file-link", "hydrated")
         if item["layer"] != "semantic" or item["category"] not in ("durable", "dynamic"):
@@ -4282,7 +6292,7 @@ def _automatic_link_candidates(
             continue
         item["_body"] = content
         candidates.append(item)
-    eligible, _ = _runtime_filter(repository, candidates, config, trace=trace)
+    eligible, _ = _runtime_filter(repository, candidates, config, trace=trace, connection=connection)
     eligible.sort(key=lambda item: (
         found[item["path"]]["rank"], bool(item.get("source_changed")),
         "".join(chr(0x10FFFF - ord(char)) for char in str(item.get("updated_at") or "")), item["path"],
@@ -4426,7 +6436,7 @@ def _shared_source_documents(
         else:
             if trace is not None:
                 trace.observe(item, "shared-source", "no-current-shared-revision")
-    eligible, _ = _runtime_filter(repository, candidates, config, trace=trace)
+    eligible, _ = _runtime_filter(repository, candidates, config, trace=trace, connection=connection)
     return eligible, len(paths)
 
 
@@ -4435,6 +6445,7 @@ def source_link_candidates(
     repository: Path,
     anchors: list[dict[str, Any]],
     seen: set[str],
+    *, _image_sink=None,
 ) -> list[dict[str, Any]]:
     """The same policy-checked expansion for lightweight lexical results.
 
@@ -4462,6 +6473,9 @@ def source_link_candidates(
     candidates, _ = _source_link_candidates(
         connection, repository, load_config(repository), hydrated, seen,
     )
+    if _image_sink is not None:
+        for name, image in _selected_index_images(candidates).items():
+            _image_sink.setdefault(name, image)
     return [_public_item(item) for item in candidates]
 
 
@@ -4505,7 +6519,7 @@ def _source_link_candidates(
                 trace.observe(anchor, "source-link", "anchor-conflict")
             continue
         # Recheck at the traversal boundary, including edits since seed search.
-        eligible, _ = _runtime_filter(repository, [dict(anchor)], config, trace=trace)
+        eligible, _ = _runtime_filter(repository, [dict(anchor)], config, trace=trace, connection=connection)
         if not eligible:
             continue
         remaining = GRAPH_ROW_LIMIT - stats["examined"]
@@ -4556,10 +6570,7 @@ def _source_link_candidates(
                 if trace is not None:
                     trace.observe(item, "source-link", "candidate-limit")
                 continue
-            content = connection.execute(
-                "SELECT content FROM documents WHERE path = ?", (item["path"],),
-            ).fetchone()
-            item["snippet"] = _body_snippet(str(content["content"]))
+            item["snippet"] = _body_snippet(item['_indexed_policy_image'][2])
             item["match"] = None
             item["selection"] = "source-link"
             item["adjusted_score"] = 0.0
@@ -4710,7 +6721,7 @@ FUNNEL_EVENTS = {
     "file-link": ("hydrated", "category", "conflict", "touch-without-query-term",
                   "hub-limit", "already-selected-or-own", "pool-limit"),
     "shared-source": ("hydrated", "no-current-shared-revision"),
-    "queue": ("lexical", "path-link", "source-link", "prompt-link", "touch-link"),
+    "queue": ("lexical", "path-link", "source-link", "prompt-link", "touch-link", "source-hint"),
     "budget": ("admitted", "budget", "hard-budget"),
     "layer": ("episodic-layer", "skill-subfile", "host-listed", "layer-limit",
               "delivered-this-session"),
@@ -5013,6 +7024,29 @@ class RetrievalTrace:
                 "coverage": "existing bounded candidate windows only; unobserved causes are unknown"}
 
 
+def _close_trace_descriptors(*descriptors: Optional[int]) -> bool:
+    """Retired ownership only: one attempt per fd, drain before cancellation."""
+    primary = sys.exc_info()[0] is not None
+    cancellation = None
+    complete = True
+    seen = set()
+    for descriptor in descriptors:
+        if descriptor is None or descriptor in seen:
+            continue
+        seen.add(descriptor)
+        try:
+            os.close(descriptor)
+        except (OSError, ValueError):
+            complete = False  # Closure is unknown; never retry that fd number.
+        except BaseException as error:
+            complete = False
+            if cancellation is None:
+                cancellation = error
+    if cancellation is not None and not primary:
+        raise cancellation
+    return complete
+
+
 def _trace_directory(repository: Path, *, create: bool = False) -> Optional[int]:
     """Anchor every operation to directory handles; never follow replaced parents.
 
@@ -5030,13 +7064,33 @@ def _trace_directory(repository: Path, *, create: bool = False) -> Optional[int]
                 except FileExistsError:
                     pass
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-            os.close(descriptor)
+            parent = descriptor
             descriptor = child
-        return descriptor
+            if not _close_trace_descriptors(parent):
+                return None
+        result, descriptor = descriptor, None
+        return result
     except (OSError, ValueError):
-        if descriptor is not None:
-            os.close(descriptor)
         return None
+    finally:
+        owned, descriptor = descriptor, None
+        _close_trace_descriptors(owned)
+
+
+def _close_trace_file(handle: Any) -> bool:
+    """Retired file-object ownership, one close attempt, primary preserved."""
+    if handle is None:
+        return True
+    primary = sys.exc_info()[0] is not None
+    try:
+        handle.close()
+        return True
+    except (OSError, ValueError):
+        return False
+    except BaseException:
+        if not primary:
+            raise
+        return False
 
 
 def _trace_payload_json(payload: dict[str, Any]) -> str:
@@ -5075,18 +7129,33 @@ def _write_trace(directory: int, identifier: str, payload: dict[str, Any]) -> No
     try:
         handle = os.fdopen(descriptor, "wb")
         descriptor = None
-        with handle:
+        try:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
+        finally:
+            owned, handle = handle, None
+            confirmed = _close_trace_file(owned)
+        if not confirmed:
+            return
         os.replace(temporary, identifier + ".json", src_dir_fd=directory, dst_dir_fd=directory)
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        primary = sys.exc_info()[0] is not None
+        owned, descriptor = descriptor, None
+        cancellation = None
+        try:
+            _close_trace_descriptors(owned)
+        except BaseException as error:
+            cancellation = error
         try:
             os.unlink(temporary, dir_fd=directory)
-        except FileNotFoundError:
+        except OSError:
             pass
+        except BaseException as error:
+            if cancellation is None:
+                cancellation = error
+        if cancellation is not None and not primary:
+            raise cancellation
 
 
 def _save_trace(repository: Path, identifier: str, trace: RetrievalTrace, config: dict[str, Any]) -> None:
@@ -5126,8 +7195,8 @@ def _save_trace(repository: Path, identifier: str, trace: RetrievalTrace, config
     except (OSError, ValueError, TypeError):
         pass
     finally:
-        if directory is not None:
-            os.close(directory)
+        owned, directory = directory, None
+        _close_trace_descriptors(owned)
 
 
 def record_render_trace(repository: Path, capsule: dict[str, Any], render: dict[str, Any]) -> None:
@@ -5149,8 +7218,9 @@ def record_render_trace(repository: Path, capsule: dict[str, Any], render: dict[
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > TRACE_FILE_LIMIT:
             return
-        with os.fdopen(descriptor, "r+", encoding="utf-8", newline="") as handle:
-            descriptor = None
+        handle = os.fdopen(descriptor, "r+", encoding="utf-8", newline="")
+        descriptor = None
+        try:
             data = json.load(handle)
             allowed = {item["path"] for item in data["records"] if item["state"] != "unavailable"}
             data["render"] = {"sha256": render["sha256"], "bytes": render["bytes"], "form": render.get("form", "capsule_text"),
@@ -5171,13 +7241,14 @@ def record_render_trace(repository: Path, capsule: dict[str, Any], render: dict[
             handle.truncate()
             handle.flush()
             os.utime(handle.fileno(), ns=(info.st_atime_ns, info.st_mtime_ns))
+        finally:
+            owned, handle = handle, None
+            _close_trace_file(owned)
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         pass
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if directory is not None:
-            os.close(directory)
+        owned, descriptor, directory = (descriptor, directory), None, None
+        _close_trace_descriptors(*owned)
 
 
 def _window_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -5460,6 +7531,45 @@ def _prune_local_manifests(directory: Path, retention: int) -> None:
 # and every selected item is serialized up to three times, so a key that says
 # "nothing unusual" would be paid for out of content on every turn. Absent
 # therefore means covered, which is what the schema and the docs record.
+class _IndexImageCapsule(dict):
+    """Operation-local renderer input, deliberately outside public JSON keys."""
+    __slots__ = ('_admitted_images',)
+
+    def __init__(self, values, images):
+        super().__init__(values)
+        object.__setattr__(self, '_admitted_images', tuple(images))
+
+    def __setattr__(self, name, value):
+        raise AttributeError('Admitted images are immutable')
+
+    def __deepcopy__(self, memo):
+        result = _IndexImageCapsule(copy.deepcopy(dict(self), memo), self._admitted_images)
+        memo[id(self)] = result
+        return result
+
+
+def _selected_index_images(items):
+    return {item['path']: item.get('_indexed_policy_image') for item in items}
+
+
+def _capsule_index_images(capsule):
+    return dict(capsule._admitted_images) if type(capsule) is _IndexImageCapsule else None
+
+
+def _with_index_images(capsule, images):
+    paths = {item['path'] for key in ('procedural', 'semantic', 'episodic', 'selected')
+             for item in capsule.get(key, []) if isinstance(item, dict) and isinstance(item.get('path'), str)}
+    admitted = [(name, image) for name, image in images.items() if name in paths
+                and isinstance(image, tuple) and len(image) == 3
+                and all(isinstance(value, str) for value in image)]
+    return _IndexImageCapsule(capsule, admitted)
+
+
+def _carry_index_images(source, capsule):
+    images = _capsule_index_images(source)
+    return _with_index_images(capsule, images) if images is not None else capsule
+
+
 _PUBLIC_ITEM_KEYS = (
     "path", "layer", "kind", "title", "snippet", "category",
     "estimated_tokens", "record_id", "conflicts",
@@ -5571,8 +7681,74 @@ def _capsule_projection(selected: list[dict[str, Any]], local_episode_selected: 
     ][:CAPSULE_SEMANTIC_LIMIT]
     # Category grouping must not move related knowledge ahead of direct
     # hits when the renderer spends its character allowance.
-    semantic.sort(key=lambda item: item.get("selection") in ("source-link", *AUTOMATIC_LINK_SELECTIONS))
+    semantic.sort(key=lambda item: (item.get("selection") == "source-hint",
+                                   item.get("selection") in ("source-link", *AUTOMATIC_LINK_SELECTIONS)))
     return {"categories": groups, "procedural": procedural, "semantic": semantic, "episodic": episodic}
+
+
+SOURCE_PROVENANCE_PROFILE = 'local-source-provenance-v1'
+SOURCE_PROVENANCE_BYTES = 65536
+
+
+def local_source_provenance(capsule: dict[str, Any], manifest: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Same-invocation transport consistency, never a disk rehash/authenticator."""
+    visible, _ = _shown_items(capsule)
+    rows = [{'path': row['path'], 'source_hash': row['source_hash']}
+            for row in manifest['selected'] if row['path'] in visible]
+    paths = [row['path'] for row in rows]
+    if len(rows) > 32 or len(set(paths)) != len(paths) or set(paths) != visible:
+        return None
+    try:
+        frame = json.dumps(capsule, ensure_ascii=False, separators=(',', ':'),
+                           sort_keys=True, allow_nan=False).encode('utf-8')
+        result = {'schema_version': 1, 'profile': SOURCE_PROVENANCE_PROFILE,
+                  'scope': 'local', 'publication': 'unconfirmed',
+                  'task_uuid': capsule.get('task_uuid'), 'task_revision': capsule.get('task_revision'),
+                  'capsule_sha256': hashlib.sha256(frame).hexdigest(), 'selected': rows}
+        encoded = json.dumps(result, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+        return result if len(encoded) <= SOURCE_PROVENANCE_BYTES else None
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return None
+
+
+def _read_final_working_record(source_file):
+    """Read a regular descriptor; a POSIX FIFO replacement cannot block open.
+
+    This is a single descriptor observation, not whole-filesystem stability or
+    a deadline for regular/network file reads. Unsupported types are withheld.
+    """
+    descriptor = os.open(source_file, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("Working record is not a regular file")
+        stream = os.fdopen(descriptor, "r", encoding="utf-8")
+        descriptor = None
+        try:
+            content = stream.read()
+        except BaseException:
+            # A cleanup OSError must not turn cancellation into an ordinary
+            # working-unavailable result. A new cleanup cancellation escapes.
+            try:
+                stream.close()
+            except Exception:
+                pass
+            raise
+        stream.close()
+        return content
+    finally:
+        if descriptor is not None:
+            active_error = sys.exc_info()[1]
+            try:
+                os.close(descriptor)
+            except Exception:
+                if active_error is None:
+                    raise
+
+
+def _working_record_image(record, body):
+    return hashlib.sha256(json.dumps([record, body], ensure_ascii=False,
+        sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
 
 def retrieve(
@@ -5588,6 +7764,7 @@ def retrieve(
     phase_seconds: Optional[dict[str, Any]] = None,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     paths: Optional[list[str]] = None,
+    source_hints: Any = None,
     host: str = "cli",
     entry_point: str = "retrieve",
     history_text: Optional[str] = None,
@@ -5598,6 +7775,9 @@ def retrieve(
     trace_paths: Optional[list[str]] = None,
     prepare_excerpts: Optional[Callable[[sqlite3.Connection, list[dict[str, Any]], str], None]] = None,
     describe_windows: Optional[Callable[[sqlite3.Connection, dict[str, Any]], dict[str, Any]]] = None,
+    delivery_profile: str = 'ordinary',
+    source_provenance_sink: Optional[dict[str, Any]] = None,
+    admit_delivery: Optional[Callable[[], None]] = None,
 ) -> dict[str, Any]:
     """Assemble governed context and record the manifest that justifies it.
 
@@ -5631,6 +7811,13 @@ def retrieve(
     ``capsule-limit``. Without it the whole selection counts as delivered.
     """
     retrieval_started = time.monotonic()
+    if source_provenance_sink is not None:
+        if type(source_provenance_sink) is not dict:
+            raise RetrievalError('Invalid source provenance transport')
+        source_provenance_sink.clear()
+    if delivery_profile not in ('ordinary','cursor-rule') or (delivery_profile == 'cursor-rule' and
+            (host != 'cursor' or entry_point not in ('refresh','hook-context') or session_id is not None or transcript is not None)):
+        raise RetrievalError('Unsupported persistent delivery profile')
     if limit < 1:
         raise RetrievalError("--limit must be a positive integer")
     if query_source not in QUERY_SOURCES:
@@ -5655,14 +7842,16 @@ def retrieve(
             f"{', '.join(RETRIEVAL_ENTRY_POINTS)}"
         )
     if task_identifier is None:
-        task_path, task = None, None
+        task_path, task, task_body = None, None, None
         manifest_scope = "local"
     else:
-        task_path, task, _ = find_task(repository, task_identifier)
+        task_path, task, task_body = find_task(repository, task_identifier)
         validate_record(task)
+    initial_working_image = _working_record_image(task, task_body) if task is not None else None
     config = load_config(repository)
     trace = RetrievalTrace(config, trace_paths)
     ensure_metadata_tables(connection)
+    trace._current_source_policy = _CurrentSourcePolicy(connection, repository)
     try:
         trace.watch(connection)
     except sqlite3.Error:
@@ -5686,7 +7875,8 @@ def retrieve(
         for layer in ("procedural", "semantic", "episodic")
         if layer not in matched_layers
     ]
-    filtered, filter_excluded = _runtime_filter(repository, candidates, config, trace=trace)
+    trace._current_source_policy.prime([*candidates, *event_candidates])
+    filtered, filter_excluded = _runtime_filter(repository, candidates, config, trace=trace, connection=connection)
     # A candidate whose cited file changed kept a reduced score; ranking it
     # again keeps fresh knowledge of equal fit ahead of it. Stable, so
     # nothing else moves.
@@ -5763,13 +7953,28 @@ def retrieve(
     # The history search's event goes through the same conflict expansion,
     # exclusions and budget as everything else, ahead in the budget queue.
     filtered = [*chosen_event, *filtered]
+    hint_candidates = []
+    hint_stats = None
+    if source_hints is not None:
+        references, hint_state = normalize_source_hints(source_hints)
+        if not _source_hint_schema_supported(repository):
+            references, hint_state = [], "unsupported"
+        if hint_state == "ready":
+            hint_candidates = _source_hint_candidates(
+                connection, repository, config, references,
+                {item["path"] for item in filtered} | history_paths, trace=trace)
+        # Only admitted allowed rows are counted; refused identities stay private.
+        if _source_hint_schema_supported(repository):
+            hint_stats = {"profile": SOURCE_HINT_PROFILE, "state": hint_state,
+                          "supplied": len(references), "admitted": len(hint_candidates), "delivered": 0}
+        filtered.extend(hint_candidates)
     # A promoted chunk and the record it was promoted from say the same thing,
     # and both used to take a slot. The chunk is the durable form, so the
     # record yields to it.
     promoted_from = {
         str(source.get("path"))
         for item in filtered
-        if item.get("kind") == "memory" and item.get("selection") != "source-link"
+        if item.get("kind") == "memory" and item.get("selection") not in ("source-link", "source-hint")
         for source in item.get("source_fingerprints") or []
         if isinstance(source, dict)
     }
@@ -5795,7 +8000,7 @@ def retrieve(
         conflict_candidates = _conflict_candidates(connection, requested)
         eligible_conflicts, conflict_excluded = _runtime_filter(
             repository, conflict_candidates, config, trace=trace
-        )
+        , connection=connection)
         filter_excluded.extend(conflict_excluded)
         found_ids = {
             item["record_id"]
@@ -5843,6 +8048,7 @@ def retrieve(
         else:
             kept.append(item)
     filtered = kept
+    filtered.sort(key=lambda item: item.get("selection") == "source-hint")
     for position, item in enumerate(filtered, start=1):
         trace.observe(item, "queue", item.get("selection") or "lexical",
                       rank=position, estimated_tokens=item.get("estimated_tokens"),
@@ -5927,6 +8133,16 @@ def retrieve(
         for episode in local_episode_selected
     )
     selected_tokens = sum(item["estimated_tokens"] for item in capsule_selected)
+    # The local episode was selected independently of the optional queue. Give
+    # its existing budget back by dropping hints, never by discarding history.
+    if local_episode_selected and selected_tokens + local_episode_tokens > TARGET_BUDGET:
+        for item in reversed(capsule_selected[:]):
+            if item.get("selection") == "source-hint":
+                capsule_selected.remove(item)
+                selected_tokens -= item["estimated_tokens"]
+                budget_excluded.append({"path": item["path"], "reason": "budget"})
+                if selected_tokens + local_episode_tokens <= TARGET_BUDGET:
+                    break
     if local_episode_selected and selected_tokens + local_episode_tokens > TARGET_BUDGET:
         local_episode_selected = []
         budget_excluded.append({"path": "local-episode", "reason": "budget"})
@@ -5950,8 +8166,9 @@ def retrieve(
     window_proposals: dict[str, Any] = {}
     if session and describe_windows is not None:
         try:
-            proposed = describe_windows(connection, copy.deepcopy({
-                "query": query, **_capsule_projection(capsule_selected, local_episode_selected)}))
+            proposed = describe_windows(connection, copy.deepcopy(_with_index_images({
+                "query": query, **_capsule_projection(capsule_selected, local_episode_selected)},
+                _selected_index_images(capsule_selected))))
             if isinstance(proposed, dict):
                 window_proposals = proposed
         except Exception:
@@ -6039,6 +8256,24 @@ def retrieve(
         for episode in repeated_episodes
     )
     selected = capsule_selected
+    # Another session's turn checkpoint can rewrite the task record while this
+    # retrieval runs - with several sessions on one checkout, every few turns.
+    # The working state is taken again here, just before it is signed and
+    # packed, so the custody check below withdraws it only for a rewrite in
+    # the last moments. A query derived from the task keeps the state it was
+    # derived from.
+    if task is not None and query_source not in ("task", "continuation"):
+        try:
+            again_text = _read_final_working_record(task_path)
+            again_task, again_body = parse_markdown_record(task_path, text=again_text)
+            if (again_task.get("id") == task["id"]
+                    and _working_record_image(again_task, again_body) != initial_working_image):
+                validate_record(again_task)
+                if record_is_eligible(repository, again_task, load_config(repository))[0]:
+                    task, task_body = again_task, again_body
+                    initial_working_image = _working_record_image(task, task_body)
+        except (BrainError, OSError, UnicodeError, ValueError, TypeError):
+            pass
     # Decided here rather than earlier because `selection_identical_to_
     # previous_turn` is a claim about what the capsule delivers, and after the
     # episodic-layer filter and the 2+3 truncation above that is only now
@@ -6052,7 +8287,7 @@ def retrieve(
         task["revision"] if task is not None else 0,
     )
     baseline_key = _retrieval_baseline_key(
-        own_id if own_id is not None else "no-task", host, entry_point
+        own_id if own_id is not None else "no-task", host, entry_point, delivery_profile
     )
     baseline_snapshot = _load_last_retrievals(connection)
     baseline_expected = _receipt_expectation(baseline_snapshot, baseline_key)
@@ -6069,6 +8304,7 @@ def retrieve(
         selected_count=len(selected) + len(local_episode_selected),
         # The selection above already left out what this conversation holds.
         conversation=session is not None,
+        delivery_profile=delivery_profile,
     )
     trace.funnel_boundary("gate_input", selected)
     withheld = gate["mode"] == "enforce" and gate["decision"] == "skip"
@@ -6109,9 +8345,8 @@ def retrieve(
             "phase": task.get("phase"),
             # Manual progress first, the automatic checkpoint as a labelled
             # supplement; a task without a checkpoint renders as it always did.
-            "progress": render_current_state(
-                task["progress"], task.get("auto_checkpoint")
-            ),
+            "progress": (task['progress'] if delivery_profile == 'cursor-rule' else
+                         render_current_state(task["progress"], task.get("auto_checkpoint"))),
             "next_steps": task["next_steps"], "files": task["files"], "sources": task["sources"],
             "created_at": task["created_at"], "updated_at": task["updated_at"],
         },
@@ -6134,6 +8369,7 @@ def retrieve(
         "manifest_scope": manifest_scope,
     }
     pack_seconds = 0.0
+    result = _with_index_images(result, _selected_index_images(selected))
     if pack is not None:
         # The capsule as the host gets it: the limits of its JSON and of its
         # rendered text leave out what does not fit, and what they leave out
@@ -6166,12 +8402,120 @@ def retrieve(
             {"path": _episode_signature(episode)[0], "reason": "capsule-limit"}
             for episode in left_out_episodes
         )
+    # Last point-in-time source custody before receipts. Packing callbacks can
+    # race edits: remove all views and recompute hint-bearing gate provenance.
+    final_config = load_config(repository)
+    final_policy = _CurrentSourcePolicy(connection, repository)
+    final_policy.prime(selected)
+    working_current = task is None
+    working_changed = False
+    if task is not None:
+        try:
+            current_text = _read_final_working_record(task_path)
+            current_task, current_body = parse_markdown_record(task_path, text=current_text)
+            validate_record(current_task)
+            eligible, _ = record_is_eligible(repository, current_task, final_config)
+            working_current = (eligible and current_task["id"] == task["id"]
+                and _working_record_image(current_task, current_body) == initial_working_image)
+            # Still this task and still deliverable, only rewritten - by
+            # another session's turn checkpoint, say - while this capsule
+            # was assembled.
+            working_changed = not working_current and eligible and current_task["id"] == task["id"]
+        except (BrainError, OSError, UnicodeError, ValueError, TypeError):
+            working_current = False
+    working_withdrawn = task is not None and not working_current
+    derived_withdrawn = working_withdrawn and query_source in ("task", "continuation")
+    if working_withdrawn:
+        result["working"] = None
+        if working_changed:
+            result["working_changed"] = True
+    if derived_withdrawn:
+        query, query_source = task_identifier, "task-id"
+        result["query"] = query
+        local_episode_selected = []
+        # This also applies to an episode-only capsule: packed views are
+        # delivery, even when there are no selected document rows to prune.
+        result.update(procedural=[], semantic=[], episodic=[], selected=[],
+                      categories={key: [] for key in result.get("categories", {})})
+    result["query_source"] = query_source
+    if selected:
+        # Recheck only delivered rows, on copies and without reranking. A
+        # second ranking pass must not halve already-admitted citation drift.
+        expected_drift = {item["path"]: set(item.get("source_changed", [])) for item in selected}
+        final_rows = [dict(item) for item in selected]
+        for item in final_rows:
+            item.pop("source_changed", None)
+        current, custody_excluded = _runtime_filter(repository, final_rows, final_config, trace=trace,
+            connection=connection, source_policy=final_policy, custody_only=True)
+        current_paths = set()
+        for item in current:
+            if final_policy.missing_source(item):
+                custody_excluded.append({"path": item["path"], "reason": "source-missing"})
+            elif set(item.get("source_changed", [])) != expected_drift[item["path"]]:
+                # Do not expand already-packed warnings or adopt new content.
+                custody_excluded.append({"path": item["path"], "reason": "source-changed-during-pack"})
+            else:
+                current_paths.add(item["path"])
+        dropped = {item["path"] for item in selected if item["path"] not in current_paths}
+        if derived_withdrawn:
+            dropped.update(item["path"] for item in selected)
+        if dropped:
+            filter_excluded.extend(custody_excluded)
+            selected = [item for item in selected if item["path"] not in dropped]
+            signature = _retrieval_signature(query,
+                [*(item.get("_excerpt_identity", (item["path"], item["source_hash"])) for item in selected),
+                 *(_episode_signature(episode) for episode in local_episode_selected)],
+                task["revision"] if task is not None else 0)
+            gate = gate_decision(gate_mode, signature=signature,
+                previous=previous if isinstance(previous, dict) else None,
+                diagnostics=diagnostics, no_match=no_match,
+                matched_count=len(candidates) + len(event_candidates) + len(episode_candidates) + path_matched_count,
+                selected_count=len(selected) + len(local_episode_selected), conversation=session is not None,
+                delivery_profile=delivery_profile)
+            withheld = gate["mode"] == "enforce" and gate["decision"] == "skip"
+            if withheld:
+                selected, local_episode_selected = [], []
+            # Prune already packed views, never rerun callbacks or expand clipped
+            # snippets. The native renderer runs from these views after return.
+            allowed = {item["path"] for item in selected}
+            for key in ("procedural", "semantic", "selected"):
+                result[key] = [item for item in result.get(key, []) if item.get("path") in allowed]
+            result["episodic"] = [item for item in result.get("episodic", [])
+                                  if not withheld and (item.get("path") in allowed or item.get("id") in
+                                      {episode.get("id") for episode in local_episode_selected})]
+            result["categories"] = {key: [item for item in items if item.get("path") in allowed]
+                                    for key, items in result.get("categories", {}).items()}
+            result["gate"] = gate
+    if (pack is not None or hint_candidates or derived_withdrawn) and not withheld:
+        # A packed-out hint was never delivered either. Its proposed identity
+        # must not poison the next turn's repeat gate or baseline receipt.
+        signature = _retrieval_signature(query,
+            [*(item.get("_excerpt_identity", (item["path"], item["source_hash"])) for item in selected),
+             *(_episode_signature(episode) for episode in local_episode_selected)],
+            task["revision"] if task is not None else 0)
+        gate = gate_decision(gate_mode, signature=signature,
+            previous=previous if isinstance(previous, dict) else None,
+            diagnostics=diagnostics, no_match=no_match,
+            matched_count=len(candidates) + len(event_candidates) + len(episode_candidates) + path_matched_count,
+            selected_count=len(selected) + len(local_episode_selected), conversation=session is not None,
+            delivery_profile=delivery_profile)
+        withheld = gate["mode"] == "enforce" and gate["decision"] == "skip"
+        result["gate"] = gate
+        if withheld:
+            selected, local_episode_selected = [], []
+            result.update(procedural=[], semantic=[], episodic=[], selected=[],
+                          categories={key: [] for key in result.get("categories", {})})
+    if hint_stats is not None:
+        hint_stats["delivered"] = sum(item.get("selection") == "source-hint" for item in selected)
     usage = _token_usage(selected, local_episode_selected)
     trace.funnel_boundary("selected_post_pack", selected)
     trace.exclusions((item for item in layer_excluded if item["reason"] == "capsule-limit"), "capsule")
     for item in selected:
         trace.observe(item, "delivery", "selected")
     result["token_estimates"] = usage
+    # Rebind only from original final admitted rows, never callback attributes.
+    # This also precedes the local-publication-failure early return.
+    result = _with_index_images(result, _selected_index_images(selected))
     baseline_plan = None if withheld else {
         "key": baseline_key, "signature": signature, "expected": baseline_expected}
     session_plan = None
@@ -6207,16 +8551,6 @@ def retrieve(
         )
         # The expectation predates callbacks/packing, not the later projection.
         session_plan["expected"] = session_expected
-    receipt_return = _commit_ordinary_receipts(connection, baseline=baseline_plan, session=session_plan)
-    try:
-        try:
-            trace.ordinary_receipt = _observe_ordinary_receipt(
-                receipt_return, baseline_plan is not None or session_plan is not None)
-        except Exception:
-            pass
-    finally:
-        # Drop the owner's sensitive latest-session projection immediately.
-        del receipt_return
     manifest = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "id": manifest_id,
@@ -6226,9 +8560,9 @@ def retrieve(
         "task_revision": task["revision"] if task is not None else None,
         "local_episode_count": len(local_episode_selected),
         "filters": {
-            "privacy": config["allowed_privacy"],
-            "owners": config["owners"],
-            "authority": config["allowed_authority"],
+            "privacy": final_config["allowed_privacy"],
+            "owners": final_config["owners"],
+            "authority": final_config["allowed_authority"],
             "freshness": True,
             "active_only": True,
         },
@@ -6282,18 +8616,48 @@ def retrieve(
             ),
         },
     }
+    if hint_stats is not None:
+        manifest["source_hints"] = hint_stats
     validate_schema_file(
         repository, "retrieval-manifest.schema.json", manifest
     )
-    if manifest_scope == "governed":
+    # Revalidate caller-owned inferred identity after packing and schema work,
+    # before either manifest path or delivery receipts can claim a publication.
+    if admit_delivery is not None:
+        admit_delivery()
+    # A delivery receipt must not refer to a publication that then fails.
+    # Governed provenance is mandatory; local diagnostics are best effort.
+    if manifest_scope == 'governed':
         with mutation_lock(repository):
             atomic_json(manifest_path, manifest)
     else:
-        # Ignored local provenance for automated retrieval: the same validated
-        # record, kept out of shared history and out of the runtime lock.
-        atomic_json(manifest_path, manifest)
-        _prune_local_manifests(
-            manifest_directory, local_manifest_retention(config)
-        )
+        try:
+            atomic_json(manifest_path, manifest)
+        except OSError:
+            # The write might have taken effect before an error returned.
+            # Never adopt/delete that possible file or claim absence/no-op.
+            result['manifest'] = None
+            result['manifest_publication'] = 'unconfirmed'
+            trace.ordinary_receipt = unknown_ordinary_receipt()
+            if source_provenance_sink is not None:
+                proof = local_source_provenance(result, manifest)
+                if proof is not None:
+                    source_provenance_sink.update(proof)
+            return result
+        try:
+            _prune_local_manifests(manifest_directory, local_manifest_retention(config))
+        except OSError:
+            # Publication was confirmed. A retention error cannot invalidate it.
+            pass
+    receipt_return = _commit_ordinary_receipts(connection, baseline=baseline_plan, session=session_plan)
+    try:
+        try:
+            trace.ordinary_receipt = _observe_ordinary_receipt(
+                receipt_return, baseline_plan is not None or session_plan is not None)
+        except Exception:
+            pass
+    finally:
+        # Drop the owner's sensitive latest-session projection immediately.
+        del receipt_return
     _save_trace(repository, manifest_id, trace, config)
     return result

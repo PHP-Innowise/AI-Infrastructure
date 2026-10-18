@@ -1,0 +1,57 @@
+{
+  "questions": [
+    {
+      "question": "Larch interval?",
+      "query_image": null
+    },
+    {
+      "question": "Larch interval?",
+      "query_image": null
+    }
+  ],
+  "memory_spec": {
+    "build_ns": 11,
+    "insert_ingress_bytes": 211,
+    "query_ns": [
+      3,
+      5
+    ],
+    "query_input_bytes": 15,
+    "query_output_bytes": 107,
+    "context": [
+      {
+        "type": "text",
+        "value": "Reference data; verify canonical sources.\nLarch beacon ticks every 23 seconds."
+      }
+    ]
+  },
+  "reader_model": "public-larch-reader",
+  "judge_model": "public-larch-judge",
+  "reader_max_completion_tokens": 37,
+  "judge_max_completion_tokens": 19,
+  "raw_responses": [
+    "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"unused paid answer\",\"role\":\"assistant\"}}],\"id\":\"PUBLIC-LARCH-ID-0\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":7,\"completion_tokens_details\":{\"reasoning_tokens\":2},\"prompt_tokens\":41,\"prompt_tokens_details\":{\"cached_tokens\":9},\"total_tokens\":48}}",
+    "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"The larch period is 23 s.\",\"role\":\"assistant\"}}],\"id\":\"PUBLIC-LARCH-ID-1\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":9,\"completion_tokens_details\":{\"reasoning_tokens\":3},\"prompt_tokens\":44,\"prompt_tokens_details\":{\"cached_tokens\":10},\"total_tokens\":53}}",
+    "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"The larch period is 23 s.\",\"role\":\"assistant\"}}],\"id\":\"PUBLIC-LARCH-ID-2\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":7,\"completion_tokens_details\":{\"reasoning_tokens\":2},\"prompt_tokens\":41,\"prompt_tokens_details\":{\"cached_tokens\":9},\"total_tokens\":48}}",
+    "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"true\",\"role\":\"assistant\"}}],\"id\":\"PUBLIC-LARCH-ID-3\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":2,\"completion_tokens_details\":{\"reasoning_tokens\":0},\"prompt_tokens\":17,\"prompt_tokens_details\":{\"cached_tokens\":3},\"total_tokens\":19}}",
+    "{\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"message\":{\"content\":\"false\",\"role\":\"assistant\"}}],\"id\":\"PUBLIC-LARCH-ID-4\",\"object\":\"chat.completion\",\"usage\":{\"completion_tokens\":3,\"completion_tokens_details\":{\"reasoning_tokens\":1},\"prompt_tokens\":19,\"prompt_tokens_details\":{\"cached_tokens\":4},\"total_tokens\":22}}"
+  ],
+  "clock_points": [
+    100,
+    107,
+    200,
+    209,
+    300,
+    311,
+    400,
+    405,
+    500,
+    506
+  ],
+  "first_decoder_error": "PUBLIC-LARCH-DECODE-ERROR",
+  "reader_answer": "The larch period is 23 s.",
+  "scripted_grades": [
+    true,
+    false
+  ]
+}

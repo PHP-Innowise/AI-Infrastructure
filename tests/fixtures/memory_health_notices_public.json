@@ -1,0 +1,65 @@
+{
+  "records": [
+    {
+      "source_notices": {
+        "invalid-utf8": 2,
+        "invalid-utf8-path": 1,
+        "private/path/canary": 999
+      }
+    },
+    {
+      "source_notices": {
+        "invalid-utf8": 3
+      }
+    },
+    {
+      "source_notices": {
+        "invalid-utf8": true,
+        "invalid-utf8-path": -2
+      }
+    },
+    {
+      "hook_status": 0
+    }
+  ],
+  "total": {
+    "records": 2,
+    "totals": {
+      "invalid-utf8": 5,
+      "invalid-utf8-path": 1
+    }
+  },
+  "window3": {
+    "records": 1,
+    "totals": {
+      "invalid-utf8": 3
+    }
+  },
+  "invalid": [
+    null,
+    [],
+    42,
+    {
+      "invalid-utf8": true
+    },
+    {
+      "invalid-utf8": false
+    },
+    {
+      "invalid-utf8": 2.5
+    },
+    {
+      "invalid-utf8": "7"
+    },
+    {
+      "invalid-utf8": 0
+    },
+    {
+      "invalid-utf8": -9
+    },
+    {
+      "private/path/canary": 12
+    }
+  ],
+  "text": "  sources omitted: invalid UTF-8 content 5; invalid UTF-8 paths 1 (2 record(s))\n"
+}

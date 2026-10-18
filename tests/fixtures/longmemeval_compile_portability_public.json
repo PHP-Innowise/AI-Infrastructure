@@ -1,0 +1,13 @@
+{
+  "profile": "selected-api-prefix-deferred-annotations-offline-v1",
+  "whole_sha256": "607ca21320067df2abc3583b80debeb819781e90955776bdea4313a8b93a0586",
+  "prefix_sha256": "6bdc677c32b42ec6d7e142e07213adbcfb21403804aac16e2a2d810319756025",
+  "prefix_bytes": 7960,
+  "expected_empty_registry": true,
+  "deferred_annotation": "str | None",
+  "callers": [
+    ["tests/test_longmemeval_bridge.py", "pinned_unchanged_memory_api_prefix.py"],
+    ["tests/test_longmemeval_lifecycle.py", "new_maple_unchanged_api_prefix.py"]
+  ],
+  "scope": "compile exact unchanged public source through caller AST only; no import of caller fixtures, builders, evaluators, trajectories, answers or provider clients; not official Python 3.11 benchmark compatibility"
+}

@@ -1,0 +1,201 @@
+{
+ "error": "Git source context unavailable",
+ "selectors": [
+  "GIT_DIR",
+  "GIT_COMMON_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_SHALLOW_FILE",
+  "GIT_NAMESPACE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM"
+ ],
+ "benign": {
+  "GIT_EDITOR": "public-editor",
+  "GIT_ASKPASS": "public-askpass",
+  "GIT_TRACE": "1",
+  "GIT_PAGER": "public-pager"
+ },
+ "policy_injection": {
+  "GIT_CONFIG_COUNT": "1",
+  "GIT_CONFIG_KEY_0": "core.excludesFile",
+  "GIT_CONFIG_VALUE_0": "{EMPTY_EXCLUDES}"
+ },
+ "paths": [
+  "docs/marten.md",
+  "docs/ledger.md",
+  "docs/global-note.md",
+  "docs/marten notes.md"
+ ],
+ "expected_ignored": [
+  "docs/global-note.md",
+  "docs/marten.md"
+ ],
+ "root_ignore": "memory-bank/local/\nproject-brain/local/\ndocs/marten.md\n",
+ "global_ignore": "**/global-note.md\n",
+ "foreign_ignore": "memory-bank/local/\n",
+ "nested_prefix": "packages/marten/",
+ "nested_root_ignore": "packages/marten/docs/marten.md\n",
+ "accelerator_path": "AGENTS.md",
+ "working_extra_ignore": "AGENTS.md\n",
+ "native": {
+  "task_id": "feature/marten-ledger",
+  "goal": "Review the marten source ledger",
+  "progress": "Marten ledger inspection is saved.",
+  "next_step": "Confirm the amber marker.",
+  "source": "docs/marten.md",
+  "source_text": "# Marten ledger\n\nThe public marten marker is amber.\n",
+  "query": "marten ledger amber",
+  "configuration": {
+   "mode": "governed",
+   "automatic_promotion": false,
+   "automatic_compaction": false,
+   "automatic_completion": false
+  },
+  "start_revision": 1,
+  "update_revision": 2,
+  "expected": {
+   "returncode": 1,
+   "stdout": "",
+   "stderr": "context: Git source context unavailable\n",
+   "hook_returncode": 0,
+   "hook_stdout": "Memory refresh unavailable: it exited 1 — context: Git source context unavailable.\nWorking memory was NOT consulted this turn. Read the canonical sources directly.\n",
+   "database_unchanged": true,
+   "shared_unchanged": true
+  }
+ },
+ "frame_template": "{TOP}\n{PREFIX}\n{GITDIR}\n",
+ "malformed_frames": [
+  "not-absolute\n\n{GITDIR}\n",
+  "{TOP}\nwrong-prefix/\n{GITDIR}\n",
+  "{TOP}\n\nrelative-gitdir\n",
+  "{TOP}\n\n{GITDIR}\nextra\n"
+ ],
+ "transport": {
+  "input": [
+   "docs/a.md",
+   "docs/a.md",
+   "docs/b.md"
+  ],
+  "responses": [
+   {
+    "name": "valid-two",
+    "status": 0,
+    "bytes_hex": "646f63732f612e6d6400646f63732f622e6d6400",
+    "expected": [
+     "docs/a.md",
+     "docs/b.md"
+    ]
+   },
+   {
+    "name": "valid-duplicate",
+    "status": 0,
+    "bytes_hex": "646f63732f612e6d6400646f63732f612e6d6400",
+    "expected": [
+     "docs/a.md"
+    ]
+   },
+   {
+    "name": "valid-empty",
+    "status": 1,
+    "bytes_hex": "",
+    "expected": []
+   },
+   {
+    "name": "missing-eof",
+    "status": 0,
+    "bytes_hex": "646f63732f612e6d64",
+    "expected": null
+   },
+   {
+    "name": "empty-member",
+    "status": 0,
+    "bytes_hex": "00",
+    "expected": null
+   },
+   {
+    "name": "foreign-member",
+    "status": 0,
+    "bytes_hex": "646f63732f632e6d6400",
+    "expected": null
+   },
+   {
+    "name": "too-many-duplicates",
+    "status": 0,
+    "bytes_hex": "646f63732f612e6d6400646f63732f612e6d6400646f63732f612e6d6400",
+    "expected": null
+   },
+   {
+    "name": "wrong-zero-status",
+    "status": 0,
+    "bytes_hex": "",
+    "expected": null
+   },
+   {
+    "name": "wrong-one-status",
+    "status": 1,
+    "bytes_hex": "646f63732f612e6d6400",
+    "expected": null
+   },
+   {
+    "name": "fatal",
+    "status": 128,
+    "bytes_hex": "",
+    "expected": null
+   }
+  ]
+ },
+ "deadlines": {
+  "ordinary_seconds": 2.0,
+  "entry_seconds": 2.0,
+  "mock_times": [
+   10.0,
+   10.01,
+   10.03,
+   10.08
+  ],
+  "expected_timeouts": [
+   1.99,
+   1.97,
+   1.92
+  ]
+ },
+ "no_stage_commit_or_fixture_history": true,
+ "layout_profiles": [
+  "normal",
+  "nested",
+  "separate-git-dir",
+  "plain-no-git"
+ ],
+ "actual_foreign_owner_native_windows_linkedworktrees": "UNRUN",
+ "capture": "postcommunicate bounded admission only; no hardproducer memory/drainwall bound",
+ "no_fs_snapshot_current_branch_or_full_authority_claim": true,
+ "setup_supplement": {
+  "native_persisted_fields": {
+   "external_id": "feature/marten-ledger",
+   "goal": "Review the marten source ledger",
+   "progress": "Marten ledger inspection is saved.",
+   "next_steps": [
+    "Confirm the amber marker."
+   ],
+   "sources": [
+    "docs/marten.md"
+   ],
+   "revision": 2
+  },
+  "early_guard": {
+   "commands": [
+    "refresh",
+    "index"
+   ],
+   "returncode": 1,
+   "stdout": "",
+   "stderr": "context: Git source context unavailable\n",
+   "ensure_attached_state_calls": 0,
+   "connect_calls": 0
+  },
+  "source_only_review_before_execution": true
+ }
+}

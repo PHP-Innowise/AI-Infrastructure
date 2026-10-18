@@ -311,7 +311,10 @@ class FleetReviewTest(unittest.TestCase):
                               "lenses": list(self.config.lenses)}, config=options)
         finally:
             connection.close()
-        self.assertEqual(attempts, {"code-reviewer": 1, "security-reviewer": 1})
+        # The reviewers run in parallel: the failure can stop the graph before
+        # the peer starts, or after it finished. Either way it never runs twice.
+        self.assertEqual(attempts["security-reviewer"], 1)
+        self.assertIn(attempts["code-reviewer"], (0, 1))
         allow_failure = False
         reopened = sqlite3.connect(str(self.config.checkpoint_path), check_same_thread=False)
         try:

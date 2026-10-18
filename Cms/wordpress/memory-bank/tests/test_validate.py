@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import shutil
+import os
 import subprocess
 import sys
 import tempfile
@@ -250,11 +252,18 @@ class MemoryBankValidatorTest(unittest.TestCase):
 
     def test_all_session_hooks_report_json_frontmatter_status(self) -> None:
         self.add_chunk('```json\n"status": "needs-review",\n```\n')
+        # Hooks derive ROOT from their own location. The temporary cwd alone
+        # used to exercise the real edition (and append its health journal).
+        shutil.copytree(REPOSITORY_ROOT / 'memory-bank/scripts', self.bank / 'scripts',
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
 
         for edition in (".claude", ".cursor", ".codex"):
             with self.subTest(edition=edition):
+                hook = self.repository / edition / 'hooks/local-context.sh'
+                hook.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(REPOSITORY_ROOT / edition / 'hooks/local-context.sh', hook)
                 result = subprocess.run(
-                    ["bash", str(REPOSITORY_ROOT / edition / "hooks" / "local-context.sh")],
+                    ["bash", str(hook)],
                     cwd=self.repository,
                     text=True,
                     capture_output=True,
@@ -264,6 +273,32 @@ class MemoryBankValidatorTest(unittest.TestCase):
                     "Memory bank: 1 chunks (1 active, 0 needs review).",
                     result.stdout,
                 )
+
+    def test_the_summary_counts_chunks_whose_cited_file_is_gone(self) -> None:
+        # A chunk citing a file renamed with `git mv` is no longer retrieved,
+        # and the session summary counted it as active all the same.
+        self.add_chunk()
+        self.assertEqual("Memory bank: 1 chunks (1 active, 0 needs review).",
+                         VALIDATOR.summarize_bank(self.bank))
+        self.repository.joinpath("AGENTS.md").rename(self.repository / "POLICY.md")
+        self.assertEqual("Memory bank: 1 chunks (1 active, 0 needs review). 1 active chunk(s) cite a file "
+                         "that is gone and are not retrieved; memory-bank/scripts/validate.py names them.",
+                         VALIDATOR.summarize_bank(self.bank))
+
+    def test_validate_names_where_git_moved_a_cited_file(self) -> None:
+        self.add_chunk()
+        git = ["git", "-C", str(self.repository), "-c", "user.email=v@example.invalid", "-c", "user.name=V"]
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        subprocess.run(git[:3] + ["init", "-q"], check=True, capture_output=True, env=environment)
+        self.repository.joinpath("AGENTS.md").write_text("# Policy\n\nLayers stay apart, always.\n",
+                                                         encoding="utf-8")
+        for arguments in (["add", "-A"], ["commit", "-q", "-m", "policy"], ["mv", "AGENTS.md", "POLICY.md"],
+                          ["commit", "-q", "-m", "rename"]):
+            subprocess.run(git + arguments, check=True, capture_output=True, env=environment)
+        result = subprocess.run([sys.executable, str(MODULE_PATH), str(self.bank)], text=True,
+                                capture_output=True, env=environment)
+        self.assertEqual(1, result.returncode)
+        self.assertIn("source path does not exist: AGENTS.md - Git moved it to POLICY.md", result.stderr)
 
     def test_chunks_directory_rejects_unexpected_file(self) -> None:
         chunks = self.bank / "chunks"

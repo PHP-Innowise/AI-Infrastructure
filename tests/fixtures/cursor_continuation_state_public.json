@@ -1,0 +1,72 @@
+{
+  "profile": "wren-cursor-continuity-public-v1",
+  "source_path": "specs/wren-routing.md",
+  "source": "# Wren envelope routing\n\nWren envelopes use two keepers and expire after eleven minutes.\n",
+  "initial_fact": "Wren envelopes use two keepers and expire after eleven minutes.",
+  "changed_fact": "Wren envelopes use three keepers and expire after thirteen minutes.",
+  "other_path": "specs/marten-audit.md",
+  "other_source": "# Marten audit policy\n\nMarten audit markers expire after seventeen minutes.\n",
+  "task_id": "feature/wren-route",
+  "explicit_goal": "Verify Wren envelope routing keepers expiry",
+  "substantive_query": "Wren envelope routing keepers expiry",
+  "other_query": "Marten audit markers expiry",
+  "unmatched_query": "ibis diffraction lattice matrix",
+  "continuations": [
+    "yes do it",
+    "yes, do it",
+    "да",
+    "сделай",
+    "дальше",
+    "continue",
+    "go on",
+    "why?",
+    "fix it"
+  ],
+  "noncontinuations": [
+    "explain cancellation policy",
+    "do not continue"
+  ],
+  "profiles": [
+    "governed-explicit",
+    "governed-derived",
+    "governed-warming",
+    "lightweight"
+  ],
+  "oracles": {
+    "continued_paths": [
+      "specs/wren-routing.md"
+    ],
+    "changed_excerpt": "Wren envelopes use three keepers and expire after thirteen minutes.",
+    "deleted_paths": [],
+    "routine_only_rule_bytes": "UNCHANGED",
+    "routine_only_rule_identity": "UNCHANGED",
+    "real_progress_rule_bytes": "CHANGED",
+    "fresh_manifest_visibility": "EXACT_RENDERED_SELECTION",
+    "other_host_output": "BYTE_IDENTICAL_UNCHANGED_PROFILE",
+    "failed_scope_seed": "NOT_USED",
+    "privacy_modified_seed": "NOT_STORED",
+    "meaningful_unmatched_next_ack": "NO_OLDER_SEED",
+    "terminal_or_new_generation_seed": "NOT_USED",
+    "provider_tokens": null,
+    "semantic_quality": "UNMEASURED",
+    "internal_fifth_turn_provision_cas": "SAME_QUERY_ONLY_PROVEN_INTERNAL_HANDOFF",
+    "explicit_rebind_or_foreign_task": "NOT_USED",
+    "unborn_named_branch": "SUPPORTED_SCOPE",
+    "same_branch_commit": "SAME_TOPIC_FRESH_CURRENT_SOURCES",
+    "enforced_repeat_new_failure": "FRESH_WARNING_VISIBLE_IN_FRESH_RULE",
+    "derived_goals": {
+      "governed": "Wren route governed (auto-provisioned from feature/wren-route-governed)",
+      "lightweight": "Wren route lightweight (auto-provisioned from feature/wren-route-lightweight)"
+    }
+  },
+  "background_sources": {
+    "specs/cinder.md": "# Cinder specimen\n\nThe cinder specimen has a numbered public marker.\n",
+    "specs/harbor.md": "# Harbor specimen\n\nThe harbor specimen has a numbered public marker.\n",
+    "specs/tundra.md": "# Tundra specimen\n\nThe tundra specimen has a numbered public marker.\n",
+    "specs/kestrel.md": "# Kestrel specimen\n\nThe kestrel specimen has a numbered public marker.\n",
+    "specs/ochre.md": "# Ochre specimen\n\nThe ochre specimen has a numbered public marker.\n",
+    "specs/periwinkle.md": "# Periwinkle specimen\n\nThe periwinkle specimen has a numbered public marker.\n",
+    "specs/quartz.md": "# Quartz specimen\n\nThe quartz specimen has a numbered public marker.\n",
+    "specs/zephyr.md": "# Zephyr specimen\n\nThe zephyr specimen has a numbered public marker.\n"
+  }
+}

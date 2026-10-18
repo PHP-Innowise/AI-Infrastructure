@@ -1,0 +1,261 @@
+{
+  "reader_request": {
+    "model": "public-cobalt-reader",
+    "messages": [
+      {
+        "role": "system",
+        "content": "Use reference memory; verify canonical sources."
+      },
+      {
+        "role": "user",
+        "content": "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nCobalt coolant limit is 48 C.\"}],\"question\":\"Cobalt coolant limit?\"}"
+      }
+    ],
+    "max_completion_tokens": 61,
+    "timeout": 12.0
+  },
+  "reader_utf8": "{\"max_completion_tokens\":61,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[{\\\"type\\\":\\\"text\\\",\\\"value\\\":\\\"Reference data; verify canonical sources.\\\\nCobalt coolant limit is 48 C.\\\"}],\\\"question\\\":\\\"Cobalt coolant limit?\\\"}\",\"role\":\"user\"}],\"model\":\"public-cobalt-reader\",\"timeout\":12.0}",
+  "reader_bytes": 363,
+  "empty_utf8": "{\"max_completion_tokens\":61,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[],\\\"question\\\":\\\"Cobalt coolant limit?\\\"}\",\"role\":\"user\"}],\"model\":\"public-cobalt-reader\",\"timeout\":12.0}",
+  "empty_bytes": 256,
+  "construction": {
+    "profile": "longmemeval/upstream-sdk-argument-construction-v1",
+    "horizon": 2,
+    "slots": [
+      {
+        "ordinal": 0,
+        "question": "Cobalt coolant limit?",
+        "query_outcome": "succeeded",
+        "local_ordinal": 0,
+        "reader_request": {
+          "system": "Use reference memory; verify canonical sources.",
+          "question": "Cobalt coolant limit?",
+          "memory_context": [
+            {
+              "type": "text",
+              "value": "Reference data; verify canonical sources.\nCobalt coolant limit is 48 C."
+            }
+          ]
+        },
+        "reader_outcome": "succeeded",
+        "reader_answer": "48 C"
+      },
+      {
+        "ordinal": 1,
+        "question": "Cobalt coolant limit?",
+        "query_outcome": "succeeded",
+        "local_ordinal": 1,
+        "reader_request": {
+          "system": "Use reference memory; verify canonical sources.",
+          "question": "Cobalt coolant limit?",
+          "memory_context": [
+            {
+              "type": "text",
+              "value": "Reference data; verify canonical sources.\nCobalt coolant limit is 48 C."
+            }
+          ]
+        },
+        "reader_outcome": "succeeded",
+        "reader_answer": "48 C"
+      }
+    ],
+    "reader_attempts": [
+      {
+        "ordinal": 0,
+        "reservation": 1,
+        "prepared_request_bytes": 363,
+        "sdk_argument_bytes": 363,
+        "sdk_create_boundaries": 1,
+        "response_proxy_bytes": 257,
+        "usage_state": "complete",
+        "usage": {
+          "input_tokens": 53,
+          "output_tokens": 14,
+          "total_tokens": 67,
+          "cached_input_tokens": 12,
+          "reasoning_output_tokens": 5
+        },
+        "outcome": "failed",
+        "request": {
+          "model": "public-cobalt-reader",
+          "messages": [
+            {
+              "role": "system",
+              "content": "Use reference memory; verify canonical sources."
+            },
+            {
+              "role": "user",
+              "content": "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nCobalt coolant limit is 48 C.\"}],\"question\":\"Cobalt coolant limit?\"}"
+            }
+          ],
+          "max_completion_tokens": 61,
+          "timeout": 12.0
+        }
+      },
+      {
+        "ordinal": 0,
+        "reservation": 2,
+        "prepared_request_bytes": 363,
+        "sdk_argument_bytes": 363,
+        "sdk_create_boundaries": 1,
+        "response_proxy_bytes": 261,
+        "usage_state": "complete",
+        "usage": {
+          "input_tokens": 59,
+          "output_tokens": 16,
+          "total_tokens": 75,
+          "cached_input_tokens": 13,
+          "reasoning_output_tokens": 6
+        },
+        "outcome": "succeeded",
+        "request": {
+          "model": "public-cobalt-reader",
+          "messages": [
+            {
+              "role": "system",
+              "content": "Use reference memory; verify canonical sources."
+            },
+            {
+              "role": "user",
+              "content": "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nCobalt coolant limit is 48 C.\"}],\"question\":\"Cobalt coolant limit?\"}"
+            }
+          ],
+          "max_completion_tokens": 61,
+          "timeout": 12.0
+        }
+      },
+      {
+        "ordinal": 1,
+        "reservation": 1,
+        "prepared_request_bytes": 363,
+        "sdk_argument_bytes": 363,
+        "sdk_create_boundaries": 1,
+        "response_proxy_bytes": 261,
+        "usage_state": "complete",
+        "usage": {
+          "input_tokens": 61,
+          "output_tokens": 17,
+          "total_tokens": 78,
+          "cached_input_tokens": 14,
+          "reasoning_output_tokens": 7
+        },
+        "outcome": "succeeded",
+        "request": {
+          "model": "public-cobalt-reader",
+          "messages": [
+            {
+              "role": "system",
+              "content": "Use reference memory; verify canonical sources."
+            },
+            {
+              "role": "user",
+              "content": "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nCobalt coolant limit is 48 C.\"}],\"question\":\"Cobalt coolant limit?\"}"
+            }
+          ],
+          "max_completion_tokens": 61,
+          "timeout": 12.0
+        }
+      }
+    ]
+  },
+  "construction_utf8": "{\"horizon\":2,\"profile\":\"longmemeval/upstream-sdk-argument-construction-v1\",\"reader_attempts\":[{\"ordinal\":0,\"outcome\":\"failed\",\"prepared_request_bytes\":363,\"request\":{\"max_completion_tokens\":61,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[{\\\"type\\\":\\\"text\\\",\\\"value\\\":\\\"Reference data; verify canonical sources.\\\\nCobalt coolant limit is 48 C.\\\"}],\\\"question\\\":\\\"Cobalt coolant limit?\\\"}\",\"role\":\"user\"}],\"model\":\"public-cobalt-reader\",\"timeout\":12.0},\"reservation\":1,\"response_proxy_bytes\":257,\"sdk_argument_bytes\":363,\"sdk_create_boundaries\":1,\"usage\":{\"cached_input_tokens\":12,\"input_tokens\":53,\"output_tokens\":14,\"reasoning_output_tokens\":5,\"total_tokens\":67},\"usage_state\":\"complete\"},{\"ordinal\":0,\"outcome\":\"succeeded\",\"prepared_request_bytes\":363,\"request\":{\"max_completion_tokens\":61,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[{\\\"type\\\":\\\"text\\\",\\\"value\\\":\\\"Reference data; verify canonical sources.\\\\nCobalt coolant limit is 48 C.\\\"}],\\\"question\\\":\\\"Cobalt coolant limit?\\\"}\",\"role\":\"user\"}],\"model\":\"public-cobalt-reader\",\"timeout\":12.0},\"reservation\":2,\"response_proxy_bytes\":261,\"sdk_argument_bytes\":363,\"sdk_create_boundaries\":1,\"usage\":{\"cached_input_tokens\":13,\"input_tokens\":59,\"output_tokens\":16,\"reasoning_output_tokens\":6,\"total_tokens\":75},\"usage_state\":\"complete\"},{\"ordinal\":1,\"outcome\":\"succeeded\",\"prepared_request_bytes\":363,\"request\":{\"max_completion_tokens\":61,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"memory_context\\\":[{\\\"type\\\":\\\"text\\\",\\\"value\\\":\\\"Reference data; verify canonical sources.\\\\nCobalt coolant limit is 48 C.\\\"}],\\\"question\\\":\\\"Cobalt coolant limit?\\\"}\",\"role\":\"user\"}],\"model\":\"public-cobalt-reader\",\"timeout\":12.0},\"reservation\":1,\"response_proxy_bytes\":261,\"sdk_argument_bytes\":363,\"sdk_create_boundaries\":1,\"usage\":{\"cached_input_tokens\":14,\"input_tokens\":61,\"output_tokens\":17,\"reasoning_output_tokens\":7,\"total_tokens\":78},\"usage_state\":\"complete\"}],\"slots\":[{\"local_ordinal\":0,\"ordinal\":0,\"query_outcome\":\"succeeded\",\"question\":\"Cobalt coolant limit?\",\"reader_answer\":\"48 C\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nCobalt coolant limit is 48 C.\"}],\"question\":\"Cobalt coolant limit?\",\"system\":\"Use reference memory; verify canonical sources.\"}},{\"local_ordinal\":1,\"ordinal\":1,\"query_outcome\":\"succeeded\",\"question\":\"Cobalt coolant limit?\",\"reader_answer\":\"48 C\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Reference data; verify canonical sources.\\nCobalt coolant limit is 48 C.\"}],\"question\":\"Cobalt coolant limit?\",\"system\":\"Use reference memory; verify canonical sources.\"}}]}",
+  "construction_sha256": "302b10d2abe4ca07e3fc5176e845cb895870f8ce422d588bba999ffa21866470",
+  "construction_bytes": 2886,
+  "judge_requests": [
+    {
+      "model": "public-cobalt-judge",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Use reference memory; verify canonical sources."
+        },
+        {
+          "role": "user",
+          "content": "{\"answer\":\"48 C\",\"construction_sha256\":\"302b10d2abe4ca07e3fc5176e845cb895870f8ce422d588bba999ffa21866470\",\"question\":\"Cobalt coolant limit?\"}"
+        }
+      ],
+      "max_completion_tokens": 17,
+      "timeout": 9.0
+    },
+    {
+      "model": "public-cobalt-judge",
+      "messages": [
+        {
+          "role": "system",
+          "content": "Use reference memory; verify canonical sources."
+        },
+        {
+          "role": "user",
+          "content": "{\"answer\":\"48 C\",\"construction_sha256\":\"302b10d2abe4ca07e3fc5176e845cb895870f8ce422d588bba999ffa21866470\",\"question\":\"Cobalt coolant limit?\"}"
+        }
+      ],
+      "max_completion_tokens": 17,
+      "timeout": 9.0
+    }
+  ],
+  "judge_utf8": [
+    "{\"max_completion_tokens\":17,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"answer\\\":\\\"48 C\\\",\\\"construction_sha256\\\":\\\"302b10d2abe4ca07e3fc5176e845cb895870f8ce422d588bba999ffa21866470\\\",\\\"question\\\":\\\"Cobalt coolant limit?\\\"}\",\"role\":\"user\"}],\"model\":\"public-cobalt-judge\",\"timeout\":9.0}",
+    "{\"max_completion_tokens\":17,\"messages\":[{\"content\":\"Use reference memory; verify canonical sources.\",\"role\":\"system\"},{\"content\":\"{\\\"answer\\\":\\\"48 C\\\",\\\"construction_sha256\\\":\\\"302b10d2abe4ca07e3fc5176e845cb895870f8ce422d588bba999ffa21866470\\\",\\\"question\\\":\\\"Cobalt coolant limit?\\\"}\",\"role\":\"user\"}],\"model\":\"public-cobalt-judge\",\"timeout\":9.0}"
+  ],
+  "judge_bytes": [
+    345,
+    345
+  ],
+  "reader_returns": [
+    [
+      "48 C",
+      {
+        "prompt_tokens": 59,
+        "completion_tokens": 16,
+        "total_tokens": 75
+      }
+    ],
+    [
+      "48 C",
+      {
+        "prompt_tokens": 61,
+        "completion_tokens": 17,
+        "total_tokens": 78
+      }
+    ]
+  ],
+  "partial_return": [
+    "48 C",
+    {
+      "prompt_tokens": 31,
+      "completion_tokens": 0,
+      "total_tokens": 40
+    }
+  ],
+  "partial_observation": {
+    "input_tokens": 31,
+    "output_tokens": null,
+    "total_tokens": 40,
+    "cached_input_tokens": 7,
+    "reasoning_output_tokens": null
+  },
+  "product_known": {
+    "tokens": 220,
+    "input": 173,
+    "output": 47,
+    "component_ns": 49,
+    "bytes": 1462
+  },
+  "experiment_known": {
+    "tokens": 279,
+    "input": 225,
+    "output": 54,
+    "component_ns": 60,
+    "bytes": 2152
+  },
+  "response_bytes": [
+    257,
+    261,
+    261,
+    259,
+    260
+  ],
+  "query_input_bytes": 21,
+  "query_output_bytes": 100,
+  "local_bytes": 373
+}

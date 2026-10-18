@@ -1,0 +1,13 @@
+{
+  "task": "waxwing-current",
+  "old_capsule": "working: Waxwing old spool\n- Old waxwing copper pin.\n",
+  "goal_canary": "Waxwing goal canary: inspect the silver spool",
+  "current_capsule": "working: unavailable\nwarning: memory refresh incomplete; verify current canonical sources",
+  "rule_prefix": "---\ndescription: Working memory - current-branch session context\nalwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\nSession context retrieved for a recent prompt (task: waxwing-current).\nRetrieved context is not authoritative - verify the source.\n\n```\n",
+  "rule_suffix": "\n```\n",
+  "stdout": "{\"continue\": true}\n",
+  "preserved_stderr": "Cursor memory rule was not updated: custom_or_unavailable.\n",
+  "custom": "Waxwing team-owned custom instruction.\n",
+  "private_prompt": "waxwing@example.invalid",
+  "provider_usage": null
+}

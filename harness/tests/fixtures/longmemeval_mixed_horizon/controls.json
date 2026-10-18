@@ -1,0 +1,2135 @@
+{
+  "cases": [
+    {
+      "clock_values": [
+        100,
+        109,
+        200,
+        213
+      ],
+      "contexts": [
+        [
+          {
+            "type": "text",
+            "value": "Route Pavo-42 ends at Dock 11."
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "Route Rill-53 uses label Cedar."
+          }
+        ]
+      ],
+      "expected": {
+        "clock_calls": 4,
+        "construction_sha256": "9efffc94e882d0e0ac379c97104f244ae7f8c5265b0316b000d59e555fb43e21",
+        "construction_utf8": "{\"horizon\":2,\"profile\":\"longmemeval/local-text-callback-construction-v1\",\"slots\":[{\"local_ordinal\":0,\"ordinal\":0,\"query_outcome\":\"succeeded\",\"question\":\"Where does route Pavo-42 end?\",\"reader_answer\":\"Dock 11.\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Pavo-42 ends at Dock 11.\"}],\"question\":\"Where does route Pavo-42 end?\",\"system\":\"Use reference memory; verify canonical sources.\"}},{\"local_ordinal\":null,\"ordinal\":1,\"query_outcome\":\"unlaunched\",\"question\":\"Which label marks route Rill-53?\",\"reader_answer\":null,\"reader_outcome\":\"unlaunched\",\"reader_request\":null}]}",
+        "final_snapshot": {
+          "callback_entries": 2,
+          "closed": true,
+          "construction_blocked": false,
+          "construction_sha256": "9efffc94e882d0e0ac379c97104f244ae7f8c5265b0316b000d59e555fb43e21",
+          "ledger": {
+            "attempt_limit": 4096,
+            "attempts": 2,
+            "duplicates": 0,
+            "experiment": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 70,
+              "known_constructed_bytes": 438,
+              "known_input_tokens": 16,
+              "known_output_tokens": 4,
+              "known_tokens": 20,
+              "known_usd_micros": 10,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "frozen": true,
+            "grading": {
+              "complete": false,
+              "conflicting": 0,
+              "correct": null,
+              "known_correct": 1,
+              "observed": 1
+            },
+            "horizon": 2,
+            "observation_errors": 0,
+            "overflow": false,
+            "phases": {
+              "build": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 1,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 31,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 72,
+                "expected_units": 1,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 31,
+                "known_constructed_bytes": 72,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "judge": {
+                "attempts": 1,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 1,
+                "input_tokens": null,
+                "known_component_ns": 13,
+                "known_constructed_bytes": 153,
+                "known_input_tokens": 5,
+                "known_output_tokens": 1,
+                "known_tokens": 6,
+                "known_usd_micros": 3,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 1
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "query": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 17,
+                "known_constructed_bytes": 34,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "reader": {
+                "attempts": 1,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 1,
+                "input_tokens": null,
+                "known_component_ns": 9,
+                "known_constructed_bytes": 179,
+                "known_input_tokens": 11,
+                "known_output_tokens": 3,
+                "known_tokens": 14,
+                "known_usd_micros": 7,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 1
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              }
+            },
+            "product": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 57,
+              "known_constructed_bytes": 285,
+              "known_input_tokens": 11,
+              "known_output_tokens": 3,
+              "known_tokens": 14,
+              "known_usd_micros": 7,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1"
+          },
+          "local_imports": 1,
+          "native_teardown_attempted": true,
+          "observation_faults": 0,
+          "pending_tickets": 0,
+          "planned_to_local": [
+            0,
+            null
+          ],
+          "profile": "longmemeval/local-text-callback-controller-v1",
+          "provider_coverage": "UNKNOWN",
+          "provider_usage_verified": false
+        },
+        "judge_factories": 1,
+        "judge_request_utf8": [
+          "{\"answer\":\"Dock 11.\",\"construction_sha256\":\"9efffc94e882d0e0ac379c97104f244ae7f8c5265b0316b000d59e555fb43e21\",\"question\":\"Where does route Pavo-42 end?\"}"
+        ],
+        "memory_actions": {
+          "clear_context": 1,
+          "close": 1,
+          "post_hook": 1,
+          "query": 1,
+          "set_context": 1,
+          "snapshot": 4
+        },
+        "reader_request_utf8": [
+          "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Pavo-42 ends at Dock 11.\"}],\"question\":\"Where does route Pavo-42 end?\",\"system\":\"Use reference memory; verify canonical sources.\"}"
+        ],
+        "repeat_final_snapshot": {
+          "callback_entries": 2,
+          "closed": true,
+          "construction_blocked": false,
+          "construction_sha256": "9efffc94e882d0e0ac379c97104f244ae7f8c5265b0316b000d59e555fb43e21",
+          "ledger": {
+            "attempt_limit": 4096,
+            "attempts": 2,
+            "duplicates": 0,
+            "experiment": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 70,
+              "known_constructed_bytes": 438,
+              "known_input_tokens": 16,
+              "known_output_tokens": 4,
+              "known_tokens": 20,
+              "known_usd_micros": 10,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "frozen": true,
+            "grading": {
+              "complete": false,
+              "conflicting": 0,
+              "correct": null,
+              "known_correct": 1,
+              "observed": 1
+            },
+            "horizon": 2,
+            "observation_errors": 0,
+            "overflow": false,
+            "phases": {
+              "build": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 1,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 31,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 72,
+                "expected_units": 1,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 31,
+                "known_constructed_bytes": 72,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "judge": {
+                "attempts": 1,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 1,
+                "input_tokens": null,
+                "known_component_ns": 13,
+                "known_constructed_bytes": 153,
+                "known_input_tokens": 5,
+                "known_output_tokens": 1,
+                "known_tokens": 6,
+                "known_usd_micros": 3,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 1
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "query": {
+                "attempts": 0,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 0,
+                "input_tokens": null,
+                "known_component_ns": 17,
+                "known_constructed_bytes": 34,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "reader": {
+                "attempts": 1,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 1,
+                "input_tokens": null,
+                "known_component_ns": 9,
+                "known_constructed_bytes": 179,
+                "known_input_tokens": 11,
+                "known_output_tokens": 3,
+                "known_tokens": 14,
+                "known_usd_micros": 7,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 1
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              }
+            },
+            "product": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 57,
+              "known_constructed_bytes": 285,
+              "known_input_tokens": 11,
+              "known_output_tokens": 3,
+              "known_tokens": 14,
+              "known_usd_micros": 7,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1"
+          },
+          "local_imports": 1,
+          "native_teardown_attempted": true,
+          "observation_faults": 0,
+          "pending_tickets": 0,
+          "planned_to_local": [
+            0,
+            null
+          ],
+          "profile": "longmemeval/local-text-callback-controller-v1",
+          "provider_coverage": "UNKNOWN",
+          "provider_usage_verified": false
+        },
+        "repeat_new_work": {
+          "callbacks": 0,
+          "clock": 0,
+          "memory_actions": 0
+        },
+        "second_judge_guard": "controller_judge_state",
+        "supplied_memory_final": {
+          "closed": true,
+          "local_observation": {
+            "ledger": {
+              "frozen": true,
+              "horizon": 2,
+              "profile": "memory-benchmark-ledger-v1"
+            },
+            "observed": {
+              "build_component_ns": 31,
+              "cleanup_outcome": "succeeded",
+              "initialization_outcome": "succeeded",
+              "insert_calls": 1,
+              "insert_ingress_bytes": 72,
+              "local_token_profile": "pinned_local_no_model",
+              "observation_incomplete": false,
+              "query_calls": 1,
+              "query_receipts": [
+                {
+                  "component_ns": 17,
+                  "input_bytes": 11,
+                  "native_metadata_bound": true,
+                  "ordinal": 0,
+                  "outcome": "succeeded",
+                  "output_bytes": 23,
+                  "query_image_ignored": false,
+                  "state": "delivered"
+                }
+              ]
+            },
+            "profile": "native-fts5/observed-local-operations-v1"
+          },
+          "profile": "longmemeval/native-fts5-registration-v1"
+        }
+      },
+      "judge_reports": [
+        {
+          "ordinal": 0,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "succeeded",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 5,
+              "output_tokens": 1,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 6
+            },
+            "usd_micros": 3,
+            "value": true
+          }
+        }
+      ],
+      "name": "graded_plus_unlaunched",
+      "questions": [
+        {
+          "query_image": null,
+          "question": "Where does route Pavo-42 end?"
+        },
+        {
+          "query_image": null,
+          "question": "Which label marks route Rill-53?"
+        }
+      ],
+      "reader_reports": [
+        {
+          "ordinal": 0,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "succeeded",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 11,
+              "output_tokens": 3,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 14
+            },
+            "usd_micros": 7,
+            "value": "Dock 11."
+          }
+        }
+      ],
+      "supplied_memory_initial": {
+        "closed": false,
+        "local_observation": {
+          "ledger": {
+            "frozen": false,
+            "horizon": 2,
+            "profile": "memory-benchmark-ledger-v1"
+          },
+          "observed": {
+            "build_component_ns": 31,
+            "cleanup_outcome": "not_attempted",
+            "initialization_outcome": "succeeded",
+            "insert_calls": 1,
+            "insert_ingress_bytes": 72,
+            "local_token_profile": "pinned_local_no_model",
+            "observation_incomplete": false,
+            "query_calls": 0,
+            "query_receipts": []
+          },
+          "profile": "native-fts5/observed-local-operations-v1"
+        },
+        "profile": "longmemeval/native-fts5-registration-v1"
+      },
+      "supplied_receipts": [
+        {
+          "component_ns": 17,
+          "input_bytes": 11,
+          "native_metadata_bound": true,
+          "ordinal": 0,
+          "outcome": "succeeded",
+          "output_bytes": 23,
+          "query_image_ignored": false,
+          "state": "delivered"
+        },
+        {
+          "component_ns": 19,
+          "input_bytes": 13,
+          "native_metadata_bound": true,
+          "ordinal": 1,
+          "outcome": "succeeded",
+          "output_bytes": 29,
+          "query_image_ignored": false,
+          "state": "delivered"
+        }
+      ]
+    },
+    {
+      "clock_values": [
+        100,
+        109,
+        200,
+        213,
+        300,
+        317
+      ],
+      "contexts": [
+        [
+          {
+            "type": "text",
+            "value": "Route Pavo-42 ends at Dock 11."
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "Route Rill-53 uses label Cedar."
+          }
+        ]
+      ],
+      "expected": {
+        "clock_calls": 6,
+        "construction_sha256": "50156239ae0fdb66cfdc06e67b31ff0ee7f9b8814386e1dad64876c31517d262",
+        "construction_utf8": "{\"horizon\":2,\"profile\":\"longmemeval/local-text-callback-construction-v1\",\"slots\":[{\"local_ordinal\":0,\"ordinal\":0,\"query_outcome\":\"succeeded\",\"question\":\"Where does route Pavo-42 end?\",\"reader_answer\":\"Dock 11.\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Pavo-42 ends at Dock 11.\"}],\"question\":\"Where does route Pavo-42 end?\",\"system\":\"Use reference memory; verify canonical sources.\"}},{\"local_ordinal\":1,\"ordinal\":1,\"query_outcome\":\"succeeded\",\"question\":\"Which label marks route Rill-53?\",\"reader_answer\":null,\"reader_outcome\":\"cancelled\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Rill-53 uses label Cedar.\"}],\"question\":\"Which label marks route Rill-53?\",\"system\":\"Use reference memory; verify canonical sources.\"}}]}",
+        "final_snapshot": {
+          "callback_entries": 3,
+          "closed": true,
+          "construction_blocked": false,
+          "construction_sha256": "50156239ae0fdb66cfdc06e67b31ff0ee7f9b8814386e1dad64876c31517d262",
+          "ledger": {
+            "attempt_limit": 4096,
+            "attempts": 3,
+            "duplicates": 0,
+            "experiment": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 106,
+              "known_constructed_bytes": 663,
+              "known_input_tokens": 29,
+              "known_output_tokens": 6,
+              "known_tokens": 35,
+              "known_usd_micros": 19,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "frozen": true,
+            "grading": {
+              "complete": false,
+              "conflicting": 0,
+              "correct": null,
+              "known_correct": 1,
+              "observed": 1
+            },
+            "horizon": 2,
+            "observation_errors": 0,
+            "overflow": false,
+            "phases": {
+              "build": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 1,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 31,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 72,
+                "expected_units": 1,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 31,
+                "known_constructed_bytes": 72,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "judge": {
+                "attempts": 1,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 1,
+                "input_tokens": null,
+                "known_component_ns": 17,
+                "known_constructed_bytes": 153,
+                "known_input_tokens": 5,
+                "known_output_tokens": 1,
+                "known_tokens": 6,
+                "known_usd_micros": 3,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 1
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "query": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 36,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 76,
+                "expected_units": 2,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 36,
+                "known_constructed_bytes": 76,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "reader": {
+                "attempts": 2,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 2,
+                "input_tokens": null,
+                "known_component_ns": 22,
+                "known_constructed_bytes": 362,
+                "known_input_tokens": 24,
+                "known_output_tokens": 5,
+                "known_tokens": 29,
+                "known_usd_micros": 16,
+                "outcomes": {
+                  "cancelled": 1,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 1
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              }
+            },
+            "product": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 89,
+              "known_constructed_bytes": 510,
+              "known_input_tokens": 24,
+              "known_output_tokens": 5,
+              "known_tokens": 29,
+              "known_usd_micros": 16,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1"
+          },
+          "local_imports": 1,
+          "native_teardown_attempted": true,
+          "observation_faults": 0,
+          "pending_tickets": 0,
+          "planned_to_local": [
+            0,
+            1
+          ],
+          "profile": "longmemeval/local-text-callback-controller-v1",
+          "provider_coverage": "UNKNOWN",
+          "provider_usage_verified": false
+        },
+        "judge_factories": 1,
+        "judge_request_utf8": [
+          "{\"answer\":\"Dock 11.\",\"construction_sha256\":\"50156239ae0fdb66cfdc06e67b31ff0ee7f9b8814386e1dad64876c31517d262\",\"question\":\"Where does route Pavo-42 end?\"}"
+        ],
+        "memory_actions": {
+          "clear_context": 2,
+          "close": 1,
+          "post_hook": 2,
+          "query": 2,
+          "set_context": 2,
+          "snapshot": 6
+        },
+        "reader_request_utf8": [
+          "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Pavo-42 ends at Dock 11.\"}],\"question\":\"Where does route Pavo-42 end?\",\"system\":\"Use reference memory; verify canonical sources.\"}",
+          "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Rill-53 uses label Cedar.\"}],\"question\":\"Which label marks route Rill-53?\",\"system\":\"Use reference memory; verify canonical sources.\"}"
+        ],
+        "repeat_final_snapshot": {
+          "callback_entries": 3,
+          "closed": true,
+          "construction_blocked": false,
+          "construction_sha256": "50156239ae0fdb66cfdc06e67b31ff0ee7f9b8814386e1dad64876c31517d262",
+          "ledger": {
+            "attempt_limit": 4096,
+            "attempts": 3,
+            "duplicates": 0,
+            "experiment": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 106,
+              "known_constructed_bytes": 663,
+              "known_input_tokens": 29,
+              "known_output_tokens": 6,
+              "known_tokens": 35,
+              "known_usd_micros": 19,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "frozen": true,
+            "grading": {
+              "complete": false,
+              "conflicting": 0,
+              "correct": null,
+              "known_correct": 1,
+              "observed": 1
+            },
+            "horizon": 2,
+            "observation_errors": 0,
+            "overflow": false,
+            "phases": {
+              "build": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 1,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 31,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 72,
+                "expected_units": 1,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 31,
+                "known_constructed_bytes": 72,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "judge": {
+                "attempts": 1,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 1,
+                "input_tokens": null,
+                "known_component_ns": 17,
+                "known_constructed_bytes": 153,
+                "known_input_tokens": 5,
+                "known_output_tokens": 1,
+                "known_tokens": 6,
+                "known_usd_micros": 3,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 1
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "query": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 36,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 76,
+                "expected_units": 2,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 36,
+                "known_constructed_bytes": 76,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "reader": {
+                "attempts": 2,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 2,
+                "input_tokens": null,
+                "known_component_ns": 22,
+                "known_constructed_bytes": 362,
+                "known_input_tokens": 24,
+                "known_output_tokens": 5,
+                "known_tokens": 29,
+                "known_usd_micros": 16,
+                "outcomes": {
+                  "cancelled": 1,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 1
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              }
+            },
+            "product": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 89,
+              "known_constructed_bytes": 510,
+              "known_input_tokens": 24,
+              "known_output_tokens": 5,
+              "known_tokens": 29,
+              "known_usd_micros": 16,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1"
+          },
+          "local_imports": 1,
+          "native_teardown_attempted": true,
+          "observation_faults": 0,
+          "pending_tickets": 0,
+          "planned_to_local": [
+            0,
+            1
+          ],
+          "profile": "longmemeval/local-text-callback-controller-v1",
+          "provider_coverage": "UNKNOWN",
+          "provider_usage_verified": false
+        },
+        "repeat_new_work": {
+          "callbacks": 0,
+          "clock": 0,
+          "memory_actions": 0
+        },
+        "second_judge_guard": "controller_judge_state",
+        "supplied_memory_final": {
+          "closed": true,
+          "local_observation": {
+            "ledger": {
+              "frozen": true,
+              "horizon": 2,
+              "profile": "memory-benchmark-ledger-v1"
+            },
+            "observed": {
+              "build_component_ns": 31,
+              "cleanup_outcome": "succeeded",
+              "initialization_outcome": "succeeded",
+              "insert_calls": 1,
+              "insert_ingress_bytes": 72,
+              "local_token_profile": "pinned_local_no_model",
+              "observation_incomplete": false,
+              "query_calls": 2,
+              "query_receipts": [
+                {
+                  "component_ns": 17,
+                  "input_bytes": 11,
+                  "native_metadata_bound": true,
+                  "ordinal": 0,
+                  "outcome": "succeeded",
+                  "output_bytes": 23,
+                  "query_image_ignored": false,
+                  "state": "delivered"
+                },
+                {
+                  "component_ns": 19,
+                  "input_bytes": 13,
+                  "native_metadata_bound": true,
+                  "ordinal": 1,
+                  "outcome": "succeeded",
+                  "output_bytes": 29,
+                  "query_image_ignored": false,
+                  "state": "delivered"
+                }
+              ]
+            },
+            "profile": "native-fts5/observed-local-operations-v1"
+          },
+          "profile": "longmemeval/native-fts5-registration-v1"
+        }
+      },
+      "judge_reports": [
+        {
+          "ordinal": 0,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "succeeded",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 5,
+              "output_tokens": 1,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 6
+            },
+            "usd_micros": 3,
+            "value": true
+          }
+        }
+      ],
+      "name": "graded_plus_cancelled_paid_reader",
+      "questions": [
+        {
+          "query_image": null,
+          "question": "Where does route Pavo-42 end?"
+        },
+        {
+          "query_image": null,
+          "question": "Which label marks route Rill-53?"
+        }
+      ],
+      "reader_reports": [
+        {
+          "ordinal": 0,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "succeeded",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 11,
+              "output_tokens": 3,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 14
+            },
+            "usd_micros": 7,
+            "value": "Dock 11."
+          }
+        },
+        {
+          "ordinal": 1,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "cancelled",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 13,
+              "output_tokens": 2,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 15
+            },
+            "usd_micros": 9,
+            "value": null
+          }
+        }
+      ],
+      "supplied_memory_initial": {
+        "closed": false,
+        "local_observation": {
+          "ledger": {
+            "frozen": false,
+            "horizon": 2,
+            "profile": "memory-benchmark-ledger-v1"
+          },
+          "observed": {
+            "build_component_ns": 31,
+            "cleanup_outcome": "not_attempted",
+            "initialization_outcome": "succeeded",
+            "insert_calls": 1,
+            "insert_ingress_bytes": 72,
+            "local_token_profile": "pinned_local_no_model",
+            "observation_incomplete": false,
+            "query_calls": 0,
+            "query_receipts": []
+          },
+          "profile": "native-fts5/observed-local-operations-v1"
+        },
+        "profile": "longmemeval/native-fts5-registration-v1"
+      },
+      "supplied_receipts": [
+        {
+          "component_ns": 17,
+          "input_bytes": 11,
+          "native_metadata_bound": true,
+          "ordinal": 0,
+          "outcome": "succeeded",
+          "output_bytes": 23,
+          "query_image_ignored": false,
+          "state": "delivered"
+        },
+        {
+          "component_ns": 19,
+          "input_bytes": 13,
+          "native_metadata_bound": true,
+          "ordinal": 1,
+          "outcome": "succeeded",
+          "output_bytes": 29,
+          "query_image_ignored": false,
+          "state": "delivered"
+        }
+      ]
+    },
+    {
+      "clock_values": [
+        100,
+        109,
+        200,
+        213,
+        300,
+        317,
+        400,
+        419
+      ],
+      "contexts": [
+        [
+          {
+            "type": "text",
+            "value": "Route Pavo-42 ends at Dock 11."
+          }
+        ],
+        [
+          {
+            "type": "text",
+            "value": "Route Rill-53 uses label Cedar."
+          }
+        ]
+      ],
+      "expected": {
+        "clock_calls": 8,
+        "construction_sha256": "3aa038100e8837a4f50df4855bf6ae52a268a62967dda902a837ef3430de4dac",
+        "construction_utf8": "{\"horizon\":2,\"profile\":\"longmemeval/local-text-callback-construction-v1\",\"slots\":[{\"local_ordinal\":0,\"ordinal\":0,\"query_outcome\":\"succeeded\",\"question\":\"Where does route Pavo-42 end?\",\"reader_answer\":\"Dock 11.\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Pavo-42 ends at Dock 11.\"}],\"question\":\"Where does route Pavo-42 end?\",\"system\":\"Use reference memory; verify canonical sources.\"}},{\"local_ordinal\":1,\"ordinal\":1,\"query_outcome\":\"succeeded\",\"question\":\"Which label marks route Rill-53?\",\"reader_answer\":\"Maple\",\"reader_outcome\":\"succeeded\",\"reader_request\":{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Rill-53 uses label Cedar.\"}],\"question\":\"Which label marks route Rill-53?\",\"system\":\"Use reference memory; verify canonical sources.\"}}]}",
+        "final_snapshot": {
+          "callback_entries": 4,
+          "closed": true,
+          "construction_blocked": false,
+          "construction_sha256": "3aa038100e8837a4f50df4855bf6ae52a268a62967dda902a837ef3430de4dac",
+          "ledger": {
+            "attempt_limit": 4096,
+            "attempts": 4,
+            "duplicates": 0,
+            "experiment": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 125,
+              "known_constructed_bytes": 816,
+              "known_input_tokens": 40,
+              "known_output_tokens": 9,
+              "known_tokens": 49,
+              "known_usd_micros": 25,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "frozen": true,
+            "grading": {
+              "complete": true,
+              "conflicting": 0,
+              "correct": 1,
+              "known_correct": 1,
+              "observed": 2
+            },
+            "horizon": 2,
+            "observation_errors": 0,
+            "overflow": false,
+            "phases": {
+              "build": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 1,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 31,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 72,
+                "expected_units": 1,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 31,
+                "known_constructed_bytes": 72,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "judge": {
+                "attempts": 2,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 2,
+                "input_tokens": null,
+                "known_component_ns": 36,
+                "known_constructed_bytes": 306,
+                "known_input_tokens": 12,
+                "known_output_tokens": 2,
+                "known_tokens": 14,
+                "known_usd_micros": 7,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 2
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "query": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 36,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 76,
+                "expected_units": 2,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 36,
+                "known_constructed_bytes": 76,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "reader": {
+                "attempts": 2,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 2,
+                "input_tokens": null,
+                "known_component_ns": 22,
+                "known_constructed_bytes": 362,
+                "known_input_tokens": 28,
+                "known_output_tokens": 7,
+                "known_tokens": 35,
+                "known_usd_micros": 18,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 2
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              }
+            },
+            "product": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 89,
+              "known_constructed_bytes": 510,
+              "known_input_tokens": 28,
+              "known_output_tokens": 7,
+              "known_tokens": 35,
+              "known_usd_micros": 18,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1"
+          },
+          "local_imports": 1,
+          "native_teardown_attempted": true,
+          "observation_faults": 0,
+          "pending_tickets": 0,
+          "planned_to_local": [
+            0,
+            1
+          ],
+          "profile": "longmemeval/local-text-callback-controller-v1",
+          "provider_coverage": "UNKNOWN",
+          "provider_usage_verified": false
+        },
+        "judge_factories": 2,
+        "judge_request_utf8": [
+          "{\"answer\":\"Dock 11.\",\"construction_sha256\":\"3aa038100e8837a4f50df4855bf6ae52a268a62967dda902a837ef3430de4dac\",\"question\":\"Where does route Pavo-42 end?\"}",
+          "{\"answer\":\"Maple\",\"construction_sha256\":\"3aa038100e8837a4f50df4855bf6ae52a268a62967dda902a837ef3430de4dac\",\"question\":\"Which label marks route Rill-53?\"}"
+        ],
+        "memory_actions": {
+          "clear_context": 2,
+          "close": 1,
+          "post_hook": 2,
+          "query": 2,
+          "set_context": 2,
+          "snapshot": 6
+        },
+        "reader_request_utf8": [
+          "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Pavo-42 ends at Dock 11.\"}],\"question\":\"Where does route Pavo-42 end?\",\"system\":\"Use reference memory; verify canonical sources.\"}",
+          "{\"memory_context\":[{\"type\":\"text\",\"value\":\"Route Rill-53 uses label Cedar.\"}],\"question\":\"Which label marks route Rill-53?\",\"system\":\"Use reference memory; verify canonical sources.\"}"
+        ],
+        "repeat_final_snapshot": {
+          "callback_entries": 4,
+          "closed": true,
+          "construction_blocked": false,
+          "construction_sha256": "3aa038100e8837a4f50df4855bf6ae52a268a62967dda902a837ef3430de4dac",
+          "ledger": {
+            "attempt_limit": 4096,
+            "attempts": 4,
+            "duplicates": 0,
+            "experiment": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 125,
+              "known_constructed_bytes": 816,
+              "known_input_tokens": 40,
+              "known_output_tokens": 9,
+              "known_tokens": 49,
+              "known_usd_micros": 25,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "frozen": true,
+            "grading": {
+              "complete": true,
+              "conflicting": 0,
+              "correct": 1,
+              "known_correct": 1,
+              "observed": 2
+            },
+            "horizon": 2,
+            "observation_errors": 0,
+            "overflow": false,
+            "phases": {
+              "build": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 1,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 31,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 72,
+                "expected_units": 1,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 31,
+                "known_constructed_bytes": 72,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "judge": {
+                "attempts": 2,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 2,
+                "input_tokens": null,
+                "known_component_ns": 36,
+                "known_constructed_bytes": 306,
+                "known_input_tokens": 12,
+                "known_output_tokens": 2,
+                "known_tokens": 14,
+                "known_usd_micros": 7,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 2
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              },
+              "query": {
+                "attempts": 0,
+                "cached_input_tokens": 0,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": true,
+                  "cache": true,
+                  "coverage": true,
+                  "reasoning": true,
+                  "timing": true,
+                  "tokens": true
+                },
+                "component_ns": 36,
+                "conflicting_attempts": 0,
+                "constructed_bytes": 76,
+                "expected_units": 2,
+                "finished_attempts": 0,
+                "input_tokens": 0,
+                "known_component_ns": 36,
+                "known_constructed_bytes": 76,
+                "known_input_tokens": 0,
+                "known_output_tokens": 0,
+                "known_tokens": 0,
+                "known_usd_micros": 0,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 0
+                },
+                "output_tokens": 0,
+                "overflow": false,
+                "reasoning_output_tokens": 0,
+                "tokens": 0,
+                "uncached_input_tokens": 0,
+                "usd_micros": null
+              },
+              "reader": {
+                "attempts": 2,
+                "cached_input_tokens": null,
+                "closed_units": 2,
+                "complete": {
+                  "billing": false,
+                  "bytes": false,
+                  "cache": false,
+                  "coverage": false,
+                  "reasoning": false,
+                  "timing": false,
+                  "tokens": false
+                },
+                "component_ns": null,
+                "conflicting_attempts": 0,
+                "constructed_bytes": null,
+                "expected_units": 2,
+                "finished_attempts": 2,
+                "input_tokens": null,
+                "known_component_ns": 22,
+                "known_constructed_bytes": 362,
+                "known_input_tokens": 28,
+                "known_output_tokens": 7,
+                "known_tokens": 35,
+                "known_usd_micros": 18,
+                "outcomes": {
+                  "cancelled": 0,
+                  "conflict": 0,
+                  "failed": 0,
+                  "pending": 0,
+                  "succeeded": 2
+                },
+                "output_tokens": null,
+                "overflow": false,
+                "reasoning_output_tokens": null,
+                "tokens": null,
+                "uncached_input_tokens": null,
+                "usd_micros": null
+              }
+            },
+            "product": {
+              "cached_input_tokens": null,
+              "complete": {
+                "billing": false,
+                "bytes": false,
+                "cache": false,
+                "coverage": false,
+                "reasoning": false,
+                "timing": false,
+                "tokens": false
+              },
+              "component_ns": null,
+              "constructed_bytes": null,
+              "input_tokens": null,
+              "known_component_ns": 89,
+              "known_constructed_bytes": 510,
+              "known_input_tokens": 28,
+              "known_output_tokens": 7,
+              "known_tokens": 35,
+              "known_usd_micros": 18,
+              "output_tokens": null,
+              "overflow": false,
+              "reasoning_output_tokens": null,
+              "tokens": null,
+              "tokens_per_correct": null,
+              "tokens_per_planned_query": null,
+              "uncached_input_tokens": null,
+              "usd_micros": null,
+              "usd_micros_per_correct": null,
+              "usd_micros_per_planned_query": null
+            },
+            "profile": "memory-benchmark-ledger-v1",
+            "usage_profile": "inclusive-input-output-v1"
+          },
+          "local_imports": 1,
+          "native_teardown_attempted": true,
+          "observation_faults": 0,
+          "pending_tickets": 0,
+          "planned_to_local": [
+            0,
+            1
+          ],
+          "profile": "longmemeval/local-text-callback-controller-v1",
+          "provider_coverage": "UNKNOWN",
+          "provider_usage_verified": false
+        },
+        "repeat_new_work": {
+          "callbacks": 0,
+          "clock": 0,
+          "memory_actions": 0
+        },
+        "second_judge_guard": null,
+        "supplied_memory_final": {
+          "closed": true,
+          "local_observation": {
+            "ledger": {
+              "frozen": true,
+              "horizon": 2,
+              "profile": "memory-benchmark-ledger-v1"
+            },
+            "observed": {
+              "build_component_ns": 31,
+              "cleanup_outcome": "succeeded",
+              "initialization_outcome": "succeeded",
+              "insert_calls": 1,
+              "insert_ingress_bytes": 72,
+              "local_token_profile": "pinned_local_no_model",
+              "observation_incomplete": false,
+              "query_calls": 2,
+              "query_receipts": [
+                {
+                  "component_ns": 17,
+                  "input_bytes": 11,
+                  "native_metadata_bound": true,
+                  "ordinal": 0,
+                  "outcome": "succeeded",
+                  "output_bytes": 23,
+                  "query_image_ignored": false,
+                  "state": "delivered"
+                },
+                {
+                  "component_ns": 19,
+                  "input_bytes": 13,
+                  "native_metadata_bound": true,
+                  "ordinal": 1,
+                  "outcome": "succeeded",
+                  "output_bytes": 29,
+                  "query_image_ignored": false,
+                  "state": "delivered"
+                }
+              ]
+            },
+            "profile": "native-fts5/observed-local-operations-v1"
+          },
+          "profile": "longmemeval/native-fts5-registration-v1"
+        }
+      },
+      "judge_reports": [
+        {
+          "ordinal": 0,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "succeeded",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 5,
+              "output_tokens": 1,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 6
+            },
+            "usd_micros": 3,
+            "value": true
+          }
+        },
+        {
+          "ordinal": 1,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "succeeded",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 7,
+              "output_tokens": 1,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 8
+            },
+            "usd_micros": 4,
+            "value": false
+          }
+        }
+      ],
+      "name": "mixed_correct_grading_incomplete_provider",
+      "questions": [
+        {
+          "query_image": null,
+          "question": "Where does route Pavo-42 end?"
+        },
+        {
+          "query_image": null,
+          "question": "Which label marks route Rill-53?"
+        }
+      ],
+      "reader_reports": [
+        {
+          "ordinal": 0,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "succeeded",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 11,
+              "output_tokens": 3,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 14
+            },
+            "usd_micros": 7,
+            "value": "Dock 11."
+          }
+        },
+        {
+          "ordinal": 1,
+          "report": {
+            "billing": "provider_reported",
+            "outcome": "succeeded",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 17,
+              "output_tokens": 4,
+              "reasoning_output_tokens": 0,
+              "total_tokens": 21
+            },
+            "usd_micros": 11,
+            "value": "Maple"
+          }
+        }
+      ],
+      "supplied_memory_initial": {
+        "closed": false,
+        "local_observation": {
+          "ledger": {
+            "frozen": false,
+            "horizon": 2,
+            "profile": "memory-benchmark-ledger-v1"
+          },
+          "observed": {
+            "build_component_ns": 31,
+            "cleanup_outcome": "not_attempted",
+            "initialization_outcome": "succeeded",
+            "insert_calls": 1,
+            "insert_ingress_bytes": 72,
+            "local_token_profile": "pinned_local_no_model",
+            "observation_incomplete": false,
+            "query_calls": 0,
+            "query_receipts": []
+          },
+          "profile": "native-fts5/observed-local-operations-v1"
+        },
+        "profile": "longmemeval/native-fts5-registration-v1"
+      },
+      "supplied_receipts": [
+        {
+          "component_ns": 17,
+          "input_bytes": 11,
+          "native_metadata_bound": true,
+          "ordinal": 0,
+          "outcome": "succeeded",
+          "output_bytes": 23,
+          "query_image_ignored": false,
+          "state": "delivered"
+        },
+        {
+          "component_ns": 19,
+          "input_bytes": 13,
+          "native_metadata_bound": true,
+          "ordinal": 1,
+          "outcome": "succeeded",
+          "output_bytes": 29,
+          "query_image_ignored": false,
+          "state": "delivered"
+        }
+      ]
+    }
+  ],
+  "profile": "fresh-public-mixed-horizon-supplied-accounting-v1",
+  "scope": "Supplied scalar receipts/reports; no physical provider or native metadata certification. Public synthetic correctness flags test accounting only."
+}

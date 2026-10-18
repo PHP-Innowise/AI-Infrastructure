@@ -1,0 +1,95 @@
+{
+  "capture_dirty_error": {
+    "action": "file_open",
+    "capture": "dirty_error",
+    "expected_record": {
+      "observation_state": "unmeasured",
+      "profile": "longmemeval/custody-failure-stage-v1",
+      "provider_tokens": null,
+      "root_cause": null,
+      "scope": "last_caught_custody_body_failure",
+      "stage": null,
+      "usd_micros": null
+    },
+    "expected_trace": [
+      "lstat:root",
+      "fstat:10",
+      "lstat:specs",
+      "fstat:11",
+      "lstat:source",
+      "fstat:12",
+      "path:expected",
+      "scandir:12",
+      "scan_enter",
+      "scan_item",
+      "scan_end",
+      "scan_exit",
+      "path:open",
+      "open:20"
+    ],
+    "fenced": true,
+    "name": "capture_writes_then_raises",
+    "outcome": "source_changed",
+    "prior": null
+  },
+  "detached_expected": {
+    "observation_state": "stage_reported",
+    "profile": "longmemeval/custody-failure-stage-v1",
+    "provider_tokens": null,
+    "root_cause": null,
+    "scope": "last_caught_custody_body_failure",
+    "stage": "file_open",
+    "usd_micros": null
+  },
+  "invalid_expected": {
+    "observation_state": "unmeasured",
+    "profile": "longmemeval/custody-failure-stage-v1",
+    "provider_tokens": null,
+    "root_cause": null,
+    "scope": "last_caught_custody_body_failure",
+    "stage": null,
+    "usd_micros": null
+  },
+  "invalid_tags": [
+    "none",
+    "dict",
+    "wrong_length",
+    "wrong_state",
+    "wrong_state_type",
+    "wrong_stage_type",
+    "oversize_stage",
+    "unknown_stage",
+    "unobserved_with_stage",
+    "unmeasured_with_stage",
+    "tuple_subclass",
+    "string_subclass"
+  ],
+  "lock_at_enter": [
+    "stage_reported",
+    "file_close"
+  ],
+  "lock_before": [
+    "unobserved",
+    null
+  ],
+  "lock_events": [
+    "enter",
+    "exit"
+  ],
+  "lock_expected": {
+    "observation_state": "stage_reported",
+    "profile": "longmemeval/custody-failure-stage-v1",
+    "provider_tokens": null,
+    "root_cause": null,
+    "scope": "last_caught_custody_body_failure",
+    "stage": "file_close",
+    "usd_micros": null
+  },
+  "profile": "independent-accessor-whole-oracles-v1",
+  "query_metadata": {
+    "marker": 109,
+    "profile": "public-stable-query",
+    "state": "not_queried"
+  },
+  "scope": "controlled private images, no threads/actualFS/native/actors/provider"
+}

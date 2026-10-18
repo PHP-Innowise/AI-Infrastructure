@@ -1,0 +1,69 @@
+{
+  "task_id": "feature/skua-tide-hooks",
+  "goal": "Inspect Skua tide hooks",
+  "query": "Skua tide hooks amber prisms",
+  "source": "app/skua-tide.php",
+  "source_text": "<?php // Skua tide hooks hold nine amber prisms.\n",
+  "other_source": "app/skua-floats.php",
+  "other_text": "<?php // Skua spare floats are silver.\n",
+  "README": "# Skua public overview\n\nSkua floats use bronze mounts.\n",
+  "chunk_path": "memory-bank/chunks/MEM-20261014-6cd82a31-skua-hooks.md",
+  "body": "# Skua tide hooks\n\nSkua tide hooks hold nine amber prisms.\n",
+  "metadata": {
+    "id": "MEM-20261014-6cd82a31",
+    "title": "Skua tide hooks amber prisms",
+    "type": "convention",
+    "status": "active",
+    "scope": [
+      "application"
+    ],
+    "tags": [
+      "skua-public"
+    ],
+    "created": "2026-10-14",
+    "last_verified": "2026-10-14",
+    "review_after": "2099-12-31",
+    "sources": [
+      "app/skua-tide.php"
+    ],
+    "supersedes": [],
+    "superseded_by": null
+  },
+  "whole_expected": {
+    "warm": "missing/empty/subset historical digests accepted per existing contract; cached unchanged chunk initially in all four stores with correct source links and eligible capsule",
+    "delete": "delete cited PHP source after warm, chunk raw bytes/stat untouched; SUCCESS incremental refresh removes exactly1/chunk from docs/metadata/outgoinglinks/sourcestate, excluded path invalid; working task cites survivingotherPHP and no manufactured warning withholding",
+    "partial": "only survivingotherPHP digest; deleting undigestedPHP yields same whole eviction",
+    "escape": "replace cited PHP with external symlink when supported, containment invalid/same eviction",
+    "http": "https://example.invalid/skua#policy retained without lookup or newhash",
+    "anchor": "local #anchor resolved to existingbase retained, deletingbase excludes",
+    "ordinary": "unchanged README cache byte-equal/no read/mask on discovery; memory_eligibility current admitted/rejected as existing contract",
+    "cost": "up to two eligible chunk text reads parse+secret verification plus citedpath resolves; honest extra CPU/bytes, no token proof",
+    "historical": "changed source without originaldigest cannot prove historical binding; declared digests never changed",
+    "malformed": "same-stat current UTF8/secret/status/expiry chunk changes excluded using existing fixed reason; no raw fixture credential echoed"
+  },
+  "source_sha256": "037bd8f05cbc0ddf31ea71f03e9e994364cf1df86084d4e3ce8e61ce089d8a41",
+  "other_sha256": "63b0f12c13a6cfc6665ba58f2d135806f57d3cc32ae3ed959a01cee872506d38",
+  "same_stat_images": {
+    "status": {
+      "base64": "LS0tCnsKICAiY3JlYXRlZCI6ICIyMDI2LTEwLTE0IiwKICAiaWQiOiAiTUVNLTIwMjYxMDE0LTZjZDgyYTMxIiwKICAibGFzdF92ZXJpZmllZCI6ICIyMDI2LTEwLTE0IiwKICAicmV2aWV3X2FmdGVyIjogIjIwMjYtMTEtMTMiLAogICJzY29wZSI6IFsKICAgICJhcHBsaWNhdGlvbiIKICBdLAogICJzb3VyY2VzIjogWwogICAgImFwcC9za3VhLXRpZGUucGhwIgogIF0sCiAgInN0YXR1cyI6ICJhcmNoaXZlZCIsCiAgInN1cGVyc2VkZWRfYnkiOiBudWxsLAogICJzdXBlcnNlZGVzIjogW10sCiAgInRhZ3MiOiBbCiAgICAic2t1YS1wdWJsaWMiCiAgXSwKICAidGl0bGUiOiAiU2t1YSB0aWRlIGhvb2tzIGFtYmVyIHByaXNtcyIsCiAgInR5cGUiOiAiY29udmVudGlvbiIKfQotLS0KCiMgU2t1YSB0aWRlIGhvb2tzCgpTa3VhIHRpZGUgaG9va3MgaG9sZCBuaW5lIGFtYmVyIHByaXNtcw==",
+      "bytes": 445,
+      "sha256": "07449787bee2f154993b0613e13b0a5ca4199e200215146b714f120d4b306641",
+      "reason": "archived",
+      "whole_expected": "same-stat warm chunk remains physically present but all four indexed stores evict, removed1, fixed exclusion reason, no runtime warning/current capsule fact/path; changed raw image retained untouched after refresh"
+    },
+    "expired": {
+      "base64": "LS0tCnsKICAiY3JlYXRlZCI6ICIyMDI2LTEwLTEzIiwKICAiaWQiOiAiTUVNLTIwMjYxMDE0LTZjZDgyYTMxIiwKICAibGFzdF92ZXJpZmllZCI6ICIyMDI2LTEwLTEzIiwKICAicmV2aWV3X2FmdGVyIjogIjIwMjYtMTAtMTMiLAogICJzY29wZSI6IFsKICAgICJhcHBsaWNhdGlvbiIKICBdLAogICJzb3VyY2VzIjogWwogICAgImFwcC9za3VhLXRpZGUucGhwIgogIF0sCiAgInN0YXR1cyI6ICJhY3RpdmUiLAogICJzdXBlcnNlZGVkX2J5IjogbnVsbCwKICAic3VwZXJzZWRlcyI6IFtdLAogICJ0YWdzIjogWwogICAgInNrdWEtcHVibGljIgogIF0sCiAgInRpdGxlIjogIlNrdWEgdGlkZSBob29rcyBhbWJlciBwcmlzbXMiLAogICJ0eXBlIjogImNvbnZlbnRpb24iCn0KLS0tCgojIFNrdWEgdGlkZSBob29rcwoKU2t1YSB0aWRlIGhvb2tzIGhvbGQgbmluZSBhbWJlciBwcmlzbXMuCg==",
+      "bytes": 445,
+      "sha256": "40de495f7b152cce8f395d6f9d7294e7c337ba4188ecaf3c3e8ac005a30ba3aa",
+      "reason": "overdue-review",
+      "whole_expected": "same-stat warm chunk remains physically present but all four indexed stores evict, removed1, fixed exclusion reason, no runtime warning/current capsule fact/path; changed raw image retained untouched after refresh"
+    },
+    "secret": {
+      "base64": "LS0tCnsKICAiY3JlYXRlZCI6ICIyMDI2LTEwLTE0IiwKICAiaWQiOiAiTUVNLTIwMjYxMDE0LTZjZDgyYTMxIiwKICAibGFzdF92ZXJpZmllZCI6ICIyMDI2LTEwLTE0IiwKICAicmV2aWV3X2FmdGVyIjogIjIwMjYtMTEtMTMiLAogICJzY29wZSI6IFsKICAgICJhcHBsaWNhdGlvbiIKICBdLAogICJzb3VyY2VzIjogWwogICAgImFwcC9za3VhLXRpZGUucGhwIgogIF0sCiAgInN0YXR1cyI6ICJhY3RpdmUiLAogICJzdXBlcnNlZGVkX2J5IjogbnVsbCwKICAic3VwZXJzZWRlcyI6IFtdLAogICJ0YWdzIjogWwogICAgInNrdWEtcHVibGljIgogIF0sCiAgInRpdGxlIjogIlNrdWEgdGlkZSBob29rcyBhbWJlciBwcmlzbXMiLAogICJ0eXBlIjogImNvbnZlbnRpb24iCn0KLS0tCgpwYXNzd29yZCA9ICdza3VhLXB1YmxpYy1jb250cm9sLW9ubHknCiAgICAgICAgICAgICAgICAgICAgIA==",
+      "bytes": 445,
+      "sha256": "d077660251085eafaa41e56d7c3510bb4d64ba45a9660f129bcb42324fbdacfa",
+      "reason": "secret",
+      "whole_expected": "same-stat warm chunk remains physically present but all four indexed stores evict, removed1, fixed exclusion reason, no runtime warning/current capsule fact/path; changed raw image retained untouched after refresh"
+    }
+  }
+}

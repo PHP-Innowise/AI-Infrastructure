@@ -13,6 +13,17 @@ import unittest
 from unittest.mock import patch
 
 GUARD = Path(__file__).resolve().parents[1] / "harness/src/harness/process_guard.py"
+# What process_runtime.launch_guarded starts: the guard from its cached bytecode.
+GUARD_CLI = GUARD.with_name("process_guard_cli.py")
+# The guard as if posix (whose functions the POSIX guard calls; os takes them
+# from it) lacked the named ones. Without pidfd_open it waits as on macOS or a
+# kernel before 5.3 (SIGCHLD wakes it, not a pidfd); without posix_spawn it
+# starts its native process through Popen, as where posix_spawn would not
+# report a failed exec.
+WITHOUT = ("import os,posix,runpy,sys; "
+           "[module.__dict__.pop(name, None) for name in sys.argv.pop(1).split(',') for module in (os, posix)]; "
+           "sys.argv[0] = sys.argv.pop(1); runpy.run_path(sys.argv[0], run_name='__main__')")
+UNAVAILABLE = b"Harness process guard could not start the native process.\n"
 
 
 @unittest.skipUnless(hasattr(os, "killpg"), "The guard requires POSIX process groups")
@@ -41,20 +52,27 @@ class ProcessGuardTests(unittest.TestCase):
                 if stream is not None:
                     stream.close()
 
-    def start_guard(self, code, *arguments):
+    def start_native(self, native, *, pidfd=True, spawn=True, lock=None, inherited=(), script=GUARD_CLI, **options):
         read_fd, write_fd = os.pipe()
+        missing = [name for name, present in (("pidfd_open", pidfd), ("posix_spawn", spawn)) if not present]
+        # Without site and through its launcher, as process_runtime.launch_guarded starts it.
+        guard = [sys.executable, "-S", *(["-c", WITHOUT, ",".join(missing)] if missing else []), str(script), str(read_fd)]
+        if lock is not None:
+            guard.extend(["--lock-fd", str(lock)])
         try:
             process = subprocess.Popen(
-                [sys.executable, str(GUARD), str(read_fd), "--", sys.executable,
-                 "-u", "-c", code, *arguments],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                pass_fds=(read_fd,), start_new_session=True,
+                [*guard, "--", *native],
+                **{"stdin": subprocess.PIPE, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, **options},
+                pass_fds=(read_fd, *inherited, *(() if lock is None else (lock,))), start_new_session=True,
             )
         finally:
             os.close(read_fd)
         self.processes.append(process)
         self.pipes.append(write_fd)
         return process, write_fd
+
+    def start_guard(self, code, *arguments, pidfd=True):
+        return self.start_native([sys.executable, "-u", "-c", code, *arguments], pidfd=pidfd)
 
     def wait_for(self, predicate, timeout=3):
         deadline = time.monotonic() + timeout
@@ -84,48 +102,258 @@ class ProcessGuardTests(unittest.TestCase):
     def test_native_io_and_exit_status_pass_through_without_shell(self):
         code = "import sys; print(sys.stdin.read()); print(sys.argv[1], file=sys.stderr); sys.exit(int(sys.argv[2]))"
         literal = "$(false); --literal-value"
-        for exit_code in (0, 7):
-            with self.subTest(exit_code=exit_code):
-                process, _ = self.start_guard(code, literal, str(exit_code))
-                stdout, stderr = process.communicate(b"harmless stdin", timeout=3)
-                self.assertEqual(process.returncode, exit_code)
-                self.assertEqual(stdout, b"harmless stdin\n")
-                self.assertEqual(stderr.decode().strip(), literal)
+        for pidfd in (True, False):
+            for exit_code in (0, 7):
+                with self.subTest(pidfd=pidfd, exit_code=exit_code):
+                    process, _ = self.start_guard(code, literal, str(exit_code), pidfd=pidfd)
+                    stdout, stderr = process.communicate(b"harmless stdin", timeout=3)
+                    self.assertEqual(process.returncode, exit_code)
+                    self.assertEqual(stdout, b"harmless stdin\n")
+                    self.assertEqual(stderr.decode().strip(), literal)
+
+    def test_start_failure_exits_127_with_its_message(self):
+        # On POSIX the guard leaves through os._exit, which skips the
+        # interpreter's final flush; its one private-safe line must still arrive.
+        for spawn in (True, False):
+            for native in (str(self.root / "missing-native"), "harness-missing-native"):
+                with self.subTest(spawn=spawn, native=native):
+                    process, _ = self.start_native([native, "--private-value"], spawn=spawn,
+                                                   stdin=subprocess.DEVNULL)
+                    stdout, stderr = process.communicate(timeout=3)
+                    self.assertEqual((process.returncode, stdout, stderr), (127, b"", UNAVAILABLE))
+
+    def test_path_search_and_its_failures_match_popen(self):
+        # On glibc posix_spawnp gives up at the first PATH entry it cannot run,
+        # and on macOS it hands a file without #! to /bin/sh. Popen moves past
+        # both and never runs a shell; the guard searches as Popen does.
+        directories = {}
+        for name, body, mode in (("plain", "echo plain\n", 0o755),  # No #!: ENOEXEC.
+                                 ("denied", "#!/bin/sh\necho denied\n", 0o644),  # EACCES.
+                                 ("found", "#!/bin/sh\necho found\n", 0o755),
+                                 ("tööls", "#!/bin/sh\necho unicode\n", 0o755)):
+            directories[name] = self.root / name
+            directories[name].mkdir()
+            tool = directories[name] / "harness-tool"
+            tool.write_text(body)
+            tool.chmod(mode)
+        (directories["tööls"] / "harness-tool").rename(directories["tööls"] / "harness-tööl")
+        directories["folder"] = self.root / "folder"
+        (directories["folder"] / "harness-tool").mkdir(parents=True)  # A directory: EACCES.
+
+        def search(*names):
+            return os.pathsep.join([str(self.root / "missing"), *(str(directories[name]) for name in names)])
+
+        unavailable = (127, b"", UNAVAILABLE)
+        cases = (
+            (["harness-tool"], search("plain", "denied", "folder", "found"), None, (0, b"found\n", b"")),
+            (["harness-tool"], search("plain", "denied", "folder"), None, unavailable),
+            ([str(directories["plain"] / "harness-tool")], search("found"), None, unavailable),
+            (["harness-tool"], "", directories["found"], (0, b"found\n", b"")),  # An empty entry: the working directory.
+            (["sh", "-c", "echo default"], None, None, (0, b"default\n", b"")),  # No PATH: os.defpath.
+            (["harness-tööl"], search("tööls"), None, (0, b"unicode\n", b"")),  # Searched in bytes, as Popen does.
+        )
+        for native, path, cwd, expected in cases:
+            environment = {key: value for key, value in os.environ.items() if key != "PATH"}
+            if path is not None:
+                environment["PATH"] = path
+            with self.subTest(native=native, path=path, popen=True):
+                try:
+                    done = subprocess.run(native, env=environment, cwd=cwd, stdin=subprocess.DEVNULL,
+                                          capture_output=True, timeout=5)
+                    self.assertEqual((done.returncode, done.stdout, done.stderr), expected)
+                except OSError:
+                    self.assertEqual(unavailable, expected)
+            for spawn in (True, False):
+                with self.subTest(native=native, path=path, spawn=spawn):
+                    process, _ = self.start_native(native, spawn=spawn, env=environment, cwd=cwd,
+                                                   stdin=subprocess.DEVNULL)
+                    stdout, stderr = process.communicate(timeout=3)
+                    self.assertEqual((process.returncode, stdout, stderr), expected)
+
+    def test_native_inherits_only_standard_streams_and_the_lock(self):
+        # Popen(close_fds=True, pass_fds=(lock,)) is the contract. posix_spawn
+        # closes only close-on-exec descriptors, so the guard marks every other
+        # one it holds; the stray one arrives inheritable, as from a careless owner.
+        listing = ("import os\n"
+                   "def is_open(fd):\n"
+                   "    try:\n"
+                   "        os.fstat(fd)\n"
+                   "    except OSError:\n"
+                   "        return False\n"
+                   "    return True\n"
+                   "print(*sorted(fd for fd in map(int, os.listdir('/dev/fd')) if is_open(fd)))\n")
+        lock = os.open(self.root / "runner.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        stray = os.open(os.devnull, os.O_RDONLY)
+        self.pipes.extend((lock, stray))
+        for spawn in (True, False):
+            with self.subTest(spawn=spawn):
+                process, _ = self.start_native([sys.executable, "-S", "-c", listing], spawn=spawn,
+                                               lock=lock, inherited=(stray,))
+                stdout, stderr = process.communicate(timeout=3)
+                self.assertEqual((process.returncode, stderr), (0, b""))
+                self.assertEqual(stdout.split(), [b"0", b"1", b"2", str(lock).encode()])
+
+    @unittest.skipUnless(Path("/proc/self/status").exists(), "Signal dispositions need /proc")
+    def test_native_starts_with_the_signals_python_ignores_at_default(self):
+        # The guard is Python, which ignores SIGPIPE and SIGXFSZ; as Popen's
+        # restore_signals does, its native process gets them at default (so a
+        # closed pipe still ends `yes | head`). cat reports its own SigIgn mask.
+        restored = 1 << (signal.SIGPIPE - 1) | 1 << (signal.SIGXFSZ - 1)
+        for spawn in (True, False):
+            with self.subTest(spawn=spawn):
+                process, _ = self.start_native(["cat", "/proc/self/status"], spawn=spawn)
+                stdout, stderr = process.communicate(timeout=3)
+                self.assertEqual((process.returncode, stderr), (0, b""))
+                ignored = next(line for line in stdout.decode().splitlines() if line.startswith("SigIgn:"))
+                self.assertEqual(int(ignored.split()[1], 16) & restored, 0)
+
+    def test_posix_guard_imports_no_windows_modules_and_no_subprocess(self):
+        # Every guarded call waits for the guard to start and to exit; on POSIX
+        # the Windows-only ctypes cost ~2 ms of that and subprocess with
+        # selectors ~5 ms. Popen stays only where posix_spawn would not do.
+        # Run in-process, the lock is not inheritable when the guard gets it;
+        # as with pass_fds, the native process must still hold it. Counted
+        # are the guard's own imports: on Python 3.11 runpy brings threading.
+        code = ("import os,runpy,sys; before = set(sys.modules); guard = runpy.run_path(sys.argv[1]); "
+                "read_fd, write_fd = os.pipe(); lock = os.open(sys.argv[2], os.O_CREAT | os.O_RDWR, 0o600); "
+                "status = guard['run'](read_fd, [sys.executable, '-S', '-c', 'import os,sys; os.fstat(int(sys.argv[1]))', "
+                "str(lock)], lock); "
+                "print(status, guard['_spawn_reports_exec_errors'](), "
+                "*sorted({'ctypes', 'selectors', 'subprocess', 'threading'} & (set(sys.modules) - before)))")
+        imported = subprocess.run([sys.executable, "-S", "-c", code, str(GUARD), str(self.root / "runner.lock")],
+                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=10, check=True,
+                                  start_new_session=True)
+        status, direct, *modules = imported.stdout.split()
+        self.assertEqual(status, b"0")
+        self.assertNotIn(b"ctypes", modules)
+        if direct == b"True":
+            self.assertEqual(modules, [])
+
+    def test_posix_guard_start_imports_nothing_it_can_do_without(self):
+        # os.py with what it imports (~1.3 ms), signal's enums (~1.6 ms) and
+        # __future__ were part of every guarded call's wait for the guard;
+        # the launcher must not bring importlib (~0.1-0.5 ms) either.
+        # PYTHONPROFILEIMPORTTIME lists the guard's imports; the native Python
+        # ignores it under -E. Warning options and dev mode import warnings
+        # at any start.
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ("PYTHONWARNINGS", "PYTHONDEVMODE")}
+        environment["PYTHONPROFILEIMPORTTIME"] = "1"
+        process, _ = self.start_native([sys.executable, "-E", "-c", ""], stdin=subprocess.DEVNULL, env=environment)
+        stdout, stderr = process.communicate(timeout=5)
+        self.assertEqual((process.returncode, stdout), (0, b""), stderr)
+        imported = {line.rpartition("|")[2].strip() for line in stderr.decode().splitlines()
+                    if line.startswith("import time:")}
+        self.assertIn("select", imported)
+        # Where Popen starts the native process (posix_spawn would not report
+        # a failed exec there), subprocess imports all of them anyway.
+        if "subprocess" not in imported:
+            self.assertEqual(sorted(imported & {"os", "signal", "enum", "__future__", "importlib", "warnings",
+                                                "selectors", "threading", "ctypes"}), [])
+
+    def test_launcher_runs_the_guard_from_its_bytecode_cache(self):
+        # Python compiles a file run as a script from source each time, ~2 ms
+        # of every guarded call for the guard. Through its launcher the guard
+        # is cached once, even under PYTHONDONTWRITEBYTECODE, which the Harness
+        # and Claude Desktop set, and nothing else is cached.
+        copy = self.root / "guard"
+        copy.mkdir()
+        for path in (GUARD, GUARD_CLI):
+            shutil.copy2(path, copy / path.name)
+        source, launcher = copy / GUARD.name, copy / GUARD_CLI.name
+        environment = {key: value for key, value in os.environ.items() if key != "PYTHONPYCACHEPREFIX"}
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        def start_failure(script):
+            process, _ = self.start_native([str(self.root / "missing-native")], script=script,
+                                           env=environment, stdin=subprocess.DEVNULL)
+            stdout, stderr = process.communicate(timeout=3)
+            self.assertEqual((process.returncode, stdout), (127, b""))
+            return stderr
+
+        self.assertEqual(start_failure(source), UNAVAILABLE)
+        self.assertEqual(list(copy.rglob("*.pyc")), [])
+        self.assertEqual(start_failure(launcher), UNAVAILABLE)
+        cached = [path.relative_to(copy).as_posix() for path in copy.rglob("*.pyc")]
+        self.assertEqual([path.split(".", 1)[0] for path in cached], ["__pycache__/process_guard"], cached)
+        # Other text of the same size and modification time: only the cached
+        # guard still prints the line it was compiled with.
+        status = source.stat()
+        source.write_bytes(source.read_bytes().replace(b"could not start", b"COULD NOT START"))
+        os.utime(source, ns=(status.st_atime_ns, status.st_mtime_ns))
+        self.assertEqual(start_failure(launcher), UNAVAILABLE)
+        self.assertEqual(start_failure(source), UNAVAILABLE.replace(b"could not start", b"COULD NOT START"))
+
+    def test_native_signal_death_reports_shell_status(self):
+        for pidfd in (True, False):
+            with self.subTest(pidfd=pidfd):
+                process, _ = self.start_guard("import os,signal; os.kill(os.getpid(), signal.SIGKILL)", pidfd=pidfd)
+                process.communicate(timeout=3)
+                self.assertEqual(process.returncode, 128 + signal.SIGKILL)
+
+    @unittest.skipUnless(Path("/proc/self/status").exists(), "Wakeup counts need /proc")
+    def test_guard_sleeps_until_an_event_instead_of_a_poll_tick(self):
+        # The owner reads EOF only once the guard exits, so a 50 ms poll tick
+        # delayed every guarded call after its native exit. Wall time varies
+        # with load; the guard's wakeups while its child sleeps do not.
+        def wakeups(pid):
+            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                if line.startswith("voluntary_ctxt_switches:"):
+                    return int(line.split()[1])
+
+        code = "import sys,time; print('ready', flush=True); time.sleep(float(sys.argv[1]))"
+        for pidfd in (True, False):
+            with self.subTest(pidfd=pidfd):
+                process, _ = self.start_guard(code, "0.6", pidfd=pidfd)
+                self.assertEqual(process.stdout.readline(), b"ready\n")
+                before = wakeups(process.pid)
+                time.sleep(0.4)
+                self.assertLessEqual(wakeups(process.pid) - before, 2)
+                process.communicate(timeout=3)
+                self.assertEqual(process.returncode, 0)
 
     def test_owner_loss_kills_stubborn_child_in_the_same_group(self):
-        marker = self.root / "child.json"
         code = (
             "import json,os,pathlib,signal,sys,time; "
             "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
             "pathlib.Path(sys.argv[1]).write_text(json.dumps([os.getpid(),os.getpgrp()])); "
             "time.sleep(30)"
         )
-        process, owner = self.start_guard(code, str(marker))
-        self.wait_for(marker.exists)
-        pid, group = json.loads(marker.read_text())
-        self.assertEqual(group, process.pid)
-        started = time.monotonic()
-        self.close_owner_pipe(owner)
-        process.wait(timeout=2)
-        self.assertLess(time.monotonic() - started, 2)
-        self.assertEqual(process.returncode, -signal.SIGKILL)
-        self.wait_for(lambda: not self.running(pid))
+        for pidfd in (True, False):
+            with self.subTest(pidfd=pidfd):
+                marker = self.root / f"child-{pidfd}.json"
+                process, owner = self.start_guard(code, str(marker), pidfd=pidfd)
+                self.wait_for(marker.exists)
+                pid, group = json.loads(marker.read_text())
+                self.assertEqual(group, process.pid)
+                started = time.monotonic()
+                self.close_owner_pipe(owner)
+                process.wait(timeout=2)
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertEqual(process.returncode, -signal.SIGKILL)
+                self.wait_for(lambda: not self.running(pid))
 
     def test_cancel_kills_stubborn_descendant_after_direct_child_exits(self):
-        marker = self.root / "descendant.pid"
         descendant = (
             "import os,pathlib,signal,sys,time; "
             "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
             "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
         )
         code = "import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]); time.sleep(30)"
-        process, _ = self.start_guard(code, descendant, str(marker))
-        self.wait_for(marker.exists)
-        pid = int(marker.read_text())
-        os.kill(process.pid, signal.SIGTERM)
-        process.wait(timeout=2)
-        self.assertEqual(process.returncode, -signal.SIGKILL)
-        self.wait_for(lambda: not self.running(pid))
+        for pidfd in (True, False):
+            with self.subTest(pidfd=pidfd):
+                marker = self.root / f"descendant-{pidfd}.pid"
+                process, _ = self.start_guard(code, descendant, str(marker), pidfd=pidfd)
+                self.wait_for(marker.exists)
+                pid = int(marker.read_text())
+                started = time.monotonic()
+                os.kill(process.pid, signal.SIGTERM)
+                process.wait(timeout=2)
+                # The direct child exits on SIGTERM; the guard still waits out
+                # the grace for the descendant that ignores it.
+                self.assertGreaterEqual(time.monotonic() - started, 0.9)
+                self.assertEqual(process.returncode, -signal.SIGKILL)
+                self.wait_for(lambda: not self.running(pid))
 
     @unittest.skipUnless(shutil.which("git"), "Checkout-filter regression requires Git")
     def test_worktree_timeout_kills_stubborn_checkout_filter(self):

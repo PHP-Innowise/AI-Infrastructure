@@ -1,0 +1,29 @@
+{
+  "task": "JUNIPER-RELAY",
+  "goal": "Juniper relay ownership",
+  "progress": "Juniper relay review is ready",
+  "next_step": "Check the relay lease",
+  "other_task": "TOPAZ-SENSOR",
+  "other_goal": "Topaz sensor calibration",
+  "source_path": "specs/juniper-relay.md",
+  "source_text": "# Juniper relay ownership\n\nJuniper relay dispatch requires a durable ownership receipt before release.\n",
+  "changed_source_text": "# Juniper relay ownership\n\nJuniper relay dispatch requires two ownership reviewers before release.\n",
+  "other_source_path": "specs/topaz-sensor.md",
+  "other_source_text": "# Topaz sensor calibration\n\nTopaz sensor calibration requires a signed calibration table.\n",
+  "continuation_prompts": [
+    "go on",
+    "дальше",
+    "ok, thanks",
+    "  продолжай!  "
+  ],
+  "meaningful_no_match": "quartz weather satellite",
+  "privacy_only": "Customer ID: PUBLIC-FIXTURE-998",
+  "privacy_modified_ack": "ok Customer ID: PUBLIC-FIXTURE-998",
+  "negative_prompts": [
+    "stop",
+    "do not continue",
+    "please explain quartz",
+    "okay quartz",
+    "ok thanks xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ]
+}

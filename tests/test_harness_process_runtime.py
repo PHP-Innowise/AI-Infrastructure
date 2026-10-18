@@ -43,6 +43,83 @@ class ProcessRuntimeTests(unittest.TestCase):
                 process_runtime.signal_tree(process, force=True)
                 process.wait(timeout=3)
 
+    @unittest.skipIf(os.name == "nt", "The Windows guard starts with site")
+    def test_posix_guard_starts_without_site_and_native_keeps_its_environment(self):
+        # site cost every guarded call about 1 ms; the guard needs only the
+        # standard library. The native process still runs site and sees PYTHONPATH.
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "site-pids"
+            Path(temporary, "sitecustomize.py").write_text(
+                f"import os\nwith open({str(marker)!r}, 'a') as f: f.write(str(os.getpid()) + '\\n')\n")
+            read_fd, write_fd = os.pipe()
+            process = None
+            try:
+                process = process_runtime.launch_guarded(
+                    [sys.executable, "-c", "import os; print(os.getpid())"], read_fd,
+                    env={**os.environ, "PYTHONPATH": temporary},
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                os.close(read_fd)
+                read_fd = None
+                stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 0, stderr)
+                self.assertEqual(marker.read_text().split(), [stdout.decode().strip()])
+            finally:
+                if read_fd is not None:
+                    os.close(read_fd)
+                os.close(write_fd)
+                if process is not None and process.poll() is None:
+                    process_runtime.signal_tree(process, force=True)
+                    process.wait(timeout=3)
+
+    def test_guard_runs_from_cached_bytecode_the_caller_did_not_ask_for(self):
+        # Run as a script the guard was compiled again on every call. The
+        # Harness asks for no bytecode on its runtime calls; the guard's
+        # launcher still caches the guard, and nothing else - on Windows not
+        # windows_commands either, which the guard imports there. The cache
+        # prefix keeps this run's cache out of the checkout; under it the
+        # guard's folder appears without its root (or Windows drive).
+        with tempfile.TemporaryDirectory() as temporary:
+            read_fd, write_fd = os.pipe()
+            process = None
+            try:
+                process = process_runtime.launch_guarded(
+                    [sys.executable, "-E", "-c", ""], read_fd,
+                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPYCACHEPREFIX": temporary},
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                os.close(read_fd)
+                read_fd = None
+                stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual((process.returncode, stdout, stderr), (0, b"", b""))
+            finally:
+                if read_fd is not None:
+                    os.close(read_fd)
+                os.close(write_fd)
+                if process is not None and process.poll() is None:
+                    process_runtime.signal_tree(process, force=True)
+                    process.wait(timeout=3)
+            cached = [path.relative_to(temporary) for path in Path(temporary).rglob("*.pyc")]
+            self.assertEqual([path.name.split(".", 1)[0] for path in cached], ["process_guard"], cached)
+            self.assertEqual(cached[0].parent.parts, process_runtime.GUARD.parent.parts[1:])
+
+    def test_launcher_names_the_guard_beside_it_whichever_slash_ends_its_folder(self):
+        # On Windows the launcher's __file__ ends its folder with a backslash,
+        # or with a slash where the caller wrote one, and the launcher has no
+        # os.path to split it. No guard sits in this folder, so loading the
+        # one the launcher names fails, naming it.
+        source = process_runtime.GUARD_CLI.read_bytes()
+        with tempfile.TemporaryDirectory() as temporary:
+            for folders in ("/", "\\"):
+                for last in ("/", "\\"):
+                    folder = temporary.replace("\\", "/").replace("/", folders) + last
+                    with self.subTest(folder=folder), patch.object(sys, "argv", ["launcher"]):
+                        with self.assertRaises(FileNotFoundError) as missing:
+                            exec(compile(source, str(process_runtime.GUARD_CLI), "exec"),
+                                 {"__name__": "__main__", "__file__": folder + "process_guard_cli.py"})
+                        guard = folder + "process_guard.py"
+                        self.assertEqual((missing.exception.filename, sys.argv[0]), (guard, guard))
+
     def test_pipe_readers_preserve_chunks_with_bounded_per_pipe_queue(self):
         process = subprocess.Popen(
             [sys.executable, "-u", "-c", "import sys; sys.stdout.buffer.write(b'first\\nsecond\\r\\n'); sys.stdout.buffer.flush()"],

@@ -1,0 +1,188 @@
+{
+  "scope": "b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a",
+  "bank_id": "harness-b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a",
+  "documents_v1": [
+    {
+      "source_id": "logical-4f6f9dd9ac6a3d342c898adedf5a6acfda2adcd3ad6f36da2bcc4b91c71d0696",
+      "path": "docs/harbor.md",
+      "document_id": "source-c7aa767b9e46fdd66cebbb86b261dfbc0ca3b1094477fa41368db95c3d690853",
+      "source_sha256": "c4affa440aea48c87e5884910980287f2686b4c3005d56670f7d2595dde824fb",
+      "classification": "operator-attested-public",
+      "retain_request": {
+        "items": [
+          {
+            "content": "# Harbor dispatch\nThe cobalt ferry uses pier seven. The dispatch cap is twelve crates.\n",
+            "document_id": "source-c7aa767b9e46fdd66cebbb86b261dfbc0ca3b1094477fa41368db95c3d690853",
+            "timestamp": "unset",
+            "context": "public canonical source",
+            "metadata": {
+              "harness_scope": "b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a",
+              "source_sha256": "c4affa440aea48c87e5884910980287f2686b4c3005d56670f7d2595dde824fb",
+              "source_id": "logical-4f6f9dd9ac6a3d342c898adedf5a6acfda2adcd3ad6f36da2bcc4b91c71d0696",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "tags": [
+              "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+            ],
+            "update_mode": "replace"
+          }
+        ],
+        "async": false,
+        "document_tags": [
+          "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+        ]
+      }
+    },
+    {
+      "source_id": "logical-f8c3407ebabdab0eece2a3519c81e57f55807850a119b0fbb68864008d0a6e9a",
+      "path": "src/quay.php",
+      "document_id": "source-76eededb1b262bd9eafbf052e47221eb32d471d3a72011c2c7f841b627acc6d6",
+      "source_sha256": "0bc756969ab95ce2611da7882686dd844288fe347007dd90de109fc3bec81e3c",
+      "classification": "operator-attested-public",
+      "retain_request": {
+        "items": [
+          {
+            "content": "<?php\nfunction berth_limit(): int { return 12; }\n",
+            "document_id": "source-76eededb1b262bd9eafbf052e47221eb32d471d3a72011c2c7f841b627acc6d6",
+            "timestamp": "unset",
+            "context": "public canonical source",
+            "metadata": {
+              "harness_scope": "b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a",
+              "source_sha256": "0bc756969ab95ce2611da7882686dd844288fe347007dd90de109fc3bec81e3c",
+              "source_id": "logical-f8c3407ebabdab0eece2a3519c81e57f55807850a119b0fbb68864008d0a6e9a",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "tags": [
+              "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+            ],
+            "update_mode": "replace"
+          }
+        ],
+        "async": false,
+        "document_tags": [
+          "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+        ]
+      }
+    },
+    {
+      "source_id": "logical-f056240af69a0d0a5925403a8ab9759df45b53a5b6b2b01b6bf89054ff40a2a7",
+      "path": "docs/storm.md",
+      "document_id": "source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0",
+      "source_sha256": "f3506ef754e27cb914b4ee395c9e7988b7437afb67032b1328537f634ee4894d",
+      "classification": "operator-attested-public",
+      "retain_request": {
+        "items": [
+          {
+            "content": "# Tide bulletin\r\nAmber sails remain docked during the Ω storm.\r\n",
+            "document_id": "source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0",
+            "timestamp": "unset",
+            "context": "public canonical source",
+            "metadata": {
+              "harness_scope": "b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a",
+              "source_sha256": "f3506ef754e27cb914b4ee395c9e7988b7437afb67032b1328537f634ee4894d",
+              "source_id": "logical-f056240af69a0d0a5925403a8ab9759df45b53a5b6b2b01b6bf89054ff40a2a7",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "tags": [
+              "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+            ],
+            "update_mode": "replace"
+          }
+        ],
+        "async": false,
+        "document_tags": [
+          "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+        ]
+      }
+    }
+  ],
+  "documents_v2": [
+    {
+      "source_id": "logical-4f6f9dd9ac6a3d342c898adedf5a6acfda2adcd3ad6f36da2bcc4b91c71d0696",
+      "path": "docs/harbor.md",
+      "document_id": "source-1e8ca3d7da248ebc25f81376106789f102dd4ef5bde04d9947f87cd04f499608",
+      "source_sha256": "b4dea9f8f0849d7862bac0788a15a0dd1036f482720f3c1937e9fdda80b0be40",
+      "classification": "operator-attested-public",
+      "retain_request": {
+        "items": [
+          {
+            "content": "# Harbor dispatch\nThe cobalt ferry uses pier nine. The dispatch cap is eight crates.\n",
+            "document_id": "source-1e8ca3d7da248ebc25f81376106789f102dd4ef5bde04d9947f87cd04f499608",
+            "timestamp": "unset",
+            "context": "public canonical source",
+            "metadata": {
+              "harness_scope": "b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a",
+              "source_sha256": "b4dea9f8f0849d7862bac0788a15a0dd1036f482720f3c1937e9fdda80b0be40",
+              "source_id": "logical-4f6f9dd9ac6a3d342c898adedf5a6acfda2adcd3ad6f36da2bcc4b91c71d0696",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "tags": [
+              "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+            ],
+            "update_mode": "replace"
+          }
+        ],
+        "async": false,
+        "document_tags": [
+          "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+        ]
+      }
+    },
+    {
+      "source_id": "logical-f056240af69a0d0a5925403a8ab9759df45b53a5b6b2b01b6bf89054ff40a2a7",
+      "path": "docs/storm.md",
+      "document_id": "source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0",
+      "source_sha256": "f3506ef754e27cb914b4ee395c9e7988b7437afb67032b1328537f634ee4894d",
+      "classification": "operator-attested-public",
+      "retain_request": {
+        "items": [
+          {
+            "content": "# Tide bulletin\r\nAmber sails remain docked during the Ω storm.\r\n",
+            "document_id": "source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0",
+            "timestamp": "unset",
+            "context": "public canonical source",
+            "metadata": {
+              "harness_scope": "b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a",
+              "source_sha256": "f3506ef754e27cb914b4ee395c9e7988b7437afb67032b1328537f634ee4894d",
+              "source_id": "logical-f056240af69a0d0a5925403a8ab9759df45b53a5b6b2b01b6bf89054ff40a2a7",
+              "export_profile": "hindsight-public-export-v1"
+            },
+            "tags": [
+              "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+            ],
+            "update_mode": "replace"
+          }
+        ],
+        "async": false,
+        "document_tags": [
+          "harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a"
+        ]
+      }
+    }
+  ],
+  "packet_v1": "{\"schema_version\":1,\"profile\":\"hindsight-public-export-v1\",\"bank_id\":\"harness-b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"scope\":\"b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"sources\":[{\"source_id\":\"logical-4f6f9dd9ac6a3d342c898adedf5a6acfda2adcd3ad6f36da2bcc4b91c71d0696\",\"path\":\"docs/harbor.md\",\"document_id\":\"source-c7aa767b9e46fdd66cebbb86b261dfbc0ca3b1094477fa41368db95c3d690853\",\"source_sha256\":\"c4affa440aea48c87e5884910980287f2686b4c3005d56670f7d2595dde824fb\",\"classification\":\"operator-attested-public\",\"retain_request\":{\"items\":[{\"content\":\"# Harbor dispatch\\nThe cobalt ferry uses pier seven. The dispatch cap is twelve crates.\\n\",\"document_id\":\"source-c7aa767b9e46fdd66cebbb86b261dfbc0ca3b1094477fa41368db95c3d690853\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"source_sha256\":\"c4affa440aea48c87e5884910980287f2686b4c3005d56670f7d2595dde824fb\",\"source_id\":\"logical-4f6f9dd9ac6a3d342c898adedf5a6acfda2adcd3ad6f36da2bcc4b91c71d0696\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"]}},{\"source_id\":\"logical-f8c3407ebabdab0eece2a3519c81e57f55807850a119b0fbb68864008d0a6e9a\",\"path\":\"src/quay.php\",\"document_id\":\"source-76eededb1b262bd9eafbf052e47221eb32d471d3a72011c2c7f841b627acc6d6\",\"source_sha256\":\"0bc756969ab95ce2611da7882686dd844288fe347007dd90de109fc3bec81e3c\",\"classification\":\"operator-attested-public\",\"retain_request\":{\"items\":[{\"content\":\"<?php\\nfunction berth_limit(): int { return 12; }\\n\",\"document_id\":\"source-76eededb1b262bd9eafbf052e47221eb32d471d3a72011c2c7f841b627acc6d6\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"source_sha256\":\"0bc756969ab95ce2611da7882686dd844288fe347007dd90de109fc3bec81e3c\",\"source_id\":\"logical-f8c3407ebabdab0eece2a3519c81e57f55807850a119b0fbb68864008d0a6e9a\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"]}},{\"source_id\":\"logical-f056240af69a0d0a5925403a8ab9759df45b53a5b6b2b01b6bf89054ff40a2a7\",\"path\":\"docs/storm.md\",\"document_id\":\"source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0\",\"source_sha256\":\"f3506ef754e27cb914b4ee395c9e7988b7437afb67032b1328537f634ee4894d\",\"classification\":\"operator-attested-public\",\"retain_request\":{\"items\":[{\"content\":\"# Tide bulletin\\r\\nAmber sails remain docked during the Ω storm.\\r\\n\",\"document_id\":\"source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"source_sha256\":\"f3506ef754e27cb914b4ee395c9e7988b7437afb67032b1328537f634ee4894d\",\"source_id\":\"logical-f056240af69a0d0a5925403a8ab9759df45b53a5b6b2b01b6bf89054ff40a2a7\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"]}}]}",
+  "packet_v2": "{\"schema_version\":1,\"profile\":\"hindsight-public-export-v1\",\"bank_id\":\"harness-b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"scope\":\"b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"sources\":[{\"source_id\":\"logical-4f6f9dd9ac6a3d342c898adedf5a6acfda2adcd3ad6f36da2bcc4b91c71d0696\",\"path\":\"docs/harbor.md\",\"document_id\":\"source-1e8ca3d7da248ebc25f81376106789f102dd4ef5bde04d9947f87cd04f499608\",\"source_sha256\":\"b4dea9f8f0849d7862bac0788a15a0dd1036f482720f3c1937e9fdda80b0be40\",\"classification\":\"operator-attested-public\",\"retain_request\":{\"items\":[{\"content\":\"# Harbor dispatch\\nThe cobalt ferry uses pier nine. The dispatch cap is eight crates.\\n\",\"document_id\":\"source-1e8ca3d7da248ebc25f81376106789f102dd4ef5bde04d9947f87cd04f499608\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"source_sha256\":\"b4dea9f8f0849d7862bac0788a15a0dd1036f482720f3c1937e9fdda80b0be40\",\"source_id\":\"logical-4f6f9dd9ac6a3d342c898adedf5a6acfda2adcd3ad6f36da2bcc4b91c71d0696\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"]}},{\"source_id\":\"logical-f056240af69a0d0a5925403a8ab9759df45b53a5b6b2b01b6bf89054ff40a2a7\",\"path\":\"docs/storm.md\",\"document_id\":\"source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0\",\"source_sha256\":\"f3506ef754e27cb914b4ee395c9e7988b7437afb67032b1328537f634ee4894d\",\"classification\":\"operator-attested-public\",\"retain_request\":{\"items\":[{\"content\":\"# Tide bulletin\\r\\nAmber sails remain docked during the Ω storm.\\r\\n\",\"document_id\":\"source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0\",\"timestamp\":\"unset\",\"context\":\"public canonical source\",\"metadata\":{\"harness_scope\":\"b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\",\"source_sha256\":\"f3506ef754e27cb914b4ee395c9e7988b7437afb67032b1328537f634ee4894d\",\"source_id\":\"logical-f056240af69a0d0a5925403a8ab9759df45b53a5b6b2b01b6bf89054ff40a2a7\",\"export_profile\":\"hindsight-public-export-v1\"},\"tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"],\"update_mode\":\"replace\"}],\"async\":false,\"document_tags\":[\"harness-scope:b9060b4a166677c6ebd0d6031ee713e207cd1ee5daa38c5b04883da761dbe34a\"]}}]}",
+  "packet_v1_sha256": "bff9a8bf17c6b42142d186b8b9cde295e83ddc5335c3e94069adcf97b75c71ab",
+  "packet_v2_sha256": "de4c33cc5071997e38c148cbd516b55c23ddd532c454051c2afa5fae91dfc567",
+  "raw_bytes_v1": 201,
+  "raw_bytes_v2": 150,
+  "retain_body_bytes_v1": 2336,
+  "delta": {
+    "input_match_count": 1,
+    "retain_candidate_ids": [
+      "source-1e8ca3d7da248ebc25f81376106789f102dd4ef5bde04d9947f87cd04f499608"
+    ],
+    "retire_candidate_ids": [
+      "source-c7aa767b9e46fdd66cebbb86b261dfbc0ca3b1094477fa41368db95c3d690853",
+      "source-76eededb1b262bd9eafbf052e47221eb32d471d3a72011c2c7f841b627acc6d6"
+    ],
+    "reconciliation_ids": [
+      "source-c7aa767b9e46fdd66cebbb86b261dfbc0ca3b1094477fa41368db95c3d690853",
+      "source-76eededb1b262bd9eafbf052e47221eb32d471d3a72011c2c7f841b627acc6d6",
+      "source-ced453b027d6db82632fc8c073b2ea9f039ef07b56cfaf692e0f8c4452528bf0",
+      "source-1e8ca3d7da248ebc25f81376106789f102dd4ef5bde04d9947f87cd04f499608"
+    ],
+    "authorized_mutations": 0,
+    "remote_noop": null
+  }
+}

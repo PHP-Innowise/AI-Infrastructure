@@ -38,7 +38,7 @@
           "estimated_tokens": {"type": "integer", "minimum": 1},
           "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "match": {"enum": ["covered", "distinctive", "conflict"]},
-          "selection": {"enum": ["path-link", "source-link", "prompt-link", "touch-link"]},
+          "selection": {"enum": ["path-link", "source-link", "prompt-link", "touch-link", "source-hint"]},
           "source_changed": {"type": "boolean"},
           "score": {"type": "number", "minimum": 0},
           "rank": {"type": ["integer", "null"], "minimum": 1}
@@ -76,6 +76,17 @@
       }
     },
     "provider": {"type": "string", "minLength": 1},
+    "source_hints": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "state", "supplied", "admitted", "delivered"],
+      "properties": {
+        "profile": {"type": "string", "const": "source-hints-v1", "enum": ["source-hints-v1"]},
+        "state": {"type": "string", "enum": ["ready", "invalid", "unsupported"]},
+        "supplied": {"type": "integer", "minimum": 0, "maximum": 8},
+        "admitted": {"type": "integer", "minimum": 0, "maximum": 8},
+        "delivered": {"type": "integer", "minimum": 0, "maximum": 8}
+      }
+    },
     "source_links": {
       "type": "object",
       "additionalProperties": false,
@@ -86,7 +97,7 @@
         "delivered": {"type": "integer", "minimum": 0, "maximum": 3}
       }
     },
-    "query_source": {"enum": ["prompt", "task", "task-id", "explicit"]},
+    "query_source": {"enum": ["prompt", "task", "task-id", "explicit", "continuation"]},
     "host": {"enum": ["cli", "claude", "codex", "cursor"]},
     "entry_point": {"enum": ["context", "retrieve", "refresh", "hook-context"]},
     "gate": {

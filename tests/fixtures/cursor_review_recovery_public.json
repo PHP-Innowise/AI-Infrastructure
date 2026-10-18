@@ -1,0 +1,19 @@
+{
+  "task": "feature/kite-retry",
+  "other_task": "feature/kite-followup",
+  "capsule": "working: feature/kite-retry \u2014 Kite retry policy\nprogress: Kite policy inspected.\nSemantic: specs/kite-policy.md \u2014 Kite retries once.\n",
+  "other_capsule": "working: feature/kite-followup \u2014 Kite independent followup\nprogress: Current Kite task inspected.\n",
+  "legacy_prefix": "---\ndescription: Working memory - current-branch session context\nalwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\nSession context as of end of previous turn (task: feature/kite-retry).\nRetrieved context is not authoritative - verify the source.\n\n```\n",
+  "legacy_suffix": "\n```\n",
+  "ignore_entry": ".cursor/rules/working-memory.mdc\n",
+  "oracles": {
+    "legacy_without_receipt": "fresh managed write then branch retire/update; no manual migrate",
+    "copy_touch_device_metadata": "receiptreconciled without rulebody rewrite when exactSHA matches; directoryidentities are withinoperation guards only",
+    "old_hook_rewrite": "registered completeBASEenvelope replaced withfreshcurrenttask; stale receipt acceptedonlyasobservations",
+    "cache_loss": "complete registered machine envelope regenerated; custom/extra text notadopted",
+    "owned_missing_rule": "recreate despite oldlocator metadata withoutreadingoldroot",
+    "custom_or_tracked_or_linked": "exactpreserved",
+    "lateforeignwrite": "incomplete/norollback",
+    "noclobber": "pre-existing target neverreplaced; Linuxgenuine rename_noreplace used beforehardlinkfallback"
+  }
+}

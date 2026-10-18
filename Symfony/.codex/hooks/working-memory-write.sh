@@ -31,24 +31,110 @@ if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${
   PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
   STATE_DIR=$ACCELERATOR_STATE_DIR
 fi
-CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
+# context_cli.py runs context.py from its cached bytecode - run as a script,
+# context.py is compiled again on every start. An older runtime has only
+# context.py.
+CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context_cli.py"
+[ -f "$CONTEXT_CLI" ] || CONTEXT_CLI="$ROOT_DIR/memory-bank/scripts/context.py"
 BUDGET_SECONDS="${CONTEXT_HOOK_BUDGET:-5}"
 FLUSH_AFTER="${CONTEXT_FLUSH_AFTER:-5}"
 
-command -v python3 > /dev/null 2>&1 || exit 0
+# Python 3.9+ by whichever name this shell knows it. Native Windows (Git Bash)
+# often has no working python3: the python.org installer provides python and
+# py, and the python3 found there may be the Microsoft Store stub, which only
+# offers to install Python. Elsewhere python3 is taken without a probe.
+resolve_python() {
+  PYTHON=()
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 > /dev/null 2>&1; then
+    PYTHON=(python3)
+    return 0
+  fi
+  # On Windows the name found is remembered per user, and taken again while
+  # the shell finds it at the same path (the hash table, no process): every
+  # hook otherwise started an interpreter just to ask its version.
+  local name path remembered="${TMPDIR:-/tmp}/ai-accelerator-python-${UID:-0}"
+  if [ "${OS:-}" = "Windows_NT" ] && [ -f "$remembered" ] && [ ! -L "$remembered" ] \
+      && IFS=$'\t' read -r name path < "$remembered" && [ -n "$path" ]; then
+    case "$name" in
+      python|py|python3)
+        if hash "$name" 2> /dev/null && [ "${BASH_CMDS[$name]:-}" = "$path" ]; then
+          PYTHON=("$name")
+          [ "$name" = py ] && PYTHON+=(-3)
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  for name in python py python3; do
+    PYTHON=("$name")
+    [ "$name" = py ] && PYTHON+=(-3)
+    if "${PYTHON[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      if [ "${OS:-}" = "Windows_NT" ] && [ ! -L "$remembered" ] && hash "$name" 2> /dev/null; then
+        printf '%s\t%s\n' "$name" "${BASH_CMDS[$name]:-}" > "$remembered" 2> /dev/null
+      fi
+      return 0
+    fi
+  done
+  PYTHON=()
+  return 1
+}
+resolve_python || exit 0
 [ -f "$CONTEXT_CLI" ] || exit 0
 
 HOOK_STDIN=$(cat 2>/dev/null)
 
+rebased_branch() {
+  local directory state name
+  directory=$(git -C "$PROJECT_DIR" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  for state in rebase-merge rebase-apply; do
+    [ -f "$directory/$state/head-name" ] || continue
+    name=
+    IFS= read -r name < "$directory/$state/head-name" || [ -n "$name" ] || continue
+    case "$name" in refs/heads/?*) printf '%s' "${name#refs/heads/}"; return 0 ;; esac
+  done
+  return 1
+}
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
+[ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
 [ -n "$TASK_ID" ] || exit 0
 
+# A bookkeeping continuation must not checkpoint the same turn again.
+MEMORY_RECOVERY=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+except (ValueError, UnicodeError):
+    payload = {}
+if not isinstance(payload, dict):
+    payload = {}
+active = (type(payload.get("loop_count")) is int and payload["loop_count"] > 0
+          if sys.argv[-1] == "cursor" else payload.get("stop_hook_active") is True)
+print("1" if active else "0")
+' --host codex 2>/dev/null)
+
+if [ "$MEMORY_RECOVERY" != "1" ]; then
 if command -v timeout > /dev/null 2>&1; then
-  timeout "$BUDGET_SECONDS" python3 "$CONTEXT_CLI" turn \
+  timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" turn \
     --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
 else
-  python3 "$CONTEXT_CLI" turn \
+  "${PYTHON[@]}" "$CONTEXT_CLI" turn \
     --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
+fi
+
+fi
+
+# The payload travels on stdin; only a metadata challenge is kept. A supported
+# Stop requests one structured save from the same agent, never a new model.
+if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] && [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
+  if command -v timeout > /dev/null 2>&1; then
+    NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
+      --host codex --task-id "$TASK_ID" 2>/dev/null)
+  else
+    NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
+      --host codex --task-id "$TASK_ID" 2>/dev/null)
+  fi
+  NATIVE_STATUS=$?
+  [ "$NATIVE_STATUS" -eq 0 ] && [ -n "$NATIVE_RESPONSE" ] && printf '%s\n' "$NATIVE_RESPONSE"
 fi
 
 # Capsule delivery: this client receives the Task Capsule at prompt time

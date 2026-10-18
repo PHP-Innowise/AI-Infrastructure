@@ -1,0 +1,31 @@
+{
+  "profile": "memory-final-remediation-oracles-v1",
+  "native": {
+    "lost_local_complete": "passive replay, task and learning exact late bytes preserved",
+    "altered_digest": "refused with no shared changes",
+    "started_unknown": "refused incomplete, no further mutations",
+    "intent_write_failure": "no task/learning mutation",
+    "legacy_existing_learning": "no implicit completion/correction",
+    "legacy_auto_late_task": "refused no mutation",
+    "new_absent_numeric": "one verified learning and task update",
+    "explicit_learning_cas": "only original positive expected learning revision permits deliberate correction; stale CAS refused before all effects",
+    "duplicate_ids": "conflicting consequences refused before effects",
+    "proof_corrupt": "refused before effects",
+    "task_auth": "rechecked on passive replay"
+  },
+  "cursor": {
+    "rename_same": "unchanged, same rule bytes and inode; receipt root updated",
+    "rename_keep": "kept, receipt root updated only",
+    "rename_prompt_held": "kept, prompt retained",
+    "rename_turn": "kept, receipt phase prompt retained",
+    "rename_changed": "written with current root",
+    "rename_retire": "removed exact rule bytes",
+    "copy": "preserved exact leaves",
+    "edited_or_replaced": "preserved exact leaves",
+    "orphan": "preserved no rule creation",
+    "tracked": "preserved exact leaves",
+    "race_before": "preserved foreign leaves",
+    "publication_failure": "incomplete, unchanged rule",
+    "race_after": "incomplete no rollback"
+  }
+}

@@ -44,6 +44,16 @@ class MemoryMcpTests(unittest.TestCase):
         self.cli_call('start', '--task-id', 'TASK-MCP', '--goal', 'Check cobalt allocation')
         return self.cli_call('get', '--task-id', 'TASK-MCP')['revision']
 
+    def test_surrogate_request_id_does_not_end_the_protocol_stream(self):
+        replies = self.exchange([
+            {'jsonrpc': '2.0', 'id': '\ud800', 'method': 'ping'},
+            {'jsonrpc': '2.0', 'id': 73, 'method': 'ping'},
+        ])
+        self.assertEqual(2, len(replies))
+        self.assertEqual('\ud800', replies[0]['id'])
+        self.assertEqual({}, replies[0]['result'])
+        self.assertEqual({'jsonrpc': '2.0', 'id': 73, 'result': {}}, replies[1])
+
     def draft(self, revision):
         return {'task_id': 'TASK-MCP', 'result_id': 'result-1', 'revision': revision,
             'progress': 'Cobalt allocation checked.', 'next_steps': [], 'verified': True,
@@ -274,22 +284,31 @@ class MemoryMcpTests(unittest.TestCase):
             self.assertEqual(0, created.returncode, created.stderr)
             self.assertTrue(self.call('memory_retrieve', task_id=identifier, query='cobalt')['isError'])
 
-    def test_a_save_that_stopped_half_way_is_finished_by_its_replay(self):
-        # The first attempt wrote the learning's record and stopped before
-        # closing it or updating the task: the replay closes that record and
-        # writes no second one.
+    def test_explicit_original_learning_cas_repairs_open_record_without_adoption(self):
+        # An open historical record is not adopted from matching text.
+        # Deliberate repair supplies its original record revision.
         draft = self.draft(self.start())
-        sys.path.insert(0, str(self.root / 'memory-bank/scripts'))
+        # Imported from this test's own copy, then put back as they were: a
+        # module cached from the copy, deleted with the test, answered for
+        # the edition's runtime in later test modules of the same process.
+        scripts = self.root / 'memory-bank/scripts'
+        runtime = {path.stem for path in scripts.glob('*.py')}
+        saved = {name: sys.modules.pop(name) for name in list(sys.modules) if name in runtime}
+        sys.path.insert(0, str(scripts))
         try:
             import memory_results
             import brain_runtime
             uuid = brain_runtime.find_record(self.root, 'TASK-MCP', record_type='task')[1]['id']
             identifier = memory_results.learning_id(uuid, draft['learnings'][0])
         finally:
-            sys.path.remove(str(self.root / 'memory-bank/scripts'))
+            sys.path.remove(str(scripts))
+            for name in runtime:
+                sys.modules.pop(name, None)
+            sys.modules.update(saved)
         learning = draft['learnings'][0]
         self.cli_call('brain-create', 'finding', '--external-id', identifier, '--title', learning['title'],
             '--goal', learning['consequence'], '--source', learning['sources'][0])
+        draft['learnings'][0]['expected_revision'] = self.cli_call('brain-get', '--record-id', identifier)['revision']
         reply = self.call('memory_record_result', **draft)
         self.assertFalse(reply['isError'], reply)
         self.assertEqual(['completed'], [item['state'] for item in reply['structuredContent']['records']])

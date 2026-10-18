@@ -1,0 +1,13 @@
+{
+  "stdout_text": "working: capybara — café\nprogress: saved\n",
+  "stdout_hex": "776f726b696e673a20636170796261726120e2809420636166c3a90a70726f67726573733a2073617665640a",
+  "stderr_text": "warning: capybara unavailable\n",
+  "stderr_hex": "7761726e696e673a20636170796261726120756e617661696c61626c650a",
+  "explicit_cr_text": "one\r\ntwo\rthree\n",
+  "explicit_cr_hex": "6f6e650d0a74776f0d74687265650a",
+  "prefix_text": "déjà\r\n",
+  "prefix_hex": "64e96ae00d0a",
+  "main_error_text": "context: --limit must be a positive integer\n",
+  "main_error_hex": "636f6e746578743a202d2d6c696d6974206d757374206265206120706f73697469766520696e74656765720a",
+  "query": "capybara"
+}

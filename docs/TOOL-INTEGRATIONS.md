@@ -106,14 +106,72 @@ capsule is delivered through `.cursor/rules/working-memory.mdc`:
   no `--session-id`: the rule is re-sent whole, so nothing in it may be left
   out as already handed), writes the rule atomically, and answers
   `{"continue": true}` on every exit path - memory never holds a prompt back.
-  Cursor puts rules at the start of the model's context, so a rule rewritten
-  for every prompt would cost the conversation its cached prefix each time;
-  the hook replaces it only when the prompt retrieved an item the rule does
-  not hold yet - a document, or another section of one it holds (a follow-up
-  on the same sections, or small talk, leaves it).
+  An identical complete render leaves the file unchanged. A changed excerpt
+  or selected set replaces it even when document/section labels match, so
+  coarse item reuse cannot hide fresher evidence. This is a content-correctness
+  rule; provider cache/token effects remain unmeasured.
   Whether the request that triggered it already carries the new rule depends
-  on when Cursor reads its rules, which has not been verified on a live client;
-  at worst the rule is one prompt behind.
+  on when Cursor reads its rules, which has not been verified on a live client.
+  A later prompt may include the new rule if the client reloads it then;
+  loading latency remains unverified, and preserved/error paths can retain
+  older bytes for longer.
+- Installed publication creates an ignored `memory-bank/local/cursor-rule.json`
+  custody receipt. Replacement/retirement requires matching bytes and physical
+  identities, untracked rule and receipt, validated installed directories, and
+  the nonblocking native cooperative lock. Fixed Git probes use a private
+  sanitized environment and the selected root's default index, so editor,
+  SSH/askpass and inherited config settings cannot disable or redirect the
+  check. Explicit repository/index selectors preserve the files because the
+  selected tracking authority is ambiguous. Enforced repeat/legacy skips keep a
+  proven same-task rule. A known empty selection (`no-relevant-match` or
+  `empty-after-filter`) publishes fresh working state without the old selected
+  facts, including when their canonical source was deleted or became ineligible.
+  For an unchanged, sanitized Cursor continuation such as `go on`, `ok` or
+  `дальше`, prompt refresh searches the current nonterminal governed task.
+  An explicit goal takes priority in the query; otherwise substantive recorded
+  progress/next steps/files may provide the task query. The full current working
+  state is still rendered. The packet labels this query as task-derived, and the
+  ordinary source, privacy and relevance checks run again. This bounded phrase
+  allowlist does not apply to meaningful new queries, privacy-modified/withheld
+  prompts, direct retrieval, other hosts, unknown/terminal tasks or a bare
+  auto-derived branch goal. It never uses a previous rule as a source.
+  A valid scoped orphan receipt can recreate an absent rule; it never authorizes
+  a newly appearing or replacement inode. Identical bytes on the same inode,
+  size and mtime permit current-image receipt reconciliation after a metadata
+  change, without claiming that chmod was the only intervening operation.
+  Legacy/custom/edited/linked/tracked
+  files, unsupported rooted filesystem operations and attached shared clones
+  are preserved. An unreceipted rule returns `ownership_unverified`; unsupported
+  platforms return `unsupported_custody`; a `.cursor` or `.cursor/rules` that is
+  a symbolic link (a rules folder shared between projects, which the capsule
+  would reach in every project sharing it) returns `linked_directory` and is
+  never written through - keep `.cursor/rules` a directory and link shared rule
+  files inside it. Header shape is never ownership.
+  For an explicitly approved legacy file, `cursor-rule --action migrate
+  --approved-current-sha256 <SHA256> --task-id <ID> --report-json` accepts a fresh
+  refresh report on stdin. Approval must come from the operator for that exact
+  current file image, never from repository metadata or an automatic hook.
+  The ordinary custody, default-index and final-image checks still apply.
+  After migration, routine maintenance remains automatic. A changed image,
+  tracked file, foreign receipt, linked parent or unsupported platform refuses
+  migration. Custody does not establish chat identity or source authority.
+  Installed Windows runtimes now carry a lazy native NT handle adapter: absolute
+  local-drive roots are walked without following reparse points, child operations
+  stay rooted at held parent handles, and new rules use a no-clobber rename.
+  NT parent handles deny delete sharing; cooperative byte-zero locks interoperate
+  with Project Brain without waiting. All custody metadata comes from that same
+  backend. Its `ctime` token is Windows creation time, not POSIX change time.
+  UNC paths, reparse points and unavailable native APIs preserve files; there is
+  no path-based mutation fallback. The actual NT acceptance controls run in the
+  Windows CI job; Linux adapter/mocked cleanup checks alone do not certify them.
+  Harness capsule delivery attempts retirement before provider startup; hooks
+  provide a fallback. Hook maintenance is capped at three seconds where
+  `timeout` is available, and Harness uses a three-second execution
+  supervisor; cleanup may take longer. The turn-end check for a held prompt
+  rule reports nothing itself: the write, keep or retire after it says what
+  happened to the rule. The rule/receipt pair is
+  not a durable transaction, and arbitrary concurrent leaf changes have no
+  atomic CAS guarantee. A taskless Stop keeps its original early exit.
 - The Cursor mirror of `working-memory-write.sh` renders the branch's capsule
   into the same rule after the turn checkpoint, unless the rule holds the
   prompt hook's capsule for the same task: rebuilt from the task alone it would
@@ -450,3 +508,10 @@ The default is governed mode. Read [Context Modes](CONTEXT-MODES.md) before
 selecting lightweight mode, and use the
 [User Task Workflow Example](examples/USER-TASK-WORKFLOW-EXAMPLE.md) for the
 end-to-end lifecycle.
+
+Recorded Cursor rule custody survives a checkout rename only when the current root,
+rules directory and rule file retain their physical identities and exact content
+hash. Matching keep/held/unchanged paths reconcile only the receipt under the same
+Git checks, lock and repeated image guards. Copies, changed files and renamed
+orphan receipts remain unowned/ambiguous and are preserved. Legacy rules without
+a receipt still require explicit operator migration; no automatic header adoption.

@@ -1,0 +1,59 @@
+{
+  "profile": "gannet-source-resilience-v1",
+  "task_id": "feature/gannet-cache",
+  "goal": "Verify Gannet cache gateway lifetime",
+  "sources": {
+    "specs/gannet-cache.md": "# Gannet cache gateway\n\nGannet gateways use the western keeper and expire after nineteen minutes.\n",
+    "specs/osprey-audit.md": "# Osprey audit\n\nOsprey journals have a forty-three minute retention interval.\n",
+    "specs/delta.md": "# Delta specimen\n\nThis delta specimen contains a numbered public marker.\n",
+    "specs/lichen.md": "# Lichen specimen\n\nThis lichen specimen contains a numbered public marker.\n",
+    "specs/fallow.md": "# Fallow specimen\n\nThis fallow specimen contains a numbered public marker.\n",
+    "specs/copper.md": "# Copper specimen\n\nThis copper specimen contains a numbered public marker.\n",
+    "specs/alpine.md": "# Alpine specimen\n\nThis alpine specimen contains a numbered public marker.\n",
+    "specs/moraine.md": "# Moraine specimen\n\nThis moraine specimen contains a numbered public marker.\n",
+    "specs/petal.md": "# Petal specimen\n\nThis petal specimen contains a numbered public marker.\n",
+    "specs/mosaic.md": "# Mosaic specimen\n\nThis mosaic specimen contains a numbered public marker.\n"
+  },
+  "query": "Gannet cache gateway lifetime",
+  "fact": "Gannet gateways use the western keeper and expire after nineteen minutes.",
+  "invalid_utf8_hex": "232047616e6e657420e96661696c7572650a",
+  "malformed_literal": "---\n{\"type\":\"finding\",\n---\nGannet malformed native record\n",
+  "handoff_case": "actual native task handoff at control/handoffs/<actualuuid>.md",
+  "late_subtree": "zz-inventory-blocked",
+  "error_prefix": "Project Brain inventory unavailable",
+  "not_found_phrase": "not found in Gannet inventory",
+  "oracles": {
+    "bad_handoff": "excluded invalid-utf8 only derived path; no old rows in documents/metadata/links/source_state; current Gannet fact remains; source bytes unchanged",
+    "bad_dynamic": "typed BrainError with offending path; no traceback/raw codec exception; refresh incomplete with no positive delivery/publication; native lookup/creation strictly refuses",
+    "bad_parse": "same incomplete contract as UTF8; known invalid native record never verified absent",
+    "late_subtree": "PermissionError before first native yield; no index commit or false A admission; complete old SQL snapshot stays",
+    "late_stat_error": "same strict incomplete for lstat/scandir iteration failure",
+    "positive_absence": "genuinely missing root/identifier produces typed not-found; legitimate native creation works",
+    "not_found_text": "path-bearing BrainError containing not found never authorizes create/_existing/rebind/autoprovision or promotion retirement",
+    "handoff_type_path": "untrusted type=handoff in dynamic record does not hide identity",
+    "working_warning": "actual task_record path only after fresh native proof; warnings print once; old memory layers empty",
+    "publication_failure": "documents/metadata/links/source_state/index_state rows exactly rollback together",
+    "actor_tokens": null,
+    "full_fs_snapshot_authenticity": "UNPROVEN",
+    "windows_native": "UNRUN"
+  },
+  "unicode_metadata": {
+    "schema_version": 1,
+    "new_public_scope": "Gannet escaped native metadata title",
+    "bad_json_string_literals": [
+      "\"Gannet \\ud800 title\"",
+      "\"Gannet \\udfff title\""
+    ],
+    "valid_json_string_literal": "\"Gannet \\ud83d\\udc26 caf\\u00e9\"",
+    "expected": {
+      "invalid_refresh_exit": 1,
+      "capsule": "other memory served; no working state",
+      "published_tables": "unchanged complete preimage",
+      "source_bytes": "unchanged exact escaped source image",
+      "fixed_diagnostic": "invalid Unicode metadata",
+      "native_validator": "BrainError",
+      "valid_utf8_hex": "47616e6e657420f09f90a620636166c3a9"
+    },
+    "claims": "Local native metadata encoding validation only; no independent derived-index failure claimed."
+  }
+}

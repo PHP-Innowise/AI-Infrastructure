@@ -1,0 +1,41 @@
+{
+  "fixture": "public-keel-cobalt-trajectories-v1",
+  "trajectories": [
+    {
+      "id": "keel-lantern",
+      "goal": "Inspect the public ferry safety board",
+      "start_url": "https://training.invalid/ferry",
+      "outcome": "Board inspected",
+      "states": [
+        {"step": 2, "url": "https://training.invalid/ferry", "action": null, "thought": null, "accessibility_tree": "Keel lantern ferry boarding uses the amber ramp.", "screenshot": "screenshots/keel-lantern/2.png"},
+        {"step": 7, "url": "https://training.invalid/ferry/safety", "action": "open safety panel", "thought": "Check the storm rule", "accessibility_tree": "Keel lantern ferry storm closure requires the silver bell.", "screenshot": "screenshots/keel-lantern/7.png"}
+      ]
+    },
+    {
+      "id": "copper-gear",
+      "goal": "Inspect the public calibration station",
+      "start_url": "https://training.invalid/gear",
+      "states": [
+        {"url": "https://training.invalid/gear", "action": null, "thoughts": null, "text": "Copper gear station calibration uses the cobalt pin.", "screenshot": "screenshots/copper-gear/0.png"}
+      ]
+    },
+    {
+      "id": "sable-tide",
+      "goal": "Inspect the public tide timetable",
+      "start_url": "https://training.invalid/tides",
+      "outcome": null,
+      "states": [
+        {"state_index": 9, "url": "https://training.invalid/tides", "action": null, "thought": null, "accessibility_tree": "Sable tide timetable maintenance occurs during the violet interval.", "screenshot": "screenshots/sable-tide/9.png"}
+      ]
+    }
+  ],
+  "requests": {
+    "ferry": "Keel lantern ferry storm closure silver bell",
+    "gear": "Copper gear station calibration cobalt pin",
+    "no_match": "Zircon zeppelin orchard"
+  },
+  "expected_support": {
+    "ferry": "Keel lantern ferry storm closure requires the silver bell.",
+    "gear": "Copper gear station calibration uses the cobalt pin."
+  }
+}

@@ -418,6 +418,7 @@ UNMIRRORED_PYTHON = {
         "the graph tests run on harness/.venv's own interpreter; the Fleet step on the one running check.py"
     ),
     ("ci.yml", "windows-harness", "3.13"): "Windows-only: it skips wherever check.py runs",
+    ("ci.yml", "windows-memory", "3.13"): "Windows-only: it skips wherever check.py runs",
 }
 
 
@@ -1008,6 +1009,19 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(os.path.realpath(seen[3]), os.path.realpath(str(self.root / "sub")))
         self.assertEqual(seen[4], "set")
 
+    def test_git_repository_selectors_do_not_reach_commands(self) -> None:
+        # Run from a pre-commit hook, GIT_INDEX_FILE names the commit being
+        # made; a test's `git add` in its own repository would write there.
+        code = ("import os\n"
+                "open('git-env.txt', 'w').write(repr(sorted(k for k in os.environ if k in "
+                "('GIT_DIR', 'GIT_INDEX_FILE', 'GIT_WORK_TREE', 'GIT_EDITOR'))))\n")
+        selected = {"GIT_DIR": str(self.root / "elsewhere.git"), "GIT_INDEX_FILE": str(self.root / "index"),
+                    "GIT_WORK_TREE": str(self.root), "GIT_EDITOR": "true"}
+        with mock.patch.dict(os.environ, selected):
+            report, _ = self.run_groups([check.Group("g", "g", "g", commands=(fake("env", code),))])
+        self.assertEqual(report.exit_code, 0, report.results[0].reason)
+        self.assertEqual("['GIT_EDITOR']", (self.root / "git-env.txt").read_text())
+
     def test_shell_step_stops_at_its_first_failure(self) -> None:
         loop = check.shell("loop", "for x in 1 2; do\n  false\n  echo reached > reached.txt\ndone")
         report, _ = self.run_groups([check.Group("g", "g", "g", commands=(loop,))])
@@ -1158,6 +1172,46 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(check.default_jobs(1), 1)
         self.assertGreaterEqual(check.default_jobs(12), 2)
         self.assertLessEqual(check.default_jobs(3), 3)
+
+
+class ExperimentalTestIsolationTests(unittest.TestCase):
+    @staticmethod
+    def private_literals(source):
+        import ast
+        def text(node):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return node.value
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                left, right = text(node.left), text(node.right)
+                return left + right if left is not None and right is not None else None
+            return None
+        found = set()
+        for node in ast.walk(ast.parse(source)):
+            value = text(node)
+            if value is not None and ('.codex/visualizations' in value.replace('\\', '/')
+                                      or 'RUN-CURRENT.json' in value):
+                found.add(value)
+        return sorted(found)
+
+    def test_experimental_tests_have_no_fixed_private_artifact_exports(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        sources = list((root / 'tests').glob('test_longmemeval*.py'))
+        sources += list((root / 'tests').glob('test_hindsight*.py'))
+        sources += list((root / 'harness/tests').glob('test_longmemeval*.py'))
+        self.assertGreaterEqual(len(sources), 3)
+        for source in sources:
+            with self.subTest(source=str(source.relative_to(root))):
+                self.assertEqual([], self.private_literals(source.read_text(encoding='utf-8')))
+
+    def test_isolation_checker_handles_literal_concatenation_and_temp_paths(self):
+        import json
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        public = json.loads((root / 'tests/fixtures/memory_regression_remediation_public.json').read_text())
+        for case in public['isolation']:
+            with self.subTest(name=case['name']):
+                self.assertEqual(case['expected_private_literals'], self.private_literals(case['source']))
 
 
 if __name__ == "__main__":

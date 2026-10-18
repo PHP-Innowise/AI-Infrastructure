@@ -1,0 +1,45 @@
+{
+  "profile": "public-nacre-registration-v1",
+  "config": {
+    "memory_type": "native_fts5_states_v1",
+    "memory_params": {
+      "horizon": 2
+    }
+  },
+  "trajectory": {
+    "id": "public-nacre-sail-54",
+    "goal": "Record the Nacre sail calibration yaw offset",
+    "start_url": "https://nacre.example.invalid/calibration",
+    "outcome": "Calibration offset recorded",
+    "states": [
+      {
+        "url": "https://nacre.example.invalid/calibration/panel",
+        "action": "open yaw calibration panel",
+        "thought": null,
+        "text": "Nacre sail calibration uses a 31 degree yaw offset. Its setting key is sail_yaw_offset.",
+        "screenshot": "public-images/nacre-54.png",
+        "step": 9
+      }
+    ]
+  },
+  "queries": [
+    {
+      "text": "Nacre sail calibration yaw offset",
+      "query_image": null
+    },
+    {
+      "text": "quartz opal zeppelin",
+      "query_image": "public-images/absent-nacre.png"
+    }
+  ],
+  "invocation_ids": [
+    "public-nacre-invocation-A",
+    "public-nacre-invocation-B"
+  ],
+  "controlled_context": [
+    {
+      "type": "text",
+      "value": "Reference data; verify canonical sources.\nNacre sail calibration uses a 31 degree yaw offset."
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "profile": "cursor-recovery-regression-v1",
+  "task": "CEDAR-RECOVERY",
+  "capsule": "working: CEDAR-RECOVERY\n- source docs/cedar-transfer.md — Cedar transfer\n  Each transfer has one owner.",
+  "expected_turn_rule": "---\ndescription: Working memory - current-branch session context\nalwaysApply: true\n---\n\n# Working Memory (auto-rendered)\n\nSession context as of end of previous turn (task: CEDAR-RECOVERY).\nRetrieved context is not authoritative - verify the source.\n\n```\nworking: CEDAR-RECOVERY\n- source docs/cedar-transfer.md — Cedar transfer\n  Each transfer has one owner.\n```\n",
+  "orphan_turn_state": "written",
+  "same_body_replacement_state": "incomplete",
+  "replacement_receipt_unchanged": true,
+  "repository_selectors_preserved": [
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_SHALLOW_FILE",
+    "GIT_NAMESPACE"
+  ]
+}

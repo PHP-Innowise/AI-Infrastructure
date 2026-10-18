@@ -460,6 +460,32 @@ class KnowledgeTests(unittest.TestCase):
                 finally:
                     record.unlink()
 
+    def test_runtime_runs_through_its_loader_and_without_one_directly(self):
+        """context_cli.py runs context.py from cached bytecode; an older runtime has only context.py."""
+        self.install()
+        commands = []
+        execute = self.manager._execute
+
+        def traced(command, *arguments, **options):
+            commands.append(command)
+            return execute(command, *arguments, **options)
+
+        with patch.object(self.manager, "_execute", side_effect=traced):
+            loaded = self.run_action("status")
+            # The Harness asks for no bytecode; the loader still caches the
+            # runtime, in the runtime's directory only.
+            cached = sorted(path.relative_to(self.project).as_posix() for path in self.project.rglob("*.pyc"))
+            (self.project / "memory-bank/scripts/context_cli.py").unlink()
+            direct = self.run_action("status")
+        self.assertEqual(["context_cli.py", "context.py"], [Path(command[1]).name for command in commands])
+        self.assertEqual(commands[0][2:], commands[1][2:])
+        self.assertEqual(["status", "--json"], commands[0][-2:])
+        self.assertEqual(sorted(loaded), sorted(direct))
+        self.assertTrue(cached)
+        self.assertTrue(all(path.startswith("memory-bank/scripts/__pycache__/") for path in cached), cached)
+        self.assertLessEqual({"context", "brain_runtime", "context_retrieval"},
+                             {Path(path).name.split(".", 1)[0] for path in cached})
+
     @unittest.skipUnless(Path("/proc").is_dir(), "Owned process cleanup checks require procfs")
     def test_timeout_output_limit_and_close_stop_the_owned_runtime_process_tree(self):
         self.install()

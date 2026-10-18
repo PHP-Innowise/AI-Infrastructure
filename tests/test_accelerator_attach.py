@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "accelerator_attach.py"
@@ -78,6 +79,20 @@ class CodexConfigurationTests(unittest.TestCase):
         self.assertEqual(['node.exe', 'codex.js', '-c', 'developer_instructions="attached"',
                           '-c', 'model_reasoning_effort="ultra"', 'exec', 'resume', 'thread-id', '-'],
                          attach.codex_config_arguments(command))
+
+
+class PreambleInterpreterTests(unittest.TestCase):
+    """The attached policy names the memory runtime's command line, and native
+    Windows with the python.org installer has no working python3."""
+
+    def test_the_runtime_is_run_by_a_python_the_system_has(self):
+        project, state = Path("/srv/project"), Path("/srv/state")
+        command = '`{} "$ACCELERATOR_HOME/memory-bank/scripts/context.py" ...`'
+        with mock.patch.object(attach.os, "name", "posix"):
+            self.assertIn(command.format("python3"), attach.preamble("Laravel", project, state))
+        with mock.patch.object(attach.os, "name", "nt"):
+            text = attach.preamble("Laravel", project, state)
+        self.assertIn(command.format("python"), text)
 
 
 class DetectEditionTests(unittest.TestCase):

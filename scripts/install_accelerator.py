@@ -102,6 +102,8 @@ EXCLUDED_PATH_PATTERNS = (
     "project-brain/control/handoffs/*.md",
     "project-brain/control/messages/*.jsonl",
     "project-brain/control/retrieval-manifests/*.json",
+    "project-brain/control/result-attempts/*.json",
+    "project-brain/control/result-learning-images/*.json",
     "project-brain/dynamic/*/*.md",
     "*/skills/skill-creator/tests/**",
     # Loads the edition in place for an attached Cursor session; an installed
@@ -855,23 +857,28 @@ def git_blob_id(data: bytes) -> str:
 
 
 def installed_edition(root: Path, target: Path) -> str | None:
-    """The edition whose inventory the target holds the most of, if any."""
+    """The edition whose inventory the target holds the most of, if any.
+
+    PHP Core's file names all recur in the Laravel and Symfony inventories, so
+    a PHP Core installation holds as many of their paths as of its own: the
+    count ties. The tie goes to the edition with the larger share of its own
+    inventory present - a framework edition's own skills are missing there.
+    """
     counts = []
     for edition in EDITIONS:
         try:
             data = load_inventory(edition, root)
         except InventoryError:
             continue
-        present = len(
-            confined_files(target, (path for paths in data["installed"].values() for path in paths))
-        )
-        counts.append((present, edition))
+        paths = [path for paths in data["installed"].values() for path in paths]
+        present = len(confined_files(target, paths))
+        counts.append((present, present / len(paths) if paths else 0.0, edition))
     counts.sort(reverse=True)
     if not counts or counts[0][0] < SYNC_MINIMUM_PRESENT:
         return None
-    if len(counts) > 1 and counts[1][0] == counts[0][0]:
+    if len(counts) > 1 and counts[1][:2] == counts[0][:2]:
         return None
-    return counts[0][1]
+    return counts[0][2]
 
 
 def released_blob_ids(root: Path, edition: str) -> dict[str, set[str]] | None:
@@ -1890,6 +1897,13 @@ def sync_installation(
         for component, paths in data["installed"].items()
         if component == "shared" or any(path in existing for path in paths)
     }
+    if not present - {"shared"}:
+        # The installer always lays down the shared files with at least one
+        # tool's. A copy of the memory runtime alone is not an installation,
+        # and syncing it would fill the project with an accelerator nobody
+        # installed there.
+        report["error"] = "not an installed accelerator (no tool's files are present)"
+        return report
     tracked = set() if update_tracked else tracked_paths(target)
     record_problem = None
     try:

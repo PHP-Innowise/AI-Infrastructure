@@ -3,8 +3,14 @@
 
 from __future__ import annotations
 
+SOURCE_HINT_PROFILE = "source-hints-v1"
+SOURCE_PROVENANCE_PROFILE = "local-source-provenance-v1"
+
 import argparse
 import hashlib
+import io
+from contextlib import nullcontext
+import math
 import json
 import os
 import re
@@ -17,8 +23,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
+import brain_runtime
 from brain_runtime import (
     BrainError,
+    BrainRecordNotFound,
     LIFECYCLES,
     MESSAGE_BODY_LIMIT,
     MESSAGE_TYPES,
@@ -29,6 +37,7 @@ from brain_runtime import (
     atomic_json,
     auto_compact,
     auto_promote,
+    retry_pending_auto_promotion,
     cancel_task,
     ensure_attached_state,
     iter_records,
@@ -42,9 +51,14 @@ from brain_runtime import (
     dynamic_path,
     get_record,
     get_task,
+    find_record,
+    find_task,
+    validate_record,
     load_config,
     mutation_lock,
     read_messages,
+    record_is_eligible,
+    sources_are_fresh,
     audit_bank,
     brain_root,
     utc_now,
@@ -69,6 +83,11 @@ from brain_runtime import (
 )
 from context_retrieval import (
     AUTOMATIC_LINK_SELECTIONS,
+    TASK_TWINS_KEY,
+    _CurrentSourcePolicy,
+    _capsule_index_images,
+    _carry_index_images,
+    _with_index_images,
     TOUCH_SEED_LIMIT,
     prompt_path_seeds,
     CAPSULE_EPISODIC_LIMIT,
@@ -101,6 +120,7 @@ from context_retrieval import (
     excerpt_weights,
     excerpt_section,
     excerpt_window,
+    _unmarked,
     is_relevant,
     linked_documents,
     source_link_candidates,
@@ -127,13 +147,15 @@ from context_retrieval import (
 import workspace_roots
 # One pattern for paths a turn may not record and sources a learning may not
 # cite: secrets, keys, environment files.
-from memory_results import SOURCE_PATH_DENYLIST as TURN_PATH_DENYLIST, record_result
+from memory_results import SOURCE_PATH_DENYLIST as TURN_PATH_DENYLIST, record_result, prepare_result
+from automatic_query import source_path_problem
 from validate import (
     PRIVATE_PATTERNS,
     SECRET_PATTERNS,
     ValidationError,
     mask_secrets,
     parse_frontmatter,
+    source_fact_memo,
     validate_metadata,
     validate_secret_patterns,
     sanitize_automatic_query as _sanitize_automatic_query,
@@ -141,8 +163,7 @@ from validate import (
 from context_handoff import HandoffError, load_handoff, render_body, save_handoff
 
 
-class ContextError(Exception):
-    """A safe, user-facing context-engine error."""
+ContextError = workspace_roots.ContextError
 
 
 SOURCE_PATTERNS = (
@@ -168,16 +189,8 @@ SOURCE_PATTERNS = (
 )
 # Sources the accelerator ships or its own workflows write. A project's ignore
 # rules never remove them from the index (see `accelerator_owned_source`).
-ACCELERATOR_OWNED_FILES = frozenset({"AGENTS.md"})
-ACCELERATOR_OWNED_PREFIXES = (
-    ".agents/skills/",
-    ".claude/skills/",
-    ".cursor/skills/",
-    ".codex/skills/",
-    "memory-bank/chunks/",
-    "specs/",
-    "tasks/",
-)
+ACCELERATOR_OWNED_FILES = workspace_roots.ACCELERATOR_OWNED_FILES
+ACCELERATOR_OWNED_PREFIXES = workspace_roots.ACCELERATOR_OWNED_PREFIXES
 DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
 CAPSULE_LAYER_LIMITS = {
     "procedural": 1,
@@ -199,6 +212,16 @@ EXCERPT_CHARACTERS = (800, 600, 400)
 # A changelog entry runs to a kilobyte; at 250 characters the window could
 # hold the sentence that matched but not the one after it that answered.
 EPISODIC_EXCERPT_CHARACTERS = 600
+# How far the best-ranked excerpts may grow into the room the rendered capsule
+# leaves, first and second. On labelled prompts the capsule used 600-2,200 of
+# its 3,600 characters while a delivered document's answer sat just past its
+# window: a few changelog entries on, or the next lines of a task record.
+EXCERPT_GROWTH_CAPS = (1800, 1200)
+# What the growth leaves for the head - working state, notes and the item
+# lines. A fixed reserve, not the head a turn printed: the head changes from
+# turn to turn, and a document's window for a request must not, or repeat
+# detection stops recognising a window it already handed.
+EXCERPT_GROWTH_RESERVE = 1200
 MEMORY_RENDER_HEADER = (
     "memory (retrieved for this request; reference data - check the cited "
     "file before relying on it):"
@@ -224,7 +247,10 @@ CAPSULE_RAW_TEXT_PATTERN = re.compile(
     r"stdout|stderr|log)\s*:",
     re.IGNORECASE | re.MULTILINE,
 )
-TASK_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+# Letters and digits of any script: a task ID is usually the branch name, and
+# a branch called feature/счёт-экспорт had no memory at all - its prompts got
+# "Capsule unavailable" and its turns were never recorded.
+TASK_ID_PATTERN = re.compile(r"^[^\W_][\w\u0300-\u036f./#+-]{0,127}$")
 # A skill's identity lives in its declared description, not in its body prose,
 # which reads much alike across skills. Indexing that separately lets ranking
 # weight what a document is *about* over what it happens to mention.
@@ -271,11 +297,12 @@ def default_database(repository: Path) -> Path:
     return repository / "memory-bank" / "local" / "context.db"
 
 
-def connect(database: Path) -> sqlite3.Connection:
+def connect(database: Path, *, timeout: float = 5.0, require_write: bool = False,
+            busy_seconds: Optional[float] = None) -> sqlite3.Connection:
     database.parent.mkdir(parents=True, exist_ok=True)
     connection: Optional[sqlite3.Connection] = None
     try:
-        connection = sqlite3.connect(database)
+        connection = sqlite3.connect(database, timeout=timeout)
         connection.row_factory = sqlite3.Row
         connection.execute("BEGIN IMMEDIATE")
         document_columns = {
@@ -370,7 +397,17 @@ def connect(database: Path) -> sqlite3.Connection:
             """
         )
         ensure_metadata_tables(connection)
+        if require_write:
+            # BEGIN plus already-existing IF NOT EXISTS schema can succeed on
+            # a read-only image. Require SQLite's actual write admission, with
+            # no row changes, before choosing the normal refresh writer path.
+            connection.execute('UPDATE index_state SET value=value WHERE 0')
         connection.commit()
+        # The startup wait decides only whether this refresh may write at
+        # all. Once admitted, a concurrent session's commit is waited for as
+        # any other connection waits, instead of failing the turn mid-refresh.
+        busy = CONNECTION_BUSY_SECONDS if busy_seconds is None else busy_seconds
+        connection.execute(f'PRAGMA busy_timeout = {max(1, int(busy * 1000))}')
         return connection
     except BaseException as error:
         if connection is None:
@@ -388,6 +425,195 @@ def connect(database: Path) -> sqlite3.Connection:
         if isinstance(error, sqlite3.OperationalError) and "fts5" in str(error).lower():
             raise ContextError("SQLite FTS5 support is required") from error
         raise
+
+
+# A refresh waits this long for write admission before falling back to the
+# read-only working-state path. Another session's refresh holds the lock for
+# a fraction of a second; 50 ms lost a parallel session's knowledge in about
+# a third of turns. A read-only database is refused at once, without waiting.
+# Under a hook the waits are shares of the hook's own budget, so a locked
+# database still leaves time for the working-state answer (_refresh_waits).
+REFRESH_STARTUP_WAIT = 2.0
+CONNECTION_BUSY_SECONDS = 5.0
+
+
+def _refresh_waits(arguments: argparse.Namespace) -> tuple[float, float]:
+    """(write-admission wait, busy wait) for this refresh."""
+    budget = None
+    raw = os.environ.get("CONTEXT_HOOK_BUDGET")
+    if raw is not None:
+        try:
+            budget = float(raw)
+        except ValueError:
+            budget = None
+        if budget is not None and not (budget > 0 and budget != float("inf")):
+            budget = None
+    if budget is None and getattr(arguments, "host", None):
+        budget = 5.0  # the hooks' default budget
+    if budget is None:
+        return REFRESH_STARTUP_WAIT, CONNECTION_BUSY_SECONDS
+    return (min(REFRESH_STARTUP_WAIT, max(0.05, budget * 0.25)),
+            min(CONNECTION_BUSY_SECONDS, max(0.05, budget * 0.5)))
+READ_ONLY_COLUMNS = {
+    'documents': ('path', 'layer', 'kind', 'title', 'summary', 'content'),
+    'episodes': ('summary', 'outcome', 'files', 'verification', 'sources', 'created_at'),
+    'working_tasks': ('task_id', 'goal', 'progress', 'auto_checkpoint', 'next_steps', 'files', 'sources', 'created_at', 'updated_at'),
+    'task_bindings': ('external_id', 'task_uuid', 'revision', 'updated_at'),
+    'document_metadata': ('path', 'category', 'privacy', 'owner', 'authority', 'lifecycle', 'source_hash', 'record_id', 'conflicts', 'source_fingerprints', 'updated_at', 'confidence', 'attestation'),
+    'document_source_state': ('path', 'mtime_ns', 'size', 'eligible_until'),
+    'document_links': ('path', 'ref_path', 'ref_kind'),
+    'index_state': ('key', 'value'),
+    'turn_deltas': ('id', 'task_id', 'created_at', 'files'),
+}
+
+
+def connect_read_only(database: Path, *, timeout: float = REFRESH_STARTUP_WAIT) -> sqlite3.Connection:
+    """Existing compatible local state; no initialization or migrations.
+
+    This handle is admitted for working-only delivery, never cached retrieval.
+    SQLite still takes normal read locks: an exclusive writer is unavailable.
+    """
+    # A read-only WAL open can create its shared-memory sidecar. This finite
+    # fallback supports rollback-journal images only; immutable=1 would ignore
+    # live writer locks and is not safe for this mutable state.
+    with database.open('rb') as handle:
+        header = handle.read(20)
+    if header[:16] != b'SQLite format 3\x00' or header[18:20] != b'\x01\x01':
+        raise ContextError('Unsupported read-only local state profile')
+    connection = sqlite3.connect(database.resolve().as_uri() + '?mode=ro',
+                                 uri=True, timeout=timeout)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute('PRAGMA query_only=ON')
+        keys = {'working_tasks': ('task_id',), 'task_bindings': ('external_id',),
+                'document_metadata': ('path',), 'document_source_state': ('path',),
+                'document_links': ('path', 'ref_path', 'ref_kind'),
+                'index_state': ('key',), 'turn_deltas': ('id',)}
+        for table, expected in READ_ONLY_COLUMNS.items():
+            schema = connection.execute(
+                'SELECT type, sql FROM sqlite_master WHERE name=?', (table,)
+            ).fetchone()
+            columns = connection.execute('PRAGMA table_info(' + table + ')').fetchall()
+            if (schema is None or schema['type'] != 'table'
+                    or {row['name'] for row in columns} != set(expected)):
+                raise ContextError('Unsupported read-only local state profile')
+            sql = (schema['sql'] or '').casefold()
+            if table in ('documents', 'episodes'):
+                unindexed = ('path', 'layer', 'kind') if table == 'documents' else ('created_at',)
+                fields = ','.join(column + (' UNINDEXED' if column in unindexed else '')
+                                  for column in expected)
+                canonical = "CREATE VIRTUAL TABLE " + table + " USING fts5(" + fields + ",tokenize='" + TOKENIZER + "')"
+                if re.sub(r'\s+', '', sql) != re.sub(r'\s+', '', canonical.casefold()):
+                    raise ContextError('Unsupported read-only local state profile')
+            elif ('create virtual table' in sql or tuple(
+                    row['name'] for row in sorted(columns, key=lambda row: row['pk'])
+                    if row['pk']) != keys[table]):
+                raise ContextError('Unsupported read-only local state profile')
+        unique_uuid = False
+        for row in connection.execute('PRAGMA index_list(task_bindings)'):
+            if row['unique'] and not row['partial']:
+                indexed = tuple(item['name'] for item in connection.execute(
+                    'SELECT name FROM pragma_index_info(?) ORDER BY seqno', (row['name'],)))
+                unique_uuid = unique_uuid or indexed == ('task_uuid',)
+        if not unique_uuid:
+            raise ContextError('Unsupported read-only local state profile')
+        for name, table, expected in (
+                ('document_metadata_conflicts', 'document_metadata', ('conflicts',)),
+                ('document_links_ref', 'document_links', ('ref_path',)),
+                ('document_links_source_path', 'document_links', ('ref_path', 'ref_kind', 'path'))):
+            schema = connection.execute(
+                'SELECT type, tbl_name FROM sqlite_master WHERE name=?', (name,)
+            ).fetchone()
+            indexed = tuple(row['name'] for row in connection.execute(
+                'SELECT name FROM pragma_index_info(?) ORDER BY seqno', (name,)))
+            if schema is None or tuple(schema) != ('index', table) or indexed != expected:
+                raise ContextError('Unsupported read-only local state profile')
+        return connection
+    except BaseException:
+        connection.close()
+        raise
+
+
+def degraded_refresh(
+    connection: Optional[sqlite3.Connection], repository: Path,
+    arguments: argparse.Namespace, mode: str, delivery_profile: str,
+    delivery_admission: Optional[Callable[[], None]] = None,
+) -> int:
+    """Fresh working state only; no index, history, receipts or filesystem writes."""
+    # Not the Brain's carried record images either.
+    brain_runtime.hold_persisted_images()
+    warning = ('Memory refresh incomplete: refresh budget exhausted; retrieval was not consulted.'
+               if getattr(arguments, 'read_only_reason', None) == 'budget' else
+               'Memory refresh incomplete: SQLite writes unavailable; retrieval was not consulted.'
+               if connection is not None else
+               'Memory refresh incomplete: local state unavailable; retrieval was not consulted.')
+    warnings = [warning]
+    capsule = None
+    if connection is not None and arguments.query is not None:
+        try:
+            query = arguments.query
+            reject_secrets('Task Capsule', [query])
+            reject_capsule_privacy('Task Capsule request', [query])
+            task_record = None
+            task = None
+            if mode == 'governed':
+                binding = governed_binding(connection, arguments.task_id)
+                task_record, task, _ = find_task(repository, arguments.task_id)
+                validate_record(task)
+                if (task['id'] != binding['task_uuid']
+                        or task['external_id'] != binding['external_id']
+                        or arguments.task_id not in (task['id'], task['external_id'])):
+                    raise ContextError('Working task identity unavailable')
+                eligible, _ = record_is_eligible(repository, task, load_config(repository))
+                # A cited file that changed since the checkpoint, or one the
+                # project ignores, does not hide the task here either: the
+                # full refresh delivers this same working state.
+                if (not eligible or task['conflicts']
+                        or any(source_path_problem(source) for source in task['sources'])):
+                    raise ContextError('Working task eligibility unavailable')
+                raw_working = governed_task_view(task)
+            else:
+                raw_working = find_working_task(connection, arguments.task_id)
+                if raw_working is None or raw_working['task_id'] != arguments.task_id:
+                    raise ContextError('Working task unavailable')
+            working, omitted = project_working_task(raw_working, delivery_profile=delivery_profile)
+            capsule = {
+                'mode': mode, 'query': build_capsule_query(query, None), 'query_source': 'prompt',
+                'task_id': task['external_id'] if task else arguments.task_id,
+                'working': working, 'omitted': omitted,
+                'procedural': [], 'semantic': [], 'episodic': [], 'selected': [],
+                'categories': {}, 'no_match': [], 'manifest': None, 'last_turn': None,
+                'warnings': warnings,
+            }
+            if task is not None:
+                capsule.update(task_uuid=task['id'], task_revision=task['revision'],
+                               task_record=task_record.relative_to(repository).as_posix())
+            capsule = (enforce_governed_capsule_contract(capsule) if mode == 'governed'
+                       else enforce_capsule_budget(capsule))
+        except SourceGitError:
+            raise
+        except (ContextError, BrainError, OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+            capsule = None
+            warnings.append('Working state unavailable: current identity or eligibility could not be verified.')
+    result = {'mode': mode, **{layer: 'failed' for layer in DOCUMENT_LAYERS},
+              'startup_profile': 'read-only-working-v1', 'documents': None,
+              'reused': None, 'counts': {}, 'warnings': warnings,
+              'capsule': capsule, 'persisted': False}
+    if capsule is not None:
+        result['capsule_text'] = '\n'.join(render_capsule_lines(
+            capsule, {}, delivery_profile=delivery_profile))
+    elif delivery_profile == 'cursor-rule':
+        result['capsule_text'] = 'working: unavailable\nwarning: ' + warning
+    if delivery_admission is not None:
+        delivery_admission()
+    if arguments.json:
+        print(json.dumps(result, ensure_ascii=False))
+    elif capsule is not None:
+        print(result['capsule_text'])
+    else:
+        for item in warnings:
+            print('warning: ' + item)
+    return 1
 
 
 def create_document_table(connection: sqlite3.Connection) -> None:
@@ -507,7 +733,7 @@ def _lapsed_reason(metadata: dict, eligible_until: Optional[str]) -> str:
 
 
 def memory_eligibility(
-    path: Path, repository: Path
+    path: Path, repository: Path, *, screened_hash: Optional[str] = None
 ) -> tuple[Optional[dict], Optional[str], Optional[str]]:
     """Frontmatter if the chunk may be served, else why not, plus its boundary.
 
@@ -516,6 +742,14 @@ def memory_eligibility(
     one the retrieval manifest already speaks - `retired`, `overdue-review`,
     `invalid`, `secret`, plus the non-active statuses - so a dropped chunk
     reaches the `excluded` channel instead of vanishing on a bare `continue`.
+
+    ``screened_hash`` is the content hash an index that admitted the chunk
+    stored for it, under the same secret policy (a changed policy rebuilds
+    the index). Text that still hashes to it is not scanned for secrets
+    again: the scan read the whole chunk against two dozen patterns on every
+    prompt, 0.4 ms a chunk - most of a prompt's cost once the Memory Bank
+    holds thousands. Other text, even behind an unchanged stat, is scanned.
+    Citations are always checked: files go away.
     """
     try:
         metadata = parse_frontmatter(path)
@@ -529,9 +763,14 @@ def memory_eligibility(
     except ValidationError:
         return None, _lapsed_reason(metadata, eligible_until), eligible_until
     try:
-        validate_secret_patterns(path)
-    except (OSError, ValidationError):
-        return None, "secret", eligible_until
+        screened = screened_hash is not None and _content_hash(path.read_text(encoding="utf-8")) == screened_hash
+    except (OSError, UnicodeError):
+        screened = False
+    if not screened:
+        try:
+            validate_secret_patterns(path)
+        except (OSError, ValidationError):
+            return None, "secret", eligible_until
     status = metadata["status"]
     if status != "active":
         return None, status, eligible_until
@@ -563,57 +802,120 @@ def accelerator_owned_source(path: str) -> bool:
     )
 
 
+SourceGitError = workspace_roots.SourceGitError
+_SOURCE_GIT_ERROR = workspace_roots._SOURCE_GIT_ERROR
+_source_git_environment = workspace_roots._source_git_environment
+_source_git_checkout = workspace_roots._source_git_checkout
+_source_git_run = workspace_roots._source_git_run
+
+
+def _source_git_frame(project, environment, deadline):
+    return workspace_roots._source_git_frame(project, environment, deadline,
+        _checkout=_source_git_checkout, _run=_source_git_run)
+
+
+def _source_git_ignored(project, paths, timeout):
+    return workspace_roots._source_git_ignored(project, paths, timeout,
+        _environment=_source_git_environment, _frame=_source_git_frame, _run=_source_git_run)
+
+
+def _rebased_branch(project: Path) -> Optional[str]:
+    """The branch a rebase in progress replays onto a detached HEAD.
+
+    Git keeps its full name in ``rebase-merge/head-name`` (``rebase-apply/``
+    for the apply backend) of the worktree's own Git directory, and removes
+    the directory when the rebase ends or is aborted. The directory is found
+    as Git finds it - ``.git`` itself, or the ``gitdir:`` a linked worktree's
+    or submodule's ``.git`` file names - without starting Git again.
+    """
+    try:
+        checkout = _source_git_checkout(project)
+        if checkout is None:
+            return None
+        directory = checkout / ".git"
+        if not directory.is_dir():
+            with directory.open("rb") as handle:
+                pointer = handle.read(4097)
+            line = pointer.decode("utf-8", "strict").splitlines()[0] if pointer else ""
+            if len(pointer) > 4096 or not line.startswith("gitdir: "):
+                return None
+            directory = checkout / line[len("gitdir: "):].strip()
+        for state in ("rebase-merge", "rebase-apply"):
+            try:
+                with (directory / state / "head-name").open("rb") as handle:
+                    raw = handle.read(4097)
+            except OSError:
+                continue
+            name = raw.decode("utf-8", "strict").rstrip("\r\n")
+            if (len(raw) <= 4096 and name.startswith("refs/heads/") and len(name) > len("refs/heads/")
+                    and not any(character in name for character in ("\0", "\r", "\n"))):
+                return name[len("refs/heads/"):]
+    except (SourceGitError, OSError, UnicodeError, ValueError):
+        return None
+    return None
+
+
+def _admit_inferred_task_branch(repository: Path, expected: Optional[str]) -> None:
+    """Recheck a hook-inferred identity; explicit task IDs add no branch probe."""
+    if expected is None:
+        return
+    message = "Inferred task branch changed or unavailable"
+    try:
+        if (type(expected) is not str or not expected or len(expected.encode("utf-8")) > 4000
+                or any(character in expected for character in ("\0", "\r", "\n"))):
+            raise SourceGitError(message)
+        project = workspace_roots.project_root(repository)
+        if _source_git_checkout(project) is None:
+            raise SourceGitError(message)
+        # One probe: `git -C <project>` with the command environment's Git
+        # selectors stripped finds the project's own repository. A prompt
+        # asks once; the checks before delivery ask again only when the
+        # checkout's HEAD changed (_branch_admission). A pinned before/after
+        # frame around it tripled the Git starts and failed outright whenever
+        # Git was slow.
+        observed = _source_git_run(project, ["symbolic-ref", "--quiet", "HEAD"],
+                                   _source_git_environment(), time.monotonic() + 2.0)
+        # A rebase detaches HEAD; the branch it rewrites stays the task.
+        if observed.returncode == 1 and _rebased_branch(project) == expected:
+            return
+        if (observed.returncode != 0
+                or not isinstance(observed.stdout, bytes) or len(observed.stdout) > 4096
+                or observed.stdout != ("refs/heads/" + expected + "\n").encode("utf-8")):
+            raise SourceGitError(message)
+    except (SourceGitError, OSError, UnicodeError, ValueError) as error:
+        raise SourceGitError(message) from error
+
+
+def _branch_admission(repository: Path, expected: str) -> Callable[[], None]:
+    """Admit the inferred branch now; return the check to repeat before
+    delivery. That check asks Git again only when the checkout's HEAD, or its
+    reftable list, changed since the last answer - each snapshot is taken
+    before Git is asked, so a switch during the question still shows."""
+    project = workspace_roots.project_root(repository)
+    held = [workspace_roots.branch_snapshot(project)]
+    _admit_inferred_task_branch(repository, expected)
+
+    def readmit() -> None:
+        current = workspace_roots.branch_snapshot(project)
+        if held[0] is not None and current == held[0]:
+            return
+        _admit_inferred_task_branch(repository, expected)
+        held[0] = current
+
+    return readmit
+
+
 def inside_git_checkout(directory: Path) -> bool:
-    """Whether `directory` or a parent holds a `.git` entry (a repository or
-    a worktree). Outside one there are no ignore rules to honour."""
-    for candidate in (directory, *directory.parents):
-        if (candidate / ".git").exists():
-            return True
-    return False
+    return _source_git_checkout(directory) is not None
 
 
 def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
-    """Return untracked ignored candidates without reading their contents.
-
-    Attached, only project keys are asked about: tooling keys are absolute
-    paths into the accelerator clone and state keys name the private state
-    directory, and neither belongs to the project's ignore rules. The
-    accelerator's own sources are never asked about either.
-
-    The probe fails closed inside a repository: a failure there could index a
-    file the team ignored on purpose. A folder that is not a repository has
-    no ignore rules at all, so "not a repository" is an empty answer rather
-    than a failure - before, it failed every refresh in such a project.
-    """
+    """Apply project ignore policy, keeping ordinary accelerator exemptions."""
     if workspace_roots.is_attached(repository):
-        paths = [
-            path
-            for path in paths
-            if not Path(path).is_absolute() and not workspace_roots.is_state_key(path)
-        ]
+        paths = [path for path in paths
+                 if not Path(path).is_absolute() and not workspace_roots.is_state_key(path)]
     paths = [path for path in paths if not accelerator_owned_source(path)]
-    if not paths:
-        return set()
-    project = workspace_roots.project_root(repository)
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(project), "check-ignore", "--stdin", "-z"],
-            input=b"".join(os.fsencode(path) + b"\0" for path in paths),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError as error:
-        if not inside_git_checkout(project):
-            return set()
-        raise ContextError("Git ignore probe failed") from error
-    if result.returncode == 128 and not inside_git_checkout(project):
-        return set()
-    if result.returncode not in (0, 1):
-        raise ContextError(
-            f"Git ignore probe failed with exit status {result.returncode}"
-        )
-    return set(result.stdout.split(b"\0")) - {b""}
+    return _source_git_ignored(workspace_roots.project_root(repository), paths, 2.0)
 
 
 # One discovered source file: layer, kind, absolute path, repository-relative
@@ -623,7 +925,16 @@ def git_ignored_paths(repository: Path, paths: list[str]) -> set[bytes]:
 SourceCandidate = tuple[str, str, Path, str, tuple[int, int], str]
 
 
-def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
+def _invalid_source_key(key: str) -> Optional[dict[str, str]]:
+    try:
+        key.encode('utf-8')
+    except UnicodeError:
+        digest = hashlib.sha256(key.encode('utf-8', 'surrogatepass')).hexdigest()[:16]
+        return {'path': '<invalid-utf8-path:'+digest+'>', 'reason': 'invalid-utf8-path'}
+    return None
+
+
+def collect_source_candidates(repository: Path, *, excluded=None) -> list[SourceCandidate]:
     """Walk SOURCE_PATTERNS once, statting each candidate exactly once.
 
     Document discovery and the skill-tree fingerprint used to walk and stat
@@ -634,6 +945,7 @@ def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
     the extra stat calls `is_file()`/`is_symlink()` would each spend.
     """
     candidates: list[SourceCandidate] = []
+    rejected = set()
     for layer, kind, pattern, base in source_scan_plan(repository):
         for path in sorted(base.glob(pattern)):
             try:
@@ -642,12 +954,23 @@ def collect_source_candidates(repository: Path) -> list[SourceCandidate]:
                 continue
             if not stat_module.S_ISREG(status.st_mode):
                 continue
+            key = workspace_roots.key_for(repository, base, path)
+            problem = _invalid_source_key(key)
+            if problem is not None:
+                if kind == 'skill':
+                    # Policy inventory is strict; never turn a malformed
+                    # skill into a clean cached parity decision by skipping it.
+                    raise RetrievalError('Skill source invalid-utf8-path')
+                if excluded is not None and problem['path'] not in rejected:
+                    excluded.append(problem)
+                rejected.add(problem['path'])
+                continue
             candidates.append(
                 (
                     layer,
                     kind,
                     path,
-                    workspace_roots.key_for(repository, base, path),
+                    key,
                     (status.st_mtime_ns, status.st_size),
                     pattern,
                 )
@@ -729,6 +1052,20 @@ def discover_documents(
     repository: Path,
     reusable: Optional[SourceState] = None,
     candidates: Optional[list[SourceCandidate]] = None,
+    screened_hashes: Optional[dict[str, str]] = None,
+) -> tuple[
+    list[DocumentRow], SourceState, SourceState, list[dict[str, str]], dict[str, tuple[str, int]]
+]:
+    # Thousands of chunks citing the same files: each is looked at once.
+    with source_fact_memo():
+        return _discover_documents(repository, reusable, candidates, screened_hashes)
+
+
+def _discover_documents(
+    repository: Path,
+    reusable: Optional[SourceState] = None,
+    candidates: Optional[list[SourceCandidate]] = None,
+    screened_hashes: Optional[dict[str, str]] = None,
 ) -> tuple[
     list[DocumentRow], SourceState, SourceState, list[dict[str, str]], dict[str, tuple[str, int]]
 ]:
@@ -738,11 +1075,12 @@ def discover_documents(
     read, values masked).
 
     ``reusable`` maps already-indexed paths to the (mtime_ns, size, boundary)
-    recorded by the last successful index. A candidate whose stat still matches
-    and whose calendar boundary has not passed is neither read nor
-    re-validated, which is what makes per-request indexing affordable: secret
-    scanning dominates a full pass. A modification that somehow reuses its
-    predecessor's stat is still not served as truth — governed retrieval
+    recorded by the last successful index. Ordinary documents whose stat still
+    matches are not re-read. Memory chunks still revalidate current eligibility:
+    their cited paths can disappear or escape while the chunk stays unchanged.
+    This costs chunk parsing and secret scanning, but preserves the existing
+    citation contract without inventing historical source hashes. A modification
+    that somehow reuses its predecessor's stat is still not served as truth — governed retrieval
     re-hashes every candidate and excludes the mismatch as stale.
 
     Only files a reader could reasonably expect to find in the index are
@@ -764,7 +1102,20 @@ def discover_documents(
     skill_keys: set[str] = set()
     claimed: set[str] = set()
     if candidates is None:
-        candidates = collect_source_candidates(repository)
+        candidates = collect_source_candidates(repository, excluded=excluded)
+    else:
+        admitted = []
+        rejected = set()
+        for candidate in candidates:
+            problem = _invalid_source_key(candidate[3])
+            if problem is None:
+                admitted.append(candidate)
+            elif candidate[1] == 'skill':
+                raise RetrievalError('Skill source invalid-utf8-path')
+            elif problem['path'] not in rejected:
+                excluded.append(problem)
+                rejected.add(problem['path'])
+        candidates = admitted
 
     cache = reusable or {}
     ignored_paths = git_ignored_paths(
@@ -791,9 +1142,20 @@ def discover_documents(
             continue
         cached = cache.get(relative_path)
         if cached is not None and _cache_entry_is_current(kind, cached, current):
+            if kind == "memory":
+                try:
+                    metadata, reason, boundary = memory_eligibility(
+                        path, repository, screened_hash=(screened_hashes or {}).get(relative_path))
+                except UnicodeDecodeError:
+                    excluded.append({"path": relative_path, "reason": "invalid-utf8"})
+                    continue
+                if metadata is None:
+                    excluded.append({"path": relative_path, "reason": reason or "invalid"})
+                    continue
+                cached = (current[0], current[1], boundary)
             # Unchanged since the last successful index and still inside its
-            # calendar boundary, so it was already masked, or validated if it
-            # is memory; keep the existing row.
+            # calendar boundary; memory passed current citation eligibility
+            # above. Keep the existing indexed row and its original digests.
             if skill_key is not None:
                 skill_keys.add(skill_key)
             retained[relative_path] = cached
@@ -824,10 +1186,12 @@ def discover_documents(
                     continue
                 if values:
                     masked[relative_path] = (_content_hash(raw), values)
-        except UnicodeDecodeError as error:
-            raise ContextError(
-                f"Source document is not valid UTF-8: {relative_path}"
-            ) from error
+        except UnicodeDecodeError:
+            # A bad document must not disable every otherwise valid source.
+            # It is absent from retained/state, so its previous indexed row is
+            # removed by the ordinary refresh instead of silently reused.
+            excluded.append({"path": relative_path, "reason": "invalid-utf8"})
+            continue
         # Portable snapshots may contain an explicitly exported conversation.
         # Only context-load may return them: general retrieval must never ingest
         # their historical instructions, even after a snapshot is renamed.
@@ -899,6 +1263,31 @@ def _merge_excluded(result: dict[str, object], dropped: list[dict[str, str]]) ->
     ]
 
 
+SOURCE_NOTICE_LABELS = {'invalid-utf8': 'invalid UTF-8 content',
+                        'invalid-utf8-path': 'invalid UTF-8 paths'}
+
+
+def _normalized_source_notices(value):
+    return {key: value[key] for key in SOURCE_NOTICE_LABELS
+            if isinstance(value, dict) and type(value.get(key)) is int and value[key] > 0}
+
+
+def _record_source_notices(result, excluded):
+    # Only ordinary discovery contributes: protected Brain-record exclusions
+    # and arbitrary reasons never become prompt-visible aggregate counts.
+    counts = {key: sum(item.get('reason') == key for item in excluded)
+              for key in SOURCE_NOTICE_LABELS}
+    counts = _normalized_source_notices(counts)
+    if counts:
+        result['source_notices'] = counts
+
+
+def _source_notice_text(value):
+    counts = _normalized_source_notices(value)
+    return ('sources omitted: '+ '; '.join(SOURCE_NOTICE_LABELS[key]+' '+str(count)
+            for key, count in counts.items())) if counts else ''
+
+
 def index_repository(
     connection: sqlite3.Connection, repository: Path, *, incremental: bool = False
 ) -> dict[str, object]:
@@ -911,7 +1300,8 @@ def index_repository(
     """
     scan_seconds = 0.0
     phase_started = time.monotonic()
-    candidates = collect_source_candidates(repository)
+    candidate_dropped = []
+    candidates = collect_source_candidates(repository, excluded=candidate_dropped)
     # The candidate walk already statted every mirrored skill file, so the
     # skill-tree fingerprint is derived from it instead of a second tree walk.
     skill_stats = [
@@ -924,8 +1314,14 @@ def index_repository(
         reusable, fingerprints = reusable_source_state(
             connection, repository, fingerprints
         )
+        # The hash each retained chunk was screened and indexed with.
+        screened = {
+            str(row[0]): str(row[1])
+            for row in connection.execute("SELECT path, source_hash FROM document_metadata")
+            if row[0] in reusable and row[1]
+        }
         documents, retained, state, dropped, masked = discover_documents(
-            repository, reusable, candidates=candidates
+            repository, reusable, candidates=candidates, screened_hashes=screened
         )
         scan_seconds += time.monotonic() - phase_started
         index_started = time.monotonic()
@@ -943,7 +1339,8 @@ def index_repository(
             # The cache disagreed with the index; fall through and rebuild.
             phase_started = time.monotonic()
         else:
-            _merge_excluded(result, dropped)
+            _merge_excluded(result, [*candidate_dropped, *dropped])
+            _record_source_notices(result, [*candidate_dropped, *dropped])
             _report_masked(result, masked)
             result["phase_seconds"] = {
                 "stat": round(scan_seconds, 6),
@@ -960,7 +1357,8 @@ def index_repository(
         fingerprints=fingerprints,
         source_hashes={path: digest for path, (digest, _) in masked.items()},
     )
-    _merge_excluded(result, dropped)
+    _merge_excluded(result, [*candidate_dropped, *dropped])
+    _record_source_notices(result, [*candidate_dropped, *dropped])
     _report_masked(result, masked)
     result["phase_seconds"] = {
         "stat": round(scan_seconds, 6),
@@ -985,6 +1383,7 @@ def search_documents(
     layer: Optional[str] = None,
     relevant_only: bool = False,
     strong_only: bool = False,
+    *, repository: Optional[Path] = None, _image_sink=None,
 ) -> list[dict[str, object]]:
     """Search the index.
 
@@ -1019,8 +1418,9 @@ def search_documents(
     if layer is not None:
         conditions.append("layer = ?")
         parameters.append(layer)
-    parameters.append(limit if not relevant_only else limit * 10)
+    parameters.append(limit * 10 if relevant_only or repository is not None else limit)
     markers = ("", "") if relevant_only else ("[", "]")
+    policy_columns = ', summary AS _policy_summary, content AS _policy_content' if repository is not None else ''
     rows = connection.execute(
         f"""
         SELECT
@@ -1029,6 +1429,7 @@ def search_documents(
             kind,
             title,
             snippet(documents, 5, ?, ?, ' … ', 18) AS snippet
+            {policy_columns}
         FROM documents
         WHERE {' AND '.join(conditions)}
         ORDER BY bm25(documents), path
@@ -1043,7 +1444,18 @@ def search_documents(
                        anchored=row["layer"] != "procedural")
         and not (strong_only and coverage.get(row["path"], 0) < minimum)
     ] if relevant_only else rows
-    items = [dict(row) for row in selected[:limit]]
+    if repository is not None:
+        policy = _CurrentSourcePolicy(connection, repository)
+        # These full unhighlighted images come from the same statement as the
+        # returned snippet. FTS highlighting may split a newly sensitive token.
+        policy.prime(selected, indexed_images={row['path']: tuple(str(row[key] or '')
+                     for key in ('title','_policy_summary','_policy_content')) for row in selected})
+        selected = [row for row in selected if policy.reason(row) is None]
+        if _image_sink is not None:
+            for row in selected[:limit]:
+                _image_sink.setdefault(row['path'], policy.indexed_images[row['path']])
+    # Extra admission columns are private and never extend the public schema.
+    items = [{key: row[key] for key in ('path','layer','kind','title','snippet')} for row in selected[:limit]]
     if relevant_only:
         for item in items:
             strength = match_strength(str(item["path"]), coverage, minimum)
@@ -1196,6 +1608,42 @@ def reject_capsule_privacy(
         )
 
 
+# Words a reply made only of is an acknowledgement, never a new subject.
+# Closed on purpose: one content word ("okay quartz") makes it a real prompt.
+_CONFIRMATION_WORDS = frozenset({
+    "yes", "yeah", "yep", "yup", "ok", "okay", "k", "sure", "please", "thanks", "thank",
+    "you", "go", "on", "ahead", "continue", "proceed", "do", "it", "that", "this",
+    "next", "keep", "going", "carry", "sounds", "good", "great", "fine", "perfect",
+    "lgtm", "alright", "right", "cool", "nice", "and", "then", "now", "so", "let's",
+    "lets", "why", "fix",
+    "да", "ок", "окей", "ага", "угу", "хорошо", "отлично", "давай", "давайте", "дальше",
+    "продолжай", "продолжи", "продолжайте", "делай", "сделай", "делайте", "так", "и",
+    "спасибо", "верно", "согласен", "согласна", "поехали", "вперёд", "вперед", "можно",
+    "ну", "пожалуйста", "это", "ладно", "годится", "норм", "супер", "почему", "исправь",
+})
+
+
+def _cursor_continuation_prompt(text: str, *, persistent: bool = False) -> bool:
+    """A bounded explicit continuation, never a generic lack-of-evidence test."""
+    if len(text) > 128:
+        return False
+    phrase = re.sub(r"[\s,.!?;]+", " ", text.casefold()).strip()
+    ordinary = {
+        "go on", "continue", "ok", "okay", "thanks", "thank you",
+        "ok thanks", "okay thanks", "ok go on",
+        "дальше", "продолжай", "продолжай дальше", "хорошо", "спасибо",
+    }
+    if phrase in ordinary:
+        return True
+    if not persistent:
+        return False
+    # The Cursor rule is re-sent with every request, so a short reply that
+    # only acknowledges ("sure", "go ahead", "давай", "ок, делай") keeps the
+    # topic it answers instead of replacing the rule's knowledge with none.
+    words = phrase.split()
+    return 0 < len(words) <= 6 and all(word in _CONFIRMATION_WORDS for word in words)
+
+
 def validate_direct_query_request(arguments: argparse.Namespace) -> None:
     """Reject unsafe direct queries before opening or mutating local state.
 
@@ -1210,8 +1658,27 @@ def validate_direct_query_request(arguments: argparse.Namespace) -> None:
     elif arguments.command == "refresh":
         query = arguments.query
         if query is not None and getattr(arguments, "sanitize", False):
+            original = query
             query = arguments.query = sanitize_automatic_query(query)
-            if not query.strip():
+            # Capture eligibility before replacing the raw prompt. Redaction
+            # must never turn a sensitive request into a task-goal lookup.
+            arguments.cursor_continuation = (
+                getattr(arguments, "host", None) == "cursor"
+                and query == original.strip(" \t\r\n,;")
+                and _cursor_continuation_prompt(original,
+                    persistent=getattr(arguments, 'delivery_profile', 'ordinary') == 'cursor-rule')
+            )
+            arguments.cursor_topic_eligible = (
+                getattr(arguments, 'delivery_profile', 'ordinary') == 'cursor-rule'
+                and query == original.strip(" \t\r\n,;") and len(original) <= 1024
+                and original.casefold().strip(' \t\r\n,.!?;') not in
+                    {'do not continue', 'не продолжай', 'стоп', 'stop'}
+            )
+            # Nothing left, or nothing a search can use: a reply of "?" or
+            # an emoji passed the sanitizer, failed the word check later, and
+            # put the operator's layer report and "Capsule unavailable" into
+            # the prompt of the turn that approves a plan.
+            if re.search(r"\w", query) is None:
                 arguments.query = None
                 arguments.query_withheld = True
                 return
@@ -1225,6 +1692,7 @@ def validate_direct_query_request(arguments: argparse.Namespace) -> None:
 
 def project_working_task(
     working: Optional[dict[str, object]],
+    *, delivery_profile: str = 'ordinary',
 ) -> tuple[Optional[dict[str, object]], dict[str, int]]:
     omitted = {
         "working_files": 0,
@@ -1269,7 +1737,7 @@ def project_working_task(
     )
     # Manual progress leads and the checkpoint follows as a labelled
     # supplement, so the capsule keeps its shape while showing both.
-    displayed = render_current_state(progress, checkpoint)
+    displayed = progress if delivery_profile == 'cursor-rule' else render_current_state(progress, checkpoint)
 
     normalized_steps = [" ".join(item.split()) for item in next_steps]
     omitted["working_files"] = max(
@@ -1355,6 +1823,7 @@ def build_context_packet(
     limit: int,
     include_retrieval: bool = True,
     warnings: Optional[list[str]] = None,
+    *, delivery_profile: str = 'ordinary', query_source: str = 'explicit',
 ) -> dict[str, object]:
     if limit < 1:
         raise ContextError("--limit must be a positive integer")
@@ -1362,9 +1831,8 @@ def build_context_packet(
     reject_capsule_privacy("Task Capsule request", [query])
 
     capsule_warnings = list(warnings or [])
-    working, omitted = project_working_task(
-        find_working_task(connection, task_id)
-    )
+    raw_working = find_working_task(connection, task_id)
+    working, omitted = project_working_task(raw_working, delivery_profile=delivery_profile)
     if task_id is None:
         capsule_warnings.append("Working task unavailable: task ID was not supplied")
     elif working is None:
@@ -1386,35 +1854,36 @@ def build_context_packet(
 
     retrieval_query = build_capsule_query(request_query, working)
     procedural_limit = min(limit, CAPSULE_LAYER_LIMITS["procedural"])
+    admitted_images = {}
     semantic_limit = min(limit, CAPSULE_LAYER_LIMITS["semantic"])
     episodic_limit = min(limit, CAPSULE_EPISODIC_LIMIT)  # lightweight: no history search
     procedural = search_documents(
         connection, request_query, procedural_limit, "procedural",
-        relevant_only=True, strong_only=True,
+        relevant_only=True, strong_only=True, repository=repository, _image_sink=admitted_images,
     )
     semantic = search_documents(
         connection, request_query, semantic_limit, "semantic",
-        relevant_only=True,
+        relevant_only=True, repository=repository, _image_sink=admitted_images,
     )
     episodic = search_documents(
         connection, request_query, episodic_limit, "episodic",
-        relevant_only=True,
+        relevant_only=True, repository=repository, _image_sink=admitted_images,
     ) + search_episodes(connection, request_query, episodic_limit)
     if retrieval_query != request_query:
         if len(deduplicate_context_items(procedural)) < procedural_limit:
             procedural += search_documents(
                 connection, retrieval_query, procedural_limit, "procedural",
-                relevant_only=True, strong_only=True,
+                relevant_only=True, strong_only=True, repository=repository, _image_sink=admitted_images,
             )
         if len(deduplicate_context_items(semantic)) < semantic_limit:
             semantic += search_documents(
                 connection, retrieval_query, semantic_limit, "semantic",
-                relevant_only=True,
+                relevant_only=True, repository=repository, _image_sink=admitted_images,
             )
         if len(deduplicate_context_items(episodic)) < episodic_limit:
             episodic += search_documents(
                 connection, retrieval_query, episodic_limit, "episodic",
-                relevant_only=True,
+                relevant_only=True, repository=repository, _image_sink=admitted_images,
             ) + search_episodes(connection, retrieval_query, episodic_limit)
     # Recorded from what survived the relevance test, before the per-layer
     # truncation below: a layer that is short because the limit cut it is not
@@ -1431,6 +1900,7 @@ def build_context_packet(
     semantic += source_link_candidates(
         connection, repository, semantic,
         {str(item["path"]) for item in semantic},
+        _image_sink=admitted_images,
     )
     # The governed capsule's rule: a skill's sub-file vacates the slot rather
     # than handing it to a weaker skill.
@@ -1440,7 +1910,7 @@ def build_context_packet(
     packet["procedural"] = []
     packet["semantic"] = deduplicate_context_items(semantic)[:semantic_limit]
     packet["episodic"] = deduplicate_context_items(episodic)[:episodic_limit]
-    return packet
+    return _with_index_images(packet, admitted_images)
 
 
 def serialize_capsule(capsule: dict[str, object]) -> str:
@@ -1576,7 +2046,7 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
             f"{CAPSULE_CHARACTER_LIMIT} characters"
         )
 
-    return compacted
+    return _carry_index_images(capsule, compacted)
 
 
 def synchronize_capsule_views(capsule: dict[str, object]) -> None:
@@ -1688,6 +2158,13 @@ def enforce_governed_capsule_contract(
     synchronize_capsule_views(compacted)
 
     while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
+        hints = [index for index, item in enumerate(compacted["semantic"])
+                 if item.get("selection") == "source-hint"]
+        if hints:
+            compacted["semantic"].pop(hints[-1])
+            compacted["omitted"]["semantic"] += 1
+            synchronize_capsule_views(compacted)
+            continue
         if compacted.get("last_turn"):
             omitted["last_turn_characters"] += len(compacted["last_turn"])
             compacted["last_turn"] = None
@@ -1723,10 +2200,10 @@ def enforce_governed_capsule_contract(
             "mandatory Task Capsule content exceeds "
             f"{CAPSULE_CHARACTER_LIMIT} characters"
         )
-    return compacted
+    return _carry_index_images(capsule, compacted)
 
 
-RELATED_SELECTIONS = ("source-link", *AUTOMATIC_LINK_SELECTIONS)
+RELATED_SELECTIONS = ("source-link", *AUTOMATIC_LINK_SELECTIONS, "source-hint")
 
 
 def _related_positions(items: object) -> list[int]:
@@ -1740,9 +2217,137 @@ def _related_positions(items: object) -> list[int]:
 def validate_task_id(task_id: str) -> str:
     normalized = task_id.strip()
     if TASK_ID_PATTERN.fullmatch(normalized) is None:
-        raise ContextError("Task ID must use letters, digits, '.', '_', '/', or '-'")
+        raise ContextError("Task ID must use letters, digits, '.', '_', '/', '#', '+' or '-'")
     reject_secrets("working task", [normalized])
     return normalized
+
+
+def branch_task_id(branch: str) -> str:
+    """The task ID of a branch, also of one whose name the grammar refuses.
+
+    Git takes names a task ID does not - an apostrophe, `@`, parentheses,
+    more than 128 characters - and such a branch had no memory at all: every
+    prompt said the task ID was invalid and no turn was recorded. Each run of
+    refused characters becomes `-`, the name is cut to fit, and eight hex
+    digits of the whole name's SHA-256 keep two such branches apart. A name
+    the grammar takes is its own task ID.
+    """
+    if TASK_ID_PATTERN.fullmatch(branch):
+        return branch
+    digest = hashlib.sha256(branch.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    stem = re.sub(r"[^\w\u0300-\u036f./#+-]+", "-", branch)
+    stem = re.sub(r"^[\W_]+", "", stem)[:119].rstrip("-")
+    return (stem or "branch") + "-" + digest
+
+
+def _on_branch(repository: Path, branch: str) -> bool:
+    """Whether the project's checkout is on ``branch`` now, or rebasing it."""
+    try:
+        project = workspace_roots.project_root(repository.resolve())
+        observed = _source_git_run(project, ["symbolic-ref", "--quiet", "HEAD"], _source_git_environment(),
+                                   time.monotonic() + 2.0)
+        if observed.returncode == 1:
+            return _rebased_branch(project) == branch
+        return (observed.returncode == 0 and isinstance(observed.stdout, bytes)
+                and observed.stdout == ("refs/heads/" + branch + "\n").encode("utf-8", "surrogatepass"))
+    except (SourceGitError, OSError, UnicodeError, ValueError):
+        return False
+
+
+# The commands the hooks run with the checkout's branch as the task ID.
+_BRANCH_IDENTITY_COMMANDS = ("refresh", "hook-context", "turn", "cursor-rule", "msg-dispatch")
+_RENAMED = re.compile(r"[^\t]*\tBranch: renamed refs/heads/(.+) to refs/heads/(.+)")
+
+
+def _renamed_from(repository: Path, branch: str) -> list[str]:
+    """The names ``branch`` had before `git branch -m`, latest first.
+
+    Git moves a branch's reflog with it and adds "Branch: renamed
+    refs/heads/<old> to refs/heads/<new>"; the log is read as a file, without
+    starting Git, as most branches were never renamed. A reftable repository
+    keeps no such file, and a branch there keeps no earlier name here.
+    """
+    try:
+        checkout = _source_git_checkout(workspace_roots.project_root(repository.resolve()))
+        if checkout is None:
+            return []
+        directory = checkout / ".git"
+        if not directory.is_dir():
+            with directory.open("rb") as handle:
+                pointer = handle.read(4097).decode("utf-8", "strict")
+            target = (pointer[len("gitdir: "):].splitlines() or [""])[0].strip()
+            if len(pointer) > 4096 or not pointer.startswith("gitdir: ") or not target:
+                return []
+            directory = checkout / target
+        if (directory / "commondir").is_file():
+            directory = directory / (directory / "commondir").read_text(encoding="utf-8").strip()
+        with (directory / "logs" / "refs" / "heads" / branch).open("rb") as handle:
+            raw = handle.read((1 << 20) + 1)
+        # A long-lived branch's log runs to thousands of lines and almost
+        # never names a rename: one byte search decides, not a parse.
+        if len(raw) > 1 << 20 or b"\tBranch: renamed refs/heads/" not in raw:
+            return []
+        renames = [match.groups() for match in map(_RENAMED.fullmatch, raw.decode("utf-8", "replace").splitlines())
+                   if match is not None]
+    except (OSError, UnicodeError, ValueError, SourceGitError):
+        return []
+    names, current = [], branch
+    for old, new in reversed(renames):
+        if new == current and old != branch and old not in names:
+            names.append(old)
+            current = old
+    return names
+
+
+def _branch_task_identity(arguments: argparse.Namespace) -> None:
+    """Give a branch-named task the ID its branch has.
+
+    A name the grammar refuses gets the ID ``branch_task_id`` derives - only
+    for the branch the checkout is on: the hooks name it as ``--task-id``,
+    with ``--expected-branch`` beside it where they read (that branch is
+    checked before anything is delivered), alone where they record a turn.
+    Any other ID the grammar refuses is still refused.
+
+    A branch renamed with `git branch -m` used to start over: its prompts
+    read "working: not recorded yet", and the fifth turn recorded a second
+    task beside the one that held its state. For the commands the hooks run,
+    a branch with no active task of its own whose earlier name has one works
+    with that task; the record keeps its ID, so a copy of the branch still
+    under the old name shares it.
+    """
+    # Module state outlives a command run in-process (tests, the rerun after
+    # a damaged database is moved aside): this command's own answer only.
+    _COMMAND_STATE.pop("renamed_from", None)
+    raw = getattr(arguments, "task_id", None)
+    if not isinstance(raw, str) or not raw:
+        return
+    on_branch = None
+    if not TASK_ID_PATTERN.fullmatch(raw.strip()):
+        on_branch = getattr(arguments, "expected_branch", None) == raw or _on_branch(arguments.root, raw)
+        if not on_branch:
+            return
+        arguments.task_id = branch_task_id(raw)
+    if arguments.command not in _BRANCH_IDENTITY_COMMANDS:
+        return
+    earlier = _renamed_from(arguments.root, raw)
+    if not earlier:
+        return
+    try:
+        repository = arguments.root.resolve()
+        if _active_claimants(repository, arguments.task_id) != []:
+            return
+        if on_branch is None:
+            on_branch = getattr(arguments, "expected_branch", None) == raw or _on_branch(arguments.root, raw)
+        if not on_branch:
+            return
+        for name in earlier:
+            task_id = branch_task_id(name)
+            if _active_claimants(repository, task_id):
+                arguments.task_id = arguments.renamed_from = task_id
+                _COMMAND_STATE["renamed_from"] = task_id
+                return
+    except (BrainError, OSError, ValueError):
+        return
 
 
 def normalize_values(label: str, values: list[str]) -> list[str]:
@@ -2260,7 +2865,9 @@ def refresh_layers(
     """
     try:
         result = index_repository(connection, repository, incremental=True)
-    except (ContextError, RetrievalError, OSError, sqlite3.Error) as error:
+    except SourceGitError:
+        raise
+    except (ContextError, BrainError, RetrievalError, OSError, sqlite3.Error) as error:
         return (
             {layer: "failed" for layer in DOCUMENT_LAYERS},
             {},
@@ -2356,7 +2963,7 @@ def load_last_turn_report(repository: Path) -> Optional[dict[str, object]]:
     return value
 
 
-def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
+def summarize_last_turn(report: dict[str, object], *, routine: bool = True) -> Optional[str]:
     """Render the previous turn's report as one compact capsule line.
 
     Only non-zero and problem items appear: a turn that merely buffered a
@@ -2390,11 +2997,15 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
     error = report.get("error")
     if isinstance(error, str) and error:
         parts.append(f"turn failed: {error}")
+    if report.get("native_capture_incomplete") is True:
+        parts.append("native memory result not saved completely; inspect the prior save before relying on it")
+    if report.get("promotion_retry_unavailable") is True:
+        parts.append("promotion retry unavailable: local scheduling state could not be saved")
     if count("discarded_turns"):
         parts.append(
             f"this branch's task is closed: {count('discarded_turns')} turn(s) "
-            "after its completion were not recorded; start a new task to keep "
-            "further work"
+            "after its completion were not recorded; to keep further work, "
+            + _closed_task_remedy(str(report.get("task_id") or ""))
         )
     for label, key in (
         ("promotion blocked", "promotion_blocked"),
@@ -2421,15 +3032,15 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
             + ", ".join(completion_candidates)
         )
     promoted = entries("promoted")
-    if promoted:
+    if routine and promoted:
         parts.append(f"promoted: {len(promoted)} record(s)")
-    if count("promotion_skipped"):
+    if routine and count("promotion_skipped"):
         parts.append(
             f"promotion deferred: {count('promotion_skipped')} record(s)"
         )
-    if count("archived"):
+    if routine and count("archived"):
         parts.append(f"archived: {count('archived')} record(s)")
-    if report.get("flushed"):
+    if routine and report.get("flushed"):
         flushed = "buffer flushed"
         if count("files"):
             flushed += f": {count('files')} file(s) this turn"
@@ -2451,12 +3062,12 @@ def summarize_last_turn(report: dict[str, object]) -> Optional[str]:
     return summary
 
 
-def last_turn_section(repository: Path) -> Optional[str]:
+def last_turn_section(repository: Path, *, routine: bool = True) -> Optional[str]:
     """The 'Last turn' capsule section, or None when there is nothing to say."""
     report = load_last_turn_report(repository)
     if report is None:
         return None
-    return summarize_last_turn(report)
+    return summarize_last_turn(report, routine=routine)
 
 
 def assemble_capsule(
@@ -2473,6 +3084,7 @@ def assemble_capsule(
     phase_seconds: Optional[dict[str, object]] = None,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     paths: Optional[list[str]] = None,
+    source_hints: object = None,
     host: str = "cli",
     entry_point: str = "retrieve",
     allow_unprovisioned: bool = False,
@@ -2482,6 +3094,11 @@ def assemble_capsule(
     prompt: Optional[str] = None,
     automatic_links: bool = False,
     trace_paths: Optional[list[str]] = None,
+    index_warnings: Optional[list[str]] = None,
+    index_notices: Optional[dict[str, int]] = None,
+    delivery_profile: str = 'ordinary',
+    source_provenance_sink: Optional[dict[str, object]] = None,
+    delivery_admission: Optional[Callable[[], None]] = None,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
@@ -2511,9 +3128,16 @@ def assemble_capsule(
     JSON: a governed capsule then keeps only the items that text shows, and
     retrieval records only those as delivered (see shown_in_render).
     """
-    warnings: list[str] = []
+    if source_provenance_sink is not None:
+        if type(source_provenance_sink) is not dict:
+            raise ContextError('Invalid source provenance transport')
+        source_provenance_sink.clear()
+    warnings: list[str] = list(index_warnings or [])
+    source_notices = _normalized_source_notices(index_notices)
     if refresh_index:
-        _, index_result, warnings = refresh_layers(connection, repository)
+        _, index_result, refresh_warnings = refresh_layers(connection, repository)
+        warnings.extend(refresh_warnings)
+        source_notices = _normalized_source_notices(index_result.get('source_notices'))
         # The refresh that just ran is this turn's index cost, so it wins over
         # anything the caller guessed.
         phase_seconds = index_result.get("phase_seconds") or None
@@ -2521,7 +3145,7 @@ def assemble_capsule(
     # capsule. Rendered once here so both modes report it identically; the
     # summary itself is bounded, and the lightweight budget below may still
     # drop it first.
-    last_turn = last_turn_section(repository)
+    last_turn = last_turn_section(repository, routine=delivery_profile != 'cursor-rule')
     if mode == "lightweight":
         result = build_context_packet(
             connection,
@@ -2531,10 +3155,16 @@ def assemble_capsule(
             limit,
             include_retrieval=not warnings,
             warnings=warnings,
+            delivery_profile=delivery_profile, query_source=query_source,
         )
         result["last_turn"] = last_turn
-        result["query_source"] = query_source
-        return enforce_capsule_budget(result)
+        if source_notices:
+            result['source_notices'] = source_notices
+        result.setdefault("query_source", query_source)
+        result = enforce_capsule_budget(result)
+        if delivery_admission is not None:
+            delivery_admission()
+        return result
     if task_id is None:
         raise ContextError("Governed retrieval requires --task-id")
     # The governed path bypasses build_context_packet, so apply the same query
@@ -2550,7 +3180,86 @@ def assemble_capsule(
         if not allow_unprovisioned or "Working task not found" not in str(error):
             raise
         binding = None
+    unbound = binding is None
+    binding_notices: list[str] = []
+    unreadable = False
+    problem, bound_record = (_bound_record(repository, binding) if binding is not None and allow_unprovisioned
+                             else (None, None))
+    if problem == "missing":
+        # The working task's record was removed with uncommitted files. Serve
+        # the turn as for a task not recorded yet - knowledge included - and
+        # say so; the next checkpoint records the task again.
+        binding_notices.append(
+            f"The working task's record {binding['task_uuid']} is gone (git stash -u or git clean "
+            "removes an uncommitted task); the next checkpoint records the task again.")
+        binding = None
+    elif problem is not None:
+        # The record is there but cannot be read as one. The turn keeps the
+        # rest of its memory; the record is the person's to repair.
+        binding_notices.append(f"The working task has no state this turn: {problem}. "
+                               "Repair or restore that file; checkpoints wait for it.")
+        binding, unreadable = None, True
+    served = str(binding["task_uuid"]) if binding is not None else None
+    served_id = str(bound_record["external_id"]) if bound_record is not None else task_id
+    successor = _successor(repository, binding, bound_record) if binding is not None else None
+    if successor is not None:
+        # Read what the next checkpoint will bind to (see ensure_working_task).
+        served = str(successor["id"])
+    if unbound and allow_unprovisioned:
+        # A fresh clone or a second machine holds the branch's task in the
+        # Brain but no binding until its first checkpoint: the turns before
+        # it read the task's state instead of "not recorded yet".
+        record = _unbound_task(repository, task_id)
+        if record is not None:
+            served, served_id = str(record["id"]), str(record["external_id"])
+    if served is not None and allow_unprovisioned:
+        binding_notices.extend(_twin_notices(connection, served_id, served))
+    if _COMMAND_STATE.get("renamed_from") == task_id:
+        binding_notices.append(f"This branch was renamed from {task_id}; its task continues here.")
+    # A finished task and nothing after it: no checkpoint starts another, so
+    # "not recorded yet" would promise one that never comes.
+    closed = (closed_task_record(connection, repository, task_id)
+              if served is None and not unreadable else None)
     request_query = build_capsule_query(query, None)
+    if warnings:
+        # The previous index is not evidence of current eligibility. Keep
+        # only fresh authoritative working state; do not search or record a
+        # delivery, even if old document bytes still match their hashes.
+        task = task_record = None
+        if served is not None:
+            task_record, task, _ = find_task(repository, served)
+            validate_record(task)
+        working, omitted = project_working_task(governed_task_view(task) if task else None,
+                                                delivery_profile=delivery_profile)
+        if working is not None:
+            working.update(phase=task.get("phase"), created_at=task["created_at"],
+                           updated_at=task["updated_at"])
+        result: dict[str, object] = {
+            "mode": mode, "query": request_query, "query_source": query_source,
+            "task_id": task["external_id"] if task else task_id,
+            "task_uuid": task["id"] if task else None,
+            "task_revision": task["revision"] if task else None,
+            "task_record": task_record.relative_to(repository).as_posix() if task_record else None,
+            "working": working, "omitted": omitted, "last_turn": last_turn,
+            "procedural": [], "semantic": [], "episodic": [],
+            "categories": {}, "selected": [], "no_match": [], "repeated": 0,
+            "manifest": None, "warnings": [*warnings, *binding_notices],
+            "token_estimates": {"procedural": 0, "semantic": 0, "episodic": 0,
+                                "local_episodes": 0, "total": 0},
+        }
+        if served is None:
+            result.update(kind="warming", task_id=task_id,
+                          pending_turns=len(pending_turn_deltas(connection, task_id)))
+            if unreadable:
+                result["task_record_unreadable"] = True
+            if closed:
+                result["task_closed"] = True
+        if source_notices:
+            result['source_notices'] = source_notices
+        result = enforce_governed_capsule_contract(result)
+        if delivery_admission is not None:
+            delivery_admission()
+        return result
     seeds: Optional[dict[str, list[str]]] = None
     if automatic_links:
         seeds = {"prompt": [], "touched": recent_touched_paths(connection, task_id)}
@@ -2567,30 +3276,39 @@ def assemble_capsule(
         deduplicate_capsule_layers(result)
         result["query_source"] = query_source
         # The print tail dereferences result["warnings"]; retrieve() has no such key.
-        result["warnings"] = warnings
+        result["warnings"] = [*warnings, *binding_notices]
+        if source_notices:
+            result['source_notices'] = source_notices
         result["last_turn"] = last_turn
-        if binding is None:
+        if served is None:
             # Rendered as "working: not recorded yet" plus how far the first
             # checkpoint is, by the same fields the Cursor warming capsule uses.
             result["kind"] = "warming"
             result["task_id"] = task_id
+            if unreadable:
+                # Recorded, but its record cannot be read: not "not recorded
+                # yet", and no checkpoint creates it while it is there.
+                result["task_record_unreadable"] = True
+            if closed:
+                result["task_closed"] = True
             result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
         capsule = enforce_governed_capsule_contract(result)
         if render:
-            shown_in_render(connection, capsule)
+            shown_in_render(connection, capsule, delivery_profile=delivery_profile)
         return capsule
 
     return retrieve(
         connection,
         repository,
         request_query,
-        binding["task_uuid"] if binding is not None else None,
+        served,
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
         query_source=query_source,
         phase_seconds=phase_seconds,
         gate_mode=gate_mode,
         paths=paths,
+        source_hints=source_hints,
         host=host,
         entry_point=entry_point,
         history_text=prompt if prompt is not None else query,
@@ -2599,12 +3317,16 @@ def assemble_capsule(
         transcript=transcript,
         pack=pack,
         trace_paths=trace_paths,
+        delivery_profile=delivery_profile,
         describe_windows=describe_excerpt_windows,
+        source_provenance_sink=source_provenance_sink,
+        admit_delivery=delivery_admission,
     )
 
 
 def hook_capsule_query(
-    repository: Path, task_id: str, task_uuid: str
+    repository: Path, task_id: str, task_uuid: str,
+    *, task_record: Optional[dict[str, object]] = None,
 ) -> tuple[str, str]:
     """The query the hook should ask with, and where it came from.
 
@@ -2624,7 +3346,7 @@ def hook_capsule_query(
     substantive remains the bare identifier is used and the manifest says so.
     """
     try:
-        task = get_task(repository, task_uuid)
+        task = get_task(repository, task_uuid) if task_record is None else task_record
         goal = str(task.get("goal") or "")
         # `derive_goal` builds the auto-provisioned form, so comparing against
         # it keeps the two definitions in lockstep instead of duplicating the
@@ -2644,12 +3366,267 @@ def hook_capsule_query(
         ):
             return task_id, "task-id"
         query = build_capsule_query(task_id, working)
+    except SourceGitError:
+        raise
     except (ContextError, BrainError, RetrievalError, KeyError, ValueError, OSError):
         # A capsule built on a bare identifier is worse than one built on the
         # task, and far better than none: Cursor would otherwise keep serving
         # the previous rule with no signal that anything failed.
         return task_id, "task-id"
     return query, "task"
+
+
+def _cursor_continuation_query(
+    connection: sqlite3.Connection, repository: Path, task_id: str,
+) -> Optional[tuple[str, str]]:
+    """Use current nonterminal governed state; never reuse a previous rule."""
+    try:
+        binding = governed_binding(connection, task_id)
+        task = get_task(repository, binding["task_uuid"])
+        if task["status"] in LIFECYCLES["task"]["terminal"]:
+            return None
+        query_task = dict(task)
+        if str(task.get("goal") or "").strip() and task["goal"] != derive_goal(task_id):
+            # Incidental progress/next-step words can dilute an explicit goal
+            # below relevance coverage. Only the query projection is narrowed;
+            # the capsule still carries all current working fields.
+            query_task.update(progress="", next_steps=[], files=[])
+        query, source = hook_capsule_query(
+            repository, task_id, binding["task_uuid"], task_record=query_task,
+        )
+        # Empty/auto-derived state and read failures otherwise seed a branch
+        # name. A continuation is allowed only a substantive current task.
+        return (query, source) if source == "task" else None
+    except SourceGitError:
+        raise
+    except (ContextError, BrainError, RetrievalError, KeyError, ValueError, OSError):
+        return None
+
+
+CURSOR_TOPIC_KEY = 'cursor-topic-v1'
+CURSOR_TOPIC_BYTES = 6144
+CURSOR_TOPIC_AGE = 86400
+
+
+def _cursor_topic_scope(connection, repository, task_id, mode):
+    """Current query-cache scope, not authority or old-source custody proof."""
+    from context_retrieval import _cursor_git_config_read, _cursor_protected_safe_root
+    from validate import secret_policy_fingerprint
+    if not isinstance(task_id, str) or not task_id or len(task_id) > 200:
+        return None
+    selectors = {'GIT_DIR', 'GIT_COMMON_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE',
+                 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+                 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT'}
+    if any(os.environ.get(name) for name in selectors):
+        return None
+    try:
+        project = workspace_roots.project_root(repository)
+        environment = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+        environment.update(GIT_OPTIONAL_LOCKS='0', GIT_CONFIG_NOSYSTEM='1',
+                           GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT='0')
+        command = ['git', '--no-optional-locks', '--no-pager', '-C', str(project)]
+        observed = _cursor_git_config_read([*command, 'symbolic-ref', '--quiet', '--short', 'HEAD'], environment)
+        if observed is not None and observed[0] == 128 and _cursor_protected_safe_root(project):
+            observed = _cursor_git_config_read([*command, '-c', 'safe.directory='+str(project.resolve()),
+                                                'symbolic-ref', '--quiet', '--short', 'HEAD'], environment)
+        if observed is None or observed[0] != 0 or not 1 <= len(observed[1]) <= 1024:
+            return None
+        branch = observed[1].decode('utf-8', 'strict').strip()
+        if not branch or any(char in branch for char in ('\n', '\r', '\0')):
+            return None
+        config_leaf = brain_root(repository) / 'config/runtime.json'
+        try:
+            meta = config_leaf.lstat()
+            if not stat_module.S_ISREG(meta.st_mode) or meta.st_nlink != 1 or meta.st_size > 65536:
+                return None
+            def same(image):
+                return (all(getattr(image, key) == getattr(meta, key)
+                            for key in ('st_dev','st_ino','st_size','st_mtime_ns','st_mode','st_nlink'))
+                        and workspace_roots.change_time_ns(image) == workspace_roots.change_time_ns(meta))
+            with config_leaf.open('rb') as stream:
+                raw = stream.read(65537)
+                after = os.fstat(stream.fileno())
+                if len(raw) > 65536 or not same(after):
+                    return None
+            if not same(config_leaf.lstat()):
+                return None
+            config_identity = hashlib.sha256(raw).hexdigest()
+        except FileNotFoundError:
+            config_identity = 'absent'
+        config = load_config(repository)
+        alias = task_id
+        task_uuid = generation = goal_hash = None
+        kind = 'warming'
+        if mode == 'governed':
+            rows = connection.execute('SELECT external_id, task_uuid FROM task_bindings '
+                'WHERE external_id=? OR task_uuid=?', (task_id, task_id)).fetchall()
+            if len(rows) > 1:
+                return None
+            if rows:
+                alias, task_uuid = rows[0]['external_id'], rows[0]['task_uuid']
+                task = get_task(repository, task_uuid)
+                if (task['external_id'] != alias or task['status'] in TERMINAL_STATES
+                        or task['privacy'] not in set(config['allowed_privacy']) & {'public','team'}):
+                    return None
+                pointer = find_working_task(connection, alias)
+                if pointer is None or pointer['goal'] != task_uuid:
+                    return None
+                generation = pointer['created_at']
+                goal_hash = hashlib.sha256(task['goal'].encode('utf-8')).hexdigest()
+                kind = 'bound'
+            else:
+                if find_working_task(connection, alias) is not None:
+                    return None
+                # Positively absent active/archive identity, not a catch-all
+                # "not found" after parse/permission/ambiguity failure.
+                from brain_runtime import iter_records
+                problems = []
+                if any(record.get('id') == alias or record.get('external_id') == alias
+                       for _, record, _ in iter_records(repository, include_archive=True,
+                                                        problems=problems)):
+                    return None
+                # A skipped record claiming this identity is not absence either.
+                if any(problem['identity'] is not None and alias in problem['identity'][1:]
+                       for problem in problems):
+                    return None
+        else:
+            task = find_working_task(connection, alias)
+            if task is not None:
+                generation = task['created_at']
+                goal_hash = hashlib.sha256(str(task['goal']).encode('utf-8')).hexdigest()
+                kind = 'bound'
+        return {'mode': mode, 'branch': branch, 'task_id': alias, 'task_uuid': task_uuid,
+                'generation': generation, 'goal': goal_hash, 'kind': kind,
+                'root': hashlib.sha256(os.fsencode(project.resolve())).hexdigest(),
+                'config': config_identity, 'secret_policy': secret_policy_fingerprint()}
+    except (OSError, ValueError, UnicodeError, BrainError, ContextError, sqlite3.Error, KeyError):
+        return None
+
+
+def _cursor_topic_begin(connection, repository, task_id, mode):
+    scope = _cursor_topic_scope(connection, repository, task_id, mode)
+    raw = None
+    try:
+        row = connection.execute("SELECT CASE WHEN typeof(value)='text' AND length(CAST(value AS BLOB))<=6144 "
+            "THEN value ELSE NULL END FROM index_state WHERE key=?", (CURSOR_TOPIC_KEY,)).fetchone()
+        raw = row[0] if row else None
+        seed = None
+        if isinstance(raw, str) and len(raw.encode('utf-8')) <= CURSOR_TOPIC_BYTES:
+            value = json.loads(raw)
+            if (isinstance(value, dict) and set(value) == {'profile','scope','query','written_at'}
+                    and value['profile'] == CURSOR_TOPIC_KEY and value['scope'] == scope and scope is not None
+                    and isinstance(value['query'], str) and 1 <= len(value['query']) <= 1024
+                    and type(value['written_at']) in (int,float)
+                    and 0 <= value['written_at'] <= time.time() and math.isfinite(value['written_at'])
+                    and 0 <= time.time() - value['written_at'] <= CURSOR_TOPIC_AGE):
+                reject_secrets('Cursor continuation query', [value['query']])
+                reject_capsule_privacy('Cursor continuation query', [value['query']])
+                seed = value
+        return scope, raw, seed
+    except (ValueError, UnicodeError, ContextError, sqlite3.Error, RecursionError, OverflowError):
+        return scope, raw, None
+
+
+def _cursor_topic_write(connection, expected, value):
+    """Own short CAS transaction; never commit or roll back a caller's work."""
+    if connection.in_transaction:
+        return False
+    previous_timeout = None
+    try:
+        # Topic bookkeeping must not spend the hook's delivery timeout waiting
+        # for another writer. Restore the caller's setting even after failure.
+        previous_timeout = connection.execute('PRAGMA busy_timeout').fetchone()[0]
+        connection.execute('PRAGMA busy_timeout=0')
+        with connection:
+            if value is None:
+                if expected is not None:
+                    connection.execute('DELETE FROM index_state WHERE key=? AND value=?', (CURSOR_TOPIC_KEY,expected))
+                return True
+            raw = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            if len(raw.encode('utf-8')) > CURSOR_TOPIC_BYTES:
+                return False
+            if expected is None:
+                # Repair only an unavailable oversized/non-text reserved row;
+                # never replace another operation's valid admitted query.
+                connection.execute("DELETE FROM index_state WHERE key=? AND "
+                    "(typeof(value)!='text' OR length(CAST(value AS BLOB))>6144)", (CURSOR_TOPIC_KEY,))
+                cursor = connection.execute('INSERT INTO index_state(key,value) VALUES (?,?) '
+                    'ON CONFLICT(key) DO NOTHING', (CURSOR_TOPIC_KEY,raw))
+            else:
+                cursor = connection.execute('UPDATE index_state SET value=? WHERE key=? AND value=?',
+                                            (raw,CURSOR_TOPIC_KEY,expected))
+            return cursor.rowcount == 1
+    except (ValueError, UnicodeError, sqlite3.Error):
+        return False
+    finally:
+        if previous_timeout is not None:
+            try:
+                connection.execute('PRAGMA busy_timeout='+str(int(previous_timeout)))
+            except sqlite3.Error:
+                pass
+
+
+def _cursor_topic_query(connection, repository, task_id, mode, plan):
+    scope, _, seed = plan
+    if scope is None:
+        return None
+    try:
+        task = (get_task(repository, scope['task_uuid']) if mode == 'governed' and scope['task_uuid']
+                else find_working_task(connection, task_id) if mode == 'lightweight' else None)
+        if task is not None and str(task.get('goal') or '').strip() and task['goal'] != derive_goal(task_id):
+            if mode == 'governed':
+                if task['privacy'] not in set(load_config(repository)['allowed_privacy']) & {'public','team'}:
+                    return None
+                # A newly explicit goal must not inherit incidental words from
+                # the old branch alias. Use the current goal alone for recall.
+                return build_capsule_query(task['goal'], None), 'task'
+            return build_capsule_query(str(task['goal']), None), 'task'
+        return (seed['query'], 'continuation') if seed is not None else None
+    except SourceGitError:
+        raise
+    except (BrainError, ContextError, KeyError, ValueError, OSError, sqlite3.Error):
+        return None
+
+
+def _cursor_topic_finish(connection, repository, task_id, mode, plan, query, eligible, warnings, *, continued=False, acknowledgement=False, selected=True):
+    scope, raw, seed = plan
+    if not eligible or warnings or scope is None:
+        _cursor_topic_write(connection, raw, None)
+        return
+    if (not isinstance(query, str) or not 1 <= len(query) <= 1024
+            or _cursor_topic_scope(connection, repository, task_id, mode) != scope):
+        _cursor_topic_write(connection, raw, None)
+        return
+    if continued and seed is not None and seed['query'] == query:
+        return  # Acknowledgements do not renew the substantive topic's age.
+    if acknowledgement:
+        if seed is None:
+            _cursor_topic_write(connection, raw, None)
+        return  # An acknowledgement is never a new substantive topic.
+    if not selected:
+        # A prompt that retrieved nothing is no topic to continue: a short
+        # reply became one, and the next "yes" searched by it.
+        _cursor_topic_write(connection, raw, None)
+        return
+    _cursor_topic_write(connection, raw, {'profile':CURSOR_TOPIC_KEY, 'scope':scope,
+        'query':query, 'written_at':time.time()})
+
+
+def _cursor_topic_handoff(connection, repository, task_id, mode, plan, created):
+    scope, raw, seed = plan
+    if scope is None or scope['kind'] != 'warming' or seed is None or not created:
+        return
+    current = _cursor_topic_scope(connection, repository, task_id, mode)
+    if current is None or current['kind'] != 'bound':
+        return
+    expected = created[0]
+    if current['task_uuid'] != expected['task_uuid'] or current['generation'] != expected['generation']:
+        return
+    if any(current[key] != scope[key] for key in ('mode','branch','task_id','root','config','secret_policy')):
+        return
+    if current['goal'] != hashlib.sha256(derive_goal(task_id).encode('utf-8')).hexdigest():
+        return
+    _cursor_topic_write(connection, raw, {**seed, 'scope': current})
 
 
 def assemble_hook_context(
@@ -2661,15 +3638,26 @@ def assemble_hook_context(
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     host: str = "cli",
     render: bool = False,
+    delivery_profile: str = 'ordinary',
+    delivery_admission: Optional[Callable[[], None]] = None,
 ) -> Optional[dict[str, object]]:
     """Return a governed capsule or a sanitized pre-provision warming capsule."""
     task_id = validate_task_id(task_id)
     reject_capsule_privacy("Task Capsule request", [], [task_id])
+    if delivery_profile == 'cursor-rule':
+        plan = _cursor_topic_begin(connection, repository, task_id, mode)
+        topic = _cursor_topic_query(connection, repository, task_id, mode, plan)
+        if topic is not None:
+            return assemble_capsule(connection, repository, mode=mode, query=topic[0], task_id=task_id,
+                limit=3, ephemeral=True, query_source=topic[1], gate_mode=gate_mode, host=host,
+                entry_point='hook-context', render=render, allow_unprovisioned=True,
+                automatic_links=True, delivery_profile=delivery_profile,
+                delivery_admission=delivery_admission)
     if mode == "lightweight":
         local_task = find_working_task(connection, task_id)
         if local_task is not None:
             working, _ = project_working_task(local_task)
-            query = build_capsule_query("", working) or task_id
+            query, query_source = build_capsule_query("", working), "task"
             return assemble_capsule(
                 connection,
                 repository,
@@ -2678,19 +3666,24 @@ def assemble_hook_context(
                 task_id=task_id,
                 limit=3,
                 ephemeral=True,
-                query_source="task",
+                query_source=query_source,
                 gate_mode=gate_mode,
                 host=host,
                 entry_point="hook-context",
+                delivery_profile=delivery_profile,
+                delivery_admission=delivery_admission,
             )
     else:
         try:
             binding = governed_binding(connection, task_id)
         except ContextError:
-            pass
-        else:
+            binding = None
+        # A fresh clone holds the branch's task in the Brain before its first
+        # checkpoint binds it: the session's rule shows that task too.
+        record = _unbound_task(repository, task_id) if binding is None else None
+        if binding is not None or record is not None:
             query, query_source = hook_capsule_query(
-                repository, task_id, binding["task_uuid"]
+                repository, task_id, binding["task_uuid"] if binding is not None else str(record["id"])
             )
             return assemble_capsule(
                 connection,
@@ -2705,10 +3698,15 @@ def assemble_hook_context(
                 host=host,
                 entry_point="hook-context",
                 render=render,
+                allow_unprovisioned=binding is None,
                 automatic_links=True,
+                delivery_profile=delivery_profile,
+                delivery_admission=delivery_admission,
             )
 
     files, excluded = changed_paths(repository)
+    if delivery_admission is not None:
+        delivery_admission()
     if not files:
         return None
     pending = len(pending_turn_deltas(connection, task_id))
@@ -2829,9 +3827,12 @@ def rendered_working_state(
 
 
 class Excerpt(str):
-    """An excerpt's text, carrying the heading of the section it quotes."""
+    """An excerpt's text, carrying the heading of the section it quotes and
+    the length it was allowed."""
 
     heading = ""
+    limit = None
+    cut = False
 
 
 def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> str:
@@ -2864,6 +3865,45 @@ def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> 
 def capsule_excerpts(
     connection: sqlite3.Connection, capsule: dict[str, object]
 ) -> dict[str, str]:
+    """Answer-bearing text for the capsule's project knowledge, by path,
+    the best-ranked excerpts grown into the room the capsule leaves.
+
+    Each excerpt is first cut to its rank's allowance. When the excerpts
+    leave room under RENDERED_CAPSULE_LIMIT beside EXCERPT_GROWTH_RESERVE,
+    the first and second excerpts that were cut short - their section runs
+    on past the window - are cut again with that room, up to
+    EXCERPT_GROWTH_CAPS. The renderer still holds the whole text to the
+    ceiling, shrinking the last excerpts first.
+    """
+    excerpts = _capsule_excerpts(connection, capsule)
+    grown = _excerpt_growth(capsule, excerpts)
+    return _capsule_excerpts(connection, capsule, limits=grown) if grown else excerpts
+
+
+def _excerpt_growth(capsule: dict[str, object], excerpts: dict[str, str]) -> dict[str, int]:
+    """Larger allowances, by path, for the best-ranked excerpts that were cut."""
+    room = RENDERED_CAPSULE_LIMIT - EXCERPT_GROWTH_RESERVE - sum(len(text) + 3 for text in excerpts.values() if text)
+    order = [
+        item["path"] for layer in ("semantic", "episodic") for item in capsule.get(layer) or []
+        if isinstance(item, dict) and isinstance(item.get("path"), str) and excerpts.get(item["path"])
+    ]
+    grown: dict[str, int] = {}
+    for cap, path in zip(EXCERPT_GROWTH_CAPS, order):
+        text = excerpts[path]
+        limit = getattr(text, "limit", None)
+        # A section quoted whole gains nothing from more room. Length cannot
+        # tell: a window of whole entries stops short of its allowance.
+        if room <= 0 or not limit or not getattr(text, "cut", False) or cap <= limit:
+            continue
+        grown[path] = limit + min(cap - limit, room)
+        room -= grown[path] - limit
+    return grown
+
+
+def _capsule_excerpts(
+    connection: sqlite3.Connection, capsule: dict[str, object],
+    *, limits: Optional[dict[str, int]] = None,
+) -> dict[str, str]:
     """Answer-bearing text for the capsule's project knowledge, by path.
 
     Skills get none: every host loads its skills itself, so a skill line names
@@ -2871,8 +3911,11 @@ def capsule_excerpts(
     none: one shared rare word is a reason to mention a document, not to quote
     it. Each value is an Excerpt whose ``heading`` names the section quoted.
     """
+    if not capsule.get("semantic") and not capsule.get("episodic"):
+        return {}
     query = str(capsule.get("query") or "")
     weights = excerpt_weights(connection, query) if query else {}
+    images = _capsule_index_images(capsule)
     excerpts: dict[str, str] = {}
     rank = 0
     for layer in ("semantic", "episodic"):
@@ -2894,41 +3937,44 @@ def capsule_excerpts(
                 continue
             if item.get("match") == "distinctive":
                 continue
+            if images is None:
+                # A detached/public capsule has bounded admitted snippets,
+                # never authority to rehydrate another live indexed body.
+                text = item.get('snippet')
+                if isinstance(text, str) and text:
+                    excerpt = Excerpt(_bounded(text, max(EXCERPT_CHARACTERS)
+                                               if layer == 'semantic' else EPISODIC_EXCERPT_CHARACTERS))
+                    excerpt.heading = ''
+                    excerpts[item['path']] = excerpt
+                continue
+            image = images.get(item['path'])
+            if image is None:
+                continue
             if item.get("selection") in AUTOMATIC_LINK_SELECTIONS and item.get("kind") == "brain-task":
                 # What a sibling task says about the shared file: its goal and
                 # the files it touched, the shared one first. 12 of the 14
                 # answers held by tasks on the evaluation were Files entries.
-                limit = EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
+                limit = (limits or {}).get(item["path"], EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)])
                 rank += 1
-                try:
-                    row = connection.execute(
-                        "SELECT content FROM documents WHERE path = ?", (item["path"],)
-                    ).fetchone()
-                except sqlite3.Error:
-                    row = None
                 text, heading = linked_task_excerpt(
-                    str(row[0]) if row else "", str(item.get("via") or ""), limit
+                    image[2], str(item.get("via") or ""), limit
                 )
                 if text:
                     excerpt = Excerpt(text)
                     excerpt.heading = heading
+                    excerpt.limit = limit
+                    excerpt.cut = len(text) >= limit - 40
                     excerpts[item["path"]] = excerpt
                 continue
-            limit = (
+            limit = (limits or {}).get(item["path"], (
                 EXCERPT_CHARACTERS[min(rank, len(EXCERPT_CHARACTERS) - 1)]
                 if layer == "semantic"
                 else EPISODIC_EXCERPT_CHARACTERS
-            )
+            ))
             rank += 1
-            marked = marked_document(connection, item["path"], query) if query else None
+            marked = marked_document(connection, item["path"], query, indexed_image=image) if query else None
             if marked is None:
-                try:
-                    row = connection.execute(
-                        "SELECT content FROM documents WHERE path = ?", (item["path"],)
-                    ).fetchone()
-                except sqlite3.Error:
-                    row = None
-                marked = str(row[0]) if row is not None else None
+                marked = image[2]
             section = (
                 excerpt_section(connection, item, marked, weights, query=query)
                 if marked
@@ -2940,6 +3986,8 @@ def capsule_excerpts(
             if text:
                 excerpt = Excerpt(text)
                 excerpt.heading = section["shown"] if section else ""
+                excerpt.limit = limit
+                excerpt.cut = bool(section) and sum(len(_unmarked(unit)) + 1 for unit in section["units"]) > limit
                 excerpts[item["path"]] = excerpt
     return excerpts
 
@@ -3010,13 +4058,13 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
 
 def render_capsule_lines(
     capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None,
-    *, trace: Optional[dict[str, object]] = None,
+    *, trace: Optional[dict[str, object]] = None, delivery_profile: str = 'ordinary',
 ) -> list[str]:
     """The capsule as Claude Code, Codex, Cursor and Harness deliver it."""
-    return _render_capsule(capsule, excerpts, trace=trace)[0]
+    return _render_capsule(capsule, excerpts, trace=trace, delivery_profile=delivery_profile)[0]
 
 
-def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) -> None:
+def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object], *, delivery_profile: str = 'ordinary') -> None:
     """Leave in a capsule only the items its rendered text shows.
 
     The text is held to RENDERED_CAPSULE_LIMIT by dropping whole entries once
@@ -3028,7 +4076,7 @@ def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) 
     every item it holds: they fitted without their excerpts, beside the
     compaction marker that every drop puts in front of them first.
     """
-    _, shown = _render_capsule(capsule, capsule_excerpts(connection, capsule))
+    _, shown = _render_capsule(capsule, capsule_excerpts(connection, capsule), delivery_profile=delivery_profile)
     kept = {id(item) for item in shown}
     omitted = capsule.get("omitted")
     for layer in DOCUMENT_LAYERS:
@@ -3063,8 +4111,11 @@ def _screen_capsule_excerpts(capsule: dict[str, object], excerpts: dict[str, str
                 safe = sanitize_automatic_query(str(raw))
             except ContextError:
                 safe = ""
-            limit = max(EXCERPT_CHARACTERS) if layer == "semantic" else EPISODIC_EXCERPT_CHARACTERS
+            limit = getattr(raw, "limit", None) or (
+                max(EXCERPT_CHARACTERS) if layer == "semantic" else EPISODIC_EXCERPT_CHARACTERS
+            )
             excerpt = Excerpt(_bounded(safe, limit))
+            excerpt.limit = getattr(raw, "limit", None)
             try:
                 excerpt.heading = sanitize_automatic_query(str(getattr(raw, "heading", "")))
             except ContextError:
@@ -3095,7 +4146,7 @@ def describe_excerpt_windows(connection: sqlite3.Connection, capsule: dict[str, 
 
 def _render_capsule(
     capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None,
-    *, trace: Optional[dict[str, object]] = None,
+    *, trace: Optional[dict[str, object]] = None, delivery_profile: str = 'ordinary',
 ) -> tuple[list[str], list[dict[str, object]]]:
     """The rendered lines, and the items they show."""
     excerpts = dict(excerpts or {})
@@ -3110,7 +4161,19 @@ def _render_capsule(
     # capsule's `omitted` counters say its JSON lost.
     cuts: dict[str, int] = {}
     working = capsule["working"]
-    if working is None and capsule.get("kind") == "warming":
+    if working is None and capsule.get("task_record_unreadable"):
+        # The task is recorded, but its record cannot be read; the warning
+        # below names the file and the cause.
+        head.append("working: unavailable (the task's record cannot be read)")
+    elif working is None and capsule.get("working_changed"):
+        # Rewritten while this turn read it; the record has the state.
+        head.append("working: unavailable (the task's record changed while this turn read it; read "
+                    + _bounded(str(capsule.get("task_record") or "the task record"), 200) + ")")
+    elif working is None and capsule.get("task_closed"):
+        # The branch's task is finished; the turns after it are not recorded.
+        head.append("working: closed (this branch's task is finished; turns are not recorded until a "
+                    "new one starts: " + _closed_task_remedy(str(capsule.get("task_id") or "")) + ")")
+    elif working is None and capsule.get("kind") == "warming":
         # A branch whose task the first checkpoint has not created yet: the
         # layers below are still this turn's retrieval.
         head.append(
@@ -3125,8 +4188,12 @@ def _render_capsule(
         state, state_cuts = rendered_working_state(capsule)
         cuts.update(state_cuts)
         head.extend(_bounded(line, RENDERED_LINE_LIMIT) for line in state)
-    if capsule.get("kind") == "warming":
-        head.append(f"warming: {capsule['pending_turns']} turn(s) pending")
+    if capsule.get("kind") == "warming" and not capsule.get("task_closed"):
+        head.append('warming: task checkpoint pending' if delivery_profile == 'cursor-rule'
+                    else f"warming: {capsule['pending_turns']} turn(s) pending")
+    notice = _source_notice_text(capsule.get('source_notices'))
+    if notice:
+        head.append(_bounded(notice, 160))
     for warning in capsule["warnings"][:3]:
         head.append(f"warning: {_bounded(warning, 160)}")
     # The JSON form has carried these counters all along; the rendered form
@@ -3144,7 +4211,7 @@ def _render_capsule(
     if capsule.get("last_turn"):
         tail.append(f"Last turn: {_bounded(capsule['last_turn'], 600)}")
     source = capsule.get("query_source")
-    if source in ("task", "task-id"):
+    if source in ("task", "task-id") and not (delivery_profile == 'cursor-rule' and source == 'task'):
         # A capsule retrieved on a branch slug and one retrieved on the task's
         # own goal are worth very different amounts.
         tail.append(
@@ -3220,6 +4287,12 @@ def _render_capsule(
     # marker, or beside the counted line where it fits, so the items recorded
     # are the ones the final text shows.
     while size(lines) > RENDERED_CAPSULE_LIMIT:
+        hinted = [index for index, (_, item, _) in enumerate(entries) if item.get("selection") == "source-hint"]
+        if hinted:
+            entries.pop(hinted[-1])
+            compaction = COMPACTION_MARKER
+            lines = assemble()
+            continue
         shrinkable = [
             key for key in reversed(list(excerpt_of)) if excerpt_of[key]
         ]
@@ -3279,11 +4352,12 @@ def _render_capsule(
 
 def print_capsule(
     capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None,
-    *, repository: Optional[Path] = None,
+    *, repository: Optional[Path] = None, delivery_profile: str = 'ordinary',
     _diagnosis_sink: Optional[Callable[[dict[str, object]], None]] = None,
 ) -> None:
     trace: dict[str, object] = {}
-    lines = render_capsule_lines(capsule, excerpts, trace=trace if repository is not None else None)
+    lines = render_capsule_lines(capsule, excerpts, trace=trace if repository is not None else None,
+                                 delivery_profile=delivery_profile)
     if repository is not None:
         emitted = ("\n".join(lines) + "\n").encode("utf-8")
         trace.update({"sha256": hashlib.sha256(emitted).hexdigest(), "bytes": len(emitted), "form": "printed_capsule"})
@@ -3781,7 +4855,14 @@ def refresh_health(repository: Path, window: Optional[int]) -> dict[str, object]
     omitted_turns = 0
     incomplete_layers = 0
     statuses: dict[str, int] = {}
+    source_notice_totals: dict[str, int] = {}
+    source_notice_records = 0
     for record in records:
+        notices = _normalized_source_notices(record.get("source_notices"))
+        if notices:
+            source_notice_records += 1
+            for reason, count in notices.items():
+                source_notice_totals[reason] = source_notice_totals.get(reason, 0) + count
         timings = record.get("phase_seconds")
         if isinstance(timings, dict):
             for name in phases:
@@ -3812,6 +4893,10 @@ def refresh_health(repository: Path, window: Optional[int]) -> dict[str, object]
         "incomplete_layers_rate": ratio(incomplete_layers),
         "funnel_diagnosis": funnel_diagnosis_summary(records),
     }
+    if source_notice_records:
+        # Historical reported occurrences, not unique sources or distinct turns.
+        result["source_notices"] = {"records": source_notice_records,
+                                    "totals": source_notice_totals}
     try:
         result["ordinary_receipt"] = ordinary_receipt_summary(records)
     except Exception:
@@ -4032,7 +5117,7 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             }
     elif branch:
         try:
-            identity = validate_task_id(branch)
+            identity = validate_task_id(branch_task_id(branch))
         except ContextError:
             task_identity = {
                 "status": "degraded",
@@ -4127,7 +5212,17 @@ def create_governed_task(
 ) -> dict[str, object]:
     """Create the Brain task and its local binding, or leave neither behind."""
     with mutation_lock(repository):
-        task = create_task(repository, task_id, goal, files, sources, owner=owner)
+        try:
+            task = create_task(repository, task_id, goal, files, sources, owner=owner)
+        except BrainError as error:
+            # A finished task keeps its ID in dynamic/ until compaction
+            # archives it - automatic compaction waits for five finished
+            # records - and a new task for the same branch was refused. That
+            # finished record, and no other, is archived now.
+            if "already exists" not in str(error) or not _finished_records_only(repository, task_id):
+                raise
+            compact(repository, only_external_id=task_id)
+            task = create_task(repository, task_id, goal, files, sources, owner=owner)
         try:
             bind_governed_task(
                 connection, task_id, str(task["id"]), int(task["revision"])
@@ -4202,6 +5297,24 @@ def rebind_governed_task(
     return {**governed_task_view(record), "already_bound": False}
 
 
+def _closed_task_remedy(task_id: str) -> str:
+    """How a branch whose task is finished records again: a new task, which
+    moves the finished record to the archive."""
+    return "start a new task: `context.py start --task-id " + (task_id or "<task>") + ' --goal "..."`'
+
+
+def _finished_records_only(repository: Path, task_id: str) -> bool:
+    """Whether every Brain record that names ``task_id`` is a finished task,
+    so a new task of that name may move them to the archive."""
+    problems: list[dict[str, Any]] = []
+    named = [record for _, record, _ in iter_records(repository, problems=problems)
+             if task_id in (record.get("id"), record.get("external_id"))]
+    if any(problem["identity"] is not None and task_id in problem["identity"][1:] for problem in problems):
+        return False
+    return bool(named) and all(record.get("type") == "task" and record.get("status") in TERMINAL_STATES
+                               for record in named)
+
+
 def closed_task_record(
     connection: sqlite3.Connection, repository: Path, task_id: str
 ) -> Optional[str]:
@@ -4227,6 +5340,7 @@ def ensure_working_task(
     task_id: str,
     mode: str,
     owner: str,
+    *, _created_sink: Optional[list[dict[str, object]]] = None,
 ) -> dict[str, object]:
     """Create or reconnect the working task when a turn has something to record.
 
@@ -4248,23 +5362,154 @@ def ensure_working_task(
         if find_working_task(connection, task_id) is not None:
             return {"provisioned": False, "rebound": None}
         start_working_task(connection, task_id, goal, [], [])
+        if _created_sink is not None:
+            _created_sink.append({'task_uuid':None, 'generation':get_working_task(connection,task_id)['created_at']})
         return {"provisioned": True, "rebound": None}
     try:
-        governed_binding(connection, task_id)
-        return {"provisioned": False, "rebound": None}
+        binding = governed_binding(connection, task_id)
     except ContextError:
-        pass
+        binding = None
+    if binding is not None:
+        problem, record = _bound_record(repository, binding)
+        if problem != "missing":
+            successor = _successor(repository, binding, record)
+            if successor is None:
+                return {"provisioned": False, "rebound": None}
+            # The bound record was finished while another record took over
+            # its task ID - the duplicate a merge left was cancelled here, on
+            # this machine's side. Follow the task ID instead of dropping
+            # every later turn as work on a closed task.
+            with connection:
+                connection.execute("DELETE FROM task_bindings WHERE task_uuid = ?", (binding["task_uuid"],))
+                connection.execute("DELETE FROM working_tasks WHERE task_id = ? AND goal = ?",
+                                   (binding["external_id"], binding["task_uuid"]))
+            task = rebind_governed_task(connection, repository, task_id, str(successor["id"]))
+            return {"provisioned": False, "rebound": str(task["task_uuid"])}
+        # The record the binding names is gone - `git stash -u` or `git clean`
+        # takes an uncommitted task with it. Drop the dead pointer and
+        # provision as on a first flush: every later Stop failed with "record
+        # not found" while status still reported memory as active.
+        with connection:
+            connection.execute("DELETE FROM task_bindings WHERE task_uuid = ?", (binding["task_uuid"],))
+            # Its compatibility row names the same record (goal = task UUID).
+            connection.execute("DELETE FROM working_tasks WHERE task_id = ? AND goal = ?",
+                               (binding["external_id"], binding["task_uuid"]))
     try:
         task = rebind_governed_task(connection, repository, task_id)
     except ContextError as error:
         # Only a genuinely absent record means "first flush on this branch";
         # every other rebind refusal (terminal task, ambiguous identifier)
         # would also fail creation and is clearer stated as what it is.
-        if "not found" not in str(error):
-            raise
-        create_governed_task(connection, repository, task_id, goal, [], [], owner)
+        absence = error.__cause__
+        if not (isinstance(absence, BrainRecordNotFound)
+                and absence.identifier == task_id and absence.record_type is None):
+            claimant = (_active_claimant(repository, task_id)
+                        if isinstance(absence, BrainError) and "ambiguous" in str(absence) else None)
+            if claimant is None:
+                raise
+            task = rebind_governed_task(connection, repository, task_id, str(claimant["id"]))
+            return {"provisioned": False, "rebound": str(task["task_uuid"])}
+        created = create_governed_task(connection, repository, task_id, goal, [], [], owner)
+        if _created_sink is not None:
+            _created_sink.append({'task_uuid':created['id'], 'generation':get_working_task(connection,task_id)['created_at']})
         return {"provisioned": True, "rebound": None}
     return {"provisioned": False, "rebound": str(task["task_uuid"])}
+
+
+def _active_claimant(repository: Path, task_id: str) -> Optional[dict[str, Any]]:
+    """The task record a clone without a binding works with when more than
+    one record claims the task ID, or None to keep the refusal.
+
+    Two copies of a branch that each started its task record one each; once
+    they merge, the ID names both. Every checkpoint of a clone without a
+    binding then failed as ambiguous - invisibly, the Stop hook hides it -
+    and the branch's memory stopped for everyone new to it. The earliest
+    created active record is chosen, so every clone settles on the same one;
+    a record claiming the ID that cannot be read keeps the refusal, and so
+    does a set of only finished tasks.
+    """
+    active = _active_claimants(repository, task_id)
+    return active[0] if active else None
+
+
+def _active_claimants(repository: Path, task_id: str) -> Optional[list[dict[str, Any]]]:
+    """The active task records claiming a task ID, earliest created first;
+    None when a record claiming it cannot be read."""
+    problems: list[dict[str, Any]] = []
+    claimants = [record for _, record, _ in iter_records(repository, problems=problems)
+                 if record["type"] == "task" and record["external_id"] == task_id]
+    if any(problem["identity"] is not None and task_id in problem["identity"][1:]
+           for problem in problems):
+        return None
+    return sorted((record for record in claimants if record.get("status") not in TERMINAL_STATES),
+                  key=lambda record: (str(record.get("created_at") or ""), str(record["id"])))
+
+
+def _successor(repository: Path, binding: sqlite3.Row, record: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """The active record that took over the task ID of a bound record that is
+    finished - a duplicate cancelled after two copies of the branch merged -
+    or None. A finished task with no active record beside it keeps its
+    binding: the turns after it are dropped, as before."""
+    if record is None or record.get("status") not in TERMINAL_STATES:
+        return None
+    active = _active_claimants(repository, str(record["external_id"])) or []
+    return next((candidate for candidate in active if candidate["id"] != record["id"]), None)
+
+
+def _unbound_task(repository: Path, task_id: str) -> Optional[dict[str, Any]]:
+    """The active task record a task ID names on a machine that holds no
+    binding for it yet - a fresh clone or a second machine - or None."""
+    try:
+        _, record, _ = find_task(repository, task_id)
+    except BrainRecordNotFound:
+        return None
+    except BrainError as error:
+        record = _active_claimant(repository, task_id) if "ambiguous" in str(error) else None
+    if record is None or record.get("status") in TERMINAL_STATES:
+        return None
+    return record
+
+
+def _twin_notices(connection: sqlite3.Connection, external_id: str, served: str) -> list[str]:
+    """Say that another active record claims the same task ID, and how to
+    keep one; two lines, as the capsule bounds each warning."""
+    try:
+        twins = json.loads(load_index_state(connection).get(TASK_TWINS_KEY) or "{}")
+    except (ValueError, TypeError, sqlite3.Error):
+        return []
+    claimed = twins.get(external_id) if isinstance(twins, dict) else None
+    if not isinstance(claimed, list) or served not in claimed or len(claimed) < 2:
+        return []
+    other = next(str(identifier) for identifier in claimed if identifier != served)
+    return [f"Task record {other} also claims {external_id}; this turn uses {served}.",
+            f"Keep one task per branch: context.py brain-update --record-id {other} "
+            "--revision auto --transition cancelled"]
+
+
+def _bound_record(repository: Path, binding: sqlite3.Row) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    """What is wrong with the task record a local binding names, if anything,
+    and the record: "missing" when it is gone from the Brain, archive
+    included, or the refusal that reading it gives. An invalid or unreadable
+    record is there, not missing: re-provisioning beside it would make a
+    duplicate."""
+    uuid = str(binding["task_uuid"])
+    present = any(os.path.lexists(repository / "project-brain" / folder / "tasks" / f"{uuid}.md")
+                  for folder in ("dynamic", "archive"))
+    try:
+        _, record, _ = find_record(repository, binding["task_uuid"], record_type="task", include_archive=True)
+    except BrainRecordNotFound:
+        return (None if present else "missing"), None
+    except BrainError as error:
+        return str(error), None
+    return None, record
+
+
+def _bound_record_problem(repository: Path, binding: sqlite3.Row) -> Optional[str]:
+    return _bound_record(repository, binding)[0]
+
+
+def _bound_record_missing(repository: Path, binding: sqlite3.Row) -> bool:
+    return _bound_record_problem(repository, binding) == "missing"
 
 
 def complete_governed_task(
@@ -4804,6 +6049,19 @@ def recent_touched_paths(
     return paths
 
 
+def _checkpoint_time(value: object) -> str:
+    """When a checkpoint's first turn began, to the minute. The capsule shows
+    it on every prompt; seconds, microseconds and the offset told a reader
+    nothing more."""
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except ValueError:
+        return str(value)
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc)
+    return moment.strftime("%Y-%m-%d %H:%M UTC")
+
+
 def pending_turn_deltas(
     connection: sqlite3.Connection, task_id: str
 ) -> list[sqlite3.Row]:
@@ -4845,7 +6103,7 @@ def flush_turn_deltas(
         files = merge_unique(files, json.loads(row["files"]))
     omitted = max(0, len(files) - file_limit)
     checkpoint = (
-        f"Auto-checkpoint: {len(pending)} turn(s) since {pending[0]['created_at']}, "
+        f"Auto-checkpoint: {len(pending)} turn(s) since {_checkpoint_time(pending[0]['created_at'])}, "
         f"{len(files)} file(s) touched."
     )
     if omitted:
@@ -4877,30 +6135,36 @@ def flush_turn_deltas(
             "revision": None, "files_omitted": 0, "provisioned": False,
             "rebound": None, "closed_task": closed, "discarded_turns": len(pending),
         }
-    ensured = ensure_working_task(connection, repository, task_id, mode, owner)
-    if mode == "lightweight":
-        result = update_working_task(
-            connection, task_id, None, [], files, [],
-            auto_checkpoint=checkpoint,
-        )
-    else:
-        result = apply_governed_update(
-            connection,
-            repository,
-            governed_binding(connection, task_id),
-            expected_revision=AUTO_REVISION,
-            progress=None,
-            next_steps=[],
-            files=files,
-            sources=[],
-            owner=owner,
-            auto_checkpoint=checkpoint,
-        )
-    with connection:
-        connection.executemany(
-            "DELETE FROM turn_deltas WHERE id = ?",
-            [(row["id"],) for row in pending],
-        )
+    with mutation_lock(repository) if mode == 'governed' else nullcontext():
+        created = []
+        topic_plan = (_cursor_topic_begin(connection, repository, task_id, mode)
+                      if connection.execute('SELECT 1 FROM index_state WHERE key=?', (CURSOR_TOPIC_KEY,)).fetchone()
+                      else (None, None, None))
+        ensured = ensure_working_task(connection, repository, task_id, mode, owner, _created_sink=created)
+        if mode == "lightweight":
+            result = update_working_task(
+                connection, task_id, None, [], files, [],
+                auto_checkpoint=checkpoint,
+            )
+        else:
+            result = apply_governed_update(
+                connection,
+                repository,
+                governed_binding(connection, task_id),
+                expected_revision=AUTO_REVISION,
+                progress=None,
+                next_steps=[],
+                files=files,
+                sources=[],
+                owner=owner,
+                auto_checkpoint=checkpoint,
+            )
+        with connection:
+            connection.executemany(
+                "DELETE FROM turn_deltas WHERE id = ?",
+                [(row["id"],) for row in pending],
+            )
+        _cursor_topic_handoff(connection, repository, task_id, mode, topic_plan, created)
     return {**result, "files_omitted": omitted, **ensured}
 
 
@@ -4936,11 +6200,9 @@ def run_turn(
             owner,
             file_limit=arguments.max_files,
         )
-    # Maintenance runs only on the boundary where a flush actually
-    # happened. The Stop hook drives this command under a hard
-    # timeout on every turn, so an ordinary turn must stay at a git
-    # status probe, a HEAD probe and local state writes — a SIGTERM
-    # there interrupts nothing mid-mutation.
+    # Full maintenance remains a flush boundary. A scheduled promotion retry
+    # is the only exception: ordinary turns use Git probes and local state,
+    # while a due retry shares the Stop hook's timeout and mutation lock.
     completion_candidates: list[dict[str, object]] = []
     promotion = {
         "enabled": False, "promoted": [], "failed": [],
@@ -4971,6 +6233,13 @@ def run_turn(
         # is moved, and compaction batches so Git history is not
         # churned one terminal record at a time.
         compaction = auto_compact(repository, owner=owner)
+    elif mode != "lightweight":
+        # A failed/interrupted promotion has its own local retry schedule.
+        # Recover it without inventing a Git delta or changing task lifecycle.
+        try:
+            promotion = retry_pending_auto_promotion(repository, owner=owner)
+        except (BrainError, OSError) as error:
+            raise ContextError(f"Automatic promotion retry failed: {error}") from error
     result = {
         "task_id": task_id,
         "delta_id": delta_id,
@@ -4996,6 +6265,8 @@ def run_turn(
         "archived": compaction["moved"],
         "archivable_pending": compaction["pending"],
     }
+    if promotion.get("retry_unavailable"):
+        result["promotion_retry_unavailable"] = True
     # The Stop hook silences this command's stdout, so the same
     # outcome is written to ignored local state for the next
     # refresh to fold into its Task Capsule.
@@ -5020,6 +6291,7 @@ def run_turn(
             "promotion_failed": promotion["failed"],
             "promotion_blocked": promotion["blocked"],
             "promotion_skipped": promotion["skipped"],
+            **({"promotion_retry_unavailable": True} if promotion.get("retry_unavailable") else {}),
             "excluded_paths": path_excluded,
             "archived": compaction["moved"],
             "compaction_errors": (
@@ -5045,7 +6317,8 @@ def run_turn(
         if result["closed_task"]:
             print(
                 f"task {task_id} is closed: {result['discarded_turns']} turn(s) "
-                "after its completion were not recorded"
+                "after its completion were not recorded; to keep further work, "
+                + _closed_task_remedy(task_id)
             )
         for item in completion_candidates:
             print(
@@ -5282,7 +6555,9 @@ def _export_source_commit(repository: Path) -> Optional[str]:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    # Named outright: run through context_cli.py, Python 3.14 would call the
+    # program `python3 -m context` in usage and error text.
+    parser = argparse.ArgumentParser(prog="context.py", description=__doc__)
     parser.add_argument("--root", type=Path, default=default_root())
     parser.add_argument("--db", type=Path)
     parser.add_argument("--mode", choices=("governed", "lightweight"))
@@ -5292,6 +6567,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Project Brain actor/owner (default: PROJECT_BRAIN_OWNER or local)",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    cursor_maintenance = commands.add_parser("cursor-rule", help="maintain a proven generated local Cursor rule")
+    cursor_maintenance.add_argument("--action", choices=("write", "keep", "retire", "prompt-held", "migrate"), required=True)
+    cursor_maintenance.add_argument("--approved-current-sha256",
+        help="explicit operator approval of one unreceipted current rule image; used only by migrate")
+    cursor_maintenance.add_argument("--task-id", default="")
+    cursor_maintenance.add_argument("--phase", choices=("prompt", "turn", "session"), default="prompt")
+    cursor_maintenance.add_argument("--report-json", action="store_true")
+    cursor_maintenance.add_argument("--json", action="store_true")
+    cursor_maintenance.add_argument("--diagnostic", action="store_true", help="fixed maintenance status on stderr")
+    cursor_retire = commands.add_parser("cursor-rule-retire", help="retire only a proven generated installed Cursor rule")
+    cursor_retire.add_argument("--json", action="store_true")
+    cursor_retire.add_argument("--diagnostic", action="store_true", help="fixed maintenance status on stderr")
 
     context_save = commands.add_parser(
         "context-save",
@@ -5341,6 +6628,8 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve_command.add_argument("--task-id", required=True)
     retrieve_command.add_argument("--limit", type=int, default=3)
     retrieve_command.add_argument("--json", action="store_true")
+    for transport_parser in (context, retrieve_command):
+        transport_parser.add_argument('--provenance-response', action='store_true', help=argparse.SUPPRESS)
 
     hook_context = commands.add_parser(
         "hook-context",
@@ -5348,9 +6637,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hook_context.add_argument("--task-id", required=True)
     hook_context.add_argument("--json", action="store_true")
+    hook_context.add_argument('--delivery-profile', choices=('ordinary','cursor-rule'), default='ordinary', help=argparse.SUPPRESS)
 
 
     for retrieval_parser in (context, retrieve_command):
+        retrieval_parser.add_argument("--source-hints-json", help=argparse.SUPPRESS)
         retrieval_parser.add_argument("--trace-path", action="append", default=[], dest="trace_paths",
                                       help="observe a document in local diagnostics only; repeatable, max 16")
         retrieval_parser.add_argument(
@@ -5411,6 +6702,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--query instead of refusing it (the automatic paths pass this)"
         ),
     )
+    refresh.add_argument("--source-hints-json", help=argparse.SUPPRESS)
     refresh.add_argument("--limit", type=int, default=3)
     refresh.add_argument("--path", action="append", default=[], dest="paths",
         help="also deliver documents citing this canonical source path")
@@ -5421,6 +6713,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write the capsule's retrieval manifest to ignored local state",
     )
+    for inferred_parser in (refresh, hook_context):
+        inferred_parser.add_argument("--expected-branch", default=None, help=argparse.SUPPRESS)
     # Every entry point that can retrieve takes the gate mode, because the
     # decision is about the turn and each of these is a turn. The resolution
     # ladder (flag, environment, runtime.json, then shadow) lives in
@@ -5448,6 +6742,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="also report Project Brain validation (reads every record)",
     )
     refresh.add_argument("--json", action="store_true")
+    refresh.add_argument('--provenance-response', action='store_true', help=argparse.SUPPRESS)
+    refresh.add_argument('--read-only', action='store_true',
+        help='read compatible existing working state without refreshing or writing local state')
+    refresh.add_argument('--read-only-reason', choices=('budget',), help=argparse.SUPPRESS)
+    refresh.add_argument('--delivery-profile', choices=('ordinary','cursor-rule'), default='ordinary', help=argparse.SUPPRESS)
 
     turn = commands.add_parser(
         "turn", help="buffer a per-turn working-memory delta and flush on a boundary"
@@ -5648,7 +6947,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "record a run's progress, next steps and up to three source-backed "
             "findings or decisions; replaying the same --result-id with the "
-            "same content completes a save that stopped half way"
+            "same content passively replays a completed save; uncertain partial saves are refused"
         ),
     )
     record.add_argument("--task-id", required=True)
@@ -5673,7 +6972,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="who checked the learnings against their sources (default: agent)",
     )
     record.add_argument("--reason")
+    record.add_argument("--prepared-scope")
     record.add_argument("--json", action="store_true")
+
+    for action in ("native-prompt", "native-stop"):
+        native = commands.add_parser(action, help="bounded automatic native result capture")
+        native.add_argument("--host", choices=("claude", "codex", "cursor"), required=True)
+        native.add_argument("--task-id", required=True)
+        native.add_argument("--json", action="store_true")
+    native = commands.add_parser("native-result", help="submit one pending native structured result")
+    native.add_argument("--request", required=True)
+    native.add_argument("--token", required=True)
+    content = native.add_mutually_exclusive_group(required=True)
+    content.add_argument("--input")
+    content.add_argument("--skip", action="store_true")
+    native.add_argument("--json", action="store_true")
+
+    for action in ("prepare-result", "replay-result"):
+        prepared_result = commands.add_parser(action, help="validate or replay a prepared memory result")
+        prepared_result.add_argument("--task-id", required=True)
+        prepared_result.add_argument("--result-id", required=True)
+        prepared_result.add_argument("--revision", type=revision_argument, required=True)
+        prepared_result.add_argument("--input", required=True)
+        prepared_result.add_argument("--attestation", choices=("agent", "person"), default="agent")
+        prepared_result.add_argument("--reason", required=True)
+        if action == "replay-result":
+            prepared_result.add_argument("--prepared-scope", required=True)
+        prepared_result.add_argument("--json", action="store_true")
 
     update_brain = commands.add_parser(
         "brain-update", help="CAS-update a governed dynamic Brain record"
@@ -5883,28 +7208,159 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def utf8_output() -> None:
-    """Print UTF-8 whatever the console's code page.
+    """Use UTF-8 and untranslated LF on standard console and pipe streams.
 
     Every capsule carries '…' and '—'. On Windows a pipe takes the ANSI code
     page, the first such character raised UnicodeEncodeError, and the hook
     delivered nothing on every turn.
     """
     for stream in (sys.stdout, sys.stderr):
+        options = {"encoding": "utf-8", "errors": "replace"}
+        # Standard wrappers support newline on every supported Python. Custom
+        # streams (including subclasses) keep their existing two-keyword API;
+        # do not retry a call that may already have flushed or changed state.
+        if type(stream) is io.TextIOWrapper:
+            options["newline"] = "\n"
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError, OSError):
+            stream.reconfigure(**options)
+        except (AttributeError, TypeError, ValueError, OSError):
             continue
 
 
+# SQLite names a damaged file in two ways; a lock, a full disk or a refused
+# permission is not damage and stays an error.
+DAMAGED_DATABASE = ("database disk image is malformed", "file is not a database")
+# Commands the hooks run on their own, whose database in governed mode is
+# derived: the index, the bindings the Brain restores, the turn buffer.
+DAMAGE_RECOVERING_COMMANDS = ("refresh", "turn", "hook-context", "retrieve", "index")
+# What this process moved aside, for the capsule to say.
+_QUARANTINED: list[tuple[str, str]] = []
+_COMMAND_STATE: dict[str, object] = {}
+
+
+class _DamagedDatabase(Exception):
+    """A governed command's local database is damaged; main() moves it aside
+    and runs the command again once."""
+
+    def __init__(self, database: Path, error: BaseException):
+        super().__init__(str(error))
+        self.database = database
+
+
+def _damaged_database(error: BaseException) -> Optional[Path]:
+    """The database to move aside, when `error` is damage to the governed
+    local database of a command that recovers from it."""
+    database = _COMMAND_STATE.get("database")
+    if (_QUARANTINED or not isinstance(error, sqlite3.DatabaseError)
+            or not any(text in str(error) for text in DAMAGED_DATABASE)
+            or _COMMAND_STATE.get("mode") != "governed"
+            or _COMMAND_STATE.get("command") not in DAMAGE_RECOVERING_COMMANDS
+            or _COMMAND_STATE.get("read_only") or not isinstance(database, Path)):
+        return None
+    return database
+
+
+def _quarantine_database(database: Path) -> str:
+    """Move a damaged database and its journals aside, never delete them."""
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    target = database.with_name(f"{database.name}.quarantine-{stamp}")
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        source = Path(str(database) + suffix)
+        if os.path.lexists(source):
+            os.replace(source, Path(str(target) + suffix))
+    return target.name
+
+
 def main() -> int:
+    # The ignore checks of one command share the Git frames they confirm.
+    with workspace_roots.source_frame_scope():
+        try:
+            return _command()
+        except _DamagedDatabase as damaged:
+            # The governed local database is derived: the index is rebuilt,
+            # the binding restored from the Brain at the next checkpoint. Only
+            # turns buffered since the last checkpoint were its own.
+            try:
+                _QUARANTINED.append((_quarantine_database(damaged.database), str(damaged)))
+            except OSError:
+                print(f"context: {damaged}", file=sys.stderr)
+                return 1
+    with workspace_roots.source_frame_scope():
+        return _command()
+
+
+def _command() -> int:
     utf8_output()
     arguments = build_parser().parse_args()
+    _branch_task_identity(arguments)
+    if arguments.command in ("cursor-rule", "cursor-rule-retire"):
+        from context_retrieval import cursor_rule, CURSOR_RULE_LIMIT
+        action = "retire" if arguments.command == "cursor-rule-retire" else arguments.action
+        capsule = ""
+        if action in ("write", "migrate"):
+            try:
+                admission = 1024 * 1024 if arguments.report_json else CURSOR_RULE_LIMIT
+                raw = sys.stdin.buffer.read(admission + 1)
+                if len(raw) <= admission:
+                    capsule = raw.decode("utf-8", "strict")
+                    if arguments.report_json:
+                        value = json.loads(capsule)
+                        packet = value.get("capsule") if isinstance(value, dict) else None
+                        gate = packet.get("gate") if isinstance(packet, dict) else None
+                        if (isinstance(gate, dict) and gate.get("mode") == "enforce"
+                                and gate.get("decision") == "skip"
+                                and gate.get("reason") not in ("no-relevant-match", "empty-after-filter")):
+                            # A withheld render is not replacement context. Keep
+                            # repeated/legacy skips, but a real empty selection
+                            # publishes current working state without old facts.
+                            action = "keep"
+                            capsule = ""
+                        else:
+                            capsule = value.get("capsule_text", "") if isinstance(value, dict) else ""
+            except (OSError, ValueError, UnicodeError, RecursionError):
+                capsule = ""
+        result = cursor_rule(arguments.root, action,
+            task=getattr(arguments, "task_id", ""), phase=getattr(arguments, "phase", "prompt"), capsule=capsule,
+            **({"approved_sha256": arguments.approved_current_sha256}
+               if getattr(arguments, "approved_current_sha256", None) is not None else {}))
+        # A held-rule question answered "preserved" is no failure to report.
+        if (arguments.diagnostic and result.get('state') in ('preserved', 'incomplete')
+                and not (action == 'prompt-held' and result.get('state') == 'preserved')):
+            reason = ('maintenance_incomplete' if result['state'] == 'incomplete' else result.get('reason'))
+            if reason not in ('maintenance_incomplete', 'configuration_unavailable', 'unsupported_custody',
+                              'migration_unapproved', 'custody_changed', 'ownership_unverified', 'receipt_unavailable',
+                              'linked_directory'):
+                reason = 'custom_or_unavailable'
+            print('Cursor memory rule was not updated: ' + reason + '.', file=sys.stderr)
+        print(json.dumps(result))
+        return 0
     repository = arguments.root.resolve()
 
     try:
+        delivery_profile = getattr(arguments, 'delivery_profile', 'ordinary')
+        if getattr(arguments, 'read_only_reason', None) and not getattr(arguments, 'read_only', False):
+            raise ContextError('Read-only reason requires read-only refresh')
+        if delivery_profile == 'cursor-rule' and (getattr(arguments,'host',None) != 'cursor'
+                or getattr(arguments,'session_id',None) is not None or getattr(arguments,'transcript',None) is not None):
+            raise ContextError('Unsupported persistent delivery profile')
         problem = workspace_roots.configuration_error()
         if problem is not None:
             raise ContextError(problem)
+        expected_branch = getattr(arguments, "expected_branch", None)
+        delivery_admission = None
+        if expected_branch is not None:
+            if getattr(arguments, "task_id", None) not in (branch_task_id(expected_branch),
+                                                         getattr(arguments, "renamed_from", None)):
+                raise SourceGitError("Inferred task branch changed or unavailable")
+            # This includes the source frame admission; do not repeat it as a
+            # separate preflight before the shared branch-operation deadline.
+            delivery_admission = _branch_admission(repository, expected_branch)
+        elif arguments.command in ("refresh", "context", "retrieve", "hook-context", "index"):
+            # Even an empty candidate list must not let a foreign/unknown source
+            # context create state or return unverified working memory.
+            environment = _source_git_environment()
+            _source_git_frame(workspace_roots.project_root(repository), environment,
+                              time.monotonic() + 1.0)
         if workspace_roots.is_attached(repository) and os.name != "nt":
             # Attached state is the project's memory kept outside it, so it is
             # its owner's alone: whatever this run creates there - records, the
@@ -5914,8 +7370,15 @@ def main() -> int:
             os.umask(0o077)
         # Attached, the state directory is created on first use; installed,
         # this does nothing and a missing root stays an error.
-        ensure_attached_state(repository)
+        if not (arguments.command == 'refresh' and arguments.read_only):
+            ensure_attached_state(repository)
         if not repository.is_dir():
+            if arguments.command == 'refresh' and arguments.read_only:
+                validate_direct_query_request(arguments)
+                if arguments.limit < 1 or (arguments.query is not None and arguments.task_id is None):
+                    raise ContextError('Invalid read-only refresh request')
+                mode = configured_mode(repository, arguments.mode)
+                return degraded_refresh(None, repository, arguments, mode, delivery_profile, delivery_admission=delivery_admission)
             raise ContextError(
                 f"Repository root must be an existing directory: {repository}"
             )
@@ -5968,13 +7431,44 @@ def main() -> int:
         # be refreshed. Host hooks remain fail-safe by swallowing this nonzero
         # result outside the CLI.
         validate_direct_query_request(arguments)
+        if getattr(arguments, 'provenance_response', False) and not arguments.json:
+            raise ContextError('Source provenance transport requires JSON output')
         database = (arguments.db or default_database(repository)).resolve()
         mode = configured_mode(repository, arguments.mode)
+        _COMMAND_STATE.update(database=database, mode=mode, command=arguments.command,
+                              read_only=bool(getattr(arguments, "read_only", False)))
         gate_mode = configured_retrieval_gate(
             repository, getattr(arguments, "gate", None)
         )
         owner = arguments.owner or os.environ.get("PROJECT_BRAIN_OWNER", "local")
-        connection = connect(database)
+        if arguments.command == 'refresh':
+            if arguments.limit < 1:
+                raise ContextError('--limit must be a positive integer')
+            if arguments.query is not None and arguments.task_id is None:
+                raise ContextError('--query requires --task-id')
+            startup_wait, busy_wait = _refresh_waits(arguments)
+            if arguments.read_only:
+                connection = None
+            else:
+                try:
+                    connection = connect(database, timeout=startup_wait, require_write=True,
+                                         busy_seconds=busy_wait)
+                except (OSError, sqlite3.Error) as error:
+                    if _damaged_database(error) is not None:
+                        raise _DamagedDatabase(database, error) from error
+                    connection = None
+            if connection is None:
+                try:
+                    connection = connect_read_only(database, timeout=startup_wait)
+                except (ContextError, OSError, sqlite3.Error):
+                    connection = None
+                try:
+                    return degraded_refresh(connection, repository, arguments, mode, delivery_profile, delivery_admission=delivery_admission)
+                finally:
+                    if connection is not None:
+                        connection.close()
+        else:
+            connection = connect(database)
         try:
             if arguments.command == "index":
                 result = index_repository(
@@ -6342,7 +7836,39 @@ def main() -> int:
                     print(f"Delegation capsule is valid ({len(content)} characters).")
                 return 0 if not problems else 1
 
-            if arguments.command == "record-result":
+            if arguments.command in ("native-prompt", "native-stop", "native-result"):
+                import native_results
+                if arguments.command == "native-result":
+                    if arguments.skip:
+                        data = None
+                    elif arguments.input == "-":
+                        data = native_results.read_input(sys.stdin.buffer)
+                    else:
+                        with Path(arguments.input).open("rb") as stream:
+                            data = native_results.read_input(stream)
+                    result = native_results.save(repository, arguments.request, arguments.token, data,
+                        owner=owner, mode=mode, skip=arguments.skip,
+                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner))
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    payload = native_results.read_input(sys.stdin.buffer)
+                    operation = native_results.begin if arguments.command == "native-prompt" else native_results.stop
+                    result = operation(repository, arguments.task_id, arguments.host, payload, owner=owner, mode=mode)
+                    if arguments.command == "native-stop":
+                        if result: print(json.dumps(result, ensure_ascii=False))
+                    else:
+                        if result.get("warning"):
+                            report = load_last_turn_report(repository) or {"schema_version": 1}
+                            report.update(timestamp=datetime.now(timezone.utc).isoformat(),
+                                          task_id=arguments.task_id, native_capture_incomplete=True)
+                            write_last_turn_report(repository, report)
+                        if arguments.json:
+                            print(json.dumps(result, ensure_ascii=False))
+                        elif result.get("warning") and arguments.host != "cursor":
+                            print(result["warning"])
+                return 0
+
+            if arguments.command in ("record-result", "prepare-result", "replay-result"):
                 raw = (
                     sys.stdin.read()
                     if arguments.input == "-"
@@ -6353,19 +7879,14 @@ def main() -> int:
                 except ValueError as error:
                     raise ContextError("The result must be a JSON object") from error
                 revision = arguments.revision
-                if revision == AUTO_REVISION:
-                    from brain_runtime import find_task
-
-                    revision = find_task(
-                        repository, validate_task_id(arguments.task_id)
-                    )[1]["revision"]
                 reason = arguments.reason or (
                     "Saved with context.py record-result; agent-attested, "
                     "not reviewed by a person"
                     if arguments.attestation == "agent"
                     else "Saved with context.py record-result; reviewed by a person"
                 )
-                result = record_result(
+                operation = prepare_result if arguments.command == "prepare-result" else record_result
+                result = operation(
                     repository,
                     arguments.task_id,
                     arguments.result_id,
@@ -6374,8 +7895,11 @@ def main() -> int:
                     owner=owner,
                     reason=reason,
                     attestation=arguments.attestation,
+                    **({"prepared": arguments.prepared_scope,
+                        "replay_only": arguments.command == "replay-result"}
+                       if arguments.command != "prepare-result" else {}),
                 )
-                if arguments.json:
+                if arguments.json or arguments.command == "prepare-result":
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     states = ", ".join(
@@ -6605,6 +8129,10 @@ def main() -> int:
                                 for name, count in result["hook_status"].items()
                             )
                         )
+                    if result.get("source_notices"):
+                        notices = result["source_notices"]
+                        print("  " + _source_notice_text(notices["totals"])
+                              + f" ({notices['records']} record(s))")
                 return 0
 
             if arguments.command == "status":
@@ -6719,7 +8247,7 @@ def main() -> int:
                 if arguments.limit < 1:
                     raise ContextError("--limit must be a positive integer")
                 documents = search_documents(
-                    connection, arguments.query, arguments.limit, arguments.layer
+                    connection, arguments.query, arguments.limit, arguments.layer, repository=repository
                 )
                 episodes = (
                     search_episodes(connection, arguments.query, arguments.limit)
@@ -6746,6 +8274,7 @@ def main() -> int:
                 return 0
 
             if arguments.command in {"context", "retrieve"}:
+                source_provenance = {} if arguments.provenance_response else None
                 result = assemble_capsule(
                     connection,
                     repository,
@@ -6756,13 +8285,23 @@ def main() -> int:
                     ephemeral=arguments.ephemeral,
                     gate_mode=gate_mode,
                     paths=arguments.paths,
+                    source_hints=arguments.source_hints_json,
                     trace_paths=arguments.trace_paths,
                     host=arguments.host,
                     entry_point=arguments.command,
                     render=not arguments.json,
+                    source_provenance_sink=source_provenance,
+                    # AGENTS.md has an agent retrieve at the start of a complex
+                    # request, often on a branch the first checkpoint has not
+                    # provisioned yet: answer with the knowledge and say so,
+                    # as the prompt hook does, instead of failing outright.
+                    allow_unprovisioned=True,
                 )
                 if arguments.json:
-                    print(serialize_capsule(result))
+                    transport = ({'response_profile': SOURCE_PROVENANCE_PROFILE,
+                                  'capsule': result, 'source_provenance': source_provenance or None}
+                                 if arguments.provenance_response else result)
+                    print(serialize_capsule(transport))
                 else:
                     print_capsule(result, capsule_excerpts(connection, result), repository=repository)
                 return 0
@@ -6776,7 +8315,11 @@ def main() -> int:
                     gate_mode=gate_mode,
                     host=arguments.host,
                     render=not arguments.json,
+                    delivery_profile=delivery_profile,
+                    delivery_admission=delivery_admission,
                 )
+                if delivery_admission is not None:
+                    delivery_admission()
                 if result is None:
                     # A valid current branch with no meaningful change has no
                     # context. Cursor uses this distinct code to remove a
@@ -6787,6 +8330,7 @@ def main() -> int:
                     isinstance(gate, dict)
                     and gate.get("mode") == "enforce"
                     and gate.get("decision") == "skip"
+                    and not (delivery_profile == 'cursor-rule' and gate.get('reason') in ('no-relevant-match','empty-after-filter'))
                 ):
                     # Print nothing and exit with a status the Cursor delivery
                     # treats as "keep what you have". Rendering the withheld
@@ -6806,10 +8350,12 @@ def main() -> int:
                         "source": "hook-context",
                     },
                 )
+                if delivery_admission is not None:
+                    delivery_admission()
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    print_capsule(result, capsule_excerpts(connection, result), repository=repository)
+                    print_capsule(result, capsule_excerpts(connection, result), repository=repository, delivery_profile=delivery_profile)
                 return 0
 
             if arguments.command == "refresh":
@@ -6821,27 +8367,45 @@ def main() -> int:
                     connection, repository
                 )
                 capsule = None
+                source_provenance = {} if arguments.provenance_response else None
+                topic_plan = (_cursor_topic_begin(connection, repository, arguments.task_id, mode)
+                              if delivery_profile == 'cursor-rule' else None)
                 retrieval_seconds = 0.0
                 if arguments.query is not None:
                     retrieval_started = time.monotonic()
+                    query, query_source = arguments.query, 'prompt'
                     try:
                         # --query accepts the raw prompt: the hook passes it
                         # as-is and distillation to informative terms happens
                         # here. The raw text is screened before any of it can
                         # reach a query or a manifest.
                         reject_secrets("Task Capsule", [arguments.query])
+                        query = arguments.query if warnings else distill_capsule_query(
+                            connection, arguments.query
+                        )
+                        query_source = "prompt"
+                        if delivery_profile == 'cursor-rule' and getattr(arguments,'cursor_continuation',False):
+                            current_topic = _cursor_topic_query(connection, repository, arguments.task_id, mode, topic_plan)
+                            if current_topic is not None:
+                                query, query_source = current_topic
+                        elif mode == "governed" and getattr(arguments, "cursor_continuation", False):
+                            current_task_query = _cursor_continuation_query(
+                                connection, repository, arguments.task_id,
+                            )
+                            if current_task_query is not None:
+                                query, query_source = current_task_query
                         capsule = assemble_capsule(
                             connection,
                             repository,
                             mode=mode,
-                            query=distill_capsule_query(
-                                connection, arguments.query
-                            ),
+                            query=query,
                             task_id=arguments.task_id,
                             limit=arguments.limit,
                             ephemeral=arguments.ephemeral,
                             refresh_index=False,
-                            query_source="prompt",
+                            index_warnings=warnings,
+                            index_notices=index_result.get('source_notices'),
+                            query_source=query_source,
                             phase_seconds=index_result.get("phase_seconds"),
                             gate_mode=gate_mode,
                             host=arguments.host,
@@ -6850,13 +8414,32 @@ def main() -> int:
                             session_id=arguments.session_id,
                             transcript=arguments.transcript,
                             paths=arguments.paths,
+                            source_hints=arguments.source_hints_json,
                             trace_paths=arguments.trace_paths,
                             # Every refresh with a query renders: hosts put
                             # capsule_text in front of the model.
                             render=True,
                             prompt=arguments.query,
                             automatic_links=True,
+                            delivery_profile=delivery_profile,
+                            source_provenance_sink=source_provenance,
+                            delivery_admission=delivery_admission,
                         )
+                        # What a governed capsule says about the turn's own task
+                        # - its record gone or unreadable - is this refresh's
+                        # warning too, as the index's warnings are the capsule's.
+                        # (A lightweight capsule warns "not found" until the
+                        # first checkpoint; that stays the capsule's.)
+                        if mode == "governed":
+                            for name, damage in _QUARANTINED:
+                                # Said after retrieval: the index is new, not stale.
+                                capsule.setdefault("warnings", []).append(
+                                    f"The memory database was damaged ({damage}) and was rebuilt; "
+                                    f"the old one is memory-bank/local/{name}.")
+                            warnings.extend(item for item in capsule.get("warnings") or []
+                                            if item not in warnings)
+                    except SourceGitError:
+                        raise
                     except (ContextError, BrainError, RetrievalError) as error:
                         # A capsule needs an active task; the layer refresh
                         # above stands on its own and is already done.
@@ -6869,7 +8452,16 @@ def main() -> int:
                             "was assembled this turn; read the canonical "
                             "sources directly."
                         )
+                    if topic_plan is not None:
+                        _cursor_topic_finish(connection, repository, arguments.task_id, mode, topic_plan, query,
+                            bool(getattr(arguments,'cursor_topic_eligible',False)) and capsule is not None,
+                            warnings, continued=query_source == 'continuation',
+                            acknowledgement=bool(getattr(arguments,'cursor_continuation',False)),
+                            selected=isinstance(capsule, dict) and any(
+                                capsule.get(layer) for layer in ('procedural', 'semantic', 'episodic')))
                     retrieval_seconds = time.monotonic() - retrieval_started
+                elif topic_plan is not None:
+                    _cursor_topic_write(connection, topic_plan[1], None)
                 codebase = codebase_map_status(connection, repository)
                 phases = {
                     "stat": 0.0,
@@ -6906,6 +8498,12 @@ def main() -> int:
                     "warnings": warnings,
                     "capsule": capsule,
                 }
+                if arguments.provenance_response:
+                    result['response_profile'] = SOURCE_PROVENANCE_PROFILE
+                    result['source_provenance'] = source_provenance or None
+                source_notices = _normalized_source_notices(index_result.get('source_notices'))
+                if source_notices:
+                    result['source_notices'] = source_notices
                 # A prompt the sanitizer left nothing of is still this turn:
                 # the host learns memory had nothing to search, and the
                 # operator report stays out of the prompt.
@@ -6921,9 +8519,12 @@ def main() -> int:
                     # three times and carried no answer-bearing text.
                     render_trace: dict[str, object] = {}
                     result["capsule_text"] = "\n".join(
-                        render_capsule_lines(capsule, excerpts, trace=render_trace)
+                        render_capsule_lines(capsule, excerpts, trace=render_trace, delivery_profile=delivery_profile)
                     )
                     record_render_trace(repository, capsule, render_trace)
+                elif delivery_profile == 'cursor-rule':
+                    result['capsule_text'] = ('working: unavailable\nwarning: memory refresh incomplete; '
+                                              'verify current canonical sources')
                 if arguments.validate:
                     errors = validate_repository(repository, check_freshness=False)
                     result["brain_validation"] = "valid" if not errors else "invalid"
@@ -6942,6 +8543,8 @@ def main() -> int:
                     "warnings": len(warnings),
                     "source": "refresh",
                 }
+                if source_notices:
+                    health_record['source_notices'] = source_notices
                 def capture_diagnosis(render: Optional[dict[str, object]]) -> None:
                     receipt_sink = None
                     try:
@@ -6971,12 +8574,16 @@ def main() -> int:
                         capture_diagnosis(render_trace if capsule is not None else None)
                     finally:
                         append_refresh_health(repository, health_record)
+                    if delivery_admission is not None:
+                        delivery_admission()
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     # Keep the original timestamp/fields and retain one row even
                     # when stdout fails before the printed-form finalizer runs.
                     try:
                         capture_diagnosis(None)
+                        if delivery_admission is not None:
+                            delivery_admission()
                         counts = result["counts"]
                         # With --query this is a turn's delivery, read by a model
                         # on every prompt: the layer and timing report is only
@@ -6986,6 +8593,14 @@ def main() -> int:
                         healthy = all(
                             layers[layer] == "updated" for layer in DOCUMENT_LAYERS
                         )
+                        # A prompt hook on a checkout that names no branch - a
+                        # detached HEAD in a rebase or a bisect - has no task to
+                        # read: its refresh only keeps the index current, and
+                        # the operator's layer report reached the model as four
+                        # lines of noise on every prompt. Failures still print.
+                        if (healthy and arguments.host != "cli" and arguments.query is None
+                                and getattr(arguments, "task_id", None) is None and not withheld):
+                            return 0
                         for layer in DOCUMENT_LAYERS:
                             if per_turn and healthy:
                                 break
@@ -6998,6 +8613,8 @@ def main() -> int:
                                 f"memory review: {result['overdue_review']} chunk(s) "
                                 "overdue, not served until re-verified (bank-audit)"
                             )
+                        if source_notices and capsule is None:
+                            print(_source_notice_text(source_notices))
                         for item in codebase:
                             behind = item["commits_behind"]
                             print(
@@ -7029,10 +8646,12 @@ def main() -> int:
                             )
                         if "brain_validation" in result:
                             print(f"brain-validation: {result['brain_validation']}")
-                        for warning in warnings:
-                            print(f"warning: {warning}")
+                        if capsule is None:
+                            for warning in warnings:
+                                print(f"warning: {warning}")
                         if capsule is not None:
-                            print_capsule(capsule, excerpts, repository=repository, _diagnosis_sink=capture_diagnosis)
+                            print_capsule(capsule, excerpts, repository=repository, delivery_profile=delivery_profile,
+                                          _diagnosis_sink=capture_diagnosis)
                     finally:
                         append_refresh_health(repository, health_record)
                 return 0 if all(
@@ -7361,6 +8980,9 @@ def main() -> int:
         finally:
             connection.close()
     except (ContextError, HandoffError, BrainError, RetrievalError, OSError, sqlite3.Error) as error:
+        damaged = _damaged_database(error)
+        if damaged is not None:
+            raise _DamagedDatabase(damaged, error) from error
         print(f"context: {error}", file=sys.stderr)
         return 1
 
