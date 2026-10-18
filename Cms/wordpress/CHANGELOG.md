@@ -26,6 +26,8 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ### Changed
 
+- A ticket the request names is rebuilt at the head of the distilled query (the sanitizer splits CMS-736 in two, and rarity dropped the prefix), and an excerpt prefers the line that names it, so the anchor reaches the rendered text.
+
 - A skill reaches the capsule only when the request names it (a word of its name of four letters or more); every host loads its own catalogue. Others are recorded as name-mismatch exclusions.
 
 - A corpus-wide document (a changelog, a large reference file) has its relevance scaled by (1,000/length)^0.20 above 1,000 characters, so a scoped record naming the same ticket outranks the file that merely mentions it.

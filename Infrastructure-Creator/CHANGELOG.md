@@ -6,6 +6,8 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`memory-seed` keeps the ticket phrase in the query and the excerpt.** The copied runtime rebuilds a ticket the request names and prefers the line naming it; the policy lock is re-recorded.
+
 - **`memory-seed` hands a skill over only when the request names it.** The copied runtime gates the procedural slot by the skill's name; the policy lock is re-recorded.
 
 - **`memory-seed` carries the document-length prior.** The copied runtime scales relevance down for corpus-wide documents; the policy lock is re-recorded.

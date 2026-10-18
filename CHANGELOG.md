@@ -28,6 +28,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **The ticket the request names stays in the text, not only in the index.** The automatic sanitizer splits CMS-736 into two words, and rarity kept the number while dropping the common prefix, so the phrase reached retrieval half named. The ticket is now rebuilt at the head of the distilled query, and a document's excerpt prefers the line that names it. On 25 real prompts the ticket appears in the rendered capsule text on all 8 ticket-bearing prompts (it was 6), and 25 of 30 ticket-naming documents are delivered.
+
+## Unreleased
+
 - **A skill is handed over only when the request names it.** Every host loads its own skill catalogue, and on 25 measured turns the procedural slot carried one pointer per turn that the request never asked for. A skill now qualifies only when a word of its name (four letters or more) appears in the request; the rest are recorded as name-mismatch exclusions. On those prompts skill delivery falls from 25 to 3, the per-turn token estimate drops from 276 to 223, and knowledge delivery is unchanged (65 records, 23 ticket-naming documents).
 
 ## Unreleased

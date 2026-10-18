@@ -69,6 +69,7 @@ from brain_runtime import (
 )
 from context_retrieval import (
     CAPSULE_SAFETY_LIMITS,
+    anchor_phrases,
     is_anchor,
     DocumentRow,
     EVIDENCE_STOPWORDS,
@@ -1080,6 +1081,13 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
     terms keep their prompt order — FTS ignores order, a human reading the
     manifest should not have to.
     """
+    # A ticket keeps its prefix: distillation sees words, and "CMS" is too
+    # common to survive while "736" is meaningless without it.
+    ticket = " ".join(
+        dict.fromkeys(
+            f"{prefix}-{number}" for prefix, number in _TICKET_PHRASE.findall(prompt)
+        )
+    )
     tokens: list[str] = []
     seen: set[str] = set()
     for token in re.findall(r"\w+", prompt, flags=re.UNICODE):
@@ -1101,7 +1109,7 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
     except sqlite3.Error:
         total = 0
     if not total:
-        return " ".join(tokens[:CAPSULE_PROMPT_TERM_LIMIT])
+        return _with_tickets(ticket, tokens[:CAPSULE_PROMPT_TERM_LIMIT])
     frequencies = token_document_frequencies(connection, tokens)
     if episode_total:
         for token in tokens:
@@ -1122,7 +1130,7 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
     ]
     pool = informative or matched
     if not pool:
-        return " ".join(tokens[:CAPSULE_PROMPT_TERM_LIMIT])
+        return _with_tickets(ticket, tokens[:CAPSULE_PROMPT_TERM_LIMIT])
     rarest = sorted(pool, key=lambda item: (item[2], item[0]))
     # A ticket or identifier the prompt names is the query's own anchor:
     # it earns a slot even when twenty-four common words would outrank it.
@@ -1133,7 +1141,18 @@ def distill_capsule_query(connection: sqlite3.Connection, prompt: str) -> str:
         : CAPSULE_PROMPT_TERM_LIMIT - len(chosen)
     ]
     kept = sorted(chosen)
-    return " ".join(token for _, token, _ in kept)
+    return _with_tickets(ticket, [token for _, token, _ in kept])
+
+
+# The automatic sanitizer turns "CMS-736" into two words, so the phrase is
+# recognised either way and rebuilt with its hyphen.
+_TICKET_PHRASE = re.compile(r"\b([A-Z]{2,6})[- ](\d{1,5})\b")
+
+
+def _with_tickets(ticket: str, tokens: list[str]) -> str:
+    """The distilled terms, led by any ticket phrase the prompt carried."""
+    words = " ".join(tokens)
+    return f"{ticket} {words}".strip() if ticket else words
 
 
 def sanitize_automatic_query(text: str) -> str:
@@ -2690,6 +2709,33 @@ def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> 
     return _bounded(f"{section['shown']}: {text}" if section["shown"] else text, limit)
 
 
+def _anchor_excerpt(content: str, query: str, limit: int) -> str:
+    """The line that names the request's own ticket, when the document has it.
+
+    A changelog section matches a dozen ordinary words; the one line naming
+    the ticket the request names is what the turn is about, and a window
+    chosen on term weight alone can land on a neighbour that does not.
+    """
+    for phrase in anchor_phrases(query):
+        words = [re.escape(word) for word in phrase.split()]
+        match = re.search(r"(?i)\b" + r"[\s\-_]*".join(words) + r"\b", content)
+        if match is None:
+            continue
+        start = content.rfind("\n", 0, match.start()) + 1
+        end = content.find("\n", match.end())
+        if end == -1:
+            end = len(content)
+        line = " ".join(content[start:end].split())
+        if not line:
+            continue
+        if len(line) <= limit:
+            return line
+        offset = max(0, match.start() - start - limit // 2)
+        window = content[start + offset:start + offset + limit - 4]
+        return ("… " if offset else "") + " ".join(window.split()) + " …"
+    return ""
+
+
 def capsule_excerpts(
     connection: sqlite3.Connection, capsule: dict[str, object]
 ) -> dict[str, str]:
@@ -2731,6 +2777,16 @@ def capsule_excerpts(
                 else None
             )
             text = excerpt_window(section["units"], limit, weights) if section else ""
+            if marked:
+                # The marked copy wraps every match in brackets; the
+                # ticket phrase has to be read as the document wrote it.
+                plain = (
+                    marked.replace("\x02", "").replace("\x03", "")
+                    .replace("[", "").replace("]", "")
+                )
+                anchored = _anchor_excerpt(plain, query, limit)
+                if anchored:
+                    text = anchored
             if not text and isinstance(item.get("snippet"), str):
                 text = _bounded(item["snippet"].replace("[", "").replace("]", ""), limit)
             if text:
