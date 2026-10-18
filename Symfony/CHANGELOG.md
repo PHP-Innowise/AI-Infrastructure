@@ -34,6 +34,8 @@ it at the top of every session.
 
 ### Changed
 
+- A corpus-wide document (a changelog, a large reference file) has its relevance scaled by (1,000/length)^0.20 above 1,000 characters, so a scoped record naming the same ticket outranks the file that merely mentions it.
+
 - A document naming the request's ticket or identifier (CMS-741, EntityArrayDenormalizer, snake_case names) ranks above one that only shares its prose: the anchor is matched as an adjacent FTS phrase and scales the score by 1.35. Query distillation keeps anchor terms inside the 24-term limit. No manifest key is added, so existing schemas keep validating.
 
 - The delivered Task Capsule is bounded by 8,000 characters of content and 20,000 of serialized payload; the rendered text (1,400-2,600 characters, by the query's evidence) is what the host inserts. Candidates are offered up to 1 procedural, 6 semantic and 4 episodic and trimmed after this conversation's repeats, so a budget-held item gets its next turn. Fixes the renderer's excerpt allowance shadowing its ceiling parameter.

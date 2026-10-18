@@ -28,6 +28,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A corpus-wide document yields to a scoped one.** Relevance is scaled by (1,000/length)^0.20 for documents above 1,000 characters, so a changelog that contains every word of the request stops outranking the record that names the same ticket. On 25 real prompts the changelog falls from 24 turns to 22, Project Brain records rise from 31 to 40, and ticket-naming delivery rises from 22 to 23, at 1,535 rendered characters per turn.
+
+## Unreleased
+
 - **A document that names the ticket outranks one that repeats its words.** The query's ticket ids and identifier names (CMS-741, EntityArrayDenormalizer, snake_case names) are extracted before ranking, matched as adjacent FTS phrases, and scale the score of a document that names one by 1.35; a document sharing prose alone does not. Query distillation now guarantees those terms a slot inside the 24-term limit, so a long request cannot lose its own subject. Anchors stay internal: no manifest key is added, so existing project schemas keep validating. On 25 real prompts, ticket-naming documents delivered rise from 17 to 22 of 26 considered at 1,452 rendered characters per turn.
 
 ## Unreleased

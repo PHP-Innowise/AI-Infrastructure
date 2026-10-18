@@ -829,6 +829,12 @@ TERM_FORM_CACHE_LIMIT = 4096
 # Column weights for bm25(): path, layer, kind, title, summary, content.
 # What a document declares itself to be about outranks what its body mentions.
 BM25_WEIGHTS = (1.0, 1.0, 1.0, 2.0, 8.0, 1.0)
+# A corpus-wide document (a changelog, a large reference file) matches
+# almost any request because it contains almost every word. Length above
+# this allowance scales relevance down slightly, so a scoped record that
+# names the same thing outranks the file that merely mentions it.
+CONTENT_LENGTH_ALLOWANCE = 1000
+CONTENT_LENGTH_PRIOR = 0.20
 
 # Ranking multipliers applied over BM25 relevance in governed retrieval.
 # BM25 knows lexical fit only; provenance quality and age are metadata the
@@ -2639,7 +2645,8 @@ def _candidates(
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
             m.source_hash, m.record_id, m.conflicts,
             m.source_fingerprints, m.updated_at, m.confidence, m.attestation,
-            bm25(documents, ?, ?, ?, ?, ?, ?) AS score
+            bm25(documents, ?, ?, ?, ?, ?, ?) AS score,
+            length(d.content) AS content_length
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
         WHERE documents MATCH ?
@@ -2665,6 +2672,11 @@ def _candidates(
         item["adjusted_score"] = relevance * ranking_weight(
             item["authority"], item["confidence"], item["updated_at"]
         )
+        content_length = int(item.get("content_length") or 0)
+        if content_length > CONTENT_LENGTH_ALLOWANCE:
+            item["adjusted_score"] *= (
+                CONTENT_LENGTH_ALLOWANCE / content_length
+            ) ** CONTENT_LENGTH_PRIOR
         result.append(item)
     anchors = anchor_phrases(query)
     if anchors and result:

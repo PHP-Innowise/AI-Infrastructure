@@ -6,6 +6,8 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`memory-seed` carries the document-length prior.** The copied runtime scales relevance down for corpus-wide documents; the policy lock is re-recorded.
+
 - **`memory-seed` keeps the anchor ranking.** The copied runtime matches a request's ticket or identifier as an adjacent phrase and scales a document that names one; distillation keeps anchor terms inside the 24-term limit. The policy lock is re-recorded.
 
 - **`memory-seed` carries the split delivery budget.** The copied runtime bounds the capsule by 8,000 characters of content and 20,000 of serialized payload, spends the rendered text by the query's evidence, and offers candidates generously before trimming after the session's repeats; the renderer's excerpt allowance no longer shadows its ceiling. The replicated `project-brain` skill and the policy lock are regenerated.
