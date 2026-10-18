@@ -43,7 +43,9 @@ class SameSectionTests(unittest.TestCase):
         return result
 
     def state(self, transform=None):
-        with sqlite3.connect(self.root/'memory-bank/local/context.db') as connection:
+        # closing(): the connection's own context manager only commits, and an
+        # open handle keeps Windows from removing the temporary project.
+        with contextlib.closing(sqlite3.connect(self.root/'memory-bank/local/context.db')) as connection, connection:
             row=connection.execute("SELECT key,value FROM index_state WHERE key LIKE '%session%deliver%'").fetchone()
             self.assertIsNotNone(row)
             state=json.loads(row[1])
