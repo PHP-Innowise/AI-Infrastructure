@@ -68,6 +68,7 @@ from brain_runtime import (
     validate_repository,
 )
 from context_retrieval import (
+    CAPSULE_SAFETY_LIMITS,
     DocumentRow,
     EVIDENCE_STOPWORDS,
     RetrievalError,
@@ -165,7 +166,7 @@ DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
 CAPSULE_LAYER_LIMITS = {
     "procedural": 1,
     "semantic": 3,
-    "episodic": 1,
+    "episodic": 2,
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
 # How many prompt terms survive distillation into the retrieval query. Rarity
@@ -173,6 +174,13 @@ CAPSULE_QUERY_TOKEN_LIMIT = 32
 # relevance by position the way the old first-N-words hook extraction did.
 CAPSULE_PROMPT_TERM_LIMIT = 24
 CAPSULE_CHARACTER_LIMIT = 8000
+# What the delivered payload may weigh with its audit views; the content
+# ceiling above is what the model's memory actually costs.
+CAPSULE_PAYLOAD_LIMIT = 20000
+# What the rendered capsule may spend on a weak, a moderate and an
+# anchored query: a query naming a ticket or a file supports more evidence
+# than one sharing prose terms, and the gate already measures which it is.
+CAPSULE_RENDER_BUDGETS = (1400, 2200, 2600)
 # What the rendered capsule - the text a model reads - may spend. Codex caps a
 # hook's additional context at 4,000 characters; this stays under it.
 RENDERED_CAPSULE_LIMIT = 3600
@@ -1473,33 +1481,105 @@ def synchronize_capsule_views(capsule: dict[str, object]) -> None:
             ]
 
 
+def capsule_content_characters(capsule: dict[str, object]) -> int:
+    """What the capsule's memory costs: the working state and one copy of each item.
+
+    The selected list and the category view repeat the same items for the
+    audit and the duplicate report; they are payload, not delivery.
+    """
+    content = {
+        key: capsule.get(key)
+        for key in ("working", "last_turn", "procedural", "semantic", "episodic")
+    }
+    return len(json.dumps(content, ensure_ascii=False, separators=(",", ":")))
+
+
+def capsule_render_budget(capsule: dict[str, object]) -> int:
+    """How much rendered text this query has earned."""
+    gate = capsule.get("gate")
+    signals = gate.get("signals") if isinstance(gate, dict) else None
+    signals = signals if isinstance(signals, dict) else {}
+    try:
+        distinctive = int(signals.get("distinctive_matches") or 0)
+    except (TypeError, ValueError):
+        distinctive = 0
+    try:
+        informative = int(signals.get("informative_terms") or 0)
+    except (TypeError, ValueError):
+        informative = 0
+    try:
+        top_score = float(signals.get("top_score") or 0.0)
+    except (TypeError, ValueError):
+        top_score = 0.0
+    if distinctive >= 3 or top_score >= 12.0:
+        budget = CAPSULE_RENDER_BUDGETS[2]
+    elif distinctive >= 1 or informative >= 8:
+        budget = CAPSULE_RENDER_BUDGETS[1]
+    else:
+        budget = CAPSULE_RENDER_BUDGETS[0]
+    return min(budget, RENDERED_CAPSULE_LIMIT)
+
+
+def _drop_weakest(capsule: dict[str, object]) -> bool:
+    """Drop one delivered item for the payload ceiling.
+
+    Skills go first: every host loads its own skill catalogue, and a pointer
+    costs a slot without answering anything. Knowledge goes by rank, so the
+    item the turn least needed is the one that leaves.
+    """
+    procedural = capsule.get("procedural")
+    if isinstance(procedural, list) and procedural:
+        procedural.pop()
+        capsule["omitted"]["procedural"] += 1
+        return True
+    weakest = None
+    for layer in ("semantic", "episodic"):
+        for index, item in enumerate(capsule.get(layer) or []):
+            if not isinstance(item, dict):
+                continue
+            rank = item.get("rank")
+            key = (rank is None, rank or 0)
+            if weakest is None or key > weakest[0]:
+                weakest = (key, layer, index)
+    if weakest is None:
+        return False
+    _, layer, index = weakest
+    capsule[layer].pop(index)
+    capsule["omitted"][layer] += 1
+    return True
+
+
 def enforce_governed_capsule_contract(
     capsule: dict[str, object],
 ) -> dict[str, object]:
     """Apply the shared 1/3/1 and 8,000-character contract to governed output."""
+    import os as _os
+    if _os.environ.get('DSH_MEM_DEBUG'):
+        import sys as _sys
+        print('DBG contract in:', {k: len(capsule.get(k) or []) for k in ('procedural','semantic','episodic')}, 'content', capsule_content_characters(capsule), 'payload', capsule_character_count(capsule), file=_sys.stderr)
     compacted = json.loads(serialize_capsule(capsule))
     compacted["procedural"] = compacted.get("procedural", [])[
-        :CAPSULE_LAYER_LIMITS["procedural"]
+        :CAPSULE_SAFETY_LIMITS["procedural"]
     ]
     compacted["semantic"] = compacted.get("semantic", [])[
-        :CAPSULE_LAYER_LIMITS["semantic"]
+        :CAPSULE_SAFETY_LIMITS["semantic"]
     ]
     compacted["episodic"] = compacted.get("episodic", [])[
-        :CAPSULE_LAYER_LIMITS["episodic"]
+        :CAPSULE_SAFETY_LIMITS["episodic"]
     ]
     compacted["omitted"] = {
         "procedural": max(
             0,
             len(capsule.get("procedural", []))
-            - CAPSULE_LAYER_LIMITS["procedural"],
+            - CAPSULE_SAFETY_LIMITS["procedural"],
         ),
         "semantic": max(
             0,
-            len(capsule.get("semantic", [])) - CAPSULE_LAYER_LIMITS["semantic"],
+            len(capsule.get("semantic", [])) - CAPSULE_SAFETY_LIMITS["semantic"],
         ),
         "episodic": max(
             0,
-            len(capsule.get("episodic", [])) - CAPSULE_LAYER_LIMITS["episodic"],
+            len(capsule.get("episodic", [])) - CAPSULE_SAFETY_LIMITS["episodic"],
         ),
     }
 
@@ -1536,19 +1616,17 @@ def enforce_governed_capsule_contract(
                 item["snippet"] = item["snippet"][:320]
     synchronize_capsule_views(compacted)
 
-    while capsule_character_count(compacted) > CAPSULE_CHARACTER_LIMIT:
+    # The model pays for the content, not for the audit views, so the
+    # delivery ceiling is content and the payload ceiling is transport.
+    while (
+        capsule_content_characters(compacted) > CAPSULE_CHARACTER_LIMIT
+        or capsule_character_count(compacted) > CAPSULE_PAYLOAD_LIMIT
+    ):
         if compacted.get("last_turn"):
             compacted["last_turn"] = None
             continue
-        dropped = False
-        for layer in ("episodic", "semantic", "procedural"):
-            if compacted[layer]:
-                compacted[layer].pop()
-                compacted["omitted"][layer] += 1
-                synchronize_capsule_views(compacted)
-                dropped = True
-                break
-        if dropped:
+        if _drop_weakest(compacted):
+            synchronize_capsule_views(compacted)
             continue
         if isinstance(working, dict) and working.get("progress"):
             excess = capsule_character_count(compacted) - CAPSULE_CHARACTER_LIMIT
@@ -2384,7 +2462,7 @@ def assemble_capsule(
             result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
         capsule = enforce_governed_capsule_contract(result)
         if render:
-            shown_in_render(connection, capsule)
+            shown_in_render(connection, capsule, capsule_render_budget(capsule))
         return capsule
 
     return retrieve(
@@ -2682,13 +2760,19 @@ def _item_line(item: dict[str, object], kind: str, section: str = "") -> str:
 
 
 def render_capsule_lines(
-    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
+    capsule: dict[str, object],
+    excerpts: Optional[dict[str, str]] = None,
+    limit: int = RENDERED_CAPSULE_LIMIT,
 ) -> list[str]:
     """The capsule as Claude Code, Codex, Cursor and Harness deliver it."""
-    return _render_capsule(capsule, excerpts)[0]
+    return _render_capsule(capsule, excerpts, limit)[0]
 
 
-def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) -> None:
+def shown_in_render(
+    connection: sqlite3.Connection,
+    capsule: dict[str, object],
+    limit: int = RENDERED_CAPSULE_LIMIT,
+) -> None:
     """Leave in a capsule only the items its rendered text shows.
 
     The text is held to RENDERED_CAPSULE_LIMIT by dropping whole entries once
@@ -2699,7 +2783,16 @@ def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) 
     only what the capsule holds, and the text rendered from the capsule shows
     every item it holds: they fitted without their excerpts.
     """
-    _, shown = _render_capsule(capsule, capsule_excerpts(connection, capsule))
+    excerpts = capsule_excerpts(connection, capsule)
+    import os as _os
+    if _os.environ.get('DSH_MEM_DEBUG'):
+        import sys as _sys
+        before = len(_render_capsule(capsule, excerpts, 10**9)[0])
+        print('DBG limit=%d before=%d items=%s' % (limit, before,
+              {k: len(capsule.get(k) or []) for k in ('procedural','semantic','episodic')}), file=_sys.stderr)
+    _, shown = _render_capsule(
+        capsule, excerpts, limit
+    )
     kept = {id(item) for item in shown}
     omitted = capsule.get("omitted")
     for layer in DOCUMENT_LAYERS:
@@ -2716,7 +2809,9 @@ def shown_in_render(connection: sqlite3.Connection, capsule: dict[str, object]) 
 
 
 def _render_capsule(
-    capsule: dict[str, object], excerpts: Optional[dict[str, str]] = None
+    capsule: dict[str, object],
+    excerpts: Optional[dict[str, str]] = None,
+    limit: int = RENDERED_CAPSULE_LIMIT,
 ) -> tuple[list[str], list[dict[str, object]]]:
     """The rendered lines, and the items they show."""
     excerpts = dict(excerpts or {})
@@ -2736,8 +2831,11 @@ def _render_capsule(
                 safe = sanitize_automatic_query(str(raw))
             except ContextError:
                 safe = ""
-            limit = max(EXCERPT_CHARACTERS) if layer == "semantic" else EPISODIC_EXCERPT_CHARACTERS
-            excerpt = Excerpt(_bounded(safe, limit))
+            allowance = (
+                max(EXCERPT_CHARACTERS) if layer == "semantic"
+                else EPISODIC_EXCERPT_CHARACTERS
+            )
+            excerpt = Excerpt(_bounded(safe, allowance))
             excerpt.heading = getattr(raw, "heading", "")
             excerpts[path] = excerpt
 
@@ -2830,7 +2928,7 @@ def _render_capsule(
     # Over the ceiling the excerpts shrink first, tail first, then go; then
     # skills, then the weakest knowledge. Working state is never cut here:
     # its own lines are bounded where they are built.
-    while size(lines) > RENDERED_CAPSULE_LIMIT:
+    while size(lines) > limit:
         shrinkable = [
             key for key in reversed(list(excerpt_of)) if excerpt_of[key]
         ]

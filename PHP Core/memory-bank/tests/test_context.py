@@ -1622,7 +1622,7 @@ class ContextEngineTest(unittest.TestCase):
         self.assertEqual("BAUMAS-133", payload["working"]["task_id"])
         self.assertLessEqual(len(payload["procedural"]), 2)
         self.assertLessEqual(len(payload["semantic"]), 2)
-        self.assertEqual(1, len(payload["episodic"]))
+        self.assertEqual(2, len(payload["episodic"]))
         self.assertTrue(
             all(item["layer"] == "procedural" for item in payload["procedural"])
         )
@@ -1700,7 +1700,7 @@ class ContextEngineTest(unittest.TestCase):
         self.assertIsNone(payload["working"])
         self.assertLessEqual(len(payload["procedural"]), 2)
         self.assertLessEqual(len(payload["semantic"]), 3)
-        self.assertLessEqual(len(payload["episodic"]), 1)
+        self.assertLessEqual(len(payload["episodic"]), 2)
         self.assertIn("Working task unavailable: task ID was not supplied", payload["warnings"])
         self.assertNotIn("FULL_DOCUMENT_SENTINEL", packet.stdout)
 

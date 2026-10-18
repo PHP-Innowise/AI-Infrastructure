@@ -237,10 +237,21 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         self.assertEqual(0, first.returncode, first.stderr)
         self.assertEqual(0, second.returncode, second.stderr)
         left, right = json.loads(first.stdout), json.loads(second.stdout)
-        self.assertLessEqual(len(left["procedural"]), 2)
-        self.assertLessEqual(len(left["semantic"]), 3)
-        self.assertLessEqual(len(left["episodic"]), 1)
-        self.assertLessEqual(len(first.stdout.strip()), 8000)
+        self.assertLessEqual(len(left["procedural"]), 1)
+        self.assertLessEqual(len(left["semantic"]), 6)
+        self.assertLessEqual(len(left["episodic"]), 4)
+        content = json.dumps(
+            {
+                key: left.get(key)
+                for key in (
+                    "working", "last_turn", "procedural", "semantic", "episodic"
+                )
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.assertLessEqual(len(content), 8000)
+        self.assertLessEqual(len(first.stdout.strip()), 20000)
         for layer in ("procedural", "semantic", "episodic"):
             self.assertEqual(left[layer], right[layer])
         manifest = json.loads(
@@ -3165,7 +3176,7 @@ class EpisodicPillarTest(RuntimeHarness):
 
     def test_an_incident_stays_semantic(self) -> None:
         # Only `event` is episodic. An open incident is active, urgent,
-        # promotable content: demoting it to the single episodic slot would
+        # promotable content: demoting it to an episodic slot would
         # take it out of the runtime filters, the budget and the manifest.
         self.start("TASK-INCIDENT")
         brain.create_record(
@@ -9335,9 +9346,13 @@ class DeliveryTest(RuntimeHarness):
         items = [line for line in lines[header + 1:] if line.startswith("- ")]
         self.assertEqual(3, len(items), lines)
         ceiling = sum(len(line) + 1 for line in [*lines[: header + 1], *items[:2]]) + 10
-        with mock.patch.object(context_cli, "RENDERED_CAPSULE_LIMIT", ceiling):
+        with mock.patch.object(
+            context_cli, "capsule_render_budget", lambda capsule: ceiling
+        ):
             first = refresh_in_process("--session-id", "c-render")
-        self.assertLessEqual(len(first["capsule_text"]), ceiling)
+        # The working state is never cut here; the ceiling bounds the item
+        # lines, and one entry has to leave for the text to fit.
+        self.assertLessEqual(len(self.shown_notes(first)), 2)
         left_out = self.assert_recorded_as_shown(first)
         self.assertEqual(1, first["capsule"]["omitted"]["semantic"])
         second = refresh_in_process("--session-id", "c-render")

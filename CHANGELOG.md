@@ -26,6 +26,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+## Unreleased
+
+- **The capsule's budget is the text the model reads, not the audit payload.** Delivery is now bounded by 8,000 characters of content - the working state plus one copy of each item - and the serialized payload, which repeats every item in three views for the duplicate report, by 20,000. The rendered text the host inserts is spent by the query's evidence: 1,400 characters for a weak query, 2,200 for a moderate one and 2,600 when the gate saw distinctive matches or a top score of 12. Candidates are offered generously (1 procedural, 6 semantic, 4 episodic) and trimmed after this conversation's repeats are gone, so an item held back by the budget is not lost for the rest of the session. Fixes a variable-shadowing bug the split exposed: the renderer's excerpt allowance overwrote the ceiling parameter, so any ceiling below 600 was ignored. On 25 real prompts the ticket-anchored recall rises from 60% to 85% at 1,343 rendered characters per turn, with no payload eviction.
+
+- **The capsule discards its weakest entry, not its last one.** The delivery order of each layer now follows the retrieval rank instead of the category grouping, and the payload ceiling drops what the turn least needed - a skill first, then the lowest-ranked knowledge - so a document ranked first is no longer removed while a lower-ranked one stays. Capsule items carry their rank for that decision; the harness strips it from its approval comparison as before. On 25 real prompts the aggregate delivery is unchanged (the ceiling binds on one turn in 25), but the evicted item moves from the best-ranked to the worst-ranked. This is also the ordering a budget-driven allocation needs.
+
+- **A governed capsule can carry two episodic items.** The delivered capsule is now capped at 1 procedural, 3 semantic and 2 episodic items under the same 8,000 serialized characters and 3,600 rendered characters. The episodic layer was the only slot that discarded ranked knowledge while the capsule used about 27% of its rendered channel, and on 23 of 25 measured real turns the single slot carried the repository changelog instead of the project record naming the same ticket. `CAPSULE_EPISODIC_LIMIT` and `CAPSULE_LAYER_LIMITS` moved together; PROTOCOL.md, the `project-brain` skill, the Project Brain README and `docs/CONTEXT-AND-MEMORY.md` state the new cap, and the capsule-boundary tests assert it.
+
 - **Automatic excerpts keep the evidence they score, and related knowledge can
   share a current code source.** Adjacent FTS highlights retain each term's
   weight; exact section-score ties prefer body evidence; oversized sentences

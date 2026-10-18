@@ -147,7 +147,7 @@ production-наблюдение на серии реальных задач, к�
 | Словарь причин | `no-relevant-match`, `empty-after-filter`, `repeat-retrieval`, `task-changed`, `new-selection`, `gate-off` | `context_retrieval.py::gate_decision` |
 | Версия манифеста | **3** (`host`, `entry_point`, `local_episode_count`, токены эпизодов); v1/v2 продолжают строго валидироваться | `project-brain/schemas/retrieval-manifest.schema.json`, `brain_runtime.py::validate_repository` |
 | Repeat-baseline | изолирован по task + host + entry point; сигнатура включает query, path + source hash, task revision и локальный эпизод | `context_retrieval.py::_retrieval_signature`, `_retrieval_baseline_key` |
-| Ладдер капсулы | 2 procedural / 3 semantic / 1 episodic | `context_retrieval.py::CAPSULE_*_LIMIT` |
+| Ладдер капсулы | 1 procedural / 3 semantic / 2 episodic | `context_retrieval.py::CAPSULE_*_LIMIT` |
 | Локальный эпизод | ищется до решения ворот, входит в лимит и токены; manifest хранит только count/tokens, не id/body | `context_retrieval.py::retrieve` |
 | Обратный индекс | таблица `document_links`, команда `links`, флаг `retrieve --path` | `context.py links --path <путь>` |
 

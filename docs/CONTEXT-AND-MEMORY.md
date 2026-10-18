@@ -183,11 +183,11 @@ no record reports a completion that did not happen.
 
 `event` is the only record type mapped to the episodic layer. An `incident`
 stays semantic even though it is also a record of something that happened: an
-open incident is active, urgent, promotable content, and moving it to the
-single episodic slot would take it out of the runtime filters, the budget and
+open incident is active, urgent, promotable content, and moving it to an
+episodic slot would take it out of the runtime filters, the budget and
 the manifest.
 
-The episodic slot of a governed capsule is ranked by `retrieve()` along with
+The episodic layer of a governed capsule is ranked by `retrieve()` along with
 everything else. It used to be fetched separately by a query that never joined
 the metadata table, which applied no privacy, owner, authority, lifecycle or
 freshness filter and left the delivered document out of the manifest entirely.
@@ -195,8 +195,8 @@ That was harmless while the only episodic document was the changelog; it stops
 being harmless once governed records live there.
 
 Machine-local episodes also enter capsule assembly before the retrieval gate,
-not as an unaccounted append after it. They can fill only the unused part of the
-single episodic slot, contribute to the capsule and token ceilings, and their
+not as an unaccounted append after it. They can fill only the unused part of an
+episodic slot, contribute to the capsule and token ceilings, and their
 content hashes participate in repeat detection. A version 3 manifest records
 only `local_episode_count` and their aggregate
 `token_estimates.local_episodes`: it never stores a local episode ID or body.
@@ -831,7 +831,7 @@ not require a task and does not create a manifest.
 4. applies runtime privacy, owner, authority, lifecycle, and freshness filters;
 5. fetches eligible linked conflict partners by UUID even if they did not
    lexically match;
-6. selects bounded snippets and any remaining episodic slot within category
+6. selects bounded snippets and any remaining episodic slots within category
    and total estimated-token budgets;
 7. writes a strict retrieval manifest;
 8. returns the working task, categorized selected context, exclusions, token
@@ -971,10 +971,11 @@ The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
 policy filtering, the delivered capsule is independently capped at 1
-procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
+procedural, 6 semantic and 4 episodic candidates, within 8,000 characters of
+content and 20,000 of serialized payload.
 Snippets are deterministically shortened as needed.
 
-A selected local episode uses only the remaining episodic slot. Its estimate is
+A selected local episode uses only an unused episodic slot. Its estimate is
 included in `token_estimates.local_episodes` and in the total ceiling even
 though its identity and content are deliberately absent from the manifest.
 

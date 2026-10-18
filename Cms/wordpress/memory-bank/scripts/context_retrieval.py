@@ -63,7 +63,11 @@ SOURCE_CHANGED_WEIGHT = 0.5
 # One: see `procedural_ranked` in `retrieve`.
 CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
-CAPSULE_EPISODIC_LIMIT = 1
+CAPSULE_EPISODIC_LIMIT = 2
+# How many candidates a layer may offer the turn. Delivery is bounded by
+# the rendered-text budget, spent after this conversation's repeats are
+# gone, so a candidate held back here never gets its turn.
+CAPSULE_SAFETY_LIMITS = {"procedural": 1, "semantic": 6, "episodic": 4}
 SKILL_EDITIONS = (".agents", ".claude", ".cursor", ".codex")
 # Skills whose body documents the host tool itself rather than a workflow this
 # repository owns. `skill-creator` instructs the agent to drive its own product
@@ -3570,7 +3574,7 @@ def _prune_local_manifests(directory: Path, retention: int) -> None:
 # therefore means covered, which is what the schema and the docs record.
 _PUBLIC_ITEM_KEYS = (
     "path", "layer", "kind", "title", "snippet", "category",
-    "estimated_tokens", "record_id", "conflicts",
+    "estimated_tokens", "record_id", "conflicts", "rank",
 )
 
 
@@ -3866,7 +3870,7 @@ def retrieve(
     # the layer column, and the two taxonomies overlap: `category_for` has no
     # `changelog` branch, so CHANGELOG.md is category 'evidence' AND layer
     # 'episodic'. Without this filter it takes one of the three semantic slots
-    # and the single episodic slot at once, and the degradation ladder then
+    # and an episodic slot at once, and the degradation ladder then
     # drops real content to stay inside the budget. Filtering here rather than
     # after the split matters twice over: the freed slot goes to the next
     # ranked candidate instead of being lost, and the manifest written below
@@ -3887,8 +3891,8 @@ def retrieve(
     episodic_ranked = [item for item in selected if item["layer"] == "episodic"]
     capsule_selected = [
         *procedural_ranked[:CAPSULE_PROCEDURAL_LIMIT],
-        *semantic_ranked[:CAPSULE_SEMANTIC_LIMIT],
-        *episodic_ranked[:CAPSULE_EPISODIC_LIMIT],
+        *semantic_ranked[: CAPSULE_SAFETY_LIMITS["semantic"]],
+        *episodic_ranked[: CAPSULE_SAFETY_LIMITS["episodic"]],
     ]
     local_episode_selected = local_episodes[
         : max(0, CAPSULE_EPISODIC_LIMIT - len(episodic_ranked[:CAPSULE_EPISODIC_LIMIT]))
@@ -4029,20 +4033,22 @@ def retrieve(
     for item in selected:
         public = _public_item(item)
         groups[item["category"]].append(public)
-    procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
-    episodic = [
-        item
-        for group in groups.values()
-        for item in group
-        if item["layer"] == "episodic"
-    ][:CAPSULE_EPISODIC_LIMIT]
+    def _rank_order(item: dict[str, Any]) -> tuple[bool, int]:
+        rank = item.get("rank") if isinstance(item, dict) else None
+        return (not isinstance(rank, int), rank if isinstance(rank, int) else 0)
+
+    # Delivery order follows the score: the renderer and the payload
+    # ceiling spend their allowance on the weakest entry, not the last one.
+    procedural = sorted(groups["policy"], key=_rank_order)[:CAPSULE_PROCEDURAL_LIMIT]
+    episodic = sorted(
+        (item for group in groups.values() for item in group if item["layer"] == "episodic"),
+        key=_rank_order,
+    )[: CAPSULE_SAFETY_LIMITS["episodic"]]
     episodic.extend(local_episode_selected[: CAPSULE_EPISODIC_LIMIT - len(episodic)])
-    semantic = [
-        *groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]
-    ][:CAPSULE_SEMANTIC_LIMIT]
-    # Category grouping must not move related knowledge ahead of direct
-    # hits when the renderer spends its character allowance.
-    semantic.sort(key=lambda item: item.get("selection") == "source-link")
+    semantic = sorted(
+        (*groups["handoff"], *groups["durable"], *groups["dynamic"], *groups["evidence"]),
+        key=_rank_order,
+    )[: CAPSULE_SAFETY_LIMITS["semantic"]]
     result: dict[str, Any] = {
         "query": query,
         "task_id": task["external_id"] if task is not None else None,

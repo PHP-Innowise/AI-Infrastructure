@@ -48,6 +48,9 @@ MEMORY_WAIT = 30
 REMEMBERED = 30
 # The runtime caps a task capsule at this many characters of compact JSON (CAPSULE_CHARACTER_LIMIT in context.py).
 CAPSULE_LIMIT = 8000
+# The delivered payload carries each item in three views for the duplicate
+# report; the transport budget is its own, larger ceiling.
+CAPSULE_PAYLOAD_LIMIT = 20000
 # Retrieved capsule items by category: policy and evidence are rules and docs, durable is the Memory bank.
 # Everything else (the working task, last turn, handoffs, dynamic records, episodes and the envelope) is Project Brain.
 CAPSULE_KINDS = {'policy': 'rules', 'evidence': 'rules', 'durable': 'bank'}
@@ -442,7 +445,7 @@ def capsule_meter(capsule, text=None):
     characters, counts, repeats = _capsule_kinds(capsule, size)
     total = size(capsule)
     omitted = capsule.get('omitted') if isinstance(capsule.get('omitted'), dict) else {}
-    return {'characters': total, 'limit': CAPSULE_LIMIT,
+    return {'characters': total, 'limit': CAPSULE_PAYLOAD_LIMIT,
             'kinds': {'brain': total - characters['rules'] - characters['bank'], **characters},
             'items': counts, 'repeats': repeats,
             'dropped': {layer: omitted[layer] for layer in ('procedural', 'semantic', 'episodic')

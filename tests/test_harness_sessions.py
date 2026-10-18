@@ -1476,7 +1476,10 @@ class SessionTests(unittest.TestCase):
             return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
         meter = sessions.capsule_meter(capsule)
         # The runtime measures compact JSON in characters, so non-ASCII text is not counted as escapes.
-        self.assertEqual((size(capsule), 8000), (meter["characters"], meter["limit"]))
+        self.assertEqual(
+            (size(capsule), sessions.CAPSULE_PAYLOAD_LIMIT),
+            (meter["characters"], meter["limit"]),
+        )
         self.assertLess(meter["characters"], len(json.dumps(capsule, separators=(",", ":"))))
         # Each item counts in its layer, among the selected items and under its category.
         rules, bank = 3 * size(policy), 3 * size(durable)

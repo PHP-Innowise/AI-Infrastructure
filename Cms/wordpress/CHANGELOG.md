@@ -26,6 +26,10 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ### Changed
 
+- The delivered Task Capsule is bounded by 8,000 characters of content and 20,000 of serialized payload; the rendered text (1,400-2,600 characters, by the query's evidence) is what the host inserts. Candidates are offered up to 1 procedural, 6 semantic and 4 episodic and trimmed after this conversation's repeats, so a budget-held item gets its next turn. Fixes the renderer's excerpt allowance shadowing its ceiling parameter.
+
+- The delivered Task Capsule carries up to 2 episodic items under the same 8,000 serialized and 3,600 rendered characters. The single episodic slot discarded ranked project records while the capsule used about a quarter of its rendered channel: on 23 of 25 measured real turns it carried the repository changelog instead of the record naming the same ticket. `CAPSULE_EPISODIC_LIMIT`, `CAPSULE_LAYER_LIMITS`, `project-brain/PROTOCOL.md`, the `project-brain` skill and the Project Brain README state the new cap, and the capsule-boundary tests assert it. The policy lock is re-recorded.
+
 - Memory promotion policy now matches runtime configuration: eligible verified
   terminal records may be applied unattended only when automatic promotion is
   enabled and remain explicitly marked as unreviewed; otherwise an independent

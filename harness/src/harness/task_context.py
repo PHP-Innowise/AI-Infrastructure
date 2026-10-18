@@ -16,7 +16,7 @@ import uuid
 from . import memory_draft
 from .automatic_query import AutomaticQueryError, sanitize_automatic_query
 from .knowledge import OLDER_RUNTIME, STALE_RECORD, KnowledgeBusy, _path, _text
-from .sessions import CAPSULE_LIMIT, SessionError, read_context
+from .sessions import CAPSULE_LIMIT, CAPSULE_PAYLOAD_LIMIT, SessionError, read_context
 
 UUID4 = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
 TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,199}')
@@ -150,7 +150,7 @@ class TaskContext:
                 or not isinstance(capsule.get('working'), dict)
                 or capsule['working'].get('task_id') != task.get('external_id')):
             raise SessionError('Retrieved context does not match the linked task and revision. Prepare it again.')
-        for layer, limit in (('procedural', 2), ('semantic', 3), ('episodic', 1)):
+        for layer, limit in (('procedural', 2), ('semantic', 3), ('episodic', 2)):
             values = capsule.get(layer)
             if not isinstance(values, list) or len(values) > limit or any(not isinstance(item, dict) for item in values):
                 raise SessionError('The runtime returned an invalid task capsule.')
@@ -159,10 +159,17 @@ class TaskContext:
         try:
             encoded = json.dumps(capsule, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
             encoded.encode('utf-8')
+            content = json.dumps(
+                {key: capsule.get(key) for key in (
+                    'working', 'last_turn', 'procedural', 'semantic', 'episodic')},
+                ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+            content.encode('utf-8')
         except (ValueError, RecursionError) as error:
             raise SessionError('The runtime returned an invalid task capsule.') from error
-        if len(encoded) > CAPSULE_LIMIT:
-            raise SessionError(f'The task capsule exceeds the native {CAPSULE_LIMIT}-character limit.')
+        if len(content) > CAPSULE_LIMIT:
+            raise SessionError(f'The task capsule exceeds the native {CAPSULE_LIMIT}-character memory limit.')
+        if len(encoded) > CAPSULE_PAYLOAD_LIMIT:
+            raise SessionError(f'The task capsule payload exceeds {CAPSULE_PAYLOAD_LIMIT} characters.')
 
     @staticmethod
     def _material(capsule):

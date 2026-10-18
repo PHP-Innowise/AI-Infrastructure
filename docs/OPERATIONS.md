@@ -444,7 +444,8 @@ and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
 
 The delivered capsule has a separate final contract in both modes: at most 1
-procedural, 3 semantic, and 1 episodic item and 8,000 serialized characters.
+procedural, 6 semantic and 4 episodic candidates, within 8,000 characters
+of content and 20,000 of serialized payload.
 Its working state carries the three newest next steps, the eight newest
 files, and four sources.
 
