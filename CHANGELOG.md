@@ -28,6 +28,91 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A shared class name no longer anchors a weak match — 2026-10-19
+
+- A document whose only query match is a name-shaped word is admitted as
+  `distinctive`; the anchor test treated any CamelCase word as a name. On the
+  current 12-prompt run three chunks about neighbouring tickets filled the
+  capsule for a FileSubscriber cleanup prompt because they share the
+  `EventSubscriber` directory in their sources - that word appears in five
+  documents. A name-shaped term now anchors only when it appears in at most
+  three documents or carries a digit: the shared directory stops admitting,
+  while `loggableName` in one document still does. On the same run the three
+  chunks are gone, the prompt's `CHANGELOG.md` takes the room, and the useful
+  turn remains useful.
+- Recorded history's floor was the weight of a term appearing in 1.5
+  documents, so an event naming a ticket could never be reached when the
+  ticket's prefix was common: six CMS-741 events matched both query concepts
+  and none passed. A match that includes a name-shaped term now clears the
+  coverage floor, while a match of ordinary words keeps the strict floor, so
+  a weak event still leaves the slot empty (the weak-event contract test
+  passes). The CMS-741 turn gains its event and becomes useful.
+- The recorded-history slot now prefers the event that carries the ticket the
+  request names, when one is admitted. On `next-9293f3` (CMS-741) the
+  higher-scored CMS-740 event (8.22) led the slot while five CMS-741 events
+  followed; the CMS-741 event `805d009f` now takes the slot, and the CMS-740
+  event leaves. A request with no exact-ticket event keeps its current event,
+  so the ACL prompts helped by a CMS-743 event beside a CMS-735/753 request
+  are unchanged.
+- A durable chunk or finding that names only another ticket is withheld. On
+  `next-9293f3` the finding `903cd91e` (CMS-739) and on `next-3b2ec4` the
+  chunk `7cc0d43f` (CMS-739) were graded noise beside a CMS-741/735 request;
+  both are gone, with no useful document lost. A chunk with no ticket (the
+  TTL note in 5b9f61/6a4bf1) and a finding with the request's ticket are kept.
+- A changelog is kept when the request names it or it mentions a ticket the
+  request names; otherwise a request with a ticket the changelog lacks no
+  longer receives it. `next-32c2e4` (CMS-741) and `next-53eabd` (CMS-740)
+  lost a changelog that named neither, while `next-9293f3` keeps it because
+  the request names `CHANGELOG.md`, and 1145cc/3b2ec4/b548e8/5b9f61 keep it
+  because it names their ticket.
+- The working task supplies the ticket when the request names none: its
+  external id, title and goal are read in memory only. The ephemeral
+  evaluation has no task, so this is covered by its unit test rather than by
+  the 12-prompt run.
+- Measured on the same 12 prompts, with every delivered document graded by an
+  agent (not a person): useful turns rose from 10 to 12, useful documents from
+  18/35 to 21/31 (51.4% to 67.7%), answer passages from 13 to 16 of 38 (34.2%
+  to 42.1%) and answer-in-text from 7 to 10 of 12; noise fell from 17 to 10
+  documents. Warm refresh p50/p95 was 0.38/0.50 s and the largest capsule
+  3,193 characters. The anchor cap alone gives 11 useful turns and 14/38; the
+  anchor-specific history floor adds the last turn and 15/38; the exact-ticket
+  preference adds one useful document and 16/38; the two ticket filters
+  remove four noise documents without losing a useful one.
+
+### A changelog's excerpt starts at its newest entry — 2026-10-19
+
+- A document of kind `changelog` now quotes the first section that has a body,
+  and that section's opening, instead of the window its shared words picked.
+  On a conflict notice that names `CHANGELOG.md`, "web editor" and "command
+  line" matched an older entry about an entity menu and an editor; the newest
+  entry, which names the release the conflict is in, was never shown. The
+  same choice displaced the newest entry on review prompts whose vocabulary
+  recurs throughout the file.
+- The head window fills its allowance from the next sentence too: a changelog
+  entry is one long list item, and stopping at the first sentence cut the
+  answer that the entry carried. The window stays within its layer's limit,
+  and a head-preferring quote finds the first body section directly rather
+  than scoring every section of a file that can run past a megabyte; warm
+  refresh p50/p95 stayed around half a second (0.52/0.55 s against 0.48/0.53 s
+  before).
+- Measured on the 12-prompt labelled set with the answer passages normalised
+  to the entry body (the old labels carried the previous renderer's heading
+  prefix, which the current format no longer repeats): answer passages
+  delivered rose from 7 to 13 of 38 (18.4% to 34.2%) and `answer in the
+  capsule text` from 5 to 7 of 12, with the same 7 useful and 3 noise-only
+  turns, the same 2.92 delivered documents per turn and the same 22 graded
+  noise documents. The largest capsule grew from 3,172 to 3,193 characters,
+  under the 3,600 ceiling. Against the unnormalised labels the change is
+  neutral (7 of 38), because those passages include the heading prefix and
+  the full entry; the measurement artifact is recorded here rather than
+  fixed by re-adding headings to the rendered body.
+- The 12-prompt labels were written against the older runtime's event-heavy
+  delivery, and the current runtime deliberately caps recorded history at one
+  event, so comparing its answer recall to the older 28-of-38 score is not
+  like for like. The 15 ungraded documents were graded in the local corpus by
+  an agent, not a person; fresh human labels for the delivered set remain the
+  open measurement.
+
 ### Recent files from what the agent read and changed — 2026-10-18
 
 - The Stop hook hands `turn --transcript` the transcript the host names. The

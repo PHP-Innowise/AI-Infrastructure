@@ -3386,6 +3386,26 @@ class HistoryAdmissionTest(unittest.TestCase):
             [1], [row[2]["id"] for row in self.candidates("quasar cobalt zirconium")[1]],
         )
 
+    def test_a_ticket_anchor_reaches_an_event_its_common_prefix_also_names(self) -> None:
+        self.event("Completed CMS-741 review")
+        self.connection.execute(
+            "INSERT INTO documents VALUES(?,?,?,?,?,?)",
+            ("cms-policy", "semantic", "doc", "CMS policy", "CMS policy", "CMS policy"),
+        )
+        self.assertEqual(
+            ["event"],
+            [row["path"] for row in self.candidates("PR numbers CMS 741")[0]],
+        )
+
+    def test_a_ticket_names_the_event_that_mentions_it(self) -> None:
+        self.event("Completed CMS-741 review")
+        self.assertEqual(
+            {"cms-741"}, retrieval._ticket_ids("What are the right PR numbers for CMS-741?")
+        )
+        events = self.candidates("PR CMS 741")[0]
+        self.assertEqual(["event"], [row["path"] for row in events])
+        self.assertTrue(events[0]["_ticket_match"])
+
     def test_raw_term_window_is_preserved(self) -> None:
         words = [f"marker{1000+i}" for i in range(24)]
         self.event("Quasar " + " ".join(words))
@@ -14137,6 +14157,89 @@ class RecentProjectFilesTest(RuntimeHarness):
         capsule = json.loads(self.run_cli("refresh", "--task-id", "TASK-RECENT", "--query", "export",
                                           "--json").stdout)
         self.assertNotIn("recent_files", capsule)
+
+
+class AnchorSpecificityTest(unittest.TestCase):
+    def test_a_task_ticket_is_used_when_the_request_has_none(self) -> None:
+        self.assertEqual(
+            {"cms-748"},
+            retrieval._request_tickets(
+                "What do you think?",
+                {"external_id": "CMS-748-followup", "title": "CMS-748", "goal": "Review"},
+            ),
+        )
+        self.assertEqual(
+            {"cms-741", "cms-748"},
+            retrieval._request_tickets(
+                "CMS-741 review", {"external_id": "CMS-748-followup"}
+            ),
+        )
+
+    def test_a_chunk_naming_only_another_ticket_is_withheld(self) -> None:
+        items = [{
+            "path": "memory-bank/chunks/MEM-1.md",
+            "category": "durable",
+            "kind": "domain",
+            "title": "Value objects",
+            "_indexed_policy_image": ("Value objects", "", "This records CMS-739 on both lines."),
+        }]
+        kept, excluded = retrieval._ticket_filter(items, {"cms-741"})
+        self.assertEqual([], kept)
+        self.assertEqual(
+            [{"path": "memory-bank/chunks/MEM-1.md", "reason": "ticket-mismatch"}],
+            excluded,
+        )
+
+    def test_a_chunk_without_a_ticket_and_an_event_are_kept(self) -> None:
+        chunk = {
+            "path": "memory-bank/chunks/MEM-2.md",
+            "category": "durable",
+            "kind": "domain",
+            "title": "Upgrade note",
+            "_indexed_policy_image": ("Upgrade note", "", "The legacy default stays."),
+        }
+        event = {
+            "path": "project-brain/dynamic/events/e.md",
+            "category": "dynamic",
+            "kind": "brain-event",
+            "title": "Completed CMS-743 review",
+            "_indexed_policy_image": ("Completed CMS-743 review", "", "CMS-743 review."),
+        }
+        kept, excluded = retrieval._ticket_filter([chunk, event], {"cms-741"})
+        self.assertEqual([chunk, event], kept)
+        self.assertEqual([], excluded)
+
+    def test_a_changelog_without_the_requested_ticket_is_withheld(self) -> None:
+        item = {
+            "path": "CHANGELOG.md",
+            "category": "evidence",
+            "kind": "changelog",
+            "title": "Changelog",
+            "_indexed_policy_image": (
+                "Changelog", "", "## 1.15.0\n- fix CMS-737 A drop is reported."
+            ),
+        }
+        kept, excluded = retrieval._ticket_filter(
+            [item], {"cms-741"}, request_text="What are the right PR numbers for CMS-741?"
+        )
+        self.assertEqual([], kept)
+        self.assertEqual(
+            [{"path": "CHANGELOG.md", "reason": "ticket-mismatch"}], excluded
+        )
+        kept, excluded = retrieval._ticket_filter(
+            [item], {"cms-741"}, request_text="Why does CHANGELOG.md conflict?"
+        )
+        self.assertEqual([item], kept)
+        self.assertEqual([], excluded)
+
+    def test_a_shared_class_word_does_not_keep_a_distinctive_match(self) -> None:
+        self.assertEqual(
+            {"a": [], "b": ["loggableName"], "c": ["741"]},
+            retrieval._specific_distinctive(
+                {"a": ["EventSubscriber"], "b": ["loggableName"], "c": ["741"]},
+                {"EventSubscriber": 5, "loggableName": 1, "741": 6},
+            ),
+        )
 
 
 if __name__ == "__main__":

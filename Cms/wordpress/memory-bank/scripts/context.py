@@ -4036,12 +4036,20 @@ def _capsule_excerpts(
             marked = marked_document(connection, item["path"], query, indexed_image=image) if query else None
             if marked is None:
                 marked = image[2]
+            prefer_head = item.get("kind") == "changelog"
+            # The marked image of a long document is a stretch around the
+            # query; the head of a chronological document is outside it.
+            quote_text = image[2] if prefer_head else marked
             section = (
-                excerpt_section(connection, item, marked, weights, query=query)
-                if marked
+                excerpt_section(connection, item, quote_text, weights, query=query,
+                                prefer_head=prefer_head)
+                if quote_text
                 else None
             )
-            text = excerpt_window(section["units"], limit, weights) if section else ""
+            text = (
+                excerpt_window(section["units"], limit, weights, prefer_head=prefer_head)
+                if section else ""
+            )
             if not text and isinstance(item.get("snippet"), str):
                 text = _bounded(item["snippet"].replace("[", "").replace("]", ""), limit)
             if text:

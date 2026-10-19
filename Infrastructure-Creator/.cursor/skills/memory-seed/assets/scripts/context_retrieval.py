@@ -1007,6 +1007,18 @@ EVIDENCE_STOPWORDS = frozenset(
 RELATIVE_SCORE_FLOOR = 0.3
 MIN_TOKEN_COVERAGE = 2
 DISTINCTIVE_DOCUMENT_RATIO = 0.1
+# How many documents a name-shaped term may appear in and still anchor a
+# distinctive match. `EventSubscriber` in five documents is a directory many
+# unrelated records cite, not a name; a method or class name shared by one to
+# three documents still names the subject. A term carrying a digit (a ticket,
+# version or record number) anchors regardless: it names one thing even when
+# several records cite it.
+ANCHOR_DOCUMENT_LIMIT = 3
+# A ticket, issue or record number in a request: the prefix and its number.
+# Exact-ticket events lead the recorded-history slot when the request names
+# one; a neighbouring ticket's event stays available only when no event
+# carries the named ticket.
+_TICKET_ID = re.compile(r"\b([A-Z]{2,10})[- ](\d{1,6})\b")
 MAPPED_COMMIT_PATTERN = re.compile(r"^mapped_commit:\s*([0-9a-fA-F]{7,40})\s*$", re.M)
 MAPPED_SCOPE_PATTERN = re.compile(r"^mapped_scope:\s*(\S+)\s*$", re.M)
 CODEBASE_MAP_MAX_DRIFT = 25
@@ -3811,6 +3823,124 @@ def is_anchor(token: str, where: Iterable[str] = ()) -> bool:
     return bool(_ANCHOR_SHAPE.search(token)) or token.casefold() in set(where)
 
 
+def _ticket_ids(text: str) -> set[str]:
+    """Ticket identifiers in a request or an event title, case-folded."""
+    return {f"{prefix.lower()}-{number}" for prefix, number in _TICKET_ID.findall(text)}
+
+
+def _request_tickets(text: str, task: Optional[dict[str, Any]]) -> set[str]:
+    """Tickets the request names, or the working task names when it names none.
+
+    A prompt often asks a question without repeating its ticket; the governed
+    task it continues carries it. The task's external id, title and goal are
+    read in memory only.
+    """
+    tickets = _ticket_ids(text)
+    if isinstance(task, dict):
+        tickets |= _ticket_ids(" ".join(
+            str(task.get(key) or "") for key in ("external_id", "title", "goal")
+        ))
+    return tickets
+
+
+def _ticket_filter(
+    items: list[dict[str, Any]], tickets: set[str], *,
+    connection: Optional[sqlite3.Connection] = None,
+    repository: Optional[Path] = None,
+    request_text: str = "",
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Withhold a durable chunk or finding that names only another ticket.
+
+    A document with no ticket, or with one the request also names, is kept;
+    a document whose tickets are all different is evidence about other work.
+    Events keep their own slot rule (they may be the same subject without the
+    ticket), and canonical project files are not filtered here.
+    """
+    if not tickets:
+        return items, []
+    kept: list[dict[str, Any]] = []
+    excluded: list[dict[str, str]] = []
+    for item in items:
+        path = str(item.get("path") or "")
+        kind = item.get("kind")
+        selected = item.get("category") == "durable" or kind == "brain-finding"
+        changelog = kind == "changelog"
+        if not selected and not changelog:
+            kept.append(item)
+            continue
+        image = item.get("_indexed_policy_image")
+        content = str(image[2]) if image and len(image) > 2 else ""
+        if not content and connection is not None:
+            # A path-linked record reached the selection without a lexical
+            # quote; its body is still in the index.
+            try:
+                row = connection.execute(
+                    "SELECT content FROM documents WHERE path = ?", (path,)
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            content = str(row[0] or "") if row is not None else ""
+        document_tickets = _ticket_ids(str(item.get("title") or "") + "\n" + content)
+        if changelog:
+            # The changelog is release context, not a ticket record: keep it
+            # when the request names it, and otherwise only when it mentions
+            # a ticket the request names. Its body is the only place the
+            # ticket list lives, and one selected changelog is read, not
+            # every candidate.
+            if not tickets or "changelog" in request_text.casefold():
+                kept.append(item)
+                continue
+            if document_tickets and not (document_tickets & tickets):
+                excluded.append({"path": path, "reason": "ticket-mismatch"})
+                continue
+            kept.append(item)
+            continue
+        if not document_tickets and item.get("kind") == "brain-finding" and repository is not None:
+            # The indexed body omits the record's frontmatter, where a
+            # finding's external id carries its ticket; the tracked file has
+            # it. Only a selected finding is read, never every candidate.
+            try:
+                source = (repository / path)
+                root = repository.resolve()
+                if source.is_file() and source.resolve().is_relative_to(root):
+                    document_tickets = _ticket_ids(source.read_text(encoding="utf-8", errors="ignore"))
+            except (OSError, ValueError):
+                document_tickets = set()
+        if document_tickets and not (document_tickets & tickets):
+            excluded.append({"path": path, "reason": "ticket-mismatch"})
+            continue
+        kept.append(item)
+    return kept, excluded
+
+
+def _anchor_names_one_thing(term: str, frequency: Optional[int]) -> bool:
+    """Whether a distinctive term is a name rather than a shared label.
+
+    A name appears in one to three documents, or carries a digit (a ticket,
+    version or record number). A CamelCase word in five documents is a
+    directory many records cite; it admits a neighbouring ticket's document
+    on that shared word alone.
+    """
+    return (
+        frequency is None
+        or frequency <= ANCHOR_DOCUMENT_LIMIT
+        or re.search(r"\d", term) is not None
+    )
+
+
+def _specific_distinctive(
+    distinctive: dict[str, list[str]], frequencies: dict[str, Optional[int]]
+) -> dict[str, list[str]]:
+    """Distinctive terms kept only where they name something."""
+    return {
+        path: [
+            term for term in terms
+            if _anchor_names_one_thing(term, frequencies.get(term))
+        ]
+        for path, terms in distinctive.items()
+    }
+
+
 def is_relevant(
     path: str,
     coverage: dict[str, int],
@@ -3974,13 +4104,25 @@ def history_query(connection: sqlite3.Connection, text: str) -> Optional[dict[st
             if len(families) >= minimum:
                 break
         minimum = required_coverage(list(families))
+    weights = {
+        token: max(0.05, math.log((total + 1) / (counts[token] + 0.5))) for token in terms
+    }
+    # Two floors. An ordinary word match keeps the strict one - the weight of
+    # a term unique in the corpus - so a weak event still leaves the slot
+    # empty. A match that includes a name-shaped term (a ticket or record
+    # number) may clear the coverage floor instead: a ticket in seventeen
+    # documents and its number in six must still reach the event that names
+    # it, and the old floor made that impossible - six CMS-741 events matched
+    # both concepts and none was admitted.
+    strict_floor = minimum * max(0.05, math.log((total + 1) / 1.5))
+    anchor_floor = sum(sorted(weights.values())[:min(minimum, len(weights))])
     return {
         "terms": terms,
-        "weights": {
-            token: max(0.05, math.log((total + 1) / (counts[token] + 0.5))) for token in terms
-        },
+        "weights": weights,
         "minimum": minimum,
-        "floor": minimum * max(0.05, math.log((total + 1) / 1.5)),
+        "floor": strict_floor,
+        "anchor_floor": anchor_floor,
+        "tickets": _ticket_ids(text),
         "events": {token: events[token] for token in terms},
         "episodes": {token: recorded[token] for token in terms},
     }
@@ -3997,16 +4139,23 @@ def _history_candidates(
     def admitted(members: dict[str, set[Any]]) -> dict[Any, float]:
         concepts: dict[Any, set[str]] = {}
         mass: dict[Any, float] = {}
+        anchors: set[Any] = set()
         for token, found in members.items():
+            anchored = is_anchor(token)
             for member in found:
                 concepts.setdefault(member, set()).add(forms[token] or token.casefold())
                 mass[member] = mass.get(member, 0.0) + history["weights"][token]
+                if anchored:
+                    anchors.add(member)
         # The tolerance keeps a matched weight exactly at the floor on the
         # right side of floating-point rounding.
         return {
             member: mass[member]
             for member in concepts
-            if len(concepts[member]) >= history["minimum"] and mass[member] + 1e-9 >= history["floor"]
+            if len(concepts[member]) >= history["minimum"]
+            and mass[member] + 1e-9 >= (
+                history["anchor_floor"] if member in anchors else history["floor"]
+            )
         }
 
     event_mass = admitted(history["events"])
@@ -4039,6 +4188,12 @@ def _history_candidates(
             if trace is not None:
                 trace.observe(item, "history", "admitted", score=item["adjusted_score"])
         events.sort(key=lambda item: (-item["adjusted_score"], item["path"]))
+        prompt_tickets = history.get("tickets") or set()
+        for item in events:
+            # Internal: the event slot prefers the named ticket when one is
+            # admitted, but a neighbouring ticket's event remains available
+            # when no event carries it.
+            item["_ticket_match"] = bool(prompt_tickets & _ticket_ids(str(item.get("title") or "")))
         for rank, item in enumerate(events, start=1):
             item["rank"] = rank
         _quote_candidates(connection, events, " ".join(history["terms"]), history["terms"])
@@ -4423,19 +4578,63 @@ def section_slug(heading: str) -> str:
     return re.sub(r"[\s_]+", "-", slug).strip("-")[:60]
 
 
+def _quoted_payload(heading: str, lines: list[str], title: str) -> dict[str, Any]:
+    units = _excerpt_units(lines)
+    plain_heading = " ".join(_unmarked(heading).split())
+    digest = hashlib.sha256(
+        "\n".join([plain_heading, *(_unmarked(unit) for unit in units)]).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "heading": plain_heading,
+        "slug": section_slug(plain_heading),
+        "units": units,
+        "hash": digest,
+        "shown": plain_heading if plain_heading.casefold() != title.casefold() else "",
+    }
+
+
+def _first_body_section(text: str) -> Optional[tuple[str, list[str]]]:
+    """The first heading's section that has prose, without scoring the rest.
+
+    A chronological document can run past a megabyte; its head section is the
+    only one a head-preferring quote needs, and parsing every section to pick
+    it by score would charge the whole file to the hook.
+    """
+    if text.startswith("---\n"):
+        _, separator, remainder = text[4:].partition("\n---\n")
+        if separator:
+            text = remainder
+    heading, lines = "", []
+    for line in text.splitlines():
+        if _EXCERPT_HEADING.match(line):
+            if _excerpt_units(lines):
+                return heading, lines
+            heading, lines = line.lstrip("#").strip(), []
+        else:
+            lines.append(line)
+    return (heading, lines) if _excerpt_units(lines) else None
+
+
 def quoted_section(
     text: str, title: str = "", weights: Optional[dict[str, float]] = None,
     *, citation_sources: Optional[set[str]] = None,
     requested_headings: Optional[set[str]] = None,
+    prefer_head: bool = False,
 ) -> Optional[dict[str, Any]]:
     """The section an excerpt quotes: the one carrying most of the query.
 
     ``text`` is a marked document (see marked_document) or plain text, which
-    has no marks and yields the opening prose. Returns the heading (empty for
-    the prose before the first heading), its slug, the section's units, and a
+    has no marks and yields the opening prose. With ``prefer_head`` the first
+    section that has a body wins instead: a chronological document (the
+    changelog) answers from its newest entry, and a query window chosen by
+    shared words would quote an older one. Returns the heading (empty for the
+    prose before the first heading), its slug, the section's units, and a
     hash of the section's text - what a conversation was handed, for not
     handing it again.
     """
+    if prefer_head and requested_headings is None and citation_sources is None:
+        found = _first_body_section(text)
+        return _quoted_payload(found[0], found[1], title) if found is not None else None
     sections = _excerpt_sections(text)
     # Every marked word asked of the tokenizer at once, not per section.
     term_forms(_EXCERPT_MARKED.findall(text))
@@ -4461,20 +4660,16 @@ def quoted_section(
             requested_best = (score, index)
     if best is None or first_with_body is None:
         return None
-    index = requested_best[1] if requested_best is not None else best[1] if best[0][0] > 0 else first_with_body
+    if requested_best is not None:
+        index = requested_best[1]
+    elif prefer_head:
+        index = first_with_body
+    elif best[0][0] > 0:
+        index = best[1]
+    else:
+        index = first_with_body
     heading, lines = sections[index]
-    units = _excerpt_units(lines)
-    plain_heading = " ".join(_unmarked(heading).split())
-    digest = hashlib.sha256(
-        "\n".join([plain_heading, *(_unmarked(unit) for unit in units)]).encode("utf-8")
-    ).hexdigest()[:16]
-    return {
-        "heading": plain_heading,
-        "slug": section_slug(plain_heading),
-        "units": units,
-        "hash": digest,
-        "shown": plain_heading if plain_heading.casefold() != title.casefold() else "",
-    }
+    return _quoted_payload(heading, lines, title)
 
 
 def _citation_only_section(heading: str, lines: list[str], sources: set[str]) -> bool:
@@ -4504,7 +4699,7 @@ def _citation_only_section(heading: str, lines: list[str], sources: set[str]) ->
 def excerpt_section(
     connection: sqlite3.Connection, item: dict[str, Any], text: str,
     weights: Optional[dict[str, float]] = None,
-    *, query: str = "",
+    *, query: str = "", prefer_head: bool = False,
 ) -> Optional[dict[str, Any]]:
     """The section delivered and remembered for this selected document.
 
@@ -4514,13 +4709,15 @@ def excerpt_section(
     under Sources, source-only records, or unavailable citation metadata.
     """
     title = str(item.get("title") or "")
+    prefer_head = prefer_head or item.get("kind") == "changelog"
     if item.get("selection") in ("path-link", "source-link", "source-hint", *AUTOMATIC_LINK_SELECTIONS) and item.get("kind") != "brain-task":
         requested = {
             heading for heading in ("sources", "references")
             if re.search(r"(?<![\w/\\.-])" + heading + r"(?![\w/\\.-])", query, re.IGNORECASE)
         }
         if requested:
-            return quoted_section(text, title, weights, requested_headings=requested)
+            return quoted_section(text, title, weights, requested_headings=requested,
+                                  prefer_head=prefer_head)
         try:
             rows = connection.execute(
                 "SELECT ref_path FROM document_links WHERE path = ? AND ref_kind = 'source' ORDER BY ref_path LIMIT ?",
@@ -4532,7 +4729,7 @@ def excerpt_section(
             section = quoted_section(text, title, weights, citation_sources={str(row[0]) for row in rows})
             if section is not None:
                 return section
-    return quoted_section(text, title, weights)
+    return quoted_section(text, title, weights, prefer_head=prefer_head)
 
 
 def _excerpt_piece(
@@ -4584,19 +4781,44 @@ def _excerpt_piece(
 
 
 def excerpt_window(
-    units: list[str], limit: int, weights: Optional[dict[str, float]] = None
+    units: list[str], limit: int, weights: Optional[dict[str, float]] = None,
+    *, prefer_head: bool = False,
 ) -> str:
     """The stretch of a section that carries most of the query, within limit.
 
     Whole sentences and list items, starting where the matches are rather
     than at the top; a list item keeps the line that introduces it, which is
-    where its condition usually is. Elided text is shown as an ellipsis.
+    where its condition usually is. With ``prefer_head`` the window starts at
+    the section's first unit instead - the newest entry of a chronological
+    document, which a query window would displace with an older one that
+    happens to share a common word. Elided text is shown as an ellipsis.
     """
     plain = [_unmarked(unit) for unit in units]
     whole = " ".join(plain)
     if len(whole) <= limit:
         return whole
     budget = max(1, limit - 4)
+    if prefer_head:
+        end, size = 0, 0
+        while end < len(units) and size + len(plain[end]) + (1 if end else 0) <= budget:
+            size += len(plain[end]) + (1 if end else 0)
+            end += 1
+        text = " ".join(plain[:end])
+        if end < len(units):
+            # Fill the rest with the head of the next sentence: a changelog
+            # entry is one long sentence, and stopping at the first one would
+            # cut the answer the newer entry carries.
+            room = budget - len(text) - (1 if text else 0)
+            if room > 40:
+                piece = plain[end][:room]
+                space = piece.rfind(" ")
+                if space > room // 2:
+                    piece = piece[:space]
+                piece = piece.rstrip()
+                if piece:
+                    text = (text + " " + piece) if text else piece
+            text = text.rstrip() + " …"
+        return text
     best: Optional[tuple[tuple[float, int], int, int, Optional[tuple[str, int, int]]]] = None
     for start in range(len(units)):
         end, size = start, 0
@@ -4660,9 +4882,17 @@ def delivery_identity(
         return path, revision
     marked = marked_document(connection, path, query,
                              indexed_image=item.get('_indexed_policy_image'))
+    prefer_head = item.get("kind") == "changelog"
+    image = item.get('_indexed_policy_image')
+    # A long changelog is marked as a stretch around the query, so its head
+    # is not in `marked`; the delivery identity must name the section the
+    # renderer actually quotes.
+    quote_text = str(image[2]) if prefer_head and image and len(image) > 2 else marked
     section = (
-        excerpt_section(connection, item, marked, excerpt_weights(connection, query), query=query)
-        if marked
+        excerpt_section(connection, item, quote_text,
+                        excerpt_weights(connection, query), query=query,
+                        prefer_head=prefer_head)
+        if quote_text
         else None
     )
     if section is None:
@@ -4796,6 +5026,20 @@ def _candidates(
         return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None, "coverage": {}}
     coverage, distinctive = token_coverage(connection, evidence)
     minimum = required_coverage(evidence)
+    # A rare term admits a document on its own only when it names something.
+    # The anchor test below sees the term's shape and the document's path; a
+    # term repeated across the corpus is a generic directory or suffix, and
+    # five records of different tickets can then win a slot on the shared
+    # word alone. Count the terms once and keep only the near-unique names;
+    # procedural documents keep their own rule (a weak skill match is never
+    # delivered, and search still ranks it).
+    anchor_frequencies = (
+        token_document_frequencies(
+            connection, {term for terms in distinctive.values() for term in terms}
+        )
+        if distinctive else {}
+    )
+    specific = _specific_distinctive(distinctive, anchor_frequencies)
     if trace is not None:
         trace.evidence_terms = len(evidence)
         trace.required_terms = minimum
@@ -4825,8 +5069,9 @@ def _candidates(
             observed_rank += int(trace._eligible(dict(row)))
             trace.observe(dict(row), "search", "fetched", rank=observed_rank,
                           matched_terms=coverage.get(row["path"], 0), required_terms=minimum)
+        matches = distinctive if row["layer"] == "procedural" else specific
         if not is_relevant(
-            row["path"], coverage, distinctive, minimum, str(row["title"] or ""),
+            row["path"], coverage, matches, minimum, str(row["title"] or ""),
             anchored=row["layer"] != "procedural",
         ):
             if trace is not None:
@@ -4958,11 +5203,20 @@ def _quote_candidates(
         # A missing/reused/changed row cannot be rebound by a later prime.
         item['_indexed_policy_image'] = tuple(str(value or '') for value in row[4:7]) if same else None
         text = str(row[0] or '') if same else ''
+        prefer_head = item.get("kind") == "changelog"
+        # A long document is marked as a stretch around the query, not from
+        # its first line: the head of a chronological document is outside it.
+        # Prefer the full unmarked image the same statement returned.
+        image = item.get('_indexed_policy_image')
+        head_text = str(image[2]) if image and len(image) > 2 else ''
+        quote_text = head_text if prefer_head and head_text else text
         section = (
-            quoted_section(text, str(item.get("title") or ""), weights) if text else None
+            quoted_section(quote_text, str(item.get("title") or ""), weights,
+                           prefer_head=prefer_head) if quote_text else None
         )
         snippet = (
-            excerpt_window(section["units"], SNIPPET_WINDOW_CHARS, weights)
+            excerpt_window(section["units"], SNIPPET_WINDOW_CHARS, weights,
+                           prefer_head=prefer_head)
             if section is not None
             # No prose at all, only headings: still never the frontmatter.
             else _body_snippet(_unmarked(text))[:SNIPPET_WINDOW_CHARS]
@@ -7861,7 +8115,11 @@ def retrieve(
     candidates, diagnostics = _candidates(connection, query, max(20, limit * 10), trace=trace)
     # Recorded history has its own search over the whole request: events and
     # local episodes share one slot beside the changelog's.
-    history = history_query(connection, query if history_text is None else history_text)
+    request_text = query if history_text is None else history_text
+    request_tickets = _request_tickets(request_text, task)
+    history = history_query(connection, request_text)
+    if history is not None:
+        history["tickets"] = request_tickets
     event_candidates, episode_candidates = (
         _history_candidates(connection, history, trace=trace) if history else ([], [])
     )
@@ -7881,7 +8139,10 @@ def retrieve(
     # again keeps fresh knowledge of equal fit ahead of it. Stable, so
     # nothing else moves.
     filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
-    chosen_event, history_excluded = _best_history_event(repository, event_candidates, config, trace=trace)
+    exact_events = [item for item in event_candidates if item.get("_ticket_match")]
+    chosen_event, history_excluded = _best_history_event(
+        repository, exact_events if exact_events else event_candidates, config, trace=trace
+    )
     filter_excluded.extend(history_excluded)
     history_episode: list[dict[str, Any]] = []
     if episode_candidates and (
@@ -7950,6 +8211,11 @@ def retrieve(
     # Related knowledge fills remaining capacity after direct matches and
     # explicit paths; provenance alone never gives it priority over them.
     filtered.extend(graph_candidates)
+    filtered, ticket_excluded = _ticket_filter(
+        filtered, request_tickets, connection=connection, repository=repository,
+        request_text=request_text,
+    )
+    filter_excluded.extend(ticket_excluded)
     # The history search's event goes through the same conflict expansion,
     # exclusions and budget as everything else, ahead in the budget queue.
     filtered = [*chosen_event, *filtered]

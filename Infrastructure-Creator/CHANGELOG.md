@@ -4,6 +4,24 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime quotes a changelog's newest entry — 2026-10-19
+
+- memory-seed carries the shared runtime's changelog head excerpt: a document
+  of kind `changelog` quotes the first section that has a body and that
+  section's opening, filling from the next sentence, instead of a window its
+  shared words picked in an older entry. Generated projects get the same
+  newest-release context the editions deliver.
+- memory-seed also carries the selection fixes: a name-shaped term shared by
+  more than three documents no longer admits a distinctive match on that word
+  alone, a ticket-anchored event can clear the history floor while an
+  ordinary-word match keeps the strict one, and the history slot prefers the
+  event that names the request's ticket. A chunk or finding that names only
+  another ticket is withheld, a changelog is kept when the request names it
+  or it names the request's ticket, and the working task supplies the ticket
+  when the request does not.
+- The model-facing policy lock was regenerated for the two changed asset
+  files (`memory-bank/scripts/context.py` and `context_retrieval.py`).
+
 ### Recent files in generated projects — 2026-10-18
 
 - hook-forge tells generated Stop hooks to hand `turn` the validated
