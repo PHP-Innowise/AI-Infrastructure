@@ -10,6 +10,10 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   transcript path, as the editions' hooks now do, and memory-seed carries the
   runtime that keeps the project's recently read and changed files for the
   capsule's `recent files:` line.
+- memory-seed carries the runtime's review fixes for that line: shell
+  commands read with their quoting, redirections, `cd` and PowerShell; a turn
+  started by a slash command or a task notification kept as its own; task
+  files the line leaves out counted in the compaction line.
 
 ### Generated projects on native Windows — 2026-10-16
 

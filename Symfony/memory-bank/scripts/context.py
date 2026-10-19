@@ -3180,6 +3180,8 @@ def assemble_capsule(
         if source_notices:
             result['source_notices'] = source_notices
         result.setdefault("query_source", query_source)
+        # The Stop hook keeps the recent files in either mode.
+        attach_recent_files(connection, repository, result)
         result = enforce_capsule_budget(result)
         if delivery_admission is not None:
             delivery_admission()
@@ -3780,22 +3782,24 @@ def _whole_paths(label: str, paths: list[str], limit: int = RENDERED_LINE_LIMIT)
     return kept
 
 
-def recent_files_line(
-    project: list[str], task_files: list[str]
-) -> tuple[Optional[str], int, int]:
+def recent_files_line(project: list[str], task_files: list[str]) -> tuple[Optional[str], int]:
     """The rendered "recent files" line, newest first: the project's recent
     files, then the task's changed files they do not name, ten at most and
-    whole paths only. Returns the line, how many paths it shows and how many
-    it meant to show."""
+    whole paths only. Returns the line and how many files it leaves out, for
+    the compaction line: every one of the task's changed files it does not
+    show counts, a file the project's pushed out of the ten included -
+    otherwise the task's own state shrank with nothing to say so."""
     candidates = list(dict.fromkeys(project))
     for path in reversed(task_files):
         if path not in candidates:
             candidates.append(path)
     candidates = candidates[:RECENT_FILES_LIMIT]
     kept = _whole_paths("recent files: ", candidates, RECENT_FILES_LINE_LIMIT)
+    shown = set(kept)
+    omitted = sum(1 for path in dict.fromkeys([*candidates, *task_files]) if path not in shown)
     if not kept:
-        return None, 0, len(candidates)
-    return "recent files: " + ", ".join(kept), len(kept), len(candidates)
+        return None, omitted
+    return "recent files: " + ", ".join(kept), omitted
 
 
 def working_state_lines(capsule: dict[str, object]) -> list[str]:
@@ -3848,8 +3852,7 @@ def rendered_working_state(
     if project:
         # The project's recent files lead; the task's own changed files
         # follow where the project's do not already name them.
-        line, shown, wanted = recent_files_line(project, files)
-        cuts["working_files"] = wanted - shown
+        line, cuts["working_files"] = recent_files_line(project, files)
         if line:
             lines.append(line)
     elif files:
@@ -4241,10 +4244,9 @@ def _render_capsule(
     if working is None and capsule.get("recent_files"):
         # Before the task is recorded - a new branch, a closed task - the
         # project still says where the work was.
-        line, shown, wanted = recent_files_line(
+        line, cuts["working_files"] = recent_files_line(
             [path for path in capsule["recent_files"] if isinstance(path, str)], []
         )
-        cuts["working_files"] = wanted - shown
         if line:
             head.append(line)
     if capsule.get("kind") == "warming" and not capsule.get("task_closed"):
@@ -5957,85 +5959,327 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
     return allowed, excluded
 
-# What one shell segment does to the files it names. Measured reads: a turn's
+# What one shell command does to the files it names. Measured reads: a turn's
 # files were named far more often through cat, sed -n, grep and git diff than
-# through the Read tool. A segment that only runs something names none.
+# through the Read tool. A command that only runs something names none.
 _SHELL_READ_VERBS = frozenset((
     "cat", "head", "tail", "sed", "awk", "nl", "less", "more", "bat", "grep", "egrep",
     "fgrep", "rg", "ag", "ack", "wc", "diff", "cmp", "jq", "yq", "xxd", "od", "strings",
     "cut", "sort", "uniq", "column",
 ))
-_SHELL_WRITE_VERBS = frozenset(("tee", "cp", "mv", "rm", "touch", "truncate", "chmod", "ln", "perl"))
+# Every file these name is changed. sed and perl change files only in place
+# (-i); a copy or a move changes only its last operand and reads the others.
+_SHELL_WRITE_VERBS = frozenset(("tee", "rm", "touch", "truncate", "chmod"))
+_SHELL_COPY_VERBS = frozenset(("cp", "ln", "install", "mv"))
+# Codex runs PowerShell on native Windows, and through it cmd.exe: cmdlets,
+# their aliases and the cmd commands, matched without case. The POSIX names
+# above are PowerShell aliases too.
+_POWERSHELL_READ_VERBS = frozenset(("get-content", "gc", "type", "select-string", "sls", "format-hex", "findstr"))
+_POWERSHELL_WRITE_VERBS = frozenset((
+    "set-content", "sc", "add-content", "ac", "clear-content", "clc", "out-file", "new-item", "ni",
+    "remove-item", "ri", "del", "erase", "tee-object",
+))
+_POWERSHELL_COPY_VERBS = frozenset((
+    "copy-item", "copy", "cpi", "move-item", "move", "mi", "rename-item", "rni", "ren",
+))
+# Commands that run the command after them, their options, and the commands
+# that move the directory later words are relative to.
+_SHELL_WRAPPERS = frozenset(("sudo", "time", "nice", "nohup", "exec", "command", "env", "xargs", "timeout"))
+_SHELL_DIRECTORY_VERBS = frozenset(("cd", "pushd", "chdir", "set-location", "sl", "push-location"))
 _GIT_READ_SUBCOMMANDS = frozenset(("show", "diff", "log", "blame", "grep", "cat-file"))
 _GIT_WRITE_SUBCOMMANDS = frozenset((
     "add", "commit", "mv", "rm", "checkout", "restore", "apply", "stash", "reset", "switch",
 ))
-_SHELL_SEGMENT_SPLIT = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
-_SHELL_REDIRECT_TARGET = re.compile(r"(?<![<>&\d])>{1,2}\s*([^\s;|&]+)")
+# The characters of the operators that separate commands and redirect them. A
+# command used to be split on `|` and `;` as text, so a quoted grep
+# alternation, sed script or jq filter cut the command in two and its file
+# was never named: `rg "a|b" src/x.php` read nothing.
+_SHELL_PUNCTUATION = "();<>|&\n"
+# Redirections, by what the word after them is: a file written, a file read,
+# or what to pass over - a here-document delimiter, a here-string, and the
+# descriptor of `>&2`, which `>&file` writes instead.
+_SHELL_WRITE_REDIRECTS = frozenset((">", ">>", ">|", "&>", "&>>"))
+_SHELL_READ_REDIRECTS = frozenset(("<", "<>"))
+_SHELL_SKIPPED_REDIRECTS = frozenset(("<<", "<<-", "<<<"))
+_SHELL_DUPLICATIONS = frozenset((">&", "<&"))
+_SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_DURATION = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+# perl edits in place under -i, alone or after argument-free switches
+# (-pi, -0pi, -i.bak); -Mstrict and -I are not it.
+_PERL_IN_PLACE = re.compile(r"-[0-9pnlaswWXtTUc]*i.*")
+_HEREDOC_OPERATOR = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+_POSIX_SHELLS = frozenset(("bash", "sh", "zsh", "dash"))
+_WINDOWS_DIRECTORY = re.compile(r"^[A-Za-z]:[\\/]")
 _PATCH_FILE_LINE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$", re.M)
 _RECENT_RUNTIME_OWNED = re.compile(rf"^project-brain/({'|'.join(TURN_RUNTIME_DIRECTORIES)})/")
 
 
-def _shell_segment_kind(words: list[str]) -> str:
-    """read, write or other: what one shell segment does to its files."""
-    words = [word for word in words if not re.match(r"^[A-Z_][A-Z0-9_]*=", word)]
-    while words and words[0] in ("sudo", "time", "nice", "command", "env", "xargs", "timeout"):
-        words = words[1:]
-        while words and (words[0].startswith("-") or re.fullmatch(r"\d+[smh]?", words[0])):
-            words = words[1:]
+def _without_heredoc_bodies(command: str) -> str:
+    """The command with each here-document's body left out: data, not commands.
+
+    A delimiter whose closing line never comes is text inside a quoted string,
+    and nothing after it is left out."""
+    lines = command.split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for match in _HEREDOC_OPERATOR.finditer(line):
+            strip_tabs, delimiter = match.group(1) == "-", match.group(3)
+            end = next(
+                (number for number in range(index, len(lines))
+                 if (lines[number].lstrip("\t") if strip_tabs else lines[number]) == delimiter),
+                None,
+            )
+            if end is not None:
+                index = end + 1
+    return "\n".join(kept)
+
+
+def _shell_tokens(command: str, *, posix: bool) -> list[tuple[str, bool]]:
+    """The words and operators of a command, as (text, is_operator).
+
+    Quoting keeps a `|`, `;` or `>` inside an argument - a grep alternation,
+    a sed or jq script, `cut -d '|'` - part of the word, and a newline
+    separates commands. A quote left open closes at the end. ``posix=False``
+    reads PowerShell and cmd, where a backslash is a path separator."""
+    tokens: list[tuple[str, bool]] = []
+    word, operator = "", ""
+    in_word = False
+    quote: Optional[str] = None
+    index = 0
+
+    def end_word() -> None:
+        nonlocal word, in_word
+        if in_word:
+            tokens.append((word, False))
+        word, in_word = "", False
+
+    def end_operator() -> None:
+        nonlocal operator
+        if operator:
+            tokens.append((operator, True))
+        operator = ""
+
+    while index < len(command):
+        char = command[index]
+        following = command[index + 1] if index + 1 < len(command) else ""
+        index += 1
+        if quote is not None:
+            if char == quote:
+                quote = None
+            elif posix and quote == '"' and char == "\\" and following in '$`"\\\n':
+                word += following if following != "\n" else ""
+                index += 1
+            else:
+                word += char
+            continue
+        if posix and char == "\\":
+            end_operator()
+            if following != "\n":
+                word, in_word = word + following, True
+            index += 1
+        elif char in "'\"":
+            end_operator()
+            quote, in_word = char, True
+        elif char in _SHELL_PUNCTUATION:
+            end_word()
+            operator += char
+        elif char in " \t\r":
+            end_word()
+            end_operator()
+        else:
+            end_operator()
+            word, in_word = word + char, True
+    end_word()
+    end_operator()
+    return tokens
+
+
+def _shell_command_files(
+    words: list[str], base: str, dialect: str
+) -> tuple[Optional[str], list[tuple[str, bool, str]]]:
+    """What one command does: the directory a `cd` moves to, else None, and
+    (word, changed, directory) for the words that may name a file it reads
+    or changes."""
+    words = list(words)
+    fold = (lambda word: word) if dialect == "sh" else (lambda word: word.lower())
+
+    def drop_assignments() -> None:
+        while words and _SHELL_ASSIGNMENT.match(words[0]):
+            words.pop(0)
+
+    drop_assignments()
+    while words and fold(words[0]) in _SHELL_WRAPPERS:
+        words.pop(0)
+        while words and (words[0].startswith("-") or _SHELL_DURATION.fullmatch(words[0])):
+            words.pop(0)
+        drop_assignments()
     if not words:
-        return "other"
-    verb = words[0].rsplit("/", 1)[-1]
+        return None, []
+    verb = fold(words[0].replace("\\", "/").rsplit("/", 1)[-1])
+    if dialect != "sh" and verb.endswith(".exe"):
+        verb = verb[:-4]
+    operands = [word for word in words[1:] if not word.startswith("-")]
+    if verb in _SHELL_DIRECTORY_VERBS:
+        target = operands[0].strip("'\"") if operands else "~"
+        if target == "-" or "$" in target or "`" in target:
+            # Somewhere only the shell knows: the words stay where they were.
+            return base, []
+        target = os.path.expanduser(target)
+        return os.path.normpath(target if os.path.isabs(target) else os.path.join(base, target)), []
     if verb == "git":
-        rest = words[1:]
+        rest, directory = words[1:], base
         while rest and rest[0].startswith("-"):
+            if rest[0] == "-C" and len(rest) > 1:
+                value = os.path.expanduser(rest[1].strip("'\""))
+                directory = value if os.path.isabs(value) else os.path.join(directory, value)
             rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
         subcommand = rest[0] if rest else ""
-        if subcommand in _GIT_READ_SUBCOMMANDS:
-            return "read"
-        return "write" if subcommand in _GIT_WRITE_SUBCOMMANDS else "other"
-    if verb == "sed" and any(word.startswith("-i") for word in words[1:]):
-        return "write"
-    if verb in _SHELL_READ_VERBS:
-        return "read"
-    return "write" if verb in _SHELL_WRITE_VERBS else "other"
+        if subcommand in _GIT_READ_SUBCOMMANDS or subcommand in _GIT_WRITE_SUBCOMMANDS:
+            changed = subcommand in _GIT_WRITE_SUBCOMMANDS
+            return None, [(word, changed, directory) for word in rest[1:]]
+        return None, []
+    if verb == "sed":
+        in_place = any(word.startswith(("-i", "--in-place")) for word in words[1:])
+        return None, [(word, in_place, base) for word in words[1:]]
+    if verb == "perl":
+        if any(_PERL_IN_PLACE.fullmatch(word) for word in words[1:]):
+            return None, [(word, True, base) for word in words[1:]]
+        return None, []
+    if verb in _SHELL_COPY_VERBS or (dialect != "sh" and verb in _POWERSHELL_COPY_VERBS):
+        if any(word in ("-t", "--target-directory") or word.startswith("--target-directory=")
+               for word in words[1:]):
+            return None, [(word, False, base) for word in operands]
+        last = len(operands) - 1
+        return None, [(word, index == last, base) for index, word in enumerate(operands)]
+    if verb in _SHELL_WRITE_VERBS or (dialect != "sh" and verb in _POWERSHELL_WRITE_VERBS):
+        return None, [(word, True, base) for word in words[1:]]
+    if verb in _SHELL_READ_VERBS or (dialect != "sh" and verb in _POWERSHELL_READ_VERBS):
+        return None, [(word, False, base) for word in words[1:]]
+    return None, []
 
 
-def _shell_file_words(command: str) -> list[tuple[str, bool]]:
-    """(word, changed) for the words of a shell command that may name a file
-    it reads or changes."""
-    found: list[tuple[str, bool]] = []
-    for segment in _SHELL_SEGMENT_SPLIT.split(command):
-        if not segment.strip():
+def _shell_file_words(command: str, base: str, *, dialect: str = "sh") -> list[tuple[str, bool, str]]:
+    """(word, changed, directory) for the words of a shell command that may
+    name a file it reads or changes, each with the directory it is relative to.
+
+    A `cd` moves the words of the commands after it, up to the parenthesis
+    that closes around it; `git -C` moves the words of its own command. A
+    redirection's file is named whatever runs: `php x.php > out.json` writes
+    out.json. ``dialect`` is "sh", or "powershell" for PowerShell and cmd."""
+    found: list[tuple[str, bool, str]] = []
+    if dialect == "sh":
+        command = _without_heredoc_bodies(command)
+    words: list[str] = []
+    # The command a parenthesis interrupts - `$(...)`, `<(...)`, a subshell -
+    # and its directory, resumed at the closing one.
+    outer: list[tuple[str, list[str]]] = []
+    # What the next word is, after a redirection: "write", "read", "skip",
+    # or "duplicate" - a descriptor to pass over, or else a file written.
+    pending: Optional[str] = None
+
+    def finish() -> None:
+        nonlocal base, words
+        if words:
+            moved, named = _shell_command_files(words, base, dialect)
+            found.extend(named)
+            if moved is not None:
+                base = moved
+        words = []
+
+    def close() -> None:
+        nonlocal base, words
+        finish()
+        if outer:
+            base, words = outer.pop()
+
+    for token, is_operator in _shell_tokens(command, posix=dialect == "sh"):
+        if not is_operator:
+            if pending is None:
+                words.append(token)
+            elif pending == "write" or (pending == "duplicate" and not (token.isdigit() or token == "-")):
+                found.append((token, True, base))
+            elif pending == "read":
+                found.append((token, False, base))
+            pending = None
             continue
-        match = _SHELL_REDIRECT_TARGET.search(segment)
-        target = match.group(1).strip("'\"") if match else None
-        try:
-            words = shlex.split(segment, comments=False, posix=True)
-        except ValueError:
-            words = segment.split()
-        kind = _shell_segment_kind(words)
-        for word in words:
-            changed = kind == "write" or (target is not None and word.strip("'\"") == target)
-            if kind != "other" or changed:
-                found.append((word, changed))
+        operator = token.replace("(", "").replace(")", "")
+        redirect = (
+            "write" if operator in _SHELL_WRITE_REDIRECTS
+            else "read" if operator in _SHELL_READ_REDIRECTS
+            else "skip" if operator in _SHELL_SKIPPED_REDIRECTS
+            else "duplicate" if operator in _SHELL_DUPLICATIONS
+            else None
+        )
+        if redirect is not None and "(" not in token:
+            for _ in range(token.count(")")):
+                close()
+            if words and words[-1].isdigit():
+                # The descriptor of `2>`, not an argument.
+                words.pop()
+            pending = redirect
+            continue
+        # Anything else separates commands - ; & && | || |& a newline - or
+        # opens and closes a parenthesis; `<(` and `>(` are a command too.
+        pending = None
+        for char in token:
+            if char == "(":
+                outer.append((base, words))
+                words = []
+            elif char == ")":
+                close()
+            elif char in ";|&\n":
+                finish()
+    finish()
     return found
 
 
-def _shell_text(command: object) -> Optional[str]:
-    """A recorded shell command as one script: Codex records an argv."""
+def _shell_script(command: object, workdir: Optional[str] = None) -> Optional[tuple[str, str]]:
+    """(dialect, script) for a recorded shell command. Codex records an argv
+    - a `bash -lc` script, or on native Windows a PowerShell or cmd one - or
+    one command line, which on Windows its PowerShell runs."""
     if isinstance(command, str):
-        return command
-    if isinstance(command, list) and command and all(isinstance(word, str) for word in command):
-        if (len(command) >= 3 and command[0].rsplit("/", 1)[-1] in ("bash", "sh", "zsh")
-                and command[1] in ("-c", "-lc")):
-            return command[-1]
-        return shlex.join(command)
-    return None
+        windows = isinstance(workdir, str) and _WINDOWS_DIRECTORY.match(workdir)
+        return ("powershell" if windows else "sh"), command
+    if not (isinstance(command, list) and command and all(isinstance(word, str) for word in command)):
+        return None
+    program = command[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if program.endswith(".exe"):
+        program = program[:-4]
+    flags = [word.lower() for word in command]
+    if program in _POSIX_SHELLS and len(command) >= 3 and command[1] in ("-c", "-lc"):
+        return "sh", command[-1]
+    if program in ("powershell", "pwsh"):
+        for flag in ("-command", "-c"):
+            if flag in flags[1:]:
+                return "powershell", " ".join(command[flags.index(flag, 1) + 1:])
+        return None
+    if program == "cmd":
+        return ("powershell", " ".join(command[flags.index("/c", 1) + 1:])) if "/c" in flags[1:] else None
+    return "sh", shlex.join(command)
+
+
+# What a host writes into the conversation as the user without starting a
+# turn: an interruption marker, a local command's or the `!` shell's output
+# and the caveat beside it, and Codex's environment and instructions. Any
+# other message starts the turn the Stop hook ends - a prompt, and also text
+# that opens with a tag: a slash command (`<command-name>`), pasted text
+# (`<pasted_content>`), a background task's `<task-notification>`. Taking
+# every `<` for the host's own text merged those turns into the one before,
+# and its files came back as the newest; on 400 recent Claude Code
+# transcripts 132 task notifications went on to call tools.
+_TRANSCRIPT_PASSIVE_PREFIXES = (
+    "[Request interrupted", "<local-command-stdout", "<local-command-stderr",
+    "<local-command-caveat", "<bash-stdout", "<bash-stderr",
+    "<environment_context", "<user_instructions",
+)
 
 
 def _transcript_prompt(record: dict[str, object]) -> bool:
-    """A person's prompt: where the transcript's latest turn begins."""
+    """A message that starts a turn: where the transcript's latest turn begins."""
     if record.get("type") == "user":
         if (record.get("isMeta") or record.get("toolUseResult")
                 or record.get("isCompactSummary") or record.get("isSidechain")):
@@ -6050,7 +6294,7 @@ def _transcript_prompt(record: dict[str, object]) -> bool:
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
         return (isinstance(content, str) and bool(content.strip())
-                and not content.lstrip().startswith(("<", "[Request interrupted")))
+                and not content.lstrip().startswith(_TRANSCRIPT_PASSIVE_PREFIXES))
     if record.get("type") == "response_item":
         payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
         if payload.get("type") != "message" or payload.get("role") != "user":
@@ -6059,7 +6303,7 @@ def _transcript_prompt(record: dict[str, object]) -> bool:
             part["text"] for part in payload.get("content") or []
             if isinstance(part, dict) and isinstance(part.get("text"), str)
         )
-        return bool(text.strip()) and not text.lstrip().startswith("<")
+        return bool(text.strip()) and not text.lstrip().startswith(_TRANSCRIPT_PASSIVE_PREFIXES)
     return False
 
 
@@ -6087,31 +6331,32 @@ def _transcript_calls(record: dict[str, object], root: str) -> list[tuple[str, d
             if payload.get("name") == "apply_patch":
                 calls.append(("apply_patch", {"patch": arguments.get("input")}, base))
             else:
-                text = _shell_text(arguments.get("cmd") or arguments.get("command"))
-                if text:
-                    calls.append(("Bash", {"command": text}, base))
+                script = _shell_script(arguments.get("cmd") or arguments.get("command"), arguments.get("workdir"))
+                if script:
+                    calls.append(("Bash", {"command": script[1], "dialect": script[0]}, base))
         elif kind == "local_shell_call":
             action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
             base = action.get("working_directory") if isinstance(action.get("working_directory"), str) else root
-            text = _shell_text(action.get("command"))
-            if text:
-                calls.append(("Bash", {"command": text}, base))
+            script = _shell_script(action.get("command"), action.get("working_directory"))
+            if script:
+                calls.append(("Bash", {"command": script[1], "dialect": script[0]}, base))
         elif kind == "custom_tool_call" and payload.get("name") == "apply_patch":
             calls.append(("apply_patch", {"patch": payload.get("input")}, root))
     return calls
 
 
-def _call_file_words(name: str, data: dict[str, object]) -> list[tuple[str, bool]]:
+def _call_file_words(name: str, data: dict[str, object], base: str) -> list[tuple[str, bool, str]]:
+    """(word, changed, directory) for what one tool call names."""
     if name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
         value = data.get("file_path") or data.get("notebook_path")
-        return [(value, True)] if isinstance(value, str) else []
+        return [(value, True, base)] if isinstance(value, str) else []
     if name in ("Read", "Grep"):
         value = data.get("file_path" if name == "Read" else "path")
-        return [(value, False)] if isinstance(value, str) else []
+        return [(value, False, base)] if isinstance(value, str) else []
     if name == "Bash" and isinstance(data.get("command"), str):
-        return _shell_file_words(data["command"])
+        return _shell_file_words(data["command"], base, dialect=str(data.get("dialect") or "sh"))
     if name == "apply_patch" and isinstance(data.get("patch"), str):
-        return [((update or moved).strip(), True) for update, moved in _PATCH_FILE_LINE.findall(data["patch"])]
+        return [((update or moved).strip(), True, base) for update, moved in _PATCH_FILE_LINE.findall(data["patch"])]
     return []
 
 
@@ -6213,8 +6458,8 @@ def transcript_turn_files(transcript: Optional[str], repository: Path) -> list[s
     read: list[str] = []
     for record in records[begin:]:
         for name, data, base in _transcript_calls(record, root):
-            for word, is_change in _call_file_words(name, data):
-                relative = _transcript_project_file(word, base, root)
+            for word, is_change, directory in _call_file_words(name, data, base):
+                relative = _transcript_project_file(word, directory, root)
                 if relative is not None and _recent_file_kept(relative):
                     (changed if is_change else read).append(relative)
     return _without_ignored(repository, list(dict.fromkeys(changed + read)))

@@ -48,6 +48,22 @@ edition's own files remain in that edition's changelog.
   the share of the needed files named rose from 31% to 54%. The reads came
   almost wholly through shell commands: the Read tool's paths alone named
   56%, no better than before.
+- Review fixes. A shell command is read with its quoting: split on `|` and
+  `;` as text, a quoted grep alternation, sed script or jq filter lost its
+  file (`rg "a|b" x.php`, `sed -n '1,20p;30,40p' x.php`). A redirection
+  names its file however it is written (`>out`, `&>out`, `>&out`,
+  `2>&1 >out`); `cd` and `git -C` move the words after them, a subshell's
+  `cd` ending with it; a here-document's body is data; `sed --in-place` and
+  `perl -pi` change their file, `cp` and `mv` only their last operand; and
+  Codex's PowerShell and cmd commands on native Windows are read. A turn now
+  starts at any user message but a local command's output: a slash command,
+  pasted text and a background task's `<task-notification>` (132 of 416 on
+  400 recent Claude Code transcripts went on to call tools) had joined the
+  turn before, whose files then came back as the newest. The task's changed
+  files the project's push off the line are counted in the compaction line
+  (they had gone without a word), and a lightweight capsule shows the line
+  too. `RecentFilesShellCommandTest` and `RecentProjectFilesTest` in
+  `project-brain/tests/test_runtime.py`.
 
 ### Excerpts grow into the capsule's room — 2026-10-17
 

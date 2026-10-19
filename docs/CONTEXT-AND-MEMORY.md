@@ -1851,6 +1851,14 @@ Claude Code turns ten such files named a file the agent then read or changed on
 75% of new sessions' first turns, against 58% for the task's five changed
 files; the reads came almost wholly through shell commands, not the Read tool.
 
+A command is read as the shell reads it: quoting keeps a `|` or `;` inside an
+argument (`rg "a|b" x.php`), a redirection names its file however it is
+written, `cd` and `git -C` move the words after them, a here-document's body
+is data, and Codex's PowerShell and cmd commands on native Windows are read
+too. The turn starts at the last user message that is not a local command's
+output - a prompt, a slash command, pasted text or a task notification. A task
+file the line leaves out is counted in the compaction line.
+
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.
 

@@ -13760,6 +13760,110 @@ class OrdinaryReceiptObservationTest(RuntimeHarness):
         self.assertEqual(retrieval.unknown_ordinary_receipt(), sink['ordinary_receipt'])
 
 
+class RecentFilesShellCommandTest(unittest.TestCase):
+    """The files a shell command reads or changes, as the recent files name them.
+
+    The command was split on `|` and `;` as text, so a quoted grep alternation
+    or sed script cut it in two and named no file; `>out` without a space, a
+    `cd` before the command, `cp`'s source and Codex's PowerShell on Windows
+    were missed or misread as well."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="recent-files-shell-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = os.path.realpath(self.temporary.name)
+        for name in ("src/Export.php", "src/Ledger.php", "var/report.json", "sub/Refund.php"):
+            path = Path(self.root, name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("<?php\n", encoding="utf-8")
+
+    def named(self, command: str, dialect: str = "sh") -> list[tuple[str, bool]]:
+        """(project file, changed) for what the command names, in order."""
+        named: list[tuple[str, bool]] = []
+        for word, changed, directory in context_cli._shell_file_words(command, self.root, dialect=dialect):
+            relative = context_cli._transcript_project_file(word, directory, self.root)
+            if relative is not None and (relative, changed) not in named:
+                named.append((relative, changed))
+        return named
+
+    def test_quoted_operators_stay_inside_their_argument(self) -> None:
+        for command in (
+            'rg -n "round|floor" src/Export.php',
+            "grep -E 'round|floor' src/Export.php",
+            "sed -n '1,20p;40,60p' src/Export.php",
+            "awk '{total += $2; print total}' src/Export.php",
+            "cut -d '|' -f1 src/Export.php",
+            "grep -c ';' src/Export.php",
+            "jq '.rows | length' src/Export.php",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual([("src/Export.php", False)], self.named(command))
+        self.assertEqual(
+            [("src/Export.php", False), ("src/Ledger.php", False)],
+            self.named("grep -n 'a|b' src/Export.php | head -5 && cat src/Ledger.php"),
+        )
+
+    def test_a_redirection_names_its_file_however_it_is_written(self) -> None:
+        for command in (
+            "php bin/report > var/report.json",
+            "php bin/report >var/report.json",
+            "php bin/report >>var/report.json 2>&1",
+            "php bin/report 2>&1 >var/report.json",
+            "php bin/report &>var/report.json",
+            "php bin/report >&var/report.json",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual([("var/report.json", True)], self.named(command))
+        self.assertEqual([], self.named("php bin/report 2>&1"))
+        self.assertEqual([("src/Export.php", False)], self.named("php -r 'echo 1;' < src/Export.php"))
+
+    def test_cd_and_git_c_move_the_words_after_them(self) -> None:
+        self.assertEqual([("sub/Refund.php", False)], self.named("cd sub && cat Refund.php"))
+        self.assertEqual([("sub/Refund.php", False)], self.named("cd sub\nsed -n '1,9p' Refund.php"))
+        self.assertEqual([("sub/Refund.php", False)], self.named("git -C sub diff Refund.php"))
+        # A subshell's cd ends with it: the second Refund.php is not there.
+        self.assertEqual(
+            [("sub/Refund.php", False)], self.named("(cd sub && cat Refund.php); cat Refund.php")
+        )
+        self.assertEqual(
+            [("src/Export.php", False), ("src/Ledger.php", False)],
+            self.named("diff <(git show HEAD:src/Export.php) src/Ledger.php"),
+        )
+
+    def test_what_a_command_changes_is_told_from_what_it_reads(self) -> None:
+        self.assertEqual([("src/Export.php", True)], self.named("sed --in-place 's/a/b/' src/Export.php"))
+        self.assertEqual([("src/Export.php", True)], self.named("sed -i.bak 's/a/b/' src/Export.php"))
+        self.assertEqual([("src/Export.php", False)], self.named("sed -n '1,5p' src/Export.php"))
+        self.assertEqual(
+            [("src/Export.php", False), ("src/Ledger.php", True)], self.named("cp src/Export.php src/Ledger.php")
+        )
+        self.assertEqual([("src/Export.php", True)], self.named("perl -pi -e 's/a/b/' src/Export.php"))
+        self.assertEqual([], self.named("perl -Mstrict src/Export.php"))
+        self.assertEqual([("src/Export.php", False)], self.named("LC_ALL=C lang=en cat src/Export.php"))
+
+    def test_a_here_document_is_data(self) -> None:
+        self.assertEqual(
+            [("src/Ledger.php", True), ("src/Export.php", False)],
+            self.named("cat > src/Ledger.php <<'EOF'\ncat sub/Refund.php\nEOF\ncat src/Export.php"),
+        )
+
+    def test_codex_powershell_and_cmd_on_windows(self) -> None:
+        for argv, expected in (
+            (["powershell.exe", "-Command", "Get-Content src/Export.php"], [("src/Export.php", False)]),
+            (["pwsh", "-NoProfile", "-Command", "Select-String -Path 'src/Export.php' -Pattern x; gc src/Ledger.php"],
+             [("src/Export.php", False), ("src/Ledger.php", False)]),
+            (["powershell.exe", "-Command", "Set-Content -Path var/report.json -Value 1"], [("var/report.json", True)]),
+            (["cmd.exe", "/c", "type src/Export.php"], [("src/Export.php", False)]),
+        ):
+            with self.subTest(argv=argv):
+                dialect, script = context_cli._shell_script(argv)
+                self.assertEqual("powershell", dialect)
+                self.assertEqual(expected, self.named(script, dialect))
+        # One command line from Codex on Windows runs in PowerShell.
+        self.assertEqual("powershell", context_cli._shell_script("gc src/Export.php", "C:\\work\\shop")[0])
+        self.assertEqual("sh", context_cli._shell_script("cat src/Export.php", "/work/shop")[0])
+
+
 class RecentProjectFilesTest(RuntimeHarness):
     """The project's recently read and changed files, from the host transcript
     the Stop hook names, as the next session's capsule shows them."""
@@ -13883,6 +13987,75 @@ class RecentProjectFilesTest(RuntimeHarness):
         transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
         self.assertEqual(3, self.turn(transcript)["recent_files"])
         self.assertEqual("recent files: src/Guard.php, src/Refund.php, src/Ledger.php", self.recent_line())
+
+    def test_codex_powershell_calls_name_their_files(self) -> None:
+        transcript = Path(self.temporary.name) / "windows-rollout.jsonl"
+        records = [
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                                                  "content": [{"type": "input_text", "text": "fix the refund"}]}},
+            {"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json.dumps({
+                "command": ["powershell.exe", "-Command", "Get-Content src/Refund.php | Select-String total"],
+                "workdir": str(self.repository)})}},
+        ]
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        self.assertEqual(1, self.turn(transcript)["recent_files"])
+        self.assertEqual("recent files: src/Refund.php", self.recent_line())
+
+    def test_a_turn_a_command_or_a_notification_starts_is_its_own(self) -> None:
+        # Claude Code writes a slash command, pasted text and a background
+        # task's notification as user messages that open with a tag. Each
+        # starts a turn; taken for the host's own text, they merged that turn
+        # into the one before and its files came back as the newest. A local
+        # command's output starts none.
+        writer = str(self.repository / "src" / "Writer.php")
+        for opening in (
+            "<command-message>checkpoint is running…</command-message>\n<command-name>/checkpoint</command-name>",
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+            "<pasted_content>Stack trace: ...</pasted_content>\nWhy does the export fail?",
+        ):
+            with self.subTest(opening=opening[:24]):
+                transcript = self.claude(
+                    self.prompt("look at the writer"),
+                    self.call("Read", {"file_path": writer}),
+                    self.prompt(opening),
+                    self.call("Bash", {"command": "cat src/Export.php"}),
+                )
+                self.assertEqual(1, self.turn(transcript)["recent_files"])
+        transcript = self.claude(
+            self.prompt("look at the writer"),
+            self.call("Read", {"file_path": writer}),
+            self.prompt("<local-command-stdout>Set model to opus</local-command-stdout>"),
+            self.call("Bash", {"command": "cat src/Export.php"}),
+        )
+        self.assertEqual(2, self.turn(transcript)["recent_files"])
+
+    def test_task_files_the_recent_files_push_out_are_counted(self) -> None:
+        # Ten files the latest turn read fill the line, and the task's own
+        # changed file no longer shows: the compaction line has to say so, or
+        # the task's state reads as complete.
+        self.start("TASK-RECENT")
+        update = self.run_cli("update", "--task-id", "TASK-RECENT", "--revision", "auto",
+                              "--progress", "Export rounding traced.", "--file", "src/Writer.php", "--json")
+        self.assertEqual(0, update.returncode, update.stderr)
+        names = [f"src/Read{index}.php" for index in range(10)]
+        for name in names:
+            (self.repository / name).write_text("<?php\n", encoding="utf-8")
+        self.turn(self.claude(self.prompt("survey the readers"), self.call("Bash", {"command": "cat " + " ".join(names)})))
+        rendered = self.run_cli("refresh", "--task-id", "TASK-RECENT", "--query", "continue the export",
+                                "--session-id", "next-session", "--ephemeral")
+        self.assertIn(rendered.returncode, (0, 1), rendered.stderr)
+        lines = rendered.stdout.splitlines()
+        self.assertIn("recent files: " + ", ".join(names), lines)
+        compaction = next((line for line in lines if line.startswith("compaction: ")), "")
+        self.assertIn("1 working file(s)", compaction)
+
+    def test_a_lightweight_capsule_shows_them_too(self) -> None:
+        self.turn(self.claude(self.prompt("compare"),
+                              self.call("Bash", {"command": "diff src/Export.php src/Ledger.php"})))
+        rendered = self.run_cli("--mode", "lightweight", "refresh", "--task-id", "TASK-RECENT",
+                                "--query", "continue the export", "--session-id", "light-session", "--ephemeral")
+        self.assertIn(rendered.returncode, (0, 1), rendered.stderr)
+        self.assertIn("recent files: src/Export.php, src/Ledger.php", rendered.stdout.splitlines())
 
     def test_an_unreadable_transcript_never_fails_the_turn(self) -> None:
         broken = Path(self.temporary.name) / "broken.jsonl"
