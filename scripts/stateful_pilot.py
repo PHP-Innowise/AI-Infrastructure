@@ -71,11 +71,16 @@ class StatefulExcerptPilot:
         self.active = False
 
     def section(self, connection: sqlite3.Connection, item: dict[str, Any],
-                marked: str, weights: Any = None, *, query: str = "") -> Any:
-        if (self.active and connection is self.connection and query == self.query
-                and item.get("path") in self.prepared):
+                marked: str, weights: Any = None, *, query: str = "",
+                prefer_head: bool = False) -> Any:
+        # A changelog is quoted from its newest entry by its kind, not by the
+        # query (`prefer_head`): no scored section replaces that. The flag
+        # goes on only when set, so a runtime without it still takes the call.
+        if (self.active and not prefer_head and connection is self.connection
+                and query == self.query and item.get("path") in self.prepared):
             return copy.deepcopy(self.prepared[item["path"]])
-        return self.original_section(connection, item, marked, weights, query=query)
+        head = {"prefer_head": True} if prefer_head else {}
+        return self.original_section(connection, item, marked, weights, query=query, **head)
 
     def options(self, connection: sqlite3.Connection, item: dict[str, Any],
                 marked: str, weights: dict[str, float], query: str) -> list[dict[str, Any]]:

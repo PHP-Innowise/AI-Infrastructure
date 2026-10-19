@@ -345,6 +345,41 @@ class StatefulTests(unittest.TestCase):
         self.assertEqual(1, len(manifests))
 
 
+class ChangelogHeadPilotTests(unittest.TestCase):
+    """A changelog keeps the runtime's head-first quote under the pilot.
+
+    The runtime started passing `prefer_head` to `excerpt_section`, and the
+    pilot's stand-in for it did not take the argument: every refresh under
+    the pilot failed with a TypeError."""
+
+    def test_the_head_choice_reaches_the_runtime_and_beats_a_scored_section(self):
+        received = []
+
+        def excerpt_section(connection, item, marked, weights=None, *, query="", prefer_head=False):
+            received.append(prefer_head)
+            return {"shown": "head" if prefer_head else "lexical"}
+
+        seam = SimpleNamespace(retrieve=lambda *a, **k: None, excerpt_section=excerpt_section)
+        pilot = StatefulExcerptPilot(seam, seam, FakeScorer())
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        pilot.active, pilot.connection, pilot.query = True, connection, "release notes"
+        pilot.prepared = {"CHANGELOG.md": {"shown": "scored"}}
+        changelog = {"path": "CHANGELOG.md", "kind": "changelog"}
+        self.assertEqual({"shown": "head"}, pilot.section(
+            connection, changelog, "text", query="release notes", prefer_head=True))
+        self.assertEqual({"shown": "scored"}, pilot.section(connection, changelog, "text", query="release notes"))
+        self.assertEqual([True], received)
+
+    def test_a_runtime_without_the_head_choice_still_takes_the_call(self):
+        def excerpt_section(connection, item, marked, weights=None, *, query=""):
+            return {"shown": "lexical"}
+
+        seam = SimpleNamespace(retrieve=lambda *a, **k: None, excerpt_section=excerpt_section)
+        pilot = StatefulExcerptPilot(seam, seam, FakeScorer())
+        self.assertEqual({"shown": "lexical"}, pilot.section(None, {"path": "docs/a.md"}, "text", query="q"))
+
+
 class CitationAndPrivacyTests(unittest.TestCase):
     def setUp(self):
         self.fixture = runtime_fixtures.LinkedMemoryExcerptTest("test_linked_rule_survives_filename_matches_in_sources")

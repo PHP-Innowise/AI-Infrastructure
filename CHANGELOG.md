@@ -112,6 +112,11 @@ edition's own files remain in that edition's changelog.
   like for like. The 15 ungraded documents were graded in the local corpus by
   an agent, not a person; fresh human labels for the delivered set remain the
   open measurement.
+- The excerpt pilot's stand-in for `excerpt_section`
+  (`scripts/stateful_pilot.py`) takes `prefer_head` and leaves a changelog's
+  head to the runtime instead of a scored section: without it every refresh
+  under the pilot failed with a TypeError, and the memory evaluation stand
+  went red. `tests/test_memory_onnx_pilot.py::ChangelogHeadPilotTests`.
 
 ### Recent files from what the agent read and changed — 2026-10-18
 
