@@ -1857,7 +1857,10 @@ written, `cd` and `git -C` move the words after them, a here-document's body
 is data, and Codex's PowerShell and cmd commands on native Windows are read
 too. The turn starts at the last user message that is not a local command's
 output - a prompt, a slash command, pasted text or a task notification. A task
-file the line leaves out is counted in the compaction line.
+file the line leaves out is counted in the compaction line. The transcript is
+read after the turn is recorded, for a second at most; each checkout of an
+attached project keeps its own list; and excerpt growth leaves the line its
+720 characters.
 
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.

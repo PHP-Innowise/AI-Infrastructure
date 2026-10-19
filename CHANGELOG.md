@@ -64,6 +64,17 @@ edition's own files remain in that edition's changelog.
   (they had gone without a word), and a lightweight capsule shows the line
   too. `RecentFilesShellCommandTest` and `RecentProjectFilesTest` in
   `project-brain/tests/test_runtime.py`.
+- `turn` reads the transcript after the turn's own record, flush and
+  promotion, and stops reading its calls after a second, keeping the files
+  found: read first, a long transcript on a slow disk could run the Stop
+  hook out of its five seconds and lose the checkpoint itself. Each checkout
+  of an attached project keeps its own recent files (an installed project
+  keeps them in its checkout's database, as before): attached checkouts
+  share one state, and parallel sessions in two worktrees named each other's
+  files. Excerpt growth reserves the whole `recent files:` line while the
+  capsule carries one, so a grown excerpt no longer makes the renderer cut
+  the later ones. `test_attached.py::AttachedRecentFilesTest`,
+  `RecentFilesExcerptRoomTest`.
 
 ### Excerpts grow into the capsule's room — 2026-10-17
 

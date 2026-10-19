@@ -13864,6 +13864,32 @@ class RecentFilesShellCommandTest(unittest.TestCase):
         self.assertEqual("sh", context_cli._shell_script("cat src/Export.php", "/work/shop")[0])
 
 
+class RecentFilesExcerptRoomTest(unittest.TestCase):
+    """Excerpt growth leaves the `recent files:` line its room.
+
+    The growth reserve was set before that line could fill 720 characters;
+    growth that counted on the room made the renderer cut the later excerpts
+    to pay for it."""
+
+    @staticmethod
+    def excerpt(text: str, limit: int):
+        value = context_cli.Excerpt(text)
+        value.limit, value.cut = limit, True
+        return value
+
+    def test_the_line_is_reserved_whole_while_the_capsule_carries_it(self) -> None:
+        excerpts = {"docs/ledger.md": self.excerpt("a" * 790, 800), "docs/refund.md": self.excerpt("b" * 590, 600)}
+        capsule = {"semantic": [{"path": "docs/ledger.md"}, {"path": "docs/refund.md"}], "episodic": []}
+
+        def grown(limits: dict[str, int]) -> int:
+            return sum(limit - excerpts[path].limit for path, limit in limits.items())
+
+        without = context_cli._excerpt_growth(capsule, excerpts)
+        beside = context_cli._excerpt_growth({**capsule, "recent_files": ["src/Export.php"]}, excerpts)
+        self.assertGreater(grown(without), context_cli.RECENT_FILES_LINE_LIMIT)
+        self.assertEqual(context_cli.RECENT_FILES_LINE_LIMIT + 1, grown(without) - grown(beside))
+
+
 class RecentProjectFilesTest(RuntimeHarness):
     """The project's recently read and changed files, from the host transcript
     the Stop hook names, as the next session's capsule shows them."""
@@ -14048,6 +14074,33 @@ class RecentProjectFilesTest(RuntimeHarness):
         self.assertIn("recent files: " + ", ".join(names), lines)
         compaction = next((line for line in lines if line.startswith("compaction: ")), "")
         self.assertIn("1 working file(s)", compaction)
+
+    def test_the_turn_is_recorded_before_its_transcript_is_read(self) -> None:
+        # The Stop hook's timeout kills `turn` outright, and what it had
+        # committed stays. Read first, a transcript that ran the hook out of
+        # time cost the turn's own checkpoint.
+        transcript = self.claude(self.prompt("fix the export"),
+                                 self.call("Read", {"file_path": str(self.repository / "src/Ledger.php")}))
+        with mock.patch.object(context_cli, "transcript_turn_files", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_main("turn", "--task-id", "TASK-RECENT", "--transcript", str(transcript), "--json")
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        self.addCleanup(connection.close)
+        self.assertEqual(1, len(context_cli.pending_turn_deltas(connection, "TASK-RECENT")))
+
+    def test_reading_a_turn_stops_at_its_time_budget(self) -> None:
+        transcript = self.claude(
+            self.prompt("survey"),
+            self.call("Read", {"file_path": str(self.repository / "src/Export.php")}),
+            self.call("Read", {"file_path": str(self.repository / "src/Ledger.php")}),
+        )
+        # The budget starts at 0.0; the first call is read at 0.5, and the
+        # clock stands past the budget for the second.
+        readings = [0.0, 0.5]
+        with mock.patch.object(context_cli.time, "monotonic",
+                               side_effect=lambda: readings.pop(0) if readings else 2.0):
+            files = context_cli.transcript_turn_files(str(transcript), self.repository)
+        self.assertEqual(["src/Export.php"], files)
 
     def test_a_lightweight_capsule_shows_them_too(self) -> None:
         self.turn(self.claude(self.prompt("compare"),

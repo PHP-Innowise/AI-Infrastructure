@@ -13,7 +13,9 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - memory-seed carries the runtime's review fixes for that line: shell
   commands read with their quoting, redirections, `cd` and PowerShell; a turn
   started by a slash command or a task notification kept as its own; task
-  files the line leaves out counted in the compaction line.
+  files the line leaves out counted in the compaction line. The transcript
+  is read after the turn's record and within a second, an attached checkout
+  keeps its own recent files, and excerpt growth leaves the line its room.
 
 ### Generated projects on native Windows — 2026-10-16
 

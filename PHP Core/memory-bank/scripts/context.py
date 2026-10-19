@@ -254,6 +254,10 @@ RECENT_FILES_LINE_LIMIT = 720
 RECENT_FILES_STATE_KEY = "recent_files"
 # The end of the transcript the Stop hook reads for its turn.
 RECENT_FILES_TRANSCRIPT_BYTES = 4 * 1024 * 1024
+# What reading a turn's calls may spend, a fifth of the Stop hook's budget:
+# the files found by then are kept. 400 commands of 43 words took 0.24 s on
+# Linux; a slow disk pays for every path a word could name.
+RECENT_FILES_PARSE_SECONDS = 1.0
 # Dependencies, caches and the runtime's own state are not where the work is,
 # and prose reaches the capsule through the memory layers.
 RECENT_FILES_SKIPPED_PREFIXES = ("vendor/", "node_modules/", "var/", ".git/", "memory-bank/local/")
@@ -3931,8 +3935,15 @@ def capsule_excerpts(
 
 
 def _excerpt_growth(capsule: dict[str, object], excerpts: dict[str, str]) -> dict[str, int]:
-    """Larger allowances, by path, for the best-ranked excerpts that were cut."""
-    room = RENDERED_CAPSULE_LIMIT - EXCERPT_GROWTH_RESERVE - sum(len(text) + 3 for text in excerpts.values() if text)
+    """Larger allowances, by path, for the best-ranked excerpts that were cut.
+
+    The head's reserve takes the whole `recent files:` line while the capsule
+    carries one: the reserve was set before that line could fill 720
+    characters, and growth that counted on the room made the renderer cut the
+    later excerpts to pay for it. Its limit, not its length, so the windows
+    stay the same from turn to turn."""
+    reserve = EXCERPT_GROWTH_RESERVE + (RECENT_FILES_LINE_LIMIT + 1 if capsule.get("recent_files") else 0)
+    room = RENDERED_CAPSULE_LIMIT - reserve - sum(len(text) + 3 for text in excerpts.values() if text)
     order = [
         item["path"] for layer in ("semantic", "episodic") for item in capsule.get(layer) or []
         if isinstance(item, dict) and isinstance(item.get("path"), str) and excerpts.get(item["path"])
@@ -6456,7 +6467,10 @@ def transcript_turn_files(transcript: Optional[str], repository: Path) -> list[s
     root = os.path.realpath(str(workspace_roots.project_root(repository)))
     changed: list[str] = []
     read: list[str] = []
+    deadline = time.monotonic() + RECENT_FILES_PARSE_SECONDS
     for record in records[begin:]:
+        if time.monotonic() > deadline:
+            break
         for name, data, base in _transcript_calls(record, root):
             for word, is_change, directory in _call_file_words(name, data, base):
                 relative = _transcript_project_file(word, directory, root)
@@ -6465,11 +6479,25 @@ def transcript_turn_files(transcript: Optional[str], repository: Path) -> list[s
     return _without_ignored(repository, list(dict.fromkeys(changed + read)))
 
 
-def load_recent_files(connection: sqlite3.Connection) -> list[str]:
-    """The project's recent files, newest first, as the Stop hook kept them."""
+def _recent_files_key(repository: Path) -> str:
+    """The state key of a checkout's recent files.
+
+    An installed project keeps them in its checkout's own database. An
+    attached one keeps one state for every checkout of the project, and
+    parallel sessions in two worktrees then named each other's files as
+    their own: each checkout has a key of its own there."""
+    if not workspace_roots.is_attached(repository):
+        return RECENT_FILES_STATE_KEY
+    checkout = os.path.realpath(str(workspace_roots.project_root(repository)))
+    digest = hashlib.sha256(os.fsencode(checkout)).hexdigest()[:16]
+    return f"{RECENT_FILES_STATE_KEY}:{digest}"
+
+
+def load_recent_files(connection: sqlite3.Connection, key: str = RECENT_FILES_STATE_KEY) -> list[str]:
+    """The checkout's recent files, newest first, as the Stop hook kept them."""
     try:
         row = connection.execute(
-            "SELECT value FROM index_state WHERE key = ?", (RECENT_FILES_STATE_KEY,)
+            "SELECT value FROM index_state WHERE key = ?", (key,)
         ).fetchone()
     except sqlite3.Error:
         return []
@@ -6485,19 +6513,21 @@ def load_recent_files(connection: sqlite3.Connection) -> list[str]:
     return [path for path in paths if isinstance(path, str)][:RECENT_FILES_KEPT]
 
 
-def record_recent_files(connection: sqlite3.Connection, paths: list[str]) -> int:
-    """Move this turn's files to the front of the project's recent files."""
+def record_recent_files(
+    connection: sqlite3.Connection, paths: list[str], key: str = RECENT_FILES_STATE_KEY
+) -> int:
+    """Move this turn's files to the front of the checkout's recent files."""
     if not paths:
         return 0
     began = not connection.in_transaction
     if began:
         connection.execute("BEGIN IMMEDIATE")
     try:
-        merged = list(dict.fromkeys([*paths, *load_recent_files(connection)]))[:RECENT_FILES_KEPT]
+        merged = list(dict.fromkeys([*paths, *load_recent_files(connection, key)]))[:RECENT_FILES_KEPT]
         connection.execute(
             "INSERT INTO index_state(key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (RECENT_FILES_STATE_KEY, json.dumps({"version": 1, "paths": merged}, ensure_ascii=False)),
+            (key, json.dumps({"version": 1, "paths": merged}, ensure_ascii=False)),
         )
         if began:
             connection.commit()
@@ -6511,10 +6541,10 @@ def record_recent_files(connection: sqlite3.Connection, paths: list[str]) -> int
 def attach_recent_files(
     connection: sqlite3.Connection, repository: Path, capsule: dict[str, object]
 ) -> None:
-    """Name the project's recent files that are still there in a capsule."""
+    """Name the checkout's recent files that are still there in a capsule."""
     root = workspace_roots.project_root(repository)
     shown: list[str] = []
-    for path in load_recent_files(connection):
+    for path in load_recent_files(connection, _recent_files_key(repository)):
         try:
             present = _recent_file_kept(path) and (root / path).is_file()
         except (OSError, ValueError):
@@ -6810,15 +6840,6 @@ def run_turn(
         raise ContextError("--max-files must be a positive integer")
     task_id = validate_task_id(arguments.task_id)
     files, path_excluded = changed_paths(repository)
-    # The project's recent files are a convenience for the next session's
-    # capsule: a transcript that cannot be read never fails the turn.
-    recent = 0
-    try:
-        recent = record_recent_files(
-            connection, transcript_turn_files(getattr(arguments, "transcript", None), repository)
-        )
-    except (OSError, ValueError, sqlite3.Error):
-        recent = 0
     # A turn that ended in a commit leaves a clean tree and is still work.
     committed = head_advanced(connection, repository, task_id)
     delta_id = (
@@ -6877,6 +6898,20 @@ def run_turn(
             promotion = retry_pending_auto_promotion(repository, owner=owner)
         except (BrainError, OSError) as error:
             raise ContextError(f"Automatic promotion retry failed: {error}") from error
+    # The project's recent files are a convenience for the next session's
+    # capsule, so they come after the turn's own record: read first, a long
+    # transcript on a slow disk could run the Stop hook out of its budget and
+    # lose the checkpoint itself. A transcript that cannot be read never fails
+    # the turn.
+    recent = 0
+    try:
+        recent = record_recent_files(
+            connection,
+            transcript_turn_files(getattr(arguments, "transcript", None), repository),
+            key=_recent_files_key(repository),
+        )
+    except (OSError, ValueError, sqlite3.Error):
+        recent = 0
     result = {
         "task_id": task_id,
         "delta_id": delta_id,
