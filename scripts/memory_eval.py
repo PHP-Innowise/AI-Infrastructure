@@ -338,12 +338,20 @@ def _compact(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", flatten(text))
 
 
-def anchors_in_text(anchors: Sequence[str], text: str) -> bool:
-    """Whether the text a model reads carries every ticket the prompt named."""
-    if not anchors:
-        return False
+def anchors_present(anchors: Sequence[str], text: str) -> int:
+    """How many of the named tickets the text a model reads carries."""
     haystack = _compact(text)
-    return all(_compact(anchor) in haystack for anchor in anchors)
+    return sum(1 for anchor in anchors if _compact(anchor) in haystack)
+
+
+def anchors_in_text(anchors: Sequence[str], text: str) -> bool:
+    """Whether the text carries the ticket the prompt is about.
+
+    The first ticket a prompt names is its subject; later ones are often
+    cited in passing (a rule from another ticket), and requiring those
+    would measure the excerpt's luck rather than the delivery.
+    """
+    return bool(anchors) and anchors_present(anchors[:1], text) == 1
 
 
 def safe_name(value: str) -> str:
@@ -1293,6 +1301,7 @@ def score(
         "class": classify(delivered, useful, noise, withheld),
         "anchors": anchors,
         "anchor_in_text": anchors_in_text(anchors, text),
+        "anchors_present": anchors_present(anchors, text),
         "delivered": delivered,
         "useful_delivered": useful,
         "noise_delivered": noise,
@@ -1440,6 +1449,8 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         "answer_in_text": sum(1 for item in evaluated if item.get("answer_in_text")),
         "anchor_turns": sum(1 for item in evaluated if item.get("anchors")),
         "anchors_in_text": sum(1 for item in evaluated if item.get("anchor_in_text")),
+        "anchors_named": sum(len(item.get("anchors") or []) for item in evaluated),
+        "anchors_present": sum(int(item.get("anchors_present") or 0) for item in evaluated),
         "answer_could_help": sum(1 for item in evaluated if item.get("answer_could_help")),
         "answer_passages_existed": passage_total,
         "answer_passages_delivered": passage_delivered,
@@ -1770,6 +1781,8 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("useful among could-help", "useful_among_could_help"),
     ("prompts naming a ticket", "anchor_turns"),
     ("ticket in the capsule text", "anchors_in_text"),
+    ("named tickets", "anchors_named"),
+    ("named tickets in the text", "anchors_present"),
     ("answer in the capsule text", "answer_in_text"),
     ("answer passages existed", "answer_passages_existed"),
     ("answer passages delivered", "answer_passages_delivered"),
@@ -1789,7 +1802,8 @@ ROWS: Tuple[Tuple[str, str], ...] = (
 SHARED_ROWS = {"useful", "answer_in_text", "anchors_in_text", "noise_only", "unjudged_only",
                "silent", "could_help", "answer_could_help", "contaminated"}
 # Rows about a run's coverage; every other row measures its evaluated prompts.
-COVERAGE_ROWS = {"prompts", "evaluated", "skipped_total", "anchor_turns"}
+COVERAGE_ROWS = {"prompts", "evaluated", "skipped_total", "anchor_turns",
+                 "anchors_named", "anchors_present"}
 
 
 def row_value(summary: Dict[str, Any], key: str) -> Optional[float]:

@@ -1215,13 +1215,24 @@ class AnchorMetricTest(unittest.TestCase):
             ["CMS-741", "PR-1"], memory_eval.prompt_anchors("CMS-741 and PR 1")
         )
 
-    def test_an_anchor_must_reach_the_rendered_text(self) -> None:
+    def test_the_primary_anchor_must_reach_the_rendered_text(self) -> None:
         self.assertTrue(
             memory_eval.anchors_in_text(["CMS-741"], "- fix CMS-741 the move")
         )
         self.assertTrue(memory_eval.anchors_in_text(["CMS-741"], "… CMS 741 …"))
         self.assertFalse(memory_eval.anchors_in_text(["CMS-741"], "- fix CMS-742"))
         self.assertFalse(memory_eval.anchors_in_text([], "anything"))
+        # The first ticket named is the subject; a later one is often cited
+        # in passing, so its absence does not fail the turn.
+        self.assertTrue(
+            memory_eval.anchors_in_text(["CMS-741", "CMS-730"], "- fix CMS-741")
+        )
+        self.assertFalse(
+            memory_eval.anchors_in_text(["CMS-741", "CMS-730"], "- fix CMS-730")
+        )
+        self.assertEqual(
+            1, memory_eval.anchors_present(["CMS-741", "CMS-730"], "- fix CMS-741")
+        )
 
     def test_score_records_the_anchor_and_the_text(self) -> None:
         result = {
@@ -1233,14 +1244,22 @@ class AnchorMetricTest(unittest.TestCase):
         self.assertTrue(scored["anchor_in_text"])
         missed = memory_eval.score(result, {}, {}, [], prompt="CMS-999")
         self.assertFalse(missed["anchor_in_text"])
+        two = memory_eval.score(
+            result, {}, {}, [], prompt="CMS-741 and CMS-730"
+        )
+        self.assertTrue(two["anchor_in_text"])
+        self.assertEqual(1, two["anchors_present"])
 
     def test_summary_counts_anchor_turns(self) -> None:
         summary = memory_eval.summarize({
-            "a": {"status": "ok", "anchors": ["CMS-741"], "anchor_in_text": True},
+            "a": {"status": "ok", "anchors": ["CMS-741"], "anchor_in_text": True,
+              "anchors_present": 1},
             "b": {"status": "ok", "anchors": [], "anchor_in_text": False},
         })
         self.assertEqual(1, summary["anchor_turns"])
         self.assertEqual(1, summary["anchors_in_text"])
+        self.assertEqual(1, summary["anchors_named"])
+        self.assertEqual(1, summary["anchors_present"])
 
 if __name__ == "__main__":
     unittest.main()

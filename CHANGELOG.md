@@ -28,6 +28,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **The ticket metric measures the subject, not every mention.** A prompt that names CMS-741 and cites CMS-730 in passing should not fail the delivery check because the excerpt quoted the first and not the second. The row now asks whether the first ticket named reached the text, and two new rows report how many tickets were named and how many reached it.
+
+## Unreleased
+
 - **A brain record's excerpt opens with its own goal.** A record exists to say what was done; its file list and verification block were winning the term-weighted window, so the summary sentence often never reached the capsule. Brain-record excerpts now prepend the record's goal line (bounded to 220 characters) before the matched window. Measured on a 12-prompt judgment corpus: labelled passage recall rises from 41.5% to 73.2%, and turns with the answer in the text from 7 to 8, at 2,632 characters per turn.
 
 ## Unreleased
