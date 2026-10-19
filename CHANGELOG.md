@@ -28,6 +28,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A brain record's excerpt opens with its own goal.** A record exists to say what was done; its file list and verification block were winning the term-weighted window, so the summary sentence often never reached the capsule. Brain-record excerpts now prepend the record's goal line (bounded to 220 characters) before the matched window. Measured on a 12-prompt judgment corpus: labelled passage recall rises from 41.5% to 73.2%, and turns with the answer in the text from 7 to 8, at 2,632 characters per turn.
+
+## Unreleased
+
 - **The memory stand reports whether the ticket a prompt names reached the text.** Each scored turn now records the ticket ids the prompt names and whether they appear, separator-normalised, in the rendered capsule; the report shows the count of ticket-naming prompts and how many of them put the ticket in front of the model. The metric needs no judgments and no network, so a retrieval change can be checked on real prompts before anyone labels them.
 
 ## Unreleased

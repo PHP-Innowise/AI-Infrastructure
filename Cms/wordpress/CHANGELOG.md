@@ -26,6 +26,8 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ### Changed
 
+- A Project Brain record's excerpt opens with its own goal line before the matched window, so the summary sentence reaches the capsule.
+
 - The episodic bound rises from four to six, so an anchored request can carry the records about the ticket it names; the per-turn character budget still decides what is delivered.
 
 - A ticket the request names is rebuilt at the head of the distilled query (the sanitizer splits CMS-736 in two, and rarity dropped the prefix), and an excerpt prefers the line that names it, so the anchor reaches the rendered text.

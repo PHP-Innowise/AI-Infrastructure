@@ -2709,6 +2709,15 @@ def best_excerpt(content: str, terms: set[str], limit: int, title: str = "") -> 
     return _bounded(f"{section['shown']}: {text}" if section["shown"] else text, limit)
 
 
+def _goal_line(content: str) -> str:
+    """A brain record's own one-line goal, which is what it exists to say."""
+    match = re.search(r"## Goal\s+(.*?)(?:\n## |\s+Verification:)", content, re.S)
+    if match is None:
+        return ""
+    text = " ".join(match.group(1).split())
+    return text[:220].rsplit(" ", 1)[0] if len(text) > 220 else text
+
+
 def _anchor_excerpt(content: str, query: str, limit: int) -> str:
     """The line that names the request's own ticket, when the document has it.
 
@@ -2789,6 +2798,13 @@ def capsule_excerpts(
                     text = anchored
             if not text and isinstance(item.get("snippet"), str):
                 text = _bounded(item["snippet"].replace("[", "").replace("]", ""), limit)
+            if text and str(item.get("path") or "").startswith(
+                "project-brain/dynamic/"
+            ):
+                goal = _goal_line(marked.replace("\x02", "").replace("\x03", ""))
+                if goal and goal.casefold() not in text.casefold():
+                    room = max(0, limit - len(goal) - 3)
+                    text = (goal + " — " + text[:room]).strip() if room else goal
             if text:
                 excerpt = Excerpt(text)
                 excerpt.heading = section["shown"] if section else ""

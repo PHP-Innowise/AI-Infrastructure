@@ -6,6 +6,8 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`memory-seed` opens brain excerpts with the record's goal.** The copied runtime prepends the goal line; the policy lock is re-recorded.
+
 - **`memory-seed` carries the wider episodic bound.** The copied runtime allows six episodic candidates; the policy lock is re-recorded.
 
 - **`memory-seed` keeps the ticket phrase in the query and the excerpt.** The copied runtime rebuilds a ticket the request names and prefers the line naming it; the policy lock is re-recorded.
