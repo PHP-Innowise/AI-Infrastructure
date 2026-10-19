@@ -159,6 +159,26 @@ class AutomaticQueryError(ValueError):
     pass
 
 
+# A URL is a place, not a subject: its host and path words (https, github,
+# com, pull, 758) match records about other work without naming what the
+# request is about. A markdown link keeps its label and loses its target.
+MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+
+
+def _markdown_label(match: "re.Match[str]") -> str:
+    """A link keeps its label and any number in its target."""
+    numbers = re.findall(r"\d+", match.group(0))
+    label = match.group(1)
+    return label + (" " + " ".join(numbers) if numbers else "")
+
+
+def _url_terms(match: "re.Match[str]") -> str:
+    """A URL keeps its numbers: pull/758 is an identifier, github is not."""
+    numbers = re.findall(r"\d+", match.group(0))
+    return " ".join(numbers) if numbers else " "
+
+
 def _cut(match: "re.Match[str]") -> str:
     """What stays of a match: nothing, or the label in front of its value."""
     if "value" not in match.re.groupindex:
@@ -182,6 +202,11 @@ def sanitize_automatic_query(text: str) -> str:
     shared writes still validate, and refuse, the original input.
     """
     original = text
+    had_url = bool(MARKDOWN_LINK.search(text) or URL_PATTERN.search(text))
+    text = MARKDOWN_LINK.sub(_markdown_label, text)
+    text = URL_PATTERN.sub(_url_terms, text)
+    if had_url:
+        text = re.sub(r"[ \t]{2,}", " ", text)
     text = PRIVATE_KEY_BLOCK.sub(" ", text)
     text = QUOTED_CREDENTIAL.sub(" ", text)
     labelled = PRIVATE_PATTERNS["customer identifier"].search(text)

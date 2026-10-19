@@ -6,6 +6,8 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ### Changed
 
+- **`memory-seed` keeps a URL's numbers, not its host.** The copied automatic query strips the scheme and host while keeping digits from the path; the policy lock is re-recorded.
+
 - **`memory-seed` opens brain excerpts with the record's goal.** The copied runtime prepends the goal line; the policy lock is re-recorded.
 
 - **`memory-seed` carries the wider episodic bound.** The copied runtime allows six episodic candidates; the policy lock is re-recorded.

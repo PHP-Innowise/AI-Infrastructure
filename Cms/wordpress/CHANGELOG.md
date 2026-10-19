@@ -26,6 +26,8 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ### Changed
 
+- An automatic query no longer searches with a URL's host and path words; the URL contributes only its numbers, and a markdown link keeps its label.
+
 - A Project Brain record's excerpt opens with its own goal line before the matched window, so the summary sentence reaches the capsule.
 
 - The episodic bound rises from four to six, so an anchored request can carry the records about the ticket it names; the per-turn character budget still decides what is delivered.

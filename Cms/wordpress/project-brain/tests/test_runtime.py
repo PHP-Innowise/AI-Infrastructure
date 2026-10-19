@@ -5525,6 +5525,19 @@ class CapsuleNoiseTest(RuntimeHarness):
         # with its body, not only its header line.
         self.assertEqual("", context_cli.sanitize_automatic_query("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"))
         self.assertEqual("copied request", context_cli.sanitize_automatic_query("User: copied request"))
+        # A URL is a place, not a subject: its host and path words would match
+        # records about other work. A markdown link keeps its label.
+        self.assertEqual(
+            "resolve the conflicts in CHANGELOG.md 758 or see",
+            context_cli.sanitize_automatic_query(
+                "resolve the conflicts in [CHANGELOG.md]"
+                "(https://github.com/unite-cms/next/pull/758/conflicts) or see "
+                "https://example.test/x"
+            ),
+        )
+        self.assertEqual(
+            "758", context_cli.sanitize_automatic_query("https://github.com/unite-cms/next/pull/758")
+        )
         self.assertEqual("why does deploy fail", context_cli.sanitize_automatic_query(
             "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA\n-----END RSA PRIVATE KEY-----\nwhy does deploy fail"))
         self.assertEqual("", context_cli.sanitize_automatic_query(

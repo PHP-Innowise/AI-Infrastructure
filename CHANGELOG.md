@@ -28,6 +28,10 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+- **A URL keeps its numbers and loses its host.** The automatic query used to search with the host and path words of a pasted link - https, github, com, pull - which match records about other work without naming anything the request is about. A URL now contributes only its numbers (pull/758 is an identifier, github is not); a markdown link keeps its label and its numbers; spacing introduced by the replacement is collapsed. Measured on the 12-prompt judgment corpus: mean noise falls from 1.83 to 1.67 with useful turns, answer delivery and passage recall unchanged, and on 25 prompts ticket delivery stays at 29 of 30.
+
+## Unreleased
+
 - **The ticket metric measures the subject, not every mention.** A prompt that names CMS-741 and cites CMS-730 in passing should not fail the delivery check because the excerpt quoted the first and not the second. The row now asks whether the first ticket named reached the text, and two new rows report how many tickets were named and how many reached it.
 
 ## Unreleased
