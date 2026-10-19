@@ -160,6 +160,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   is read after the turn's record and within a second, an attached checkout
   keeps its own recent files, and excerpt growth leaves the line its room.
 
+### The generator's validator reads unquoted heredocs — 2026-10-19
+
+- The generator's own `bash-validator.sh` takes the shared generic section's
+  heredoc fix (see the root `CHANGELOG.md`). Under an unquoted delimiter
+  (`<<EOF`) bash runs the `$(...)` and backticks of a heredoc body while it
+  reads it, so they are checked as commands now; a quoted delimiter
+  (`<<'EOF'`) keeps the body data.
+
 ### Generated projects on native Windows — 2026-10-16
 
 - bootstrap-verifier checks hook syntax with Git Bash on Windows -

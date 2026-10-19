@@ -667,6 +667,35 @@ change below has a test that fails on `a47e1eb8`.
   the later ones. `test_attached.py::AttachedRecentFilesTest`,
   `RecentFilesExcerptRoomTest`.
 
+### bash-validator: substitutions in unquoted heredocs — 2026-10-19
+
+- Under an unquoted heredoc delimiter (`<<EOF`) bash expands the body while it
+  reads it: every `$(...)` and backtick substitution in it runs, also between
+  quotes, which are plain characters there. The validator treated every
+  heredoc body as data, so `cat > f <<EOF` holding `$(gh repo delete x)`, or a
+  commit message written through `git commit -m "$(cat <<EOF ...)"` with
+  `` `git push --force` `` in Markdown backticks, passed. The generic section
+  (all five copies and their `.cursor`/`.codex` mirrors) now keeps whether
+  the delimiter is quoted (`'EOF'`, `"EOF"`, `\EOF`, `E"O"F`, `$'EOF'`).
+  An unquoted body is walked for `$(...)` and backticks, including those
+  inside `${...}`; they become segments of their own under the command that
+  owns the heredoc and are checked by the same rules as the rest of the line.
+  The text around them stays data, and a quoted body stays data as before.
+- An unquoted body also loses its backslash-newlines as bash reads it, so a
+  line `EO\` followed by `F` ends the heredoc and the next line runs. The
+  delimiter is now matched against the joined line, which also stops a body
+  ending in a backslash from ending early. Leading tabs of a `<<-` line are
+  stripped in one step instead of one per tab: 40,000 tabs took 1.3 s, now
+  0.05 s.
+- The corpus grows from 323 to 338 cases and gains a `heredoc` decision; the
+  parse-cost test covers an unquoted body and a tab-indented line. An
+  unquoted body costs what the same text costs in double quotes: a 100 KB PHP
+  file written through `<<EOF` takes 0.16 s instead of 0.10 s. Against bash
+  itself, none of 7,500 generated heredoc commands was let through while
+  bash ran its destructive command, or blocked while bash did not; the old
+  validator let 179 of the first 1,500 through. The editions' hooks README
+  says which heredocs are data.
+
 ### Excerpts grow into the capsule's room — 2026-10-17
 
 - The first and second delivered excerpts whose section runs on past their

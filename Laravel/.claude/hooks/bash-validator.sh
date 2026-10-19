@@ -117,7 +117,9 @@ fi
 #     shell that reads stdin, directly or through a launcher (docker exec -i
 #     app bash, ssh host bash -s), or to ssh HOST with no remote command;
 #   - any other heredoc body is data: only the SQL rules of the segment that
-#     owns it read it;
+#     owns it read it. Under an unquoted delimiter (<<EOF, not <<'EOF',
+#     <<"EOF" or <<\EOF) bash expands the body while it reads it, so the
+#     $(...) and `...` bodies in it become segments of their own as well;
 #   - VAR=value prefixes, wrappers (command, builtin, exec, nohup, time,
 #     sudo, doas, env, nice, ionice, timeout, stdbuf, xargs) and a binary's
 #     directory (/usr/bin/git -> git) are stripped; `php script` runs the
@@ -173,6 +175,9 @@ BV_LAUNCHERS=',ssh,sshpass,mosh,ddev,lando,vagrant,sail,docker,docker-compose,po
 BV_NOT_PLAIN=$'*[!]A-Za-z0-9_./:=@%+,~^!?*{}[;&| \t-]*'
 BV_RE_ASSIGN='^[A-Za-z_][A-Za-z0-9_]*[+]?='
 BV_RE_BROAD='^(/[^/]*|~[A-Za-z0-9._-]*|(\.\.?/)*\.\.?)$'
+# A line ending in an unpaired backslash, which an unquoted heredoc body
+# joins to the next line.
+BV_RE_JOIN='(^|[^\\])(\\\\)*\\$'
 BV_SQL_WS="[[:space:]${BV_US}]+"
 BV_RE_SQL_DROP="(^|[^[:alnum:]_])[Dd][Rr][Oo][Pp]${BV_SQL_WS}([Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa])([^[:alnum:]_]|\$)"
 BV_RE_SQL_TRUNCATE="(^|[^[:alnum:]_])[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]${BV_SQL_WS}[Tt][Aa][Bb][Ll][Ee]([^[:alnum:]_]|\$)"
@@ -201,19 +206,24 @@ BV_GENERIC_RULES=(
 bv_hit() { [[ -n $BV_HIT ]] || BV_HIT=$1; }
 
 # ---- parser ---------------------------------------------------------------
-# bv_parse STOP DEPTH PARENT walks BV_S from BV_P. STOP is "" (end of text),
-# ")" or "`". Segments are appended to the BV_SEG_* arrays; the helpers below
-# work on bv_parse's locals (word, have, want, words, docs, seg). A long word
-# or word list is kept in two parts (wordh/word, wordsh/words) so that each
-# append copies at most a short tail instead of everything collected so far.
+# bv_parse STOP DEPTH PARENT walks BV_S from BV_P to BV_L. STOP is "" (end of
+# text), ")" or "`". Segments are appended to the BV_SEG_* arrays; the helpers
+# below work on bv_parse's locals (word, have, quoted, want, words, docs,
+# seg). A long word or word list is kept in two parts (wordh/word,
+# wordsh/words) so that each append copies at most a short tail instead of
+# everything collected so far.
 #
 # Characters are read through BV_WIN, the text of BV_S from BV_WB to BV_WE:
 # every ${BV_S:offset:length} copies the whole of BV_S, so reading a long
 # command from it a character at a time would be quadratic. A loop moves the
-# window (bv_win) before it can come within reach of its end.
+# window (bv_win) before it can come within reach of its end. Nothing is read
+# past BV_L, which bv_heredoc_expand lowers to the end of a heredoc body.
 
 bv_win() {
-  BV_WIN=${BV_S:BV_P:1024}
+  local n=$(( BV_L - BV_P ))
+  (( n <= 1024 )) || n=1024
+  (( n >= 0 )) || n=0
+  BV_WIN=${BV_S:BV_P:n}
   BV_WB=$BV_P; BV_WE=$(( BV_P + ${#BV_WIN} ))
 }
 
@@ -234,7 +244,7 @@ bv_upto() {
   (( BV_P + 512 <= BV_WE || BV_WE >= BV_L )) || bv_win
   w=${BV_WIN:BV_P-BV_WB}
   if [[ $w == *"$1"* ]]; then BV_UPTO=${w%%"$1"*}; return 0; fi
-  (( BV_WE >= BV_L )) || w=${BV_S:BV_P}
+  (( BV_WE >= BV_L )) || w=${BV_S:BV_P:BV_L-BV_P}
   BV_UPTO=${w%%"$1"*}
   [[ $w == *"$1"* ]]
 }
@@ -256,11 +266,11 @@ bv_word() {
     '')
       words=$words$BV_US$word
       (( ${#words} < 1024 )) || { wordsh=$wordsh$words; words=''; } ;;
-    '<<'|'<<-') docs=$docs$BV_RS$seg$BV_GS$want$BV_GS$word ;;
+    '<<'|'<<-') docs=$docs$BV_RS$seg$BV_GS$quoted$want$BV_GS$word ;;
     '<<<') BV_SEG_DOC[seg]=${BV_SEG_DOC[seg]}$BV_US$word ;;
     *) BV_SEG_REDIR[seg]=${BV_SEG_REDIR[seg]}$BV_US$want$BV_GS$word ;;
   esac
-  word=''; have=0; want=''
+  word=''; have=0; quoted=0; want=''
 }
 
 bv_end_seg() {
@@ -268,42 +278,97 @@ bv_end_seg() {
   wordsh=''; words=''; want=''
 }
 
+# The bodies of the heredocs whose line just ended, in order. A docs entry is
+# the owning segment, then 1 or 0 (delimiter quoted or not) and the operator,
+# then the delimiter.
 bv_heredocs() {
-  local list=$docs$BV_RS entry owner op delim rest line body part
+  local list=$docs$BV_RS entry owner op quoted delim rest line piece body part start end at
   docs=''
   list=${list#"$BV_RS"}
   while [[ -n $list ]]; do
     entry=${list%%"$BV_RS"*}; list=${list#*"$BV_RS"}
     owner=${entry%%"$BV_GS"*}; entry=${entry#*"$BV_GS"}
     op=${entry%%"$BV_GS"*}; delim=${entry#*"$BV_GS"}
-    body=''
-    rest=${BV_S:BV_P}
-    # Fast path: a plain << body ends at the first line that is the delimiter.
+    quoted=${op:0:1}; op=${op:1}
+    body='' rest='' start=$BV_P end=-1
+    (( BV_P >= BV_L )) || rest=${BV_S:BV_P:BV_L-BV_P}
+    # Fast path: a plain << body ends at the first line that is the
+    # delimiter, unless an unquoted body has a backslash-newline to join.
     if [[ $op == '<<' && $BV_NL$rest == *"$BV_NL$delim$BV_NL"* && $rest != *"$BV_CR"* ]]; then
-      if [[ $rest == "$delim$BV_NL"* ]]; then
-        BV_P=$(( BV_P + ${#delim} + 1 ))
+      [[ $rest == "$delim$BV_NL"* ]] || body=${rest%%"$BV_NL$delim$BV_NL"*}$BV_NL
+      if [[ $quoted == 1 || $body != *'\'"$BV_NL"* ]]; then
+        end=$(( BV_P + ${#body} )); BV_P=$(( end + ${#delim} + 1 ))
       else
-        body=${rest%%"$BV_NL$delim$BV_NL"*}$BV_NL
-        BV_P=$(( BV_P + ${#body} + ${#delim} + 1 ))
+        body=''
       fi
-      BV_SEG_DOC[owner]=${BV_SEG_DOC[owner]}$BV_US$body
-      continue
     fi
-    part=''
-    while (( BV_P < BV_L )); do
-      bv_upto "$BV_NL"
-      line=$BV_UPTO
-      BV_P=$(( BV_P + ${#line} + 1 ))
-      line=${line%"$BV_CR"}
-      if [[ $op == '<<-' ]]; then
-        while [[ $line == "$BV_TAB"* ]]; do line=${line#"$BV_TAB"}; done
-      fi
-      [[ $line == "$delim" ]] && break
-      part=$part$line$BV_NL
-      (( ${#part} < 1024 )) || { body=$body$part; part=''; }
-    done
-    BV_SEG_DOC[owner]=${BV_SEG_DOC[owner]}$BV_US$body$part
+    if (( end < 0 )); then
+      part='' end=$BV_L
+      while (( BV_P < BV_L )); do
+        at=$BV_P; line=''
+        while :; do
+          bv_upto "$BV_NL"; piece=$BV_UPTO
+          BV_P=$(( BV_P + ${#piece} + 1 ))
+          if [[ $op == '<<-' && -z $line && $piece == "$BV_TAB"* && $piece =~ ^$BV_TAB+ ]]; then
+            piece=${piece:${#BASH_REMATCH}}
+          fi
+          # bash drops every backslash-newline of an unquoted body while it
+          # reads it, so a line ending in an unpaired backslash goes on in
+          # the next one. Only as much of the joined line is kept as can
+          # still equal the delimiter.
+          [[ $quoted == 0 && $piece == *'\' ]] && (( BV_P <= BV_L )) &&
+            [[ $piece =~ $BV_RE_JOIN ]] || break
+          (( ${#line} > ${#delim} )) || line=$line${piece%'\'}
+          part=$part$piece$BV_NL
+          (( ${#part} < 1024 )) || { body=$body$part; part=''; }
+        done
+        piece=${piece%"$BV_CR"}
+        (( ${#line} > ${#delim} )) || line=$line$piece
+        if [[ $line == "$delim" ]]; then end=$at; break; fi
+        part=$part$piece$BV_NL
+        (( ${#part} < 1024 )) || { body=$body$part; part=''; }
+      done
+      body=$body$part
+    fi
+    BV_SEG_DOC[owner]=${BV_SEG_DOC[owner]}$BV_US$body
+    [[ $quoted == 1 || $body != *[\$\`]* ]] || bv_heredoc_expand "$start" "$end" "$owner"
   done
+}
+
+# bv_heredoc_expand START END OWNER: bash expands the body of a heredoc whose
+# delimiter is unquoted (START to END of BV_S) while it reads it, the way it
+# expands double-quoted text, except that quotes are plain characters: its
+# $(...) and `...` run. They are parsed by the rules of any other word, into
+# segments under OWNER, with BV_L lowered to END so that none reads past the
+# body.
+bv_heredoc_expand() {
+  local seg=$3 depth=${BV_SEG_DEPTH[$3]} at=$BV_P bound=$BV_L word='' wordh='' c rest chunk
+  BV_P=$1; BV_L=$2
+  bv_win
+  while (( BV_P < BV_L )); do
+    (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+    c=${BV_WIN:BV_P-BV_WB:1}
+    case $c in
+      '\') BV_P=$(( BV_P + 2 )) ;;
+      '$')
+        # Only $( runs anything; the text of ${...} is walked on, so a
+        # $(...) in a default value is found too.
+        if [[ ${BV_WIN:BV_P-BV_WB+1:1} == '(' ]]; then
+          word=''; bv_dollar "$depth" "$seg" 1
+        else
+          BV_P=$(( BV_P + 1 ))
+        fi ;;
+      '`')
+        BV_P=$(( BV_P + 1 ))
+        bv_parse '`' $(( depth + 1 )) "$seg" ;;
+      *)
+        rest=${BV_WIN:BV_P-BV_WB:256}
+        chunk=${rest%%[\\\$\`]*}
+        BV_P=$(( BV_P + ${#chunk} )) ;;
+    esac
+  done
+  BV_P=$at; BV_L=$bound
+  bv_win
 }
 
 bv_dollar() {
@@ -329,7 +394,7 @@ bv_dollar() {
       if (( indq )); then
         word=$word'$'; BV_P=$(( BV_P + 1 ))
       else
-        BV_P=$(( BV_P + 2 ))
+        BV_P=$(( BV_P + 2 )); quoted=1
         while (( BV_P < BV_L )); do
           (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
           (( ${#word} < 1024 )) || { wordh=$wordh$word; word=''; }
@@ -387,7 +452,7 @@ bv_dquote() {
 
 bv_parse() {
   local stop=$1 depth=$2 parent=$3
-  local seg word='' wordh='' have=0 words='' wordsh='' want='' docs='' c c2 rest chunk start
+  local seg word='' wordh='' have=0 quoted=0 words='' wordsh='' want='' docs='' c c2 rest chunk start
   # Every ( $( ` <( level costs call frames; far past any real command bash
   # would run out of stack and the hook would die without blocking.
   if (( ${#FUNCNAME[@]} > BV_MAX_NEST )); then
@@ -447,7 +512,7 @@ bv_parse() {
           continue
         fi
         # An all-digit word glued to the operator is a file descriptor.
-        if (( have )) && [[ -z $wordh && $word =~ ^[0-9]+$ ]]; then word=''; have=0; else bv_word; fi
+        if (( have )) && [[ -z $wordh && $word =~ ^[0-9]+$ ]]; then word=''; have=0; quoted=0; else bv_word; fi
         BV_P=$(( BV_P + 1 )); want=$c
         case $c$c2 in
           '<<')
@@ -462,13 +527,13 @@ bv_parse() {
       "'")
         BV_P=$(( BV_P + 1 ))
         bv_upto "'"
-        word=$word$BV_UPTO; have=1; BV_P=$(( BV_P + ${#BV_UPTO} + 1 )) ;;
+        word=$word$BV_UPTO; have=1; quoted=1; BV_P=$(( BV_P + ${#BV_UPTO} + 1 )) ;;
       '"')
-        BV_P=$(( BV_P + 1 )); have=1
+        BV_P=$(( BV_P + 1 )); have=1; quoted=1
         bv_dquote "$depth" "$seg" ;;
       '\')
         c2=${BV_WIN:BV_P-BV_WB+1:1}
-        if [[ $c2 != "$BV_NL" ]]; then word=$word$c2; have=1; fi
+        if [[ $c2 != "$BV_NL" ]]; then word=$word$c2; have=1; quoted=1; fi
         BV_P=$(( BV_P + 2 )) ;;
       '$')
         have=1

@@ -13,7 +13,8 @@
     "delete-from": "DELETE with no WHERE, and TRUNCATE without TABLE, are refused only when a simple command of the input runs SQL text (mysql, psql, sqlite3, wp db query, dbal:run-sql, artisan tinker, ...). Elsewhere 'delete from the cart' is a test name, an issue title or a translation. DROP TABLE, TRUNCATE TABLE and an always-true WHERE (1=1, true, bare 1) stay refused everywhere, as before.",
     "core.hooksPath": "Every git config write or unset of core.hooksPath is refused, also one that points the hooks at a project directory such as .githooks: the hook cannot tell enabling hooks from disabling them, so the user runs it.",
     "launchers": "A quoted command line is checked as a command only when a known launcher (BV_LAUNCHERS: ssh, ddev, lando, vagrant, docker, kubectl, tmux, ...) receives it; a quoted argument of any other program is text.",
-    "nesting": "Nesting deeper than any real command (BV_MAX_NEST call frames) is refused as 'command too complex' instead of parsed: bash would overflow its stack and the hook would fail open."
+    "nesting": "Nesting deeper than any real command (BV_MAX_NEST call frames) is refused as 'command too complex' instead of parsed: bash would overflow its stack and the hook would fail open.",
+    "heredoc": "A heredoc body is input, not commands: only the SQL rules of the command that owns it read it, unless that command is a shell that reads its stdin. Under an unquoted delimiter (<<EOF) bash expands the body while it reads it, so every $(...) and `...` in it runs then, quotes being plain characters there: those are checked as commands, and the text around them stays data. A quoted delimiter (<<'EOF', <<\"EOF\", <<\\EOF) keeps the whole body data."
   },
   "cases": [
     {
@@ -966,6 +967,97 @@
       "expect": "pass",
       "editions": "all",
       "note": "not a launcher: a quoted argument is text"
+    },
+    {
+      "command": "cat > f <<EOF\n$(gh repo delete x)\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "an unquoted heredoc delimiter makes bash expand the body: the $(...) runs while the heredoc is read",
+      "category": "destructive command"
+    },
+    {
+      "command": "cat > f <<EOF\n`gh repo delete x`\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "a backtick substitution in an unquoted heredoc body runs too"
+    },
+    {
+      "command": "cat > f <<'EOF'\n$(gh repo delete x)\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a quoted delimiter keeps the body data: nothing in it runs"
+    },
+    {
+      "command": "cat > f <<\"EOF\"\n$(gh repo delete x)\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a double-quoted delimiter keeps the body data too"
+    },
+    {
+      "command": "cat > f <<\\EOF\n$(gh repo delete x)\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "and so does a backslash-quoted one"
+    },
+    {
+      "command": "cat > docs/notes.md <<EOF\nNever run gh repo delete or git push --force here.\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "plain text in an unquoted heredoc body stays data; only its substitutions run"
+    },
+    {
+      "command": "cat > BUILD.txt <<EOF\nBuilt $(date -u) from $(git rev-parse --short HEAD) by `whoami` in $HOME\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "harmless substitutions in an unquoted heredoc body"
+    },
+    {
+      "command": "cat > f <<EOF\n'$(gh repo delete x)'\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "quotes are plain characters in a heredoc body: the substitution between them still runs"
+    },
+    {
+      "command": "cat > f <<EOF\n\\$(gh repo delete x) and \\`gh repo delete x\\`\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "an escaped $ or backtick in an unquoted body is text"
+    },
+    {
+      "command": "cat > f <<EOF\n${REMOTE:-$(gh repo delete x)}\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "a substitution in the default value of an unquoted body's ${...} runs"
+    },
+    {
+      "command": "cat <<-EOF\n\t$(git reset --hard)\n\tEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "<<- with an unquoted delimiter expands the body as well"
+    },
+    {
+      "command": "git commit -m \"$(cat <<EOF\nfix: stop `git push --force` in deploy\nEOF\n)\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "Markdown backticks in an unquoted commit-message heredoc run as a command"
+    },
+    {
+      "command": "cat > f <<EOF\n$(cat <<'X'\ngh repo delete x\nX\n)\nEOF",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a quoted heredoc inside the substitution is data again"
+    },
+    {
+      "command": "cat > f <<A; cat > g <<'B'\n$(date)\nA\n$(gh repo delete x)\nB",
+      "expect": "pass",
+      "editions": "all",
+      "note": "each heredoc of a line keeps its own quoting: only A is expanded"
+    },
+    {
+      "command": "cat <<EOF\nbody\nEO\\\nF\ngh repo delete x\nEOF",
+      "expect": "block",
+      "editions": "all",
+      "note": "an unquoted body joins a line ending in a backslash to the next, so EO\\ and F end the heredoc and the line after them runs"
     },
     {
       "command": "psql -c \"TRUNCATE users CASCADE\"",

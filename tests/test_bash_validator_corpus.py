@@ -282,6 +282,9 @@ class ParseCostTest(unittest.TestCase):
             "expansions in double quotes": 'python3 -c "' + "$a $b ${c} " * n + '"',
             "ANSI-C quoted string": "printf $'" + "line\\n" * (n * 2) + "'",
             "long word list": "ls " + "file.txt " * n,
+            # Walked for $(...) and `...`, line by line for joined lines.
+            "unquoted heredoc body": "cat > f <<EOF\n" + "$a ${b} \\$c text \\\n" * n + "EOF",
+            "tab-indented heredoc line": "cat <<-EOF\n" + "\t" * (n * 5) + "x\n\tEOF",
         }[kind]
 
     def best_time(self, command: str) -> float:
@@ -294,7 +297,13 @@ class ParseCostTest(unittest.TestCase):
         return min(times)
 
     def test_parse_time_grows_linearly(self) -> None:
-        for kind in ("expansions in double quotes", "ANSI-C quoted string", "long word list"):
+        for kind in (
+            "expansions in double quotes",
+            "ANSI-C quoted string",
+            "long word list",
+            "unquoted heredoc body",
+            "tab-indented heredoc line",
+        ):
             with self.subTest(kind=kind):
                 small = self.best_time(self.dense(kind, 2000))
                 large = self.best_time(self.dense(kind, 8000))
