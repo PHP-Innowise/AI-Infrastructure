@@ -422,6 +422,53 @@ paths retained by the ordinary packer. See the [optional experiment](../docs/MEM
 for asset format, limits and evaluation rules. These files are not installed
 into target projects.
 
+### `memory_fact_consolidation.py`
+
+**Purpose and status.** Optional, source-only deterministic fact resolver. It
+groups candidate facts by key and chooses the maximum explicit
+`serial`/`version`/`revision`, breaking an equal version on `updated_at`; a true
+tie is reported as ambiguous rather than arbitrated by path or ID. It implements
+the measured "extract candidates, then take a Python maximum" recipe at the
+consolidation boundary and is deliberately not part of prompt-time retrieval.
+
+```bash
+python3 scripts/memory_fact_consolidation.py --input facts.json --json
+```
+
+- **Inputs:** a JSON list, or `{ "facts": [...] }`, with `id`, `fact`, an
+  optional version field and an optional `updated_at`.
+- **Outputs:** winner, superseded IDs, candidates and an ambiguity flag per
+  fact group.
+- **Dependencies:** Python 3.9+ standard library.
+- **Writes:** none.
+- **CI relationship:** `tests/test_memory_fact_consolidation.py` and
+  `tests/fixtures/fact-consolidation.json`; see
+  [the write-path doc](../docs/MEMORY-WRITE-PATH.md).
+
+### `memory_sqlite_vec_pilot.py`
+
+**Purpose and status.** Optional, off-by-default maintainer probe for a local
+dense candidate pool using the sqlite-vec and sqlite-lembed loadable
+extensions. The runtime stays standard-library only: this file is never
+installed, imported by the runtime or run by CI.
+
+```bash
+python3 scripts/memory_sqlite_vec_pilot.py probe \
+  --vec-extension PATH --lembed-extension PATH --model PATH --json
+python3 scripts/memory_sqlite_vec_pilot.py fuse \
+  --lexical lexical.json --dense dense.json --json
+```
+
+- **Inputs:** local extension and GGUF paths (assets are never downloaded) or
+  two JSON lists of ranked paths.
+- **Outputs:** JSON availability/versions, or deterministic RRF rows.
+- **Dependencies:** Python 3.9+ standard library; the probe needs SQLite built
+  with extension loading and the supplied local assets.
+- **Writes:** none; it opens `:memory:` only.
+- **CI relationship:** `tests/test_memory_sqlite_vec_pilot.py` covers the
+  fail-closed paths and RRF; see
+  [the pilot doc](../docs/MEMORY-SQLITE-VEC-PILOT.md).
+
 ### `collect_context.py`
 
 **Purpose and status.** Optional developer-local `code2prompt` wrapper;

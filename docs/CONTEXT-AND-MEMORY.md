@@ -1439,7 +1439,10 @@ propose -> independent human review -> apply
 ```
 
 The automatic mode, enabled by `automatic_promotion` in `runtime.json`, runs
-unattended on the same boundary as the working-memory flush:
+unattended on the same boundary as the working-memory flush. With
+`automatic_consolidation` (on by default in the shipped config), that boundary
+first collapses a ticket's completed-event series into one observed finding;
+set it to `false` to keep every event as its own record:
 
 ```text
 propose -> apply
@@ -1920,15 +1923,17 @@ command with the caller's current numeric revision and verification evidence.
 Merging the default branch *into* a long-running branch is not a candidate; the
 default branch itself and deleted branches are also excluded.
 
-With `automatic_promotion` enabled, the turn hook also promotes eligible
-resolved knowledge into durable memory on the same boundary, and with
-`automatic_compaction` it archives terminal records once `compaction_threshold`
-of them have accumulated. Compaction runs in batches rather than every turn:
-archiving one record at a time would churn Git history for no benefit.
+With `automatic_consolidation` enabled, the turn hook first collapses a
+ticket's completed events into one observed finding. With
+`automatic_promotion` it then promotes eligible resolved knowledge into durable
+memory, and with `automatic_compaction` it archives terminal records once
+`compaction_threshold` of them have accumulated. Compaction runs in batches
+rather than every turn: archiving one record at a time would churn Git history
+for no benefit.
 
-The order within a turn is fixed — report completion candidates, promote, then
-archive. Archived records stay promotable, so a promotion run that hits its
-per-run cap does not lose the remainder to the archive.
+The order within a turn is fixed — report completion candidates, consolidate,
+promote, then archive. Archived records stay promotable, so a promotion run
+that hits its per-run cap does not lose the remainder to the archive.
 
 This distinction matters: a healthy status line means the tools are available;
 it does not mean an agent has loaded, verified, or acted on the relevant

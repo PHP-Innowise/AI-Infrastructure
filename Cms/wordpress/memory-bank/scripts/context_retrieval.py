@@ -7908,8 +7908,26 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
 def _capsule_projection(selected: list[dict[str, Any]], local_episode_selected: list[dict[str, Any]]) -> dict[str, Any]:
     """Preserve the exact category/history/related ordering of capsule layers."""
     groups = {category: [] for category in BUDGETS}
+    # Conflict partners are both delivered by contract; the capsule names the
+    # other side so a reader does not have to infer it from a bare mark.
+    paths_by_record = {
+        item.get("record_id"): str(item.get("path"))
+        for item in selected
+        if isinstance(item.get("record_id"), str) and item.get("path")
+    }
     for item in selected:
         public = _public_item(item)
+        conflicts = item.get("conflicts")
+        if isinstance(conflicts, list):
+            partners = [
+                paths_by_record[record_id]
+                for record_id in conflicts
+                if isinstance(record_id, str)
+                and record_id in paths_by_record
+                and record_id != item.get("record_id")
+            ]
+            if partners:
+                public["conflict"] = partners
         groups[item["category"]].append(public)
     procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
     history_items = [

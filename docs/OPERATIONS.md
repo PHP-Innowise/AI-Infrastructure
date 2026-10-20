@@ -928,6 +928,31 @@ Compaction moves history; it does not delete it. Current terminal states are:
 
 Incident `resolved` and decision `accepted` are intentionally not terminal.
 
+### `consolidate`
+
+```bash
+python3 memory-bank/scripts/context.py consolidate [--ticket CMS-741] [--apply] [--json]
+```
+
+Read-only by default. Groups **recorded events whose title says `Completed`**
+by the first ticket they name and, for a group of at least two, plans one
+`finding` with external ID `CONSOLIDATED-<ticket>`. The finding takes the
+latest event's outcome sentence as title and goal, the union of the events'
+local existing sources, and a `progress` line naming the source event IDs and
+up to three `Verification:` sentences. It is created `resolved` with authority
+`observed`: mechanical consolidation is not a verification and does not make it
+promotable on its own.
+
+The turn boundary calls this automatically when `automatic_consolidation` is
+enabled (the shipped default); the command is the explicit replay/backfill for
+a project whose boundary has not run yet. `--apply` writes the finding and
+transitions each source event to `superseded` with the event's own owner as
+actor. Events are not archived;
+`compact` remains the command that moves terminal records. A private or
+restricted event is never folded into a team-visible finding, and a second run
+is idempotent. The dry run reports each ticket as `planned`, `skipped` or
+`blocked`, with the event count and reason.
+
 ### `promote-propose`
 
 ```bash
@@ -1003,6 +1028,12 @@ says so (`enabled: false`). The turn boundary waits for `--flush-after`
 turns; this is for knowledge recorded deliberately, such as what a Harness
 run saves when it completes, which should not wait for a counter. The result lists what
 was promoted, blocked with its reason, failed, and deferred.
+
+Automatic promotion also refuses a record whose cited source is an `http(s)://`
+URL or whose title or promoted content matches an instruction-like pattern
+(`ignore previous instructions`, `system prompt`, chat-template control
+tokens). The record stays eligible for the reviewed `promote-propose` /
+`promote-review` path; the gate applies only to the unreviewed path.
 
 ### `retrieval-report`
 
@@ -1083,14 +1114,17 @@ on a very large Brain expect `status` to take proportionally longer.
 ### `bank-audit`
 
 ```bash
-python3 memory-bank/scripts/context.py bank-audit [--json]
+python3 memory-bank/scripts/context.py bank-audit [--provenance] [--json]
 ```
 
 Read-only. Reports, for active chunks only: `source_changed` (a cited local
 file whose digest no longer matches, or that is gone), `overdue_review` (past
 `review_after`), `undigested` (cites local files but records no digests, which
 is every chunk written before digests existed), and `duplicates` (pairs of
-active chunks whose text overlaps at or above `bank_duplicate_ratio`). A
+active chunks whose text overlaps at or above `bank_duplicate_ratio`).
+`--provenance` adds `auto_promoted` (active chunks tagged `auto-promoted`),
+`external_sources` (chunks citing a remote URL) and `instruction_like` (chunks
+whose title or body matches an instruction pattern). A
 duplicate pair is a decision for a human: update the survivor, or close the
 older one with `bank-retire`. The engine never merges chunks by itself. A
 retired chunk is not audited — it has nothing left to attest to, and its dead citations would bury
@@ -1124,6 +1158,20 @@ exist to replace.
 
 A URL in `sources` is cited but never digested — the runtime has no network,
 so the only honest thing it can say about a remote citation is nothing.
+
+### `bank-quarantine`
+
+```bash
+python3 memory-bank/scripts/context.py bank-quarantine --id MEM-... \
+  [--reason "..."] [--json]
+```
+
+Stops serving a chunk **now**: it closes the validity period at today and
+archives the chunk. Use it for a suspected poisoned or unsafe memory, not for
+ordinary knowledge that merely stopped being true — that is `bank-retire`,
+with the date the knowledge ceased and, optionally, its successor. Because the chunk schema is
+a closed key set, the reason is reported in the command output and is not
+written into frontmatter.
 
 ### `bank-retire`
 

@@ -28,6 +28,58 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Memory maintenance runs on the turn boundary — 2026-10-19
+
+- `automatic_consolidation` is on in the shipped config (and in the generator's
+  `runtime.json.template`). At the same flush boundary that promotes and
+  compacts, the runtime collapses a ticket's completed-event series into one
+  observed finding before promotion, so the user does not run `consolidate`
+  for normal work. The command remains as the explicit replay/backfill.
+- An `auto-promoted` chunk whose source is remote or whose title/body is
+  instruction-like is now withheld from retrieval automatically, because no
+  person read it. Manually reviewed chunks are not withheld, and
+  `bank-audit --provenance` still reports all three groups.
+- `automatic_consolidation: false` restores the previous event-only behavior.
+- The turn result reports `consolidation` (`enabled`, `created`, `superseded`,
+  `blocked`, `tickets`, `error`) beside promotion and compaction; a maintenance
+  failure is reported there rather than failing the checkpoint.
+- Tests: automatic boundary consolidation, disabled-setting behavior,
+  idempotent second boundary, shipped-config flag, and automatic withholding
+  of an auto-promoted instruction-like chunk.
+
+### Memory write path: consolidation, provenance and deterministic facts — 2026-10-19
+
+- `context.py consolidate --ticket T` (dry-run unless `--apply`) turns two or
+  more completed events for one ticket into one `resolved`/`observed` finding.
+  The finding cites the events' local existing sources, keeps their IDs and
+  `Verification:` lines in `progress`, and is idempotent. The source events are
+  transitioned to `superseded` by their own owner and are left for `compact` to
+  archive; private and restricted events are not folded into a team finding.
+- Automatic promotion now refuses a record whose cited source is `http(s)://`
+  or whose title/content is instruction-like (`ignore previous instructions`,
+  `system prompt`, chat-template control tokens). A person can still review and
+  promote such a record; the gate is only on the unreviewed path.
+- `bank-audit --provenance` adds active auto-promoted chunks, chunks citing a
+  remote source, and instruction-like chunks. `bank-quarantine --id ...` closes
+  a chunk's validity at today and archives it, so a suspected poisoned or unsafe
+  memory stops being served immediately.
+- `scripts/memory_fact_consolidation.py` implements the deterministic
+  conflict-resolution recipe: group candidates by fact, take the maximum
+  explicit serial/version/revision, break an equal version on `updated_at`, and
+  report a true tie as ambiguous. It is not wired into the capsule: records
+  that declare each other in `conflicts` remain shown together by contract.
+  The known-answer fixture is `tests/fixtures/fact-consolidation.json`. When two
+  records that declare each other in `conflicts` are both selected, the capsule
+  now names the partner paths in `conflict`, beside the existing
+  `match: conflict`; neither record is dropped.
+- `scripts/memory_sqlite_vec_pilot.py` probes local `sqlite-vec`/`sqlite-lembed`
+  assets and fuses lexical and dense path lists with RRF. It is maintainer-only,
+  never imported by the runtime, fails closed, and adds no default dependency;
+  see `docs/MEMORY-SQLITE-VEC-PILOT.md` and `docs/MEMORY-WRITE-PATH.md`.
+- Tests: five event-consolidation cases, provenance audit/quarantine, the
+  provenance problem gate, the fact-consolidation fixture and the fail-closed
+  pilot/RRF suite; the full PHP Core Project Brain suite is 670 tests.
+
 ### A shared class name no longer anchors a weak match — 2026-10-19
 
 - A document whose only query match is a name-shaped word is admitted as

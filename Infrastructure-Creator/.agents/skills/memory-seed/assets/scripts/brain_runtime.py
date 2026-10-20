@@ -532,6 +532,7 @@ def load_config(repository: Path) -> dict[str, Any]:
         "provider": "sqlite-fts5",
         "automatic_promotion": False,
         "automatic_completion": False,
+        "automatic_consolidation": True,
         "automatic_compaction": False,
         "compaction_threshold": 5,
         "codebase_map_max_drift": 25,
@@ -2834,6 +2835,216 @@ def promoted_source_rewrites(
     return rewrites
 
 
+TICKET_PATTERN = re.compile(r"\b([A-Z]{2,10})-(\d{1,6})\b")
+CONSOLIDATION_MIN_EVENTS = 2
+CONSOLIDATION_VERIFICATION = re.compile(r"Verification:\s*(.+?)(?:\s+##|\s*$)", re.S | re.I)
+
+
+def _event_tickets(record: dict[str, Any]) -> list[str]:
+    """Ticket IDs an event names, title first and external ID last.
+
+    An event's own external ID may itself look like a ticket (`EV-1`); it is a
+    fallback, never the subject the event is about.
+    """
+    tickets: list[str] = []
+    for key in ("title", "goal", "external_id"):
+        for prefix, number in TICKET_PATTERN.findall(str(record.get(key) or "")):
+            value = f"{prefix.upper()}-{number}"
+            if value not in tickets:
+                tickets.append(value)
+    return tickets
+
+
+def _first_sentence(text: object, limit: int = 600) -> str:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return ""
+    end = re.search(r"(?<=[.!?])\s+", value)
+    sentence = value[: end.start()] if end else value
+    return sentence[:limit].rstrip()
+
+
+def _consolidated_finding(
+    repository: Path, ticket: str, events: list[tuple[Path, dict[str, Any], str]]
+) -> dict[str, Any]:
+    ordered = sorted(events, key=lambda item: str(item[1].get("created_at") or ""))
+    latest = ordered[-1][1]
+    goal = _first_sentence(latest.get("goal")) or _first_sentence(latest.get("title")) or ticket
+    title = f"{ticket}: {goal}"
+    if len(title) > 160:
+        title = title[:157].rstrip() + "..."
+    verifications: list[str] = []
+    sources: list[str] = []
+    files: list[str] = []
+    for _, record, _ in ordered:
+        for source in record.get("sources") or []:
+            if not isinstance(source, str) or not source or source in sources:
+                continue
+            if source.startswith(("https://", "http://")):
+                # The record can name a remote source; a durable finding is
+                # fingerprinted locally, and an unfingerprinted URL would make
+                # the new record unvalidatable.
+                continue
+            try:
+                path = workspace_roots.resolve(repository, source.split("#", 1)[0])
+            except (OSError, ValueError):
+                continue
+            if path.is_file():
+                sources.append(source)
+        for path in record.get("files") or []:
+            if isinstance(path, str) and path and path not in files:
+                files.append(path)
+        match = CONSOLIDATION_VERIFICATION.search(str(record.get("goal") or ""))
+        if match:
+            sentence = _first_sentence(match.group(1), 240)
+            if sentence and sentence not in verifications:
+                verifications.append(sentence)
+    identifiers = ", ".join(str(record.get("id")) for _, record, _ in ordered)
+    progress = (
+        f"Consolidated {len(ordered)} completed events for {ticket}: {identifiers}. "
+        + ("Verification: " + " ".join(verifications[:3]) if verifications else "")
+    ).strip()
+    return {
+        "external_id": f"CONSOLIDATED-{ticket}",
+        "title": title,
+        "goal": goal,
+        "files": files,
+        "sources": sources,
+        "progress": progress[:4000],
+        "events": len(ordered),
+    }
+
+
+def consolidate(
+    repository: Path,
+    *,
+    apply: bool = False,
+    ticket: Optional[str] = None,
+    owner: str = "local",
+) -> dict[str, Any]:
+    """Collapse a ticket's completed events into one finding, optionally applying.
+
+    Read-only without ``apply``. The finding cites the events' own sources, not
+    the event files: compaction may archive those, and a citation to a moved
+    record would make the durable conclusion stale. The event IDs stay in the
+    finding's progress for the operator, while the machine link that matters -
+    the canonical sources - survives compaction.
+
+    Events are immutable except for lifecycle supersession, so consolidation
+    marks each source event ``superseded``. It never archives them: the
+    archived copy is the operator's decision, and a later ``compact`` is
+    already the command that moves terminal records.
+    """
+    wanted = ticket.strip().upper() if isinstance(ticket, str) and ticket.strip() else None
+    groups: dict[str, list[tuple[Path, dict[str, Any], str]]] = {}
+    for path, record, body in iter_records(repository):
+        if record.get("type") != "event" or record.get("status") != "recorded":
+            continue
+        if record.get("privacy") not in ("public", "team"):
+            # A shared finding must not carry a private or restricted event's
+            # text into a team-visible record.
+            continue
+        if "completed" not in str(record.get("title") or "").casefold():
+            continue
+        tickets = _event_tickets(record)
+        if not tickets:
+            continue
+        value = tickets[0]
+        if wanted is not None and value != wanted:
+            continue
+        groups.setdefault(value, []).append((path, record, body))
+    report: dict[str, Any] = {
+        "applied": apply,
+        "tickets": [],
+        "created": 0,
+        "superseded": 0,
+        "blocked": 0,
+    }
+    for value in sorted(groups):
+        events = groups[value]
+        entry: dict[str, Any] = {
+            "ticket": value,
+            "events": len(events),
+            "ids": [str(record.get("id")) for _, record, _ in events],
+        }
+        if len(events) < CONSOLIDATION_MIN_EVENTS:
+            entry.update(state="skipped", reason="fewer than two completed events")
+            report["tickets"].append(entry)
+            continue
+        planned = _consolidated_finding(repository, value, events)
+        entry["finding"] = planned["external_id"]
+        try:
+            find_record(repository, planned["external_id"])
+        except BrainRecordNotFound:
+            pass
+        else:
+            entry.update(state="skipped", reason="consolidated finding already exists")
+            report["tickets"].append(entry)
+            continue
+        entry.update(state="planned", title=planned["title"], sources=len(planned["sources"]))
+        report["tickets"].append(entry)
+        if not apply:
+            continue
+        with mutation_lock(repository):
+            snapshot = snapshot_files(
+                [path for path, _, _ in events] + list(index_paths(repository))
+            )
+            created: Optional[dict[str, Any]] = None
+            try:
+                created = create_record(
+                    repository,
+                    "finding",
+                    planned["external_id"],
+                    planned["title"],
+                    planned["files"],
+                    planned["sources"],
+                    owner=owner,
+                    authority="observed",
+                    goal=planned["goal"],
+                )
+                update_record(
+                    repository,
+                    created["id"],
+                    expected_revision=created["revision"],
+                    progress=planned["progress"],
+                    next_steps=[],
+                    files=[],
+                    sources=[],
+                    actor=owner,
+                    transition_to="resolved",
+                    reason=f"Consolidated {planned['events']} completed events",
+                )
+                for _, record, _ in events:
+                    update_record(
+                        repository,
+                        record["id"],
+                        expected_revision=record["revision"],
+                        progress=None,
+                        next_steps=[],
+                        files=[],
+                        sources=[],
+                        # The event's own owner is the actor authorized to
+                        # supersede it; the operator consolidating may differ.
+                        actor=str(record.get("owner") or owner),
+                        transition_to="superseded",
+                        reason=f"Consolidated into {planned['external_id']}",
+                    )
+            except Exception as error:
+                if created is not None:
+                    try:
+                        rollback_created_record(repository, created["id"])
+                    except BrainError:
+                        pass
+                restore_files(snapshot)
+                entry.update(state="blocked", reason=str(error))
+                report["blocked"] += 1
+                continue
+        entry["state"] = "created"
+        report["created"] += 1
+        report["superseded"] += len(events)
+    return report
+
+
 def compact(repository: Path, *, only_external_id: Optional[str] = None) -> dict[str, int]:
     """Archive terminal and superseded records; with ``only_external_id``,
     only those of that ID - what a new task of the same name needs moved."""
@@ -3381,6 +3592,36 @@ def promotion_eligibility_error(
     )
 
 
+# A promoted chunk is durable shared knowledge, so text that tries to steer an
+# agent is withheld from the automatic path even when its record is resolved
+# and verified. A person can still review the proposal; the gate is about what
+# the machine may do without one.
+_PROVENANCE_INSTRUCTION_PATTERNS = (
+    re.compile(r"\bignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?\b", re.I),
+    re.compile(r"\bdisregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+instructions?\b", re.I),
+    re.compile(r"\bforget\s+(?:all\s+)?(?:previous|prior|above|your)\s+instructions?\b", re.I),
+    re.compile(r"\bsystem\s+prompt\b", re.I),
+    re.compile(r"<\|(?:im_start|im_end|system|assistant)\|>", re.I),
+)
+
+
+def provenance_problems(record: dict[str, Any], content: Optional[str] = None) -> list[str]:
+    """Why an automatic promotion may not carry this record, if it may not."""
+    problems: list[str] = []
+    sources = [source for source in record.get("sources") or [] if isinstance(source, str)]
+    external = [source for source in sources if source.startswith(("https://", "http://"))]
+    if external:
+        problems.append(
+            "external source requires review: " + external[0]
+        )
+    text = "\n".join(
+        part for part in (str(record.get("title") or ""), str(content or "")) if part
+    )
+    if any(pattern.search(text) for pattern in _PROVENANCE_INSTRUCTION_PATTERNS):
+        problems.append("instruction-like content requires review")
+    return problems
+
+
 def promotable_records(
     repository: Path,
     config: dict[str, Any],
@@ -3447,6 +3688,10 @@ def promotable_records(
                     "promote the revision by hand if it still holds")})
                 continue
             supersedes = memory_id
+        provenance = provenance_problems(record, content)
+        if provenance:
+            blocked.append({"record_id": record["id"], "reason": "; ".join(provenance)})
+            continue
         reason = promotion_eligibility_error(
             repository, record, config, allow_changed_sources=allow_changed_sources
         )
@@ -3859,6 +4104,35 @@ def archivable_records(repository: Path) -> int:
     return total
 
 
+def auto_consolidate(repository: Path, *, owner: str = "local") -> dict[str, Any]:
+    """Collapse completed events on the turn boundary, without a user command.
+
+    The same boundary that promotes durable memory and archives terminal
+    records first turns a ticket's completed-event series into one finding.
+    A failure is reported, never raised: the checkpoint that already landed
+    must not be presented as a failed turn because maintenance could not run.
+    """
+    config = load_config(repository)
+    empty = {
+        "enabled": False, "created": 0, "superseded": 0,
+        "blocked": 0, "tickets": 0, "error": None,
+    }
+    if not config.get("automatic_consolidation"):
+        return empty
+    try:
+        result = consolidate(repository, apply=True, owner=owner)
+    except (BrainError, OSError, ValueError) as error:
+        return {**empty, "enabled": True, "error": str(error)}
+    return {
+        "enabled": True,
+        "created": result["created"],
+        "superseded": result["superseded"],
+        "blocked": result["blocked"],
+        "tickets": len(result["tickets"]),
+        "error": None,
+    }
+
+
 def auto_compact(repository: Path, *, owner: str = "local") -> dict[str, Any]:
     """Archive terminal records once enough of them have accumulated.
 
@@ -4106,7 +4380,7 @@ def retire_chunk(
     }
 
 
-def audit_bank(repository: Path) -> dict[str, Any]:
+def audit_bank(repository: Path, *, provenance: bool = False) -> dict[str, Any]:
     """Report chunks whose citations moved on, and chunks overdue for review.
 
     Read-only and dependency-free. Answers the question the digests exist to
@@ -4119,19 +4393,46 @@ def audit_bank(repository: Path) -> dict[str, Any]:
     changed: list[dict[str, Any]] = []
     overdue: list[dict[str, Any]] = []
     undigested: list[str] = []
+    auto_promoted: list[dict[str, Any]] = []
+    external_sources: list[dict[str, Any]] = []
+    instruction_like: list[str] = []
     total = 0
     if chunks.is_dir():
         for path in sorted(chunks.glob("*.md")):
             if BANK_FILENAME_PATTERN.fullmatch(path.name) is None:
                 continue
             try:
-                metadata, _ = _parse_chunk(path)
+                metadata, body = _parse_chunk(path)
             except BrainError:
                 continue
             total += 1
             relative = path.relative_to(repository).as_posix()
             if metadata.get("status") != "active":
                 continue
+            tags = metadata.get("tags") if isinstance(metadata.get("tags"), list) else []
+            if provenance and "auto-promoted" in tags:
+                auto_promoted.append(
+                    {
+                        "chunk": relative,
+                        "id": metadata.get("id"),
+                        "created": metadata.get("created"),
+                        "last_verified": metadata.get("last_verified"),
+                    }
+                )
+            sources = metadata.get("sources") if isinstance(metadata.get("sources"), list) else []
+            urls = [
+                source for source in sources
+                if isinstance(source, str) and source.startswith(("https://", "http://"))
+            ]
+            if provenance and urls:
+                external_sources.append(
+                    {"chunk": relative, "id": metadata.get("id"), "sources": urls}
+                )
+            text = str(metadata.get("title") or "") + "\n" + body
+            if provenance and any(
+                pattern.search(text) for pattern in _PROVENANCE_INSTRUCTION_PATTERNS
+            ):
+                instruction_like.append(relative)
             digests = metadata.get("source_digests")
             if not isinstance(digests, list) or not digests:
                 if digestible_sources(metadata.get("sources")):
@@ -4188,7 +4489,7 @@ def audit_bank(repository: Path) -> dict[str, Any]:
                         "similarity": round(score, 3),
                     }
                 )
-    return {
+    result: dict[str, Any] = {
         "chunks": total,
         "source_changed": changed,
         "overdue_review": overdue,
@@ -4197,6 +4498,13 @@ def audit_bank(repository: Path) -> dict[str, Any]:
         # one with `bank-retire`. The engine never merges chunks by itself.
         "duplicates": duplicates,
     }
+    if provenance:
+        result["provenance"] = {
+            "auto_promoted": auto_promoted,
+            "external_sources": external_sources,
+            "instruction_like": instruction_like,
+        }
+    return result
 
 
 def reverify_chunk(

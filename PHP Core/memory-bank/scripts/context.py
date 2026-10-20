@@ -37,6 +37,7 @@ from brain_runtime import (
     append_message,
     atomic_json,
     auto_compact,
+    auto_consolidate,
     auto_promote,
     retry_pending_auto_promotion,
     cancel_task,
@@ -44,6 +45,7 @@ from brain_runtime import (
     iter_records,
     close_task,
     compact,
+    consolidate,
     configured_mode,
     configured_retrieval_gate,
     create_promotion,
@@ -797,6 +799,18 @@ def memory_eligibility(
     status = metadata["status"]
     if status != "active":
         return None, status, eligible_until
+    tags = metadata.get("tags")
+    if isinstance(tags, list) and "auto-promoted" in tags:
+        # Automatic promotion wrote this chunk without a person reading it.
+        # If it cites a remote source or reads like an instruction, withhold
+        # it from retrieval automatically; `bank-audit --provenance` still
+        # reports it and a reviewed chunk is never withheld this way.
+        try:
+            body = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None, "provenance", eligible_until
+        if brain_runtime.provenance_problems(metadata, body):
+            return None, "provenance", eligible_until
     return metadata, None, eligible_until
 
 
@@ -6875,6 +6889,10 @@ def run_turn(
         "blocked": [], "skipped": 0,
     }
     compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
+    consolidation = {
+        "enabled": False, "created": 0, "superseded": 0,
+        "blocked": 0, "tickets": 0, "error": None,
+    }
     if flushed is not None and mode != "lightweight":
         # Merge evidence is advisory. It may suggest an explicit completion,
         # but this unattended path never changes task lifecycle state.
@@ -6886,6 +6904,9 @@ def run_turn(
             raise ContextError(
                 f"Merge completion-candidate detection failed: {error}"
             ) from error
+        # A ticket's completed events become one finding before promotion:
+        # the diary is the input, not a second durable layer.
+        consolidation = auto_consolidate(repository, owner=owner)
         # Durable memory is promoted on the same boundary as the
         # working-memory flush, so the whole pipeline runs
         # unattended.
@@ -6926,6 +6947,7 @@ def run_turn(
         "files": len(files),
         "excluded": path_excluded,
         "recent_files": recent,
+        "consolidation": consolidation,
         "pending": 0 if flushed else buffered,
         "flushed": flushed is not None and not flushed.get("closed_task"),
         "revision": flushed.get("revision") if flushed else None,
@@ -7796,9 +7818,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compact_command.add_argument("--json", action="store_true")
 
+    consolidate_command = commands.add_parser(
+        "consolidate",
+        help=(
+            "collapse one ticket's completed events into a finding; dry-run "
+            "unless --apply is passed"
+        ),
+    )
+    consolidate_command.add_argument("--apply", action="store_true")
+    consolidate_command.add_argument(
+        "--ticket", default=None, help="only this ticket, for example CMS-741"
+    )
+    consolidate_command.add_argument("--json", action="store_true")
+
     bank_audit = commands.add_parser(
         "bank-audit",
         help="report chunks whose cited sources changed and chunks overdue for review",
+    )
+    bank_audit.add_argument(
+        "--provenance",
+        action="store_true",
+        help="also report auto-promoted, external-source and instruction-like chunks",
     )
     bank_audit.add_argument("--json", action="store_true")
 
@@ -7835,6 +7875,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bank_retire.add_argument("--reason", default=None)
     bank_retire.add_argument("--json", action="store_true")
+
+    bank_quarantine = commands.add_parser(
+        "bank-quarantine",
+        help=(
+            "stop serving a chunk now - for suspected poisoning or an unsafe "
+            "claim - by closing its validity at today"
+        ),
+    )
+    bank_quarantine.add_argument("--id", required=True, dest="memory_id")
+    bank_quarantine.add_argument("--reason", default=None)
+    bank_quarantine.add_argument("--json", action="store_true")
 
     reindex_bank_command = commands.add_parser(
         "reindex-bank",
@@ -9495,8 +9546,32 @@ def _command() -> int:
                     print(f"Project Brain compacted: {result['moved']} record(s) archived.")
                 return 0
 
+            if arguments.command == "consolidate":
+                result = consolidate(
+                    repository,
+                    apply=arguments.apply,
+                    ticket=arguments.ticket,
+                    owner=owner,
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    verb = "Created" if arguments.apply else "Planned"
+                    print(
+                        f"{verb} {len([t for t in result['tickets'] if t['state'] in ('created', 'planned')])} "
+                        f"finding(s); {result['superseded']} event(s) superseded, "
+                        f"{result['blocked']} blocked."
+                    )
+                    for item in result["tickets"]:
+                        print(
+                            f"  {item['ticket']}: {item['state']} "
+                            f"({item['events']} event(s))"
+                            + (f" - {item.get('reason')}" if item.get("reason") else "")
+                        )
+                return 0
+
             if arguments.command == "bank-audit":
-                result = audit_bank(repository)
+                result = audit_bank(repository, provenance=arguments.provenance)
                 if arguments.json:
                     print(json.dumps(result))
                 else:
@@ -9524,6 +9599,13 @@ def _command() -> int:
                         )
                     for path in result["undigested"]:
                         print(f"  undigested: {path}")
+                    provenance = result.get("provenance") or {}
+                    print(
+                        f"  provenance: {len(provenance.get('auto_promoted') or [])} "
+                        f"auto-promoted, {len(provenance.get('external_sources') or [])} "
+                        f"with external sources, "
+                        f"{len(provenance.get('instruction_like') or [])} instruction-like."
+                    )
                 return 0
 
             if arguments.command == "bank-reverify":
@@ -9563,6 +9645,23 @@ def _command() -> int:
                         f"Retired {result['id']}: {result['status']} "
                         f"as of {result['valid_to']}{replacement}. "
                         f"Index rewritten with {result['chunks']} chunk row(s)."
+                    )
+                return 0
+
+            if arguments.command == "bank-quarantine":
+                result = retire_chunk(
+                    repository,
+                    arguments.memory_id,
+                    valid_to=date.today().isoformat(),
+                    reason=arguments.reason or "quarantined",
+                )
+                if arguments.json:
+                    print(json.dumps(result))
+                else:
+                    print(
+                        f"Quarantined {result['id']}: {result['status']} as of "
+                        f"{result['valid_to']}; index rewritten with "
+                        f"{result['chunks']} chunk row(s)."
                     )
                 return 0
 

@@ -4,6 +4,32 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime consolidates on the turn boundary — 2026-10-19
+
+- memory-seed's `runtime.json.template` now ships
+  `automatic_consolidation: true`; generated projects collapse a ticket's
+  completed events into one observed finding on the same flush boundary that
+  promotes and compacts, with no `consolidate` command from the user.
+- the seeded runtime withholds an `auto-promoted` chunk that cites a remote
+  source or reads like an instruction, while leaving manually reviewed chunks
+  alone; the reason is reported by `bank-audit --provenance`.
+- the policy lock was regenerated for the changed runtime asset and the
+  template.
+
+### Seeded runtime consolidates events and guards memory provenance — 2026-10-19
+
+- memory-seed carries the shared runtime's `consolidate` command: two or more
+  completed events for one ticket become one resolved/observed finding with the
+  events' sources, a dry-run default and idempotent re-runs. Generated projects
+  can now turn their event diary into reusable conclusions without a new
+  dependency.
+- it also carries the automatic-promotion provenance gate: a record citing an
+  external URL or carrying instruction-like text is held for a person instead
+  of becoming an auto-promoted chunk. `bank-audit --provenance` and
+  `bank-quarantine` expose and stop a suspected memory.
+- the model-facing policy lock was regenerated for the two changed asset files
+  (`memory-bank/scripts/brain_runtime.py` and `context.py`).
+
 ### Seeded runtime quotes a changelog's newest entry — 2026-10-19
 
 - memory-seed carries the shared runtime's changelog head excerpt: a document

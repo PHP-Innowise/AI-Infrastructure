@@ -9,6 +9,7 @@
   ],
   "automatic_compaction": true,
   "automatic_completion": false,
+  "automatic_consolidation": true,
   "automatic_promotion": true,
   "canonical_edition": ".agents",
   "codebase_map_max_drift": 25,
