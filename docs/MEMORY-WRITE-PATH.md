@@ -55,7 +55,11 @@ The source events are transitioned to `superseded` with their own owner as the
 actor; they are **not** archived. Archiving is the operator's decision and
 `compact` remains the command that moves terminal records. A private or
 restricted event is never folded into the team-visible finding. A second run is
-idempotent and reports `skipped` for an existing finding.
+idempotent and reports `skipped` for an existing consolidated finding. If the
+ticket already has a different **resolved** finding, consolidation creates no
+second conclusion: it supersedes the events with that finding named in the
+reason and reports the ticket as `existing`. An open or investigating finding
+is a specific work item, not a conclusion, so it does not suppress the summary.
 
 The finding cites the events' canonical sources, not the event files, so a
 later `compact` cannot turn the durable conclusion stale by moving its cited

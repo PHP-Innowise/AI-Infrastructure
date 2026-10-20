@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime does not duplicate a resolved ticket finding — 2026-10-20
+
+- memory-seed's consolidation now treats an existing `resolved` finding for a
+  ticket as the conclusion: completed events are superseded into it and no
+  second `CONSOLIDATED-*` finding is written. Open/investigating findings do not
+  block the summary.
+- the policy lock was regenerated for the changed runtime asset.
+
 ### Seeded runtime retains unverified consolidated findings — 2026-10-20
 
 - memory-seed's automatic compaction now leaves a `CONSOLIDATED-*` finding in

@@ -2948,6 +2948,27 @@ def _consolidated_finding(
     }
 
 
+def _resolved_ticket_finding(
+    repository: Path, ticket: str
+) -> Optional[dict[str, Any]]:
+    """An already-resolved finding for this ticket, if one exists.
+
+    A second resolved conclusion for the same ticket is a duplicate even when
+    its title differs. An open/investigating finding is a specific work item,
+    not a conclusion, so it does not suppress the summary.
+    """
+    own = f"CONSOLIDATED-{ticket}"
+    pattern = re.compile(r"(?<![A-Za-z0-9])" + re.escape(ticket) + r"(?![A-Za-z0-9])", re.I)
+    for _, record, _ in iter_records(repository, include_archive=True):
+        if record.get("type") != "finding" or record.get("status") != "resolved":
+            continue
+        if record.get("external_id") == own:
+            continue
+        if pattern.search(f"{record.get('external_id', '')} {record.get('title', '')}"):
+            return record
+    return None
+
+
 def consolidate(
     repository: Path,
     *,
@@ -2990,6 +3011,7 @@ def consolidate(
         "applied": apply,
         "tickets": [],
         "created": 0,
+        "existing": 0,
         "superseded": 0,
         "blocked": 0,
     }
@@ -3013,6 +3035,45 @@ def consolidate(
         else:
             entry.update(state="skipped", reason="consolidated finding already exists")
             report["tickets"].append(entry)
+            continue
+        existing = _resolved_ticket_finding(repository, value)
+        if existing is not None:
+            entry.update(
+                state="existing",
+                finding=existing.get("external_id"),
+                title=planned["title"],
+            )
+            report["tickets"].append(entry)
+            if not apply:
+                continue
+            with mutation_lock(repository):
+                snapshot = snapshot_files(
+                    [path for path, _, _ in events] + list(index_paths(repository))
+                )
+                try:
+                    for _, record, _ in events:
+                        update_record(
+                            repository,
+                            record["id"],
+                            expected_revision=record["revision"],
+                            progress=None,
+                            next_steps=[],
+                            files=[],
+                            sources=[],
+                            actor=str(record.get("owner") or owner),
+                            transition_to="superseded",
+                            reason=(
+                                "Consolidated into existing finding "
+                                f"{existing.get('external_id')}"
+                            ),
+                        )
+                except Exception as error:
+                    restore_files(snapshot)
+                    entry.update(state="blocked", reason=str(error))
+                    report["blocked"] += 1
+                    continue
+            report["existing"] += 1
+            report["superseded"] += len(events)
             continue
         entry.update(state="planned", title=planned["title"], sources=len(planned["sources"]))
         report["tickets"].append(entry)

@@ -28,6 +28,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A resolved ticket finding suppresses a duplicate summary — 2026-10-20
+
+- If a ticket already has a `resolved` finding, `consolidate` no longer creates
+  a second `CONSOLIDATED-*` conclusion. It transitions the ticket's completed
+  events to `superseded` with the existing finding named in the reason and
+  reports the ticket as `existing`. An open/investigating finding is a specific
+  work item, not a conclusion, so it does not suppress the summary.
+- Tests: the existing resolved finding survives untouched, no duplicate is
+  created, and both events are superseded; the full PHP Core Project Brain suite
+  is 674.
+
 ### Automatic compaction keeps unverified consolidated findings active — 2026-10-20
 
 - The turn boundary creates a consolidated finding as `resolved`/`observed`,
@@ -65,7 +76,7 @@ edition's own files remain in that edition's changelog.
   behavior`.
 - Tests: a named ticket delivers both of its events, the governed contract
   keeps three history items, and a generic latest goal uses the descriptive
-  event title; the full PHP Core Project Brain suite is 673.
+  event title; the full PHP Core Project Brain suite is 674.
 
 ### Memory maintenance runs on the turn boundary — 2026-10-19
 
