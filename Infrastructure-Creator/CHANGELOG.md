@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime retains unverified consolidated findings — 2026-10-20
+
+- memory-seed's automatic compaction now leaves a `CONSOLIDATED-*` finding in
+  `dynamic/findings` until its authority is `verified`; the same turn boundary
+  that creates it no longer archives it immediately. Generated projects can
+  actually retrieve the conclusions they just consolidated.
+- the policy lock was regenerated for the changed runtime asset.
+
 ### Seeded runtime shares two same-ticket events — 2026-10-20
 
 - memory-seed carries the history-layer change: a request that names a ticket

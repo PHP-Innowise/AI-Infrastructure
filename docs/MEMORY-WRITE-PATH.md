@@ -32,7 +32,11 @@ python3 memory-bank/scripts/context.py consolidate --ticket CMS-741 --apply
 ```
 
 The turn boundary runs this automatically when `automatic_consolidation` is
-enabled (the shipped default); the command is the explicit replay. It groups
+enabled (the shipped default); the command is the explicit replay. A
+`CONSOLIDATED-*` finding stays in `dynamic/findings` until its authority is
+`verified`, even when automatic compaction runs on the same boundary: resolved
+is terminal, but an unverified conclusion archived before anyone could read it
+is not durable memory. It groups
 **recorded events whose title says `Completed`** by the first ticket they name,
 and only when at least two events share it. For each
 group it creates one `finding`:

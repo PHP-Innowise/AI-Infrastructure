@@ -3078,6 +3078,21 @@ def consolidate(
     return report
 
 
+def _retain_consolidated(record: dict[str, Any]) -> bool:
+    """Whether a consolidated, still-observed finding must stay active.
+
+    Consolidation writes an observed finding on the turn boundary; the
+    automatic compaction that follows would immediately move it to the
+    archive, where a capsule cannot reach it. It stays in dynamic until a
+    person or agent verifies it (and promotion has had its chance).
+    """
+    return (
+        record.get("type") == "finding"
+        and str(record.get("external_id") or "").startswith("CONSOLIDATED-")
+        and record.get("authority") != "verified"
+    )
+
+
 def compact(repository: Path, *, only_external_id: Optional[str] = None) -> dict[str, int]:
     """Archive terminal and superseded records; with ``only_external_id``,
     only those of that ID - what a new task of the same name needs moved."""
@@ -3101,6 +3116,8 @@ def compact(repository: Path, *, only_external_id: Optional[str] = None) -> dict
                 record["status"] not in LIFECYCLES[record["type"]]["terminal"]
                 and record.get("superseded_by") is None
             ):
+                continue
+            if _retain_consolidated(record):
                 continue
             if only_external_id is not None and record.get("external_id") != only_external_id:
                 continue
@@ -4132,7 +4149,7 @@ def archivable_records(repository: Path) -> int:
         if (
             record["status"] in LIFECYCLES[record["type"]]["terminal"]
             or record.get("superseded_by") is not None
-        ):
+        ) and not _retain_consolidated(record):
             total += 1
     return total
 

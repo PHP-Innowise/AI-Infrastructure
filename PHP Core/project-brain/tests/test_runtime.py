@@ -3106,11 +3106,15 @@ class EventConsolidationTest(RuntimeHarness):
 class AutomaticConsolidationTest(RuntimeHarness):
     """Completed events become a finding at the turn boundary, not by command."""
 
-    def enable(self, value: bool = True) -> None:
+    def enable(self, value: bool = True, **flags: object) -> None:
         config = self.repository / "project-brain/config/runtime.json"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(
-            json.dumps({"mode": "governed", "automatic_consolidation": value}),
+            json.dumps({
+                "mode": "governed",
+                "automatic_consolidation": value,
+                **flags,
+            }),
             encoding="utf-8",
         )
 
@@ -3145,6 +3149,24 @@ class AutomaticConsolidationTest(RuntimeHarness):
         self.assertFalse(payload["consolidation"]["enabled"], payload)
         with self.assertRaises(brain.BrainRecordNotFound):
             brain.get_record(self.repository, "CONSOLIDATED-CMS-741")
+
+    def test_automatic_compaction_keeps_an_unverified_finding(self) -> None:
+        self.enable(automatic_compaction=True, compaction_threshold=1)
+        self.event(1)
+        self.event(2)
+        result = self.run_cli("turn", "--task-id", "feature/x", "--flush", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(1, payload["consolidation"]["created"], payload)
+        finding = brain.get_record(self.repository, "CONSOLIDATED-CMS-741")
+        self.assertEqual("resolved", finding["status"])
+        self.assertEqual(
+            [], list((self.repository / "project-brain/archive/finding").glob(
+                "*CONSOLIDATED*"))
+        )
+        path, _, _ = brain.find_record(self.repository, "CONSOLIDATED-CMS-741")
+        self.assertIn("project-brain/dynamic/findings", path.as_posix())
+        self.assertEqual(0, brain.archivable_records(self.repository))
 
     def test_a_second_boundary_is_idempotent(self) -> None:
         self.enable()

@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Automatic compaction keeps unverified consolidated findings active — 2026-10-20
+
+- The turn boundary creates a consolidated finding as `resolved`/`observed`,
+  then the same boundary's automatic compaction archived it immediately because
+  `resolved` is terminal. On a real-data copy all seven new findings landed in
+  `archive/finding` and no capsule could reach them. `compact` and
+  `archivable_records` now retain a `CONSOLIDATED-*` finding until its authority
+  is `verified`; superseded events still archive normally.
+- On a fresh copy, `turn --flush` created seven findings, superseded 27 events,
+  left all seven in `dynamic/findings`, archived none of them, and `validate`
+  passed. The manual `consolidate --apply` path already left them active; this
+  closes the automatic path.
+- Tests: the automatic boundary with `compaction_threshold=1` keeps the
+  unverified finding in `dynamic/` and out of the archive; the full PHP Core
+  Project Brain suite is 673.
+
 ### Two same-ticket events share the history layer — 2026-10-20
 
 - When the request names a ticket, the history layer admits the two
@@ -49,7 +65,7 @@ edition's own files remain in that edition's changelog.
   behavior`.
 - Tests: a named ticket delivers both of its events, the governed contract
   keeps three history items, and a generic latest goal uses the descriptive
-  event title; the full PHP Core Project Brain suite is 672.
+  event title; the full PHP Core Project Brain suite is 673.
 
 ### Memory maintenance runs on the turn boundary — 2026-10-19
 
