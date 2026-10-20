@@ -128,9 +128,19 @@ timestamp and belongs at the consolidation boundary.
 
 On the evaluated project's 28 events, 27 were titled `Completed` and named one
 of eight tickets. `consolidate --json` planned **seven findings covering 27
-events**; `CMS-748` had a single event and stayed `skipped`. No `--apply` was
-run on that project, so this is a count of what the command would write, not a
-measured change in a capsule.
+events**; `CMS-748` had a single event and stayed `skipped`. On a copy with the
+cited local sources present, `--apply` created those seven findings, superseded
+27 events, blocked none, and `validate` passed. The dry run was never applied to
+the original project.
+
+The first copy exposed a title-quality defect: a latest goal that is literally
+`completed Verification: ...` produced titles like `CMS-744: completed
+Verification: ...`. Consolidation now takes the descriptive part of the latest
+event title after `Completed <ticket>:`, skips auto-provisioned or ticket-led
+subjects, and falls back to the goal. The same copy then produced titles such
+as `CMS-744: Remove legacy unsigned ACL headers and preserve SDK presigner
+behavior` and `CMS-741: Read-only ten-agent review of current CMS-741 invalid
+to-many reference handling`.
 
 ## Why not a section-level index (yet)
 
@@ -148,9 +158,10 @@ selection.
 The measured lever was the history layer instead: when the request names a
 ticket, the two best events carrying it share the event slot. On the same
 12-prompt stand that delivered **18/37 answer passages (48.6%) instead of
-15/37 (40.5%)**, **24 judged-useful documents instead of 21**, with noise
-unchanged at 10 and two newly delivered events still unjudged. Without a ticket
-the single-event behavior is unchanged. A section index remains a possible
+15/37 (40.5%)** and **26 judged-useful documents instead of 21**, with noise
+unchanged at 10 and no unjudged documents after the two new events were graded
+1 (same ticket / same subject). Without a ticket the single-event behavior is
+unchanged. A section index remains a possible
 future experiment for a corpus where long documents hold several answer
 passages, but the current stand does not justify it.
 

@@ -3069,6 +3069,24 @@ class EventConsolidationTest(RuntimeHarness):
         self.assertEqual(0, result["created"])
         self.assertEqual("skipped", result["tickets"][0]["state"])
 
+    def test_a_generic_latest_goal_uses_the_descriptive_event_title(self) -> None:
+        self.event(
+            "EV-1", "Completed CMS-741: Validate the cobalt reference path",
+            "Resolved the first cobalt gap.",
+        )
+        self.event(
+            "EV-2", "Completed CMS-741: Validate the cobalt reference path",
+            "completed Verification: the full suite passed.",
+        )
+        self.assertEqual(1, brain.consolidate(self.repository, apply=True)["created"])
+        finding = brain.get_record(self.repository, "CONSOLIDATED-CMS-741")
+        self.assertEqual(
+            "CMS-741: Validate the cobalt reference path", finding["title"]
+        )
+        self.assertEqual(
+            "Validate the cobalt reference path", finding["goal"]
+        )
+
     def test_a_private_event_is_not_promoted_into_a_team_finding(self) -> None:
         self.event("EV-1", "Completed CMS-741: first", "Resolved the first cobalt gap.", privacy="private")
         self.event("EV-2", "Completed CMS-741: second", "Resolved the second cobalt gap.", privacy="private")

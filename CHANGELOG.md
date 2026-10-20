@@ -33,15 +33,23 @@ edition's own files remain in that edition's changelog.
 - When the request names a ticket, the history layer admits the two
   highest-ranked events that carry it instead of one; without a ticket it keeps
   one. On the 12-prompt stand this delivered 18/37 answer passages instead of
-  15/37 (40.5% → 48.6%), 24 judged-useful paths instead of 21, with noise
-  unchanged at 10 and 2 newly delivered events still unjudged. The governed
+  15/37 (40.5% → 48.6%), 26 judged-useful paths instead of 21, with noise
+  unchanged at 10 and no unjudged documents after both new events were graded
+  1 (same ticket / same subject). The governed
   capsule contract now keeps the changelog plus two event/episode slots.
 - `_under_git` asks Git whether a `.git` entry is a usable repository instead of
   trusting the entry's existence. A stale or empty `.git` above a plain project
   made `context-save` fail with "cannot verify source ignore rules"; the
   outside-Git handoff test now covers that case.
-- Tests: a named ticket delivers both of its events, and the governed contract
-  keeps three history items; the full PHP Core Project Brain suite is 671.
+- Applying automatic consolidation to a copy of the evaluated project with its
+  cited sources created seven findings from 27 completed events, superseded all
+  27, blocked none, and passed `validate`. A generic latest goal no longer
+  becomes the finding title: `CMS-744: completed Verification: ...` became
+  `CMS-744: Remove legacy unsigned ACL headers and preserve SDK presigner
+  behavior`.
+- Tests: a named ticket delivers both of its events, the governed contract
+  keeps three history items, and a generic latest goal uses the descriptive
+  event title; the full PHP Core Project Brain suite is 672.
 
 ### Memory maintenance runs on the turn boundary — 2026-10-19
 

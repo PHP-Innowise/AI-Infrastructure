@@ -2864,12 +2864,45 @@ def _first_sentence(text: object, limit: int = 600) -> str:
     return sentence[:limit].rstrip()
 
 
+def _event_subject(record: dict[str, Any]) -> str:
+    """The descriptive part of a completed event's title, when it has one.
+
+    A goal is often the literal word "completed" followed by a verification
+    block; taking the latest goal as the finding's title produced
+    "CMS-744: completed Verification: ..." on the real 27-event series. The
+    title after "Completed <ticket>: " names the work instead.
+    """
+    title = " ".join(str(record.get("title") or "").split())
+    if title.casefold().startswith("completed "):
+        title = title[len("Completed "):]
+    if ": " in title:
+        title = title.split(": ", 1)[1]
+    title = title.strip(" :-")
+    if len(title.split()) < 4:
+        return ""
+    if title.casefold().startswith(("completed", "verification")):
+        return ""
+    if "auto-provisioned" in title.casefold():
+        return ""
+    if re.match(r"^[A-Z]{2,10}-\d+\b", title):
+        return ""
+    return title
+
+
 def _consolidated_finding(
     repository: Path, ticket: str, events: list[tuple[Path, dict[str, Any], str]]
 ) -> dict[str, Any]:
     ordered = sorted(events, key=lambda item: str(item[1].get("created_at") or ""))
     latest = ordered[-1][1]
-    goal = _first_sentence(latest.get("goal")) or _first_sentence(latest.get("title")) or ticket
+    subject = next(
+        (
+            candidate
+            for candidate in (_event_subject(record) for _, record, _ in reversed(ordered))
+            if candidate
+        ),
+        "",
+    )
+    goal = subject or _first_sentence(latest.get("goal")) or _first_sentence(latest.get("title")) or ticket
     title = f"{ticket}: {goal}"
     if len(title) > 160:
         title = title[:157].rstrip() + "..."
