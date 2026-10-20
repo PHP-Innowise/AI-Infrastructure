@@ -198,7 +198,7 @@ DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
 CAPSULE_LAYER_LIMITS = {
     "procedural": 1,
     "semantic": 3,
-    # The changelog, and one Project Brain event or local episode.
+    # The changelog, and up to two Project Brain events (or local episodes).
     "episodic": CAPSULE_EPISODIC_LIMIT + CAPSULE_EVENT_LIMIT,
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
@@ -802,14 +802,18 @@ def memory_eligibility(
     tags = metadata.get("tags")
     if isinstance(tags, list) and "auto-promoted" in tags:
         # Automatic promotion wrote this chunk without a person reading it.
-        # If it cites a remote source or reads like an instruction, withhold
-        # it from retrieval automatically; `bank-audit --provenance` still
-        # reports it and a reviewed chunk is never withheld this way.
+        # Instruction-like text is withheld automatically; a remote citation
+        # is not, because a pinned source URL is legitimate evidence and
+        # withholding every one of them lost a measured useful chunk. The
+        # remote citation stays visible to `bank-audit --provenance`.
         try:
             body = path.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             return None, "provenance", eligible_until
-        if brain_runtime.provenance_problems(metadata, body):
+        if any(
+            "instruction-like" in problem
+            for problem in brain_runtime.provenance_problems(metadata, body)
+        ):
             return None, "provenance", eligible_until
     return metadata, None, eligible_until
 
@@ -2113,7 +2117,8 @@ def enforce_governed_capsule_contract(
     capsule: dict[str, object],
 ) -> dict[str, object]:
     """Apply the shared layer limits and 8,000-character contract to governed
-    output: no procedural item reaches it (see retrieve), 3 semantic, 2 episodic."""
+    output: no procedural item reaches it (see retrieve), 3 semantic, the
+    changelog plus two event/episode slots."""
     compacted = json.loads(serialize_capsule(capsule))
     compacted["procedural"] = compacted.get("procedural", [])[
         :CAPSULE_LAYER_LIMITS["procedural"]

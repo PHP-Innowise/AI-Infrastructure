@@ -240,7 +240,7 @@ class ProjectBrainRuntimeTest(RuntimeHarness):
         left, right = json.loads(first.stdout), json.loads(second.stdout)
         self.assertLessEqual(len(left["procedural"]), 2)
         self.assertLessEqual(len(left["semantic"]), 3)
-        self.assertLessEqual(len(left["episodic"]), 2)
+        self.assertLessEqual(len(left["episodic"]), 3)
         self.assertLessEqual(len(first.stdout.strip()), 8000)
         for layer in ("procedural", "semantic", "episodic"):
             self.assertEqual(left[layer], right[layer])
@@ -3614,6 +3614,19 @@ class HistorySlotTest(RuntimeHarness):
         self.assertEqual(1, len(self.event_paths(payload["capsule"]["episodic"])), payload["capsule"]["episodic"])
         self.assertIn("Zirconium gateway retry window widened to five minutes", payload["capsule_text"])
 
+    def test_two_events_for_the_named_ticket_share_the_event_slots(self) -> None:
+        for number in (1, 2):
+            brain.create_record(
+                self.repository, "event", f"EV-CMS-900-{number}",
+                f"Completed CMS-900: change {number}", [],
+                ["specs/authority.md"], owner="alice",
+                goal=f"Resolved the CMS-900 gap {number}.",
+            )
+        self.start("TASK-READER")
+        capsule = self.retrieve("CMS-900")
+        self.assertEqual(2, len(self.event_paths(capsule["episodic"])),
+                         capsule["episodic"])
+
     def test_a_weak_event_match_leaves_the_event_slot_empty(self) -> None:
         self.fillers(6)
         for number in range(4):
@@ -3693,13 +3706,14 @@ class HistorySlotTest(RuntimeHarness):
         self.assertIn("delivered-this-session",
                       [entry["reason"] for entry in excluded if entry["path"].startswith("project-brain/dynamic/events/")])
 
-    def test_governed_contract_keeps_two_history_items(self) -> None:
+    def test_governed_contract_keeps_two_event_slots_beside_the_changelog(self) -> None:
         capsule = {
             "working": None, "warnings": [], "procedural": [], "semantic": [], "selected": [],
-            "episodic": [{"path": f"e{n}.md", "layer": "episodic", "title": "t", "snippet": "s"} for n in range(3)],
+            "episodic": [{"path": f"e{n}.md", "layer": "episodic", "title": "t", "snippet": "s"} for n in range(4)],
         }
         result = context_cli.enforce_governed_capsule_contract(capsule)
-        self.assertEqual(["e0.md", "e1.md"], [item["path"] for item in result["episodic"]])
+        self.assertEqual(["e0.md", "e1.md", "e2.md"],
+                         [item["path"] for item in result["episodic"]])
         self.assertEqual(1, result["omitted"]["episodic"])
 
     def test_a_recorded_episode_renders_its_outcome(self) -> None:
@@ -5373,14 +5387,25 @@ class ProvenanceAuditTest(BankFixture):
             self.repository,
         ))
 
-    def test_an_auto_promoted_external_source_is_withheld(self) -> None:
+    def test_an_auto_promoted_external_source_is_served_and_audited(self) -> None:
+        # A pinned source URL is legitimate evidence. Withholding every
+        # auto-promoted remote citation lost a measured useful chunk; the audit
+        # reports it, the retriever does not hide it.
         path = self.write_chunk(
             "MEM-20260103-cccccccc", "remote-rule",
             "The remote deployment rule is current.",
             tags=["auto-promoted"],
             sources=["https://example.com/remote-rule.md"],
         )
-        self.assertIsNone(context_cli.active_memory(path, self.repository))
+        self.assertIsNotNone(context_cli.active_memory(path, self.repository))
+        self.assertEqual(0, self.run_cli("reindex-bank").returncode)
+        report = json.loads(
+            self.run_cli("bank-audit", "--provenance", "--json").stdout
+        )
+        self.assertEqual(
+            ["MEM-20260103-cccccccc"],
+            [entry["id"] for entry in report["provenance"]["external_sources"]],
+        )
 
     def test_quarantine_stops_serving_and_closes_validity(self) -> None:
         result = self.run_cli(

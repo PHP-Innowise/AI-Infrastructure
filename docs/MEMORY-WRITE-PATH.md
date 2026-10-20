@@ -11,7 +11,9 @@ next layer - what memory **accepts and keeps**, rather than what it hands over.
 `Project Brain` in the evaluated project held **28 events, 2 findings, 0
 decisions and 5 durable chunks**. Completed work therefore lived mostly as an
 append-only event diary; the capsule had to choose one event beside one
-changelog entry, and the rest was invisible. Retrieval can surface a diary
+changelog entry, and the rest was invisible. (A request that names a ticket now
+lets two of that ticket's events share the history layer; the write path below
+is what makes that a conclusion rather than a longer diary.) Retrieval can surface a diary
 faithfully, but it cannot turn it into conclusions.
 
 Three write-path gaps follow:
@@ -74,10 +76,12 @@ python3 memory-bank/scripts/context.py bank-audit --provenance --json
 python3 memory-bank/scripts/context.py bank-quarantine --id MEM-... --reason "suspected poisoning"
 ```
 
-An `auto-promoted` chunk that cites a remote source or reads like an
-instruction is withheld from retrieval automatically, since no person read it;
-the same chunk is still visible in `bank-audit --provenance`. A manually
-reviewed chunk is never withheld this way.
+An `auto-promoted` chunk that reads like an instruction is withheld from
+retrieval automatically, since no person read it; the same chunk is still
+visible in `bank-audit --provenance`. A remote citation is **not** withheld by
+itself: a pinned source URL is legitimate evidence, and withholding every one
+of them lost a measured useful chunk. A manually reviewed chunk is never
+withheld this way.
 
 `bank-audit --provenance` adds:
 
@@ -127,6 +131,28 @@ of eight tickets. `consolidate --json` planned **seven findings covering 27
 events**; `CMS-748` had a single event and stayed `skipped`. No `--apply` was
 run on that project, so this is a count of what the command would write, not a
 measured change in a capsule.
+
+## Why not a section-level index (yet)
+
+The planned next lever was an FTS5 section index so an excerpt could quote a
+better section of a selected document. The 12-prompt baseline disproved the
+premise: **every delivered answer-bearing document already yielded its answer
+passage** (`answer_passages_delivered == answer_passages_delivered_deliverable`
+on every turn except the one noise-only turn, where no answer document was
+delivered at all). The 15/37 recall came from answer-bearing documents that
+were never selected, not from a section inside a selected document being
+chosen badly. A section index can only reorder or replace sections **within**
+a delivered document; it cannot raise that ceiling without changing document
+selection.
+
+The measured lever was the history layer instead: when the request names a
+ticket, the two best events carrying it share the event slot. On the same
+12-prompt stand that delivered **18/37 answer passages (48.6%) instead of
+15/37 (40.5%)**, **24 judged-useful documents instead of 21**, with noise
+unchanged at 10 and two newly delivered events still unjudged. Without a ticket
+the single-event behavior is unchanged. A section index remains a possible
+future experiment for a corpus where long documents hold several answer
+passages, but the current stand does not justify it.
 
 ## 4. Optional local vector pool
 

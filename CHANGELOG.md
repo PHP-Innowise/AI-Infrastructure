@@ -28,6 +28,21 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Two same-ticket events share the history layer — 2026-10-20
+
+- When the request names a ticket, the history layer admits the two
+  highest-ranked events that carry it instead of one; without a ticket it keeps
+  one. On the 12-prompt stand this delivered 18/37 answer passages instead of
+  15/37 (40.5% → 48.6%), 24 judged-useful paths instead of 21, with noise
+  unchanged at 10 and 2 newly delivered events still unjudged. The governed
+  capsule contract now keeps the changelog plus two event/episode slots.
+- `_under_git` asks Git whether a `.git` entry is a usable repository instead of
+  trusting the entry's existence. A stale or empty `.git` above a plain project
+  made `context-save` fail with "cannot verify source ignore rules"; the
+  outside-Git handoff test now covers that case.
+- Tests: a named ticket delivers both of its events, and the governed contract
+  keeps three history items; the full PHP Core Project Brain suite is 671.
+
 ### Memory maintenance runs on the turn boundary — 2026-10-19
 
 - `automatic_consolidation` is on in the shipped config (and in the generator's
@@ -35,10 +50,11 @@ edition's own files remain in that edition's changelog.
   compacts, the runtime collapses a ticket's completed-event series into one
   observed finding before promotion, so the user does not run `consolidate`
   for normal work. The command remains as the explicit replay/backfill.
-- An `auto-promoted` chunk whose source is remote or whose title/body is
-  instruction-like is now withheld from retrieval automatically, because no
-  person read it. Manually reviewed chunks are not withheld, and
-  `bank-audit --provenance` still reports all three groups.
+- An `auto-promoted` chunk whose title/body is instruction-like is now withheld
+  from retrieval automatically, because no person read it. A remote citation is
+  reported by `bank-audit --provenance` but is not withheld by itself: a pinned
+  source URL is legitimate evidence, and withholding every one lost a measured
+  useful chunk. Manually reviewed chunks are not withheld.
 - `automatic_consolidation: false` restores the previous event-only behavior.
 - The turn result reports `consolidation` (`enabled`, `created`, `superseded`,
   `blocked`, `tickets`, `error`) beside promotion and compaction; a maintenance
@@ -78,7 +94,7 @@ edition's own files remain in that edition's changelog.
   see `docs/MEMORY-SQLITE-VEC-PILOT.md` and `docs/MEMORY-WRITE-PATH.md`.
 - Tests: five event-consolidation cases, provenance audit/quarantine, the
   provenance problem gate, the fact-consolidation fixture and the fail-closed
-  pilot/RRF suite; the full PHP Core Project Brain suite is 670 tests.
+  pilot/RRF suite; the full PHP Core Project Brain suite is 671 tests.
 
 ### A shared class name no longer anchors a weak match — 2026-10-19
 

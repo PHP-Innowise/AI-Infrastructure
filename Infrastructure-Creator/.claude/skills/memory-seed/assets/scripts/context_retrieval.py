@@ -82,11 +82,13 @@ CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
 # Repository history the main query ranks: the changelog.
 CAPSULE_EPISODIC_LIMIT = 1
-# Recorded history: one Project Brain event or local episode, found by its own
-# search (history_query). It used to share the changelog's single slot, which
-# the changelog held on every turn of the 121 evaluated prompts that had an
-# event - while 19 answers sat in events never delivered.
-CAPSULE_EVENT_LIMIT = 1
+# Recorded history: up to two Project Brain events (or local episodes) found
+# by their own search (history_query). The second event is admitted only when
+# the request names a ticket and both events carry it; otherwise the slot keeps
+# its single best candidate. It used to share the changelog's slot entirely,
+# which the changelog held on every turn of the 121 evaluated prompts that had
+# an event - while 19 answers sat in events never delivered.
+CAPSULE_EVENT_LIMIT = 2
 HISTORY_KIND = "brain-event"
 # How many prompt terms survive into a retrieval query. Rarity in the index
 # decides which ones, so the cap bounds cost without deciding relevance by
@@ -4216,24 +4218,23 @@ def _history_candidates(
 
 def _best_history_event(
     repository: Path, events: list[dict[str, Any]], config: dict[str, Any],
-    *, trace: Optional[RetrievalTrace] = None,
+    *, trace: Optional[RetrievalTrace] = None, limit: int = 1,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """The best admitted event that passes the runtime filters.
+    """The best admitted events that pass the runtime filters.
 
-    The filters only remove a candidate or lower its score, so once the next
-    candidate's unfiltered score cannot beat the best filtered one, no later
-    one can: usually one or two files are read, however many events exist.
+    ``limit`` is the event slot's capacity. One is the established contract;
+    more is an experiment that lets several same-ticket events share the slot.
     """
-    best: Optional[dict[str, Any]] = None
+    kept_events: list[dict[str, Any]] = []
     excluded: list[dict[str, str]] = []
     for item in events:
-        if best is not None and item["adjusted_score"] <= best["adjusted_score"]:
+        if len(kept_events) >= max(1, limit):
             break
         kept, dropped = _runtime_filter(repository, [item], config, trace=trace)
         excluded.extend(dropped)
-        if kept and (best is None or kept[0]["adjusted_score"] > best["adjusted_score"]):
-            best = kept[0]
-    return ([best] if best is not None else []), excluded
+        if kept:
+            kept_events.append(kept[0])
+    return kept_events, excluded
 
 
 # The part of a document a capsule quotes. A capsule that names a document
@@ -8159,7 +8160,11 @@ def retrieve(
     filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
     exact_events = [item for item in event_candidates if item.get("_ticket_match")]
     chosen_event, history_excluded = _best_history_event(
-        repository, exact_events if exact_events else event_candidates, config, trace=trace
+        repository, exact_events if exact_events else event_candidates, config,
+        trace=trace,
+        # A same-ticket series is only a series when the request names the
+        # ticket; without one, the extra events are neighbours, not the answer.
+        limit=CAPSULE_EVENT_LIMIT if request_tickets else 1,
     )
     filter_excluded.extend(history_excluded)
     history_episode: list[dict[str, Any]] = []

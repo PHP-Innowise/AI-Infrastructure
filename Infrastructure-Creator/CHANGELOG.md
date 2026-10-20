@@ -4,6 +4,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime shares two same-ticket events — 2026-10-20
+
+- memory-seed carries the history-layer change: a request that names a ticket
+  admits its two best events instead of one, and the governed capsule keeps the
+  changelog plus two event/episode slots. Without a ticket the single-event
+  behavior is unchanged.
+- it also carries the handoff fix that asks Git whether a `.git` entry is a real
+  repository, so a stale ancestor `.git` no longer blocks a save outside Git.
+- the policy lock was regenerated for the changed runtime assets.
+
 ### Seeded runtime consolidates on the turn boundary — 2026-10-19
 
 - memory-seed's `runtime.json.template` now ships

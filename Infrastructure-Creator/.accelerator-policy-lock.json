@@ -99,11 +99,11 @@
     ".agents/skills/memory-seed/assets/runtime-contract.json": "64522a0fa2fab417e806fc4be611e3f25e97a844256607f449f5d911f2684e4a",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "13e09d26050f26bf4ba15af6c034ea236c1b2ee85c0fa7937f399f27e1987933",
     ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "77ec2d957393196c25e7b0900455a9faeae8ae2e4b44b3fe3125bf5c287511f3",
-    ".agents/skills/memory-seed/assets/scripts/context.py": "4c9502d96cc8ea7ee9723209f65c8ffe853bfa370f479c400e187f4c30c2bd7f",
+    ".agents/skills/memory-seed/assets/scripts/context.py": "8802b33c70389274ada963fabb6b00f1d01fcdcea36a7d3db0c7503795467ded",
     ".agents/skills/memory-seed/assets/scripts/context_cli.py": "ec874c9312133eafae8f16bc298fc011fb55579cb4b300453e81e3f31a4d0123",
     ".agents/skills/memory-seed/assets/scripts/context_continuity.py": "70c8f134f2374225829d14aa6935262b60b0329b9bfc27251637867981befee5",
-    ".agents/skills/memory-seed/assets/scripts/context_handoff.py": "eb0ba874c162091a696aeb4658bfc1680bf22618536416290c56c86a80d46306",
-    ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "85069e94b06676a1360ad3aaa9f6471aefbcc50da403af0d6a6ae4c8378bfd6d",
+    ".agents/skills/memory-seed/assets/scripts/context_handoff.py": "cbb82c4c610e2ccce46167bb2c27fff12b1516acc4a8ec7de98e0cda5ad2b9a6",
+    ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "32902d9523453ccd8bb123dd789a644186ea04aaafc3346ee2af0c713e6e12ba",
     ".agents/skills/memory-seed/assets/scripts/mcp_config.py": "d3bac7148db0afbc84d71772e76bbe20729f157e4ade571261e9b61c39bbe87c",
     ".agents/skills/memory-seed/assets/scripts/mcp_server.py": "df2f98eb1690e0ae66239fb680713e92b1ce9c188a36b1612f952ef5bd798f48",
     ".agents/skills/memory-seed/assets/scripts/memory_results.py": "cbf49bc18ada432c6f6eab960bb0ca1c783f08987734e0fb865c7afaa4ed93fd",
@@ -174,7 +174,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "ba770200eda5be6411d5877d955c8d9591713b0f269c4b3652458202ebc54897",
+  "policy_digest": "b5aa0ca187552cf66c1c5654268021f806607ea60d240d53225dc212c5d1109d",
   "release": "2.5.0",
   "schema_version": 1
 }

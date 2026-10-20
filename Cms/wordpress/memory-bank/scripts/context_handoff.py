@@ -235,7 +235,34 @@ def _under_git(repository: Path) -> bool:
     if os.environ.get("GIT_DIR"):
         return True
     current = repository.absolute()
-    return any(os.path.lexists(directory / ".git") for directory in (current, *current.parents))
+    metadata = next(
+        (directory for directory in (current, *current.parents)
+         if os.path.lexists(directory / ".git")),
+        None,
+    )
+    if metadata is None:
+        return False
+    git_metadata = metadata / ".git"
+    if git_metadata.is_dir() and not any(
+        (git_metadata / name).exists() for name in ("HEAD", "commondir")
+    ):
+        # An empty or stale `.git` directory is not a repository. This is the
+        # portable-copy case: the project has no ignore rules to consult.
+        return False
+    # Ask Git itself; a project outside a valid repository has no ignore rules
+    # to consult, while a real Git metadata directory that cannot answer still
+    # refuses (the caller cannot verify the rules).
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True
+    return completed.returncode == 0 or git_metadata.is_dir()
 
 
 def _is_ignored(repository: Path, relative: str) -> bool:
