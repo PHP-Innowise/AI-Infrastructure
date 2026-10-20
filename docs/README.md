@@ -17,6 +17,7 @@ your situation.
 - **Add or change accelerator behavior:** [Extending the Accelerator](EXTENDING.md)
 - **Measure a memory retrieval change on real prompts:** [Memory Evaluation Stand](MEMORY-EVAL.md)
 - **Understand what memory accepts, consolidates and refuses:** [Memory Write Path](MEMORY-WRITE-PATH.md) · [local vector pilot](MEMORY-SQLITE-VEC-PILOT.md)
+- **Reverse engineer memory plugins for DeepSeek Harness:** [Harness memory applications](RE-MEMORY-APPLICATIONS-2026-10.md)
 - **Run orchestrated workflows:** [Orchestrator Commands](ORCHESTRATOR-COMMANDS.md)
 - **Coordinate changes across services:** [System-level AI Coordination](AI-SYSTEM-ORCHESTRATION.md) — stack-neutral catalogs, plans, sequential workers and recovery.
 - **See a complete task lifecycle:** [User Task Workflow Example](examples/USER-TASK-WORKFLOW-EXAMPLE.md)
