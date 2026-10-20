@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Every-event evidence verifies a consolidated finding — 2026-10-20
+
+- With `automatic_consolidation_verification` (on in the shipped config), a
+  consolidated finding becomes `verified` only when **every** source event
+  recorded a `Verification:` line and at least one local source was
+  fingerprinted. The authority transition is agent-attested, like the existing
+  Harness save path; a finding without that evidence stays observed.
+- This lets the same turn boundary's automatic promotion turn the verified
+  summary into a durable chunk; an observed summary remains only in the Brain.
+- Tests: two verified events produce a verified finding, two unverified events
+  do not; the full PHP Core Project Brain suite is 676.
+
 ### A consolidated summary names its ticket's existing findings — 2026-10-20
 
 - The summary's `progress` now lists the external id and UUID of every finding
@@ -36,7 +48,7 @@ edition's own files remain in that edition's changelog.
   schema change: the reviewer can follow the specific review finding from the
   summary, and the two records keep their distinct scope.
 - Tests: an open `CMS-741-REVIEW` finding is named by the new summary and keeps
-  its status; the full PHP Core Project Brain suite is 675.
+  its status; the full PHP Core Project Brain suite is 676.
 
 ### A resolved ticket finding suppresses a duplicate summary — 2026-10-20
 
@@ -86,7 +98,7 @@ edition's own files remain in that edition's changelog.
   behavior`.
 - Tests: a named ticket delivers both of its events, the governed contract
   keeps three history items, and a generic latest goal uses the descriptive
-  event title; the full PHP Core Project Brain suite is 675.
+  event title; the full PHP Core Project Brain suite is 676.
 
 ### Memory maintenance runs on the turn boundary — 2026-10-19
 

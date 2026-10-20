@@ -48,8 +48,12 @@ group it creates one `finding`:
   unvalidatable);
 - `progress` records the source event IDs and up to three `Verification:`
   sentences;
-- status `resolved`, authority `observed` - mechanical consolidation is not a
-  verification.
+- status `resolved`, authority `observed` by default - mechanical consolidation
+  is not a verification. With `automatic_consolidation_verification` (shipped
+  on), it becomes `verified` only when every source event recorded a
+  `Verification:` line and at least one local source was fingerprinted; the
+  authority transition is agent-attested and the same boundary may promote the
+  summary into a durable chunk.
 
 The source events are transitioned to `superseded` with their own owner as the
 actor; they are **not** archived. Archiving is the operator's decision and

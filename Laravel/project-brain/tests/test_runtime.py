@@ -3128,6 +3128,19 @@ class EventConsolidationTest(RuntimeHarness):
             brain.get_record(self.repository, "CMS-741-REVIEW")["status"],
         )
 
+    def test_evidence_from_every_event_verifies_the_finding(self) -> None:
+        for number in (1, 2):
+            self.event(
+                f"EV-{number}", f"Completed CMS-741: change {number}",
+                f"Resolved the cobalt gap {number}. Verification: suite {number} passed.",
+            )
+        result = brain.consolidate(self.repository, apply=True)
+        self.assertEqual(1, result["created"])
+        self.assertEqual(1, result["verified"])
+        finding = brain.get_record(self.repository, "CONSOLIDATED-CMS-741")
+        self.assertEqual("verified", finding["authority"])
+        self.assertEqual("resolved", finding["status"])
+
     def test_a_private_event_is_not_promoted_into_a_team_finding(self) -> None:
         self.event("EV-1", "Completed CMS-741: first", "Resolved the first cobalt gap.", privacy="private")
         self.event("EV-2", "Completed CMS-741: second", "Resolved the second cobalt gap.", privacy="private")
@@ -10127,7 +10140,8 @@ class ShippedRuntimeConfigTest(unittest.TestCase):
 
     def test_only_safe_memory_maintenance_is_automatic_by_default(self) -> None:
         for flag in (
-            "automatic_promotion", "automatic_consolidation", "automatic_compaction"
+            "automatic_promotion", "automatic_consolidation",
+            "automatic_consolidation_verification", "automatic_compaction",
         ):
             with self.subTest(flag=flag):
                 self.assertIs(True, self.config.get(flag))

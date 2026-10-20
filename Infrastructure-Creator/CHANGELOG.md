@@ -4,6 +4,15 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime verifies evidence-backed summaries — 2026-10-20
+
+- memory-seed ships `automatic_consolidation_verification: true`: a
+  consolidated finding becomes agent-attested `verified` only when every source
+  event recorded a `Verification:` line and a local source was fingerprinted,
+  so automatic promotion can turn it into a durable chunk. Findings without
+  that evidence stay observed.
+- the policy lock was regenerated for the changed runtime asset and template.
+
 ### Seeded runtime names a ticket's existing findings — 2026-10-20
 
 - a consolidated summary's progress now lists the external id and UUID of every

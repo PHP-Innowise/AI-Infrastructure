@@ -533,6 +533,7 @@ def load_config(repository: Path) -> dict[str, Any]:
         "automatic_promotion": False,
         "automatic_completion": False,
         "automatic_consolidation": True,
+        "automatic_consolidation_verification": True,
         "automatic_compaction": False,
         "compaction_threshold": 5,
         "codebase_map_max_drift": 25,
@@ -2950,6 +2951,8 @@ def _consolidated_finding(
         "sources": sources,
         "progress": progress[:4000],
         "events": len(ordered),
+        "verifications": len(verifications),
+        "all_verified": len(verifications) == len(ordered),
     }
 
 
@@ -3002,6 +3005,8 @@ def consolidate(
     archived copy is the operator's decision, and a later ``compact`` is
     already the command that moves terminal records.
     """
+    config = load_config(repository)
+    verify_consolidated = bool(config.get("automatic_consolidation_verification"))
     wanted = ticket.strip().upper() if isinstance(ticket, str) and ticket.strip() else None
     groups: dict[str, list[tuple[Path, dict[str, Any], str]]] = {}
     for path, record, body in iter_records(repository):
@@ -3025,6 +3030,7 @@ def consolidate(
         "tickets": [],
         "created": 0,
         "existing": 0,
+        "verified": 0,
         "superseded": 0,
         "blocked": 0,
     }
@@ -3109,7 +3115,7 @@ def consolidate(
                     authority="observed",
                     goal=planned["goal"],
                 )
-                update_record(
+                updated = update_record(
                     repository,
                     created["id"],
                     expected_revision=created["revision"],
@@ -3121,6 +3127,24 @@ def consolidate(
                     transition_to="resolved",
                     reason=f"Consolidated {planned['events']} completed events",
                 )
+                if (
+                    verify_consolidated
+                    and planned["all_verified"]
+                    and planned["sources"]
+                ):
+                    updated = update_record(
+                        repository,
+                        created["id"],
+                        expected_revision=updated["revision"],
+                        progress=None,
+                        next_steps=[],
+                        files=[],
+                        sources=[],
+                        actor=owner,
+                        authority="verified",
+                        attestation="agent",
+                        reason="Every consolidated event recorded verification",
+                    )
                 for _, record, _ in events:
                     update_record(
                         repository,
@@ -3148,6 +3172,11 @@ def consolidate(
                 continue
         entry["state"] = "created"
         report["created"] += 1
+        entry["verified"] = bool(
+            verify_consolidated and planned["all_verified"] and planned["sources"]
+        )
+        if entry["verified"]:
+            report["verified"] += 1
         report["superseded"] += len(events)
     return report
 
