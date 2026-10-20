@@ -123,6 +123,7 @@ from context_retrieval import (
     excerpt_weights,
     excerpt_section,
     excerpt_window,
+    fts_query,
     _unmarked,
     is_relevant,
     linked_documents,
@@ -1406,15 +1407,6 @@ def index_repository(
         "index": round(time.monotonic() - index_started, 6),
     }
     return result
-
-
-def fts_query(query: str) -> str:
-    # ponytail: FTS5-only retrieval; add local embeddings only after a
-    # golden-query evaluation shows lexical recall is insufficient.
-    tokens = re.findall(r"\w+", query, flags=re.UNICODE)
-    if not tokens:
-        raise ContextError("Search query must contain a word")
-    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 def search_documents(

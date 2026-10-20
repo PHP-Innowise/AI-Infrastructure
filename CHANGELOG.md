@@ -28,6 +28,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A Russian technical query reaches the English index — 2026-10-20
+
+- `query_tokens` now applies a small, prefix-based seed glossary for common
+  Russian software terms (path, log, drop, unknown, properties, entity, field,
+  nested, list, ttl, preview, legacy, admin, …). It rewrites only Cyrillic
+  words; English queries, code identifiers and tickets are untouched. The
+  duplicated local `fts_query` in `context.py` now delegates to the aliasing
+  implementation.
+- On the real project's three Russian prompts that previously returned an empty
+  selection, the same corpus now returns 2–3 semantic documents and the
+  changelog; the TTL-preview prompt reaches the exact chunk
+  `MEM-20260915-77964094-upgrade-note-overstates-legacy-preview-ttl-configurability`.
+- The 12-prompt English stand is unchanged: 26 judged-useful documents, 10
+  noise, 18/37 answer passages, 11/12 useful turns.
+- Tests: the mapping produces path/written/log/drop/unknown/properties/entity
+  and an in-memory English document is found from the Russian question; the
+  full PHP Core Project Brain suite is 678.
+
 ### Every-event evidence verifies a consolidated finding — 2026-10-20
 
 - With `automatic_consolidation_verification` (on in the shipped config), a
@@ -38,7 +56,7 @@ edition's own files remain in that edition's changelog.
 - This lets the same turn boundary's automatic promotion turn the verified
   summary into a durable chunk; an observed summary remains only in the Brain.
 - Tests: two verified events produce a verified finding, two unverified events
-  do not; the full PHP Core Project Brain suite is 676.
+  do not; the full PHP Core Project Brain suite is 678.
 
 ### A consolidated summary names its ticket's existing findings — 2026-10-20
 
@@ -48,7 +66,7 @@ edition's own files remain in that edition's changelog.
   schema change: the reviewer can follow the specific review finding from the
   summary, and the two records keep their distinct scope.
 - Tests: an open `CMS-741-REVIEW` finding is named by the new summary and keeps
-  its status; the full PHP Core Project Brain suite is 676.
+  its status; the full PHP Core Project Brain suite is 678.
 
 ### A resolved ticket finding suppresses a duplicate summary — 2026-10-20
 
@@ -98,7 +116,7 @@ edition's own files remain in that edition's changelog.
   behavior`.
 - Tests: a named ticket delivers both of its events, the governed contract
   keeps three history items, and a generic latest goal uses the descriptive
-  event title; the full PHP Core Project Brain suite is 676.
+  event title; the full PHP Core Project Brain suite is 678.
 
 ### Memory maintenance runs on the turn boundary — 2026-10-19
 

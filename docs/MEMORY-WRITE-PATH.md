@@ -116,7 +116,22 @@ This follows the memory-poisoning threat model: memory is a persistence layer
 for an attacker, and a durable chunk is a higher-value target than a prompt
 injection that disappears with the session.
 
-## 3. Deterministic fact consolidation
+## 3. Cross-language technical queries
+
+The evaluated project's real prompts include Russian questions while the indexed
+source is English. Three of them previously selected nothing. `query_tokens`
+now carries a small prefix-based seed glossary for common software terms
+(`путь` → path, `лог` → log, `отбрасывание` → drop, `свойства` → properties,
+`сущности` → entity, `срок` → ttl, `просмотр` → preview, …). It rewrites only
+Cyrillic words; English text, identifiers and tickets pass through unchanged.
+On those three prompts the same corpus now returns 2–3 semantic documents and
+the changelog, including the exact TTL-preview chunk for one of them. The
+12-prompt English stand is unchanged.
+
+The glossary is a bridge, not a translation service: it is deliberately small,
+local, dependency-free and extendable in one table.
+
+## 4. Deterministic fact consolidation
 
 ```bash
 python3 scripts/memory_fact_consolidation.py --input facts.json --json
@@ -180,7 +195,7 @@ unchanged. A section index remains a possible
 future experiment for a corpus where long documents hold several answer
 passages, but the current stand does not justify it.
 
-## 4. Optional local vector pool
+## 5. Optional local vector pool
 
 `scripts/memory_sqlite_vec_pilot.py` probes local `sqlite-vec`/`sqlite-lembed`
 assets and fuses a dense path list with the lexical one through RRF. It is

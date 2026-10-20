@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime bridges Russian technical queries — 2026-10-20
+
+- memory-seed carries the prefix-based Russian software glossary: a Russian
+  question now reaches English project documents and durable chunks, while
+  English queries and identifiers are untouched.
+- the policy lock was regenerated for the changed runtime assets.
+
 ### Seeded runtime verifies evidence-backed summaries — 2026-10-20
 
 - memory-seed ships `automatic_consolidation_verification: true`: a

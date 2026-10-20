@@ -3659,15 +3659,63 @@ def index_documents(
     }
 
 
+# A seed glossary for the Russian technical questions this project actually
+# receives. It is deliberately small and prefix-based, and it only rewrites
+# Cyrillic words: an English query, a code identifier or a ticket is left
+# untouched. This is a bridge, not a translation service; a project with a
+# different language should extend `_QUERY_ALIASES` rather than expect a model
+# call from the indexing hot path.
+_QUERY_ALIASES = (
+    ("предотвращ", "prevent"),
+    ("подделк", "spoof"),
+    ("вложенн", "nested"),
+    ("неизвестн", "unknown"),
+    ("записыва", "written"),
+    ("отбрасыва", "drop"),
+    ("просмотр", "preview"),
+    ("временн", "temporary"),
+    ("действ", "validity"),
+    ("измен", "change"),
+    ("админк", "admin"),
+    ("стар", "legacy"),
+    ("файл", "files"),
+    ("свойств", "properties"),
+    ("сущност", "entity"),
+    ("строк", "lines"),
+    ("списк", "list"),
+    ("пут", "path"),
+    ("лог", "log"),
+    ("поля", "field"),
+    ("поле", "field"),
+    ("полей", "field"),
+    ("полю", "field"),
+    ("полем", "field"),
+    ("полях", "field"),
+    ("имя", "name"),
+    ("срок", "ttl"),
+)
+
+
+def _query_alias(token: str) -> list[str]:
+    if not re.search(r"[А-Яа-яЁё]", token):
+        return [token]
+    folded = token.casefold()
+    for prefix, english in _QUERY_ALIASES:
+        if folded.startswith(prefix):
+            return english.split()
+    return [token]
+
+
 def query_tokens(query: str) -> list[str]:
     tokens: list[str] = []
     seen: set[str] = set()
     for token in re.findall(r"\w+", query, flags=re.UNICODE):
-        folded = token.casefold()
-        if folded in seen:
-            continue
-        seen.add(folded)
-        tokens.append(token)
+        for candidate in _query_alias(token):
+            folded = candidate.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            tokens.append(candidate)
     if not tokens:
         raise RetrievalError("Search query must contain a word")
     return tokens

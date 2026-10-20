@@ -3644,6 +3644,37 @@ class HistoryAdmissionTest(unittest.TestCase):
         self.assertEqual(["quasar", "quasars", *words[:22]], history["terms"])
 
 
+class RussianQueryAliasTest(unittest.TestCase):
+    def test_technical_russian_terms_become_english_tokens(self) -> None:
+        tokens = retrieval.query_tokens(
+            "Какой путь записывается в лог при отбрасывании неизвестных свойств сущности"
+        )
+        for term in ("path", "written", "log", "drop", "unknown", "properties", "entity"):
+            self.assertIn(term, tokens)
+
+    def test_the_english_document_is_found(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE VIRTUAL TABLE documents USING fts5("
+            "path,layer,kind,title,summary,content,tokenize='porter unicode61')"
+        )
+        connection.execute(
+            "INSERT INTO documents VALUES(?,?,?,?,?,?)",
+            ("russian", "semantic", "doc", "Path", "Path in log",
+             "The path is written to the log when unknown entity properties are dropped."),
+        )
+        try:
+            rows = context_cli.search_documents(
+                connection,
+                "Какой путь записывается в лог при отбрасывании неизвестных свойств сущности",
+                5,
+            )
+        finally:
+            connection.close()
+        self.assertEqual(["russian"], [row["path"] for row in rows])
+
+
 class HistorySlotTest(RuntimeHarness):
     """Recorded history - a Project Brain event or a local episode - has its
     own slot and its own search beside the changelog's."""
