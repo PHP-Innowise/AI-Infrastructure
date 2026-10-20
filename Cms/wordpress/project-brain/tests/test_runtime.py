@@ -3111,6 +3111,23 @@ class EventConsolidationTest(RuntimeHarness):
             self.assertEqual("superseded", record["status"])
         self.assertEqual("resolved", brain.get_record(self.repository, existing["id"])["status"])
 
+    def test_a_consolidated_summary_names_an_existing_open_finding(self) -> None:
+        brain.create_record(
+            self.repository, "finding", "CMS-741-REVIEW",
+            "CMS-741 review still investigating the edge case", [],
+            ["specs/authority.md"], owner="alice",
+        )
+        self.event("EV-1", "Completed CMS-741: first", "Resolved the first cobalt gap.")
+        self.event("EV-2", "Completed CMS-741: second", "Resolved the second cobalt gap.")
+        result = brain.consolidate(self.repository, apply=True)
+        self.assertEqual(1, result["created"])
+        finding = brain.get_record(self.repository, "CONSOLIDATED-CMS-741")
+        self.assertIn("CMS-741-REVIEW", finding["progress"])
+        self.assertEqual(
+            "open",
+            brain.get_record(self.repository, "CMS-741-REVIEW")["status"],
+        )
+
     def test_a_private_event_is_not_promoted_into_a_team_finding(self) -> None:
         self.event("EV-1", "Completed CMS-741: first", "Resolved the first cobalt gap.", privacy="private")
         self.event("EV-2", "Completed CMS-741: second", "Resolved the second cobalt gap.", privacy="private")

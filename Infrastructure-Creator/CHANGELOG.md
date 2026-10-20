@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime names a ticket's existing findings — 2026-10-20
+
+- a consolidated summary's progress now lists the external id and UUID of every
+  finding that names the same ticket, including open/investigating ones, so a
+  generated project can follow the specific review finding from the summary.
+- the policy lock was regenerated for the changed runtime asset.
+
 ### Seeded runtime does not duplicate a resolved ticket finding — 2026-10-20
 
 - memory-seed's consolidation now treats an existing `resolved` finding for a

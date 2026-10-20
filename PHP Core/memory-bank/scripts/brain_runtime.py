@@ -2933,9 +2933,14 @@ def _consolidated_finding(
             if sentence and sentence not in verifications:
                 verifications.append(sentence)
     identifiers = ", ".join(str(record.get("id")) for _, record, _ in ordered)
+    related = [
+        f"{record.get('external_id')} ({record.get('id')})"
+        for record in _ticket_findings(repository, ticket)
+    ]
     progress = (
         f"Consolidated {len(ordered)} completed events for {ticket}: {identifiers}. "
         + ("Verification: " + " ".join(verifications[:3]) if verifications else "")
+        + (" Related findings: " + ", ".join(related[:8]) if related else "")
     ).strip()
     return {
         "external_id": f"CONSOLIDATED-{ticket}",
@@ -2948,6 +2953,19 @@ def _consolidated_finding(
     }
 
 
+def _ticket_findings(repository: Path, ticket: str) -> list[dict[str, Any]]:
+    """Findings that name this ticket, whether active or archived."""
+    own = f"CONSOLIDATED-{ticket}"
+    pattern = re.compile(r"(?<![A-Za-z0-9])" + re.escape(ticket) + r"(?![A-Za-z0-9])", re.I)
+    found: list[dict[str, Any]] = []
+    for _, record, _ in iter_records(repository, include_archive=True):
+        if record.get("type") != "finding" or record.get("external_id") == own:
+            continue
+        if pattern.search(f"{record.get('external_id', '')} {record.get('title', '')}"):
+            found.append(record)
+    return found
+
+
 def _resolved_ticket_finding(
     repository: Path, ticket: str
 ) -> Optional[dict[str, Any]]:
@@ -2957,16 +2975,11 @@ def _resolved_ticket_finding(
     its title differs. An open/investigating finding is a specific work item,
     not a conclusion, so it does not suppress the summary.
     """
-    own = f"CONSOLIDATED-{ticket}"
-    pattern = re.compile(r"(?<![A-Za-z0-9])" + re.escape(ticket) + r"(?![A-Za-z0-9])", re.I)
-    for _, record, _ in iter_records(repository, include_archive=True):
-        if record.get("type") != "finding" or record.get("status") != "resolved":
-            continue
-        if record.get("external_id") == own:
-            continue
-        if pattern.search(f"{record.get('external_id', '')} {record.get('title', '')}"):
-            return record
-    return None
+    return next(
+        (record for record in _ticket_findings(repository, ticket)
+         if record.get("status") == "resolved"),
+        None,
+    )
 
 
 def consolidate(

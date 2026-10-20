@@ -28,6 +28,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A consolidated summary names its ticket's existing findings — 2026-10-20
+
+- The summary's `progress` now lists the external id and UUID of every finding
+  that names the same ticket, including an open/investigating one, after the
+  event ids and verification. The capsule carries the link in text without a
+  schema change: the reviewer can follow the specific review finding from the
+  summary, and the two records keep their distinct scope.
+- Tests: an open `CMS-741-REVIEW` finding is named by the new summary and keeps
+  its status; the full PHP Core Project Brain suite is 675.
+
 ### A resolved ticket finding suppresses a duplicate summary — 2026-10-20
 
 - If a ticket already has a `resolved` finding, `consolidate` no longer creates
@@ -76,7 +86,7 @@ edition's own files remain in that edition's changelog.
   behavior`.
 - Tests: a named ticket delivers both of its events, the governed contract
   keeps three history items, and a generic latest goal uses the descriptive
-  event title; the full PHP Core Project Brain suite is 674.
+  event title; the full PHP Core Project Brain suite is 675.
 
 ### Memory maintenance runs on the turn boundary — 2026-10-19
 
