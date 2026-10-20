@@ -361,6 +361,43 @@ mechanism questions against shipped artifacts.
 - **Minimal baseline:** `dsh-memory@0.1.0` is not compatible with the installed
   DSH (peer `0.1.0-rc.6`); use it only as a small reference implementation.
 
+## 11. Deployment record (2026-10-20)
+
+The decision above was executed for the live DSH profile, not only documented:
+
+- Host: DSH `0.2.1-rc.2`, Node `v26.11.1`; active profile `~/.dsh/profiles/web`.
+- Installed: `@tr1v3r/dsh-ltm@0.3.3` via
+  `dsh plugin --profile web add @tr1v3r/dsh-ltm`.
+- DSH’s plugin manager requires `pnpm`; this host had only `corepack`, so a
+  user-local shim was created at `~/.local/bin/pnpm`:
+  `exec corepack pnpm "$@"` (pnpm 11.21.0). No global root install was needed.
+- Bundle entry added to the profile:
+  `@tr1v3r/dsh-ltm` after `@deepseek-ai/dsh-base` and
+  `@deepseek-ai/dsh-web-app`, `patchReload: live`.
+- Effective config verified with `dsh web --dump-config`:
+  `path: dshHomePath('memory/ltm.db')`, `promptMaxChars: 2000`,
+  `promptRecentCount: 10`, `maxTextChars: 2000`, `autoProjectScope: true`,
+  `staleAfterDays: 90`.
+- Store: `~/.dsh/memory/ltm.db` (WAL). The directory was tightened to `0700`
+  and the DB/WAL/SHM files to `0600` after the plugin created them.
+- The live process picked up the bundle through `patchReload: live`; the
+  model-facing `memory_*` tool schemas appeared in the session before a
+  restart. A restart remains the deterministic fallback.
+- **Functional verification (not just configuration):** the model-facing
+  `memory_write` tool created record `#1`, revision 1, scope
+  `git:aac7e823833e939f` (the canonical common Git dir of this repository),
+  tags `memory harness decision`, 244 chars. `memory_search` returned it with
+  score `0.7627`; the next turn's system prompt contained the record, proving
+  prompt-section injection. FTS and the 2,000-char section both work.
+- Rollback: `dsh plugin --profile web remove @tr1v3r/dsh-ltm`; the DB is
+  independent of any legacy `memory/memory.db`. Do not delete the DB to
+  uninstall; removing the bundle is enough to stop injection.
+
+This deploys only the **bounded, current-compatible** target. The stronger
+CBDC design (`dsh-memory-gate`) remains a reference until a 0.2.1-rc.2 adapter
+exists; the workspace and vault plugins remain uninstalled for the reasons in
+sections 2, 4 and 6.
+
 ## Sources
 
 - DSH: <https://github.com/deepseek-ai/deepseek-harness>
