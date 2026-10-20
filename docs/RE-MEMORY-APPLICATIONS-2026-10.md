@@ -7,6 +7,9 @@ No plugin was installed, enabled, or executed. Downloads are npm tarballs into
 `/tmp`; REA parsed the shipped JavaScript as inert text. Local DSH packages were
 inventory-only.
 
+Mechanical evidence (schemas, thresholds, feedback math, token budgets,
+compatibility): [RE-HARNESS-MEMORY-MECHANICS-2026-10.md](RE-HARNESS-MEMORY-MECHANICS-2026-10.md).
+
 ## 1. What “memory for Harness” means
 
 The installed DSH tree has session persistence, compaction, checkpoints,
@@ -42,7 +45,7 @@ question.
 | 1 | **dsh-memory-gate** | 0.15.0 | Local SQLite + FTS5; Claim → Belief → Decision → Consumption; `use/verify/ignore`; feedback updates belief | **Not verified**: declared through 0.2.1-alpha.2 | The only plugin found that makes **retrieved ≠ injected** explicit and learns from post-use feedback |
 | 2 | **@tr1v3r/dsh-ltm** | 0.3.3 | Local SQLite; CJK-aware FTS + char n-gram rerank; scopes; dedupe; expiry; prompt budget | **Explicitly supports 0.2.1-rc.1/rc.2** | Best current-compatible deterministic memory; good schema/ranking target |
 | 3 | **dsh-workspace-memories** | 1.1.2 | Per-workspace Markdown files; prompt-section injection; `save_workspace_memory`; sidebar panel | No declared compatibility; simple API | Cleanest “memory outside the repo” design and easiest full source read |
-| 4 | **@jacklika/dsh-memory** | 0.1.7-rc.40 | Obsidian-compatible vault; per-agent write namespaces; serialized writes; git history; graph; curator/conflict tools | Peer range includes `0.2.x` | Most ambitious write path: queue, git, version checks, graph |
+| 4 | **@jacklika/dsh-memory** | 0.1.7-rc.40 | Obsidian-compatible vault; per-agent write namespaces; serialized writes; git history; graph; curator/conflict tools | Peer range includes `0.2.x`; **published bundle lacks `@jacklika/dsh-memory-time` in its dependency list** | Most ambitious write path: queue, git, version checks, graph |
 | 5 | **@fooxe/dsh-memory** | 0.13.10 | Markdown user/project scopes; session-start index; touch activation by read/edit path; panel | Peer tools range likely includes current | File-memory UX and path-triggered activation; bounded 200 lines / 25 KB index |
 | 6 | **dsh-memory** | 0.1.0 | One SQLite file + FTS5; `memory_write/search/forget`; recall section | **Not compatible**: peers 0.1.0-rc.6 | Minimal baseline; useful to compare a 3-tool design |
 | 7 | **bailian-memo-dsh** | 2.5.0 | Cloud Bailian Memory; auto recall; silent curation; remember/forget; consent/status | Peer 0.2.1-alpha.1; current not verified | Harness-native cloud memory with auto-recall and curation |
@@ -110,7 +113,8 @@ Two local channels:
 1. **Capsule**: up to 2 trusted explicit global preferences/constraints; does
    not require the current query to repeat their terms.
 2. **Trigger**: FTS5 + normalized term rerank over current session, current
-   workspace and explicit globals; at most 500 active claims.
+   workspace and explicit globals; the code applies a scan ceiling of
+   `min(max(limit*20,100),500)` (280 at default limits).
 
 Ranking:
 
@@ -254,7 +258,13 @@ near-duplicate semantics, scope isolation, prompt-budget truncation.
 - Frontmatter `expires` becomes an `expired` flag; expired notes are not
   auto-deleted.
 - Optional semantic search is disabled until an embeddings endpoint is
-  configured; `wiki_search` reports `fused` and `semantic`.
+  configured; `wiki_search` reports `fused` and `semantic`. When enabled it
+  sends the first 8,000 chars of every note, including `archive/` and other
+  agents' namespaces, to that endpoint.
+- **A real load blocker:** the bundle manifest lists 7 members but both the
+  filesystem and curator members import `@jacklika/dsh-memory-time`, which is
+  not listed. The 7 declared member versions match; the time package must be
+  supplied/resolved separately.
 - Provenance fields on capture/correct: `source_session`, `commit`, `verified`.
 
 RE questions: queue liveness/heartbeat, git history semantics, atomic publish
@@ -333,6 +343,23 @@ mechanism questions against shipped artifacts.
 5. **Pin plugin compatibility per DSH release.** The installed DSH is
    `0.2.1-rc.2`; several plugins stop at `0.2.1-alpha.2` or
    `0.1.0-rc.6`. A memory plugin must declare and test a compatibility window.
+
+## 10. Decision for the current DSH
+
+- **Deployable now:** `@tr1v3r/dsh-ltm@0.3.3` — the only inspected plugin that
+  explicitly supports DSH `0.2.1-rc.2`; local SQLite, hard 2,000-char prompt
+  cap, scopes, dedupe and expiry.
+- **Design reference, not deployable:** `dsh-memory-gate@0.15.0` — the best
+  CBDC/feedback model, but declared only through `0.2.1-alpha.2`; port the
+  pure decision/feedback logic or add a current-DSH adapter before installing.
+- **Team/vault option after a dependency fix:** `@jacklika/dsh-memory` — strong
+  write ladder, but the published bundle is missing
+  `@jacklika/dsh-memory-time` and reads are vault-wide.
+- **Simple per-workspace option after a prompt budget:** 
+  `dsh-workspace-memories` — excellent storage isolation, currently unbounded
+  prompt injection (20 × 32,768 chars).
+- **Minimal baseline:** `dsh-memory@0.1.0` is not compatible with the installed
+  DSH (peer `0.1.0-rc.6`); use it only as a small reference implementation.
 
 ## Sources
 
