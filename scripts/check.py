@@ -427,7 +427,11 @@ def _memory_commands(version: str) -> List[Command]:
     return [
                 unittests_leg("Memory evaluation stand", ["tests.test_memory_eval", "tests.test_memory_graph_pilot",
                                                       "tests.test_memory_miss_audit", "tests.test_memory_onnx",
-                                                      "tests.test_memory_onnx_pilot"]),
+                                                      "tests.test_memory_onnx_pilot", "tests.test_memory_outcome_ab",
+                                                      "tests.test_memory_rerank_pilot",
+                                                      "tests.test_memory_sqlite_vec_pilot",
+                                                      "tests.test_memory_fact_consolidation",
+                                                      "tests.test_memory_history_series"]),
                 unittests_leg('Memory snapshot and failed-refresh boundaries', ['tests.test_memory_runtime_reliability']),
                 unittests_leg('Native memory source diagnostics and complete-governance boundaries', ['tests.test_memory_source_resilience']),
                 unittests_leg('Native read-only startup and fresh working-state delivery', ['tests.test_memory_startup_readonly']),
