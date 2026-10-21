@@ -18,3 +18,62 @@
 
 # Client-supplied task material keeps the bytes it was delivered with.
 */Task/** -text
+
+# The memory core is written from PHP Core/ by scripts/core_sync.py (and the
+# generator asset by asset_parity.py); the parity gates hold every copy
+# byte-identical, so a pull request shows the canonical change once.
+# PHP Core/ itself and the two framework-shaped hooks stay reviewed.
+Laravel/memory-bank/scripts/*.py linguist-generated=true
+Laravel/memory-bank/MCP.md linguist-generated=true
+Laravel/memory-bank/tests/*.py linguist-generated=true
+Laravel/memory-bank/templates/* linguist-generated=true
+Laravel/project-brain/scripts/*.py linguist-generated=true
+Laravel/project-brain/schemas/** linguist-generated=true
+Laravel/project-brain/PROTOCOL.md linguist-generated=true
+Laravel/project-brain/tests/*.py linguist-generated=true
+Laravel/project-brain/tests/fixtures/memory-probes.json linguist-generated=true
+Laravel/.claude/hooks/*.sh linguist-generated=true
+Laravel/.claude/hooks/bash-validator.sh -linguist-generated
+Laravel/.claude/hooks/local-context.sh -linguist-generated
+Symfony/memory-bank/scripts/*.py linguist-generated=true
+Symfony/memory-bank/MCP.md linguist-generated=true
+Symfony/memory-bank/tests/*.py linguist-generated=true
+Symfony/memory-bank/templates/* linguist-generated=true
+Symfony/project-brain/scripts/*.py linguist-generated=true
+Symfony/project-brain/schemas/** linguist-generated=true
+Symfony/project-brain/PROTOCOL.md linguist-generated=true
+Symfony/project-brain/tests/*.py linguist-generated=true
+Symfony/project-brain/tests/fixtures/memory-probes.json linguist-generated=true
+Symfony/.claude/hooks/*.sh linguist-generated=true
+Symfony/.claude/hooks/bash-validator.sh -linguist-generated
+Symfony/.claude/hooks/local-context.sh -linguist-generated
+Cms/wordpress/memory-bank/scripts/*.py linguist-generated=true
+Cms/wordpress/memory-bank/MCP.md linguist-generated=true
+Cms/wordpress/memory-bank/tests/*.py linguist-generated=true
+Cms/wordpress/memory-bank/templates/* linguist-generated=true
+Cms/wordpress/project-brain/scripts/*.py linguist-generated=true
+Cms/wordpress/project-brain/schemas/** linguist-generated=true
+Cms/wordpress/project-brain/PROTOCOL.md linguist-generated=true
+Cms/wordpress/project-brain/tests/*.py linguist-generated=true
+Cms/wordpress/project-brain/tests/fixtures/memory-probes.json linguist-generated=true
+Cms/wordpress/.claude/hooks/*.sh linguist-generated=true
+Cms/wordpress/.claude/hooks/bash-validator.sh -linguist-generated
+Cms/wordpress/.claude/hooks/local-context.sh -linguist-generated
+Infrastructure-Creator/.agents/skills/memory-seed/assets/scripts/** linguist-generated=true
+Infrastructure-Creator/.agents/skills/memory-seed/assets/MCP.md linguist-generated=true
+Infrastructure-Creator/.agents/skills/memory-seed/assets/templates/** linguist-generated=true
+Infrastructure-Creator/.agents/skills/memory-seed/assets/project-brain/** linguist-generated=true
+Infrastructure-Creator/.agents/skills/memory-seed/assets/runtime-contract.json -linguist-generated
+Infrastructure-Creator/.agents/skills/memory-seed/assets/project-brain/config/runtime.json.template -linguist-generated
+Infrastructure-Creator/.claude/skills/memory-seed/assets/scripts/** linguist-generated=true
+Infrastructure-Creator/.claude/skills/memory-seed/assets/MCP.md linguist-generated=true
+Infrastructure-Creator/.claude/skills/memory-seed/assets/templates/** linguist-generated=true
+Infrastructure-Creator/.claude/skills/memory-seed/assets/project-brain/** linguist-generated=true
+Infrastructure-Creator/.claude/skills/memory-seed/assets/runtime-contract.json -linguist-generated
+Infrastructure-Creator/.claude/skills/memory-seed/assets/project-brain/config/runtime.json.template -linguist-generated
+Infrastructure-Creator/.cursor/skills/memory-seed/assets/scripts/** linguist-generated=true
+Infrastructure-Creator/.cursor/skills/memory-seed/assets/MCP.md linguist-generated=true
+Infrastructure-Creator/.cursor/skills/memory-seed/assets/templates/** linguist-generated=true
+Infrastructure-Creator/.cursor/skills/memory-seed/assets/project-brain/** linguist-generated=true
+Infrastructure-Creator/.cursor/skills/memory-seed/assets/runtime-contract.json -linguist-generated
+Infrastructure-Creator/.cursor/skills/memory-seed/assets/project-brain/config/runtime.json.template -linguist-generated

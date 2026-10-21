@@ -54,6 +54,28 @@ edition's own files remain in that edition's changelog.
   2026-10-20/21 commits added without wiring them: rerank pilot, sqlite-vec
   pilot, fact consolidation and the history series pilot.
 
+### The memory core has one source — 2026-10-21
+
+- `scripts/core_sync.py --write` copies the memory core from `PHP Core/` to
+  Laravel, Symfony and WordPress, removing a core file that was removed from
+  `PHP Core/`. It then runs `asset_parity.py --write` and
+  `build_mirrors.py --write`, so one command carries a core change to every
+  copy, the generator asset and the tool mirrors. `--check` lists the copies
+  that differ.
+- The file set is the runtime's own `CROSS_EDITION_CORE_MANIFEST` minus
+  `CROSS_EDITION_ALLOWED_DRIFT`; the framework-shaped `bash-validator.sh` and
+  `local-context.sh` stay each edition's own.
+- `.gitattributes` marks those copies and the memory-seed asset
+  `linguist-generated`, so a pull request shows a core change once instead of
+  five to seven times. `PHP Core/`, the framework hooks and the asset's own
+  template and contract stay reviewed.
+- The editions stay self-contained: the installer, attached mode and each
+  edition's own test suites still find the whole runtime inside the edition.
+  Removing the copies outright would have broken all three.
+- Tests: the plan and writer on a synthetic four-edition tree, the real
+  repository's copies, and the attribute marking through `git check-attr`
+  (`tests/test_core_sync.py`, in the `parity` job).
+
 ### Review of the consolidation and ticket work — 2026-10-21
 
 Fixes for what a review of the twelve unpushed commits of 2026-10-20/21 found,

@@ -665,6 +665,38 @@ runtime template) and `EDITION_ONLY` (per-target prose, both Python test
 suites, installer bookkeeping, the materialized `runtime.json`). Record a new
 divergence there with its reason rather than widening a glob.
 
+### `core_sync.py`
+
+**Purpose and status.** Gives the memory core one source. A core change is
+made in `PHP Core/` only, and this tool writes it to the other editions. The
+file set is the runtime's own cross-edition manifest, read from `PHP Core`'s
+`context_retrieval.py`, so the writer and `context.py parity --cross-edition`
+cannot disagree.
+
+`--write` then runs `asset_parity.py --write` and `build_mirrors.py --write`,
+so one command carries a core change to the generator asset and the tool
+mirrors as well. The copies are marked `linguist-generated` in
+`.gitattributes`.
+
+```bash
+python3 scripts/core_sync.py --check
+python3 scripts/core_sync.py --write [--no-chain]
+```
+
+- **Inputs:** the repository's four editions.
+- **Outputs:** one `ADD`/`UPDATE`/`MODE`/`REMOVE` line per copy that
+  differs from `PHP Core/`. `--check` exits 1 when any copy differs.
+- **Dependencies:** Python 3.9+ standard library and `PHP Core`'s
+  `context_retrieval.py`.
+- **Writes:** only with `--write`:
+  - the core files of Laravel, Symfony and WordPress, with the executable
+    bit of the canonical file;
+  - a core file removed from `PHP Core/` is removed from the copies;
+  - the generator asset and the mirrors, through the two chained writers.
+- **CI relationship:** `tests/test_core_sync.py` in the `parity` job. It
+  covers the plan, the writer, the framework-shaped hooks it leaves alone and
+  the `.gitattributes` marking.
+
 ### `file_modes.py`
 
 **Purpose and status.** Shared helper module, imported by `build_mirrors.py`
