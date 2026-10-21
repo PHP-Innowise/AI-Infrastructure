@@ -42,6 +42,36 @@ clone, runs the refresh the hook runs, and scores the result against curated
 judgments. Record who authored the labels when that evidence is available;
 existing labels with unknown provenance must not be described as human judgments.
 
+## Accepting a retrieval change
+
+A labelled set that steered a change cannot also accept it. In October 2026
+four retrieval changes were tuned on the same 12-prompt set, reported it
+unchanged or improved, and still broke behaviour the set never exercised:
+- version and standard names ("PHP 8.2", "UTF-8", "PSR-4") were read as
+  tickets and withheld the chunks that mentioned them;
+- a Keep a Changelog preamble replaced the newest entry in the quote;
+- Russian aliases replaced the words a Russian document is found by;
+- a request naming any unknown ticket admitted two neighbouring events.
+
+So:
+
+- The set a change was tuned on is a smoke test. It shows that the change does
+  what it was written for, not that it generalises.
+- Acceptance needs a held-out measurement written down before it runs:
+  another project, or the same project's later period. The metric, the
+  threshold and the one variant under test are fixed in advance, with a
+  digest of that note. A variant whose ties are broken by hash order is not
+  one variant; fix the tie-break first.
+- Every behaviour change carries a test that fails on the previous commit.
+  Such a test uses inputs outside the tuning set's vocabulary: version and
+  standard names, another changelog format, another language, a Brain with
+  several owners.
+- A write-path mutation that has not been measured (consolidation, automatic
+  verification) ships switched off. Turning it on needs a run on a copy of a
+  real Brain.
+- Insufficient and negative held-out results are reported as they are.
+  "Unchanged on the stand" is not evidence that a change is safe.
+
 ## What a run does, per prompt
 
 Nothing is written into the project. All work happens in the cache (default
