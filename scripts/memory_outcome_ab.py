@@ -59,7 +59,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import memory_eval as stand  # noqa: E402
 from accelerator_attach import _toml  # noqa: E402
 
-ARMS = ("off", "capsule")
+ARMS = ("off", "capsule", "navigation")
+DEFAULT_ARMS = ("off", "capsule")
+# `navigation` runs the same prompt hook with `capsule_profile: navigation` in
+# the corpus: working state and recent files, no documents and no manifest.
+HOOKED_ARMS = ("capsule", "navigation")
 DEFAULT_CAP = 40
 DEFAULT_TIMEOUT = 900.0
 TOOL_ITEMS = ("command_execution", "file_change", "mcp_tool_call", "web_search")
@@ -412,7 +416,7 @@ def codex_command(codex: str, corpus: Path, arm: str, prompt: str, model: Option
                "-s", "workspace-write", "-C", str(corpus)]
     if model:
         command += ["-m", model]
-    command += hook_arguments(corpus) if arm == "capsule" else ["-c", "features.hooks=false"]
+    command += hook_arguments(corpus) if arm in HOOKED_ARMS else ["-c", "features.hooks=false"]
     return [*command, prompt]
 
 
@@ -492,12 +496,36 @@ def stop(process: subprocess.Popen) -> None:
         process.wait(timeout=10)
 
 
+def health_lines(path: Path) -> int:
+    try:
+        with path.open("rb") as handle:
+            return sum(1 for _ in handle)
+    except OSError:
+        return 0
+
+
+def set_capsule_profile(corpus: Path, profile: str) -> None:
+    """Write the capsule profile into a corpus's runtime.json."""
+    config = corpus / "project-brain" / "config" / "runtime.json"
+    try:
+        values = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        values = {}
+    if not isinstance(values, dict):
+        values = {}
+    values["capsule_profile"] = profile
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
             timeout: float, events: Optional[Path] = None) -> Dict[str, Any]:
     """One headless session, stopped at the first gold touch, the cap or the
     deadline. Only counts leave this function."""
     manifests = corpus / "memory-bank" / "local" / "retrieval-manifests"
     before = set(manifests.glob("*.json")) if manifests.is_dir() else set()
+    health = corpus / "memory-bank" / "local" / "refresh-health.ndjson"
+    health_before = health_lines(health)
     counter = Counter(corpus, gold, cap)
     started = time.monotonic()
     reason = "finished"
@@ -559,12 +587,18 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
     # The policy has agents run `context.py retrieve` themselves, in either
     # arm. The Codex prompt hook runs `refresh`; Claude's runs `hook-context`.
     entry_points: Dict[str, int] = {}
+    capsule_tokens = 0
     for path in after - before:
         try:
-            point = str(json.loads(path.read_text(encoding="utf-8")).get("entry_point"))
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            point = str(manifest.get("entry_point"))
         except (OSError, ValueError, AttributeError):
-            point = "unreadable"
+            manifest, point = {}, "unreadable"
         entry_points[point] = entry_points.get(point, 0) + 1
+        if point in HOOK_ENTRY_POINTS:
+            estimates = manifest.get("token_estimates") if isinstance(manifest, dict) else None
+            if isinstance(estimates, dict) and isinstance(estimates.get("total"), (int, float)):
+                capsule_tokens += int(estimates["total"])
     delivered = sum(count for point, count in entry_points.items() if point in HOOK_ENTRY_POINTS)
     return {
         "stopped": reason,
@@ -573,6 +607,10 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
         "seconds": round(time.monotonic() - started, 1),
         "usage": counter.usage,
         "capsule_delivered": delivered > 0,
+        # Every prompt-hook refresh appends one health line, with or without
+        # documents: the navigation profile writes no manifest but this.
+        "hook_ran": health_lines(health) > health_before,
+        "capsule_tokens": capsule_tokens,
         "manifests": dict(sorted(entry_points.items())),
         "exit": process.returncode,
     }
@@ -629,6 +667,8 @@ def command_run(arguments: argparse.Namespace) -> int:
                 for arm in order:
                     corpus = work / f"{stand.safe_name(str(task.get('id')))}-{arm}-{replicate}"
                     shutil.copytree(base, corpus, symlinks=True)
+                    if arm == "navigation":
+                        set_capsule_profile(corpus, "navigation")
                     try:
                         outcome = run_arm(
                             codex_command(arguments.codex, corpus, arm, task["prompt"], arguments.model),
@@ -696,41 +736,56 @@ def sign_test(differences: Sequence[float]) -> float:
     return min(1.0, 2 * tail)
 
 
-def summarize(result: Dict[str, Any]) -> Dict[str, Any]:
+def valid_arm(arm: str, runs: Sequence[Dict[str, Any]]) -> bool:
+    """Whether an arm got the treatment it names, in every repeat.
+
+    A result written before `hook_ran` existed only knows deliveries.
+    """
+    delivered = [bool(run.get("capsule_delivered")) for run in runs]
+    ran = [run.get("hook_ran") for run in runs]
+    if arm == "capsule":
+        return all(delivered)
+    if arm == "navigation":
+        return all(value is True for value in ran) and not any(delivered)
+    return not any(delivered) and not any(value is True for value in ran)
+
+
+def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS) -> Dict[str, Any]:
+    """Paired calls to the first gold file, treatment `compare[1]` against
+    baseline `compare[0]`."""
+    baseline, treatment = compare
     cap = int(result.get("meta", {}).get("cap") or DEFAULT_CAP)
     pairs = []
     for task_key, item in sorted((result.get("items") or {}).items()):
         arms = {arm: runs if isinstance(runs, list) else [runs] for arm, runs in (item.get("arms") or {}).items()}
-        if item.get("status") != "ok" or not all(arms.get(arm) for arm in ARMS):
+        if item.get("status") != "ok" or not all(arms.get(arm) for arm in compare):
             continue
-        if any(run.get("stopped") == "error" for arm in ARMS for run in arms[arm]):
+        if any(run.get("stopped") == "error" for arm in compare for run in arms[arm]):
             continue
-        if not all(run.get("capsule_delivered") for run in arms["capsule"]):
-            # The capsule arm is only a capsule arm when the hook delivered.
-            continue
-        if any(run.get("capsule_delivered") for run in arms["off"]):
+        if not all(valid_arm(arm, arms[arm]) for arm in compare):
             continue
         pairs.append({
             "id": task_key,
-            "off": sum(censored(run, cap) for run in arms["off"]) / len(arms["off"]),
-            "capsule": sum(censored(run, cap) for run in arms["capsule"]) / len(arms["capsule"]),
-            "off_touched": all(run.get("calls_to_gold") is not None for run in arms["off"]),
-            "capsule_touched": all(run.get("calls_to_gold") is not None for run in arms["capsule"]),
+            baseline: sum(censored(run, cap) for run in arms[baseline]) / len(arms[baseline]),
+            treatment: sum(censored(run, cap) for run in arms[treatment]) / len(arms[treatment]),
+            f"{baseline}_touched": all(run.get("calls_to_gold") is not None for run in arms[baseline]),
+            f"{treatment}_touched": all(run.get("calls_to_gold") is not None for run in arms[treatment]),
         })
-    differences = [pair["capsule"] - pair["off"] for pair in pairs]
+    differences = [pair[treatment] - pair[baseline] for pair in pairs]
     summary: Dict[str, Any] = {
+        "compare": [baseline, treatment],
         "tasks": len(result.get("items") or {}),
         "pairs": len(pairs),
         "cap": cap,
-        "mean_off": round(sum(p["off"] for p in pairs) / len(pairs), 2) if pairs else None,
-        "mean_capsule": round(sum(p["capsule"] for p in pairs) / len(pairs), 2) if pairs else None,
+        f"mean_{baseline}": round(sum(p[baseline] for p in pairs) / len(pairs), 2) if pairs else None,
+        f"mean_{treatment}": round(sum(p[treatment] for p in pairs) / len(pairs), 2) if pairs else None,
         "mean_difference": round(sum(differences) / len(differences), 2) if differences else None,
         "ci95": [round(value, 2) for value in bootstrap(differences)] if len(differences) >= 2 else None,
         "sign_test_p": round(sign_test(differences), 4) if differences else None,
-        "capsule_fewer": sum(1 for value in differences if value < 0),
-        "capsule_more": sum(1 for value in differences if value > 0),
-        "touched_off": sum(1 for p in pairs if p["off_touched"]),
-        "touched_capsule": sum(1 for p in pairs if p["capsule_touched"]),
+        f"{treatment}_fewer": sum(1 for value in differences if value < 0),
+        f"{treatment}_more": sum(1 for value in differences if value > 0),
+        f"touched_{baseline}": sum(1 for p in pairs if p[f"{baseline}_touched"]),
+        f"touched_{treatment}": sum(1 for p in pairs if p[f"{treatment}_touched"]),
     }
     summary["verdict"] = verdict(summary)
     return summary
@@ -738,28 +793,36 @@ def summarize(result: Dict[str, Any]) -> Dict[str, Any]:
 
 def verdict(summary: Dict[str, Any]) -> str:
     """The rule written down before the runs (docs/MEMORY-EVAL.md)."""
+    baseline, treatment = summary.get("compare") or DEFAULT_ARMS
     interval = summary.get("ci95")
     if not interval or summary["pairs"] < 20:
         return "insufficient"
-    if interval[1] < 0 and summary["touched_capsule"] >= summary["touched_off"] - 1:
-        return "capsule-helps"
+    if interval[1] < 0 and summary[f"touched_{treatment}"] >= summary[f"touched_{baseline}"] - 1:
+        return f"{treatment}-helps"
     if interval[0] > 0:
-        return "capsule-hurts"
+        return f"{treatment}-hurts"
     return "no-difference-shown"
 
 
 def command_report(arguments: argparse.Namespace) -> int:
     result = json.loads(arguments.result.expanduser().read_text(encoding="utf-8"))
-    summary = summarize(result)
+    compare = tuple(value.strip() for value in arguments.compare.split(",") if value.strip())
+    if len(compare) != 2 or any(arm not in ARMS for arm in compare) or compare[0] == compare[1]:
+        raise OutcomeError(f"--compare takes two different arms of {', '.join(ARMS)}")
+    baseline, treatment = compare
+    summary = summarize(result, compare)
     if arguments.json:
         print(json.dumps(summary, indent=1))
         return 0
     print(f"pairs {summary['pairs']} of {summary['tasks']} tasks; a run without a gold touch counts {summary['cap'] + 1}")
     if summary["pairs"]:
-        print(f"calls to the first gold file: off {summary['mean_off']}, capsule {summary['mean_capsule']}")
-        print(f"capsule - off: {summary['mean_difference']} (95% CI {summary['ci95']}), "
-              f"fewer {summary['capsule_fewer']} / more {summary['capsule_more']}, sign test p {summary['sign_test_p']}")
-        print(f"gold touched within the cap: off {summary['touched_off']}, capsule {summary['touched_capsule']}")
+        print(f"calls to the first gold file: {baseline} {summary[f'mean_{baseline}']}, "
+              f"{treatment} {summary[f'mean_{treatment}']}")
+        print(f"{treatment} - {baseline}: {summary['mean_difference']} (95% CI {summary['ci95']}), "
+              f"fewer {summary[f'{treatment}_fewer']} / more {summary[f'{treatment}_more']}, "
+              f"sign test p {summary['sign_test_p']}")
+        print(f"gold touched within the cap: {baseline} {summary[f'touched_{baseline}']}, "
+              f"{treatment} {summary[f'touched_{treatment}']}")
     print(f"verdict: {summary['verdict']}")
     return 0
 
@@ -783,7 +846,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
     run.add_argument("--transcripts", type=Path, default=Path.home() / ".claude" / "projects")
     run.add_argument("--cache", type=Path)
-    run.add_argument("--arms", default=",".join(ARMS))
+    run.add_argument("--arms", default=",".join(DEFAULT_ARMS), help=f"some of {', '.join(ARMS)}")
     run.add_argument("--ids")
     run.add_argument("--cap", type=int, default=DEFAULT_CAP)
     run.add_argument("--repeat", type=int, default=1, help="runs of each arm per task")
@@ -796,6 +859,8 @@ def build_parser() -> argparse.ArgumentParser:
     report = commands.add_parser("report", help="paired calls to the first gold file")
     report.add_argument("result", type=Path)
     report.add_argument("--json", action="store_true")
+    report.add_argument("--compare", default=",".join(DEFAULT_ARMS),
+                        help="baseline,treatment: two arms of the result")
     return parser
 
 

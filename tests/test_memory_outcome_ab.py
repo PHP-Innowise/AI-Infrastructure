@@ -115,6 +115,16 @@ class HookArgumentsTest(unittest.TestCase):
         self.assertFalse(any("Stop" in value or "SessionStart" in value for value in arguments))
         self.assertIn("features.hooks=false", off)
         self.assertNotIn("--dangerously-bypass-hook-trust", off)
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory)
+            (corpus / ".codex").mkdir()
+            (corpus / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": read}]}]}}), encoding="utf-8")
+            navigation = ab.codex_command("codex", corpus, "navigation", "do it", None)
+            ab.set_capsule_profile(corpus, "navigation")
+            config = json.loads((corpus / "project-brain/config/runtime.json").read_text(encoding="utf-8"))
+        self.assertIn("--dangerously-bypass-hook-trust", navigation)
+        self.assertEqual("navigation", config["capsule_profile"])
         self.assertEqual("do it", capsule[-1])
         self.assertIn("workspace-write", capsule)
 
@@ -165,6 +175,31 @@ class ReportTest(unittest.TestCase):
         result = self.result([((5,), (3,))])
         result["items"]["T0"]["arms"]["capsule"][0]["capsule_delivered"] = False
         self.assertEqual(0, ab.summarize(result)["pairs"])
+
+    def test_navigation_is_compared_with_the_full_capsule(self) -> None:
+        def run(calls, delivered, ran):
+            return {"stopped": "gold", "calls_to_gold": calls, "capsule_delivered": delivered, "hook_ran": ran}
+        items = {f"T{n}": {"status": "ok", "arms": {
+            "capsule": [run(5, True, True)], "navigation": [run(3, False, True)], "off": [run(6, False, False)],
+        }} for n in range(21)}
+        summary = ab.summarize({"meta": {"cap": 40}, "items": items}, ("capsule", "navigation"))
+        self.assertEqual(21, summary["pairs"])
+        self.assertEqual(-2.0, summary["mean_difference"])
+        self.assertEqual("navigation-helps", summary["verdict"])
+        self.assertEqual(21, summary["navigation_fewer"])
+
+    def test_a_navigation_run_that_delivered_documents_is_not_navigation(self) -> None:
+        run = {"stopped": "gold", "calls_to_gold": 3, "capsule_delivered": True, "hook_ran": True}
+        self.assertFalse(ab.valid_arm("navigation", [run]))
+        self.assertTrue(ab.valid_arm("capsule", [run]))
+        self.assertFalse(ab.valid_arm("off", [{**run, "capsule_delivered": False}]))
+
+    def test_the_report_refuses_an_unknown_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "result.json"
+            result.write_text(json.dumps({"meta": {"cap": 40}, "items": {}}), encoding="utf-8")
+            self.assertEqual(2, ab.main(["report", str(result), "--compare", "off,documents"]))
+            self.assertEqual(0, ab.main(["report", str(result), "--compare", "off,navigation"]))
 
     def test_the_sign_test_is_exact_and_two_sided(self) -> None:
         self.assertEqual(1.0, ab.sign_test([0, 0]))
@@ -241,7 +276,11 @@ class RunArmTest(unittest.TestCase):
             from pathlib import Path
             manifests = Path({str(manifests)!r})
             if "--dangerously-bypass-hook-trust" in sys.argv:
-                (manifests / "hook.json").write_text(json.dumps({{"entry_point": "refresh"}}))
+                with open(manifests.parent / "refresh-health.ndjson", "a") as health:
+                    health.write(json.dumps({{"source": "refresh"}}) + "\\n")
+                if "--navigation" not in sys.argv:
+                    (manifests / "hook.json").write_text(json.dumps(
+                        {{"entry_point": "refresh", "token_estimates": {{"total": 812}}}}))
             (manifests / "agent.json").write_text(json.dumps({{"entry_point": "retrieve"}}))
             def emit(event):
                 print(json.dumps(event), flush=True)
@@ -262,12 +301,22 @@ class RunArmTest(unittest.TestCase):
         self.assertEqual(2, outcome["calls_to_gold"])
         self.assertLess(outcome["seconds"], 15)
         self.assertTrue(outcome["capsule_delivered"])
+        self.assertTrue(outcome["hook_ran"])
+        self.assertEqual(812, outcome["capsule_tokens"])
         self.assertEqual({"refresh": 1, "retrieve": 1}, outcome["manifests"])
+
+    def test_a_navigation_run_has_a_hook_line_and_no_delivery(self) -> None:
+        command = [sys.executable, str(self.fake), "--dangerously-bypass-hook-trust", "--navigation", "prompt"]
+        outcome = ab.run_arm(command, self.corpus, ["src/Gold.php"], cap=40, timeout=20)
+        self.assertTrue(outcome["hook_ran"])
+        self.assertFalse(outcome["capsule_delivered"])
+        self.assertEqual(0, outcome["capsule_tokens"])
 
     def test_an_agent_retrieve_is_not_a_delivered_capsule(self) -> None:
         command = [sys.executable, str(self.fake), "prompt"]
         outcome = ab.run_arm(command, self.corpus, ["src/Gold.php"], cap=40, timeout=20)
         self.assertFalse(outcome["capsule_delivered"])
+        self.assertFalse(outcome["hook_ran"])
 
     def test_the_deadline_stops_a_quiet_session(self) -> None:
         command = [sys.executable, str(self.fake), "prompt"]

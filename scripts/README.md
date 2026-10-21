@@ -483,8 +483,9 @@ maintainer's signed-in Codex CLI.
 python3 scripts/memory_outcome_ab.py sample --projects next,scb --before 2026-10-07 \
   --n 30 --seed 1 [--exclude-set TUNING_SET] --out OUTSIDE/set.json
 python3 scripts/memory_outcome_ab.py run --set OUTSIDE/set.json --out OUTSIDE/result.json \
-  [--repeat 2] [--cap 40] [--timeout 900] [--ids ID,...] [--events OUTSIDE/events]
-python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--json]
+  [--arms off,capsule,navigation] [--repeat 2] [--cap 40] [--timeout 900] [--ids ID,...] \
+  [--events OUTSIDE/events]
+python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--compare off,capsule] [--json]
 ```
 
 - **Inputs:**
