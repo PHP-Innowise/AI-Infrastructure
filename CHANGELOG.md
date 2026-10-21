@@ -28,6 +28,28 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A navigation-only capsule, behind an experiment switch — 2026-10-21
+
+- `capsule_profile` in `runtime.json` (or `CONTEXT_CAPSULE_PROFILE`) chooses
+  what the automatic capsule carries:
+  - `full`, the default, is unchanged;
+  - `navigation` keeps the working state and the recent files and neither
+    searches nor records a delivery.
+- Only the automatic entry points read the switch (`refresh` and
+  `hook-context`); an explicit `context.py retrieve` still searches. An
+  unknown value leaves the turn without a capsule and names the setting, as a
+  bad retrieval gate does.
+- Why a switch and not a default: the task-outcome measurement found no
+  difference between the full capsule and none, and the retrieval freeze
+  (#51) lets an experiment switch land only if the default stays as it is.
+  The navigation capsule is the next arm of that measurement.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`.
+- Tests: the default capsule carries a matching chunk; `navigation` drops it
+  and keeps the `working:` line; the environment overrides the config; an
+  explicit retrieval still finds the chunk; an unknown profile degrades
+  without failing the turn.
+
 ### The memory core has one source — 2026-10-21
 
 - `scripts/core_sync.py --write` copies the memory core from `PHP Core/` to

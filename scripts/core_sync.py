@@ -128,11 +128,22 @@ def apply(repo_root: Path, runtime: Any, actions: Sequence[Dict[str, str]]) -> N
 
 
 def chained(repo_root: Path) -> int:
-    """The generator asset and the tool mirrors follow the editions."""
+    """The generator asset and the tool mirrors follow the editions.
+
+    The policy locks are only checked: a lock is the deliberate record of a
+    model-facing change, so a stale one is named with its command rather than
+    rewritten here. The generator's lock covers the memory-seed asset and
+    goes stale with every core change.
+    """
     status = 0
     for command in (["scripts/asset_parity.py", "--write"], ["scripts/build_mirrors.py", "--write"]):
         completed = subprocess.run([sys.executable, *command], cwd=str(repo_root))
         status = status or completed.returncode
+    lock = subprocess.run([sys.executable, "scripts/policy_lock.py", "--check"], cwd=str(repo_root),
+                          capture_output=True, text=True)
+    if lock.returncode != 0:
+        print("core_sync: the policy lock is stale after this change; review it and run "
+              "python3 scripts/policy_lock.py --write", file=sys.stderr)
     return status
 
 

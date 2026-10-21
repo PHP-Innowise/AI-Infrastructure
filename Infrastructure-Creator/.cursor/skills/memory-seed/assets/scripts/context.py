@@ -46,6 +46,7 @@ from brain_runtime import (
     close_task,
     compact,
     consolidate,
+    configured_capsule_profile,
     configured_mode,
     configured_retrieval_gate,
     create_promotion,
@@ -3150,6 +3151,11 @@ def last_turn_section(repository: Path, *, routine: bool = True) -> Optional[str
     return summarize_last_turn(report, routine=routine)
 
 
+# Entry points that build the capsule a hook delivers on its own; the
+# capsule profile applies to these and never to an explicit retrieval.
+AUTOMATIC_ENTRY_POINTS = ("refresh", "hook-context")
+
+
 def assemble_capsule(
     connection: sqlite3.Connection,
     repository: Path,
@@ -3226,6 +3232,12 @@ def assemble_capsule(
     # summary itself is bounded, and the lightweight budget below may still
     # drop it first.
     last_turn = last_turn_section(repository, routine=delivery_profile != 'cursor-rule')
+    # The automatic capsule may be configured to carry navigation only; an
+    # explicit retrieval always searches.
+    navigation_only = (
+        entry_point in AUTOMATIC_ENTRY_POINTS
+        and configured_capsule_profile(repository) == "navigation"
+    )
     if mode == "lightweight":
         result = build_context_packet(
             connection,
@@ -3233,7 +3245,7 @@ def assemble_capsule(
             query,
             task_id,
             limit,
-            include_retrieval=not warnings,
+            include_retrieval=not warnings and not navigation_only,
             warnings=warnings,
             delivery_profile=delivery_profile, query_source=query_source,
         )
@@ -3322,10 +3334,12 @@ def assemble_capsule(
         except (ContextError, RetrievalError, KeyError, TypeError, ValueError):
             query_fallback = None
     request_query = build_capsule_query(query, None)
-    if warnings:
+    if warnings or navigation_only:
         # The previous index is not evidence of current eligibility. Keep
         # only fresh authoritative working state; do not search or record a
         # delivery, even if old document bytes still match their hashes.
+        # A navigation-only profile takes the same path by choice: working
+        # state and recent files, no documents and no delivery record.
         task = task_record = None
         if served is not None:
             task_record, task, _ = find_task(repository, served)

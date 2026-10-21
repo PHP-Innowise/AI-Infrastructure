@@ -15277,5 +15277,65 @@ class AnchorSpecificityTest(unittest.TestCase):
         )
 
 
+
+class CapsuleProfileTest(BankFixture):
+    """`capsule_profile: navigation` keeps the automatic capsule to working
+    state and recent files; the default and explicit retrieval are unchanged."""
+
+    def configure(self, **values: object) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", **values}), encoding="utf-8")
+
+    def refresh_text(self, env: Optional[dict] = None) -> str:
+        result = subprocess.run(
+            [sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository), "refresh",
+             "--query", "cerulean rollout", "--task-id", "TASK-1", "--ephemeral", "--json"],
+            text=True, capture_output=True, env={**os.environ, **(env or {})},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return json.loads(result.stdout)["capsule_text"]
+
+    def test_the_default_capsule_carries_the_matching_chunk(self) -> None:
+        self.start()
+        self.assertIn("MEM-20260101-aaaaaaaa", self.refresh_text())
+
+    def test_navigation_drops_the_document_layers_and_keeps_working_state(self) -> None:
+        self.start()
+        self.configure(capsule_profile="navigation")
+        text = self.refresh_text()
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
+        self.assertTrue(text.startswith("working: TASK-1"), text)
+
+    def test_the_environment_overrides_the_configured_profile(self) -> None:
+        self.start()
+        self.configure(capsule_profile="full")
+        self.assertNotIn(
+            "MEM-20260101-aaaaaaaa",
+            self.refresh_text({"CONTEXT_CAPSULE_PROFILE": "navigation"}),
+        )
+
+    def test_an_explicit_retrieval_still_searches(self) -> None:
+        self.start()
+        self.configure(capsule_profile="navigation")
+        result = self.run_cli("retrieve", "cerulean rollout", "--task-id", "TASK-1", "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        paths = [item["path"] for item in json.loads(result.stdout)["semantic"]]
+        self.assertTrue(any("MEM-20260101-aaaaaaaa" in path for path in paths), paths)
+
+    def test_an_unknown_profile_is_refused_without_failing_the_turn(self) -> None:
+        # The prompt hook never fails a turn: a bad profile leaves the turn
+        # without a capsule and says why, as a bad index does.
+        self.start()
+        self.configure(capsule_profile="documents-only")
+        result = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
+                              "--ephemeral", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertIsNone(payload["capsule"])
+        self.assertTrue(any("Capsule profile must be full or navigation" in warning
+                            for warning in payload["warnings"]), payload["warnings"])
+
+
 if __name__ == "__main__":
     unittest.main()
