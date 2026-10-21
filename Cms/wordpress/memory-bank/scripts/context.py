@@ -3185,6 +3185,7 @@ def assemble_capsule(
     delivery_profile: str = 'ordinary',
     source_provenance_sink: Optional[dict[str, object]] = None,
     delivery_admission: Optional[Callable[[], None]] = None,
+    capsule_profile: Optional[str] = None,
 ) -> dict[str, object]:
     """Build the layered capsule for one request.
 
@@ -3236,7 +3237,7 @@ def assemble_capsule(
     # explicit retrieval always searches.
     navigation_only = (
         entry_point in AUTOMATIC_ENTRY_POINTS
-        and configured_capsule_profile(repository) == "navigation"
+        and configured_capsule_profile(repository, capsule_profile) == "navigation"
     )
     if mode == "lightweight":
         result = build_context_packet(
@@ -7494,6 +7495,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="write the capsule's retrieval manifest to ignored local state",
     )
+    refresh.add_argument(
+        "--capsule-profile",
+        choices=("full", "navigation"),
+        default=None,
+        help=(
+            "what this capsule carries, over CONTEXT_CAPSULE_PROFILE and "
+            "runtime.json; an explicit request (MCP memory_retrieve) passes full"
+        ),
+    )
     for inferred_parser in (refresh, hook_context):
         inferred_parser.add_argument("--expected-branch", default=None, help=argparse.SUPPRESS)
     # Every entry point that can retrieve takes the gate mode, because the
@@ -9238,6 +9248,7 @@ def _command() -> int:
                             delivery_profile=delivery_profile,
                             source_provenance_sink=source_provenance,
                             delivery_admission=delivery_admission,
+                            capsule_profile=arguments.capsule_profile,
                         )
                         # What a governed capsule says about the turn's own task
                         # - its record gone or unreadable - is this refresh's

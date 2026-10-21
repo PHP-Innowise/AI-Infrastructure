@@ -39,6 +39,11 @@ edition's own files remain in that edition's changelog.
   `hook-context`); an explicit `context.py retrieve` still searches. An
   unknown value leaves the turn without a capsule and names the setting, as a
   bad retrieval gate does.
+- `refresh --capsule-profile full|navigation` overrides the environment and
+  the config for one call. The MCP `memory_retrieve` tool reaches the capsule
+  through `refresh`, but it is the agent's own request, so it passes `full`;
+  the evaluation stand pins `full` in its runtime environment because it
+  measures document retrieval.
 - Why a switch and not a default: the task-outcome measurement found no
   difference between the full capsule and none, and the retrieval freeze
   (#51) lets an experiment switch land only if the default stays as it is.

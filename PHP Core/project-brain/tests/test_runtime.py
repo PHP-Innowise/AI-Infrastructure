@@ -15315,6 +15315,16 @@ class CapsuleProfileTest(BankFixture):
             self.refresh_text({"CONTEXT_CAPSULE_PROFILE": "navigation"}),
         )
 
+    def test_the_refresh_flag_overrides_the_configured_profile(self) -> None:
+        # MCP memory_retrieve and the evaluation stand reach the capsule
+        # through refresh; their requests are explicit and pass full.
+        self.start()
+        self.configure(capsule_profile="navigation")
+        result = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
+                              "--ephemeral", "--json", "--capsule-profile", "full")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("MEM-20260101-aaaaaaaa", json.loads(result.stdout)["capsule_text"])
+
     def test_an_explicit_retrieval_still_searches(self) -> None:
         self.start()
         self.configure(capsule_profile="navigation")
