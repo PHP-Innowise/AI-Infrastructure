@@ -246,7 +246,9 @@ only a required executable bit is missing); `.gitignore` and
 and an existing root `README.md` is preserved while accelerator documentation
 is written to `ACCELERATOR.md`. Every other differing selected path remains a
 collision. A malformed managed block, symlink, non-file obstruction, or
-conflicting `ACCELERATOR.md` is also refused.
+conflicting `ACCELERATOR.md` is also refused; `--sync` keeps an untouched
+`ACCELERATOR.md` at the release, so adding a tool to a synced project later
+finds it unchanged.
 
 A file the install replaces - a merge into a project file, an `--overwrite`
 collision - and every MCP configuration it writes are written whole beside
@@ -276,6 +278,19 @@ and memory server call that runtime; a tool's new hooks wait for its wiring
 wiring waits for a new hook that cannot be written. Each held-back file is
 listed under `kept` with a reason starting `held back:`, and `partial` says
 the project is not at the release (it is `null` otherwise).
+
+The edition README that `--merge-existing` installed as `ACCELERATOR.md`
+beside a project's own `README.md` follows the release by the same rules:
+the sync records it in `memory-bank/local/accelerator-install.json`, updates
+it while it holds a README the edition shipped or what the last sync wrote,
+and keeps one the team edited, listed under `kept`. Syncs before this one
+did not record it; such a copy is recognised from the clone's Git history of
+the edition README, and without that history (a source from an archive) an
+older copy stays, reported as edited. The sync writes no `README.md` and
+adds no `ACCELERATOR.md`. After a sync, adding a tool with
+`--edition E --tool T --target DIR --merge-existing` finds `ACCELERATOR.md`
+unchanged; before, a release that changed the README made that install
+refuse it (`accelerator-readme-exists`) until the file was moved aside.
 
 A project that commits its accelerator takes a release through a commit:
 `--sync --update-tracked --target DIR` (`--dry-run` first) writes the files
