@@ -43,6 +43,13 @@ edition's own files remain in that edition's changelog.
   difference between the full capsule and none, and the retrieval freeze
   (#51) lets an experiment switch land only if the default stays as it is.
   The navigation capsule is the next arm of that measurement.
+- `scripts/memory_outcome_ab.py` gains the matching arm:
+  - `navigation` runs the memory prompt hook with the profile set in the
+    corpus;
+  - a hook run is recognised by its `refresh-health.ndjson` line, since the
+    profile writes no manifest;
+  - `report --compare BASELINE,TREATMENT` compares any two arms;
+  - each run records the token estimate of the documents the hook delivered.
 - The core change was made in `PHP Core/` and written to the other editions,
   the generator asset and the mirrors by `scripts/core_sync.py --write`.
 - Tests: the default capsule carries a matching chunk; `navigation` drops it
