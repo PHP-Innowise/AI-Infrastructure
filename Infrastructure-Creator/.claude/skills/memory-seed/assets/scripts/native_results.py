@@ -186,7 +186,7 @@ def _instruction(root,key,state):
         *interpreter,'memory-bank/scripts/context.py','--root',str(root),'native-result',
         '--request',key,'--token',state['token'],'--input','-','--json'])+')'
     return ('INTERNAL_NATIVE_MEMORY_RESULT '+state['token']+'\n'
-        'Save only the result of the work already performed in this session. Do not repeat the task, '
+        'This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
         'edit application files, run tests, delegate, or mark the task completed. '
         'Use your shell tool to pipe one JSON object into this exact command: '+command+'\n'
         'JSON: progress (summary, at most 1000 characters), optional next_steps '
@@ -203,7 +203,10 @@ def _instruction(root,key,state):
         'only when you personally checked every learning against current sources; this is agent '
         'attestation, never human review. Empty learnings is valid. No raw requests, transcripts, '
         'logs, credentials or personal data. If no project result is safe to save, use the same '
-        'command replacing --input - with --skip. Check the command result, then finish briefly. '
+        'command replacing --input - with --skip. Check the command result. After a successful save or skip, '
+        'return the substantive answer to the original user request, retaining its facts, source citations '
+        'and requested format; do not replace that answer with a save acknowledgement or mention routine '
+        'memory operations. If a save is refused, retain the substantive answer and briefly report the held save. '
         'If JSON/schema is refused before any write, correct its format once in this continuation. '
         'On stale revision, scope or ownership refusal, stop and report the held save; never override '
         'newer work or repeat the user task.')
@@ -253,8 +256,14 @@ def save(root,key,token,data,*,owner,mode,provision,skip=False):
     with mutation_lock(root):
         state=_read(root,key)
         if (state is None or state['token'] != token or state['owner'] != owner
-                or state['project'] != _project(root) or state['phase'] not in {'requested','saved','held'}):
+                or state['project'] != _project(root)
+                or state['phase'] not in {'requested','saved','held','failed'}):
             raise BrainError('native-result:request-unavailable')
+        begun=state['digest'] is not None
+        if state['phase'] != 'requested' and not begun:
+            raise BrainError('native-result:request-unavailable')
+        if begun and (state['task_uuid'] is None or state['revision'] is None):
+            raise BrainError('native-result:invalid-state')
         if (time.time()-state['updated'] > 24*60*60 or state['updated'] > time.time()+60
                 or state['checkout'] != _checkout(root) or state['adapter'] != _adapter()
                 or state['scope'] != prepared_scope(root,owner,REASON,'agent')):
@@ -263,7 +272,10 @@ def save(root,key,token,data,*,owner,mode,provision,skip=False):
             if state['digest'] is not None: raise BrainError('native-result:save-already-started')
             state['phase']='omitted';_write(root,key,state)
             return {'state':'omitted','attestation':'agent'}
-        normalized=normalize(root,data)
+        # A completed replay may outlive its sources or active task alias.
+        # Only the canonical result protocol can admit such a replay; local
+        # challenge metadata alone must never authorize a fresh write.
+        normalized=normalize(root,data,check_files=not begun)
         if (state['task_uuid'] is None and normalized['progress'] is None
                 and not normalized['next_steps'] and not normalized['learnings']):
             raise BrainError('native-result:nothing-to-record')
@@ -276,15 +288,17 @@ def save(root,key,token,data,*,owner,mode,provision,skip=False):
             task=writable_task(root,state['task_id'],owner)
             state.update(task_uuid=task['id'],revision=task['revision'])
             _write(root,key,state)
-        task=writable_task(root,state['task_id'],owner)
-        if task['id'] != state['task_uuid']:
-            raise BrainError('native-result:task-changed')
+        if not begun:
+            task=writable_task(root,state['task_id'],owner)
+            if task['id'] != state['task_uuid']:
+                raise BrainError('native-result:task-changed')
         digest=request_digest(state['task_uuid'],normalized)
         if state['digest'] is not None and state['digest'] != digest:
             raise BrainError('native-result:content-changed')
         state['digest']=digest;_write(root,key,state)
         result=record_result(root,state['task_uuid'],'native-'+token,state['revision'],data,
-                             owner=owner,reason=REASON,attestation='agent',prepared=state['scope'])
+                             owner=owner,reason=REASON,attestation='agent',prepared=state['scope'],
+                             replay_only=begun)
         held=any(item['state'] in {'differs','archived-differs'} for item in result['records'])
         state['phase']='held' if held else 'saved';_write(root,key,state)
         return result

@@ -127,9 +127,15 @@ class MemoryStartupReadonlyTests(unittest.TestCase):
 
     def test_corrupt_and_exclusively_locked_database_stay_unknown(self):
         original=self.database.read_bytes();self.database.write_bytes(b'Teal is not a SQLite image\n');before=self.database.read_bytes()
-        self.assert_degraded(self.readonly(),False);self.assertEqual(before,self.database.read_bytes());self.database.write_bytes(original)
+        started=time.monotonic();self.assert_degraded(self.readonly(),False);unlocked=time.monotonic()-started
+        self.assertEqual(before,self.database.read_bytes());self.database.write_bytes(original)
+        # Locked, a refresh adds two 0.25 s shares of the 1 s hook budget to
+        # what an unlocked degraded refresh costs on this machine (Python
+        # starts several times slower on Windows runners, which also stall for
+        # up to a second); 1.5 s absorbs that. Ignoring the budget in either
+        # wait (2 s each) still overruns.
         with self.db() as db:
-            db.execute('BEGIN EXCLUSIVE');self.assert_degraded(self.refresh(timeout=1.5),False)
+            db.execute('BEGIN EXCLUSIVE');self.assert_degraded(self.refresh(timeout=unlocked+2.0),False)
 
     def test_current_native_progress_wins_over_old_binding_revision(self):
         self.record_change(progress=PUBLIC['updated_progress'],revision=3)

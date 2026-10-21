@@ -187,13 +187,80 @@ python3 scripts/memory_eval.py realized --project ~/Desktop/next --since 2026-09
 `run` prints the report of its result; it exits 0 when at least one prompt
 was evaluated, 1 when none was, 2 on a usage error.
 
-`report A --compare B` prints each result's own numbers side by side. The
-delta of every measure is over the prompts evaluated in both - a prompt one
-run skipped would otherwise read as a loss or a gain - while `prompts`,
-`evaluated` and `skipped` compare the whole runs. When the runs evaluated
-different prompts, the column is headed `paired delta` and a note gives the
-counts; the paired per-prompt diff below it names the ids evaluated in only
-one run.
+`report A --compare B` prints each result's own numbers side by side and
+classifies recorded comparison conditions before the numeric table. The
+`recorded-comparison-v1` check compares input/oracle hashes, host, clock,
+historical mode, timeout, and each shared successful unit's project, timestamp,
+commit, actual edition, history linkage and reconstruction counters. Declared
+scorer and optional worker budgets must also have matching valid evidence.
+Runtime versions, edition digests and materialization may differ as the
+intended treatment; they do not by themselves invalidate a comparison.
+
+- `compatible recorded metadata`: ordinary numeric deltas and paired gains.
+- `incompatible`: known condition mismatches; quality/latency/mechanism deltas
+  and paired gains are withheld. Individual columns and coverage counts remain.
+- `unknown`: missing or malformed comparison evidence in otherwise readable
+  legacy results; explicitly labelled ID-overlap diagnostics remain readable,
+  without a strict paired claim. Existing result-shape and timing validation
+  still refuses invalid files or timing budgets.
+
+A known mismatch takes precedence over unrelated missing evidence. Explicit
+`passages_sha256: null` on both sides records the same absent passage input;
+missing keys do not. Contaminated historical copies remain uncertain. Existing
+`as-of now` results omit the contamination field and therefore cannot establish
+strict recorded compatibility without that evidence. A malformed timestamp,
+including timezone overflow outside the representable UTC range, stays unknown.
+Reasons name fields rather than echoing their supplied values.
+
+Quality and latency deltas retain their existing **successful-intersection**
+meaning: only prompts evaluated successfully in both runs contribute. A timeout
+does not become a successful quality/latency observation. `prompts`, `evaluated`
+and `skipped` compare all items recorded in each file, and the report names ids
+successful in only one run. Inspect those coverage losses alongside the
+conditional diagnostics. This table is not a whole-planned outcome endpoint:
+interrupted legacy files may lack unattempted units or source opportunities.
+Recorded compatibility also does not prove identical historical corpus bodies,
+task success, total model cost or complete experiment execution.
+
+New runs separately report `whole-planned` delivery using the
+`planned-delivery-v1` manifest. The selected logical IDs and input digests are
+saved before the first evaluation. Each unit's useful-path, answer-path and
+distinct normalized answer-passage opportunity is frozen and checkpointed
+before index warm-up. The same private passage set is used for scoring. Result
+JSON retains counts and SHA-256 bindings, never the prompt or answer bodies.
+Terminal-only `items` and their existing `summary` keep their prior meaning.
+
+The supplementary **unit delivery** rate is the fraction of planned units with
+known useful source material that delivered a useful path. **Passage recall**
+is total delivered answer passages divided by the frozen source passages.
+A completed refresh timeout/error contributes zero delivery while retaining its
+known opportunity. For two useful units with passage ceilings 3+1, delivery of
+the first and timeout of the second gives 50% unit delivery and 75% passage
+recall; reversing the timeout gives 50% and 25%. These measure local hook
+delivery, not source verification, model use, task success or total token cost.
+
+Final rates require a finished, noninterrupted run, a terminal result for every
+selected ID and known source opportunity for every unit. Missing projects,
+missing history and invalid timestamps remain visible `source_excluded` units
+with unknown opportunity; they do not silently shrink the planned denominator.
+Incomplete runs show terminal/source-known coverage, truly unattempted units
+and units without a terminal result, with final rates unavailable. A
+`runtime-admitted` checkpoint precedes warm-up; it is not proof of a physical
+call or its cost. Interruption inside warm-up preserves its opportunity and
+marks that unit interrupted. A failed checkpoint prevents subsequent runtime
+calls. Empty opportunity yields an unavailable rate rather than fabricated 0%.
+
+Legacy results without a manifest, malformed counts or inconsistent item/plan
+bindings report `unknown`. Recorded consistency is not proof of producer
+honesty or identical source bytes. Whole-planned values are individual run
+figures with **no paired delta**: the comparison compatibility check above
+examines shared successful units and does not establish matching opportunities
+for failed units. Physical retries do not create additional logical IDs; this
+stand has no retry or complete model-attempt cost ledger.
+Passage-count evidence uses strict integers from 0 to 2^53−1 and delivery cannot
+exceed its source ceiling. Invalid counts are unavailable in the conditional
+table too; otherwise valid successful-intersection arithmetic is unchanged.
+Invalid UTF-8 inputs fail before runtime and preserve the preceding output.
 
 `realized` reads Claude Code transcripts (`--claude-root`, default
 `~/.claude/projects`) and Codex rollouts (`--codex-root`, default
@@ -253,7 +320,15 @@ verification; a separate Rector suite does not establish the namespace fix.
 The legacy `answer_*` counters measure literal labelled-text presence, not
 necessity, model use or final-answer correctness.
 
-**Result** - `{"meta": ..., "items": {id: ...}, "summary": ...}`. `meta` names
+**Result** - `{"meta": ..., "items": {id: ...}, "summary": ...}`; new runs also
+carry `planned` and a derived `planned_delivery`. Reports recompute the latter
+from the manifest and terminal items. `planned` contains `profile`, ordered
+`ids` and `units`; each unit repeats its `id` and keeps `input_sha256`, `runtime_admitted`, a
+`state` (`unattempted`, `preparing`, `runtime-admitted`, `finished` or
+`interrupted`) and, when known, `source_opportunity` counts (`useful_paths`,
+`answer_paths`, `answer_passages`). Terminal items repeat `input_sha256` and
+their `planned_id`; IDs and distinct digests must match the manifest entries.
+`meta` names
 the edition(s) with their release, a digest of the edition files the overlay
 installs and whether the edition directory had uncommitted changes, this
 clone's commit, the host, `as_of`, the clock, the SHA-256 of the set,

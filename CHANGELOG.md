@@ -551,6 +551,36 @@ change below has a test that fails on `a47e1eb8`.
   documents longer than it marks whole (64 KB). On the labelled sets every
   existing passage was reachable.
 
+### Native final-answer preservation — 2026-10-17
+
+- Keep routine native memory capture silent and preserve the original substantive answer, source citations and requested format after successful or skipped capture. A save acknowledgement must not replace the task result consumed as the last agent message. Refused saves retain their warning alongside the answer.
+- Reproduced against an actual Codex Stop continuation; empty reusable learnings remain valid and do not create findings merely to pass a lifecycle probe.
+
+### Automatic promotion apply admission — 2026-10-16
+
+- Recheck configured near-duplicate admission inside automatic promotion apply, including stalled retries. A chunk left by an interrupted apply cannot be duplicated under a later date; the original chunk and authoritative records remain untouched. A valid revision still excludes its recorded predecessor.
+- Add a date-bound interruption/replay regression and public process-exit controls. This prevents a later normal write from duplicating knowledge; it does not adopt an unproven chunk or promise arbitrary crash recovery.
+
+### Correctable native result preflight — 2026-10-16
+
+- Reject conflicting learning identities during normalization, before native task provisioning or digest binding. A refused first payload can be corrected in the same continuation; identical duplicates still save once, while genuinely begun results retain their exact-payload and canonical-proof guards.
+- Cover existing and unprovisioned tasks, normalized identity conflicts and duplicate save/replay through the public CLI. Apply the shared JSON contract across all editions and generator assets.
+
+### Whole-planned memory delivery — 2026-10-16
+
+- Persist the full selected logical plan before evaluation and freeze source opportunity before warm-up. Completed refresh failures retain their source denominator; interruptions preserve in-flight evidence without changing terminal-only successful-intersection metrics.
+- Report supplementary unit delivery and passage recall only for complete, internally consistent plans with known source opportunities. Legacy, malformed, missing-source and interrupted evidence cannot produce a final rate; no whole-planned paired delta or task-success/cost claim is inferred. Add actual producer, timeout, interruption, checkpoint-failure, frozen-source and malformed-evidence regressions.
+
+### Recorded memory-evaluation compatibility — 2026-10-16
+
+- Classify comparison metadata before numeric reports: matching recorded inputs/source conditions and budgets retain paired gains; known mismatches withhold quality/latency deltas and gains; missing or malformed legacy evidence is explicitly diagnostic. Runtime treatment versions may differ. Preserve the existing successful-intersection arithmetic and visible coverage losses.
+- Keep malformed legacy headers readable and treat out-of-range UTC conversions as unknown timestamps. Add mismatch, typed/absent evidence, runtime-treatment and real graph-pilot report regressions; document that recorded compatibility does not prove corpus-body identity or whole-planned task outcomes.
+
+### Native exact-result recovery — 2026-10-16
+
+- An already-started native save can finish through the canonical guarded retry after its recovery Stop marks the challenge failed. Completed saves replay without requiring a still-present citation or active task alias, including after archival and alias reuse.
+- Native retries require the original content, pinned task UUID/revision and canonical result evidence; missing evidence cannot turn a retry into a first write. Fresh saves still check current sources before task creation. Add interruption, archive, disposable receipt loss and refusal regressions; the single automatic continuation remains bounded.
+
 ### Memory suites on native Windows — 2026-10-16
 
 - The 23 memory regression suites that failed on their first native Windows

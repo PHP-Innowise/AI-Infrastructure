@@ -5197,6 +5197,20 @@ def apply_promotion(repository: Path, promotion_id: str) -> dict[str, Any]:
                 "Promotion destination already exists: "
                 + bank_display_path(destination, bank)
             )
+        if automatic:
+            # Stalled proposals enter apply without fresh-candidate admission.
+            # A prior interrupted apply may already have written this claim
+            # under another date. Refuse duplication without adopting or
+            # rewriting an unproven chunk; a valid revision may replace its
+            # own recorded predecessor as before.
+            replaces = predecessor[1]["id"] if predecessor else None
+            duplicate = near_duplicate_chunk(
+                f"{proposal['title']}\n{proposal['content']}",
+                [item for item in active_chunk_texts(repository) if item[0] != replaces],
+                bank_duplicate_ratio(config),
+            )
+            if duplicate is not None:
+                raise BrainError(f"near-duplicate of {duplicate}; merge or supersede first")
         # Tag the chunk so the bank itself shows which knowledge no human
         # approved; a reader must not have to open the promotion to find out.
         tags = ["project-brain", "promoted"] + (["auto-promoted"] if automatic else [])
