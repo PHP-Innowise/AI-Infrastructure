@@ -460,6 +460,52 @@ python3 scripts/memory_fact_consolidation.py --input facts.json --json
   `tests/fixtures/fact-consolidation.json`; see
   [the write-path doc](../docs/MEMORY-WRITE-PATH.md).
 
+### `memory_outcome_ab.py`
+
+**Purpose and status.** A maintainer-only measurement of task outcomes. It
+answers whether the automatic capsule changes what an agent does, not whether
+the capsule's documents are relevant.
+
+For a real task — the first prompt of a recorded session that went on to change
+files — it does the following:
+- rebuilds the project as it was at that prompt, with the `memory_eval.py`
+  reconstruction and recent-files history seeded from the earlier sessions;
+- runs a headless Codex session on the prompt with no hooks and with the
+  memory prompt hook alone;
+- counts the tool calls before the agent first touches a file the original
+  session changed.
+
+Runs stop at that touch, so a pair costs the start of two sessions. It is never
+installed and never run by CI; it spends model calls through the
+maintainer's signed-in Codex CLI.
+
+```bash
+python3 scripts/memory_outcome_ab.py sample --projects next,scb --before 2026-10-07 \
+  --n 30 --seed 1 [--exclude-set TUNING_SET] --out OUTSIDE/set.json
+python3 scripts/memory_outcome_ab.py run --set OUTSIDE/set.json --out OUTSIDE/result.json \
+  [--repeat 2] [--cap 40] [--timeout 900] [--ids ID,...] [--events OUTSIDE/events]
+python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--json]
+```
+
+- **Inputs:**
+  - Claude Code transcripts under `~/.claude/projects`;
+  - the projects under `--projects-root`;
+  - for `run`, a signed-in `codex` on PATH.
+- **Outputs:**
+  - `sample`: a set with prompts and gold paths;
+  - `run`: per-task counts, stop reasons and whether the hook delivered;
+  - `report`: paired differences, a bootstrap interval, a sign test and the
+    verdict rule documented in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md).
+- **Dependencies:** Python 3.9+ standard library, `memory_eval.py`,
+  `accelerator_attach.py` and the edition runtime's transcript parsers.
+- **Writes:**
+  - the set and the result, owner-only, refused inside the clone;
+  - disposable corpora under the cache.
+
+  Sessions are `--ephemeral`, so `~/.codex/sessions` keeps nothing.
+- **CI relationship:** `tests/test_memory_outcome_ab.py` covers path and event
+  parsing, stopping, hook flags, the statistics and sampling, without a model.
+
 ### `memory_rerank_pilot.py`
 
 **Purpose and status.** Optional, source-only maintainer pilot. It compares the
