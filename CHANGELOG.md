@@ -28,6 +28,32 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Task outcomes, measured: capsule on against off — 2026-10-21
+
+- `scripts/memory_outcome_ab.py` measures what the stand cannot: whether the
+  automatic capsule changes what an agent does.
+  - It rebuilds a project as of a real task's first prompt and runs a
+    headless Codex session twice: without hooks, and with the memory prompt
+    hook alone.
+  - It counts the tool calls before the agent first touches a file the
+    original session changed.
+  - Runs stop at that touch, so a pair costs the start of two sessions.
+  - Sets and results stay outside the clone; sessions are ephemeral.
+- First measurement, under a rule sealed before the run:
+  - 30 client tasks, two repeats per arm;
+  - mean calls 17.10 without the capsule, 17.13 with it, 95% CI of the
+    difference [−2.57, +2.65]: **no difference shown**;
+  - each arm touched gold on 18 tasks;
+  - the capsule took fewer calls on 15 tasks and more on 5 (sign test
+    p 0.041), and about one call fewer where both arms reached the target
+    (exploratory).
+  - The document layers have not shown an effect on the outcome; a capsule
+    reduced to working state and navigation is the next candidate, to be
+    measured the same way.
+- The memory-stand CI step now also runs the four test modules the
+  2026-10-20/21 commits added without wiring them: rerank pilot, sqlite-vec
+  pilot, fact consolidation and the history series pilot.
+
 ### Review of the consolidation and ticket work — 2026-10-21
 
 Fixes for what a review of the twelve unpushed commits of 2026-10-20/21 found,

@@ -644,6 +644,34 @@ the note.
 - Long prompts that name components leave few calls to save, which bounds any
   effect from above.
 
+**The first measurement (2026-10-21).**
+
+Setup:
+- 30 tasks, drawn with a fixed seed from the 62 cold starts that changed 1–10
+  gold files in four client projects before 2026-10-07. The tuning set and
+  the pilot were excluded.
+- Runtime `fef3b217`; Codex CLI 0.163.0 with its default model.
+- Two repeats of each arm per task.
+- The rule above was written down and sealed by digest before the run.
+
+Results:
+- 30 valid pairs.
+- Mean calls to the first gold file: 17.10 without the capsule, 17.13 with it.
+- Difference +0.03, 95% CI [−2.57, +2.65]: **no-difference-shown**.
+- Each arm touched gold in every repeat on 18 tasks.
+- The capsule arm took fewer calls on 15 tasks and more on 5 (sign test
+  p 0.041). It also ended a session without touching gold about as often as
+  the other arm (22 of 60 runs against 21), and those censored runs carry the
+  mean.
+
+On the 16 tasks where every run of both arms reached gold, the capsule saved
+about one call (−1.09, CI [−1.72, −0.5]). That figure is exploratory and not
+part of the rule.
+
+What follows: the document layers have not shown that they change what an
+agent does. A capsule reduced to the working state and navigation is the next
+candidate default, measured the same way against this one.
+
 **Privacy.** Sets carry prompts and results name client paths. Both are
 written owner-only and are refused inside the clone. `--events` keeps raw
 sessions for a pilot and belongs in a private folder.
