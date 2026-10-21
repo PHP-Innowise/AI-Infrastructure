@@ -28,6 +28,123 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A same-ticket event series pilot — 2026-10-21
+
+- `CONTEXT_EVENT_SERIES=1` is an opt-in experiment: when the request names no
+  ticket, the history slot may take up to two events from the largest
+  same-ticket series instead of exactly one. The default remains one event.
+- On the real 12-prompt stand the pilot changed selected recall 52.6% -> 55.3%
+  and useful paths 19 -> 20, with answer passage recall 34.2% -> 36.8% and the
+  same two noise-only turns. That is too small to change the default; the
+  switch stays off and documented as a pilot.
+- A distinct-ticket variant and a plain top-two variant were also measured.
+  The first added only a noise document; the second changed nothing because
+  ticket-bearing prompts already had a two-event limit. Both were removed
+  rather than left as unused switches.
+- History metrics now tag an entry by the indexed `brain-event` kind rather
+  than only by its funnel stage. This corrected `history_paths` from 15 to 26
+  and showed the real baseline: 13 of 26 event paths delivered (50%), not
+  2 of 15. `history-event-limit` remains 15 -> 14 under the pilot.
+
+### The miss audit keeps dynamic history visible — 2026-10-21
+
+- `memory_miss_audit.py` now treats an unavailable Git source context during
+  history admission as `unknown-history` instead of raising and erasing every
+  judged path in the prompt. A per-path guard keeps the stages already
+  established when one path cannot be resolved.
+- `memory_eval` reports `history_paths`, `history_delivered` and
+  `history_recall` beside candidate/selected recall. On the real 12-prompt
+  stand this made the loss visible: 15 judged paths were dynamic history
+  records, only 2 were delivered, while semantic candidate recall was 95.7%
+  and selected recall 87.0%.
+- `docs/MEMORY-EVAL.md` explains that candidate/selected shares cover
+  semantic documents and history has its own share. The report prints all
+  three, and paired deltas format the new share as a percentage.
+- `memory_eval --audit-git` seeds a disposable Git snapshot for history
+  admission when the evaluation corpus has no usable `.git`. It is diagnostic
+  only, and the source-policy deadline still applies.
+- History admission now receives the database connection, so the event filter
+  no longer fails with `Git source context unavailable` in a seeded or
+  attached corpus. On the real 12-prompt stand all 38 judged paths classified:
+  candidate recall 97.4%, selected recall 52.6%, and 15 paths lost to
+  `history-event-limit`; `unknown_history` disappeared.
+- Answer-presence comparison ignores Markdown heading lines, and a labelled
+  passage with no non-heading body is reported as `heading-only` and excluded
+  from answer passages rather than counted as a retrieval miss. The audit and
+  the evaluator use the same normalization. On the real stand 7 labels were
+  heading-only; answer passage recall is 41.9% (13/31) instead of 34.2%
+  (13/38). This is label hygiene, not a claimed retrieval gain.
+
+### A reranker pilot before a runtime change — 2026-10-21
+
+- `scripts/memory_rerank_pilot.py` compares the runtime's normal candidate
+  order with a deterministic path/title feature reranker on a local index and
+  judged queries. Path is unindexed in FTS5, so the feature gives a file name
+  a bounded voice; the base BM25/authority score still dominates.
+- The pilot is read-only, stdlib-only and never imported by the runtime. It
+  reports per-query baseline/reranked useful paths and an aggregate, so a
+  positive result is evidence for integration rather than a default change.
+- `docs/MEMORY-RERANK-PILOT.md` explains the weights, the candidate window and
+  why a low `candidate_recall` is out of scope. `tests/test_memory_rerank_pilot.py`
+  covers feature scoring, promotion, metrics and malformed input.
+
+### Decision templates keep the options that lost — 2026-10-21
+
+- The Project Brain `decision` template and the durable chunk template now
+  carry a `Rejected Alternatives` section. A future task that proposes the
+  same option again can find why it was rejected; a fact or constraint deletes
+  the section. This is authoring guidance, not a new admission rule: the
+  existing promotion and retrieval rules are unchanged.
+- The generator's memory-seed asset carries both templates.
+
+### The memory stand separates candidate recall from selection — 2026-10-21
+
+- `memory_miss_audit.py` now builds its query through the runtime's
+  `expand_query_tokens`, so a judged path is diagnosed against the same
+  identifier-aware vocabulary the capsule actually searched. An audit that
+  used raw prompt tokens described a different retrieval from the one under
+  test.
+- `memory_eval` derives `candidate_recall` and `selected_recall` from the
+  existing stage funnel. The denominator is the labelled paths the index could
+  have returned (absent, not-indexed and unknown are excluded). A low candidate
+  share points at query/index work; a high candidate share with a low selected
+  share points at ranking, admission or budget.
+- The report prints both shares and their paired deltas, and names the larger
+  loss as `candidate-bound`, `selection-bound`, `mixed` or `none measured`.
+  `MEMORY-EVAL.md` explains how to read them.
+- Tests: a stage fixture with selected, relevance-drop, no-candidate,
+  absent-source and unknown paths; a four-word identifier reaches the audit
+  through the shared expansion; the report carries both rows. The full
+  memory-evaluation suite is 93 tests.
+
+### CamelCase identifiers and short continuations reach the index — 2026-10-20
+
+- The local context index now carries a derived `identifier_terms` table: a
+  document naming `getUserById` is reachable from "get user by id". The table
+  stores only `(path, identifier, expansion)`; it is rebuilt incrementally for
+  changed documents, once on an older index, and never becomes a second source
+  of truth. `search`, capsule candidates, marked excerpts, episode search and
+  excerpt weights all use the same expansion.
+- Expansion is deliberately one-directional: words in the request gain the
+  identifier the index spells, but an identifier is never expanded into its
+  words. The reverse admitted every document sharing two common subwords and
+  displaced the prompt-link upgrade that names a class. An opaque
+  `SkylarkEpisode695` therefore does not match every unrelated
+  `SkylarkSignal842` on the shared prefix. Ordinary words, short tokens and
+  all-caps acronyms without a boundary produce no row.
+- A short imperative continuation ("fix it", "do it") now borrows the active
+  task's goal and next steps for governed retrieval. The prompt must name an
+  explicit action verb; bare acknowledgements ("continue", "ok", "sure", "go
+  ahead", "thanks") keep the existing no-injection behaviour, so a touch link
+  still needs a shared informative term. The manifest records
+  `query_source: continuation` and the combined query it actually searched.
+- Tests: identifier forms for camelCase, snake_case, namespace and dotted
+  names; the words-to-identifier direction through `search`; a negative test
+  that an identifier does not expand into shared subwords; incremental
+  replacement, document removal and an older-index rebuild; and an imperative
+  continuation that reaches the task's specification. The full PHP Core
+  Project Brain suite is 680.
+
 ### A Russian technical query reaches the English index — 2026-10-20
 
 - `query_tokens` now applies a small, prefix-based seed glossary for common

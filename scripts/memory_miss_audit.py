@@ -12,8 +12,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Optional, Sequence
@@ -111,8 +114,13 @@ def _read_manifest(corpus: Path, reference: object, runtime: Any) -> dict[str, A
 
 
 def _informative_tokens(connection: sqlite3.Connection, runtime: Any, query: str) -> list[str]:
-    """Read-only equivalent of runtime.informative_tokens (cache is immaterial)."""
-    tokens = runtime.query_tokens(query)
+    """Read-only equivalent of the runtime's query vocabulary.
+
+    The runtime expands an identifier's words before filtering; the audit must
+    ask the same question or its stages describe a different retrieval than
+    the one the capsule used.
+    """
+    tokens = runtime.expand_query_tokens(connection, runtime.query_tokens(query))
     total = connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
     if not total:
         return tokens
@@ -194,6 +202,20 @@ def _flat(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
+def _answer_flat(value: str) -> str:
+    """Flatten text for answer presence, excluding Markdown heading lines.
+
+    A labelled changelog passage starts with `# Changelog` and its section
+    heading, while the capsule deliberately quotes the entry body. The
+    answer is present even when the presentation heading is not; treating the
+    heading as required text made six selected entries look undelivered.
+    """
+    body = "\n".join(
+        line for line in value.splitlines() if not line.lstrip().startswith("#")
+    )
+    return _flat(body or value)
+
+
 def _history_stage(corpus: Path, connection: sqlite3.Connection, runtime: Any,
                    path: str, text: Optional[str]) -> str:
     if text is None:
@@ -201,17 +223,40 @@ def _history_stage(corpus: Path, connection: sqlite3.Connection, runtime: Any,
     # The manifest holds the distilled main query. Recorded history instead
     # uses the whole screened prompt; never substitute one for the other.
     screened = runtime.miss_audit_sanitizer(text)
-    history = runtime.history_query(connection, screened)
-    events, episodes = runtime._history_candidates(connection, history) if history else ([], [])
+    try:
+        history = runtime.history_query(connection, screened)
+        events, episodes = runtime._history_candidates(connection, history) if history else ([], [])
+    except (OSError, sqlite3.Error):
+        return "unknown-history"
     if not any(item["path"] == path for item in events):
         return "history-admission-drop"
-    winner, excluded = runtime._best_history_event(corpus, events, runtime.load_config(corpus))
+    try:
+        winner, excluded = runtime._best_history_event(
+            corpus, events, runtime.load_config(corpus), connection=connection
+        )
+    except (OSError, sqlite3.Error):
+        return "unknown-history"
+    except Exception as error:
+        # The evaluation corpus is a copy without the project's Git context;
+        # `_best_history_event` asks Git for the source policy and raises
+        # SourceGitError. A missing context is an unknown stage, not a reason
+        # to lose every judged path in the prompt.
+        source_error = getattr(
+            getattr(runtime, "workspace_roots", None), "SourceGitError", None
+        )
+        if source_error is not None and isinstance(error, source_error):
+            return "unknown-history"
+        raise
     if any(item.get("path") == path for item in excluded):
         return "runtime-exclusion"
     if episodes and (not winner or episodes[0][0] > winner[0]["adjusted_score"]):
         return "history-event-limit"
     if winner and winner[0]["path"] != path:
         return "history-event-limit"
+    if not winner:
+        # No event survived admission and the target was not one of the
+        # recorded exclusions: the event slot is empty for this query.
+        return "history-admission-drop"
     return "unknown-history"
 
 
@@ -229,11 +274,19 @@ def _answer_status(
     except (OSError, sqlite3.Error):
         return "unknown", {"eligible": 0, "indexed": 0, "delivered": 0}
     wanted = sorted({_flat(value) for value in passages if isinstance(value, str) and _flat(value)})
+    bodies = {
+        _flat(value): _answer_flat(value) or _flat(value)
+        for value in passages if isinstance(value, str) and _flat(value)
+    }
     if not wanted:
         return "not-applicable", {"eligible": 0, "indexed": 0, "delivered": 0}
     eligible = {value for value in wanted if value in source_text}
     indexed = {value for value in eligible if value in indexed_text}
-    delivered = {value for value in indexed if value in _flat(capsule_text)}
+    capsule_body = _answer_flat(capsule_text)
+    delivered = {
+        value for value in indexed
+        if bodies.get(value) and bodies[value] in capsule_body
+    }
     counts = {"eligible": len(eligible), "indexed": len(indexed), "delivered": len(delivered)}
     if not eligible:
         return "not-in-source", counts
@@ -248,10 +301,47 @@ def _answer_status(
     return "delivered", counts
 
 
+def _seed_git(corpus: Path, when: Optional[str]) -> bool:
+    """Seed a disposable Git snapshot so history admission can be audited.
+
+    The evaluation corpus is copied without `.git`; `_best_history_event`
+    asks Git for the source policy and otherwise fails. A temporary repository
+    whose files are all tracked/clean is enough for that diagnostic, but it is
+    not the project's real history: the caller must treat its result as an
+    audit fallback, never as a runtime claim. Returns whether `.git` was
+    created here (and therefore must be removed).
+    """
+    if (corpus / ".git").exists():
+        return False
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
+    environment.update(
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+    )
+    if when:
+        environment.update(GIT_AUTHOR_DATE=when, GIT_COMMITTER_DATE=when)
+    try:
+        subprocess.run(["git", "init", "-q"], cwd=corpus, env=environment, check=True)
+        subprocess.run(["git", "add", "-A"], cwd=corpus, env=environment, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=memory-eval", "-c", "user.email=memory-eval@example.invalid",
+             "commit", "-q", "-m", "memory-eval audit snapshot"],
+            cwd=corpus, env=environment, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        shutil.rmtree(corpus / ".git", ignore_errors=True)
+        return False
+    return True
+
+
 def audit(
     corpus: Path, manifest_reference: object, known_paths: Iterable[object], *,
     query_withheld: bool = False, answer_passages: Optional[dict[str, list[str]]] = None,
     capsule_text: str = "", history_text: Optional[str] = None,
+    seed_git: bool = False,
 ) -> dict[str, Any]:
     paths = [path for value in known_paths if (path := _safe_relative(value)) is not None]
     if query_withheld:
@@ -264,6 +354,9 @@ def audit(
             raise ValueError("index-unavailable")
         connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
         connection.row_factory = sqlite3.Row
+        seeded_git = bool(
+            seed_git and _seed_git(corpus, manifest.get("created_at"))
+        )
     except Exception:
         return {"status": "unknown", "items": [{"path": path, "stage": "unknown", "answer": "unknown", "answer_counts": {"eligible": 0, "indexed": 0, "delivered": 0}} for path in paths]}
     try:
@@ -281,46 +374,66 @@ def audit(
         items = []
         answer_passages = answer_passages or {}
         for path in paths:
-            sources = _source_paths(corpus, path)
-            if not sources:
-                stage, indexed = "absent-source", path
-            else:
-                indexed = next((name for name, _source in sources if connection.execute(
-                    "SELECT 1 FROM documents WHERE path = ?", (name,)
-                ).fetchone() is not None), sources[0][0])
-                if connection.execute("SELECT 1 FROM documents WHERE path = ?", (indexed,)).fetchone() is None:
-                    stage = "not-indexed"
-                elif indexed in selected:
-                    stage = "selected"
-                elif indexed in excluded:
-                    reason = excluded[indexed]
-                    stage = (
-                        "budget-loss" if reason in {"budget", "hard-budget"}
-                        else "automatic-link-limit" if reason == "file-link-limit"
-                        else "capsule-loss" if reason == "capsule-limit"
-                        else "rank-loss" if reason in RANK_REASONS
-                        else "runtime-exclusion" if reason in RUNTIME_REASONS
-                        else "unknown"
-                    )
+            try:
+                sources = _source_paths(corpus, path)
+                if not sources:
+                    stage, indexed = "absent-source", path
                 else:
-                    stage = _stage_for_indexed(connection, runtime, manifest["query"], indexed, limit)
-                    if stage == "unknown-history":
-                        stage = _history_stage(corpus, connection, runtime, indexed, history_text)
-            answer = "not-applicable"
-            answer_counts = {"eligible": 0, "indexed": 0, "delivered": 0}
-            passages = answer_passages.get(path, [])
-            if sources and connection.execute("SELECT 1 FROM documents WHERE path = ?", (indexed,)).fetchone() is not None:
-                answer, answer_counts = _answer_status(connection, indexed, sources, passages, capsule_text)
-                if stage == "selected" and answer in {"not-in-delivery", "partial-delivery"}:
-                    stage = "selected-answer-not-in-text"
-            elif passages:
-                answer = "unknown"
-            items.append({"path": path, "stage": stage, "answer": answer, "answer_counts": answer_counts})
+                    indexed = next((name for name, _source in sources if connection.execute(
+                        "SELECT 1 FROM documents WHERE path = ?", (name,)
+                    ).fetchone() is not None), sources[0][0])
+                    if connection.execute("SELECT 1 FROM documents WHERE path = ?", (indexed,)).fetchone() is None:
+                        stage = "not-indexed"
+                    elif indexed in selected:
+                        stage = "selected"
+                    elif indexed in excluded:
+                        reason = excluded[indexed]
+                        stage = (
+                            "budget-loss" if reason in {"budget", "hard-budget"}
+                            else "automatic-link-limit" if reason == "file-link-limit"
+                            else "capsule-loss" if reason == "capsule-limit"
+                            else "rank-loss" if reason in RANK_REASONS
+                            else "runtime-exclusion" if reason in RUNTIME_REASONS
+                            else "unknown"
+                        )
+                    else:
+                        stage = _stage_for_indexed(connection, runtime, manifest["query"], indexed, limit)
+                        if stage == "unknown-history":
+                            stage = _history_stage(corpus, connection, runtime, indexed, history_text)
+                answer = "not-applicable"
+                answer_counts = {"eligible": 0, "indexed": 0, "delivered": 0}
+                passages = answer_passages.get(path, [])
+                history = False
+                if sources:
+                    kind_row = connection.execute(
+                        "SELECT kind FROM documents WHERE path = ?", (indexed,)
+                    ).fetchone()
+                    history = bool(kind_row is not None and kind_row[0] == runtime.HISTORY_KIND)
+                if sources and connection.execute("SELECT 1 FROM documents WHERE path = ?", (indexed,)).fetchone() is not None:
+                    answer, answer_counts = _answer_status(connection, indexed, sources, passages, capsule_text)
+                    if stage == "selected" and answer in {"not-in-delivery", "partial-delivery"}:
+                        stage = "selected-answer-not-in-text"
+                elif passages:
+                    answer = "unknown"
+                items.append({
+                    "path": path, "stage": stage, "answer": answer,
+                    "answer_counts": answer_counts, "history": history,
+                })
+            except Exception:
+                # One path's unavailable history context must not erase
+                # the stages already established for the prompt.
+                items.append({
+                    "path": path, "stage": "unknown", "answer": "unknown",
+                    "answer_counts": {"eligible": 0, "indexed": 0, "delivered": 0},
+                    "history": False,
+                })
         return {"status": "ok", "items": items}
     except Exception:
         return {"status": "unknown", "items": [{"path": path, "stage": "unknown", "answer": "unknown", "answer_counts": {"eligible": 0, "indexed": 0, "delivered": 0}} for path in paths]}
     finally:
         connection.close()
+        if seeded_git:
+            shutil.rmtree(corpus / ".git", ignore_errors=True)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -329,6 +442,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--paths-json", required=True)
     parser.add_argument("--query-withheld", action="store_true")
+    parser.add_argument("--audit-git", action="store_true")
     arguments = parser.parse_args(argv)
     try:
         paths = json.loads(arguments.paths_json)
@@ -350,7 +464,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(json.dumps(
         audit(arguments.corpus.resolve(), arguments.manifest, paths,
               query_withheld=arguments.query_withheld, answer_passages=answers,
-              capsule_text=text, history_text=history),
+              capsule_text=text, history_text=history, seed_git=arguments.audit_git),
         sort_keys=True,
     ))
     return 0

@@ -9,3 +9,8 @@
 ## Decision
 
 ## Consequences
+
+## Rejected Alternatives
+
+Name the options that lost and why. A future task that proposes one of them
+again needs this section; delete it only when no alternative was considered.

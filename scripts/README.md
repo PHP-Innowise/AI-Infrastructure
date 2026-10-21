@@ -445,6 +445,26 @@ python3 scripts/memory_fact_consolidation.py --input facts.json --json
   `tests/fixtures/fact-consolidation.json`; see
   [the write-path doc](../docs/MEMORY-WRITE-PATH.md).
 
+### `memory_rerank_pilot.py`
+
+**Purpose and status.** Optional, source-only maintainer pilot. It compares the
+runtime's normal candidate order with a deterministic path/title feature
+reranker on a local `context.db` and judged queries. It never changes the
+runtime, index or CI.
+
+```bash
+python3 scripts/memory_rerank_pilot.py --database DB --queries QUERIES \
+  [--judgments JUDGMENTS] [--limit 3] [--runtime DIR] [--json]
+```
+
+- **Inputs:** a local context index, JSON queries and optional grades.
+- **Outputs:** per-query baseline/reranked useful paths and an aggregate.
+- **Dependencies:** Python 3.9+ standard library; the selected edition's
+  `context_retrieval.py`.
+- **Writes:** none; it opens the database read-only.
+- **CI relationship:** `tests/test_memory_rerank_pilot.py`; see
+  [the pilot doc](../docs/MEMORY-RERANK-PILOT.md).
+
 ### `memory_sqlite_vec_pilot.py`
 
 **Purpose and status.** Optional, off-by-default maintainer probe for a local

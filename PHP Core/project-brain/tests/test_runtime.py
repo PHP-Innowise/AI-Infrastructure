@@ -6307,6 +6307,27 @@ class AutomaticFileLinkTest(FileEdgeFixture):
             capsule = self.refresh(query)["capsule"]
             self.assertNotIn(self.record_path("TASK-OTHER"), self.by_path(capsule), query)
 
+    def test_an_imperative_continuation_borrows_the_task_terms(self) -> None:
+        self.fillers()
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rounding rule is canonical.\n", encoding="utf-8")
+        self.task("TASK-CUR", "Explain the cobalt authority rounding rule.")
+        payload = self.refresh("fix it")
+        self.assertIn("specs/authority.md", self.by_path(payload["capsule"]))
+        manifest = self.manifest(payload["capsule"])
+        self.assertEqual("continuation", manifest["query_source"])
+        self.assertIn("cobalt", manifest["query"])
+
+    def test_acknowledgements_do_not_borrow_the_task_terms(self) -> None:
+        self.fillers()
+        self.repository.joinpath("specs/authority.md").write_text(
+            "# Authority\n\nThe cobalt authority rounding rule is canonical.\n", encoding="utf-8")
+        self.task("TASK-CUR", "Explain the cobalt authority rounding rule.")
+        for query in ("sure", "go ahead", "please continue", "yes"):
+            payload = self.refresh(query)
+            self.assertNotIn("specs/authority.md", self.by_path(payload["capsule"]), query)
+            self.assertNotEqual("continuation", self.manifest(payload["capsule"])["query_source"], query)
+
     def test_a_hub_file_links_nothing(self) -> None:
         self.fillers(30)
         self.track("app/Shared.php", "app/Rare.php")

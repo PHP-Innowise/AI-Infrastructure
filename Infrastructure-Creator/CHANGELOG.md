@@ -4,6 +4,23 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded templates keep rejected alternatives — 2026-10-21
+
+- memory-seed carries the `Rejected Alternatives` section in the Brain
+  decision template and the durable chunk template, so a generated project
+  records why an option lost as well as what was chosen.
+- the policy lock and mirrors were regenerated for the changed templates.
+
+### Seeded runtime expands identifiers and task continuations — 2026-10-20
+
+- memory-seed carries the derived identifier index: "get user by id" reaches
+  `getUserById` without a model, and a short imperative continuation borrows
+  the active task's terms. Citation frontmatter and generated `Sources`,
+  `References` and `Files` sections are excluded so an identifier in
+  provenance cannot displace the fact; the reverse expansion is deliberately
+  absent because it admitted unrelated documents on shared subwords.
+- the policy lock was regenerated for the changed runtime assets.
+
 ### Seeded runtime bridges Russian technical queries — 2026-10-20
 
 - memory-seed carries the prefix-based Russian software glossary: a Russian

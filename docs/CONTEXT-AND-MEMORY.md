@@ -150,17 +150,26 @@ The Local Context Engine is the Python/SQLite retrieval runtime exposed through
 It provides:
 
 - SQLite FTS5/BM25 lexical indexing and search;
+- a derived identifier index that maps "get user by id" to `getUserById`, so
+  prose reaches a code name without a model; the identifier itself remains an
+  exact token and is never expanded into its words;
 - task-aware context assembly;
 - eligibility metadata and freshness checks;
 - bounded snippets and estimated-token budgets;
 - machine-local task bindings in governed mode;
 - optional local working tasks and replay episodes in lightweight mode.
 
-The database is derived and disposable only in part. Its document and metadata
-indexes can be rebuilt from repository sources. Governed compatibility bindings
-can be restored from Git-tracked task records with `rebind`, and the next
-automated turn flush performs the same restoration. Lightweight tasks and local
-episodes remain machine-local and cannot be reconstructed after deletion.
+The database is derived and disposable only in part. Its document, metadata
+and identifier indexes can be rebuilt from repository sources. The identifier
+table stores only path, identifier and expansion; a changed document replaces
+its rows, and an index created before the table rebuilds it once. Query
+expansion is a candidate aid, never an admission rule: coverage, authority,
+privacy, freshness and source hashes still decide what a capsule may carry.
+
+Governed compatibility bindings can be restored from Git-tracked task records
+with `rebind`, and the next automated turn flush performs the same restoration.
+Lightweight tasks and local episodes remain machine-local and cannot be
+reconstructed after deletion.
 
 The active provider is local `sqlite-fts5`: network access and embeddings are
 disabled. An external provider entry exists only as a disabled contract.
@@ -367,9 +376,11 @@ raw customer data, production identifiers, confidential logs, or unredacted
 payloads.
 
 Use a **decision** for a proposed project choice that needs acceptance or
-rejection and may later be superseded. If the decision changes architecture,
-API behavior, schema, security behavior, or another living contract, update the
-canonical specification too; the Brain decision does not replace it.
+rejection and may later be superseded. Record the alternatives that lost and
+why; that section is what stops a later task from proposing the same rejected
+option. If the decision changes architecture, API behavior, schema, security
+behavior, or another living contract, update the canonical specification too;
+the Brain decision does not replace it.
 
 Use an **event** for a notable immutable occurrence. Event content cannot be
 updated; only lifecycle supersession is supported. Do not use events as an

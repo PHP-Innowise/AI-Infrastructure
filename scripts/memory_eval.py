@@ -137,6 +137,8 @@ IDENTITY = ("memory-eval", "memory-eval@localhost")
 ENV_PASSTHROUGH = (
     "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT",
     "SYSTEMDRIVE", "COMSPEC", "PATHEXT", "WINDIR", "USER", "LOGNAME", "USERNAME",
+    # Explicit maintainer pilot; absent by default.
+    "CONTEXT_EVENT_SERIES",
 )
 STDERR_LINES = 6
 STDERR_CHARACTERS = 600
@@ -1417,9 +1419,32 @@ def delivered_paths(capsule: object) -> List[str]:
     return found
 
 
+def passage_body(value: object) -> str:
+    """A passage's non-heading text; headings alone are not an answer body."""
+    return "\n".join(
+        line for line in str(value or "").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+def answer_flatten(value: object) -> str:
+    """Flatten an answer passage without Markdown heading lines.
+
+    A labelled changelog passage includes `# Changelog` and its section
+    heading; the capsule quotes the entry body. The answer is present even
+    when the presentation heading is not, so the heading must not decide
+    answer-passage recall.
+    """
+    body = "\n".join(
+        line for line in str(value or "").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    return flatten(body or value)
+
+
 def answer_in_text(useful: Sequence[str], passages: Dict[str, Dict[str, Any]], capsule_text: str) -> bool:
     """A labelled passage of a useful delivered document is in the text the model reads."""
-    haystack = flatten(capsule_text)
+    haystack = answer_flatten(capsule_text)
     if not haystack:
         return False
     for path in useful:
@@ -1427,8 +1452,8 @@ def answer_in_text(useful: Sequence[str], passages: Dict[str, Dict[str, Any]], c
         if not isinstance(entry, dict) or entry.get("useful") is False:
             continue
         for passage in entry.get("passages") or []:
-            if isinstance(passage, str):
-                needle = flatten(passage)
+            if isinstance(passage, str) and passage_body(passage):
+                needle = answer_flatten(passage)
                 if needle and needle in haystack:
                     return True
     return False
@@ -1437,11 +1462,11 @@ def answer_in_text(useful: Sequence[str], passages: Dict[str, Dict[str, Any]], c
 def labelled_passages(paths: Sequence[str], passages: Dict[str, Dict[str, Any]]) -> Set[str]:
     """Unique normalized answers, not duplicated labels or source pointers."""
     return {
-        flatten(value) for path in paths
+        answer_flatten(value) for path in paths
         if isinstance(passages.get(path), dict) and passages[path].get("useful") is not False
         for value in (passages[path].get("passages")
                       if isinstance(passages[path].get("passages"), list) else [])
-        if isinstance(value, str) and flatten(value)
+        if isinstance(value, str) and passage_body(value) and answer_flatten(value)
     }
 
 
@@ -1479,7 +1504,7 @@ def score(
     delivered_answers = labelled_passages(useful, passages) & expected
     # What the runtime could have quoted: in the index's text of the document.
     deliverable = expected if deliverable_passages is None else deliverable_passages & expected
-    haystack = flatten(text)
+    haystack = answer_flatten(text)
     return {
         "class": classify(delivered, useful, noise, withheld),
         "delivered": delivered,
@@ -1492,6 +1517,11 @@ def score(
         "answer_could_help": bool(answer_existed),
         "answer_in_text": answer_in_text(useful, passages, text),
         "answer_passages_existed": len(expected),
+        "answer_passages_heading_only": sum(
+            1 for path in answer_existed
+            for value in (passages.get(path, {}).get("passages") or [])
+            if isinstance(value, str) and not passage_body(value)
+        ),
         "answer_passages_delivered": sum(value in haystack for value in delivered_answers),
         "answer_passages_deliverable": len(deliverable),
         "answer_passages_delivered_deliverable": sum(value in haystack for value in delivered_answers & deliverable),
@@ -1681,6 +1711,7 @@ def source_link_stats(corpus: Path, result: Dict[str, Any]) -> Optional[Dict[str
 def miss_audit(
     corpus: Path, result: Dict[str, Any], paths: Sequence[str], answer_passages: Dict[str, List[str]],
     env: Dict[str, str], timeout: float, history_text: Optional[str] = None,
+    seed_git: bool = False,
 ) -> Dict[str, Any]:
     """Trace known judged paths in a pinned-clock subprocess, never exposing query/text.
 
@@ -1695,6 +1726,19 @@ def miss_audit(
         "capsule_text": result.get("capsule_text") if isinstance(result.get("capsule_text"), str) else "",
         "history_text": history_text,
     }).encode("utf-8")
+    if seed_git:
+        # The archive may carry a `.git` copied from the project. It is either
+        # stale or not a valid repository for the synthetic worktree, and it
+        # prevented the diagnostic seed from ever running. The corpus belongs
+        # to this evaluation run, so strip it before the audit subprocess.
+        git_path = corpus / ".git"
+        try:
+            if git_path.is_dir() and not git_path.is_symlink():
+                shutil.rmtree(git_path)
+            elif git_path.exists():
+                git_path.unlink()
+        except OSError:
+            pass
     command = [
         sys.executable, str(ROOT / "scripts" / "memory_miss_audit.py"),
         "--corpus", str(corpus), "--manifest", str(manifest or ""),
@@ -1702,6 +1746,8 @@ def miss_audit(
     ]
     if result.get("query_withheld"):
         command.append("--query-withheld")
+    if seed_git:
+        command.append("--audit-git")
     try:
         completed = subprocess.run(
             command, cwd=str(corpus), env=env, input=payload, capture_output=True, timeout=timeout,
@@ -1724,7 +1770,10 @@ def miss_audit(
                 and all(type(counts.get(key)) is int and counts[key] >= 0 for key in ("eligible", "indexed", "delivered"))
             )
             if path in expected and stage in MISS_AUDIT_STAGES and answer in MISS_AUDIT_ANSWERS and valid_counts:
-                clean.append({"path": path, "stage": stage, "answer": answer, "answer_counts": counts})
+                clean.append({
+                    "path": path, "stage": stage, "answer": answer,
+                    "answer_counts": counts, "history": entry.get("history") is True,
+                })
     found = {entry["path"] for entry in clean}
     clean.extend(
         {"path": path, "stage": "unknown", "answer": "unknown", "answer_counts": {"eligible": 0, "indexed": 0, "delivered": 0}}
@@ -1736,7 +1785,10 @@ def miss_audit(
 def audit_answer_passages(grades: Dict[str, int], passages: Dict[str, Dict[str, Any]]) -> Dict[str, List[str]]:
     """Explicit labels used by both score() and the miss audit, for grades 1 and 2."""
     return {
-        path: [value for value in entry.get("passages") or [] if isinstance(value, str)]
+        path: [
+            value for value in entry.get("passages") or []
+            if isinstance(value, str) and passage_body(value)
+        ]
         for path, grade in grades.items()
         if grade >= 1
         for entry in [passages.get(path)]
@@ -1844,6 +1896,10 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         "mean_delivered": mean("delivered"),
         "mean_noise": mean("noise_delivered"),
         "mean_unjudged": mean("unjudged"),
+        "answer_passages_heading_only": sum(
+            int(item.get("answer_passages_heading_only") or 0)
+            for item in evaluated
+        ),
         "latency_p50": percentile(seconds, 0.50),
         "latency_p95": percentile(seconds, 0.95),
         **mechanism_totals(evaluated),
@@ -1861,10 +1917,45 @@ def summarize(items: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
             entry.get("answer_counts", {}).get(key, 0)
             for entry in entries if isinstance(entry.get("answer_counts"), dict)
         ) for key in ("eligible", "indexed", "delivered")}
+        unknown = sum(
+            stages.get(name, 0)
+            for name in ("unknown", "unknown-history", "unknown-query-withheld")
+        )
+        # A path that never existed at the prompt, or was never indexed, is
+        # not evidence about retrieval. The candidate denominator is therefore
+        # the labelled paths that the index could have returned.
+        eligible = (
+            len(entries) - unknown
+            - stages.get("absent-source", 0) - stages.get("not-indexed", 0)
+        )
+        pre_candidate = stages.get("no-fts-candidate", 0) + stages.get("window-limit", 0)
+        selected = sum(
+            stages.get(name, 0)
+            for name in ("selected", "selected-answer-not-in-text", "budget-loss", "capsule-loss")
+        )
+        history_stages = {"unknown-history", "history-admission-drop", "history-event-limit"}
+        history_entries = [
+            entry for entry in entries
+            if entry.get("history") is True
+            or ("history" not in entry and entry.get("stage") in history_stages)
+        ]
+        history_delivered = sum(
+            1 for entry in history_entries
+            if entry.get("answer") in {"delivered", "partial-delivery"}
+        )
         result["miss_audit"] = {
             "prompts": len(audits),
             "known_paths": len(entries),
-            "unknown_paths": sum(stages.get(name, 0) for name in ("unknown", "unknown-history", "unknown-query-withheld")),
+            "unknown_paths": unknown,
+            "eligible_paths": eligible,
+            "candidate_recall": round((eligible - pre_candidate) / eligible, 4) if eligible > 0 else None,
+            "selected_recall": round(selected / eligible, 4) if eligible > 0 else None,
+            "history_paths": len(history_entries),
+            "history_delivered": history_delivered,
+            "history_recall": (
+                round(history_delivered / len(history_entries), 4)
+                if history_entries else None
+            ),
             "stages": dict(sorted(stages.items())),
             "answer_states": dict(sorted(answers.items())),
             # Per-path normalized passages intentionally do not replace the
@@ -2105,6 +2196,8 @@ class Run:
         }
         if arguments.diagnose_misses:
             self.meta["diagnose_misses"] = True
+        if arguments.audit_git:
+            self.meta["audit_git"] = True
         if arguments.onnx_excerpts:
             manifest = arguments.onnx_excerpts / "manifest.json"
             self.meta["onnx_excerpts"] = {
@@ -2290,6 +2383,7 @@ class Run:
                 item["miss_audit"] = miss_audit(
                     corpus, result, known_paths, answer_passages, env, self.arguments.timeout,
                     history_text=prompt["prompt"],
+                    seed_git=self.arguments.audit_git,
                 )
             item["status"] = "ok"
         except Skip as skip:
@@ -2393,6 +2487,7 @@ ROWS: Tuple[Tuple[str, str], ...] = (
     ("useful among could-help", "useful_among_could_help"),
     ("answer in the capsule text", "answer_in_text"),
     ("answer passages existed", "answer_passages_existed"),
+    ("answer passages heading-only", "answer_passages_heading_only"),
     ("answer passages delivered", "answer_passages_delivered"),
     ("answer passage recall", "answer_passage_recall"),
     ("answer passages deliverable (in the index)", "answer_passages_deliverable"),
@@ -2463,7 +2558,11 @@ def row_cell(summary: Dict[str, Any], key: str) -> str:
         return f"{int(value)}/{int(summary.get('could_help') or 0)}"
     if key == "answer_in_text_among_answer_could_help":
         return f"{int(value)}/{int(summary.get('answer_could_help') or 0)}"
-    if key in ("answer_passage_recall", "deliverable_passage_recall"):
+    if key in (
+        "answer_passage_recall", "deliverable_passage_recall",
+        "miss_audit/candidate_recall", "miss_audit/selected_recall",
+        "miss_audit/history_recall",
+    ):
         return f"{value:.1%}"
     if key == "useful_paths_delivered":
         return f"{int(value)}/{int(summary.get('useful_paths_existed') or 0)}"
@@ -2518,10 +2617,35 @@ def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
                 f"note: {len(both)} evaluated in both, {only[0]} only in A, {only[1]} only in B: each measure's "
                 "delta is over the prompts evaluated in both; prompts, evaluated and skipped compare the whole runs"
             )
+    for (label, _path, _document), summary in zip(results, summaries):
+        audit = summary.get("miss_audit") or {}
+        candidate = audit.get("candidate_recall")
+        selected = audit.get("selected_recall")
+        if not (isinstance(candidate, (int, float)) and isinstance(selected, (int, float))):
+            continue
+        candidate_loss = max(0.0, 1.0 - float(candidate))
+        selection_loss = max(0.0, float(candidate) - float(selected))
+        if candidate_loss == 0.0 and selection_loss == 0.0:
+            bound = "none measured"
+        elif candidate_loss > selection_loss:
+            bound = "candidate-bound"
+        elif selection_loss > candidate_loss:
+            bound = "selection-bound"
+        else:
+            bound = "mixed"
+        lines.append(
+            f"{label}: retrieval loss candidate {candidate_loss * 100:.1f}pp, "
+            f"selection {selection_loss * 100:.1f}pp ({bound})"
+        )
     rows = list(ROWS)
     if any("miss_audit" in summary for summary in summaries):
         rows += [("audit: prompts", "miss_audit/prompts"),
-                 ("audit: unknown judged paths", "miss_audit/unknown_paths")]
+                 ("audit: unknown judged paths", "miss_audit/unknown_paths"),
+                 ("audit: candidate recall", "miss_audit/candidate_recall"),
+                 ("audit: selected recall", "miss_audit/selected_recall"),
+                 ("audit: history paths", "miss_audit/history_paths"),
+                 ("audit: history delivered", "miss_audit/history_delivered"),
+                 ("audit: history recall", "miss_audit/history_recall")]
         for group in ("knowledge", "skills"):
             stages = sorted(set().union(*(set((summary.get("miss_audit") or {}).get(group, {}))
                                           for summary in summaries)))
@@ -2538,7 +2662,11 @@ def format_report(results: Sequence[Tuple[str, Path, Dict[str, Any]]]) -> str:
             values = [row_value(summary, key) for summary in (summaries if key in COVERAGE_ROWS else paired)]
             if len(values) == 2 and values[0] is not None and values[1] is not None:
                 change = values[1] - values[0]
-                delta = (f"{change * 100:+.1f}pp" if key in ("answer_passage_recall", "deliverable_passage_recall")
+                delta = (f"{change * 100:+.1f}pp" if key in (
+                    "answer_passage_recall", "deliverable_passage_recall",
+                    "miss_audit/candidate_recall", "miss_audit/selected_recall",
+                    "miss_audit/history_recall",
+                )
                          else f"{change:+.3f}" if key.startswith(("mean", "latency", "index_latency"))
                          else f"{int(change):+d}")
                 row += delta.rjust(cell)
@@ -3074,6 +3202,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--diagnose-misses", action="store_true",
         help="opt in to pinned-clock, judged-path retrieval-stage diagnostics",
+    )
+    run.add_argument(
+        "--audit-git", action="store_true",
+        help=(
+            "diagnostic only: seed a temporary Git snapshot in each evaluation "
+            "corpus so history admission can be audited without the project's real .git"
+        ),
     )
     run.add_argument("--onnx-excerpts", type=Path,
                      help="maintainer-only pilot: local hash-locked asset directory; off by default")

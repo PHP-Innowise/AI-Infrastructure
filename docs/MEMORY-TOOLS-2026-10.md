@@ -114,3 +114,21 @@ is installed; the runtime stays standard-library only.
 | [sqlite-lembed](https://github.com/asg017/sqlite-lembed) | GGUF embeddings inside SQLite through llama.cpp. | **Optional pilot asset**, alongside Model2Vec: `scripts/memory_sqlite_vec_pilot.py` probes it and `sqlite-vec`, fails closed, and fuses path lists with RRF. Candidate-only; alpha extensions are not defaults. |
 | [temporal-rag / Glacier](https://github.com/Emmimal/temporal-rag) | Validity windows, exponential decay and `supersedes` chains. | **Pattern already present.** The record/chunk model has `valid_from`, `valid_to`, `review_after` and `supersedes`; the useful increment is the consolidation boundary above, not another store. |
 | [LongMemEval](https://proceedings.iclr.cc/paper_files/paper/2025/hash/d813d324dbf0598bbdc9c8e79740ed01-Abstract-Conference.html) and MemoryAgentBench | Long-term conversational memory and fact-consolidation benchmarks. | **Later measurement.** FactConsolidation has a local deterministic fixture now; a conversational benchmark does not replace the 12-prompt repository stand. |
+
+## Follow-up 2026-10-20: identifier expansion before embeddings
+
+The first lexical increment did not add a model. `context_retrieval.py` now
+derives `identifier_terms(path, identifier, expansion)` from indexed content,
+excluding frontmatter and generated `Sources`/`References`/`Files` sections.
+A query phrase such as "find user by email" gains `findUserByEmail`; the exact
+identifier is left alone. The reverse expansion is deliberately absent:
+turning `getUserById` into "get user by id" admitted unrelated documents that
+shared two common subwords, and a precise identifier already matches its own
+token. File extensions are stripped so `InvoiceTotal.php` expands from
+"InvoiceTotal", not "invoice total php".
+
+This is a candidate aid only. Coverage, authority, privacy, freshness and
+source hashes still run after the expanded query, and the table is derived:
+deleting it loses an expansion, not knowledge. It is the cheaper experiment
+the sqlite-vec pilot still has to beat on candidate recall and answer-passage
+recall at the same capsule budget.

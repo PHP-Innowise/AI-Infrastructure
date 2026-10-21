@@ -3491,6 +3491,295 @@ def _drop_indexed_paths(connection: sqlite3.Connection, paths: list[str]) -> Non
         )
 
 
+# ---------------------------------------------------------------------------
+# Identifier forms
+#
+# A codebase says `getUserById`; a person asks "get user by id". FTS5's
+# tokenizer keeps the camelCase name as one token, so the two never meet. The
+# reverse also happens: a prompt names `getUserById` while a spec spells the
+# operation out. The derived table below records both directions for the
+# documents already in the index. It is an index, never a source: deleting it
+# loses only a query expansion, and every admission rule still runs after the
+# expanded query returns its candidates.
+# ---------------------------------------------------------------------------
+
+IDENTIFIER_TERMS_KEY = "identifier_terms_ready"
+IDENTIFIER_ROW_LIMIT = 4096
+QUERY_EXPANSION_LIMIT = 48
+_IDENTIFIER_TOKEN = re.compile(r"[A-Za-z_\\][A-Za-z0-9_\\]*(?:\.[A-Za-z0-9_]+)*")
+_IDENTIFIER_PART = re.compile(r"[A-Z]+(?=[A-Z][a-z]|\d|\b)|[A-Z]?[a-z]+|[A-Z]+|\d+")
+_IDENTIFIER_HINT = re.compile(r"[a-z][A-Z]|_|[A-Z]{2,}[a-z]|\\")
+_FILE_SUFFIXES = (
+    ".php", ".py", ".md", ".json", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+    ".java", ".kt", ".rb", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cs",
+    ".yaml", ".yml", ".xml", ".sql", ".sh", ".vue", ".svelte", ".css", ".scss",
+)
+
+
+def _identifier_stem(token: str) -> str:
+    """A file name's identifier is its stem, not its extension.
+
+    `InvoiceTotal.php` expands to "invoice total php" otherwise, and a query
+    for "invoice total" never asks the table for it. The extension is also not
+    part of the class name a person searches for.
+    """
+    folded = token.casefold()
+    for suffix in _FILE_SUFFIXES:
+        if folded.endswith(suffix) and len(token) > len(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _identifier_parts(value: str) -> list[str]:
+    parts: list[str] = []
+    for segment in re.split(r"[_\\.]+", value):
+        if segment:
+            parts.extend(_IDENTIFIER_PART.findall(segment))
+    return [part.casefold() for part in parts if part]
+
+
+def identifier_form(token: str) -> Optional[str]:
+    """The words a code identifier is made of, or None for an ordinary word.
+
+    Deliberately conservative: only a token that actually carries a boundary
+    (camelCase, snake_case, a namespace separator or a dot) earns an
+    expansion. Expanding ordinary prose would add every English word to every
+    query and turn a precise lexical index into a bag of noise.
+    """
+    if len(token) < 4 or len(token) > 200:
+        return None
+    if not re.search(r"[_\\]|\.|[a-z][A-Z]|[A-Z]{2,}[a-z]", token):
+        return None
+    parts = _identifier_parts(token)
+    if len(parts) < 2:
+        return None
+    expansion = " ".join(parts)
+    if expansion == token.casefold():
+        return None
+    return expansion
+
+
+def _identifier_text(content: str) -> str:
+    """The part of a document that makes a claim, not its citations.
+
+    Frontmatter and generated `Sources`/`References` sections name files and
+    URLs; an identifier there is provenance, not prose. Scanning them made a
+    query about "aster willow" add `AsterWillow` from a citation footer, and
+    the excerpt selector then quoted that footer instead of the fact.
+    """
+    text = content
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            text = text[end + 5:]
+    return re.sub(
+        r"(?ims)^##[ \t]+(?:Sources|References|Files)[ \t]*\n.*?(?=^##[ \t]+|\Z)",
+        "",
+        text,
+    )
+
+
+def identifier_terms(path: str, content: str) -> list[tuple[str, str]]:
+    """(identifier, expansion) pairs for one indexed document.
+
+    Only content is scanned. A path-derived form would be a citation, not a
+    statement: adding a source file's `AsterWillow` to a query about "aster
+    willow" made the excerpt selector quote the `Sources` footer instead of
+    the fact, because the footer is the only place that path text appears.
+    A query that already names the identifier is handled directly, without a
+    row, and a file name the prose never repeats was not a retrieval signal.
+    """
+    if _IDENTIFIER_HINT.search(content) is None:
+        # Ordinary prose has no camelCase, snake_case or namespace boundary;
+        # scanning every word of every document on the cold-index path cost
+        # more than the derived table is worth. One cheap pass decides.
+        return []
+    text = _identifier_text(content)
+    if _IDENTIFIER_HINT.search(text) is None:
+        return []
+    found: dict[tuple[str, str], None] = {}
+
+    def add(token: str) -> None:
+        stem = _identifier_stem(token)
+        expansion = identifier_form(stem)
+        if expansion is not None:
+            found[(stem, expansion)] = None
+
+    for match in _IDENTIFIER_TOKEN.finditer(text):
+        add(match.group(0))
+        if len(found) >= IDENTIFIER_ROW_LIMIT:
+            break
+    return list(found)
+
+
+def ensure_identifier_table(connection: sqlite3.Connection) -> bool:
+    """Create the derived identifier table; True when this call created it.
+
+    `IF NOT EXISTS` on both objects is what makes two concurrent refreshes
+    safe: each may see the table absent and both may run the DDL, but only one
+    creates it. A crash between the table and its index is repaired on the
+    next call instead of leaving a permanent full scan.
+    """
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'identifier_terms'"
+    ).fetchone() is not None:
+        indexes = {
+            str(row[1]) for row in connection.execute(
+                "PRAGMA index_list('identifier_terms')"
+            )
+        }
+        if "identifier_terms_expansion" not in indexes:
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS identifier_terms_expansion "
+                "ON identifier_terms(expansion)"
+            )
+        return False
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS identifier_terms(
+            path TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            expansion TEXT NOT NULL,
+            PRIMARY KEY(path, identifier, expansion)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS identifier_terms_expansion "
+        "ON identifier_terms(expansion)"
+    )
+    return True
+
+
+def _write_identifier_rows(connection: sqlite3.Connection, rows) -> None:
+    connection.executemany(
+        "INSERT OR REPLACE INTO identifier_terms(path, identifier, expansion) "
+        "VALUES (?, ?, ?)",
+        (
+            (path, identifier, expansion)
+            for path, terms in rows
+            for identifier, expansion in terms
+        ),
+    )
+
+
+def rebuild_identifier_terms(connection: sqlite3.Connection, documents=None) -> None:
+    """Rebuild the whole derived table from the index or supplied rows.
+
+    A full index already holds every row in ``documents``; re-reading them
+    from SQLite and scanning the same text a second time was the cold-hook
+    cost. Only a migration with retained documents, which are not in the
+    changed list, falls back to the database.
+    """
+    connection.execute("DELETE FROM identifier_terms")
+    if documents is None:
+        rows = connection.execute("SELECT path, content FROM documents").fetchall()
+        documents = [(str(row[0]), None, None, None, None, str(row[1] or "")) for row in rows]
+    _write_identifier_rows(
+        connection,
+        [
+            (str(row[0]), identifier_terms(str(row[0]), str(row[5] or "")))
+            for row in documents
+        ],
+    )
+
+
+def update_identifier_terms(
+    connection: sqlite3.Connection,
+    documents,
+    removed: set[str],
+) -> None:
+    """Replace the rows of changed documents and drop removed ones.
+
+    ``documents`` are the rows just inserted, in the same
+    ``(path, layer, kind, title, summary, content)`` shape the index uses.
+    """
+    changed = sorted({str(row[0]) for row in documents})
+    for path in sorted({*removed, *changed}):
+        connection.execute("DELETE FROM identifier_terms WHERE path = ?", (path,))
+    _write_identifier_rows(
+        connection,
+        [
+            (str(row[0]), identifier_terms(str(row[0]), str(row[5] or "")))
+            for row in documents
+        ],
+    )
+
+
+def _query_ngrams(tokens: list[str]) -> list[str]:
+    """Contiguous phrases, longest first, for identifier-form lookup.
+
+    Longer first matters: an expansion such as "find user by email" is four
+    words, and a two/three-gram-only window never asked the table for it. The
+    cap keeps a long prompt from issuing hundreds of lookups; the phrases a
+    person actually typed are the ones near the front and the full span.
+    """
+    values = [token.casefold() for token in tokens]
+    grams: list[str] = []
+    for size in range(min(6, len(values)), 1, -1):
+        for start in range(0, len(values) - size + 1):
+            grams.append(" ".join(values[start:start + size]))
+            if len(grams) >= 64:
+                return grams
+    return grams
+
+
+def expand_query_tokens(
+    connection: sqlite3.Connection, tokens: list[str]
+) -> list[str]:
+    """Add the identifier a query phrase spells out, when the index has one.
+
+    A person asks "find user by email"; the code says `findUserByEmail`. The
+    table maps the expansion back to the identifier, and the main FTS query
+    finds the document that names it. The other direction - expanding an
+    identifier into its words - is deliberately not done: it admits every
+    document that shares two common subwords, and a precise identifier hit is
+    already served by the exact token.
+
+    Expansions are candidates only. They do not admit a document on their
+    own: `informative_tokens`, `is_relevant`, authority, privacy and source
+    checks run on the expanded list exactly as they did before.
+    """
+    result = list(tokens)
+    seen = {token.casefold() for token in result}
+    limit = len(tokens) + QUERY_EXPANSION_LIMIT
+    memo = workspace_roots.command_memo("query-expansion")
+    key = None
+    if memo is not None:
+        try:
+            generation = load_index_state(connection).get(INDEX_GENERATION_KEY, "")
+        except sqlite3.Error:
+            memo = None
+        else:
+            key = (generation, tuple(tokens))
+            cached = memo.get(key)
+            if isinstance(cached, tuple):
+                return list(cached)
+
+    def add(token: str) -> None:
+        folded = token.casefold()
+        if folded and folded not in seen and len(result) < limit:
+            seen.add(folded)
+            result.append(token)
+
+    grams = _query_ngrams(tokens)
+    if grams:
+        try:
+            placeholders = ",".join("?" for _ in grams)
+            rows = connection.execute(
+                "SELECT DISTINCT identifier FROM identifier_terms "
+                f"WHERE expansion IN ({placeholders})",
+                grams,
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        for row in rows:
+            add(str(row[0]))
+    if memo is not None and key is not None:
+        memo[key] = tuple(result)
+    return result
+
+
 def index_documents(
     connection: sqlite3.Connection,
     repository: Path,
@@ -3555,10 +3844,17 @@ def index_documents(
     ] + brain_links
     state = source_state or {}
     ensure_metadata_tables(connection)
+    identifier_created = ensure_identifier_table(connection)
+    rebuild_identifiers = identifier_created or stored.get(IDENTIFIER_TERMS_KEY) != "1"
     existing = {
         row[0] for row in connection.execute("SELECT path FROM documents").fetchall()
     }
     keep = set(retained or {})
+    if not keep:
+        # A full rebuild has no retained rows to compare against; the
+        # identifier table is derived from the same documents and must not
+        # outlive a replaced index with rows for paths that no longer exist.
+        rebuild_identifiers = True
     missing = keep - existing
     if missing:
         raise RetrievalError(
@@ -3577,6 +3873,7 @@ def index_documents(
         and fingerprints is not None
         and INDEX_PARITY_KEY in stored
         and all(stored.get(key) == value for key, value in fingerprints.items())
+        and not rebuild_identifiers
     ):
         # Nothing observable changed, so a per-request refresh costs reads only:
         # the Brain rows rebuilt from the records match the stored ones, and the
@@ -3631,6 +3928,13 @@ def index_documents(
                 for path, value in sorted(state.items())
             ],
         )
+        removed_paths = existing - (keep | {str(row[0]) for row in documents})
+        if rebuild_identifiers:
+            # A full rebuild has every document in `documents`; a migration
+            # with retained rows does not and must read them back.
+            rebuild_identifier_terms(connection, documents if not keep else None)
+        else:
+            update_identifier_terms(connection, documents, removed_paths)
         store_index_state(
             connection,
             {
@@ -3642,6 +3946,7 @@ def index_documents(
                 # (token frequencies) is invalid from this point on.
                 INDEX_GENERATION_KEY: new_uuid(),
                 INDEX_BRAIN_ROWS_KEY: brain_digest,
+                IDENTIFIER_TERMS_KEY: "1",
                 **state_updates,
             },
         )
@@ -3721,8 +4026,13 @@ def query_tokens(query: str) -> list[str]:
     return tokens
 
 
+def fts_query_tokens(tokens: Iterable[str]) -> str:
+    """The FTS5 expression for a token list, preserving caller order."""
+    return " OR ".join(f'"{token}"' for token in tokens)
+
+
 def fts_query(query: str) -> str:
-    return " OR ".join(f'"{token}"' for token in query_tokens(query))
+    return fts_query_tokens(query_tokens(query))
 
 
 def _document_frequency(connection: sqlite3.Connection, token: str) -> Optional[int]:
@@ -4264,21 +4574,47 @@ def _history_candidates(
     return events, episodes
 
 
+def _history_series_pilot() -> bool:
+    """Opt-in pilot: a same-ticket event series may share the history slot."""
+    return os.environ.get("CONTEXT_EVENT_SERIES", "").strip().casefold() in {
+        "1", "true", "yes",
+    }
+
+
+def _same_ticket_series(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The largest same-ticket event series, in the existing event order."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in events:
+        for ticket in _ticket_ids(str(item.get("title") or "")):
+            groups.setdefault(ticket, []).append(item)
+    if not groups:
+        return []
+    series = max(groups.values(), key=len)
+    return series if len(series) > 1 else []
+
+
 def _best_history_event(
     repository: Path, events: list[dict[str, Any]], config: dict[str, Any],
-    *, trace: Optional[RetrievalTrace] = None, limit: int = 1,
+    *, trace: Optional[RetrievalTrace] = None, limit: int = 1, connection=None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """The best admitted events that pass the runtime filters.
 
     ``limit`` is the event slot's capacity. One is the established contract;
     more is an experiment that lets several same-ticket events share the slot.
     """
+    if limit == 1 and _history_series_pilot():
+        series = _same_ticket_series(events)
+        if series:
+            events = series
+            limit = min(CAPSULE_EVENT_LIMIT, len(series))
     kept_events: list[dict[str, Any]] = []
     excluded: list[dict[str, str]] = []
     for item in events:
         if len(kept_events) >= max(1, limit):
             break
-        kept, dropped = _runtime_filter(repository, [item], config, trace=trace)
+        kept, dropped = _runtime_filter(
+            repository, [item], config, trace=trace, connection=connection
+        )
         excluded.extend(dropped)
         if kept:
             kept_events.append(kept[0])
@@ -4468,7 +4804,9 @@ def marked_document(
                  or not all(isinstance(value, str) for value in indexed_image)):
         return None
     try:
-        tokens = evidence_tokens(informative_tokens(connection, query_tokens(query)))
+        tokens = evidence_tokens(informative_tokens(
+            connection, expand_query_tokens(connection, query_tokens(query))
+        ))
     except RetrievalError:
         return None
     if not tokens:
@@ -4580,7 +4918,9 @@ def excerpt_weights(connection: sqlite3.Connection, query: str) -> dict[str, flo
     entry with the most common words in it, not the one naming the ticket.
     """
     try:
-        tokens = evidence_tokens(informative_tokens(connection, query_tokens(query)))
+        tokens = evidence_tokens(informative_tokens(
+            connection, expand_query_tokens(connection, query_tokens(query))
+        ))
     except RetrievalError:
         return {}
     if not tokens:
@@ -5068,7 +5408,9 @@ def _candidates(
     this window nor set the episodic floor the changelog is held to.
     """
     ensure_metadata_tables(connection)
-    tokens = informative_tokens(connection, query_tokens(query))
+    tokens = informative_tokens(
+        connection, expand_query_tokens(connection, query_tokens(query))
+    )
     evidence = evidence_tokens(tokens)
     if not evidence:
         # Nothing in the request is about anything: "thanks", "ok, go on".
@@ -8082,6 +8424,7 @@ def retrieve(
     provider: Optional[str] = None,
     manifest_scope: str = "governed",
     query_source: str = "explicit",
+    query_fallback: Optional[str] = None,
     phase_seconds: Optional[dict[str, Any]] = None,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     paths: Optional[list[str]] = None,
@@ -8145,6 +8488,19 @@ def retrieve(
         raise RetrievalError(
             f"Query source must be one of {', '.join(sorted(QUERY_SOURCES))}"
         )
+    if query_fallback:
+        # A short imperative continuation ("fix it", "do it") carries no
+        # subject. The task it continues does. Keep the prompt's own terms
+        # first and add the task's terms behind them; the manifest records the
+        # combined query, so the turn can still be audited.
+        try:
+            combined = list(dict.fromkeys([
+                *query_tokens(query), *query_tokens(query_fallback)
+            ]))
+        except RetrievalError:
+            combined = query_tokens(query_fallback) if query_fallback else []
+        if combined:
+            query = " ".join(combined)
     if manifest_scope not in MANIFEST_SCOPES:
         raise RetrievalError(
             f"Manifest scope must be one of {', '.join(MANIFEST_SCOPES)}"
@@ -8210,6 +8566,7 @@ def retrieve(
     chosen_event, history_excluded = _best_history_event(
         repository, exact_events if exact_events else event_candidates, config,
         trace=trace,
+        connection=connection,
         # A same-ticket series is only a series when the request names the
         # ticket; without one, the extra events are neighbours, not the answer.
         limit=CAPSULE_EVENT_LIMIT if request_tickets else 1,

@@ -120,6 +120,8 @@ from context_retrieval import (
     store_index_state,
     codebase_map_drift,
     evidence_tokens,
+    expand_query_tokens,
+    fts_query_tokens,
     excerpt_weights,
     excerpt_section,
     excerpt_window,
@@ -1434,7 +1436,9 @@ def search_documents(
     distinctive: dict[str, list[str]] = {}
     minimum = 0
     if relevant_only:
-        tokens = informative_tokens(connection, query_tokens(query))
+        tokens = informative_tokens(
+            connection, expand_query_tokens(connection, query_tokens(query))
+        )
         # Broad skill discovery keeps its routing contract; automatic capsules
         # use strong_only and must ignore acknowledgements/intent-only terms.
         if layer != "procedural" or strong_only:
@@ -1445,7 +1449,9 @@ def search_documents(
         minimum = required_coverage(tokens)
         match_expression = " OR ".join(f'"{token}"' for token in tokens)
     else:
-        match_expression = fts_query(query)
+        match_expression = fts_query_tokens(
+            expand_query_tokens(connection, query_tokens(query))
+        )
     conditions = ["documents MATCH ?"]
     parameters: list[object] = [match_expression]
     if layer is not None:
@@ -1519,7 +1525,7 @@ def search_episodes(
         ORDER BY bm25(episodes), rowid DESC
         LIMIT ?
         """,
-        (fts_query(query), limit),
+        (fts_query_tokens(expand_query_tokens(connection, query_tokens(query))), limit),
     ).fetchall()
     return [episode_item(row) for row in rows]
 
@@ -1654,6 +1660,50 @@ _CONFIRMATION_WORDS = frozenset({
     "спасибо", "верно", "согласен", "согласна", "поехали", "вперёд", "вперед", "можно",
     "ну", "пожалуйста", "это", "ладно", "годится", "норм", "супер", "почему", "исправь",
 })
+
+
+_TASK_FALLBACK_ACKNOWLEDGEMENTS = frozenset({
+    "continue", "go on", "ok", "okay", "thanks", "thank you",
+    "ok thanks", "okay thanks", "ok go on",
+    "дальше", "продолжай", "продолжай дальше", "хорошо", "спасибо",
+})
+# A short continuation may borrow the task only when it names an action. The
+# acknowledgement set alone is not enough: `_CONFIRMATION_WORDS` also accepts
+# "sure", "go ahead", "please continue" and "yes", none of which is a request
+# to do anything. The action verbs are deliberately small and explicit; an
+# unknown short phrase gets no memory rather than unsolicited context.
+_TASK_FALLBACK_ACTIONS = frozenset({
+    "fix", "do", "implement", "update", "change", "add", "remove", "refactor",
+    "test", "run", "check", "review", "apply", "finish",
+    "исправь", "сделай", "делай", "добавь", "обнови", "измени", "проверь",
+    "запусти", "реализуй", "поправь", "заверши",
+})
+
+
+def _task_fallback_prompt(text: str) -> bool:
+    """Whether a short prompt may borrow the task's terms for retrieval.
+
+    A bare acknowledgement is not a new request: the governed capsule has
+    never injected memory for "continue", and a touch link admitted only by
+    the task's words would be exactly the unsolicited context that rule
+    excludes. An imperative continuation ("fix it", "do it") does name an
+    action, so the task it continues is the only place its subject can be
+    read.
+    """
+    phrase = re.sub(r"[\s,.!?;]+", " ", text.casefold()).strip()
+    if phrase in _TASK_FALLBACK_ACKNOWLEDGEMENTS:
+        return False
+    words = phrase.split()
+    if not words or len(words) > 6:
+        return False
+    if any(
+        word not in _TASK_FALLBACK_ACTIONS and word not in _CONFIRMATION_WORDS
+        for word in words
+    ):
+        # A phrase with a subject of its own ("fix the bug", "update the
+        # rule") is not a continuation; retrieval already has its words.
+        return False
+    return any(word in _TASK_FALLBACK_ACTIONS for word in words)
 
 
 def _cursor_continuation_prompt(text: str, *, persistent: bool = False) -> bool:
@@ -3256,6 +3306,25 @@ def assemble_capsule(
     # "not recorded yet" would promise one that never comes.
     closed = (closed_task_record(connection, repository, task_id)
               if served is None and not unreadable else None)
+    query_fallback = None
+    if bound_record is not None and _task_fallback_prompt(query):
+        # The prompt is an acknowledgement or a short continuation, not a
+        # subject. The task it continues carries the retrieval terms; without
+        # them a "fix it" turn asked memory about the word "fix".
+        try:
+            task_working, _ = project_working_task(
+                governed_task_view(bound_record), delivery_profile=delivery_profile
+            )
+            if task_working:
+                external_id = str(bound_record.get("external_id") or task_id)
+                if task_working.get("goal") == derive_goal(external_id):
+                    # The branch slug re-cased is not a subject; the same
+                    # exclusion the hook's task query already applies.
+                    task_working = {**task_working, "goal": ""}
+                query_fallback = build_capsule_query("", task_working)
+                query_source = "continuation"
+        except (ContextError, RetrievalError, KeyError, TypeError, ValueError):
+            query_fallback = None
     request_query = build_capsule_query(query, None)
     if warnings:
         # The previous index is not evidence of current eligibility. Keep
@@ -3343,6 +3412,7 @@ def assemble_capsule(
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
         query_source=query_source,
+        query_fallback=query_fallback,
         phase_seconds=phase_seconds,
         gate_mode=gate_mode,
         paths=paths,
