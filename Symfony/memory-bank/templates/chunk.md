@@ -28,6 +28,12 @@ State the smallest reusable fact, constraint, decision, or lesson. Do not copy a
 
 Explain what future work should do differently because of this memory and where it applies.
 
+## Rejected Alternatives
+
+For a decision, name the options that lost and why. Delete this section for a
+fact or constraint; the section exists so a later task does not propose the
+same rejected option again.
+
 ## Verification
 
 Record how the cited sources establish the claim and what change should trigger review.

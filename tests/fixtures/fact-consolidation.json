@@ -1,0 +1,130 @@
+{
+  "_comment": "Deterministic FactConsolidation fixture, after the 2026-05 conflict-resolution recipe: extract the candidates, then take the maximum explicit version/marker in Python. No model call, no vector or graph store. The metadata-only analogue in the runtime uses updated_at; a serial is the stand-in the fixture can carry portably.",
+  "cases": [
+    {
+      "name": "newest timestamp wins",
+      "fact": "Cobalt deployment status",
+      "facts": [
+        {
+          "path": "project-brain/dynamic/findings/cobalt-v1.md",
+          "serial": 1,
+          "updated_at": "2026-06-01T00:00:00Z",
+          "claim": "blue",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "conflicts": [],
+          "fact": "Cobalt deployment status"
+        },
+        {
+          "path": "project-brain/dynamic/findings/cobalt-v2.md",
+          "serial": 2,
+          "updated_at": "2026-06-02T00:00:00Z",
+          "claim": "green",
+          "id": "22222222-2222-4222-8222-222222222222",
+          "conflicts": [],
+          "fact": "Cobalt deployment status"
+        },
+        {
+          "path": "project-brain/dynamic/findings/cobalt-v3.md",
+          "serial": 3,
+          "updated_at": "2026-06-03T00:00:00Z",
+          "claim": "amber",
+          "id": "33333333-3333-4333-8333-333333333333",
+          "conflicts": [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222"
+          ],
+          "fact": "Cobalt deployment status"
+        }
+      ],
+      "expected": {
+        "kept": [
+          "project-brain/dynamic/findings/cobalt-v3.md"
+        ],
+        "superseded": [
+          "project-brain/dynamic/findings/cobalt-v1.md",
+          "project-brain/dynamic/findings/cobalt-v2.md"
+        ]
+      },
+      "conflicts": {
+        "cobalt-v3": [
+          "11111111-1111-4111-8111-111111111111",
+          "22222222-2222-4222-8222-222222222222"
+        ]
+      }
+    },
+    {
+      "name": "equal timestamps stay ambiguous",
+      "fact": "Cerulean deployment status",
+      "facts": [
+        {
+          "path": "project-brain/dynamic/findings/cerulean-a.md",
+          "serial": 1,
+          "updated_at": "2026-06-01T00:00:00Z",
+          "claim": "blue",
+          "id": "44444444-4444-4444-8444-444444444444",
+          "conflicts": [
+            "55555555-5555-4555-8555-555555555555"
+          ],
+          "fact": "Cerulean deployment status"
+        },
+        {
+          "path": "project-brain/dynamic/findings/cerulean-b.md",
+          "serial": 1,
+          "updated_at": "2026-06-01T00:00:00Z",
+          "claim": "green",
+          "id": "55555555-5555-4555-8555-555555555555",
+          "conflicts": [
+            "44444444-4444-4444-8444-444444444444"
+          ],
+          "fact": "Cerulean deployment status"
+        }
+      ],
+      "expected": {
+        "kept": [
+          "project-brain/dynamic/findings/cerulean-a.md",
+          "project-brain/dynamic/findings/cerulean-b.md"
+        ],
+        "superseded": []
+      },
+      "conflicts": {
+        "cerulean-a": [
+          "55555555-5555-4555-8555-555555555555"
+        ],
+        "cerulean-b": [
+          "44444444-4444-4444-8444-444444444444"
+        ]
+      }
+    },
+    {
+      "name": "an unrelated fact is not grouped",
+      "fact": "Cobalt deployment status",
+      "facts": [
+        {
+          "path": "project-brain/dynamic/findings/cobalt-v1.md",
+          "serial": 1,
+          "updated_at": "2026-06-01T00:00:00Z",
+          "claim": "blue",
+          "id": "11111111-1111-4111-8111-111111111111",
+          "conflicts": [],
+          "fact": "Cobalt deployment status"
+        },
+        {
+          "path": "project-brain/dynamic/findings/zirconium.md",
+          "serial": 9,
+          "updated_at": "2026-06-09T00:00:00Z",
+          "claim": "zirconium",
+          "fact": "Zirconium rollout",
+          "id": "66666666-6666-4666-8666-666666666666",
+          "conflicts": []
+        }
+      ],
+      "expected": {
+        "kept": [
+          "project-brain/dynamic/findings/cobalt-v1.md",
+          "project-brain/dynamic/findings/zirconium.md"
+        ],
+        "superseded": []
+      }
+    }
+  ]
+}

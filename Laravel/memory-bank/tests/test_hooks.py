@@ -1484,7 +1484,7 @@ class RebaseIdentityTest(unittest.TestCase):
         self.assertNotIn("--task-id", argv)
 
     def run_write_hook(self, tool, state=None, *, ref="refs/heads/feature/rebased",
-                       explicit=None, attached=False, linked=False):
+                       explicit=None, attached=False, linked=False, payload=None):
         with tempfile.TemporaryDirectory(prefix="rebase stop identity ") as directory:
             base = Path(directory)
             root = base / "tooling" if attached else base / "project"
@@ -1525,8 +1525,8 @@ class RebaseIdentityTest(unittest.TestCase):
                            ACCELERATOR_STATE_DIR=str(base / "local state"))
             if explicit:
                 env["CONTEXT_TASK_ID"] = explicit
-            result = subprocess.run([BASH, str(hooks / "working-memory-write.sh")], input="{}",
-                capture_output=True, text=True, env=env, timeout=HOOK_TIMEOUT)
+            result = subprocess.run([BASH, str(hooks / "working-memory-write.sh")],
+                input=json.dumps(payload or {}), capture_output=True, text=True, env=env, timeout=HOOK_TIMEOUT)
             calls = [json.loads(line) for line in argv_file.read_text().splitlines()] if argv_file.exists() else []
             self.assertEqual(0, result.returncode, result.stderr)
             return [args for args in calls if args and args[0] == "turn"]
@@ -1563,6 +1563,22 @@ class RebaseIdentityTest(unittest.TestCase):
                 calls = self.run_write_hook(tool, "rebase-apply", attached=True)
                 self.assertEqual(1, len(calls))
                 self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
+
+    def test_stop_hands_the_turn_its_transcript_for_the_recent_files(self):
+        with tempfile.TemporaryDirectory(prefix="stop transcript ") as directory:
+            transcript = Path(directory) / "session transcript.jsonl"
+            transcript.write_text("{}\n", encoding="utf-8")
+            for tool in MIRRORS:
+                with self.subTest(tool=tool):
+                    calls = self.run_write_hook(tool, "rebase-merge", payload={"transcript_path": str(transcript)})
+                    self.assertEqual(1, len(calls))
+                    self.assertEqual(str(transcript), calls[0][calls[0].index("--transcript") + 1])
+                    # Only an absolute file the host names reaches the runtime.
+                    for named in ("relative.jsonl", str(Path(directory) / "absent.jsonl"),
+                                  str(transcript) + "\nsecond line", 42):
+                        calls = self.run_write_hook(tool, "rebase-merge", payload={"transcript_path": named})
+                        self.assertEqual(1, len(calls))
+                        self.assertNotIn("--transcript", calls[0])
 
     def test_stop_uses_linked_worktree_rebase_state(self):
         calls = self.run_write_hook("codex", "rebase-merge", linked=True)

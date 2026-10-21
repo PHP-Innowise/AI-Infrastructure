@@ -708,6 +708,7 @@
     "memory-bank/tests/test_context_handoff.py",
     "memory-bank/tests/test_context_handoff_index.py",
     "memory-bank/tests/test_hooks.py",
+    "memory-bank/tests/test_identifier_terms.py",
     "memory-bank/tests/test_memory.py",
     "memory-bank/tests/test_parity.py",
     "memory-bank/tests/test_validate.py",

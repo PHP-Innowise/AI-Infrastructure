@@ -4,6 +4,143 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded memory consolidates only on request — 2026-10-21
+
+- memory-seed's `runtime.json.template` ships `automatic_consolidation` and
+  `automatic_consolidation_verification` off: the pass rewrites a generated
+  project's tracked Project Brain on its first flush, so the project turns it
+  on deliberately. The seeded runtime carries the corrected consolidation
+  (every event's outcome kept, events superseded only once a chunk carries
+  their finding, the operator as actor), the hyphen-only ticket rule with its
+  stop list, the changelog head that skips a Keep a Changelog preamble, the
+  Russian aliases that keep the Russian word, and the event slot that weighs a
+  changed source; its `PROTOCOL.md` and `README.md` say the capsule's episodic
+  layer holds three items.
+- the policy lock and mirrors were regenerated for the changed assets.
+
+### Seeded templates keep rejected alternatives — 2026-10-21
+
+- memory-seed carries the `Rejected Alternatives` section in the Brain
+  decision template and the durable chunk template, so a generated project
+  records why an option lost as well as what was chosen.
+- the policy lock and mirrors were regenerated for the changed templates.
+
+### Seeded runtime expands identifiers and task continuations — 2026-10-20
+
+- memory-seed carries the derived identifier index: "get user by id" reaches
+  `getUserById` without a model, and a short imperative continuation borrows
+  the active task's terms. Citation frontmatter and generated `Sources`,
+  `References` and `Files` sections are excluded so an identifier in
+  provenance cannot displace the fact; the reverse expansion is deliberately
+  absent because it admitted unrelated documents on shared subwords.
+- the policy lock was regenerated for the changed runtime assets.
+
+### Seeded runtime bridges Russian technical queries — 2026-10-20
+
+- memory-seed carries the prefix-based Russian software glossary: a Russian
+  question now reaches English project documents and durable chunks, while
+  English queries and identifiers are untouched.
+- the policy lock was regenerated for the changed runtime assets.
+
+### Seeded runtime verifies evidence-backed summaries — 2026-10-20
+
+- memory-seed ships `automatic_consolidation_verification: true`: a
+  consolidated finding becomes agent-attested `verified` only when every source
+  event recorded a `Verification:` line and a local source was fingerprinted,
+  so automatic promotion can turn it into a durable chunk. Findings without
+  that evidence stay observed.
+- the policy lock was regenerated for the changed runtime asset and template.
+
+### Seeded runtime names a ticket's existing findings — 2026-10-20
+
+- a consolidated summary's progress now lists the external id and UUID of every
+  finding that names the same ticket, including open/investigating ones, so a
+  generated project can follow the specific review finding from the summary.
+- the policy lock was regenerated for the changed runtime asset.
+
+### Seeded runtime does not duplicate a resolved ticket finding — 2026-10-20
+
+- memory-seed's consolidation now treats an existing `resolved` finding for a
+  ticket as the conclusion: completed events are superseded into it and no
+  second `CONSOLIDATED-*` finding is written. Open/investigating findings do not
+  block the summary.
+- the policy lock was regenerated for the changed runtime asset.
+
+### Seeded runtime retains unverified consolidated findings — 2026-10-20
+
+- memory-seed's automatic compaction now leaves a `CONSOLIDATED-*` finding in
+  `dynamic/findings` until its authority is `verified`; the same turn boundary
+  that creates it no longer archives it immediately. Generated projects can
+  actually retrieve the conclusions they just consolidated.
+- the policy lock was regenerated for the changed runtime asset.
+
+### Seeded runtime shares two same-ticket events — 2026-10-20
+
+- memory-seed carries the history-layer change: a request that names a ticket
+  admits its two best events instead of one, and the governed capsule keeps the
+  changelog plus two event/episode slots. Without a ticket the single-event
+  behavior is unchanged.
+- it also carries the handoff fix that asks Git whether a `.git` entry is a real
+  repository, so a stale ancestor `.git` no longer blocks a save outside Git.
+- the policy lock was regenerated for the changed runtime assets.
+
+### Seeded runtime consolidates on the turn boundary — 2026-10-19
+
+- memory-seed's `runtime.json.template` now ships
+  `automatic_consolidation: true`; generated projects collapse a ticket's
+  completed events into one observed finding on the same flush boundary that
+  promotes and compacts, with no `consolidate` command from the user.
+- the seeded runtime withholds an `auto-promoted` chunk that cites a remote
+  source or reads like an instruction, while leaving manually reviewed chunks
+  alone; the reason is reported by `bank-audit --provenance`.
+- the policy lock was regenerated for the changed runtime asset and the
+  template.
+
+### Seeded runtime consolidates events and guards memory provenance — 2026-10-19
+
+- memory-seed carries the shared runtime's `consolidate` command: two or more
+  completed events for one ticket become one resolved/observed finding with the
+  events' sources, a dry-run default and idempotent re-runs. Generated projects
+  can now turn their event diary into reusable conclusions without a new
+  dependency.
+- it also carries the automatic-promotion provenance gate: a record citing an
+  external URL or carrying instruction-like text is held for a person instead
+  of becoming an auto-promoted chunk. `bank-audit --provenance` and
+  `bank-quarantine` expose and stop a suspected memory.
+- the model-facing policy lock was regenerated for the two changed asset files
+  (`memory-bank/scripts/brain_runtime.py` and `context.py`).
+
+### Seeded runtime quotes a changelog's newest entry — 2026-10-19
+
+- memory-seed carries the shared runtime's changelog head excerpt: a document
+  of kind `changelog` quotes the first section that has a body and that
+  section's opening, filling from the next sentence, instead of a window its
+  shared words picked in an older entry. Generated projects get the same
+  newest-release context the editions deliver.
+- memory-seed also carries the selection fixes: a name-shaped term shared by
+  more than three documents no longer admits a distinctive match on that word
+  alone, a ticket-anchored event can clear the history floor while an
+  ordinary-word match keeps the strict one, and the history slot prefers the
+  event that names the request's ticket. A chunk or finding that names only
+  another ticket is withheld, a changelog is kept when the request names it
+  or it names the request's ticket, and the working task supplies the ticket
+  when the request does not.
+- The model-facing policy lock was regenerated for the two changed asset
+  files (`memory-bank/scripts/context.py` and `context_retrieval.py`).
+
+### Recent files in generated projects — 2026-10-18
+
+- hook-forge tells generated Stop hooks to hand `turn` the validated
+  transcript path, as the editions' hooks now do, and memory-seed carries the
+  runtime that keeps the project's recently read and changed files for the
+  capsule's `recent files:` line.
+- memory-seed carries the runtime's review fixes for that line: shell
+  commands read with their quoting, redirections, `cd` and PowerShell; a turn
+  started by a slash command or a task notification kept as its own; task
+  files the line leaves out counted in the compaction line. The transcript
+  is read after the turn's record and within a second, an attached checkout
+  keeps its own recent files, and excerpt growth leaves the line its room.
+
 ### Generated projects on native Windows — 2026-10-16
 
 - bootstrap-verifier checks hook syntax with Git Bash on Windows -
