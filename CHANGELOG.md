@@ -44,10 +44,16 @@ edition's own files remain in that edition's changelog.
   through `refresh`, but it is the agent's own request, so it passes `full`;
   the evaluation stand pins `full` in its runtime environment because it
   measures document retrieval.
-- Why a switch and not a default: the task-outcome measurement found no
-  difference between the full capsule and none, and the retrieval freeze
-  (#51) lets an experiment switch land only if the default stays as it is.
-  The navigation capsule is the next arm of that measurement.
+- Why a switch and not a default:
+  - The second, three-arm measurement (30 fresh client tasks, rule sealed
+    before the run) found that the navigation capsule reached the file a task
+    changed in 2.92 fewer calls than the full one (95% CI [−6.25, −0.40]); the
+    full capsule against none again showed no difference.
+  - Shipping navigation would also turn off what the hook delivers through
+    the document layers: recall of a saved result in the next session, source
+    hints, documents in the Cursor rule. Twenty-three suites pin those, and
+    the measurement does not cover recall.
+  - The default therefore stays `full`; `navigation` is opt-in.
 - `scripts/memory_outcome_ab.py` gains the matching arm:
   - `navigation` runs the memory prompt hook with the profile set in the
     corpus;
