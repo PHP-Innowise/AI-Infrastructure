@@ -82,11 +82,13 @@ CAPSULE_PROCEDURAL_LIMIT = 1
 CAPSULE_SEMANTIC_LIMIT = 3
 # Repository history the main query ranks: the changelog.
 CAPSULE_EPISODIC_LIMIT = 1
-# Recorded history: one Project Brain event or local episode, found by its own
-# search (history_query). It used to share the changelog's single slot, which
-# the changelog held on every turn of the 121 evaluated prompts that had an
-# event - while 19 answers sat in events never delivered.
-CAPSULE_EVENT_LIMIT = 1
+# Recorded history: up to two Project Brain events (or local episodes) found
+# by their own search (history_query). The second event is admitted only when
+# the request names a ticket and both events carry it; otherwise the slot keeps
+# its single best candidate. It used to share the changelog's slot entirely,
+# which the changelog held on every turn of the 121 evaluated prompts that had
+# an event - while 19 answers sat in events never delivered.
+CAPSULE_EVENT_LIMIT = 2
 HISTORY_KIND = "brain-event"
 # How many prompt terms survive into a retrieval query. Rarity in the index
 # decides which ones, so the cap bounds cost without deciding relevance by
@@ -1007,6 +1009,13 @@ EVIDENCE_STOPWORDS = frozenset(
 RELATIVE_SCORE_FLOOR = 0.3
 MIN_TOKEN_COVERAGE = 2
 DISTINCTIVE_DOCUMENT_RATIO = 0.1
+# How many documents a name-shaped term may appear in and still anchor a
+# distinctive match. `EventSubscriber` in five documents is a directory many
+# unrelated records cite, not a name; a method or class name shared by one to
+# three documents still names the subject. A term carrying a digit (a ticket,
+# version or record number) anchors regardless: it names one thing even when
+# several records cite it.
+ANCHOR_DOCUMENT_LIMIT = 3
 MAPPED_COMMIT_PATTERN = re.compile(r"^mapped_commit:\s*([0-9a-fA-F]{7,40})\s*$", re.M)
 MAPPED_SCOPE_PATTERN = re.compile(r"^mapped_scope:\s*(\S+)\s*$", re.M)
 CODEBASE_MAP_MAX_DRIFT = 25
@@ -1015,6 +1024,9 @@ DELETE_CHUNK = 500
 INDEX_CONFIG_KEY = "config-fingerprint"
 INDEX_SKILL_KEY = "skill-tree-fingerprint"
 INDEX_SECRET_POLICY_KEY = "secret-policy-fingerprint"
+# The instruction patterns an auto-promoted chunk is screened against: an
+# index that admitted a chunk under other patterns has not screened it.
+INDEX_PROVENANCE_POLICY_KEY = "provenance-policy-fingerprint"
 INDEX_PARITY_KEY = "skill-parity-drift"
 # A fresh value is stamped whenever index_documents rewrites the tables, so
 # anything derived from index content (the token-frequency cache below) can
@@ -1029,6 +1041,10 @@ INDEX_BRAIN_ROWS_KEY = "brain-rows-digest"
 # records, earliest created first: two copies of a branch that each started
 # its task and were merged. Kept by the index pass, read by the capsule.
 TASK_TWINS_KEY = "task-twins"
+# The ticket prefixes this project files its work under - its tasks' IDs and
+# the tasks its completion events name - so that `CMS-741` is a ticket here
+# and `GPT-4` is not. Kept by the index pass, read by retrieval.
+TICKET_PREFIXES_KEY = "ticket-prefixes"
 TOKEN_FREQUENCY_LIMIT = 4096
 
 # Porter wraps unicode61 so "rounding" matches "round" and "review" matches
@@ -1350,6 +1366,7 @@ def index_fingerprints(
         INDEX_CONFIG_KEY: config_fingerprint(repository),
         INDEX_SKILL_KEY: skill_tree_fingerprint(repository, skill_stats),
         INDEX_SECRET_POLICY_KEY: secret_policy_fingerprint(),
+        INDEX_PROVENANCE_POLICY_KEY: brain_runtime.provenance_policy_fingerprint(),
     }
 
 
@@ -1370,6 +1387,10 @@ def reusable_source_state(
     if stored.get(INDEX_SECRET_POLICY_KEY) != fingerprints[INDEX_SECRET_POLICY_KEY]:
         # Indexed text is masked by the secret patterns, so a changed pattern
         # set must reach documents whose files did not change.
+        return {}, fingerprints
+    if stored.get(INDEX_PROVENANCE_POLICY_KEY) != fingerprints[INDEX_PROVENANCE_POLICY_KEY]:
+        # A retained chunk is not screened again (memory_eligibility), so a
+        # changed instruction pattern set must reach unchanged chunks too.
         return {}, fingerprints
     indexed = {row[0] for row in connection.execute("SELECT path FROM documents")}
     return {
@@ -3306,7 +3327,11 @@ def _brain_rows(repository: Path, config: dict[str, Any], stored: Optional[dict[
     eligible_tasks: dict[str, dict[str, Any]] = {}
     problems: list[dict[str, Any]] = []
     claims: dict[str, list[tuple[str, str]]] = {}
+    prefixes: set[str] = set()
     for path, record, body, source_text in brain_runtime.iter_record_images(repository, problems=problems):
+        # Every record read, eligible or not: a completed task still names
+        # the prefix its project's work goes under.
+        prefixes |= brain_runtime.work_ticket_prefixes(record)
         if record["type"] == "task" and record.get("status") not in brain_runtime.TERMINAL_STATES:
             claims.setdefault(str(record["external_id"]), []).append(
                 (str(record.get("created_at") or ""), str(record["id"])))
@@ -3437,6 +3462,7 @@ def _brain_rows(repository: Path, config: dict[str, Any], stored: Optional[dict[
     state_updates[TASK_TWINS_KEY] = json.dumps(
         {external: [identifier for _, identifier in sorted(ids)]
          for external, ids in claims.items() if len(ids) > 1}, sort_keys=True)
+    state_updates[TICKET_PREFIXES_KEY] = json.dumps(sorted(prefixes))
     return documents, metadata_rows, excluded, links, state_updates
 
 
@@ -3475,6 +3501,295 @@ def _drop_indexed_paths(connection: sqlite3.Connection, paths: list[str]) -> Non
         connection.execute(
             f"DELETE FROM document_links WHERE path IN ({placeholders})", chunk
         )
+
+
+# ---------------------------------------------------------------------------
+# Identifier forms
+#
+# A codebase says `getUserById`; a person asks "get user by id". FTS5's
+# tokenizer keeps the camelCase name as one token, so the two never meet. The
+# reverse also happens: a prompt names `getUserById` while a spec spells the
+# operation out. The derived table below records both directions for the
+# documents already in the index. It is an index, never a source: deleting it
+# loses only a query expansion, and every admission rule still runs after the
+# expanded query returns its candidates.
+# ---------------------------------------------------------------------------
+
+IDENTIFIER_TERMS_KEY = "identifier_terms_ready"
+IDENTIFIER_ROW_LIMIT = 4096
+QUERY_EXPANSION_LIMIT = 48
+_IDENTIFIER_TOKEN = re.compile(r"[A-Za-z_\\][A-Za-z0-9_\\]*(?:\.[A-Za-z0-9_]+)*")
+_IDENTIFIER_PART = re.compile(r"[A-Z]+(?=[A-Z][a-z]|\d|\b)|[A-Z]?[a-z]+|[A-Z]+|\d+")
+_IDENTIFIER_HINT = re.compile(r"[a-z][A-Z]|_|[A-Z]{2,}[a-z]|\\")
+_FILE_SUFFIXES = (
+    ".php", ".py", ".md", ".json", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+    ".java", ".kt", ".rb", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cs",
+    ".yaml", ".yml", ".xml", ".sql", ".sh", ".vue", ".svelte", ".css", ".scss",
+)
+
+
+def _identifier_stem(token: str) -> str:
+    """A file name's identifier is its stem, not its extension.
+
+    `InvoiceTotal.php` expands to "invoice total php" otherwise, and a query
+    for "invoice total" never asks the table for it. The extension is also not
+    part of the class name a person searches for.
+    """
+    folded = token.casefold()
+    for suffix in _FILE_SUFFIXES:
+        if folded.endswith(suffix) and len(token) > len(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _identifier_parts(value: str) -> list[str]:
+    parts: list[str] = []
+    for segment in re.split(r"[_\\.]+", value):
+        if segment:
+            parts.extend(_IDENTIFIER_PART.findall(segment))
+    return [part.casefold() for part in parts if part]
+
+
+def identifier_form(token: str) -> Optional[str]:
+    """The words a code identifier is made of, or None for an ordinary word.
+
+    Deliberately conservative: only a token that actually carries a boundary
+    (camelCase, snake_case, a namespace separator or a dot) earns an
+    expansion. Expanding ordinary prose would add every English word to every
+    query and turn a precise lexical index into a bag of noise.
+    """
+    if len(token) < 4 or len(token) > 200:
+        return None
+    if not re.search(r"[_\\]|\.|[a-z][A-Z]|[A-Z]{2,}[a-z]", token):
+        return None
+    parts = _identifier_parts(token)
+    if len(parts) < 2:
+        return None
+    expansion = " ".join(parts)
+    if expansion == token.casefold():
+        return None
+    return expansion
+
+
+def _identifier_text(content: str) -> str:
+    """The part of a document that makes a claim, not its citations.
+
+    Frontmatter and generated `Sources`/`References` sections name files and
+    URLs; an identifier there is provenance, not prose. Scanning them made a
+    query about "aster willow" add `AsterWillow` from a citation footer, and
+    the excerpt selector then quoted that footer instead of the fact.
+    """
+    text = content
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            text = text[end + 5:]
+    return re.sub(
+        r"(?ims)^##[ \t]+(?:Sources|References|Files)[ \t]*\n.*?(?=^##[ \t]+|\Z)",
+        "",
+        text,
+    )
+
+
+def identifier_terms(path: str, content: str) -> list[tuple[str, str]]:
+    """(identifier, expansion) pairs for one indexed document.
+
+    Only content is scanned. A path-derived form would be a citation, not a
+    statement: adding a source file's `AsterWillow` to a query about "aster
+    willow" made the excerpt selector quote the `Sources` footer instead of
+    the fact, because the footer is the only place that path text appears.
+    A query that already names the identifier is handled directly, without a
+    row, and a file name the prose never repeats was not a retrieval signal.
+    """
+    if _IDENTIFIER_HINT.search(content) is None:
+        # Ordinary prose has no camelCase, snake_case or namespace boundary;
+        # scanning every word of every document on the cold-index path cost
+        # more than the derived table is worth. One cheap pass decides.
+        return []
+    text = _identifier_text(content)
+    if _IDENTIFIER_HINT.search(text) is None:
+        return []
+    found: dict[tuple[str, str], None] = {}
+
+    def add(token: str) -> None:
+        stem = _identifier_stem(token)
+        expansion = identifier_form(stem)
+        if expansion is not None:
+            found[(stem, expansion)] = None
+
+    for match in _IDENTIFIER_TOKEN.finditer(text):
+        add(match.group(0))
+        if len(found) >= IDENTIFIER_ROW_LIMIT:
+            break
+    return list(found)
+
+
+def ensure_identifier_table(connection: sqlite3.Connection) -> bool:
+    """Create the derived identifier table; True when this call created it.
+
+    `IF NOT EXISTS` on both objects is what makes two concurrent refreshes
+    safe: each may see the table absent and both may run the DDL, but only one
+    creates it. A crash between the table and its index is repaired on the
+    next call instead of leaving a permanent full scan.
+    """
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'identifier_terms'"
+    ).fetchone() is not None:
+        indexes = {
+            str(row[1]) for row in connection.execute(
+                "PRAGMA index_list('identifier_terms')"
+            )
+        }
+        if "identifier_terms_expansion" not in indexes:
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS identifier_terms_expansion "
+                "ON identifier_terms(expansion)"
+            )
+        return False
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS identifier_terms(
+            path TEXT NOT NULL,
+            identifier TEXT NOT NULL,
+            expansion TEXT NOT NULL,
+            PRIMARY KEY(path, identifier, expansion)
+        )
+        """
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS identifier_terms_expansion "
+        "ON identifier_terms(expansion)"
+    )
+    return True
+
+
+def _write_identifier_rows(connection: sqlite3.Connection, rows) -> None:
+    connection.executemany(
+        "INSERT OR REPLACE INTO identifier_terms(path, identifier, expansion) "
+        "VALUES (?, ?, ?)",
+        (
+            (path, identifier, expansion)
+            for path, terms in rows
+            for identifier, expansion in terms
+        ),
+    )
+
+
+def rebuild_identifier_terms(connection: sqlite3.Connection, documents=None) -> None:
+    """Rebuild the whole derived table from the index or supplied rows.
+
+    A full index already holds every row in ``documents``; re-reading them
+    from SQLite and scanning the same text a second time was the cold-hook
+    cost. Only a migration with retained documents, which are not in the
+    changed list, falls back to the database.
+    """
+    connection.execute("DELETE FROM identifier_terms")
+    if documents is None:
+        rows = connection.execute("SELECT path, content FROM documents").fetchall()
+        documents = [(str(row[0]), None, None, None, None, str(row[1] or "")) for row in rows]
+    _write_identifier_rows(
+        connection,
+        [
+            (str(row[0]), identifier_terms(str(row[0]), str(row[5] or "")))
+            for row in documents
+        ],
+    )
+
+
+def update_identifier_terms(
+    connection: sqlite3.Connection,
+    documents,
+    removed: set[str],
+) -> None:
+    """Replace the rows of changed documents and drop removed ones.
+
+    ``documents`` are the rows just inserted, in the same
+    ``(path, layer, kind, title, summary, content)`` shape the index uses.
+    """
+    changed = sorted({str(row[0]) for row in documents})
+    for path in sorted({*removed, *changed}):
+        connection.execute("DELETE FROM identifier_terms WHERE path = ?", (path,))
+    _write_identifier_rows(
+        connection,
+        [
+            (str(row[0]), identifier_terms(str(row[0]), str(row[5] or "")))
+            for row in documents
+        ],
+    )
+
+
+def _query_ngrams(tokens: list[str]) -> list[str]:
+    """Contiguous phrases, longest first, for identifier-form lookup.
+
+    Longer first matters: an expansion such as "find user by email" is four
+    words, and a two/three-gram-only window never asked the table for it. The
+    cap keeps a long prompt from issuing hundreds of lookups; the phrases a
+    person actually typed are the ones near the front and the full span.
+    """
+    values = [token.casefold() for token in tokens]
+    grams: list[str] = []
+    for size in range(min(6, len(values)), 1, -1):
+        for start in range(0, len(values) - size + 1):
+            grams.append(" ".join(values[start:start + size]))
+            if len(grams) >= 64:
+                return grams
+    return grams
+
+
+def expand_query_tokens(
+    connection: sqlite3.Connection, tokens: list[str]
+) -> list[str]:
+    """Add the identifier a query phrase spells out, when the index has one.
+
+    A person asks "find user by email"; the code says `findUserByEmail`. The
+    table maps the expansion back to the identifier, and the main FTS query
+    finds the document that names it. The other direction - expanding an
+    identifier into its words - is deliberately not done: it admits every
+    document that shares two common subwords, and a precise identifier hit is
+    already served by the exact token.
+
+    Expansions are candidates only. They do not admit a document on their
+    own: `informative_tokens`, `is_relevant`, authority, privacy and source
+    checks run on the expanded list exactly as they did before.
+    """
+    result = list(tokens)
+    seen = {token.casefold() for token in result}
+    limit = len(tokens) + QUERY_EXPANSION_LIMIT
+    memo = workspace_roots.command_memo("query-expansion")
+    key = None
+    if memo is not None:
+        try:
+            generation = load_index_state(connection).get(INDEX_GENERATION_KEY, "")
+        except sqlite3.Error:
+            memo = None
+        else:
+            key = (generation, tuple(tokens))
+            cached = memo.get(key)
+            if isinstance(cached, tuple):
+                return list(cached)
+
+    def add(token: str) -> None:
+        folded = token.casefold()
+        if folded and folded not in seen and len(result) < limit:
+            seen.add(folded)
+            result.append(token)
+
+    grams = _query_ngrams(tokens)
+    if grams:
+        try:
+            placeholders = ",".join("?" for _ in grams)
+            rows = connection.execute(
+                "SELECT DISTINCT identifier FROM identifier_terms "
+                f"WHERE expansion IN ({placeholders})",
+                grams,
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        for row in rows:
+            add(str(row[0]))
+    if memo is not None and key is not None:
+        memo[key] = tuple(result)
+    return result
 
 
 def index_documents(
@@ -3541,10 +3856,17 @@ def index_documents(
     ] + brain_links
     state = source_state or {}
     ensure_metadata_tables(connection)
+    identifier_created = ensure_identifier_table(connection)
+    rebuild_identifiers = identifier_created or stored.get(IDENTIFIER_TERMS_KEY) != "1"
     existing = {
         row[0] for row in connection.execute("SELECT path FROM documents").fetchall()
     }
     keep = set(retained or {})
+    if not keep:
+        # A full rebuild has no retained rows to compare against; the
+        # identifier table is derived from the same documents and must not
+        # outlive a replaced index with rows for paths that no longer exist.
+        rebuild_identifiers = True
     missing = keep - existing
     if missing:
         raise RetrievalError(
@@ -3563,6 +3885,7 @@ def index_documents(
         and fingerprints is not None
         and INDEX_PARITY_KEY in stored
         and all(stored.get(key) == value for key, value in fingerprints.items())
+        and not rebuild_identifiers
     ):
         # Nothing observable changed, so a per-request refresh costs reads only:
         # the Brain rows rebuilt from the records match the stored ones, and the
@@ -3617,6 +3940,13 @@ def index_documents(
                 for path, value in sorted(state.items())
             ],
         )
+        removed_paths = existing - (keep | {str(row[0]) for row in documents})
+        if rebuild_identifiers:
+            # A full rebuild has every document in `documents`; a migration
+            # with retained rows does not and must read them back.
+            rebuild_identifier_terms(connection, documents if not keep else None)
+        else:
+            update_identifier_terms(connection, documents, removed_paths)
         store_index_state(
             connection,
             {
@@ -3628,6 +3958,7 @@ def index_documents(
                 # (token frequencies) is invalid from this point on.
                 INDEX_GENERATION_KEY: new_uuid(),
                 INDEX_BRAIN_ROWS_KEY: brain_digest,
+                IDENTIFIER_TERMS_KEY: "1",
                 **state_updates,
             },
         )
@@ -3645,22 +3976,81 @@ def index_documents(
     }
 
 
+# A seed glossary for the Russian technical questions this project actually
+# receives. It is deliberately small, and it only adds to Cyrillic words: an
+# English query, a code identifier or a ticket is left untouched, and the
+# Russian word stays in the query beside its English term - replacing it lost
+# the Russian documents that answer in Russian. Each entry is a pattern over
+# the whole folded word: a bare prefix took "логика" and "логин" for log,
+# "старт" for legacy and "полезно" for field. This is a bridge, not a
+# translation service; a project with a different language should extend
+# `_QUERY_ALIASES` rather than expect a model call from the indexing hot path.
+_QUERY_ALIASES = tuple(
+    (re.compile(pattern), english)
+    for pattern, english in (
+        (r"предотвращ\w*", "prevent"),
+        (r"подделк\w*", "spoof"),
+        (r"вложенн\w*", "nested"),
+        (r"неизвестн\w*", "unknown"),
+        (r"записыва\w*", "written"),
+        (r"отбрасыва\w*", "drop"),
+        (r"просмотр\w*", "preview"),
+        (r"временн\w*", "temporary"),
+        # "действительный" and its forms - not "действительно" (indeed) or
+        # "действие" (an action).
+        (r"действительн(?!о$)\w*", "validity"),
+        (r"измен\w*", "change"),
+        (r"админк\w*", "admin"),
+        # "старый" and its forms - not "старт" or "стараться".
+        (r"стар(?:ый|ая|ое|ые|ого|ой|ому|ым|ых|ыми|ую|ом)", "legacy"),
+        (r"файл\w*", "files"),
+        (r"свойств\w*", "properties"),
+        (r"сущност\w*", "entity"),
+        (r"строк(?:а|и|у|ой|ою|е|ам|ами|ах)?", "lines"),
+        (r"спис(?:ок|ка|ку|ком|ке|ки|ков|кам|ками|ках)", "list"),
+        (r"пут(?:ь|и|ем|ём|ям|ями|ях)", "path"),
+        # "лог", "логирование", "логгер" - not "логика" or "логин".
+        (r"лог(?:и|а|ов|е|у|ом|ам|ами|ах)?|логир\w*|логгер\w*", "log"),
+        (r"пол(?:е|я|ей|ю|ям|ем|ями|ях)", "field"),
+        (r"им(?:я|ени|енем|ена|ён|ен|енам|енами|енах)", "name"),
+        (r"срок\w*", "ttl"),
+    )
+)
+
+
+def _query_alias(token: str) -> list[str]:
+    """The token, followed by the English term a Russian technical word names."""
+    if not re.search(r"[А-Яа-яЁё]", token):
+        return [token]
+    folded = token.casefold()
+    for pattern, english in _QUERY_ALIASES:
+        if pattern.fullmatch(folded):
+            return [token, *english.split()]
+    return [token]
+
+
 def query_tokens(query: str) -> list[str]:
     tokens: list[str] = []
     seen: set[str] = set()
     for token in re.findall(r"\w+", query, flags=re.UNICODE):
-        folded = token.casefold()
-        if folded in seen:
-            continue
-        seen.add(folded)
-        tokens.append(token)
+        for candidate in _query_alias(token):
+            folded = candidate.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            tokens.append(candidate)
     if not tokens:
         raise RetrievalError("Search query must contain a word")
     return tokens
 
 
+def fts_query_tokens(tokens: Iterable[str]) -> str:
+    """The FTS5 expression for a token list, preserving caller order."""
+    return " OR ".join(f'"{token}"' for token in tokens)
+
+
 def fts_query(query: str) -> str:
-    return " OR ".join(f'"{token}"' for token in query_tokens(query))
+    return fts_query_tokens(query_tokens(query))
 
 
 def _document_frequency(connection: sqlite3.Connection, token: str) -> Optional[int]:
@@ -3809,6 +4199,150 @@ def is_anchor(token: str, where: Iterable[str] = ()) -> bool:
     merely rare here: an identifier-shaped term, or a word of the document's
     own path or title (``where``, casefolded words)."""
     return bool(_ANCHOR_SHAPE.search(token)) or token.casefold() in set(where)
+
+
+def _ticket_ids(text: str, known: Optional[Iterable[str]] = None) -> set[str]:
+    """Ticket identifiers in a request or an event title, case-folded.
+
+    The shape is `CMS-741` - a hyphen, never a space, so "PHP 8.2" is not a
+    ticket - and a standard's prefix (`UTF-8`, `PSR-4`, `ISO-8601`) never
+    counts. ``known`` are the prefixes the project files its work under:
+    when there are any, only they count (see brain_runtime.ticket_ids).
+    """
+    return {value.lower() for value in brain_runtime.ticket_ids(text, known)}
+
+
+def _known_ticket_prefixes(
+    connection: sqlite3.Connection, task: Optional[dict[str, Any]] = None
+) -> frozenset[str]:
+    """The ticket prefixes the index found the project's work filed under,
+    and the bound task's own; empty when there are none."""
+    try:
+        stored = json.loads(load_index_state(connection).get(TICKET_PREFIXES_KEY) or "[]")
+    except (sqlite3.Error, TypeError, ValueError):
+        stored = []
+    prefixes = {value for value in stored if isinstance(value, str)} if isinstance(stored, list) else set()
+    if isinstance(task, dict):
+        prefixes |= brain_runtime.work_ticket_prefixes({**task, "type": "task"})
+    return frozenset(prefixes)
+
+
+def _request_tickets(
+    text: str, task: Optional[dict[str, Any]], known: Optional[Iterable[str]] = None
+) -> set[str]:
+    """Tickets the request names, or the working task names when it names none.
+
+    A prompt often asks a question without repeating its ticket; the governed
+    task it continues carries it. The task's external id, title and goal are
+    read in memory only.
+    """
+    tickets = _ticket_ids(text, known)
+    if isinstance(task, dict):
+        tickets |= _ticket_ids(" ".join(
+            str(task.get(key) or "") for key in ("external_id", "title", "goal")
+        ), known)
+    return tickets
+
+
+def _ticket_filter(
+    items: list[dict[str, Any]], tickets: set[str], *,
+    connection: Optional[sqlite3.Connection] = None,
+    repository: Optional[Path] = None,
+    request_text: str = "",
+    known: Optional[Iterable[str]] = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    """Withhold a durable chunk or finding that names only another ticket.
+
+    A document with no ticket, or with one the request also names, is kept;
+    a document whose tickets are all different is evidence about other work.
+    Events keep their own slot rule (they may be the same subject without the
+    ticket), and canonical project files are not filtered here. ``known`` are
+    the project's ticket prefixes, read the same way on both sides.
+    """
+    if not tickets:
+        return items, []
+    kept: list[dict[str, Any]] = []
+    excluded: list[dict[str, str]] = []
+    for item in items:
+        path = str(item.get("path") or "")
+        kind = item.get("kind")
+        selected = item.get("category") == "durable" or kind == "brain-finding"
+        changelog = kind == "changelog"
+        if not selected and not changelog:
+            kept.append(item)
+            continue
+        image = item.get("_indexed_policy_image")
+        content = str(image[2]) if image and len(image) > 2 else ""
+        if not content and connection is not None:
+            # A path-linked record reached the selection without a lexical
+            # quote; its body is still in the index.
+            try:
+                row = connection.execute(
+                    "SELECT content FROM documents WHERE path = ?", (path,)
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            content = str(row[0] or "") if row is not None else ""
+        document_tickets = _ticket_ids(str(item.get("title") or "") + "\n" + content, known)
+        if changelog:
+            # The changelog is release context, not a ticket record: keep it
+            # when the request names it, and otherwise only when it mentions
+            # a ticket the request names. Its body is the only place the
+            # ticket list lives, and one selected changelog is read, not
+            # every candidate.
+            if not tickets or "changelog" in request_text.casefold():
+                kept.append(item)
+                continue
+            if document_tickets and not (document_tickets & tickets):
+                excluded.append({"path": path, "reason": "ticket-mismatch"})
+                continue
+            kept.append(item)
+            continue
+        if not document_tickets and item.get("kind") == "brain-finding" and repository is not None:
+            # The indexed body omits the record's frontmatter, where a
+            # finding's external id carries its ticket; the tracked file has
+            # it. Only a selected finding is read, never every candidate.
+            try:
+                source = (repository / path)
+                root = repository.resolve()
+                if source.is_file() and source.resolve().is_relative_to(root):
+                    document_tickets = _ticket_ids(
+                        source.read_text(encoding="utf-8", errors="ignore"), known)
+            except (OSError, ValueError):
+                document_tickets = set()
+        if document_tickets and not (document_tickets & tickets):
+            excluded.append({"path": path, "reason": "ticket-mismatch"})
+            continue
+        kept.append(item)
+    return kept, excluded
+
+
+def _anchor_names_one_thing(term: str, frequency: Optional[int]) -> bool:
+    """Whether a distinctive term is a name rather than a shared label.
+
+    A name appears in one to three documents, or carries a digit (a ticket,
+    version or record number). A CamelCase word in five documents is a
+    directory many records cite; it admits a neighbouring ticket's document
+    on that shared word alone.
+    """
+    return (
+        frequency is None
+        or frequency <= ANCHOR_DOCUMENT_LIMIT
+        or re.search(r"\d", term) is not None
+    )
+
+
+def _specific_distinctive(
+    distinctive: dict[str, list[str]], frequencies: dict[str, Optional[int]]
+) -> dict[str, list[str]]:
+    """Distinctive terms kept only where they name something."""
+    return {
+        path: [
+            term for term in terms
+            if _anchor_names_one_thing(term, frequencies.get(term))
+        ]
+        for path, terms in distinctive.items()
+    }
 
 
 def is_relevant(
@@ -3974,13 +4508,25 @@ def history_query(connection: sqlite3.Connection, text: str) -> Optional[dict[st
             if len(families) >= minimum:
                 break
         minimum = required_coverage(list(families))
+    weights = {
+        token: max(0.05, math.log((total + 1) / (counts[token] + 0.5))) for token in terms
+    }
+    # Two floors. An ordinary word match keeps the strict one - the weight of
+    # a term unique in the corpus - so a weak event still leaves the slot
+    # empty. A match that includes a name-shaped term (a ticket or record
+    # number) may clear the coverage floor instead: a ticket in seventeen
+    # documents and its number in six must still reach the event that names
+    # it, and the old floor made that impossible - six CMS-741 events matched
+    # both concepts and none was admitted.
+    strict_floor = minimum * max(0.05, math.log((total + 1) / 1.5))
+    anchor_floor = sum(sorted(weights.values())[:min(minimum, len(weights))])
     return {
         "terms": terms,
-        "weights": {
-            token: max(0.05, math.log((total + 1) / (counts[token] + 0.5))) for token in terms
-        },
+        "weights": weights,
         "minimum": minimum,
-        "floor": minimum * max(0.05, math.log((total + 1) / 1.5)),
+        "floor": strict_floor,
+        "anchor_floor": anchor_floor,
+        "tickets": _ticket_ids(text),
         "events": {token: events[token] for token in terms},
         "episodes": {token: recorded[token] for token in terms},
     }
@@ -3997,16 +4543,23 @@ def _history_candidates(
     def admitted(members: dict[str, set[Any]]) -> dict[Any, float]:
         concepts: dict[Any, set[str]] = {}
         mass: dict[Any, float] = {}
+        anchors: set[Any] = set()
         for token, found in members.items():
+            anchored = is_anchor(token)
             for member in found:
                 concepts.setdefault(member, set()).add(forms[token] or token.casefold())
                 mass[member] = mass.get(member, 0.0) + history["weights"][token]
+                if anchored:
+                    anchors.add(member)
         # The tolerance keeps a matched weight exactly at the floor on the
         # right side of floating-point rounding.
         return {
             member: mass[member]
             for member in concepts
-            if len(concepts[member]) >= history["minimum"] and mass[member] + 1e-9 >= history["floor"]
+            if len(concepts[member]) >= history["minimum"]
+            and mass[member] + 1e-9 >= (
+                history["anchor_floor"] if member in anchors else history["floor"]
+            )
         }
 
     event_mass = admitted(history["events"])
@@ -4039,6 +4592,15 @@ def _history_candidates(
             if trace is not None:
                 trace.observe(item, "history", "admitted", score=item["adjusted_score"])
         events.sort(key=lambda item: (-item["adjusted_score"], item["path"]))
+        prompt_tickets = history.get("tickets") or set()
+        known = history.get("known_tickets")
+        for item in events:
+            # Internal: the event slot prefers the named ticket when one is
+            # admitted, but a neighbouring ticket's event remains available
+            # when no event carries it.
+            item["_ticket_match"] = bool(
+                prompt_tickets & _ticket_ids(str(item.get("title") or ""), known)
+            )
         for rank, item in enumerate(events, start=1):
             item["rank"] = rank
         _quote_candidates(connection, events, " ".join(history["terms"]), history["terms"])
@@ -4059,26 +4621,64 @@ def _history_candidates(
     return events, episodes
 
 
+def _history_series_pilot() -> bool:
+    """Opt-in pilot: a same-ticket event series may share the history slot."""
+    return os.environ.get("CONTEXT_EVENT_SERIES", "").strip().casefold() in {
+        "1", "true", "yes",
+    }
+
+
+def _same_ticket_series(
+    events: list[dict[str, Any]], known: Optional[Iterable[str]] = None
+) -> list[dict[str, Any]]:
+    """The largest same-ticket event series, in the existing event order."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for item in events:
+        for ticket in _ticket_ids(str(item.get("title") or ""), known):
+            groups.setdefault(ticket, []).append(item)
+    if not groups:
+        return []
+    series = max(groups.values(), key=len)
+    return series if len(series) > 1 else []
+
+
 def _best_history_event(
     repository: Path, events: list[dict[str, Any]], config: dict[str, Any],
-    *, trace: Optional[RetrievalTrace] = None,
+    *, trace: Optional[RetrievalTrace] = None, limit: int = 1, connection=None,
+    known: Optional[Iterable[str]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-    """The best admitted event that passes the runtime filters.
+    """The best admitted events that pass the runtime filters.
 
-    The filters only remove a candidate or lower its score, so once the next
-    candidate's unfiltered score cannot beat the best filtered one, no later
-    one can: usually one or two files are read, however many events exist.
+    ``limit`` is the event slot's capacity: one, or two events of the ticket
+    the request names (and the opt-in series pilot). The filters only remove
+    a candidate or lower its score - an event whose cited file changed keeps
+    half - so once the next candidate's unfiltered score cannot beat the
+    weakest one kept, no later one can: usually one or two files are read,
+    however many events exist. Taking the first ``limit`` that passed instead
+    let a halved 12.5 (6.3) hold the slot against a fresh 9.6.
     """
-    best: Optional[dict[str, Any]] = None
+    if limit == 1 and _history_series_pilot():
+        series = _same_ticket_series(events, known)
+        if series:
+            events = series
+            limit = min(CAPSULE_EVENT_LIMIT, len(series))
+    capacity = max(1, limit)
+    kept_events: list[dict[str, Any]] = []
     excluded: list[dict[str, str]] = []
     for item in events:
-        if best is not None and item["adjusted_score"] <= best["adjusted_score"]:
+        if (len(kept_events) >= capacity
+                and item["adjusted_score"] <= kept_events[-1]["adjusted_score"]):
             break
-        kept, dropped = _runtime_filter(repository, [item], config, trace=trace)
+        kept, dropped = _runtime_filter(
+            repository, [item], config, trace=trace, connection=connection
+        )
         excluded.extend(dropped)
-        if kept and (best is None or kept[0]["adjusted_score"] > best["adjusted_score"]):
-            best = kept[0]
-    return ([best] if best is not None else []), excluded
+        if kept:
+            kept_events.append(kept[0])
+            # Stable: of equal scores the earlier candidate stays ahead.
+            kept_events.sort(key=lambda entry: -entry["adjusted_score"])
+            del kept_events[capacity:]
+    return kept_events, excluded
 
 
 # The part of a document a capsule quotes. A capsule that names a document
@@ -4264,7 +4864,9 @@ def marked_document(
                  or not all(isinstance(value, str) for value in indexed_image)):
         return None
     try:
-        tokens = evidence_tokens(informative_tokens(connection, query_tokens(query)))
+        tokens = evidence_tokens(informative_tokens(
+            connection, expand_query_tokens(connection, query_tokens(query))
+        ))
     except RetrievalError:
         return None
     if not tokens:
@@ -4376,7 +4978,9 @@ def excerpt_weights(connection: sqlite3.Connection, query: str) -> dict[str, flo
     entry with the most common words in it, not the one naming the ticket.
     """
     try:
-        tokens = evidence_tokens(informative_tokens(connection, query_tokens(query)))
+        tokens = evidence_tokens(informative_tokens(
+            connection, expand_query_tokens(connection, query_tokens(query))
+        ))
     except RetrievalError:
         return {}
     if not tokens:
@@ -4423,19 +5027,84 @@ def section_slug(heading: str) -> str:
     return re.sub(r"[\s_]+", "-", slug).strip("-")[:60]
 
 
+def _quoted_payload(heading: str, lines: list[str], title: str) -> dict[str, Any]:
+    units = _excerpt_units(lines)
+    plain_heading = " ".join(_unmarked(heading).split())
+    digest = hashlib.sha256(
+        "\n".join([plain_heading, *(_unmarked(unit) for unit in units)]).encode("utf-8")
+    ).hexdigest()[:16]
+    return {
+        "heading": plain_heading,
+        "slug": section_slug(plain_heading),
+        "units": units,
+        "hash": digest,
+        "shown": plain_heading if plain_heading.casefold() != title.casefold() else "",
+    }
+
+
+def _first_body_section(text: str) -> Optional[tuple[str, list[str]]]:
+    """The newest entry of a chronological document: the first section after
+    its title that has prose, without scoring the rest.
+
+    A chronological document can run past a megabyte; its head section is the
+    only one a head-preferring quote needs, and parsing every section to pick
+    it by score would charge the whole file to the hook. The prose under the
+    title is a preamble - Keep a Changelog's "All notable changes to this
+    project ..." - not an entry, so it is quoted only when no entry has any.
+    An entry whose heading has no prose of its own before a subsection
+    (`## [1.2.0] - 2026-10-01`, then `### Fixed`) is named with it:
+    "[1.2.0] - 2026-10-01 › Fixed".
+    """
+    if text.startswith("---\n"):
+        _, separator, remainder = text[4:].partition("\n---\n")
+        if separator:
+            text = remainder
+    title, preamble = "", []
+    # Headings enclosing the current entry, title excluded, as (level, text).
+    trail: list[tuple[int, str]] = []
+    lines: Optional[list[str]] = None
+    for line in text.splitlines():
+        if not _EXCERPT_HEADING.match(line):
+            (preamble if lines is None else lines).append(line)
+            continue
+        if lines is not None and _excerpt_units(lines):
+            return " › ".join(name for _, name in trail), lines
+        level = len(line) - len(line.lstrip("#"))
+        name = line.lstrip("#").strip()
+        if lines is None and level == 1 and not title and not re.search(r"\d", name):
+            # The document's title. A first heading with a number in it is a
+            # version (`# 1.2.0`), the newest entry itself.
+            title = name
+            continue
+        while trail and trail[-1][0] >= level:
+            trail.pop()
+        trail.append((level, name))
+        lines = []
+    if lines is not None and _excerpt_units(lines):
+        return " › ".join(name for _, name in trail), lines
+    return (title, preamble) if _excerpt_units(preamble) else None
+
+
 def quoted_section(
     text: str, title: str = "", weights: Optional[dict[str, float]] = None,
     *, citation_sources: Optional[set[str]] = None,
     requested_headings: Optional[set[str]] = None,
+    prefer_head: bool = False,
 ) -> Optional[dict[str, Any]]:
     """The section an excerpt quotes: the one carrying most of the query.
 
     ``text`` is a marked document (see marked_document) or plain text, which
-    has no marks and yields the opening prose. Returns the heading (empty for
-    the prose before the first heading), its slug, the section's units, and a
+    has no marks and yields the opening prose. With ``prefer_head`` the first
+    section that has a body wins instead: a chronological document (the
+    changelog) answers from its newest entry, and a query window chosen by
+    shared words would quote an older one. Returns the heading (empty for the
+    prose before the first heading), its slug, the section's units, and a
     hash of the section's text - what a conversation was handed, for not
     handing it again.
     """
+    if prefer_head and requested_headings is None and citation_sources is None:
+        found = _first_body_section(text)
+        return _quoted_payload(found[0], found[1], title) if found is not None else None
     sections = _excerpt_sections(text)
     # Every marked word asked of the tokenizer at once, not per section.
     term_forms(_EXCERPT_MARKED.findall(text))
@@ -4461,20 +5130,17 @@ def quoted_section(
             requested_best = (score, index)
     if best is None or first_with_body is None:
         return None
-    index = requested_best[1] if requested_best is not None else best[1] if best[0][0] > 0 else first_with_body
+    if requested_best is not None:
+        index = requested_best[1]
+    elif prefer_head:
+        found = _first_body_section(text)
+        return _quoted_payload(found[0], found[1], title) if found is not None else None
+    elif best[0][0] > 0:
+        index = best[1]
+    else:
+        index = first_with_body
     heading, lines = sections[index]
-    units = _excerpt_units(lines)
-    plain_heading = " ".join(_unmarked(heading).split())
-    digest = hashlib.sha256(
-        "\n".join([plain_heading, *(_unmarked(unit) for unit in units)]).encode("utf-8")
-    ).hexdigest()[:16]
-    return {
-        "heading": plain_heading,
-        "slug": section_slug(plain_heading),
-        "units": units,
-        "hash": digest,
-        "shown": plain_heading if plain_heading.casefold() != title.casefold() else "",
-    }
+    return _quoted_payload(heading, lines, title)
 
 
 def _citation_only_section(heading: str, lines: list[str], sources: set[str]) -> bool:
@@ -4504,7 +5170,7 @@ def _citation_only_section(heading: str, lines: list[str], sources: set[str]) ->
 def excerpt_section(
     connection: sqlite3.Connection, item: dict[str, Any], text: str,
     weights: Optional[dict[str, float]] = None,
-    *, query: str = "",
+    *, query: str = "", prefer_head: bool = False,
 ) -> Optional[dict[str, Any]]:
     """The section delivered and remembered for this selected document.
 
@@ -4514,13 +5180,15 @@ def excerpt_section(
     under Sources, source-only records, or unavailable citation metadata.
     """
     title = str(item.get("title") or "")
+    prefer_head = prefer_head or item.get("kind") == "changelog"
     if item.get("selection") in ("path-link", "source-link", "source-hint", *AUTOMATIC_LINK_SELECTIONS) and item.get("kind") != "brain-task":
         requested = {
             heading for heading in ("sources", "references")
             if re.search(r"(?<![\w/\\.-])" + heading + r"(?![\w/\\.-])", query, re.IGNORECASE)
         }
         if requested:
-            return quoted_section(text, title, weights, requested_headings=requested)
+            return quoted_section(text, title, weights, requested_headings=requested,
+                                  prefer_head=prefer_head)
         try:
             rows = connection.execute(
                 "SELECT ref_path FROM document_links WHERE path = ? AND ref_kind = 'source' ORDER BY ref_path LIMIT ?",
@@ -4532,7 +5200,7 @@ def excerpt_section(
             section = quoted_section(text, title, weights, citation_sources={str(row[0]) for row in rows})
             if section is not None:
                 return section
-    return quoted_section(text, title, weights)
+    return quoted_section(text, title, weights, prefer_head=prefer_head)
 
 
 def _excerpt_piece(
@@ -4584,19 +5252,44 @@ def _excerpt_piece(
 
 
 def excerpt_window(
-    units: list[str], limit: int, weights: Optional[dict[str, float]] = None
+    units: list[str], limit: int, weights: Optional[dict[str, float]] = None,
+    *, prefer_head: bool = False,
 ) -> str:
     """The stretch of a section that carries most of the query, within limit.
 
     Whole sentences and list items, starting where the matches are rather
     than at the top; a list item keeps the line that introduces it, which is
-    where its condition usually is. Elided text is shown as an ellipsis.
+    where its condition usually is. With ``prefer_head`` the window starts at
+    the section's first unit instead - the newest entry of a chronological
+    document, which a query window would displace with an older one that
+    happens to share a common word. Elided text is shown as an ellipsis.
     """
     plain = [_unmarked(unit) for unit in units]
     whole = " ".join(plain)
     if len(whole) <= limit:
         return whole
     budget = max(1, limit - 4)
+    if prefer_head:
+        end, size = 0, 0
+        while end < len(units) and size + len(plain[end]) + (1 if end else 0) <= budget:
+            size += len(plain[end]) + (1 if end else 0)
+            end += 1
+        text = " ".join(plain[:end])
+        if end < len(units):
+            # Fill the rest with the head of the next sentence: a changelog
+            # entry is one long sentence, and stopping at the first one would
+            # cut the answer the newer entry carries.
+            room = budget - len(text) - (1 if text else 0)
+            if room > 40:
+                piece = plain[end][:room]
+                space = piece.rfind(" ")
+                if space > room // 2:
+                    piece = piece[:space]
+                piece = piece.rstrip()
+                if piece:
+                    text = (text + " " + piece) if text else piece
+            text = text.rstrip() + " …"
+        return text
     best: Optional[tuple[tuple[float, int], int, int, Optional[tuple[str, int, int]]]] = None
     for start in range(len(units)):
         end, size = start, 0
@@ -4660,9 +5353,17 @@ def delivery_identity(
         return path, revision
     marked = marked_document(connection, path, query,
                              indexed_image=item.get('_indexed_policy_image'))
+    prefer_head = item.get("kind") == "changelog"
+    image = item.get('_indexed_policy_image')
+    # A long changelog is marked as a stretch around the query, so its head
+    # is not in `marked`; the delivery identity must name the section the
+    # renderer actually quotes.
+    quote_text = str(image[2]) if prefer_head and image and len(image) > 2 else marked
     section = (
-        excerpt_section(connection, item, marked, excerpt_weights(connection, query), query=query)
-        if marked
+        excerpt_section(connection, item, quote_text,
+                        excerpt_weights(connection, query), query=query,
+                        prefer_head=prefer_head)
+        if quote_text
         else None
     )
     if section is None:
@@ -4789,13 +5490,29 @@ def _candidates(
     this window nor set the episodic floor the changelog is held to.
     """
     ensure_metadata_tables(connection)
-    tokens = informative_tokens(connection, query_tokens(query))
+    tokens = informative_tokens(
+        connection, expand_query_tokens(connection, query_tokens(query))
+    )
     evidence = evidence_tokens(tokens)
     if not evidence:
         # Nothing in the request is about anything: "thanks", "ok, go on".
         return [], {"informative_terms": 0, "distinctive_matches": 0, "top_score": None, "coverage": {}}
     coverage, distinctive = token_coverage(connection, evidence)
     minimum = required_coverage(evidence)
+    # A rare term admits a document on its own only when it names something.
+    # The anchor test below sees the term's shape and the document's path; a
+    # term repeated across the corpus is a generic directory or suffix, and
+    # five records of different tickets can then win a slot on the shared
+    # word alone. Count the terms once and keep only the near-unique names;
+    # procedural documents keep their own rule (a weak skill match is never
+    # delivered, and search still ranks it).
+    anchor_frequencies = (
+        token_document_frequencies(
+            connection, {term for terms in distinctive.values() for term in terms}
+        )
+        if distinctive else {}
+    )
+    specific = _specific_distinctive(distinctive, anchor_frequencies)
     if trace is not None:
         trace.evidence_terms = len(evidence)
         trace.required_terms = minimum
@@ -4825,8 +5542,9 @@ def _candidates(
             observed_rank += int(trace._eligible(dict(row)))
             trace.observe(dict(row), "search", "fetched", rank=observed_rank,
                           matched_terms=coverage.get(row["path"], 0), required_terms=minimum)
+        matches = distinctive if row["layer"] == "procedural" else specific
         if not is_relevant(
-            row["path"], coverage, distinctive, minimum, str(row["title"] or ""),
+            row["path"], coverage, matches, minimum, str(row["title"] or ""),
             anchored=row["layer"] != "procedural",
         ):
             if trace is not None:
@@ -4958,11 +5676,20 @@ def _quote_candidates(
         # A missing/reused/changed row cannot be rebound by a later prime.
         item['_indexed_policy_image'] = tuple(str(value or '') for value in row[4:7]) if same else None
         text = str(row[0] or '') if same else ''
+        prefer_head = item.get("kind") == "changelog"
+        # A long document is marked as a stretch around the query, not from
+        # its first line: the head of a chronological document is outside it.
+        # Prefer the full unmarked image the same statement returned.
+        image = item.get('_indexed_policy_image')
+        head_text = str(image[2]) if image and len(image) > 2 else ''
+        quote_text = head_text if prefer_head and head_text else text
         section = (
-            quoted_section(text, str(item.get("title") or ""), weights) if text else None
+            quoted_section(quote_text, str(item.get("title") or ""), weights,
+                           prefer_head=prefer_head) if quote_text else None
         )
         snippet = (
-            excerpt_window(section["units"], SNIPPET_WINDOW_CHARS, weights)
+            excerpt_window(section["units"], SNIPPET_WINDOW_CHARS, weights,
+                           prefer_head=prefer_head)
             if section is not None
             # No prose at all, only headings: still never the frontmatter.
             else _body_snippet(_unmarked(text))[:SNIPPET_WINDOW_CHARS]
@@ -7654,8 +8381,26 @@ def _public_item(item: dict[str, Any]) -> dict[str, Any]:
 def _capsule_projection(selected: list[dict[str, Any]], local_episode_selected: list[dict[str, Any]]) -> dict[str, Any]:
     """Preserve the exact category/history/related ordering of capsule layers."""
     groups = {category: [] for category in BUDGETS}
+    # Conflict partners are both delivered by contract; the capsule names the
+    # other side so a reader does not have to infer it from a bare mark.
+    paths_by_record = {
+        item.get("record_id"): str(item.get("path"))
+        for item in selected
+        if isinstance(item.get("record_id"), str) and item.get("path")
+    }
     for item in selected:
         public = _public_item(item)
+        conflicts = item.get("conflicts")
+        if isinstance(conflicts, list):
+            partners = [
+                paths_by_record[record_id]
+                for record_id in conflicts
+                if isinstance(record_id, str)
+                and record_id in paths_by_record
+                and record_id != item.get("record_id")
+            ]
+            if partners:
+                public["conflict"] = partners
         groups[item["category"]].append(public)
     procedural = groups["policy"][:CAPSULE_PROCEDURAL_LIMIT]
     history_items = [
@@ -7761,6 +8506,7 @@ def retrieve(
     provider: Optional[str] = None,
     manifest_scope: str = "governed",
     query_source: str = "explicit",
+    query_fallback: Optional[str] = None,
     phase_seconds: Optional[dict[str, Any]] = None,
     gate_mode: str = RETRIEVAL_GATE_DEFAULT,
     paths: Optional[list[str]] = None,
@@ -7824,6 +8570,19 @@ def retrieve(
         raise RetrievalError(
             f"Query source must be one of {', '.join(sorted(QUERY_SOURCES))}"
         )
+    if query_fallback:
+        # A short imperative continuation ("fix it", "do it") carries no
+        # subject. The task it continues does. Keep the prompt's own terms
+        # first and add the task's terms behind them; the manifest records the
+        # combined query, so the turn can still be audited.
+        try:
+            combined = list(dict.fromkeys([
+                *query_tokens(query), *query_tokens(query_fallback)
+            ]))
+        except RetrievalError:
+            combined = query_tokens(query_fallback) if query_fallback else []
+        if combined:
+            query = " ".join(combined)
     if manifest_scope not in MANIFEST_SCOPES:
         raise RetrievalError(
             f"Manifest scope must be one of {', '.join(MANIFEST_SCOPES)}"
@@ -7861,7 +8620,13 @@ def retrieve(
     candidates, diagnostics = _candidates(connection, query, max(20, limit * 10), trace=trace)
     # Recorded history has its own search over the whole request: events and
     # local episodes share one slot beside the changelog's.
-    history = history_query(connection, query if history_text is None else history_text)
+    request_text = query if history_text is None else history_text
+    known_tickets = _known_ticket_prefixes(connection, task)
+    request_tickets = _request_tickets(request_text, task, known_tickets)
+    history = history_query(connection, request_text)
+    if history is not None:
+        history["tickets"] = request_tickets
+        history["known_tickets"] = known_tickets
     event_candidates, episode_candidates = (
         _history_candidates(connection, history, trace=trace) if history else ([], [])
     )
@@ -7881,7 +8646,17 @@ def retrieve(
     # again keeps fresh knowledge of equal fit ahead of it. Stable, so
     # nothing else moves.
     filtered.sort(key=lambda item: -float(item.get("adjusted_score") or 0.0))
-    chosen_event, history_excluded = _best_history_event(repository, event_candidates, config, trace=trace)
+    exact_events = [item for item in event_candidates if item.get("_ticket_match")]
+    chosen_event, history_excluded = _best_history_event(
+        repository, exact_events if exact_events else event_candidates, config,
+        trace=trace,
+        connection=connection,
+        # A same-ticket series is only a series when events carry the ticket
+        # the request names; a ticket no event carries - or "PHP 8.3" - left
+        # two neighbours in the slot, and neither was the answer.
+        limit=CAPSULE_EVENT_LIMIT if exact_events else 1,
+        known=known_tickets,
+    )
     filter_excluded.extend(history_excluded)
     history_episode: list[dict[str, Any]] = []
     if episode_candidates and (
@@ -7950,6 +8725,11 @@ def retrieve(
     # Related knowledge fills remaining capacity after direct matches and
     # explicit paths; provenance alone never gives it priority over them.
     filtered.extend(graph_candidates)
+    filtered, ticket_excluded = _ticket_filter(
+        filtered, request_tickets, connection=connection, repository=repository,
+        request_text=request_text, known=known_tickets,
+    )
+    filter_excluded.extend(ticket_excluded)
     # The history search's event goes through the same conflict expansion,
     # exclusions and budget as everything else, ahead in the budget queue.
     filtered = [*chosen_event, *filtered]

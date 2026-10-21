@@ -567,5 +567,45 @@ class AttachedHooksTest(AttachedProject):
                 self.assert_project_untouched()
 
 
+class AttachedRecentFilesTest(AttachedProject):
+    """Each checkout of an attached project keeps its own recent files.
+
+    Every checkout of an attached project shares one state; parallel
+    sessions in two worktrees wrote one list, and each capsule named the
+    other session's files as where the work was."""
+
+    def test_two_worktrees_keep_apart_what_they_read(self) -> None:
+        (self.project / "app" / "Invoice.php").write_text("<?php\n\nfinal class Invoice\n{\n}\n", encoding="utf-8")
+        git(self.project, "add", "-A")
+        git(self.project, "-c", "user.email=test@example.invalid", "-c", "user.name=Test",
+            "commit", "--quiet", "-m", "Invoice")
+        second = Path(self.temporary.name) / "shop-refunds"
+        git(self.project, "worktree", "add", "--quiet", "-b", "feature/refunds", str(second))
+
+        def turn(checkout: Path, task: str, read: str) -> dict:
+            transcript = Path(self.temporary.name) / f"{checkout.name}.jsonl"
+            records = [
+                {"type": "user", "cwd": str(checkout), "message": {"role": "user", "content": "look at it"}},
+                {"type": "assistant", "cwd": str(checkout), "message": {"content": [
+                    {"type": "tool_use", "id": "t", "name": "Read", "input": {"file_path": str(checkout / read)}}]}},
+            ]
+            transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+            environment = {**self.environment, "ACCELERATOR_PROJECT_DIR": str(checkout)}
+            result = self.run_cli("turn", "--task-id", task, "--transcript", str(transcript), "--json",
+                                  environment=environment)
+            self.assertEqual(0, result.returncode, result.stderr)
+            return environment
+
+        def recent_line(environment: dict, task: str):
+            rendered = self.run_cli("refresh", "--task-id", task, "--query", "continue the work",
+                                    "--session-id", task.replace("/", "-"), "--ephemeral", environment=environment)
+            return next((line for line in rendered.stdout.splitlines() if line.startswith("recent files: ")), None)
+
+        first = turn(self.project, "feature/saffron-checkout", "app/Order.php")
+        other = turn(second, "feature/refunds", "app/Invoice.php")
+        self.assertEqual("recent files: app/Order.php", recent_line(first, "feature/saffron-checkout"))
+        self.assertEqual("recent files: app/Invoice.php", recent_line(other, "feature/refunds"))
+
+
 if __name__ == "__main__":
     unittest.main()

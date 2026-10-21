@@ -21,7 +21,9 @@
     "automatic_completion": false,
     "automatic_compaction": false,
     "compaction_threshold": 5,
-    "codebase_map_max_drift": 25
+    "codebase_map_max_drift": 25,
+    "automatic_consolidation": false,
+    "automatic_consolidation_verification": false
   },
   "valid": [
     {
@@ -59,7 +61,9 @@
             ""
           ],
           "label": "kestrelé"
-        }
+        },
+        "automatic_consolidation": false,
+        "automatic_consolidation_verification": false
       }
     },
     {
@@ -97,7 +101,9 @@
             ""
           ],
           "label": "kestrelé"
-        }
+        },
+        "automatic_consolidation": false,
+        "automatic_consolidation_verification": false
       }
     },
     {
@@ -135,7 +141,9 @@
             ""
           ],
           "label": "kestrelé"
-        }
+        },
+        "automatic_consolidation": false,
+        "automatic_consolidation_verification": false
       }
     }
   ],
@@ -176,7 +184,9 @@
       "mode": "governed",
       "automatic_promotion": false,
       "automatic_completion": false,
-      "automatic_compaction": false
+      "automatic_compaction": false,
+      "automatic_consolidation": false,
+      "automatic_consolidation_verification": false
     },
     "start_revision": 1,
     "update_revision": 2,

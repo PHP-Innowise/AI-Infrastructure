@@ -5,6 +5,13 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- `runtime.json` ships `automatic_consolidation` and
+  `automatic_consolidation_verification` off; `AGENTS.md`, the `project-brain`
+  skill, `PROTOCOL.md` and the READMEs say the capsule's episodic layer holds
+  three items (the changelog and up to two recorded events). `runtime.json`
+  names this edition's framework (`wordpress`) again. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
+
 - `.cursor/hooks/README.md` says why a `.cursor/rules` that is a symbolic
   link gets no memory rule (`linked_directory`), and that a rule the first
   releases wrote is upgraded. Details in the root

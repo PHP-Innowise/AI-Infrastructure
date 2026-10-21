@@ -461,9 +461,9 @@ hard ceiling, with an escalation reason. Privacy, authority, lifecycle, owner,
 and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
 
-The delivered capsule has a separate final contract: at most 3 semantic and 2
-episodic items (the changelog and one recorded event or episode; lightweight
-mode keeps one), no procedural item, and 8,000 serialized characters.
+The delivered capsule has a separate final contract: at most 3 semantic and 3
+episodic items (the changelog and up to two recorded events, or one local
+episode; lightweight mode keeps one), no procedural item, and 8,000 serialized characters.
 Its working state carries the three newest next steps, the eight newest
 files, and four sources.
 
@@ -472,7 +472,9 @@ Claude Code, Codex, and Cursor — opens with `working: <task> — <goal>` and
 then the task's state, each line bounded and left out when empty: `phase:`,
 `progress:` (manual progress, then the automatic checkpoint, at most 400
 characters, keeping its opening and its end), one `next:` line per step,
-`recent files:` (the five newest, whole paths only), `sources:` (the task's
+`recent files:` (the ten files an agent most recently read or changed in the
+project, newest first, then the task's changed files they do not name, whole
+paths only), `sources:` (the task's
 cited sources), and in governed mode `task record:`, the path of the full
 record. Selected project knowledge/history also carries its already-filtered
 excerpt. The complete text is capped at 3,600 characters; excerpts shrink
@@ -926,6 +928,50 @@ Compaction moves history; it does not delete it. Current terminal states are:
 
 Incident `resolved` and decision `accepted` are intentionally not terminal.
 
+### `consolidate`
+
+```bash
+python3 memory-bank/scripts/context.py consolidate [--ticket CMS-741] [--apply] [--json]
+```
+
+Read-only by default. Groups the operator's own **recorded events whose title
+says `Completed`** by the ticket their title names (`Completed CMS-741: ...`;
+a standard with a number such as `UTF-8` or `PSR-4` is not a ticket) and, for a
+group of at least two, plans one `finding` with external ID
+`CONSOLIDATED-<ticket>`. Its title and goal name the latest descriptive event;
+its `progress` carries every event on a line of its own - what was done, the
+outcome and the `Verification:` the event recorded, ending with the event's
+UUID - then the ticket's other findings. It cites the union of the events'
+local existing sources and is created `resolved` with authority `observed`.
+
+With `automatic_consolidation_verification`, the finding becomes `verified`
+(attested by the agent) when **every** event recorded a `Verification:` line
+and at least one local source was fingerprinted; two events that both say
+"unit tests passed" count twice. Without it, or without that evidence,
+mechanical consolidation is not a verification and the finding stays
+`observed`, which promotion never takes.
+
+`--apply` writes the finding. Events that reach the ticket later are added to
+an active `observed` finding; a `verified` one takes only events that recorded
+their own verification, as a revised claim; once the finding is archived, a
+new one takes them. Retrieval serves no resolved finding, so the events stay
+`recorded` - on a fresh clone they are where their outcomes are found - until
+the finding's current revision is an active Memory Bank chunk. Then the next
+run marks them `superseded`, with the operator as the actor, and `compact`
+moves them. Another owner's events are left to that owner; a ticket that
+already has a resolved finding of its own is reported as `existing` and its
+events are left alone, since folding them into that finding would drop their
+text. A private or restricted event is never folded into a team-visible
+finding, and a run with nothing new changes nothing (`unchanged`). The report
+names each ticket's state (`planned`, `created`, `planned-update`, `updated`,
+`planned-supersede`, `superseded`, `unchanged`, `existing`, `skipped` or
+`blocked`), its event count and the reason.
+
+The turn boundary runs the same pass when `automatic_consolidation` is set in
+`runtime.json`. It is off by default and in the shipped configuration: it
+rewrites the team's tracked Project Brain on its first flush, so a project
+turns it on deliberately; the command is the explicit replay or backfill.
+
 ### `promote-propose`
 
 ```bash
@@ -1001,6 +1047,12 @@ says so (`enabled: false`). The turn boundary waits for `--flush-after`
 turns; this is for knowledge recorded deliberately, such as what a Harness
 run saves when it completes, which should not wait for a counter. The result lists what
 was promoted, blocked with its reason, failed, and deferred.
+
+Automatic promotion also refuses a record whose cited source is an `http(s)://`
+URL or whose title or promoted content matches an instruction-like pattern
+(`ignore previous instructions`, `system prompt`, chat-template control
+tokens). The record stays eligible for the reviewed `promote-propose` /
+`promote-review` path; the gate applies only to the unreviewed path.
 
 ### `retrieval-report`
 
@@ -1081,14 +1133,17 @@ on a very large Brain expect `status` to take proportionally longer.
 ### `bank-audit`
 
 ```bash
-python3 memory-bank/scripts/context.py bank-audit [--json]
+python3 memory-bank/scripts/context.py bank-audit [--provenance] [--json]
 ```
 
 Read-only. Reports, for active chunks only: `source_changed` (a cited local
 file whose digest no longer matches, or that is gone), `overdue_review` (past
 `review_after`), `undigested` (cites local files but records no digests, which
 is every chunk written before digests existed), and `duplicates` (pairs of
-active chunks whose text overlaps at or above `bank_duplicate_ratio`). A
+active chunks whose text overlaps at or above `bank_duplicate_ratio`).
+`--provenance` adds `auto_promoted` (active chunks tagged `auto-promoted`),
+`external_sources` (chunks citing a remote URL) and `instruction_like` (chunks
+whose title or body matches an instruction pattern). A
 duplicate pair is a decision for a human: update the survivor, or close the
 older one with `bank-retire`. The engine never merges chunks by itself. A
 retired chunk is not audited — it has nothing left to attest to, and its dead citations would bury
@@ -1122,6 +1177,20 @@ exist to replace.
 
 A URL in `sources` is cited but never digested — the runtime has no network,
 so the only honest thing it can say about a remote citation is nothing.
+
+### `bank-quarantine`
+
+```bash
+python3 memory-bank/scripts/context.py bank-quarantine --id MEM-... \
+  [--reason "..."] [--json]
+```
+
+Stops serving a chunk **now**: it closes the validity period at today and
+archives the chunk. Use it for a suspected poisoned or unsafe memory, not for
+ordinary knowledge that merely stopped being true — that is `bank-retire`,
+with the date the knowledge ceased and, optionally, its successor. Because the chunk schema is
+a closed key set, the reason is reported in the command output and is not
+written into frontmatter.
 
 ### `bank-retire`
 

@@ -98,9 +98,11 @@ TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev
 [ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
 [ -n "$TASK_ID" ] || exit 0
 
-# A bookkeeping continuation must not checkpoint the same turn again.
-MEMORY_RECOVERY=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
-import json, sys
+# A bookkeeping continuation must not checkpoint the same turn again. The
+# transcript the host names gives the files this turn read or changed, for the
+# next session's "recent files"; the runtime keeps their paths only.
+HOOK_FIELDS=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
+import json, os, sys
 try:
     payload = json.load(sys.stdin)
 except (ValueError, UnicodeError):
@@ -109,18 +111,25 @@ if not isinstance(payload, dict):
     payload = {}
 active = (type(payload.get("loop_count")) is int and payload["loop_count"] > 0
           if sys.argv[-1] == "cursor" else payload.get("stop_hook_active") is True)
-print("1" if active else "0")
+transcript = payload.get("transcript_path", "")
+if not isinstance(transcript, str) or len(transcript) > 4096 or "\n" in transcript or not os.path.isabs(transcript):
+    transcript = ""
+sys.stdout.write(("1" if active else "0") + "\n" + transcript + "\n.")
 ' --host cursor 2>/dev/null)
+MEMORY_RECOVERY=${HOOK_FIELDS%%$'\n'*}
+TRANSCRIPT=
+case "$HOOK_FIELDS" in
+  *$'\n'*$'\n'*) TRANSCRIPT=${HOOK_FIELDS#*$'\n'}; TRANSCRIPT=${TRANSCRIPT%%$'\n'*} ;;
+esac
+TURN_ARGUMENTS=(turn --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER")
+[ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && TURN_ARGUMENTS+=(--transcript "$TRANSCRIPT")
 
 if [ "$MEMORY_RECOVERY" != "1" ]; then
 if command -v timeout > /dev/null 2>&1; then
-  timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" turn \
-    --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
+  timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" "${TURN_ARGUMENTS[@]}" > /dev/null 2>&1
 else
-  "${PYTHON[@]}" "$CONTEXT_CLI" turn \
-    --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER" > /dev/null 2>&1
+  "${PYTHON[@]}" "$CONTEXT_CLI" "${TURN_ARGUMENTS[@]}" > /dev/null 2>&1
 fi
-
 fi
 
 # The payload travels on stdin; only a metadata challenge is kept. A supported

@@ -14,13 +14,14 @@ import math
 import json
 import os
 import re
+import shlex
 import sqlite3
 import stat as stat_module
 import subprocess
 import sys
 import time
 from datetime import date, datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 import brain_runtime
@@ -36,6 +37,7 @@ from brain_runtime import (
     append_message,
     atomic_json,
     auto_compact,
+    auto_consolidate,
     auto_promote,
     retry_pending_auto_promotion,
     cancel_task,
@@ -43,6 +45,7 @@ from brain_runtime import (
     iter_records,
     close_task,
     compact,
+    consolidate,
     configured_mode,
     configured_retrieval_gate,
     create_promotion,
@@ -117,9 +120,12 @@ from context_retrieval import (
     store_index_state,
     codebase_map_drift,
     evidence_tokens,
+    expand_query_tokens,
+    fts_query_tokens,
     excerpt_weights,
     excerpt_section,
     excerpt_window,
+    fts_query,
     _unmarked,
     is_relevant,
     linked_documents,
@@ -195,7 +201,7 @@ DOCUMENT_LAYERS = ("procedural", "semantic", "episodic")
 CAPSULE_LAYER_LIMITS = {
     "procedural": 1,
     "semantic": 3,
-    # The changelog, and one Project Brain event or local episode.
+    # The changelog, and up to two Project Brain events (or local episodes).
     "episodic": CAPSULE_EPISODIC_LIMIT + CAPSULE_EVENT_LIMIT,
 }
 CAPSULE_QUERY_TOKEN_LIMIT = 32
@@ -239,6 +245,28 @@ RENDERED_FILE_LIMIT = 5
 # Any one line of the rendered head. The path lines stop at a whole path below
 # it rather than end in half of one.
 RENDERED_LINE_LIMIT = 500
+# The project's files an agent read or changed on its latest turns, newest
+# first, so a new session starts where the work was. On 1,940 real turns ten
+# such files named a file the agent then read or changed in 75% of new
+# sessions' first turns, against 58% for the task's five changed files; the
+# reads came almost wholly through shell commands, not the Read tool.
+RECENT_FILES_LIMIT = 10
+# Kept beyond the ten shown, so a file touched again moves back up.
+RECENT_FILES_KEPT = 64
+# Ten paths ran to 557 characters at the median and 692 at the 90th
+# percentile; the line stops at a whole path past this.
+RECENT_FILES_LINE_LIMIT = 720
+RECENT_FILES_STATE_KEY = "recent_files"
+# The end of the transcript the Stop hook reads for its turn.
+RECENT_FILES_TRANSCRIPT_BYTES = 4 * 1024 * 1024
+# What reading a turn's calls may spend, a fifth of the Stop hook's budget:
+# the files found by then are kept. 400 commands of 43 words took 0.24 s on
+# Linux; a slow disk pays for every path a word could name.
+RECENT_FILES_PARSE_SECONDS = 1.0
+# Dependencies, caches and the runtime's own state are not where the work is,
+# and prose reaches the capsule through the memory layers.
+RECENT_FILES_SKIPPED_PREFIXES = ("vendor/", "node_modules/", "var/", ".git/", "memory-bank/local/")
+RECENT_FILES_SKIPPED_SUFFIXES = (".md", ".mdx", ".rst", ".txt", ".adoc")
 # Defined beside SECRET_PATTERNS in validate.py, so the Project Brain write
 # path (brain_runtime) refuses the same personal data the capsule does.
 CAPSULE_PRIVATE_PATTERNS = tuple(PRIVATE_PATTERNS.values())
@@ -744,11 +772,13 @@ def memory_eligibility(
     reaches the `excluded` channel instead of vanishing on a bare `continue`.
 
     ``screened_hash`` is the content hash an index that admitted the chunk
-    stored for it, under the same secret policy (a changed policy rebuilds
-    the index). Text that still hashes to it is not scanned for secrets
-    again: the scan read the whole chunk against two dozen patterns on every
-    prompt, 0.4 ms a chunk - most of a prompt's cost once the Memory Bank
-    holds thousands. Other text, even behind an unchanged stat, is scanned.
+    stored for it, under the same secret and provenance policies (a changed
+    policy rebuilds the index). Text that still hashes to it is not scanned
+    again: the secret scan read the whole chunk against two dozen patterns on
+    every prompt, 0.4 ms a chunk - most of a prompt's cost once the Memory
+    Bank holds thousands - and the provenance scan of an auto-promoted chunk
+    read it a second time (1,000 such chunks took a retrieval from 141 to
+    186 ms). Other text, even behind an unchanged stat, is scanned.
     Citations are always checked: files go away.
     """
     try:
@@ -763,9 +793,10 @@ def memory_eligibility(
     except ValidationError:
         return None, _lapsed_reason(metadata, eligible_until), eligible_until
     try:
-        screened = screened_hash is not None and _content_hash(path.read_text(encoding="utf-8")) == screened_hash
+        text: Optional[str] = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        screened = False
+        text = None
+    screened = screened_hash is not None and text is not None and _content_hash(text) == screened_hash
     if not screened:
         try:
             validate_secret_patterns(path)
@@ -774,6 +805,15 @@ def memory_eligibility(
     status = metadata["status"]
     if status != "active":
         return None, status, eligible_until
+    tags = metadata.get("tags")
+    if not screened and isinstance(tags, list) and "auto-promoted" in tags:
+        # Automatic promotion wrote this chunk without a person reading it.
+        # Instruction-like text is withheld automatically; a remote citation
+        # is not, because a pinned source URL is legitimate evidence and
+        # withholding every one of them lost a measured useful chunk. The
+        # remote citation stays visible to `bank-audit --provenance`.
+        if text is None or brain_runtime.instruction_like(metadata.get("title"), text):
+            return None, "provenance", eligible_until
     return metadata, None, eligible_until
 
 
@@ -1367,15 +1407,6 @@ def index_repository(
     return result
 
 
-def fts_query(query: str) -> str:
-    # ponytail: FTS5-only retrieval; add local embeddings only after a
-    # golden-query evaluation shows lexical recall is insufficient.
-    tokens = re.findall(r"\w+", query, flags=re.UNICODE)
-    if not tokens:
-        raise ContextError("Search query must contain a word")
-    return " OR ".join(f'"{token}"' for token in tokens)
-
-
 def search_documents(
     connection: sqlite3.Connection,
     query: str,
@@ -1401,7 +1432,9 @@ def search_documents(
     distinctive: dict[str, list[str]] = {}
     minimum = 0
     if relevant_only:
-        tokens = informative_tokens(connection, query_tokens(query))
+        tokens = informative_tokens(
+            connection, expand_query_tokens(connection, query_tokens(query))
+        )
         # Broad skill discovery keeps its routing contract; automatic capsules
         # use strong_only and must ignore acknowledgements/intent-only terms.
         if layer != "procedural" or strong_only:
@@ -1412,7 +1445,9 @@ def search_documents(
         minimum = required_coverage(tokens)
         match_expression = " OR ".join(f'"{token}"' for token in tokens)
     else:
-        match_expression = fts_query(query)
+        match_expression = fts_query_tokens(
+            expand_query_tokens(connection, query_tokens(query))
+        )
     conditions = ["documents MATCH ?"]
     parameters: list[object] = [match_expression]
     if layer is not None:
@@ -1486,7 +1521,7 @@ def search_episodes(
         ORDER BY bm25(episodes), rowid DESC
         LIMIT ?
         """,
-        (fts_query(query), limit),
+        (fts_query_tokens(expand_query_tokens(connection, query_tokens(query))), limit),
     ).fetchall()
     return [episode_item(row) for row in rows]
 
@@ -1621,6 +1656,50 @@ _CONFIRMATION_WORDS = frozenset({
     "спасибо", "верно", "согласен", "согласна", "поехали", "вперёд", "вперед", "можно",
     "ну", "пожалуйста", "это", "ладно", "годится", "норм", "супер", "почему", "исправь",
 })
+
+
+_TASK_FALLBACK_ACKNOWLEDGEMENTS = frozenset({
+    "continue", "go on", "ok", "okay", "thanks", "thank you",
+    "ok thanks", "okay thanks", "ok go on",
+    "дальше", "продолжай", "продолжай дальше", "хорошо", "спасибо",
+})
+# A short continuation may borrow the task only when it names an action. The
+# acknowledgement set alone is not enough: `_CONFIRMATION_WORDS` also accepts
+# "sure", "go ahead", "please continue" and "yes", none of which is a request
+# to do anything. The action verbs are deliberately small and explicit; an
+# unknown short phrase gets no memory rather than unsolicited context.
+_TASK_FALLBACK_ACTIONS = frozenset({
+    "fix", "do", "implement", "update", "change", "add", "remove", "refactor",
+    "test", "run", "check", "review", "apply", "finish",
+    "исправь", "сделай", "делай", "добавь", "обнови", "измени", "проверь",
+    "запусти", "реализуй", "поправь", "заверши",
+})
+
+
+def _task_fallback_prompt(text: str) -> bool:
+    """Whether a short prompt may borrow the task's terms for retrieval.
+
+    A bare acknowledgement is not a new request: the governed capsule has
+    never injected memory for "continue", and a touch link admitted only by
+    the task's words would be exactly the unsolicited context that rule
+    excludes. An imperative continuation ("fix it", "do it") does name an
+    action, so the task it continues is the only place its subject can be
+    read.
+    """
+    phrase = re.sub(r"[\s,.!?;]+", " ", text.casefold()).strip()
+    if phrase in _TASK_FALLBACK_ACKNOWLEDGEMENTS:
+        return False
+    words = phrase.split()
+    if not words or len(words) > 6:
+        return False
+    if any(
+        word not in _TASK_FALLBACK_ACTIONS and word not in _CONFIRMATION_WORDS
+        for word in words
+    ):
+        # A phrase with a subject of its own ("fix the bug", "update the
+        # rule") is not a continuation; retrieval already has its words.
+        return False
+    return any(word in _TASK_FALLBACK_ACTIONS for word in words)
 
 
 def _cursor_continuation_prompt(text: str, *, persistent: bool = False) -> bool:
@@ -2076,7 +2155,8 @@ def enforce_governed_capsule_contract(
     capsule: dict[str, object],
 ) -> dict[str, object]:
     """Apply the shared layer limits and 8,000-character contract to governed
-    output: no procedural item reaches it (see retrieve), 3 semantic, 2 episodic."""
+    output: no procedural item reaches it (see retrieve), 3 semantic, the
+    changelog plus two event/episode slots."""
     compacted = json.loads(serialize_capsule(capsule))
     compacted["procedural"] = compacted.get("procedural", [])[
         :CAPSULE_LAYER_LIMITS["procedural"]
@@ -3161,6 +3241,8 @@ def assemble_capsule(
         if source_notices:
             result['source_notices'] = source_notices
         result.setdefault("query_source", query_source)
+        # The Stop hook keeps the recent files in either mode.
+        attach_recent_files(connection, repository, result)
         result = enforce_capsule_budget(result)
         if delivery_admission is not None:
             delivery_admission()
@@ -3220,6 +3302,25 @@ def assemble_capsule(
     # "not recorded yet" would promise one that never comes.
     closed = (closed_task_record(connection, repository, task_id)
               if served is None and not unreadable else None)
+    query_fallback = None
+    if bound_record is not None and _task_fallback_prompt(query):
+        # The prompt is an acknowledgement or a short continuation, not a
+        # subject. The task it continues carries the retrieval terms; without
+        # them a "fix it" turn asked memory about the word "fix".
+        try:
+            task_working, _ = project_working_task(
+                governed_task_view(bound_record), delivery_profile=delivery_profile
+            )
+            if task_working:
+                external_id = str(bound_record.get("external_id") or task_id)
+                if task_working.get("goal") == derive_goal(external_id):
+                    # The branch slug re-cased is not a subject; the same
+                    # exclusion the hook's task query already applies.
+                    task_working = {**task_working, "goal": ""}
+                query_fallback = build_capsule_query("", task_working)
+                query_source = "continuation"
+        except (ContextError, RetrievalError, KeyError, TypeError, ValueError):
+            query_fallback = None
     request_query = build_capsule_query(query, None)
     if warnings:
         # The previous index is not evidence of current eligibility. Keep
@@ -3256,6 +3357,7 @@ def assemble_capsule(
                 result["task_closed"] = True
         if source_notices:
             result['source_notices'] = source_notices
+        attach_recent_files(connection, repository, result)
         result = enforce_governed_capsule_contract(result)
         if delivery_admission is not None:
             delivery_admission()
@@ -3292,6 +3394,7 @@ def assemble_capsule(
             if closed:
                 result["task_closed"] = True
             result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
+        attach_recent_files(connection, repository, result)
         capsule = enforce_governed_capsule_contract(result)
         if render:
             shown_in_render(connection, capsule, delivery_profile=delivery_profile)
@@ -3305,6 +3408,7 @@ def assemble_capsule(
         limit=limit,
         manifest_scope="local" if ephemeral else "governed",
         query_source=query_source,
+        query_fallback=query_fallback,
         phase_seconds=phase_seconds,
         gate_mode=gate_mode,
         paths=paths,
@@ -3740,7 +3844,7 @@ def _bounded(text: object, limit: int) -> str:
     return _bounded_cut(text, limit)[0]
 
 
-def _whole_paths(label: str, paths: list[str]) -> list[str]:
+def _whole_paths(label: str, paths: list[str], limit: int = RENDERED_LINE_LIMIT) -> list[str]:
     """The leading ``paths`` that fit one rendered line after ``label``.
 
     Whole paths only: a path cut in half names no file. Even the first is
@@ -3750,13 +3854,33 @@ def _whole_paths(label: str, paths: list[str]) -> list[str]:
     width = len(label)
     for path in paths:
         width += len(path) + (2 if kept else 0)
-        if width > RENDERED_LINE_LIMIT:
+        if width > limit:
             if kept:
                 break
             width = len(label)
             continue
         kept.append(path)
     return kept
+
+
+def recent_files_line(project: list[str], task_files: list[str]) -> tuple[Optional[str], int]:
+    """The rendered "recent files" line, newest first: the project's recent
+    files, then the task's changed files they do not name, ten at most and
+    whole paths only. Returns the line and how many files it leaves out, for
+    the compaction line: every one of the task's changed files it does not
+    show counts, a file the project's pushed out of the ten included -
+    otherwise the task's own state shrank with nothing to say so."""
+    candidates = list(dict.fromkeys(project))
+    for path in reversed(task_files):
+        if path not in candidates:
+            candidates.append(path)
+    candidates = candidates[:RECENT_FILES_LIMIT]
+    kept = _whole_paths("recent files: ", candidates, RECENT_FILES_LINE_LIMIT)
+    shown = set(kept)
+    omitted = sum(1 for path in dict.fromkeys([*candidates, *task_files]) if path not in shown)
+    if not kept:
+        return None, omitted
+    return "recent files: " + ", ".join(kept), omitted
 
 
 def working_state_lines(capsule: dict[str, object]) -> list[str]:
@@ -3805,7 +3929,14 @@ def rendered_working_state(
         cuts["working_next_step_characters"] += lost
         lines.append(f"next: {text}")
     files = [str(path) for path in working.get("files") or []]
-    if files:
+    project = [path for path in capsule.get("recent_files") or [] if isinstance(path, str)]
+    if project:
+        # The project's recent files lead; the task's own changed files
+        # follow where the project's do not already name them.
+        line, cuts["working_files"] = recent_files_line(project, files)
+        if line:
+            lines.append(line)
+    elif files:
         # Newest last in the task, so the tail is the work in hand: the
         # newest that fit, shown in the task's order.
         recent = _whole_paths(
@@ -3881,8 +4012,15 @@ def capsule_excerpts(
 
 
 def _excerpt_growth(capsule: dict[str, object], excerpts: dict[str, str]) -> dict[str, int]:
-    """Larger allowances, by path, for the best-ranked excerpts that were cut."""
-    room = RENDERED_CAPSULE_LIMIT - EXCERPT_GROWTH_RESERVE - sum(len(text) + 3 for text in excerpts.values() if text)
+    """Larger allowances, by path, for the best-ranked excerpts that were cut.
+
+    The head's reserve takes the whole `recent files:` line while the capsule
+    carries one: the reserve was set before that line could fill 720
+    characters, and growth that counted on the room made the renderer cut the
+    later excerpts to pay for it. Its limit, not its length, so the windows
+    stay the same from turn to turn."""
+    reserve = EXCERPT_GROWTH_RESERVE + (RECENT_FILES_LINE_LIMIT + 1 if capsule.get("recent_files") else 0)
+    room = RENDERED_CAPSULE_LIMIT - reserve - sum(len(text) + 3 for text in excerpts.values() if text)
     order = [
         item["path"] for layer in ("semantic", "episodic") for item in capsule.get(layer) or []
         if isinstance(item, dict) and isinstance(item.get("path"), str) and excerpts.get(item["path"])
@@ -3975,12 +4113,20 @@ def _capsule_excerpts(
             marked = marked_document(connection, item["path"], query, indexed_image=image) if query else None
             if marked is None:
                 marked = image[2]
+            prefer_head = item.get("kind") == "changelog"
+            # The marked image of a long document is a stretch around the
+            # query; the head of a chronological document is outside it.
+            quote_text = image[2] if prefer_head else marked
             section = (
-                excerpt_section(connection, item, marked, weights, query=query)
-                if marked
+                excerpt_section(connection, item, quote_text, weights, query=query,
+                                prefer_head=prefer_head)
+                if quote_text
                 else None
             )
-            text = excerpt_window(section["units"], limit, weights) if section else ""
+            text = (
+                excerpt_window(section["units"], limit, weights, prefer_head=prefer_head)
+                if section else ""
+            )
             if not text and isinstance(item.get("snippet"), str):
                 text = _bounded(item["snippet"].replace("[", "").replace("]", ""), limit)
             if text:
@@ -4187,7 +4333,18 @@ def _render_capsule(
         head.append(f"working: {_bounded(working['task_id'], 200)} — {goal}")
         state, state_cuts = rendered_working_state(capsule)
         cuts.update(state_cuts)
-        head.extend(_bounded(line, RENDERED_LINE_LIMIT) for line in state)
+        head.extend(
+            _bounded(line, RECENT_FILES_LINE_LIMIT if line.startswith("recent files: ") else RENDERED_LINE_LIMIT)
+            for line in state
+        )
+    if working is None and capsule.get("recent_files"):
+        # Before the task is recorded - a new branch, a closed task - the
+        # project still says where the work was.
+        line, cuts["working_files"] = recent_files_line(
+            [path for path in capsule["recent_files"] if isinstance(path, str)], []
+        )
+        if line:
+            head.append(line)
     if capsule.get("kind") == "warming" and not capsule.get("task_closed"):
         head.append('warming: task checkpoint pending' if delivery_profile == 'cursor-rule'
                     else f"warming: {capsule['pending_turns']} turn(s) pending")
@@ -5898,6 +6055,592 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
     return allowed, excluded
 
+# What one shell command does to the files it names. Measured reads: a turn's
+# files were named far more often through cat, sed -n, grep and git diff than
+# through the Read tool. A command that only runs something names none.
+_SHELL_READ_VERBS = frozenset((
+    "cat", "head", "tail", "sed", "awk", "nl", "less", "more", "bat", "grep", "egrep",
+    "fgrep", "rg", "ag", "ack", "wc", "diff", "cmp", "jq", "yq", "xxd", "od", "strings",
+    "cut", "sort", "uniq", "column",
+))
+# Every file these name is changed. sed and perl change files only in place
+# (-i); a copy or a move changes only its last operand and reads the others.
+_SHELL_WRITE_VERBS = frozenset(("tee", "rm", "touch", "truncate", "chmod"))
+_SHELL_COPY_VERBS = frozenset(("cp", "ln", "install", "mv"))
+# Codex runs PowerShell on native Windows, and through it cmd.exe: cmdlets,
+# their aliases and the cmd commands, matched without case. The POSIX names
+# above are PowerShell aliases too.
+_POWERSHELL_READ_VERBS = frozenset(("get-content", "gc", "type", "select-string", "sls", "format-hex", "findstr"))
+_POWERSHELL_WRITE_VERBS = frozenset((
+    "set-content", "sc", "add-content", "ac", "clear-content", "clc", "out-file", "new-item", "ni",
+    "remove-item", "ri", "del", "erase", "tee-object",
+))
+_POWERSHELL_COPY_VERBS = frozenset((
+    "copy-item", "copy", "cpi", "move-item", "move", "mi", "rename-item", "rni", "ren",
+))
+# Commands that run the command after them, their options, and the commands
+# that move the directory later words are relative to.
+_SHELL_WRAPPERS = frozenset(("sudo", "time", "nice", "nohup", "exec", "command", "env", "xargs", "timeout"))
+_SHELL_DIRECTORY_VERBS = frozenset(("cd", "pushd", "chdir", "set-location", "sl", "push-location"))
+_GIT_READ_SUBCOMMANDS = frozenset(("show", "diff", "log", "blame", "grep", "cat-file"))
+_GIT_WRITE_SUBCOMMANDS = frozenset((
+    "add", "commit", "mv", "rm", "checkout", "restore", "apply", "stash", "reset", "switch",
+))
+# The characters of the operators that separate commands and redirect them. A
+# command used to be split on `|` and `;` as text, so a quoted grep
+# alternation, sed script or jq filter cut the command in two and its file
+# was never named: `rg "a|b" src/x.php` read nothing.
+_SHELL_PUNCTUATION = "();<>|&\n"
+# Redirections, by what the word after them is: a file written, a file read,
+# or what to pass over - a here-document delimiter, a here-string, and the
+# descriptor of `>&2`, which `>&file` writes instead.
+_SHELL_WRITE_REDIRECTS = frozenset((">", ">>", ">|", "&>", "&>>"))
+_SHELL_READ_REDIRECTS = frozenset(("<", "<>"))
+_SHELL_SKIPPED_REDIRECTS = frozenset(("<<", "<<-", "<<<"))
+_SHELL_DUPLICATIONS = frozenset((">&", "<&"))
+_SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_DURATION = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+# perl edits in place under -i, alone or after argument-free switches
+# (-pi, -0pi, -i.bak); -Mstrict and -I are not it.
+_PERL_IN_PLACE = re.compile(r"-[0-9pnlaswWXtTUc]*i.*")
+_HEREDOC_OPERATOR = re.compile(r"(?<!<)<<(-?)[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\2")
+_POSIX_SHELLS = frozenset(("bash", "sh", "zsh", "dash"))
+_WINDOWS_DIRECTORY = re.compile(r"^[A-Za-z]:[\\/]")
+_PATCH_FILE_LINE = re.compile(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$", re.M)
+_RECENT_RUNTIME_OWNED = re.compile(rf"^project-brain/({'|'.join(TURN_RUNTIME_DIRECTORIES)})/")
+
+
+def _without_heredoc_bodies(command: str) -> str:
+    """The command with each here-document's body left out: data, not commands.
+
+    A delimiter whose closing line never comes is text inside a quoted string,
+    and nothing after it is left out."""
+    lines = command.split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for match in _HEREDOC_OPERATOR.finditer(line):
+            strip_tabs, delimiter = match.group(1) == "-", match.group(3)
+            end = next(
+                (number for number in range(index, len(lines))
+                 if (lines[number].lstrip("\t") if strip_tabs else lines[number]) == delimiter),
+                None,
+            )
+            if end is not None:
+                index = end + 1
+    return "\n".join(kept)
+
+
+def _shell_tokens(command: str, *, posix: bool) -> list[tuple[str, bool]]:
+    """The words and operators of a command, as (text, is_operator).
+
+    Quoting keeps a `|`, `;` or `>` inside an argument - a grep alternation,
+    a sed or jq script, `cut -d '|'` - part of the word, and a newline
+    separates commands. A quote left open closes at the end. ``posix=False``
+    reads PowerShell and cmd, where a backslash is a path separator."""
+    tokens: list[tuple[str, bool]] = []
+    word, operator = "", ""
+    in_word = False
+    quote: Optional[str] = None
+    index = 0
+
+    def end_word() -> None:
+        nonlocal word, in_word
+        if in_word:
+            tokens.append((word, False))
+        word, in_word = "", False
+
+    def end_operator() -> None:
+        nonlocal operator
+        if operator:
+            tokens.append((operator, True))
+        operator = ""
+
+    while index < len(command):
+        char = command[index]
+        following = command[index + 1] if index + 1 < len(command) else ""
+        index += 1
+        if quote is not None:
+            if char == quote:
+                quote = None
+            elif posix and quote == '"' and char == "\\" and following in '$`"\\\n':
+                word += following if following != "\n" else ""
+                index += 1
+            else:
+                word += char
+            continue
+        if posix and char == "\\":
+            end_operator()
+            if following != "\n":
+                word, in_word = word + following, True
+            index += 1
+        elif char in "'\"":
+            end_operator()
+            quote, in_word = char, True
+        elif char in _SHELL_PUNCTUATION:
+            end_word()
+            operator += char
+        elif char in " \t\r":
+            end_word()
+            end_operator()
+        else:
+            end_operator()
+            word, in_word = word + char, True
+    end_word()
+    end_operator()
+    return tokens
+
+
+def _shell_command_files(
+    words: list[str], base: str, dialect: str
+) -> tuple[Optional[str], list[tuple[str, bool, str]]]:
+    """What one command does: the directory a `cd` moves to, else None, and
+    (word, changed, directory) for the words that may name a file it reads
+    or changes."""
+    words = list(words)
+    fold = (lambda word: word) if dialect == "sh" else (lambda word: word.lower())
+
+    def drop_assignments() -> None:
+        while words and _SHELL_ASSIGNMENT.match(words[0]):
+            words.pop(0)
+
+    drop_assignments()
+    while words and fold(words[0]) in _SHELL_WRAPPERS:
+        words.pop(0)
+        while words and (words[0].startswith("-") or _SHELL_DURATION.fullmatch(words[0])):
+            words.pop(0)
+        drop_assignments()
+    if not words:
+        return None, []
+    verb = fold(words[0].replace("\\", "/").rsplit("/", 1)[-1])
+    if dialect != "sh" and verb.endswith(".exe"):
+        verb = verb[:-4]
+    operands = [word for word in words[1:] if not word.startswith("-")]
+    if verb in _SHELL_DIRECTORY_VERBS:
+        target = operands[0].strip("'\"") if operands else "~"
+        if target == "-" or "$" in target or "`" in target:
+            # Somewhere only the shell knows: the words stay where they were.
+            return base, []
+        target = os.path.expanduser(target)
+        return os.path.normpath(target if os.path.isabs(target) else os.path.join(base, target)), []
+    if verb == "git":
+        rest, directory = words[1:], base
+        while rest and rest[0].startswith("-"):
+            if rest[0] == "-C" and len(rest) > 1:
+                value = os.path.expanduser(rest[1].strip("'\""))
+                directory = value if os.path.isabs(value) else os.path.join(directory, value)
+            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
+        subcommand = rest[0] if rest else ""
+        if subcommand in _GIT_READ_SUBCOMMANDS or subcommand in _GIT_WRITE_SUBCOMMANDS:
+            changed = subcommand in _GIT_WRITE_SUBCOMMANDS
+            return None, [(word, changed, directory) for word in rest[1:]]
+        return None, []
+    if verb == "sed":
+        in_place = any(word.startswith(("-i", "--in-place")) for word in words[1:])
+        return None, [(word, in_place, base) for word in words[1:]]
+    if verb == "perl":
+        if any(_PERL_IN_PLACE.fullmatch(word) for word in words[1:]):
+            return None, [(word, True, base) for word in words[1:]]
+        return None, []
+    if verb in _SHELL_COPY_VERBS or (dialect != "sh" and verb in _POWERSHELL_COPY_VERBS):
+        if any(word in ("-t", "--target-directory") or word.startswith("--target-directory=")
+               for word in words[1:]):
+            return None, [(word, False, base) for word in operands]
+        last = len(operands) - 1
+        return None, [(word, index == last, base) for index, word in enumerate(operands)]
+    if verb in _SHELL_WRITE_VERBS or (dialect != "sh" and verb in _POWERSHELL_WRITE_VERBS):
+        return None, [(word, True, base) for word in words[1:]]
+    if verb in _SHELL_READ_VERBS or (dialect != "sh" and verb in _POWERSHELL_READ_VERBS):
+        return None, [(word, False, base) for word in words[1:]]
+    return None, []
+
+
+def _shell_file_words(command: str, base: str, *, dialect: str = "sh") -> list[tuple[str, bool, str]]:
+    """(word, changed, directory) for the words of a shell command that may
+    name a file it reads or changes, each with the directory it is relative to.
+
+    A `cd` moves the words of the commands after it, up to the parenthesis
+    that closes around it; `git -C` moves the words of its own command. A
+    redirection's file is named whatever runs: `php x.php > out.json` writes
+    out.json. ``dialect`` is "sh", or "powershell" for PowerShell and cmd."""
+    found: list[tuple[str, bool, str]] = []
+    if dialect == "sh":
+        command = _without_heredoc_bodies(command)
+    words: list[str] = []
+    # The command a parenthesis interrupts - `$(...)`, `<(...)`, a subshell -
+    # and its directory, resumed at the closing one.
+    outer: list[tuple[str, list[str]]] = []
+    # What the next word is, after a redirection: "write", "read", "skip",
+    # or "duplicate" - a descriptor to pass over, or else a file written.
+    pending: Optional[str] = None
+
+    def finish() -> None:
+        nonlocal base, words
+        if words:
+            moved, named = _shell_command_files(words, base, dialect)
+            found.extend(named)
+            if moved is not None:
+                base = moved
+        words = []
+
+    def close() -> None:
+        nonlocal base, words
+        finish()
+        if outer:
+            base, words = outer.pop()
+
+    for token, is_operator in _shell_tokens(command, posix=dialect == "sh"):
+        if not is_operator:
+            if pending is None:
+                words.append(token)
+            elif pending == "write" or (pending == "duplicate" and not (token.isdigit() or token == "-")):
+                found.append((token, True, base))
+            elif pending == "read":
+                found.append((token, False, base))
+            pending = None
+            continue
+        operator = token.replace("(", "").replace(")", "")
+        redirect = (
+            "write" if operator in _SHELL_WRITE_REDIRECTS
+            else "read" if operator in _SHELL_READ_REDIRECTS
+            else "skip" if operator in _SHELL_SKIPPED_REDIRECTS
+            else "duplicate" if operator in _SHELL_DUPLICATIONS
+            else None
+        )
+        if redirect is not None and "(" not in token:
+            for _ in range(token.count(")")):
+                close()
+            if words and words[-1].isdigit():
+                # The descriptor of `2>`, not an argument.
+                words.pop()
+            pending = redirect
+            continue
+        # Anything else separates commands - ; & && | || |& a newline - or
+        # opens and closes a parenthesis; `<(` and `>(` are a command too.
+        pending = None
+        for char in token:
+            if char == "(":
+                outer.append((base, words))
+                words = []
+            elif char == ")":
+                close()
+            elif char in ";|&\n":
+                finish()
+    finish()
+    return found
+
+
+def _shell_script(command: object, workdir: Optional[str] = None) -> Optional[tuple[str, str]]:
+    """(dialect, script) for a recorded shell command. Codex records an argv
+    - a `bash -lc` script, or on native Windows a PowerShell or cmd one - or
+    one command line, which on Windows its PowerShell runs."""
+    if isinstance(command, str):
+        windows = isinstance(workdir, str) and _WINDOWS_DIRECTORY.match(workdir)
+        return ("powershell" if windows else "sh"), command
+    if not (isinstance(command, list) and command and all(isinstance(word, str) for word in command)):
+        return None
+    program = command[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if program.endswith(".exe"):
+        program = program[:-4]
+    flags = [word.lower() for word in command]
+    if program in _POSIX_SHELLS and len(command) >= 3 and command[1] in ("-c", "-lc"):
+        return "sh", command[-1]
+    if program in ("powershell", "pwsh"):
+        for flag in ("-command", "-c"):
+            if flag in flags[1:]:
+                return "powershell", " ".join(command[flags.index(flag, 1) + 1:])
+        return None
+    if program == "cmd":
+        return ("powershell", " ".join(command[flags.index("/c", 1) + 1:])) if "/c" in flags[1:] else None
+    return "sh", shlex.join(command)
+
+
+# What a host writes into the conversation as the user without starting a
+# turn: an interruption marker, a local command's or the `!` shell's output
+# and the caveat beside it, and Codex's environment and instructions. Any
+# other message starts the turn the Stop hook ends - a prompt, and also text
+# that opens with a tag: a slash command (`<command-name>`), pasted text
+# (`<pasted_content>`), a background task's `<task-notification>`. Taking
+# every `<` for the host's own text merged those turns into the one before,
+# and its files came back as the newest; on 400 recent Claude Code
+# transcripts 132 task notifications went on to call tools.
+_TRANSCRIPT_PASSIVE_PREFIXES = (
+    "[Request interrupted", "<local-command-stdout", "<local-command-stderr",
+    "<local-command-caveat", "<bash-stdout", "<bash-stderr",
+    "<environment_context", "<user_instructions",
+)
+
+
+def _transcript_prompt(record: dict[str, object]) -> bool:
+    """A message that starts a turn: where the transcript's latest turn begins."""
+    if record.get("type") == "user":
+        if (record.get("isMeta") or record.get("toolUseResult")
+                or record.get("isCompactSummary") or record.get("isSidechain")):
+            return False
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        content = message.get("content")
+        if isinstance(content, list):
+            if any(isinstance(part, dict) and part.get("type") == "tool_result" for part in content):
+                return False
+            content = "".join(
+                part["text"] for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
+        return (isinstance(content, str) and bool(content.strip())
+                and not content.lstrip().startswith(_TRANSCRIPT_PASSIVE_PREFIXES))
+    if record.get("type") == "response_item":
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        if payload.get("type") != "message" or payload.get("role") != "user":
+            return False
+        text = "".join(
+            part["text"] for part in payload.get("content") or []
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+        return bool(text.strip()) and not text.lstrip().startswith(_TRANSCRIPT_PASSIVE_PREFIXES)
+    return False
+
+
+def _transcript_calls(record: dict[str, object], root: str) -> list[tuple[str, dict[str, object], str]]:
+    """(tool, arguments, working directory) for the calls one record makes:
+    Claude Code main-thread tool uses, Codex shell and patch calls."""
+    calls: list[tuple[str, dict[str, object], str]] = []
+    if record.get("type") == "assistant" and not record.get("isSidechain"):
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        base = record.get("cwd") if isinstance(record.get("cwd"), str) else root
+        for part in message.get("content") or []:
+            if (isinstance(part, dict) and part.get("type") == "tool_use"
+                    and isinstance(part.get("input"), dict)):
+                calls.append((str(part.get("name") or ""), part["input"], base))
+    elif record.get("type") == "response_item":
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        kind = payload.get("type")
+        if kind == "function_call":
+            try:
+                arguments = json.loads(payload.get("arguments") or "{}")
+            except (TypeError, ValueError):
+                arguments = {}
+            arguments = arguments if isinstance(arguments, dict) else {}
+            base = arguments.get("workdir") if isinstance(arguments.get("workdir"), str) else root
+            if payload.get("name") == "apply_patch":
+                calls.append(("apply_patch", {"patch": arguments.get("input")}, base))
+            else:
+                script = _shell_script(arguments.get("cmd") or arguments.get("command"), arguments.get("workdir"))
+                if script:
+                    calls.append(("Bash", {"command": script[1], "dialect": script[0]}, base))
+        elif kind == "local_shell_call":
+            action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+            base = action.get("working_directory") if isinstance(action.get("working_directory"), str) else root
+            script = _shell_script(action.get("command"), action.get("working_directory"))
+            if script:
+                calls.append(("Bash", {"command": script[1], "dialect": script[0]}, base))
+        elif kind == "custom_tool_call" and payload.get("name") == "apply_patch":
+            calls.append(("apply_patch", {"patch": payload.get("input")}, root))
+    return calls
+
+
+def _call_file_words(name: str, data: dict[str, object], base: str) -> list[tuple[str, bool, str]]:
+    """(word, changed, directory) for what one tool call names."""
+    if name in ("Edit", "MultiEdit", "Write", "NotebookEdit"):
+        value = data.get("file_path") or data.get("notebook_path")
+        return [(value, True, base)] if isinstance(value, str) else []
+    if name in ("Read", "Grep"):
+        value = data.get("file_path" if name == "Read" else "path")
+        return [(value, False, base)] if isinstance(value, str) else []
+    if name == "Bash" and isinstance(data.get("command"), str):
+        return _shell_file_words(data["command"], base, dialect=str(data.get("dialect") or "sh"))
+    if name == "apply_patch" and isinstance(data.get("patch"), str):
+        return [((update or moved).strip(), True, base) for update, moved in _PATCH_FILE_LINE.findall(data["patch"])]
+    return []
+
+
+def _transcript_project_file(word: str, base: str, root: str) -> Optional[str]:
+    """The project file a transcript word names, project-relative, or None.
+
+    It must exist inside the project after symlinks resolve; ``git show
+    REV:path``, ``path:12`` and ``path#L3`` forms name their path."""
+    word = word.strip().strip("'\"`,;()[]{}<>")
+    if not word or word.startswith("-") or len(word) > 400 or "\0" in word:
+        return None
+    candidates = [word]
+    if ":" in word and not os.path.isabs(word):
+        candidates.append(word.split(":", 1)[1])
+    candidates.append(re.sub(r"(:\d+(:\d+)?|#L\d+(-L?\d+)?)$", "", word))
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            joined = candidate if os.path.isabs(candidate) else os.path.join(base, candidate)
+            resolved = os.path.realpath(joined)
+        except (OSError, ValueError):
+            continue
+        if resolved.startswith(root + os.sep) and os.path.isfile(resolved):
+            return Path(os.path.relpath(resolved, root)).as_posix()
+    return None
+
+
+def _recent_file_kept(path: str) -> bool:
+    pure = PurePosixPath(path)
+    return not (
+        pure.is_absolute() or ".." in pure.parts
+        or path.startswith(RECENT_FILES_SKIPPED_PREFIXES)
+        or path.lower().endswith(RECENT_FILES_SKIPPED_SUFFIXES)
+        or TURN_PATH_DENYLIST.search(path) or _RECENT_RUNTIME_OWNED.match(path)
+    )
+
+
+def _without_ignored(repository: Path, paths: list[str]) -> list[str]:
+    """Drop what the project's ignore rules exclude; tracked files stay."""
+    if not paths:
+        return paths
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workspace_roots.project_root(repository)), "check-ignore", "--stdin", "-z"],
+            input=b"\0".join(os.fsencode(path) for path in paths) + b"\0",
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return paths
+    if result.returncode not in (0, 1):
+        return paths
+    ignored = {os.fsdecode(item) for item in result.stdout.split(b"\0") if item}
+    return [path for path in paths if path not in ignored]
+
+
+def transcript_turn_files(transcript: Optional[str], repository: Path) -> list[str]:
+    """The project files the agent read or changed in the transcript's latest
+    turn: changed first, then read, each in call order.
+
+    Only call metadata is read - the file paths a call names and the words of
+    a shell command that name an existing project file. Tool results, file
+    contents and the commands themselves are never kept. The transcript must
+    be an absolute regular file; only its last few megabytes are read."""
+    if not transcript:
+        return []
+    path = Path(transcript)
+    try:
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            return []
+        size = path.stat().st_size
+        start = max(0, size - RECENT_FILES_TRANSCRIPT_BYTES)
+        with path.open("rb") as handle:
+            handle.seek(start)
+            chunk = handle.read(size - start)
+    except (OSError, ValueError):
+        return []
+    lines = chunk.split(b"\n")
+    if start:
+        # The window began inside a record.
+        lines = lines[1:]
+    records: list[dict[str, object]] = []
+    for raw in lines:
+        if not raw.strip():
+            continue
+        try:
+            record = json.loads(raw)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    begin = 0
+    for index in range(len(records) - 1, -1, -1):
+        if _transcript_prompt(records[index]):
+            begin = index + 1
+            break
+    root = os.path.realpath(str(workspace_roots.project_root(repository)))
+    changed: list[str] = []
+    read: list[str] = []
+    deadline = time.monotonic() + RECENT_FILES_PARSE_SECONDS
+    for record in records[begin:]:
+        if time.monotonic() > deadline:
+            break
+        for name, data, base in _transcript_calls(record, root):
+            for word, is_change, directory in _call_file_words(name, data, base):
+                relative = _transcript_project_file(word, directory, root)
+                if relative is not None and _recent_file_kept(relative):
+                    (changed if is_change else read).append(relative)
+    return _without_ignored(repository, list(dict.fromkeys(changed + read)))
+
+
+def _recent_files_key(repository: Path) -> str:
+    """The state key of a checkout's recent files.
+
+    An installed project keeps them in its checkout's own database. An
+    attached one keeps one state for every checkout of the project, and
+    parallel sessions in two worktrees then named each other's files as
+    their own: each checkout has a key of its own there."""
+    if not workspace_roots.is_attached(repository):
+        return RECENT_FILES_STATE_KEY
+    checkout = os.path.realpath(str(workspace_roots.project_root(repository)))
+    digest = hashlib.sha256(os.fsencode(checkout)).hexdigest()[:16]
+    return f"{RECENT_FILES_STATE_KEY}:{digest}"
+
+
+def load_recent_files(connection: sqlite3.Connection, key: str = RECENT_FILES_STATE_KEY) -> list[str]:
+    """The checkout's recent files, newest first, as the Stop hook kept them."""
+    try:
+        row = connection.execute(
+            "SELECT value FROM index_state WHERE key = ?", (key,)
+        ).fetchone()
+    except sqlite3.Error:
+        return []
+    if row is None:
+        return []
+    try:
+        state = json.loads(row[0])
+    except (TypeError, ValueError):
+        return []
+    paths = state.get("paths") if isinstance(state, dict) and state.get("version") == 1 else None
+    if not isinstance(paths, list):
+        return []
+    return [path for path in paths if isinstance(path, str)][:RECENT_FILES_KEPT]
+
+
+def record_recent_files(
+    connection: sqlite3.Connection, paths: list[str], key: str = RECENT_FILES_STATE_KEY
+) -> int:
+    """Move this turn's files to the front of the checkout's recent files."""
+    if not paths:
+        return 0
+    began = not connection.in_transaction
+    if began:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        merged = list(dict.fromkeys([*paths, *load_recent_files(connection, key)]))[:RECENT_FILES_KEPT]
+        connection.execute(
+            "INSERT INTO index_state(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, json.dumps({"version": 1, "paths": merged}, ensure_ascii=False)),
+        )
+        if began:
+            connection.commit()
+    except BaseException:
+        if began:
+            connection.rollback()
+        raise
+    return len(paths)
+
+
+def attach_recent_files(
+    connection: sqlite3.Connection, repository: Path, capsule: dict[str, object]
+) -> None:
+    """Name the checkout's recent files that are still there in a capsule."""
+    root = workspace_roots.project_root(repository)
+    shown: list[str] = []
+    for path in load_recent_files(connection, _recent_files_key(repository)):
+        try:
+            present = _recent_file_kept(path) and (root / path).is_file()
+        except (OSError, ValueError):
+            present = False
+        if present:
+            shown.append(path)
+        if len(shown) >= RECENT_FILES_LIMIT:
+            break
+    if shown:
+        capsule["recent_files"] = shown
+
 
 def head_commit(repository: Path) -> Optional[str]:
     try:
@@ -6209,6 +6952,10 @@ def run_turn(
         "blocked": [], "skipped": 0,
     }
     compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
+    consolidation = {
+        "enabled": False, "created": 0, "updated": 0, "superseded": 0,
+        "blocked": 0, "tickets": 0, "error": None,
+    }
     if flushed is not None and mode != "lightweight":
         # Merge evidence is advisory. It may suggest an explicit completion,
         # but this unattended path never changes task lifecycle state.
@@ -6220,6 +6967,10 @@ def run_turn(
             raise ContextError(
                 f"Merge completion-candidate detection failed: {error}"
             ) from error
+        # A ticket's completed events become one finding before promotion,
+        # which may carry it into the Memory Bank; the events leave the diary
+        # on a later boundary, once a chunk holds what they said.
+        consolidation = auto_consolidate(repository, owner=owner)
         # Durable memory is promoted on the same boundary as the
         # working-memory flush, so the whole pipeline runs
         # unattended.
@@ -6240,11 +6991,27 @@ def run_turn(
             promotion = retry_pending_auto_promotion(repository, owner=owner)
         except (BrainError, OSError) as error:
             raise ContextError(f"Automatic promotion retry failed: {error}") from error
+    # The project's recent files are a convenience for the next session's
+    # capsule, so they come after the turn's own record: read first, a long
+    # transcript on a slow disk could run the Stop hook out of its budget and
+    # lose the checkpoint itself. A transcript that cannot be read never fails
+    # the turn.
+    recent = 0
+    try:
+        recent = record_recent_files(
+            connection,
+            transcript_turn_files(getattr(arguments, "transcript", None), repository),
+            key=_recent_files_key(repository),
+        )
+    except (OSError, ValueError, sqlite3.Error):
+        recent = 0
     result = {
         "task_id": task_id,
         "delta_id": delta_id,
         "files": len(files),
         "excluded": path_excluded,
+        "recent_files": recent,
+        "consolidation": consolidation,
         "pending": 0 if flushed else buffered,
         "flushed": flushed is not None and not flushed.get("closed_task"),
         "revision": flushed.get("revision") if flushed else None,
@@ -6756,6 +7523,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--flush", action="store_true", help="flush regardless of the threshold"
     )
     turn.add_argument(
+        "--transcript",
+        help="the host's transcript, for the files this turn read or changed (paths only)",
+    )
+    turn.add_argument(
         "--flush-after",
         type=int,
         default=DEFAULT_TURN_FLUSH_AFTER,
@@ -7111,9 +7882,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compact_command.add_argument("--json", action="store_true")
 
+    consolidate_command = commands.add_parser(
+        "consolidate",
+        help=(
+            "collapse one ticket's completed events into a finding; dry-run "
+            "unless --apply is passed"
+        ),
+    )
+    consolidate_command.add_argument("--apply", action="store_true")
+    consolidate_command.add_argument(
+        "--ticket", default=None, help="only this ticket, for example CMS-741"
+    )
+    consolidate_command.add_argument("--json", action="store_true")
+
     bank_audit = commands.add_parser(
         "bank-audit",
         help="report chunks whose cited sources changed and chunks overdue for review",
+    )
+    bank_audit.add_argument(
+        "--provenance",
+        action="store_true",
+        help="also report auto-promoted, external-source and instruction-like chunks",
     )
     bank_audit.add_argument("--json", action="store_true")
 
@@ -7150,6 +7939,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bank_retire.add_argument("--reason", default=None)
     bank_retire.add_argument("--json", action="store_true")
+
+    bank_quarantine = commands.add_parser(
+        "bank-quarantine",
+        help=(
+            "stop serving a chunk now - for suspected poisoning or an unsafe "
+            "claim - by closing its validity at today"
+        ),
+    )
+    bank_quarantine.add_argument("--id", required=True, dest="memory_id")
+    bank_quarantine.add_argument("--reason", default=None)
+    bank_quarantine.add_argument("--json", action="store_true")
 
     reindex_bank_command = commands.add_parser(
         "reindex-bank",
@@ -8810,8 +9610,40 @@ def _command() -> int:
                     print(f"Project Brain compacted: {result['moved']} record(s) archived.")
                 return 0
 
+            if arguments.command == "consolidate":
+                result = consolidate(
+                    repository,
+                    apply=arguments.apply,
+                    ticket=arguments.ticket,
+                    owner=owner,
+                )
+                if arguments.json:
+                    print(json.dumps(result, ensure_ascii=False))
+                else:
+                    states = [item["state"] for item in result["tickets"]]
+                    if arguments.apply:
+                        print(
+                            f"Created {result['created']} finding(s), updated "
+                            f"{result['updated']}; {result['superseded']} event(s) "
+                            f"superseded, {result['blocked']} blocked."
+                        )
+                    else:
+                        print(
+                            f"Planned {states.count('planned')} finding(s), "
+                            f"{states.count('planned-update')} update(s); "
+                            f"{sum(item.get('supersede', 0) for item in result['tickets'])} "
+                            "event(s) to supersede."
+                        )
+                    for item in result["tickets"]:
+                        print(
+                            f"  {item['ticket']}: {item['state']} "
+                            f"({item['events']} event(s))"
+                            + (f" - {item.get('reason')}" if item.get("reason") else "")
+                        )
+                return 0
+
             if arguments.command == "bank-audit":
-                result = audit_bank(repository)
+                result = audit_bank(repository, provenance=arguments.provenance)
                 if arguments.json:
                     print(json.dumps(result))
                 else:
@@ -8839,6 +9671,16 @@ def _command() -> int:
                         )
                     for path in result["undigested"]:
                         print(f"  undigested: {path}")
+                    provenance = result.get("provenance")
+                    if provenance is not None:
+                        # Only asked for: without --provenance nothing was
+                        # counted, and "0 auto-promoted" would say otherwise.
+                        print(
+                            f"  provenance: {len(provenance.get('auto_promoted') or [])} "
+                            f"auto-promoted, {len(provenance.get('external_sources') or [])} "
+                            f"with external sources, "
+                            f"{len(provenance.get('instruction_like') or [])} instruction-like."
+                        )
                 return 0
 
             if arguments.command == "bank-reverify":
@@ -8878,6 +9720,23 @@ def _command() -> int:
                         f"Retired {result['id']}: {result['status']} "
                         f"as of {result['valid_to']}{replacement}. "
                         f"Index rewritten with {result['chunks']} chunk row(s)."
+                    )
+                return 0
+
+            if arguments.command == "bank-quarantine":
+                result = retire_chunk(
+                    repository,
+                    arguments.memory_id,
+                    valid_to=date.today().isoformat(),
+                    reason=arguments.reason or "quarantined",
+                )
+                if arguments.json:
+                    print(json.dumps(result))
+                else:
+                    print(
+                        f"Quarantined {result['id']}: {result['status']} as of "
+                        f"{result['valid_to']}; index rewritten with "
+                        f"{result['chunks']} chunk row(s)."
                     )
                 return 0
 

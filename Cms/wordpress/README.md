@@ -189,7 +189,7 @@ and specifications outrank all retrieved context.
 
 Use `memory` in Codex or `/memory` in Claude/Cursor for the authority-aware
 context refresh. Complex phase handoffs use a Task Capsule capped at 8,000
-Unicode characters with at most three Semantic and two Episodic
+Unicode characters with at most three Semantic and three Episodic
 results plus bounded Working state, and no Procedural item: skills are left to the
 host's own list. It carries cited discovery hints,
 not the parent conversation; agents verify the cited canonical sources before

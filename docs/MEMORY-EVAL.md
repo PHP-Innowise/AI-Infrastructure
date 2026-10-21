@@ -178,6 +178,7 @@ python3 scripts/memory_eval.py realized --project ~/Desktop/next --since 2026-09
 | `--updated-after drop\|keep` | A working-tree memory document created before the prompt but edited after it: leave it out (default, the strict as-of corpus) or copy today's body and mark the turn contaminated. |
 | `--cache DIR` | Work and cache directory; refused inside this clone. |
 | `--diagnose-misses` | Add opt-in judged-path stage and answer-presence counters; default JSON stays unchanged. |
+| `--audit-git` | Diagnostic only: seed a temporary Git snapshot in each evaluation corpus so history admission can be audited when the archive has no usable `.git`. |
 | `--onnx-excerpts DIR` / `--onnx-python FILE` | Maintainer-only excerpt pilot with local assets and an explicit isolated worker. Supply both; default is off. |
 | `--onnx-timeout SECONDS` | Worker budget including startup and cleanup (default and maximum 5); larger requests are capped and the remaining evaluator timeout can tighten it; failure retains lexical excerpts. |
 | `--timeout SECONDS` | Per runtime call (default 30). A refresh past it skips the prompt as `refresh-timeout`. |
@@ -406,11 +407,47 @@ counts. Main FTS uses the explicitly pinned refresh limit of 3 (window 30).
 History uses the whole screened prompt, matching the runtime's separate
 history query, rather than substituting the distilled main query.
 
+When the ranking branch is the larger loss, the
+[document reranker pilot](MEMORY-RERANK-PILOT.md) compares the baseline order
+with a path/title feature reranker before any runtime change.
+
+The evaluation corpus is a copy without the project's live Git context.
+`--audit-git` seeds a disposable repository for the history audit, but a large
+corpus can still exceed the source-policy deadline; in that case its paths stay
+`unknown-history` and `history_recall` is a lower bound. Run the history audit
+against a live checkout when the exact admission verdict matters.
+
+`CONTEXT_EVENT_SERIES=1` is an off-by-default runtime pilot: when the request
+names no ticket, the history slot may take up to two events from the largest
+same-ticket series. On the real 12-prompt stand it moved selected recall from
+52.6% to 55.3% and answer passage recall from 34.2% to 36.8%, with the same
+noise-only count; that is not enough to change the default. `memory_eval`
+passes the variable through only for a stand run.
+
+A labelled answer passage must have non-heading text. A passage that is only
+`#` headings is reported as `answer passages heading-only` and excluded from
+the answer-passage denominator; it is a label to rewrite, not a document the
+runtime failed to quote. On the real stand 7 labels were heading-only, so the
+honest recall was 41.9% (13/31) rather than 34.2% (13/38).
+
 Interpret stages as a funnel: `absent-source` and `not-indexed` precede
 retrieval; `no-fts-candidate`, `window-limit`, `relevance-drop` and `floor-drop`
-precede selection. Manifest policy exclusions, layer/rank limits, budget and
-capsule drops remain distinct. `history-admission-drop` means the recorded
-subject did not pass coverage/weighted-floor admission; `history-event-limit`
+precede selection. The summary reports two derived shares over the labelled
+paths the index could have returned (`eligible_paths`, which excludes absent,
+not-indexed and unavailable/unknown): `candidate_recall` is the share that
+reached the FTS window at all, and `selected_recall` is the share that reached
+the final selection, including an item later lost to the capsule budget. A low
+candidate share means query/index work; a high candidate share with a low
+selected share means ranking or admission work. History paths are tagged by
+the indexed `brain-event` kind, whether they reached `selected`,
+`history-event-limit` or `history-admission-drop`; they participate in those
+two shares and have their own `history_paths`, `history_delivered` and
+`history_recall`. Only an unavailable history context stays `unknown-history`
+and is excluded. The report prints the larger of the two losses as
+`candidate-bound`, `selection-bound`, `mixed` or `none measured`.
+Manifest policy exclusions, layer/rank limits, budget and capsule drops remain
+distinct. `history-admission-drop` means the recorded subject did not pass
+coverage/weighted-floor admission; `history-event-limit`
 means another admitted event/episode won the shared slot. `automatic-link-limit`
 is the manifest's explicit file-link cap. `selected-answer-not-in-text`
 includes partial delivery of a source's labelled answers. Unsupported evidence

@@ -28,6 +28,490 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Review of the consolidation and ticket work — 2026-10-21
+
+Fixes for what a review of the twelve unpushed commits of 2026-10-20/21 found,
+each reproduced through the CLI on a temporary repository. Every behaviour
+change below has a test that fails on `a47e1eb8`.
+
+- **Inventories.** `install/inventories/*.json` carry
+  `memory-bank/tests/test_identifier_terms.py`; `--verify-inventories` is
+  VERIFIED again and the `installation` job passes.
+- **A ticket is `PREFIX-123`, not "PHP 8.2".** A space no longer joins a
+  prefix and a number, a number that runs on into a decimal is a version, and
+  a standard's prefix - `UTF-8`, `PSR-4`, `SHA-256`, `ISO-8601`, … - is never a
+  ticket (`brain_runtime.ticket_ids`, shared by consolidation and retrieval).
+  The index also keeps the prefixes the project files its work under - its
+  tasks' IDs and the tasks its completion events name (`ticket-prefixes` in
+  `index_state`) - and, once there are any, retrieval counts only those, so
+  `GPT-4` or `COVID-19` is not a ticket where the work is `CMS-741`. A request
+  about Composer "on PHP 8.2" no longer withholds the chunk naming PSR-4, and
+  in task `CMS-741` the chunk about UTF-8 exports is delivered again.
+- **Consolidation keeps what the events said.** The finding carries every
+  event on a line of its own - what was done, the outcome and its
+  `Verification:` - not only the latest event's topic. Retrieval serves no
+  resolved finding, so the events stay `recorded` until the finding's current
+  revision is an active Memory Bank chunk; only then does a pass supersede
+  them. A fresh clone after the flush answers "How are invoice totals rounded
+  for CMS-741?" from the rounding event (observed) or from the chunk
+  (verified and promoted); before, both events had left retrieval.
+- Consolidation no longer supersedes events "into" another resolved finding of
+  the ticket - active or archived - that does not carry their text: they stay
+  recorded and the ticket is reported `existing`.
+- The actor of a supersession is the operator, never the event's owner;
+  another owner's events are skipped and left to that owner.
+- `all_verified` counts events with a `Verification:` line: two events that
+  both say "unit tests passed" verify the finding.
+- Events that reach a ticket after its finding was written are added to it
+  (`updated`) instead of staying "already exists" for good; a verified finding
+  takes only verified events, re-attested by the agent, and an archived one is
+  followed by a new finding. A pass reads the archive and the promotion ledger
+  once, and not at all when every ticket's finding covers its events - it read
+  the archive once per such ticket on every flush. At 40 such tickets and
+  2,000 archived records a pass took 540 ms and now takes 12 ms.
+- **Consolidation is opt-in.** `load_config` defaults
+  `automatic_consolidation` and `automatic_consolidation_verification` to
+  `false`, like promotion and compaction, and the four editions' `runtime.json`
+  and the generator's `runtime.json.template` now ship them `false` too: the
+  pass rewrites the team's tracked Brain on its first flush (27 of 28 events on
+  the evaluated project) and a verified summary becomes an agent-attested chunk
+  no person reviewed, and the redesigned pass has not been measured on a real
+  project yet. The `consolidate` command is unchanged as the explicit replay.
+- The same commits had copied PHP Core's `runtime.json` over the other
+  editions: Laravel, Symfony and WordPress are `laravel`, `symfony` and
+  `wordpress` again, and Symfony's tool-owned Cursor `skill-creator` command
+  and agent, which `build_mirrors --write` had overwritten once the framework
+  read `php-core`, are restored with their `.gitattributes` lines.
+- **The changelog quote is its newest version.** A Keep a Changelog file was
+  quoted from its preamble ("All notable changes …"); the head quote now skips
+  the prose under the document title and names an entry whose heading has no
+  prose of its own with its subsection: `[1.2.0] - 2026-10-01 › Fixed`.
+- **Russian aliases add, they do not replace.** `query_tokens` keeps the
+  Russian word beside its English term, so the chunk "Поля сущности счёта" is
+  found by "Какие поля у сущности?" again, and each alias matches whole word
+  forms: `логика`/`логин` are not log, `старт`/`стараться` not legacy,
+  `действительно`/`действие` not validity, `полезно` not field.
+- **Event slot.** Two events share the history slot only when events carry
+  the ticket the request names; a ticket no event carries, or "PHP 8.3", left
+  two neighbours there. The slot again weighs the halving for a changed
+  source: a fresh 9.6 beats a 12.5 halved to 6.3.
+- **Provenance is screened at indexing.** An auto-promoted chunk is checked
+  for instruction-like text when it is indexed, under the same screened hash
+  as the secret scan, instead of being read and scanned on every refresh. A
+  warm `retrieve` with 1,000 such chunks took 359 ms on `a47e1eb8` and 284 ms
+  before the check existed; it takes 238 ms now. A changed pattern set
+  (`provenance-policy-fingerprint`) screens every chunk again.
+- `bank-audit` without `--provenance` no longer prints a provenance line it
+  never counted.
+- The capsule's episodic layer holds three items - the changelog and up to two
+  recorded events - since the two-event slot: `AGENTS.md` (four editions), the
+  `project-brain` skill, `PROTOCOL.md`, the READMEs, `docs/OPERATIONS.md` and
+  `docs/CONTEXT-AND-MEMORY.md` said two, and the Harness capsule validator
+  refused a third item.
+- Documentation: `docs/MEMORY-WRITE-PATH.md`, `docs/OPERATIONS.md` and
+  `docs/CONTEXT-AND-MEMORY.md` describe the consolidation above and no longer
+  call it on by default; `docs/RE-MEMORY-APPLICATIONS-2026-10.md` no longer
+  says nothing was installed while its section 11 records the `dsh-ltm`
+  deployment.
+
+### A same-ticket event series pilot — 2026-10-21
+
+- `CONTEXT_EVENT_SERIES=1` is an opt-in experiment: when the request names no
+  ticket, the history slot may take up to two events from the largest
+  same-ticket series instead of exactly one. The default remains one event.
+- On the real 12-prompt stand the pilot changed selected recall 52.6% -> 55.3%
+  and useful paths 19 -> 20, with answer passage recall 34.2% -> 36.8% and the
+  same two noise-only turns. That is too small to change the default; the
+  switch stays off and documented as a pilot.
+- A distinct-ticket variant and a plain top-two variant were also measured.
+  The first added only a noise document; the second changed nothing because
+  ticket-bearing prompts already had a two-event limit. Both were removed
+  rather than left as unused switches.
+- History metrics now tag an entry by the indexed `brain-event` kind rather
+  than only by its funnel stage. This corrected `history_paths` from 15 to 26
+  and showed the real baseline: 13 of 26 event paths delivered (50%), not
+  2 of 15. `history-event-limit` remains 15 -> 14 under the pilot.
+
+### The miss audit keeps dynamic history visible — 2026-10-21
+
+- `memory_miss_audit.py` now treats an unavailable Git source context during
+  history admission as `unknown-history` instead of raising and erasing every
+  judged path in the prompt. A per-path guard keeps the stages already
+  established when one path cannot be resolved.
+- `memory_eval` reports `history_paths`, `history_delivered` and
+  `history_recall` beside candidate/selected recall. On the real 12-prompt
+  stand this made the loss visible: 15 judged paths were dynamic history
+  records, only 2 were delivered, while semantic candidate recall was 95.7%
+  and selected recall 87.0%.
+- `docs/MEMORY-EVAL.md` explains that candidate/selected shares cover
+  semantic documents and history has its own share. The report prints all
+  three, and paired deltas format the new share as a percentage.
+- `memory_eval --audit-git` seeds a disposable Git snapshot for history
+  admission when the evaluation corpus has no usable `.git`. It is diagnostic
+  only, and the source-policy deadline still applies.
+- History admission now receives the database connection, so the event filter
+  no longer fails with `Git source context unavailable` in a seeded or
+  attached corpus. On the real 12-prompt stand all 38 judged paths classified:
+  candidate recall 97.4%, selected recall 52.6%, and 15 paths lost to
+  `history-event-limit`; `unknown_history` disappeared.
+- Answer-presence comparison ignores Markdown heading lines, and a labelled
+  passage with no non-heading body is reported as `heading-only` and excluded
+  from answer passages rather than counted as a retrieval miss. The audit and
+  the evaluator use the same normalization. On the real stand 7 labels were
+  heading-only; answer passage recall is 41.9% (13/31) instead of 34.2%
+  (13/38). This is label hygiene, not a claimed retrieval gain.
+
+### A reranker pilot before a runtime change — 2026-10-21
+
+- `scripts/memory_rerank_pilot.py` compares the runtime's normal candidate
+  order with a deterministic path/title feature reranker on a local index and
+  judged queries. Path is unindexed in FTS5, so the feature gives a file name
+  a bounded voice; the base BM25/authority score still dominates.
+- The pilot is read-only, stdlib-only and never imported by the runtime. It
+  reports per-query baseline/reranked useful paths and an aggregate, so a
+  positive result is evidence for integration rather than a default change.
+- `docs/MEMORY-RERANK-PILOT.md` explains the weights, the candidate window and
+  why a low `candidate_recall` is out of scope. `tests/test_memory_rerank_pilot.py`
+  covers feature scoring, promotion, metrics and malformed input.
+
+### Decision templates keep the options that lost — 2026-10-21
+
+- The Project Brain `decision` template and the durable chunk template now
+  carry a `Rejected Alternatives` section. A future task that proposes the
+  same option again can find why it was rejected; a fact or constraint deletes
+  the section. This is authoring guidance, not a new admission rule: the
+  existing promotion and retrieval rules are unchanged.
+- The generator's memory-seed asset carries both templates.
+
+### The memory stand separates candidate recall from selection — 2026-10-21
+
+- `memory_miss_audit.py` now builds its query through the runtime's
+  `expand_query_tokens`, so a judged path is diagnosed against the same
+  identifier-aware vocabulary the capsule actually searched. An audit that
+  used raw prompt tokens described a different retrieval from the one under
+  test.
+- `memory_eval` derives `candidate_recall` and `selected_recall` from the
+  existing stage funnel. The denominator is the labelled paths the index could
+  have returned (absent, not-indexed and unknown are excluded). A low candidate
+  share points at query/index work; a high candidate share with a low selected
+  share points at ranking, admission or budget.
+- The report prints both shares and their paired deltas, and names the larger
+  loss as `candidate-bound`, `selection-bound`, `mixed` or `none measured`.
+  `MEMORY-EVAL.md` explains how to read them.
+- Tests: a stage fixture with selected, relevance-drop, no-candidate,
+  absent-source and unknown paths; a four-word identifier reaches the audit
+  through the shared expansion; the report carries both rows. The full
+  memory-evaluation suite is 93 tests.
+
+### CamelCase identifiers and short continuations reach the index — 2026-10-20
+
+- The local context index now carries a derived `identifier_terms` table: a
+  document naming `getUserById` is reachable from "get user by id". The table
+  stores only `(path, identifier, expansion)`; it is rebuilt incrementally for
+  changed documents, once on an older index, and never becomes a second source
+  of truth. `search`, capsule candidates, marked excerpts, episode search and
+  excerpt weights all use the same expansion.
+- Expansion is deliberately one-directional: words in the request gain the
+  identifier the index spells, but an identifier is never expanded into its
+  words. The reverse admitted every document sharing two common subwords and
+  displaced the prompt-link upgrade that names a class. An opaque
+  `SkylarkEpisode695` therefore does not match every unrelated
+  `SkylarkSignal842` on the shared prefix. Ordinary words, short tokens and
+  all-caps acronyms without a boundary produce no row.
+- A short imperative continuation ("fix it", "do it") now borrows the active
+  task's goal and next steps for governed retrieval. The prompt must name an
+  explicit action verb; bare acknowledgements ("continue", "ok", "sure", "go
+  ahead", "thanks") keep the existing no-injection behaviour, so a touch link
+  still needs a shared informative term. The manifest records
+  `query_source: continuation` and the combined query it actually searched.
+- Tests: identifier forms for camelCase, snake_case, namespace and dotted
+  names; the words-to-identifier direction through `search`; a negative test
+  that an identifier does not expand into shared subwords; incremental
+  replacement, document removal and an older-index rebuild; and an imperative
+  continuation that reaches the task's specification. The full PHP Core
+  Project Brain suite is 680.
+
+### A Russian technical query reaches the English index — 2026-10-20
+
+- `query_tokens` now applies a small, prefix-based seed glossary for common
+  Russian software terms (path, log, drop, unknown, properties, entity, field,
+  nested, list, ttl, preview, legacy, admin, …). It rewrites only Cyrillic
+  words; English queries, code identifiers and tickets are untouched. The
+  duplicated local `fts_query` in `context.py` now delegates to the aliasing
+  implementation.
+- On the real project's three Russian prompts that previously returned an empty
+  selection, the same corpus now returns 2–3 semantic documents and the
+  changelog; the TTL-preview prompt reaches the exact chunk
+  `MEM-20260915-77964094-upgrade-note-overstates-legacy-preview-ttl-configurability`.
+- The 12-prompt English stand is unchanged: 26 judged-useful documents, 10
+  noise, 18/37 answer passages, 11/12 useful turns.
+- Tests: the mapping produces path/written/log/drop/unknown/properties/entity
+  and an in-memory English document is found from the Russian question; the
+  full PHP Core Project Brain suite is 678.
+
+### Every-event evidence verifies a consolidated finding — 2026-10-20
+
+- With `automatic_consolidation_verification` (on in the shipped config), a
+  consolidated finding becomes `verified` only when **every** source event
+  recorded a `Verification:` line and at least one local source was
+  fingerprinted. The authority transition is agent-attested, like the existing
+  Harness save path; a finding without that evidence stays observed.
+- This lets the same turn boundary's automatic promotion turn the verified
+  summary into a durable chunk; an observed summary remains only in the Brain.
+- Tests: two verified events produce a verified finding, two unverified events
+  do not; the full PHP Core Project Brain suite is 678.
+
+### A consolidated summary names its ticket's existing findings — 2026-10-20
+
+- The summary's `progress` now lists the external id and UUID of every finding
+  that names the same ticket, including an open/investigating one, after the
+  event ids and verification. The capsule carries the link in text without a
+  schema change: the reviewer can follow the specific review finding from the
+  summary, and the two records keep their distinct scope.
+- Tests: an open `CMS-741-REVIEW` finding is named by the new summary and keeps
+  its status; the full PHP Core Project Brain suite is 678.
+
+### A resolved ticket finding suppresses a duplicate summary — 2026-10-20
+
+- If a ticket already has a `resolved` finding, `consolidate` no longer creates
+  a second `CONSOLIDATED-*` conclusion. It transitions the ticket's completed
+  events to `superseded` with the existing finding named in the reason and
+  reports the ticket as `existing`. An open/investigating finding is a specific
+  work item, not a conclusion, so it does not suppress the summary.
+- Tests: the existing resolved finding survives untouched, no duplicate is
+  created, and both events are superseded; the full PHP Core Project Brain suite
+  is 674.
+
+### Automatic compaction keeps unverified consolidated findings active — 2026-10-20
+
+- The turn boundary creates a consolidated finding as `resolved`/`observed`,
+  then the same boundary's automatic compaction archived it immediately because
+  `resolved` is terminal. On a real-data copy all seven new findings landed in
+  `archive/finding` and no capsule could reach them. `compact` and
+  `archivable_records` now retain a `CONSOLIDATED-*` finding until its authority
+  is `verified`; superseded events still archive normally.
+- On a fresh copy, `turn --flush` created seven findings, superseded 27 events,
+  left all seven in `dynamic/findings`, archived none of them, and `validate`
+  passed. The manual `consolidate --apply` path already left them active; this
+  closes the automatic path.
+- Tests: the automatic boundary with `compaction_threshold=1` keeps the
+  unverified finding in `dynamic/` and out of the archive; the full PHP Core
+  Project Brain suite is 673.
+
+### Two same-ticket events share the history layer — 2026-10-20
+
+- When the request names a ticket, the history layer admits the two
+  highest-ranked events that carry it instead of one; without a ticket it keeps
+  one. On the 12-prompt stand this delivered 18/37 answer passages instead of
+  15/37 (40.5% → 48.6%), 26 judged-useful paths instead of 21, with noise
+  unchanged at 10 and no unjudged documents after both new events were graded
+  1 (same ticket / same subject). The governed
+  capsule contract now keeps the changelog plus two event/episode slots.
+- `_under_git` asks Git whether a `.git` entry is a usable repository instead of
+  trusting the entry's existence. A stale or empty `.git` above a plain project
+  made `context-save` fail with "cannot verify source ignore rules"; the
+  outside-Git handoff test now covers that case.
+- Applying automatic consolidation to a copy of the evaluated project with its
+  cited sources created seven findings from 27 completed events, superseded all
+  27, blocked none, and passed `validate`. A generic latest goal no longer
+  becomes the finding title: `CMS-744: completed Verification: ...` became
+  `CMS-744: Remove legacy unsigned ACL headers and preserve SDK presigner
+  behavior`.
+- Tests: a named ticket delivers both of its events, the governed contract
+  keeps three history items, and a generic latest goal uses the descriptive
+  event title; the full PHP Core Project Brain suite is 678.
+
+### Memory maintenance runs on the turn boundary — 2026-10-19
+
+- `automatic_consolidation` is on in the shipped config (and in the generator's
+  `runtime.json.template`). At the same flush boundary that promotes and
+  compacts, the runtime collapses a ticket's completed-event series into one
+  observed finding before promotion, so the user does not run `consolidate`
+  for normal work. The command remains as the explicit replay/backfill.
+- An `auto-promoted` chunk whose title/body is instruction-like is now withheld
+  from retrieval automatically, because no person read it. A remote citation is
+  reported by `bank-audit --provenance` but is not withheld by itself: a pinned
+  source URL is legitimate evidence, and withholding every one lost a measured
+  useful chunk. Manually reviewed chunks are not withheld.
+- `automatic_consolidation: false` restores the previous event-only behavior.
+- The turn result reports `consolidation` (`enabled`, `created`, `superseded`,
+  `blocked`, `tickets`, `error`) beside promotion and compaction; a maintenance
+  failure is reported there rather than failing the checkpoint.
+- Tests: automatic boundary consolidation, disabled-setting behavior,
+  idempotent second boundary, shipped-config flag, and automatic withholding
+  of an auto-promoted instruction-like chunk.
+
+### Memory write path: consolidation, provenance and deterministic facts — 2026-10-19
+
+- `context.py consolidate --ticket T` (dry-run unless `--apply`) turns two or
+  more completed events for one ticket into one `resolved`/`observed` finding.
+  The finding cites the events' local existing sources, keeps their IDs and
+  `Verification:` lines in `progress`, and is idempotent. The source events are
+  transitioned to `superseded` by their own owner and are left for `compact` to
+  archive; private and restricted events are not folded into a team finding.
+- Automatic promotion now refuses a record whose cited source is `http(s)://`
+  or whose title/content is instruction-like (`ignore previous instructions`,
+  `system prompt`, chat-template control tokens). A person can still review and
+  promote such a record; the gate is only on the unreviewed path.
+- `bank-audit --provenance` adds active auto-promoted chunks, chunks citing a
+  remote source, and instruction-like chunks. `bank-quarantine --id ...` closes
+  a chunk's validity at today and archives it, so a suspected poisoned or unsafe
+  memory stops being served immediately.
+- `scripts/memory_fact_consolidation.py` implements the deterministic
+  conflict-resolution recipe: group candidates by fact, take the maximum
+  explicit serial/version/revision, break an equal version on `updated_at`, and
+  report a true tie as ambiguous. It is not wired into the capsule: records
+  that declare each other in `conflicts` remain shown together by contract.
+  The known-answer fixture is `tests/fixtures/fact-consolidation.json`. When two
+  records that declare each other in `conflicts` are both selected, the capsule
+  now names the partner paths in `conflict`, beside the existing
+  `match: conflict`; neither record is dropped.
+- `scripts/memory_sqlite_vec_pilot.py` probes local `sqlite-vec`/`sqlite-lembed`
+  assets and fuses lexical and dense path lists with RRF. It is maintainer-only,
+  never imported by the runtime, fails closed, and adds no default dependency;
+  see `docs/MEMORY-SQLITE-VEC-PILOT.md` and `docs/MEMORY-WRITE-PATH.md`.
+- Tests: five event-consolidation cases, provenance audit/quarantine, the
+  provenance problem gate, the fact-consolidation fixture and the fail-closed
+  pilot/RRF suite; the full PHP Core Project Brain suite is 671 tests.
+
+### A shared class name no longer anchors a weak match — 2026-10-19
+
+- A document whose only query match is a name-shaped word is admitted as
+  `distinctive`; the anchor test treated any CamelCase word as a name. On the
+  current 12-prompt run three chunks about neighbouring tickets filled the
+  capsule for a FileSubscriber cleanup prompt because they share the
+  `EventSubscriber` directory in their sources - that word appears in five
+  documents. A name-shaped term now anchors only when it appears in at most
+  three documents or carries a digit: the shared directory stops admitting,
+  while `loggableName` in one document still does. On the same run the three
+  chunks are gone, the prompt's `CHANGELOG.md` takes the room, and the useful
+  turn remains useful.
+- Recorded history's floor was the weight of a term appearing in 1.5
+  documents, so an event naming a ticket could never be reached when the
+  ticket's prefix was common: six CMS-741 events matched both query concepts
+  and none passed. A match that includes a name-shaped term now clears the
+  coverage floor, while a match of ordinary words keeps the strict floor, so
+  a weak event still leaves the slot empty (the weak-event contract test
+  passes). The CMS-741 turn gains its event and becomes useful.
+- The recorded-history slot now prefers the event that carries the ticket the
+  request names, when one is admitted. On `next-9293f3` (CMS-741) the
+  higher-scored CMS-740 event (8.22) led the slot while five CMS-741 events
+  followed; the CMS-741 event `805d009f` now takes the slot, and the CMS-740
+  event leaves. A request with no exact-ticket event keeps its current event,
+  so the ACL prompts helped by a CMS-743 event beside a CMS-735/753 request
+  are unchanged.
+- A durable chunk or finding that names only another ticket is withheld. On
+  `next-9293f3` the finding `903cd91e` (CMS-739) and on `next-3b2ec4` the
+  chunk `7cc0d43f` (CMS-739) were graded noise beside a CMS-741/735 request;
+  both are gone, with no useful document lost. A chunk with no ticket (the
+  TTL note in 5b9f61/6a4bf1) and a finding with the request's ticket are kept.
+- A changelog is kept when the request names it or it mentions a ticket the
+  request names; otherwise a request with a ticket the changelog lacks no
+  longer receives it. `next-32c2e4` (CMS-741) and `next-53eabd` (CMS-740)
+  lost a changelog that named neither, while `next-9293f3` keeps it because
+  the request names `CHANGELOG.md`, and 1145cc/3b2ec4/b548e8/5b9f61 keep it
+  because it names their ticket.
+- The working task supplies the ticket when the request names none: its
+  external id, title and goal are read in memory only. The ephemeral
+  evaluation has no task, so this is covered by its unit test rather than by
+  the 12-prompt run.
+- Measured on the same 12 prompts, with every delivered document graded by an
+  agent (not a person): useful turns rose from 10 to 12, useful documents from
+  18/35 to 21/31 (51.4% to 67.7%), answer passages from 13 to 16 of 38 (34.2%
+  to 42.1%) and answer-in-text from 7 to 10 of 12; noise fell from 17 to 10
+  documents. Warm refresh p50/p95 was 0.38/0.50 s and the largest capsule
+  3,193 characters. The anchor cap alone gives 11 useful turns and 14/38; the
+  anchor-specific history floor adds the last turn and 15/38; the exact-ticket
+  preference adds one useful document and 16/38; the two ticket filters
+  remove four noise documents without losing a useful one.
+
+### A changelog's excerpt starts at its newest entry — 2026-10-19
+
+- A document of kind `changelog` now quotes the first section that has a body,
+  and that section's opening, instead of the window its shared words picked.
+  On a conflict notice that names `CHANGELOG.md`, "web editor" and "command
+  line" matched an older entry about an entity menu and an editor; the newest
+  entry, which names the release the conflict is in, was never shown. The
+  same choice displaced the newest entry on review prompts whose vocabulary
+  recurs throughout the file.
+- The head window fills its allowance from the next sentence too: a changelog
+  entry is one long list item, and stopping at the first sentence cut the
+  answer that the entry carried. The window stays within its layer's limit,
+  and a head-preferring quote finds the first body section directly rather
+  than scoring every section of a file that can run past a megabyte; warm
+  refresh p50/p95 stayed around half a second (0.52/0.55 s against 0.48/0.53 s
+  before).
+- Measured on the 12-prompt labelled set with the answer passages normalised
+  to the entry body (the old labels carried the previous renderer's heading
+  prefix, which the current format no longer repeats): answer passages
+  delivered rose from 7 to 13 of 38 (18.4% to 34.2%) and `answer in the
+  capsule text` from 5 to 7 of 12, with the same 7 useful and 3 noise-only
+  turns, the same 2.92 delivered documents per turn and the same 22 graded
+  noise documents. The largest capsule grew from 3,172 to 3,193 characters,
+  under the 3,600 ceiling. Against the unnormalised labels the change is
+  neutral (7 of 38), because those passages include the heading prefix and
+  the full entry; the measurement artifact is recorded here rather than
+  fixed by re-adding headings to the rendered body.
+- The 12-prompt labels were written against the older runtime's event-heavy
+  delivery, and the current runtime deliberately caps recorded history at one
+  event, so comparing its answer recall to the older 28-of-38 score is not
+  like for like. The 15 ungraded documents were graded in the local corpus by
+  an agent, not a person; fresh human labels for the delivered set remain the
+  open measurement.
+- The excerpt pilot's stand-in for `excerpt_section`
+  (`scripts/stateful_pilot.py`) takes `prefer_head` and leaves a changelog's
+  head to the runtime instead of a scored section: without it every refresh
+  under the pilot failed with a TypeError, and the memory evaluation stand
+  went red. `tests/test_memory_onnx_pilot.py::ChangelogHeadPilotTests`.
+
+### Recent files from what the agent read and changed — 2026-10-18
+
+- The Stop hook hands `turn --transcript` the transcript the host names. The
+  runtime keeps the project files the turn read or changed - tool-call paths
+  and the words of shell commands (`cat`, `sed -n`, `grep`, `git diff`,
+  `git add`, redirections) that name an existing project file, changed
+  first - as the project's recent files in local state, newest first, 64 at
+  most. Commands, tool results and file contents are never kept;
+  dependencies, prose, ignored and secret-looking paths are left out; an
+  unreadable transcript records nothing and never fails the turn. Claude Code
+  and Codex transcripts are read; a host that names none keeps the old line.
+- The capsule's `recent files:` line shows ten - the project's, then the
+  task's changed files they do not name, whole paths within 720 characters -
+  and shows them before the task is recorded too. On 1,940 real Claude Code
+  turns of four projects, ten such files named at least one file the agent
+  then read or changed on 75% of new sessions' first turns (held-out, 140),
+  against 58% for the task's five changed files (+17 points, 95% CI 10-24);
+  the share of the needed files named rose from 31% to 54%. The reads came
+  almost wholly through shell commands: the Read tool's paths alone named
+  56%, no better than before.
+- Review fixes. A shell command is read with its quoting: split on `|` and
+  `;` as text, a quoted grep alternation, sed script or jq filter lost its
+  file (`rg "a|b" x.php`, `sed -n '1,20p;30,40p' x.php`). A redirection
+  names its file however it is written (`>out`, `&>out`, `>&out`,
+  `2>&1 >out`); `cd` and `git -C` move the words after them, a subshell's
+  `cd` ending with it; a here-document's body is data; `sed --in-place` and
+  `perl -pi` change their file, `cp` and `mv` only their last operand; and
+  Codex's PowerShell and cmd commands on native Windows are read. A turn now
+  starts at any user message but a local command's output: a slash command,
+  pasted text and a background task's `<task-notification>` (132 of 416 on
+  400 recent Claude Code transcripts went on to call tools) had joined the
+  turn before, whose files then came back as the newest. The task's changed
+  files the project's push off the line are counted in the compaction line
+  (they had gone without a word), and a lightweight capsule shows the line
+  too. `RecentFilesShellCommandTest` and `RecentProjectFilesTest` in
+  `project-brain/tests/test_runtime.py`.
+- `turn` reads the transcript after the turn's own record, flush and
+  promotion, and stops reading its calls after a second, keeping the files
+  found: read first, a long transcript on a slow disk could run the Stop
+  hook out of its five seconds and lose the checkpoint itself. Each checkout
+  of an attached project keeps its own recent files (an installed project
+  keeps them in its checkout's database, as before): attached checkouts
+  share one state, and parallel sessions in two worktrees named each other's
+  files. Excerpt growth reserves the whole `recent files:` line while the
+  capsule carries one, so a grown excerpt no longer makes the renderer cut
+  the later ones. `test_attached.py::AttachedRecentFilesTest`,
+  `RecentFilesExcerptRoomTest`.
+
 ### Excerpts grow into the capsule's room — 2026-10-17
 
 - The first and second delivered excerpts whose section runs on past their

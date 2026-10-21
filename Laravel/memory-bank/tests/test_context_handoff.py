@@ -322,6 +322,27 @@ class ContextHandoffTest(unittest.TestCase):
                                  "handoff.md", "--json"], text=True, capture_output=True)
         self.assertEqual(0, copied.returncode, copied.stderr)
 
+    def test_an_invalid_ancestor_git_directory_is_not_a_repository(self) -> None:
+        # A stale or empty `.git` directory above a project is not a Git
+        # repository. Treating its mere presence as one made every handoff
+        # save outside Git fail with "cannot verify source ignore rules".
+        parent = Path(self.tmp.name + "-invalid-git")
+        parent.mkdir()
+        self.addCleanup(shutil.rmtree, parent, True)
+        (parent / ".git").mkdir()
+        project = parent / "project"
+        project.mkdir()
+        (project / "index.php").write_text("<?php echo 1;\n", encoding="utf-8")
+        self.write_input(files=["index.php"])
+        saved = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(project), "context-save",
+             "--input", str(self.input), "--output", "tasks/handoff.md",
+             "--detail", "summary", "--source-client", "claude"],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(0, saved.returncode, saved.stderr)
+
     def test_attached_layout_reads_the_project_and_never_writes_into_the_state(self) -> None:
         state = Path(self.tmp.name + "-state")
         state.mkdir()

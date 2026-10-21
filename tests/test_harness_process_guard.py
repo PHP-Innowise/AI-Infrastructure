@@ -93,10 +93,12 @@ class ProcessGuardTests(unittest.TestCase):
         except ProcessLookupError:
             return False
         # A killed orphan can await reaping by the system's init process.
+        # Reaped between the open and the read, its stat file answers ESRCH
+        # (ProcessLookupError), not a missing file: either way it is gone.
         status = Path(f"/proc/{pid}/stat")
         try:
             return status.read_text().rsplit(") ", 1)[1].split()[0] != "Z"
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             return False
 
     def test_native_io_and_exit_status_pass_through_without_shell(self):

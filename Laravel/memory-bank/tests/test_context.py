@@ -3221,5 +3221,55 @@ class ContextCliBytecodeTest(unittest.TestCase):
                 written = self.cache(runtime)
 
 
+class ChangelogExcerptTest(unittest.TestCase):
+    """A chronological document answers from its newest entry."""
+
+    CHANGELOG = (
+        "# Changelog\n\n## 1.15.0 [unreleased]\n"
+        "- fix [Core] CMS-737 The drop is reported on a budget of its own.\n"
+        "- chore [App] CMS-751 The storage guard reads the ids the owner pins.\n"
+    )
+
+    def test_the_head_is_the_first_entry_not_the_matching_one(self):
+        section = CONTEXT.quoted_section(self.CHANGELOG, "Changelog", prefer_head=True)
+        self.assertEqual("1.15.0 [unreleased]", section["heading"])
+        text = CONTEXT.excerpt_window(section["units"], 90, prefer_head=True)
+        self.assertTrue(text.startswith("- fix [Core] CMS-737"), text)
+        self.assertNotIn("CMS-751", text)
+
+    def test_a_keep_a_changelog_preamble_is_not_the_newest_entry(self):
+        changelog = (
+            "# Changelog\n\n"
+            "All notable changes to this project will be documented in this file.\n\n"
+            "The format is based on [Keep a Changelog](https://keepachangelog.com/),\n"
+            "and this project adheres to Semantic Versioning.\n\n"
+            "## [Unreleased]\n\n"
+            "## [1.2.0] - 2026-10-01\n### Fixed\n"
+            "- Invoice totals now round half-up per line before tax.\n\n"
+            "## [1.1.0] - 2026-09-01\n### Added\n- Invoice CSV export.\n"
+        )
+        section = CONTEXT.quoted_section(changelog, "Changelog", prefer_head=True)
+        self.assertEqual("[1.2.0] - 2026-10-01 › Fixed", section["heading"])
+        self.assertEqual(["- Invoice totals now round half-up per line before tax."], section["units"])
+        # A document of nothing but its preamble still answers with it.
+        only = CONTEXT.quoted_section("# Changelog\n\nNothing released yet.\n", "Changelog",
+                                      prefer_head=True)
+        self.assertEqual(["Nothing released yet."], only["units"])
+        # A version that is a first-level heading is an entry, not a title.
+        versions = CONTEXT.quoted_section("# 1.2.0\n- Round half-up.\n# 1.1.0\n- Export.\n",
+                                          "Changelog", prefer_head=True)
+        self.assertEqual(("1.2.0", ["- Round half-up."]), (versions["heading"], versions["units"]))
+
+    def test_the_head_fills_with_the_next_sentence(self):
+        units = [
+            "- fix [Core] CMS-737 The first sentence.",
+            "The second sentence continues well past the remaining room. " + "detail " * 20,
+        ]
+        text = CONTEXT.excerpt_window(units, 100, prefer_head=True)
+        self.assertTrue(text.startswith("- fix [Core] CMS-737 The first sentence."), text)
+        self.assertIn("The second sentence continues", text)
+        self.assertLessEqual(len(text), 100)
+
+
 if __name__ == "__main__":
     unittest.main()

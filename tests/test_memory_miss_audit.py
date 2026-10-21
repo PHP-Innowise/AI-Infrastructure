@@ -40,13 +40,13 @@ class MissAuditTests(unittest.TestCase):
         self.connection.close()
         self.temporary.cleanup()
 
-    def add_document(self, path: str, content: str, *, title: str = "Neutral") -> None:
+    def add_document(self, path: str, content: str, *, title: str = "Neutral", kind: str = "memory") -> None:
         target = self.corpus / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         self.connection.execute(
-            "INSERT INTO documents(path, layer, kind, title, summary, content) VALUES (?, 'semantic', 'memory', ?, '', ?)",
-            (path, title, content),
+            "INSERT INTO documents(path, layer, kind, title, summary, content) VALUES (?, 'semantic', ?, ?, '', ?)",
+            (path, kind, title, content),
         )
         self.connection.execute(
             "INSERT INTO document_metadata(path, category, privacy, owner, authority, lifecycle, source_hash, record_id, conflicts) VALUES (?, 'durable', 'internal', '*', 'verified', 'active', ?, NULL, '[]')",
@@ -64,11 +64,40 @@ class MissAuditTests(unittest.TestCase):
         result = audit.audit(self.corpus, self.manifest("zirconium"), ["docs/a.md"])
         self.assertEqual("no-fts-candidate", result["items"][0]["stage"])
 
+    def test_the_audit_uses_the_same_identifier_expansion_as_runtime(self) -> None:
+        self.connection.execute(
+            "CREATE TABLE identifier_terms(path TEXT, identifier TEXT, expansion TEXT)"
+        )
+        self.connection.execute(
+            "INSERT INTO identifier_terms VALUES ('docs/a.md', 'findUserByEmail', 'find user by email')"
+        )
+        self.add_document("docs/a.md", "Call findUserByEmail during login.")
+        result = audit.audit(
+            self.corpus,
+            self.manifest("find user by email", [{"path": "docs/a.md"}]),
+            ["docs/a.md"],
+        )
+        self.assertEqual("selected", result["items"][0]["stage"])
+
     def test_reports_relevance_drop_after_bounded_fts_window(self) -> None:
         self.add_document("docs/a.md", "alpha only")
         self.add_document("docs/b.md", "beta only")
         result = audit.audit(self.corpus, self.manifest("alpha beta"), ["docs/a.md"])
         self.assertEqual("relevance-drop", result["items"][0]["stage"])
+
+    def test_heading_markers_do_not_make_a_delivered_answer_look_absent(self) -> None:
+        content = "# Changelog\n\n## 1.0\n\nThe entry answer is here."
+        self.add_document("CHANGELOG.md", content)
+        result = audit.audit(
+            self.corpus,
+            self.manifest("answer", [{"path": "CHANGELOG.md"}]),
+            ["CHANGELOG.md"],
+            answer_passages={"CHANGELOG.md": ["# Changelog\n## 1.0\nThe entry answer is here."]},
+            capsule_text="The entry answer is here.",
+        )
+        item = result["items"][0]
+        self.assertEqual("selected", item["stage"])
+        self.assertEqual({"eligible": 1, "indexed": 1, "delivered": 1}, item["answer_counts"])
 
     def test_partial_answer_in_selected_document_is_excerpt_loss(self) -> None:
         content = "First required answer. Second required answer."
@@ -109,6 +138,39 @@ class MissAuditTests(unittest.TestCase):
         )
         self.assertEqual({"docs/a.md": ["A useful sentence"]}, passages)
 
+    def test_history_without_git_context_is_unknown_not_an_exception(self) -> None:
+        class SourceGitError(Exception):
+            pass
+
+        runtime = SimpleNamespace(
+            miss_audit_sanitizer=lambda text: text,
+            history_query=mock.Mock(return_value={"history": True}),
+            _history_candidates=mock.Mock(return_value=([{"path": "target"}], [])),
+            _best_history_event=mock.Mock(side_effect=SourceGitError("no git")),
+            load_config=mock.Mock(return_value={}),
+            workspace_roots=SimpleNamespace(SourceGitError=SourceGitError),
+        )
+        self.assertEqual(
+            "unknown-history",
+            audit._history_stage(self.corpus, self.connection, runtime, "target", "subject"),
+        )
+
+    def test_one_unavailable_history_path_does_not_erase_other_stages(self) -> None:
+        event = "project-brain/dynamic/events/11111111-1111-4111-8111-111111111111.md"
+        self.add_document(event, "Event subject", kind="brain-event")
+        self.add_document("docs/a.md", "answer")
+        value = audit.audit(
+            self.corpus,
+            self.manifest("answer", [{"path": "docs/a.md"}]),
+            [event, "docs/a.md"],
+            history_text="subject",
+        )
+        stages = {item["path"]: item["stage"] for item in value["items"]}
+        self.assertEqual("selected", stages["docs/a.md"])
+        self.assertIn(stages[event], {"unknown", "unknown-history"})
+        self.assertTrue(next(item for item in value["items"] if item["path"] == event)["history"])
+        self.assertEqual("ok", value["status"])
+
     def test_history_uses_whole_screened_prompt_and_distinct_pipeline(self) -> None:
         runtime = SimpleNamespace(
             miss_audit_sanitizer=lambda text: text,
@@ -125,6 +187,22 @@ class MissAuditTests(unittest.TestCase):
         self.assertEqual("history-admission-drop", audit._history_stage(self.corpus, self.connection, runtime, "absent", "subject"))
         runtime._best_history_event.return_value = ([], [{"path": "target", "reason": "privacy"}])
         self.assertEqual("runtime-exclusion", audit._history_stage(self.corpus, self.connection, runtime, "target", "subject"))
+        runtime._best_history_event.return_value = ([], [])
+        self.assertEqual("history-admission-drop", audit._history_stage(self.corpus, self.connection, runtime, "target", "subject"))
+        self.assertIs(self.connection, runtime._best_history_event.call_args.kwargs.get("connection"))
+
+    def test_seed_git_is_disposable_and_removed_after_the_audit(self) -> None:
+        event = "project-brain/dynamic/events/11111111-1111-4111-8111-111111111111.md"
+        self.add_document(event, "Event subject", kind="brain-event")
+        value = audit.audit(
+            self.corpus,
+            self.manifest("subject"),
+            [event],
+            history_text="subject",
+            seed_git=True,
+        )
+        self.assertEqual("ok", value["status"])
+        self.assertFalse((self.corpus / ".git").exists())
 
     def test_manifest_link_cap_and_report_are_visible_only_when_opted_in(self) -> None:
         self.add_document("docs/a.md", "answer")

@@ -260,7 +260,11 @@ class TaskContextTests(unittest.TestCase):
                    'working': {'task_id': 'TASK-H'}, 'procedural': [], 'semantic': [],
                    'episodic': [{'path': 'project-brain/dynamic/events/x.md'}, {'path': 'CHANGELOG.md'}]}
         TaskContext._validate_capsule(capsule, task)
-        capsule['episodic'].append({'path': 'docs/third.md'})
+        # Two events of the ticket a request names share the history layer
+        # beside the changelog; a Harness session refused that capsule.
+        capsule['episodic'].insert(1, {'path': 'project-brain/dynamic/events/y.md'})
+        TaskContext._validate_capsule(capsule, task)
+        capsule['episodic'].append({'path': 'docs/fourth.md'})
         with self.assertRaises(sessions.SessionError):
             TaskContext._validate_capsule(capsule, task)
 

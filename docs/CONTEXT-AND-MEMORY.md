@@ -150,17 +150,26 @@ The Local Context Engine is the Python/SQLite retrieval runtime exposed through
 It provides:
 
 - SQLite FTS5/BM25 lexical indexing and search;
+- a derived identifier index that maps "get user by id" to `getUserById`, so
+  prose reaches a code name without a model; the identifier itself remains an
+  exact token and is never expanded into its words;
 - task-aware context assembly;
 - eligibility metadata and freshness checks;
 - bounded snippets and estimated-token budgets;
 - machine-local task bindings in governed mode;
 - optional local working tasks and replay episodes in lightweight mode.
 
-The database is derived and disposable only in part. Its document and metadata
-indexes can be rebuilt from repository sources. Governed compatibility bindings
-can be restored from Git-tracked task records with `rebind`, and the next
-automated turn flush performs the same restoration. Lightweight tasks and local
-episodes remain machine-local and cannot be reconstructed after deletion.
+The database is derived and disposable only in part. Its document, metadata
+and identifier indexes can be rebuilt from repository sources. The identifier
+table stores only path, identifier and expansion; a changed document replaces
+its rows, and an index created before the table rebuilds it once. Query
+expansion is a candidate aid, never an admission rule: coverage, authority,
+privacy, freshness and source hashes still decide what a capsule may carry.
+
+Governed compatibility bindings can be restored from Git-tracked task records
+with `rebind`, and the next automated turn flush performs the same restoration.
+Lightweight tasks and local episodes remain machine-local and cannot be
+reconstructed after deletion.
 
 The active provider is local `sqlite-fts5`: network access and embeddings are
 disabled. An external provider entry exists only as a disabled contract.
@@ -367,9 +376,11 @@ raw customer data, production identifiers, confidential logs, or unredacted
 payloads.
 
 Use a **decision** for a proposed project choice that needs acceptance or
-rejection and may later be superseded. If the decision changes architecture,
-API behavior, schema, security behavior, or another living contract, update the
-canonical specification too; the Brain decision does not replace it.
+rejection and may later be superseded. Record the alternatives that lost and
+why; that section is what stops a later task from proposing the same rejected
+option. If the decision changes architecture, API behavior, schema, security
+behavior, or another living contract, update the canonical specification too;
+the Brain decision does not replace it.
 
 Use an **event** for a notable immutable occurrence. Event content cannot be
 updated; only lifecycle supersession is supported. Do not use events as an
@@ -1242,7 +1253,8 @@ The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
 policy filtering, the delivered capsule is independently capped at 3 semantic
-and 2 episodic items (the changelog and one recorded event or episode) and
+and 3 episodic items (the changelog and up to two recorded events, or one
+local episode) and
 8,000 serialized characters; it carries no procedural item. Snippets are
 deterministically shortened as needed.
 
@@ -1439,7 +1451,11 @@ propose -> independent human review -> apply
 ```
 
 The automatic mode, enabled by `automatic_promotion` in `runtime.json`, runs
-unattended on the same boundary as the working-memory flush:
+unattended on the same boundary as the working-memory flush. With
+`automatic_consolidation` (off unless a project sets it), that boundary first
+writes a ticket's completed-event series into one finding that carries every
+event's outcome; the events stay recorded until a chunk carries that finding
+(see `consolidate` in [OPERATIONS.md](OPERATIONS.md)):
 
 ```text
 propose -> apply
@@ -1837,6 +1853,31 @@ loads by itself as `host-loaded` — `CLAUDE.md` and its `@path` imports for
 Claude Code, `AGENTS.md` for Codex. On two real installations `CLAUDE.md` had
 held a procedural slot on most Claude Code turns.
 
+`recent files:` names the files the work is in. The Stop hook hands the turn
+its host transcript (`turn --transcript`), and the runtime keeps from it only
+the project files the turn read or changed: tool-call paths, and the words of
+shell commands - `cat`, `sed -n`, `grep`, `git diff`, `git add`, a redirection
+- that name an existing project file, changed first. The project's newest 64
+stay in local state (`index_state`), newest first; the capsule shows ten, then
+the task's own changed files, whole paths only, and shows them before the task
+is recorded too, on a new branch's first turns. Dependencies (`vendor/`,
+`node_modules/`, `var/`), prose, ignored and secret-looking paths are left out,
+and commands, tool results and file contents are never kept. On 1,940 real
+Claude Code turns ten such files named a file the agent then read or changed on
+75% of new sessions' first turns, against 58% for the task's five changed
+files; the reads came almost wholly through shell commands, not the Read tool.
+
+A command is read as the shell reads it: quoting keeps a `|` or `;` inside an
+argument (`rg "a|b" x.php`), a redirection names its file however it is
+written, `cd` and `git -C` move the words after them, a here-document's body
+is data, and Codex's PowerShell and cmd commands on native Windows are read
+too. The turn starts at the last user message that is not a local command's
+output - a prompt, a slash command, pasted text or a task notification. A task
+file the line leaves out is counted in the compaction line. The transcript is
+read after the turn is recorded, for a second at most; each checkout of an
+attached project keeps its own list; and excerpt growth leaves the line its
+720 characters.
+
 The capsule is retrieved context, not authority: the ordinary hierarchy still
 applies, and a capsule entry never outranks the source it summarizes.
 
@@ -1895,15 +1936,18 @@ command with the caller's current numeric revision and verification evidence.
 Merging the default branch *into* a long-running branch is not a candidate; the
 default branch itself and deleted branches are also excluded.
 
-With `automatic_promotion` enabled, the turn hook also promotes eligible
-resolved knowledge into durable memory on the same boundary, and with
-`automatic_compaction` it archives terminal records once `compaction_threshold`
-of them have accumulated. Compaction runs in batches rather than every turn:
-archiving one record at a time would churn Git history for no benefit.
+With `automatic_consolidation` enabled, the turn hook first writes a ticket's
+completed events into one finding, and lets the events go once a Memory Bank
+chunk carries it. With
+`automatic_promotion` it then promotes eligible resolved knowledge into durable
+memory, and with `automatic_compaction` it archives terminal records once
+`compaction_threshold` of them have accumulated. Compaction runs in batches
+rather than every turn: archiving one record at a time would churn Git history
+for no benefit.
 
-The order within a turn is fixed — report completion candidates, promote, then
-archive. Archived records stay promotable, so a promotion run that hits its
-per-run cap does not lose the remainder to the archive.
+The order within a turn is fixed — report completion candidates, consolidate,
+promote, then archive. Archived records stay promotable, so a promotion run
+that hits its per-run cap does not lose the remainder to the archive.
 
 This distinction matters: a healthy status line means the tools are available;
 it does not mean an agent has loaded, verified, or acted on the relevant

@@ -846,6 +846,88 @@ class ScoringTest(unittest.TestCase):
         self.assertEqual((summary["mean_delivered"], summary["mean_noise"]), (1.0, 0.5))
         self.assertEqual((summary["latency_p50"], summary["latency_p95"]), (0.2, 0.4))
 
+    def test_heading_only_labels_are_reported_but_not_answers(self) -> None:
+        labels = {
+            "docs/a.md": {"useful": True, "passages": ["# Changelog ## 1.0"]},
+            "docs/b.md": {"useful": True, "passages": ["# Changelog\nThe body answer."]},
+        }
+        self.assertEqual("", memory_eval.passage_body("# Changelog ## 1.0"))
+        self.assertEqual(
+            {"the body answer."},
+            memory_eval.labelled_passages(["docs/a.md", "docs/b.md"], labels),
+        )
+        self.assertEqual(
+            {"docs/a.md": [], "docs/b.md": ["# Changelog\nThe body answer."]},
+            memory_eval.audit_answer_passages({"docs/a.md": 1, "docs/b.md": 1}, labels),
+        )
+
+    def test_candidate_and_selected_recall_summary(self) -> None:
+        audit = {
+            "items": [
+                {"path": "docs/a.md", "stage": "selected", "answer": "delivered"},
+                {"path": "docs/b.md", "stage": "relevance-drop", "answer": "not-in-delivery"},
+                {"path": "docs/c.md", "stage": "no-fts-candidate", "answer": "not-in-delivery"},
+                {"path": "docs/d.md", "stage": "absent-source", "answer": "not-in-source"},
+                {"path": "docs/e.md", "stage": "unknown", "answer": "unknown"},
+                {"path": "docs/event.md", "stage": "unknown-history", "answer": "delivered"},
+            ]
+        }
+        summary = memory_eval.summarize({
+            "a": {
+                "status": "ok", "class": "useful", "could_help": True,
+                "answer_in_text": True, "delivered": ["docs/a.md"],
+                "noise_delivered": [], "unjudged": [], "miss_audit": audit,
+                "refresh": {"seconds": 0.1},
+            },
+            "b": {"status": "skipped", "reason": "no-history"},
+        })
+        result = summary["miss_audit"]
+        self.assertEqual(6, result["known_paths"])
+        self.assertEqual(2, result["unknown_paths"])
+        self.assertEqual(3, result["eligible_paths"])
+        self.assertEqual(0.6667, result["candidate_recall"])
+        self.assertEqual(0.3333, result["selected_recall"])
+        self.assertEqual(1, result["history_paths"])
+        self.assertEqual(1, result["history_delivered"])
+        self.assertEqual(1.0, result["history_recall"])
+        self.assertEqual(1, result["stages"]["selected"])
+        report = memory_eval.format_report([(
+            "A", Path("a.json"),
+            {"meta": {}, "items": {"a": {
+                "status": "ok", "class": "useful", "could_help": True,
+                "answer_in_text": True, "delivered": ["docs/a.md"],
+                "noise_delivered": [], "unjudged": [], "miss_audit": audit,
+                "refresh": {"seconds": 0.1},
+            }}},
+        )])
+        self.assertIn("audit: candidate recall", report)
+        self.assertIn("audit: selected recall", report)
+        self.assertIn("audit: history recall", report)
+        self.assertIn("retrieval loss", report)
+
+    def test_history_event_limit_is_part_of_the_selected_denominator(self) -> None:
+        audit = {
+            "items": [
+                {"path": "docs/a.md", "stage": "selected", "answer": "delivered"},
+                {"path": "docs/event.md", "stage": "history-event-limit", "answer": "not-in-delivery"},
+            ]
+        }
+        summary = memory_eval.summarize({
+            "a": {
+                "status": "ok", "class": "useful", "could_help": True,
+                "answer_in_text": True, "delivered": ["docs/a.md"],
+                "noise_delivered": [], "unjudged": [], "miss_audit": audit,
+                "refresh": {"seconds": 0.1},
+            }
+        })
+        result = summary["miss_audit"]
+        self.assertEqual(2, result["eligible_paths"])
+        self.assertEqual(1.0, result["candidate_recall"])
+        self.assertEqual(0.5, result["selected_recall"])
+        self.assertEqual(1, result["history_paths"])
+        self.assertEqual(0, result["history_delivered"])
+        self.assertEqual(0.0, result["history_recall"])
+
     def test_paired_diff(self) -> None:
         first = {
             "a": {"status": "ok", "class": "useful", "answer_in_text": True},
