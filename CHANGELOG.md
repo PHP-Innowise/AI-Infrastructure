@@ -28,6 +28,92 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Review of the consolidation and ticket work — 2026-10-21
+
+Fixes for what a review of the twelve unpushed commits of 2026-10-20/21 found,
+each reproduced through the CLI on a temporary repository. Every behaviour
+change below has a test that fails on `a47e1eb8`.
+
+- **Inventories.** `install/inventories/*.json` carry
+  `memory-bank/tests/test_identifier_terms.py`; `--verify-inventories` is
+  VERIFIED again and the `installation` job passes.
+- **A ticket is `PREFIX-123`, not "PHP 8.2".** A space no longer joins a
+  prefix and a number, a number that runs on into a decimal is a version, and
+  a standard's prefix - `UTF-8`, `PSR-4`, `SHA-256`, `ISO-8601`, … - is never a
+  ticket (`brain_runtime.ticket_ids`, shared by consolidation and retrieval).
+  The index also keeps the prefixes the project files its work under - its
+  tasks' IDs and the tasks its completion events name (`ticket-prefixes` in
+  `index_state`) - and, once there are any, retrieval counts only those, so
+  `GPT-4` or `COVID-19` is not a ticket where the work is `CMS-741`. A request
+  about Composer "on PHP 8.2" no longer withholds the chunk naming PSR-4, and
+  in task `CMS-741` the chunk about UTF-8 exports is delivered again.
+- **Consolidation keeps what the events said.** The finding carries every
+  event on a line of its own - what was done, the outcome and its
+  `Verification:` - not only the latest event's topic. Retrieval serves no
+  resolved finding, so the events stay `recorded` until the finding's current
+  revision is an active Memory Bank chunk; only then does a pass supersede
+  them. A fresh clone after the flush answers "How are invoice totals rounded
+  for CMS-741?" from the rounding event (observed) or from the chunk
+  (verified and promoted); before, both events had left retrieval.
+- Consolidation no longer supersedes events "into" another resolved finding of
+  the ticket - active or archived - that does not carry their text: they stay
+  recorded and the ticket is reported `existing`.
+- The actor of a supersession is the operator, never the event's owner;
+  another owner's events are skipped and left to that owner.
+- `all_verified` counts events with a `Verification:` line: two events that
+  both say "unit tests passed" verify the finding.
+- Events that reach a ticket after its finding was written are added to it
+  (`updated`) instead of staying "already exists" for good; a verified finding
+  takes only verified events, re-attested by the agent, and an archived one is
+  followed by a new finding. A pass reads the archive and the promotion ledger
+  once, and not at all when every ticket's finding covers its events - it read
+  the archive once per such ticket on every flush. At 40 such tickets and
+  2,000 archived records a pass took 540 ms and now takes 12 ms.
+- **Consolidation is opt-in.** `load_config` defaults
+  `automatic_consolidation` and `automatic_consolidation_verification` to
+  `false`, like promotion and compaction, and the four editions' `runtime.json`
+  and the generator's `runtime.json.template` now ship them `false` too: the
+  pass rewrites the team's tracked Brain on its first flush (27 of 28 events on
+  the evaluated project) and a verified summary becomes an agent-attested chunk
+  no person reviewed, and the redesigned pass has not been measured on a real
+  project yet. The `consolidate` command is unchanged as the explicit replay.
+- The same commits had copied PHP Core's `runtime.json` over the other
+  editions: Laravel, Symfony and WordPress are `laravel`, `symfony` and
+  `wordpress` again, and Symfony's tool-owned Cursor `skill-creator` command
+  and agent, which `build_mirrors --write` had overwritten once the framework
+  read `php-core`, are restored with their `.gitattributes` lines.
+- **The changelog quote is its newest version.** A Keep a Changelog file was
+  quoted from its preamble ("All notable changes …"); the head quote now skips
+  the prose under the document title and names an entry whose heading has no
+  prose of its own with its subsection: `[1.2.0] - 2026-10-01 › Fixed`.
+- **Russian aliases add, they do not replace.** `query_tokens` keeps the
+  Russian word beside its English term, so the chunk "Поля сущности счёта" is
+  found by "Какие поля у сущности?" again, and each alias matches whole word
+  forms: `логика`/`логин` are not log, `старт`/`стараться` not legacy,
+  `действительно`/`действие` not validity, `полезно` not field.
+- **Event slot.** Two events share the history slot only when events carry
+  the ticket the request names; a ticket no event carries, or "PHP 8.3", left
+  two neighbours there. The slot again weighs the halving for a changed
+  source: a fresh 9.6 beats a 12.5 halved to 6.3.
+- **Provenance is screened at indexing.** An auto-promoted chunk is checked
+  for instruction-like text when it is indexed, under the same screened hash
+  as the secret scan, instead of being read and scanned on every refresh. A
+  warm `retrieve` with 1,000 such chunks took 359 ms on `a47e1eb8` and 284 ms
+  before the check existed; it takes 238 ms now. A changed pattern set
+  (`provenance-policy-fingerprint`) screens every chunk again.
+- `bank-audit` without `--provenance` no longer prints a provenance line it
+  never counted.
+- The capsule's episodic layer holds three items - the changelog and up to two
+  recorded events - since the two-event slot: `AGENTS.md` (four editions), the
+  `project-brain` skill, `PROTOCOL.md`, the READMEs, `docs/OPERATIONS.md` and
+  `docs/CONTEXT-AND-MEMORY.md` said two, and the Harness capsule validator
+  refused a third item.
+- Documentation: `docs/MEMORY-WRITE-PATH.md`, `docs/OPERATIONS.md` and
+  `docs/CONTEXT-AND-MEMORY.md` describe the consolidation above and no longer
+  call it on by default; `docs/RE-MEMORY-APPLICATIONS-2026-10.md` no longer
+  says nothing was installed while its section 11 records the `dsh-ltm`
+  deployment.
+
 ### A same-ticket event series pilot — 2026-10-21
 
 - `CONTEXT_EVENT_SERIES=1` is an opt-in experiment: when the request names no

@@ -1253,7 +1253,8 @@ The internal category limits are policy 1,200, handoff 1,500, durable 3,500,
 dynamic 1,500, and evidence 2,000 estimated tokens. Candidate selection has an
 8,000-token target and a 12,000-token conflict ceiling. After ranking and
 policy filtering, the delivered capsule is independently capped at 3 semantic
-and 2 episodic items (the changelog and one recorded event or episode) and
+and 3 episodic items (the changelog and up to two recorded events, or one
+local episode) and
 8,000 serialized characters; it carries no procedural item. Snippets are
 deterministically shortened as needed.
 
@@ -1451,9 +1452,10 @@ propose -> independent human review -> apply
 
 The automatic mode, enabled by `automatic_promotion` in `runtime.json`, runs
 unattended on the same boundary as the working-memory flush. With
-`automatic_consolidation` (on by default in the shipped config), that boundary
-first collapses a ticket's completed-event series into one observed finding;
-set it to `false` to keep every event as its own record:
+`automatic_consolidation` (off unless a project sets it), that boundary first
+writes a ticket's completed-event series into one finding that carries every
+event's outcome; the events stay recorded until a chunk carries that finding
+(see `consolidate` in [OPERATIONS.md](OPERATIONS.md)):
 
 ```text
 propose -> apply
@@ -1934,8 +1936,9 @@ command with the caller's current numeric revision and verification evidence.
 Merging the default branch *into* a long-running branch is not a candidate; the
 default branch itself and deleted branches are also excluded.
 
-With `automatic_consolidation` enabled, the turn hook first collapses a
-ticket's completed events into one observed finding. With
+With `automatic_consolidation` enabled, the turn hook first writes a ticket's
+completed events into one finding, and lets the events go once a Memory Bank
+chunk carries it. With
 `automatic_promotion` it then promotes eligible resolved knowledge into durable
 memory, and with `automatic_compaction` it archives terminal records once
 `compaction_threshold` of them have accumulated. Compaction runs in batches

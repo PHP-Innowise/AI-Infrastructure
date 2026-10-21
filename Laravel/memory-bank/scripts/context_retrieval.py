@@ -1016,11 +1016,6 @@ DISTINCTIVE_DOCUMENT_RATIO = 0.1
 # version or record number) anchors regardless: it names one thing even when
 # several records cite it.
 ANCHOR_DOCUMENT_LIMIT = 3
-# A ticket, issue or record number in a request: the prefix and its number.
-# Exact-ticket events lead the recorded-history slot when the request names
-# one; a neighbouring ticket's event stays available only when no event
-# carries the named ticket.
-_TICKET_ID = re.compile(r"\b([A-Z]{2,10})[- ](\d{1,6})\b")
 MAPPED_COMMIT_PATTERN = re.compile(r"^mapped_commit:\s*([0-9a-fA-F]{7,40})\s*$", re.M)
 MAPPED_SCOPE_PATTERN = re.compile(r"^mapped_scope:\s*(\S+)\s*$", re.M)
 CODEBASE_MAP_MAX_DRIFT = 25
@@ -1029,6 +1024,9 @@ DELETE_CHUNK = 500
 INDEX_CONFIG_KEY = "config-fingerprint"
 INDEX_SKILL_KEY = "skill-tree-fingerprint"
 INDEX_SECRET_POLICY_KEY = "secret-policy-fingerprint"
+# The instruction patterns an auto-promoted chunk is screened against: an
+# index that admitted a chunk under other patterns has not screened it.
+INDEX_PROVENANCE_POLICY_KEY = "provenance-policy-fingerprint"
 INDEX_PARITY_KEY = "skill-parity-drift"
 # A fresh value is stamped whenever index_documents rewrites the tables, so
 # anything derived from index content (the token-frequency cache below) can
@@ -1043,6 +1041,10 @@ INDEX_BRAIN_ROWS_KEY = "brain-rows-digest"
 # records, earliest created first: two copies of a branch that each started
 # its task and were merged. Kept by the index pass, read by the capsule.
 TASK_TWINS_KEY = "task-twins"
+# The ticket prefixes this project files its work under - its tasks' IDs and
+# the tasks its completion events name - so that `CMS-741` is a ticket here
+# and `GPT-4` is not. Kept by the index pass, read by retrieval.
+TICKET_PREFIXES_KEY = "ticket-prefixes"
 TOKEN_FREQUENCY_LIMIT = 4096
 
 # Porter wraps unicode61 so "rounding" matches "round" and "review" matches
@@ -1364,6 +1366,7 @@ def index_fingerprints(
         INDEX_CONFIG_KEY: config_fingerprint(repository),
         INDEX_SKILL_KEY: skill_tree_fingerprint(repository, skill_stats),
         INDEX_SECRET_POLICY_KEY: secret_policy_fingerprint(),
+        INDEX_PROVENANCE_POLICY_KEY: brain_runtime.provenance_policy_fingerprint(),
     }
 
 
@@ -1384,6 +1387,10 @@ def reusable_source_state(
     if stored.get(INDEX_SECRET_POLICY_KEY) != fingerprints[INDEX_SECRET_POLICY_KEY]:
         # Indexed text is masked by the secret patterns, so a changed pattern
         # set must reach documents whose files did not change.
+        return {}, fingerprints
+    if stored.get(INDEX_PROVENANCE_POLICY_KEY) != fingerprints[INDEX_PROVENANCE_POLICY_KEY]:
+        # A retained chunk is not screened again (memory_eligibility), so a
+        # changed instruction pattern set must reach unchanged chunks too.
         return {}, fingerprints
     indexed = {row[0] for row in connection.execute("SELECT path FROM documents")}
     return {
@@ -3320,7 +3327,11 @@ def _brain_rows(repository: Path, config: dict[str, Any], stored: Optional[dict[
     eligible_tasks: dict[str, dict[str, Any]] = {}
     problems: list[dict[str, Any]] = []
     claims: dict[str, list[tuple[str, str]]] = {}
+    prefixes: set[str] = set()
     for path, record, body, source_text in brain_runtime.iter_record_images(repository, problems=problems):
+        # Every record read, eligible or not: a completed task still names
+        # the prefix its project's work goes under.
+        prefixes |= brain_runtime.work_ticket_prefixes(record)
         if record["type"] == "task" and record.get("status") not in brain_runtime.TERMINAL_STATES:
             claims.setdefault(str(record["external_id"]), []).append(
                 (str(record.get("created_at") or ""), str(record["id"])))
@@ -3451,6 +3462,7 @@ def _brain_rows(repository: Path, config: dict[str, Any], stored: Optional[dict[
     state_updates[TASK_TWINS_KEY] = json.dumps(
         {external: [identifier for _, identifier in sorted(ids)]
          for external, ids in claims.items() if len(ids) > 1}, sort_keys=True)
+    state_updates[TICKET_PREFIXES_KEY] = json.dumps(sorted(prefixes))
     return documents, metadata_rows, excluded, links, state_updates
 
 
@@ -3965,49 +3977,55 @@ def index_documents(
 
 
 # A seed glossary for the Russian technical questions this project actually
-# receives. It is deliberately small and prefix-based, and it only rewrites
-# Cyrillic words: an English query, a code identifier or a ticket is left
-# untouched. This is a bridge, not a translation service; a project with a
-# different language should extend `_QUERY_ALIASES` rather than expect a model
-# call from the indexing hot path.
-_QUERY_ALIASES = (
-    ("предотвращ", "prevent"),
-    ("подделк", "spoof"),
-    ("вложенн", "nested"),
-    ("неизвестн", "unknown"),
-    ("записыва", "written"),
-    ("отбрасыва", "drop"),
-    ("просмотр", "preview"),
-    ("временн", "temporary"),
-    ("действ", "validity"),
-    ("измен", "change"),
-    ("админк", "admin"),
-    ("стар", "legacy"),
-    ("файл", "files"),
-    ("свойств", "properties"),
-    ("сущност", "entity"),
-    ("строк", "lines"),
-    ("списк", "list"),
-    ("пут", "path"),
-    ("лог", "log"),
-    ("поля", "field"),
-    ("поле", "field"),
-    ("полей", "field"),
-    ("полю", "field"),
-    ("полем", "field"),
-    ("полях", "field"),
-    ("имя", "name"),
-    ("срок", "ttl"),
+# receives. It is deliberately small, and it only adds to Cyrillic words: an
+# English query, a code identifier or a ticket is left untouched, and the
+# Russian word stays in the query beside its English term - replacing it lost
+# the Russian documents that answer in Russian. Each entry is a pattern over
+# the whole folded word: a bare prefix took "логика" and "логин" for log,
+# "старт" for legacy and "полезно" for field. This is a bridge, not a
+# translation service; a project with a different language should extend
+# `_QUERY_ALIASES` rather than expect a model call from the indexing hot path.
+_QUERY_ALIASES = tuple(
+    (re.compile(pattern), english)
+    for pattern, english in (
+        (r"предотвращ\w*", "prevent"),
+        (r"подделк\w*", "spoof"),
+        (r"вложенн\w*", "nested"),
+        (r"неизвестн\w*", "unknown"),
+        (r"записыва\w*", "written"),
+        (r"отбрасыва\w*", "drop"),
+        (r"просмотр\w*", "preview"),
+        (r"временн\w*", "temporary"),
+        # "действительный" and its forms - not "действительно" (indeed) or
+        # "действие" (an action).
+        (r"действительн(?!о$)\w*", "validity"),
+        (r"измен\w*", "change"),
+        (r"админк\w*", "admin"),
+        # "старый" and its forms - not "старт" or "стараться".
+        (r"стар(?:ый|ая|ое|ые|ого|ой|ому|ым|ых|ыми|ую|ом)", "legacy"),
+        (r"файл\w*", "files"),
+        (r"свойств\w*", "properties"),
+        (r"сущност\w*", "entity"),
+        (r"строк(?:а|и|у|ой|ою|е|ам|ами|ах)?", "lines"),
+        (r"спис(?:ок|ка|ку|ком|ке|ки|ков|кам|ками|ках)", "list"),
+        (r"пут(?:ь|и|ем|ём|ям|ями|ях)", "path"),
+        # "лог", "логирование", "логгер" - not "логика" or "логин".
+        (r"лог(?:и|а|ов|е|у|ом|ам|ами|ах)?|логир\w*|логгер\w*", "log"),
+        (r"пол(?:е|я|ей|ю|ям|ем|ями|ях)", "field"),
+        (r"им(?:я|ени|енем|ена|ён|ен|енам|енами|енах)", "name"),
+        (r"срок\w*", "ttl"),
+    )
 )
 
 
 def _query_alias(token: str) -> list[str]:
+    """The token, followed by the English term a Russian technical word names."""
     if not re.search(r"[А-Яа-яЁё]", token):
         return [token]
     folded = token.casefold()
-    for prefix, english in _QUERY_ALIASES:
-        if folded.startswith(prefix):
-            return english.split()
+    for pattern, english in _QUERY_ALIASES:
+        if pattern.fullmatch(folded):
+            return [token, *english.split()]
     return [token]
 
 
@@ -4183,23 +4201,46 @@ def is_anchor(token: str, where: Iterable[str] = ()) -> bool:
     return bool(_ANCHOR_SHAPE.search(token)) or token.casefold() in set(where)
 
 
-def _ticket_ids(text: str) -> set[str]:
-    """Ticket identifiers in a request or an event title, case-folded."""
-    return {f"{prefix.lower()}-{number}" for prefix, number in _TICKET_ID.findall(text)}
+def _ticket_ids(text: str, known: Optional[Iterable[str]] = None) -> set[str]:
+    """Ticket identifiers in a request or an event title, case-folded.
+
+    The shape is `CMS-741` - a hyphen, never a space, so "PHP 8.2" is not a
+    ticket - and a standard's prefix (`UTF-8`, `PSR-4`, `ISO-8601`) never
+    counts. ``known`` are the prefixes the project files its work under:
+    when there are any, only they count (see brain_runtime.ticket_ids).
+    """
+    return {value.lower() for value in brain_runtime.ticket_ids(text, known)}
 
 
-def _request_tickets(text: str, task: Optional[dict[str, Any]]) -> set[str]:
+def _known_ticket_prefixes(
+    connection: sqlite3.Connection, task: Optional[dict[str, Any]] = None
+) -> frozenset[str]:
+    """The ticket prefixes the index found the project's work filed under,
+    and the bound task's own; empty when there are none."""
+    try:
+        stored = json.loads(load_index_state(connection).get(TICKET_PREFIXES_KEY) or "[]")
+    except (sqlite3.Error, TypeError, ValueError):
+        stored = []
+    prefixes = {value for value in stored if isinstance(value, str)} if isinstance(stored, list) else set()
+    if isinstance(task, dict):
+        prefixes |= brain_runtime.work_ticket_prefixes({**task, "type": "task"})
+    return frozenset(prefixes)
+
+
+def _request_tickets(
+    text: str, task: Optional[dict[str, Any]], known: Optional[Iterable[str]] = None
+) -> set[str]:
     """Tickets the request names, or the working task names when it names none.
 
     A prompt often asks a question without repeating its ticket; the governed
     task it continues carries it. The task's external id, title and goal are
     read in memory only.
     """
-    tickets = _ticket_ids(text)
+    tickets = _ticket_ids(text, known)
     if isinstance(task, dict):
         tickets |= _ticket_ids(" ".join(
             str(task.get(key) or "") for key in ("external_id", "title", "goal")
-        ))
+        ), known)
     return tickets
 
 
@@ -4208,13 +4249,15 @@ def _ticket_filter(
     connection: Optional[sqlite3.Connection] = None,
     repository: Optional[Path] = None,
     request_text: str = "",
+    known: Optional[Iterable[str]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Withhold a durable chunk or finding that names only another ticket.
 
     A document with no ticket, or with one the request also names, is kept;
     a document whose tickets are all different is evidence about other work.
     Events keep their own slot rule (they may be the same subject without the
-    ticket), and canonical project files are not filtered here.
+    ticket), and canonical project files are not filtered here. ``known`` are
+    the project's ticket prefixes, read the same way on both sides.
     """
     if not tickets:
         return items, []
@@ -4240,7 +4283,7 @@ def _ticket_filter(
             except sqlite3.Error:
                 row = None
             content = str(row[0] or "") if row is not None else ""
-        document_tickets = _ticket_ids(str(item.get("title") or "") + "\n" + content)
+        document_tickets = _ticket_ids(str(item.get("title") or "") + "\n" + content, known)
         if changelog:
             # The changelog is release context, not a ticket record: keep it
             # when the request names it, and otherwise only when it mentions
@@ -4263,7 +4306,8 @@ def _ticket_filter(
                 source = (repository / path)
                 root = repository.resolve()
                 if source.is_file() and source.resolve().is_relative_to(root):
-                    document_tickets = _ticket_ids(source.read_text(encoding="utf-8", errors="ignore"))
+                    document_tickets = _ticket_ids(
+                        source.read_text(encoding="utf-8", errors="ignore"), known)
             except (OSError, ValueError):
                 document_tickets = set()
         if document_tickets and not (document_tickets & tickets):
@@ -4549,11 +4593,14 @@ def _history_candidates(
                 trace.observe(item, "history", "admitted", score=item["adjusted_score"])
         events.sort(key=lambda item: (-item["adjusted_score"], item["path"]))
         prompt_tickets = history.get("tickets") or set()
+        known = history.get("known_tickets")
         for item in events:
             # Internal: the event slot prefers the named ticket when one is
             # admitted, but a neighbouring ticket's event remains available
             # when no event carries it.
-            item["_ticket_match"] = bool(prompt_tickets & _ticket_ids(str(item.get("title") or "")))
+            item["_ticket_match"] = bool(
+                prompt_tickets & _ticket_ids(str(item.get("title") or ""), known)
+            )
         for rank, item in enumerate(events, start=1):
             item["rank"] = rank
         _quote_candidates(connection, events, " ".join(history["terms"]), history["terms"])
@@ -4581,11 +4628,13 @@ def _history_series_pilot() -> bool:
     }
 
 
-def _same_ticket_series(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _same_ticket_series(
+    events: list[dict[str, Any]], known: Optional[Iterable[str]] = None
+) -> list[dict[str, Any]]:
     """The largest same-ticket event series, in the existing event order."""
     groups: dict[str, list[dict[str, Any]]] = {}
     for item in events:
-        for ticket in _ticket_ids(str(item.get("title") or "")):
+        for ticket in _ticket_ids(str(item.get("title") or ""), known):
             groups.setdefault(ticket, []).append(item)
     if not groups:
         return []
@@ -4596,21 +4645,29 @@ def _same_ticket_series(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _best_history_event(
     repository: Path, events: list[dict[str, Any]], config: dict[str, Any],
     *, trace: Optional[RetrievalTrace] = None, limit: int = 1, connection=None,
+    known: Optional[Iterable[str]] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """The best admitted events that pass the runtime filters.
 
-    ``limit`` is the event slot's capacity. One is the established contract;
-    more is an experiment that lets several same-ticket events share the slot.
+    ``limit`` is the event slot's capacity: one, or two events of the ticket
+    the request names (and the opt-in series pilot). The filters only remove
+    a candidate or lower its score - an event whose cited file changed keeps
+    half - so once the next candidate's unfiltered score cannot beat the
+    weakest one kept, no later one can: usually one or two files are read,
+    however many events exist. Taking the first ``limit`` that passed instead
+    let a halved 12.5 (6.3) hold the slot against a fresh 9.6.
     """
     if limit == 1 and _history_series_pilot():
-        series = _same_ticket_series(events)
+        series = _same_ticket_series(events, known)
         if series:
             events = series
             limit = min(CAPSULE_EVENT_LIMIT, len(series))
+    capacity = max(1, limit)
     kept_events: list[dict[str, Any]] = []
     excluded: list[dict[str, str]] = []
     for item in events:
-        if len(kept_events) >= max(1, limit):
+        if (len(kept_events) >= capacity
+                and item["adjusted_score"] <= kept_events[-1]["adjusted_score"]):
             break
         kept, dropped = _runtime_filter(
             repository, [item], config, trace=trace, connection=connection
@@ -4618,6 +4675,9 @@ def _best_history_event(
         excluded.extend(dropped)
         if kept:
             kept_events.append(kept[0])
+            # Stable: of equal scores the earlier candidate stays ahead.
+            kept_events.sort(key=lambda entry: -entry["adjusted_score"])
+            del kept_events[capacity:]
     return kept_events, excluded
 
 
@@ -4983,25 +5043,46 @@ def _quoted_payload(heading: str, lines: list[str], title: str) -> dict[str, Any
 
 
 def _first_body_section(text: str) -> Optional[tuple[str, list[str]]]:
-    """The first heading's section that has prose, without scoring the rest.
+    """The newest entry of a chronological document: the first section after
+    its title that has prose, without scoring the rest.
 
     A chronological document can run past a megabyte; its head section is the
     only one a head-preferring quote needs, and parsing every section to pick
-    it by score would charge the whole file to the hook.
+    it by score would charge the whole file to the hook. The prose under the
+    title is a preamble - Keep a Changelog's "All notable changes to this
+    project ..." - not an entry, so it is quoted only when no entry has any.
+    An entry whose heading has no prose of its own before a subsection
+    (`## [1.2.0] - 2026-10-01`, then `### Fixed`) is named with it:
+    "[1.2.0] - 2026-10-01 › Fixed".
     """
     if text.startswith("---\n"):
         _, separator, remainder = text[4:].partition("\n---\n")
         if separator:
             text = remainder
-    heading, lines = "", []
+    title, preamble = "", []
+    # Headings enclosing the current entry, title excluded, as (level, text).
+    trail: list[tuple[int, str]] = []
+    lines: Optional[list[str]] = None
     for line in text.splitlines():
-        if _EXCERPT_HEADING.match(line):
-            if _excerpt_units(lines):
-                return heading, lines
-            heading, lines = line.lstrip("#").strip(), []
-        else:
-            lines.append(line)
-    return (heading, lines) if _excerpt_units(lines) else None
+        if not _EXCERPT_HEADING.match(line):
+            (preamble if lines is None else lines).append(line)
+            continue
+        if lines is not None and _excerpt_units(lines):
+            return " › ".join(name for _, name in trail), lines
+        level = len(line) - len(line.lstrip("#"))
+        name = line.lstrip("#").strip()
+        if lines is None and level == 1 and not title and not re.search(r"\d", name):
+            # The document's title. A first heading with a number in it is a
+            # version (`# 1.2.0`), the newest entry itself.
+            title = name
+            continue
+        while trail and trail[-1][0] >= level:
+            trail.pop()
+        trail.append((level, name))
+        lines = []
+    if lines is not None and _excerpt_units(lines):
+        return " › ".join(name for _, name in trail), lines
+    return (title, preamble) if _excerpt_units(preamble) else None
 
 
 def quoted_section(
@@ -5052,7 +5133,8 @@ def quoted_section(
     if requested_best is not None:
         index = requested_best[1]
     elif prefer_head:
-        index = first_with_body
+        found = _first_body_section(text)
+        return _quoted_payload(found[0], found[1], title) if found is not None else None
     elif best[0][0] > 0:
         index = best[1]
     else:
@@ -8539,10 +8621,12 @@ def retrieve(
     # Recorded history has its own search over the whole request: events and
     # local episodes share one slot beside the changelog's.
     request_text = query if history_text is None else history_text
-    request_tickets = _request_tickets(request_text, task)
+    known_tickets = _known_ticket_prefixes(connection, task)
+    request_tickets = _request_tickets(request_text, task, known_tickets)
     history = history_query(connection, request_text)
     if history is not None:
         history["tickets"] = request_tickets
+        history["known_tickets"] = known_tickets
     event_candidates, episode_candidates = (
         _history_candidates(connection, history, trace=trace) if history else ([], [])
     )
@@ -8567,9 +8651,11 @@ def retrieve(
         repository, exact_events if exact_events else event_candidates, config,
         trace=trace,
         connection=connection,
-        # A same-ticket series is only a series when the request names the
-        # ticket; without one, the extra events are neighbours, not the answer.
-        limit=CAPSULE_EVENT_LIMIT if request_tickets else 1,
+        # A same-ticket series is only a series when events carry the ticket
+        # the request names; a ticket no event carries - or "PHP 8.3" - left
+        # two neighbours in the slot, and neither was the answer.
+        limit=CAPSULE_EVENT_LIMIT if exact_events else 1,
+        known=known_tickets,
     )
     filter_excluded.extend(history_excluded)
     history_episode: list[dict[str, Any]] = []
@@ -8641,7 +8727,7 @@ def retrieve(
     filtered.extend(graph_candidates)
     filtered, ticket_excluded = _ticket_filter(
         filtered, request_tickets, connection=connection, repository=repository,
-        request_text=request_text,
+        request_text=request_text, known=known_tickets,
     )
     filter_excluded.extend(ticket_excluded)
     # The history search's event goes through the same conflict expansion,

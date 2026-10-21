@@ -3,9 +3,11 @@
 Research date: 2026-10-20. Scope: **DeepSeek Harness (DSH) 0.2.1-rc.2** and
 memory plugins that extend harness behavior.
 
-No plugin was installed, enabled, or executed. Downloads are npm tarballs into
-`/tmp`; REA parsed the shipped JavaScript as inert text. Local DSH packages were
-inventory-only.
+The research itself installed, enabled and executed nothing: downloads are npm
+tarballs into `/tmp`, REA parsed the shipped JavaScript as inert text, and local
+DSH packages were inventory-only. One plugin was deployed afterwards, as the
+decision in section 10 says - `@tr1v3r/dsh-ltm` into the live `web` profile;
+section 11 records how and how it was verified.
 
 Mechanical evidence (schemas, thresholds, feedback math, token budgets,
 compatibility): [RE-HARNESS-MEMORY-MECHANICS-2026-10.md](RE-HARNESS-MEMORY-MECHANICS-2026-10.md).
@@ -426,9 +428,13 @@ sections 2, 4 and 6.
 ## Artifact notes
 
 - npm tarballs were fetched into `/tmp/harness-memory-pkgs` and
-  `/tmp/harness-memory-pkgs2`; nothing was installed into a DSH profile.
+  `/tmp/harness-memory-pkgs2`; none of them was installed into a DSH profile
+  (the deployment in section 11 installed `@tr1v3r/dsh-ltm` through
+  `dsh plugin add`, not from these tarballs).
 - REA evidence: `ev_4220c587fc5ea3296add651cddf32a52aadf780afcc9d81a03fafa88edd1dc2f`
   (`dsh-memory-gate`) and
   `ev_b5f90cf205ac8bf283122191d51215e0efe6cf638afad71a6ddd7f942f01b5fd`
   (`dsh-workspace-memories`). Both are static; no runtime claim.
-- Local DSH is `0.2.1-rc.2`; no DSH memory plugin is installed or enabled.
+- Local DSH is `0.2.1-rc.2`; at research time no DSH memory plugin was
+  installed or enabled, and since the deployment in section 11
+  `@tr1v3r/dsh-ltm@0.3.3` is, in the `web` profile only.

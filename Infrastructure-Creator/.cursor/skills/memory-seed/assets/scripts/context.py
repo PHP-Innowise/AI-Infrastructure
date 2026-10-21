@@ -772,11 +772,13 @@ def memory_eligibility(
     reaches the `excluded` channel instead of vanishing on a bare `continue`.
 
     ``screened_hash`` is the content hash an index that admitted the chunk
-    stored for it, under the same secret policy (a changed policy rebuilds
-    the index). Text that still hashes to it is not scanned for secrets
-    again: the scan read the whole chunk against two dozen patterns on every
-    prompt, 0.4 ms a chunk - most of a prompt's cost once the Memory Bank
-    holds thousands. Other text, even behind an unchanged stat, is scanned.
+    stored for it, under the same secret and provenance policies (a changed
+    policy rebuilds the index). Text that still hashes to it is not scanned
+    again: the secret scan read the whole chunk against two dozen patterns on
+    every prompt, 0.4 ms a chunk - most of a prompt's cost once the Memory
+    Bank holds thousands - and the provenance scan of an auto-promoted chunk
+    read it a second time (1,000 such chunks took a retrieval from 141 to
+    186 ms). Other text, even behind an unchanged stat, is scanned.
     Citations are always checked: files go away.
     """
     try:
@@ -791,9 +793,10 @@ def memory_eligibility(
     except ValidationError:
         return None, _lapsed_reason(metadata, eligible_until), eligible_until
     try:
-        screened = screened_hash is not None and _content_hash(path.read_text(encoding="utf-8")) == screened_hash
+        text: Optional[str] = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        screened = False
+        text = None
+    screened = screened_hash is not None and text is not None and _content_hash(text) == screened_hash
     if not screened:
         try:
             validate_secret_patterns(path)
@@ -803,20 +806,13 @@ def memory_eligibility(
     if status != "active":
         return None, status, eligible_until
     tags = metadata.get("tags")
-    if isinstance(tags, list) and "auto-promoted" in tags:
+    if not screened and isinstance(tags, list) and "auto-promoted" in tags:
         # Automatic promotion wrote this chunk without a person reading it.
         # Instruction-like text is withheld automatically; a remote citation
         # is not, because a pinned source URL is legitimate evidence and
         # withholding every one of them lost a measured useful chunk. The
         # remote citation stays visible to `bank-audit --provenance`.
-        try:
-            body = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
-            return None, "provenance", eligible_until
-        if any(
-            "instruction-like" in problem
-            for problem in brain_runtime.provenance_problems(metadata, body)
-        ):
+        if text is None or brain_runtime.instruction_like(metadata.get("title"), text):
             return None, "provenance", eligible_until
     return metadata, None, eligible_until
 
@@ -6957,7 +6953,7 @@ def run_turn(
     }
     compaction = {"enabled": False, "moved": 0, "pending": 0, "error": None}
     consolidation = {
-        "enabled": False, "created": 0, "superseded": 0,
+        "enabled": False, "created": 0, "updated": 0, "superseded": 0,
         "blocked": 0, "tickets": 0, "error": None,
     }
     if flushed is not None and mode != "lightweight":
@@ -6971,8 +6967,9 @@ def run_turn(
             raise ContextError(
                 f"Merge completion-candidate detection failed: {error}"
             ) from error
-        # A ticket's completed events become one finding before promotion:
-        # the diary is the input, not a second durable layer.
+        # A ticket's completed events become one finding before promotion,
+        # which may carry it into the Memory Bank; the events leave the diary
+        # on a later boundary, once a chunk holds what they said.
         consolidation = auto_consolidate(repository, owner=owner)
         # Durable memory is promoted on the same boundary as the
         # working-memory flush, so the whole pipeline runs
@@ -9623,12 +9620,20 @@ def _command() -> int:
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
-                    verb = "Created" if arguments.apply else "Planned"
-                    print(
-                        f"{verb} {len([t for t in result['tickets'] if t['state'] in ('created', 'planned')])} "
-                        f"finding(s); {result['superseded']} event(s) superseded, "
-                        f"{result['blocked']} blocked."
-                    )
+                    states = [item["state"] for item in result["tickets"]]
+                    if arguments.apply:
+                        print(
+                            f"Created {result['created']} finding(s), updated "
+                            f"{result['updated']}; {result['superseded']} event(s) "
+                            f"superseded, {result['blocked']} blocked."
+                        )
+                    else:
+                        print(
+                            f"Planned {states.count('planned')} finding(s), "
+                            f"{states.count('planned-update')} update(s); "
+                            f"{sum(item.get('supersede', 0) for item in result['tickets'])} "
+                            "event(s) to supersede."
+                        )
                     for item in result["tickets"]:
                         print(
                             f"  {item['ticket']}: {item['state']} "
@@ -9666,13 +9671,16 @@ def _command() -> int:
                         )
                     for path in result["undigested"]:
                         print(f"  undigested: {path}")
-                    provenance = result.get("provenance") or {}
-                    print(
-                        f"  provenance: {len(provenance.get('auto_promoted') or [])} "
-                        f"auto-promoted, {len(provenance.get('external_sources') or [])} "
-                        f"with external sources, "
-                        f"{len(provenance.get('instruction_like') or [])} instruction-like."
-                    )
+                    provenance = result.get("provenance")
+                    if provenance is not None:
+                        # Only asked for: without --provenance nothing was
+                        # counted, and "0 auto-promoted" would say otherwise.
+                        print(
+                            f"  provenance: {len(provenance.get('auto_promoted') or [])} "
+                            f"auto-promoted, {len(provenance.get('external_sources') or [])} "
+                            f"with external sources, "
+                            f"{len(provenance.get('instruction_like') or [])} instruction-like."
+                        )
                 return 0
 
             if arguments.command == "bank-reverify":

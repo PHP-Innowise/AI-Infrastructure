@@ -461,9 +461,9 @@ hard ceiling, with an escalation reason. Privacy, authority, lifecycle, owner,
 and freshness filters still take precedence. Token counts are estimates based
 on text length, not provider billing measurements.
 
-The delivered capsule has a separate final contract: at most 3 semantic and 2
-episodic items (the changelog and one recorded event or episode; lightweight
-mode keeps one), no procedural item, and 8,000 serialized characters.
+The delivered capsule has a separate final contract: at most 3 semantic and 3
+episodic items (the changelog and up to two recorded events, or one local
+episode; lightweight mode keeps one), no procedural item, and 8,000 serialized characters.
 Its working state carries the three newest next steps, the eight newest
 files, and four sources.
 
@@ -934,24 +934,43 @@ Incident `resolved` and decision `accepted` are intentionally not terminal.
 python3 memory-bank/scripts/context.py consolidate [--ticket CMS-741] [--apply] [--json]
 ```
 
-Read-only by default. Groups **recorded events whose title says `Completed`**
-by the first ticket they name and, for a group of at least two, plans one
-`finding` with external ID `CONSOLIDATED-<ticket>`. The finding takes the
-latest event's outcome sentence as title and goal, the union of the events'
-local existing sources, and a `progress` line naming the source event IDs and
-up to three `Verification:` sentences. It is created `resolved` with authority
-`observed`: mechanical consolidation is not a verification and does not make it
-promotable on its own.
+Read-only by default. Groups the operator's own **recorded events whose title
+says `Completed`** by the ticket their title names (`Completed CMS-741: ...`;
+a standard with a number such as `UTF-8` or `PSR-4` is not a ticket) and, for a
+group of at least two, plans one `finding` with external ID
+`CONSOLIDATED-<ticket>`. Its title and goal name the latest descriptive event;
+its `progress` carries every event on a line of its own - what was done, the
+outcome and the `Verification:` the event recorded, ending with the event's
+UUID - then the ticket's other findings. It cites the union of the events'
+local existing sources and is created `resolved` with authority `observed`.
 
-The turn boundary calls this automatically when `automatic_consolidation` is
-enabled (the shipped default); the command is the explicit replay/backfill for
-a project whose boundary has not run yet. `--apply` writes the finding and
-transitions each source event to `superseded` with the event's own owner as
-actor. Events are not archived;
-`compact` remains the command that moves terminal records. A private or
-restricted event is never folded into a team-visible finding, and a second run
-is idempotent. The dry run reports each ticket as `planned`, `skipped` or
-`blocked`, with the event count and reason.
+With `automatic_consolidation_verification`, the finding becomes `verified`
+(attested by the agent) when **every** event recorded a `Verification:` line
+and at least one local source was fingerprinted; two events that both say
+"unit tests passed" count twice. Without it, or without that evidence,
+mechanical consolidation is not a verification and the finding stays
+`observed`, which promotion never takes.
+
+`--apply` writes the finding. Events that reach the ticket later are added to
+an active `observed` finding; a `verified` one takes only events that recorded
+their own verification, as a revised claim; once the finding is archived, a
+new one takes them. Retrieval serves no resolved finding, so the events stay
+`recorded` - on a fresh clone they are where their outcomes are found - until
+the finding's current revision is an active Memory Bank chunk. Then the next
+run marks them `superseded`, with the operator as the actor, and `compact`
+moves them. Another owner's events are left to that owner; a ticket that
+already has a resolved finding of its own is reported as `existing` and its
+events are left alone, since folding them into that finding would drop their
+text. A private or restricted event is never folded into a team-visible
+finding, and a run with nothing new changes nothing (`unchanged`). The report
+names each ticket's state (`planned`, `created`, `planned-update`, `updated`,
+`planned-supersede`, `superseded`, `unchanged`, `existing`, `skipped` or
+`blocked`), its event count and the reason.
+
+The turn boundary runs the same pass when `automatic_consolidation` is set in
+`runtime.json`. It is off by default and in the shipped configuration: it
+rewrites the team's tracked Project Brain on its first flush, so a project
+turns it on deliberately; the command is the explicit replay or backfill.
 
 ### `promote-propose`
 

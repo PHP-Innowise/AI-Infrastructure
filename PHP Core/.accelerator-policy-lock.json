@@ -56,7 +56,7 @@
     ".agents/skills/memory-bank/SKILL.md": "69d42e308cbb362de9b8b8e0f01371e8354d637acc48da3e25936a9c04b1264c",
     ".agents/skills/memory/SKILL.md": "522b72ecc502d650a0df356138f804a2cdbc2c8c41b2422dfdcdc7c64d280e58",
     ".agents/skills/performance-optimization/SKILL.md": "cdb584b9f508e247240a1acec566f63f01caa083de3935c831d0c08c821527d2",
-    ".agents/skills/project-brain/SKILL.md": "f680d55b0f6b300d9317b1e31419b1daa90cfc874a5168dcc1dbde62d4f9cbc5",
+    ".agents/skills/project-brain/SKILL.md": "aefea78db64eb1887224d8c4137bd63c92f6e2dfc47abac0fa57b66df5c703a8",
     ".agents/skills/refactorer/SKILL.md": "5e7ba5fe06f738080ed14407139a5155dad9f2f7ee54c6a95806e425a6386f9f",
     ".agents/skills/reflect/SKILL.md": "d1061773b9861c8a705ed7c5ef96c34b5675c4000be1a315ddd375af38b47994",
     ".agents/skills/release/SKILL.md": "fe02543d87d14773fb93c973b8e6f5917de6dc9de76c937c350260f94a9d97b1",
@@ -217,9 +217,9 @@
     ".cursor/rules/safety-and-verification.mdc": "5e8cb5bfd3d427836e521417a2a7e68bd1b3a00a25a1d174df61b29e5471344f",
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
-    "AGENTS.md": "643b162517bc59075c4a0acde3a826611fb9a9b0a5c8a851c91629f3ff01b50e"
+    "AGENTS.md": "47a0de56517e0bcd187f6c93ac604761ed715ca2a9a41b98089000440f16ddf0"
   },
-  "policy_digest": "d8587d5c9ab470d7c1a9a2e806b6ddfd378a7539a6feef4840ad13ce0baa47c6",
+  "policy_digest": "48e6eeef02a24a9fb233e81171e7f14c3109ce9dad84387bfa4721f8a94e0665",
   "release": "2.0.0",
   "schema_version": 1
 }

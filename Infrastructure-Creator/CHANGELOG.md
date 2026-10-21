@@ -4,6 +4,20 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded memory consolidates only on request — 2026-10-21
+
+- memory-seed's `runtime.json.template` ships `automatic_consolidation` and
+  `automatic_consolidation_verification` off: the pass rewrites a generated
+  project's tracked Project Brain on its first flush, so the project turns it
+  on deliberately. The seeded runtime carries the corrected consolidation
+  (every event's outcome kept, events superseded only once a chunk carries
+  their finding, the operator as actor), the hyphen-only ticket rule with its
+  stop list, the changelog head that skips a Keep a Changelog preamble, the
+  Russian aliases that keep the Russian word, and the event slot that weighs a
+  changed source; its `PROTOCOL.md` and `README.md` say the capsule's episodic
+  layer holds three items.
+- the policy lock and mirrors were regenerated for the changed assets.
+
 ### Seeded templates keep rejected alternatives — 2026-10-21
 
 - memory-seed carries the `Rejected Alternatives` section in the Brain

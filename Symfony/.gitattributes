@@ -152,7 +152,6 @@
 .cursor/agents/review-pr-agent.md -diff linguist-generated=true
 .cursor/agents/security-reviewer-agent.md -diff linguist-generated=true
 .cursor/agents/security-voter-designer-agent.md -diff linguist-generated=true
-.cursor/agents/skill-creator-agent.md -diff linguist-generated=true
 .cursor/agents/systematic-debugger-agent.md -diff linguist-generated=true
 .cursor/agents/test-generator-agent.md -diff linguist-generated=true
 .cursor/agents/twig-ux-reviewer-agent.md -diff linguist-generated=true
@@ -203,7 +202,6 @@
 .cursor/commands/sdd.md -diff linguist-generated=true
 .cursor/commands/security-reviewer.md -diff linguist-generated=true
 .cursor/commands/security-voter-designer.md -diff linguist-generated=true
-.cursor/commands/skill-creator.md -diff linguist-generated=true
 .cursor/commands/test-generator.md -diff linguist-generated=true
 .cursor/commands/twig-ux-reviewer.md -diff linguist-generated=true
 .cursor/commands/verify.md -diff linguist-generated=true

@@ -18,7 +18,7 @@ import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 import workspace_roots
 from validate import (
@@ -532,8 +532,8 @@ def load_config(repository: Path) -> dict[str, Any]:
         "provider": "sqlite-fts5",
         "automatic_promotion": False,
         "automatic_completion": False,
-        "automatic_consolidation": True,
-        "automatic_consolidation_verification": True,
+        "automatic_consolidation": False,
+        "automatic_consolidation_verification": False,
         "automatic_compaction": False,
         "compaction_threshold": 5,
         "codebase_map_max_drift": 25,
@@ -2836,21 +2836,96 @@ def promoted_source_rewrites(
     return rewrites
 
 
-TICKET_PATTERN = re.compile(r"\b([A-Z]{2,10})-(\d{1,6})\b")
+# A ticket, issue or record number: an uppercase prefix, a hyphen and a
+# number - `CMS-741`. A space does not join them: "PHP 8.2" and "ISO 8601" are
+# a language and a standard with their versions, not work items, and a number
+# that runs on into a decimal is a version as well ("PHP-8.2").
+TICKET_PATTERN = re.compile(r"\b([A-Z]{2,10})-(\d{1,6})\b(?!\.\d)")
+# Prefixes that, with a number, name a standard, an encoding, an algorithm, a
+# protocol, a license or a product version rather than a work item. "UTF-8"
+# made two unrelated completion events one ticket's series, and "PSR-4" in a
+# chunk withheld it as evidence about another ticket. A project that files its
+# work under one of these keys loses only the ticket preference for it.
+TICKET_STOP_PREFIXES = frozenset(
+    """
+    AES AGPL ANSI ASCII BCP BSD CET CP CRC CSS CVE CVSS CWE DES DIN DNS DSA
+    ECDSA ECMA EN EPL ES FIPS GDPR GMT GPL GPT HMAC HTML HTTP HTTPS IEC IEEE IP
+    IPV ISO JSON KOI LATIN LGPL MD MPEG MPL NIST OAUTH OWASP PCI PER PHP PSR
+    RFC RSA SHA SOC SSL TCP TLS UCS UDP UTC UTF UUID WCAG WIN XML YAML
+    """.split()
+)
 CONSOLIDATION_MIN_EVENTS = 2
 CONSOLIDATION_VERIFICATION = re.compile(r"Verification:\s*(.+?)(?:\s+##|\s*$)", re.S | re.I)
+CONSOLIDATED_PREFIX = "CONSOLIDATED-"
+# A consolidated finding carries each event it covers on a line of its own -
+# what was done, the outcome and the verification the event recorded - ending
+# with the event's UUID. The line is the event's content once the event leaves
+# retrieval, and the UUID is how a later pass knows the event is covered.
+_CONSOLIDATED_ENTRY = re.compile(
+    r"^- .*\[event ([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\]$",
+    re.M,
+)
+CONSOLIDATED_ENTRY_LIMIT = 2000
+
+
+def ticket_ids(text: object, known: Optional[Iterable[str]] = None) -> list[str]:
+    """Ticket identifiers ``text`` names, uppercase and in order, each once.
+
+    ``known`` holds the prefixes a project files its work under; when it names
+    any, only those count, so `GPT-4` or `COVID-19` is not taken for a ticket
+    where the work is `CMS-741`. Without it the shape and the stop list decide.
+    """
+    allowed = frozenset(known or ())
+    found: list[str] = []
+    for prefix, number in TICKET_PATTERN.findall(str(text or "")):
+        if prefix in TICKET_STOP_PREFIXES or (allowed and prefix not in allowed):
+            continue
+        value = f"{prefix}-{number}"
+        if value not in found:
+            found.append(value)
+    return found
+
+
+def completion_subject(title: object) -> Optional[str]:
+    """What a completion event says it completed: the `X` of `Completed X: ...`."""
+    value = " ".join(str(title or "").split())
+    if not value.casefold().startswith("completed "):
+        return None
+    subject, separator, _ = value[len("completed "):].partition(": ")
+    if not separator:
+        return None
+    return subject.strip() or None
+
+
+def work_ticket_prefixes(record: dict[str, Any]) -> set[str]:
+    """Ticket prefixes a record shows the project filing its work under.
+
+    A task's own ID, and the task a completion event names: both are names
+    people gave their work, unlike a ticket an outcome or a document merely
+    mentions.
+    """
+    if record.get("type") == "task":
+        text: object = record.get("external_id")
+    elif record.get("type") == "event":
+        text = completion_subject(record.get("title"))
+    else:
+        return set()
+    return {value.split("-", 1)[0] for value in ticket_ids(text)}
 
 
 def _event_tickets(record: dict[str, Any]) -> list[str]:
     """Ticket IDs an event names, title first and external ID last.
 
-    An event's own external ID may itself look like a ticket (`EV-1`); it is a
-    fallback, never the subject the event is about.
+    A completion event's title leads with the task it completed (`Completed
+    CMS-741: ...`), so its first ticket is the subject. An event's own
+    external ID may itself look like a ticket (`EV-1`); it is a fallback,
+    never the subject the event is about. The goal is not read: an outcome
+    that mentions a related ticket does not move the event into that
+    ticket's series.
     """
     tickets: list[str] = []
-    for key in ("title", "goal", "external_id"):
-        for prefix, number in TICKET_PATTERN.findall(str(record.get(key) or "")):
-            value = f"{prefix.upper()}-{number}"
+    for key in ("title", "external_id"):
+        for value in ticket_ids(record.get(key)):
             if value not in tickets:
                 tickets.append(value)
     return tickets
@@ -2890,8 +2965,111 @@ def _event_subject(record: dict[str, Any]) -> str:
     return title
 
 
+def _event_verification(record: dict[str, Any]) -> str:
+    """What an event says verified it, or '' when it says nothing."""
+    match = CONSOLIDATION_VERIFICATION.search(str(record.get("goal") or ""))
+    return " ".join(match.group(1).split()) if match else ""
+
+
+def _event_outcome(record: dict[str, Any]) -> str:
+    """The outcome an event recorded, without its verification."""
+    goal = str(record.get("goal") or "")
+    match = CONSOLIDATION_VERIFICATION.search(goal)
+    outcome = " ".join((goal[: match.start()] if match else goal).split())
+    # A completion without an outcome of its own records the bare word.
+    if outcome.rstrip(".").casefold() in ("completed", "complete", "done"):
+        return ""
+    return outcome
+
+
+def _clipped(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[: max(1, limit - 1)]
+    space = cut.rfind(" ")
+    if space > limit // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:") + "…"
+
+
+def _consolidation_entry(record: dict[str, Any]) -> str:
+    """The line that carries one event in its ticket's finding: what was done,
+    the outcome and the verification, whole up to a generous bound."""
+    title = " ".join(str(record.get("title") or "").split())
+    subject = title.split(": ", 1)[1] if completion_subject(title) is not None else title
+    subject = subject.strip(" :-") or str(record.get("external_id") or "event")
+    parts = [_clipped(subject, 160) + ":"]
+    outcome = _event_outcome(record)
+    if outcome:
+        parts.append(outcome)
+    verification = _event_verification(record)
+    if verification:
+        parts.append(f"Verification: {verification}")
+    return f"- {_clipped(' '.join(parts), CONSOLIDATED_ENTRY_LIMIT)} [event {record['id']}]"
+
+
+def _covered_events(record: Optional[dict[str, Any]]) -> dict[str, str]:
+    """The events a consolidated finding already carries, by UUID, with their lines."""
+    if record is None:
+        return {}
+    return {
+        match.group(1): match.group(0)
+        for match in _CONSOLIDATED_ENTRY.finditer(str(record.get("progress") or ""))
+    }
+
+
+def _consolidated_progress(
+    ticket: str, previous: str, lines: list[str], related: list[str]
+) -> str:
+    """A consolidated finding's progress: every event line, old ones first.
+
+    Lines a previous pass wrote are kept as they are, and so is other text a
+    finding written before these lines existed carried, so nothing it said is
+    lost when an event is added.
+    """
+    kept: list[str] = []
+    entries: list[str] = []
+    for line in previous.splitlines():
+        if _CONSOLIDATED_ENTRY.fullmatch(line):
+            entries.append(line)
+        elif line.strip() and not (
+            re.fullmatch(r"Consolidated \d+ completed events? for \S+\.", line)
+            or line.startswith("Related findings: ")
+        ):
+            kept.append(line)
+    entries.extend(lines)
+    head = (
+        f"Consolidated {len(entries)} completed event"
+        f"{'' if len(entries) == 1 else 's'} for {ticket}."
+    )
+    tail = ["Related findings: " + ", ".join(related[:8]) + "."] if related else []
+    return "\n".join([head, *kept, *entries, *tail])
+
+
+def _local_sources(repository: Path, records: list[dict[str, Any]]) -> list[str]:
+    """The records' sources a finding can fingerprint: local files that exist."""
+    sources: list[str] = []
+    for record in records:
+        for source in record.get("sources") or []:
+            if not isinstance(source, str) or not source or source in sources:
+                continue
+            if source.startswith(("https://", "http://")):
+                # The record can name a remote source; a durable finding is
+                # fingerprinted locally, and an unfingerprinted URL would make
+                # the new record unvalidatable.
+                continue
+            try:
+                path = workspace_roots.resolve(repository, source.split("#", 1)[0])
+            except (OSError, ValueError):
+                continue
+            if path.is_file():
+                sources.append(source)
+    return sources
+
+
 def _consolidated_finding(
-    repository: Path, ticket: str, events: list[tuple[Path, dict[str, Any], str]]
+    repository: Path, ticket: str, events: list[tuple[Path, dict[str, Any], str]],
+    related: list[str],
 ) -> dict[str, Any]:
     ordered = sorted(events, key=lambda item: str(item[1].get("created_at") or ""))
     latest = ordered[-1][1]
@@ -2907,82 +3085,63 @@ def _consolidated_finding(
     title = f"{ticket}: {goal}"
     if len(title) > 160:
         title = title[:157].rstrip() + "..."
-    verifications: list[str] = []
-    sources: list[str] = []
+    records = [record for _, record, _ in ordered]
     files: list[str] = []
-    for _, record, _ in ordered:
-        for source in record.get("sources") or []:
-            if not isinstance(source, str) or not source or source in sources:
-                continue
-            if source.startswith(("https://", "http://")):
-                # The record can name a remote source; a durable finding is
-                # fingerprinted locally, and an unfingerprinted URL would make
-                # the new record unvalidatable.
-                continue
-            try:
-                path = workspace_roots.resolve(repository, source.split("#", 1)[0])
-            except (OSError, ValueError):
-                continue
-            if path.is_file():
-                sources.append(source)
+    for record in records:
         for path in record.get("files") or []:
             if isinstance(path, str) and path and path not in files:
                 files.append(path)
-        match = CONSOLIDATION_VERIFICATION.search(str(record.get("goal") or ""))
-        if match:
-            sentence = _first_sentence(match.group(1), 240)
-            if sentence and sentence not in verifications:
-                verifications.append(sentence)
-    identifiers = ", ".join(str(record.get("id")) for _, record, _ in ordered)
-    related = [
-        f"{record.get('external_id')} ({record.get('id')})"
-        for record in _ticket_findings(repository, ticket)
-    ]
-    progress = (
-        f"Consolidated {len(ordered)} completed events for {ticket}: {identifiers}. "
-        + ("Verification: " + " ".join(verifications[:3]) if verifications else "")
-        + (" Related findings: " + ", ".join(related[:8]) if related else "")
-    ).strip()
+    verified = sum(1 for record in records if _event_verification(record))
     return {
-        "external_id": f"CONSOLIDATED-{ticket}",
+        "external_id": f"{CONSOLIDATED_PREFIX}{ticket}",
         "title": title,
         "goal": goal,
         "files": files,
-        "sources": sources,
-        "progress": progress[:4000],
+        "sources": _local_sources(repository, records),
+        "progress": _consolidated_progress(
+            ticket, "", [_consolidation_entry(record) for record in records], related
+        ),
         "events": len(ordered),
-        "verifications": len(verifications),
-        "all_verified": len(verifications) == len(ordered),
+        "verifications": verified,
+        # Every event recorded its own verification. Counting distinct
+        # sentences instead left a finding unverified when two events both
+        # said "unit tests passed".
+        "all_verified": verified == len(ordered),
     }
 
 
-def _ticket_findings(repository: Path, ticket: str) -> list[dict[str, Any]]:
-    """Findings that name this ticket, whether active or archived."""
-    own = f"CONSOLIDATED-{ticket}"
-    pattern = re.compile(r"(?<![A-Za-z0-9])" + re.escape(ticket) + r"(?![A-Za-z0-9])", re.I)
-    found: list[dict[str, Any]] = []
-    for _, record, _ in iter_records(repository, include_archive=True):
-        if record.get("type") != "finding" or record.get("external_id") == own:
+def _consolidation_findings(
+    repository: Path,
+) -> tuple[dict[str, list[tuple[dict[str, Any], bool]]], dict[str, list[dict[str, Any]]]]:
+    """Every finding by the ticket it is about, in one pass over the Brain and
+    its archive: each ticket's consolidated findings - the active one and any
+    archived earlier one - and the other findings that name the ticket."""
+    archive = brain_root(repository) / "archive"
+    own: dict[str, list[tuple[dict[str, Any], bool]]] = {}
+    related: dict[str, list[dict[str, Any]]] = {}
+    for path, record, _ in iter_records(repository, include_archive=True):
+        if record.get("type") != "finding":
             continue
-        if pattern.search(f"{record.get('external_id', '')} {record.get('title', '')}"):
-            found.append(record)
-    return found
+        external = str(record.get("external_id") or "")
+        if external.startswith(CONSOLIDATED_PREFIX):
+            own.setdefault(external[len(CONSOLIDATED_PREFIX):], []).append(
+                (record, archive in path.parents)
+            )
+            continue
+        for value in ticket_ids(f"{external} {record.get('title') or ''}".upper()):
+            related.setdefault(value, []).append(record)
+    return own, related
 
 
-def _resolved_ticket_finding(
-    repository: Path, ticket: str
-) -> Optional[dict[str, Any]]:
-    """An already-resolved finding for this ticket, if one exists.
-
-    A second resolved conclusion for the same ticket is a duplicate even when
-    its title differs. An open/investigating finding is a specific work item,
-    not a conclusion, so it does not suppress the summary.
-    """
-    return next(
-        (record for record in _ticket_findings(repository, ticket)
-         if record.get("status") == "resolved"),
-        None,
-    )
+def _promoted_chunk(
+    repository: Path, record: dict[str, Any], latest: dict[str, dict[str, Any]]
+) -> Optional[str]:
+    """The active chunk that carries this exact revision of the record, if any."""
+    proposal = latest.get(record["id"])
+    if proposal is None or proposal["source_records"][0].get("revision") != record["revision"]:
+        return None
+    memory_id = proposal.get("destination_memory_id")
+    return memory_id if _chunk_status(repository, memory_id) == "active" else None
 
 
 def consolidate(
@@ -2994,22 +3153,36 @@ def consolidate(
 ) -> dict[str, Any]:
     """Collapse a ticket's completed events into one finding, optionally applying.
 
-    Read-only without ``apply``. The finding cites the events' own sources, not
-    the event files: compaction may archive those, and a citation to a moved
-    record would make the durable conclusion stale. The event IDs stay in the
-    finding's progress for the operator, while the machine link that matters -
-    the canonical sources - survives compaction.
+    Read-only without ``apply``. The finding carries every event it covers on
+    a line of its own - what was done, the outcome and the verification - and
+    cites the events' own sources, not the event files: compaction may archive
+    those, and a citation to a moved record would make the durable conclusion
+    stale. Events that reach the ticket later are added to its finding while
+    the finding is active; once it is archived, a new finding takes them.
 
-    Events are immutable except for lifecycle supersession, so consolidation
-    marks each source event ``superseded``. It never archives them: the
-    archived copy is the operator's decision, and a later ``compact`` is
-    already the command that moves terminal records.
+    Retrieval serves no resolved finding, so an event leaves the diary only
+    once its finding's current revision is an active Memory Bank chunk: until
+    then the event is the one place its outcome can be found, on a fresh clone
+    as anywhere. It is then marked ``superseded`` by the operator, never in
+    another owner's name, and a later ``compact`` moves it.
+
+    Only the operator's own events are folded in; another owner's are left to
+    that owner. A ticket that already has a resolved finding of its own is
+    left alone: a second conclusion would duplicate it, and superseding the
+    events into it would drop their text, which it does not carry.
     """
     config = load_config(repository)
     verify_consolidated = bool(config.get("automatic_consolidation_verification"))
     wanted = ticket.strip().upper() if isinstance(ticket, str) and ticket.strip() else None
     groups: dict[str, list[tuple[Path, dict[str, Any], str]]] = {}
+    foreign: dict[str, int] = {}
+    active: dict[str, tuple[Path, dict[str, Any]]] = {}
     for path, record, body in iter_records(repository):
+        if record.get("type") == "finding":
+            external = str(record.get("external_id") or "")
+            if external.startswith(CONSOLIDATED_PREFIX):
+                active[external[len(CONSOLIDATED_PREFIX):]] = (path, record)
+            continue
         if record.get("type") != "event" or record.get("status") != "recorded":
             continue
         if record.get("privacy") not in ("public", "team"):
@@ -3024,128 +3197,301 @@ def consolidate(
         value = tickets[0]
         if wanted is not None and value != wanted:
             continue
+        if owner not in (record.get("authorized_owners") or []):
+            # Another owner's record is theirs to supersede, and their own
+            # consolidation adds it to the ticket's finding.
+            foreign[value] = foreign.get(value, 0) + 1
+            continue
         groups.setdefault(value, []).append((path, record, body))
     report: dict[str, Any] = {
         "applied": apply,
         "tickets": [],
         "created": 0,
+        "updated": 0,
         "existing": 0,
         "verified": 0,
         "superseded": 0,
         "blocked": 0,
     }
-    for value in sorted(groups):
-        events = groups[value]
+    # Read once for the whole pass, and only when a ticket needs them: a
+    # ticket whose events its active finding already covers needs neither the
+    # archive nor the promotion ledger.
+    index: Optional[tuple[dict[str, list[tuple[dict[str, Any], bool]]],
+                          dict[str, list[dict[str, Any]]]]] = None
+    ledger: Optional[dict[str, dict[str, Any]]] = None
+    for value in sorted(set(groups) | set(foreign)):
+        events = sorted(
+            groups.get(value, []),
+            key=lambda item: (str(item[1].get("created_at") or ""), str(item[1]["id"])),
+        )
         entry: dict[str, Any] = {
             "ticket": value,
             "events": len(events),
             "ids": [str(record.get("id")) for _, record, _ in events],
         }
-        if len(events) < CONSOLIDATION_MIN_EVENTS:
-            entry.update(state="skipped", reason="fewer than two completed events")
-            report["tickets"].append(entry)
-            continue
-        planned = _consolidated_finding(repository, value, events)
-        entry["finding"] = planned["external_id"]
-        try:
-            find_record(repository, planned["external_id"])
-        except BrainRecordNotFound:
-            pass
-        else:
-            entry.update(state="skipped", reason="consolidated finding already exists")
-            report["tickets"].append(entry)
-            continue
-        existing = _resolved_ticket_finding(repository, value)
-        if existing is not None:
+        if foreign.get(value):
+            entry["foreign"] = foreign[value]
+        report["tickets"].append(entry)
+        if not events:
             entry.update(
-                state="existing",
-                finding=existing.get("external_id"),
-                title=planned["title"],
+                state="skipped",
+                reason="the completed events belong to another owner, who consolidates them",
             )
-            report["tickets"].append(entry)
-            if not apply:
+            continue
+        summary_path, summary = active.get(value, (None, None))
+        covered = _covered_events(summary)
+        uncovered = [item for item in events if item[1]["id"] not in covered]
+        if summary is not None and not uncovered and summary.get("authority") != "verified":
+            # A ticket's steady state: nothing new, and an observed finding is
+            # never promoted, so no event can leave the diary yet.
+            entry.update(
+                state="unchanged", finding=summary.get("external_id"),
+                reason="the events stay recorded until the finding is verified and promoted",
+            )
+            continue
+        archived: list[dict[str, Any]] = []
+        related: list[dict[str, Any]] = []
+        if summary is None or uncovered:
+            if index is None:
+                index = _consolidation_findings(repository)
+            archived = [record for record, gone in index[0].get(value, []) if gone]
+            related = index[1].get(value, [])
+        # The events a Memory Bank chunk already carries leave the diary.
+        retiring: list[tuple[dict[str, Any], str, list[tuple[Path, dict[str, Any], str]]]] = []
+        taken: set[str] = set()
+        for volume in ([summary] if summary is not None else []) + archived:
+            carried = _covered_events(volume)
+            taken.update(carried)
+            members = [item for item in events if item[1]["id"] in carried]
+            if not members or volume.get("authority") != "verified":
                 continue
-            with mutation_lock(repository):
-                snapshot = snapshot_files(
-                    [path for path, _, _ in events] + list(index_paths(repository))
-                )
-                try:
-                    for _, record, _ in events:
-                        update_record(
-                            repository,
-                            record["id"],
-                            expected_revision=record["revision"],
-                            progress=None,
-                            next_steps=[],
-                            files=[],
-                            sources=[],
-                            actor=str(record.get("owner") or owner),
-                            transition_to="superseded",
-                            reason=(
-                                "Consolidated into existing finding "
-                                f"{existing.get('external_id')}"
-                            ),
-                        )
-                except Exception as error:
-                    restore_files(snapshot)
-                    entry.update(state="blocked", reason=str(error))
+            if ledger is None:
+                ledger = promotion_ledger(repository)[1]
+            memory_id = _promoted_chunk(repository, volume, ledger)
+            if memory_id is not None:
+                retiring.append((volume, memory_id, members))
+        if retiring:
+            entry["supersede"] = sum(len(members) for _, _, members in retiring)
+            if apply:
+                superseded = _retire_consolidated_events(repository, retiring, owner, entry)
+                if superseded is None:
                     report["blocked"] += 1
                     continue
-            report["existing"] += 1
-            report["superseded"] += len(events)
+                entry["superseded"] = superseded
+                report["superseded"] += superseded
+        remaining = [item for item in events if item[1]["id"] not in taken]
+        if not remaining:
+            if retiring:
+                entry["state"] = "superseded" if apply else "planned-supersede"
+            else:
+                entry.update(
+                    state="unchanged", finding=summary.get("external_id") if summary else None,
+                    reason="the events stay recorded until the finding's revision is promoted",
+                )
             continue
-        entry.update(state="planned", title=planned["title"], sources=len(planned["sources"]))
-        report["tickets"].append(entry)
+        names = [f"{record.get('external_id')} ({record.get('id')})" for record in related]
+        if summary is not None:
+            _extend_consolidated(
+                repository, summary_path, summary, value, remaining, names, entry, report,
+                apply=apply, owner=owner, verify_consolidated=verify_consolidated,
+            )
+            continue
+        resolved = next(
+            (record for record in related if record.get("status") == "resolved"), None
+        )
+        if resolved is not None:
+            # The ticket's own conclusion exists. A second one would duplicate
+            # it, and superseding the events into it would drop their text.
+            entry.update(
+                state="existing", finding=resolved.get("external_id"),
+                reason="the ticket has a resolved finding; the events stay recorded",
+            )
+            report["existing"] += 1
+            continue
+        if len(remaining) < CONSOLIDATION_MIN_EVENTS:
+            entry.update(state="skipped", reason="fewer than two completed events")
+            continue
+        planned = _consolidated_finding(repository, value, remaining, names)
+        entry.update(
+            state="planned", finding=planned["external_id"], title=planned["title"],
+            sources=len(planned["sources"]), adds=len(remaining),
+        )
         if not apply:
             continue
-        with mutation_lock(repository):
-            snapshot = snapshot_files(
-                [path for path, _, _ in events] + list(index_paths(repository))
+        verify = bool(verify_consolidated and planned["all_verified"] and planned["sources"])
+        if not _create_consolidated(repository, planned, entry, owner=owner, verify=verify):
+            report["blocked"] += 1
+            continue
+        report["created"] += 1
+        if verify:
+            report["verified"] += 1
+    return report
+
+
+def _create_consolidated(
+    repository: Path, planned: dict[str, Any], entry: dict[str, Any], *,
+    owner: str, verify: bool,
+) -> bool:
+    """Write a new consolidated finding, resolved - and verified when every
+    event recorded its verification; False with a blocked entry otherwise."""
+    with mutation_lock(repository):
+        snapshot = snapshot_files(list(index_paths(repository)))
+        created: Optional[dict[str, Any]] = None
+        try:
+            created = create_record(
+                repository,
+                "finding",
+                planned["external_id"],
+                planned["title"],
+                planned["files"],
+                planned["sources"],
+                owner=owner,
+                authority="observed",
+                goal=planned["goal"],
             )
-            created: Optional[dict[str, Any]] = None
-            try:
-                created = create_record(
-                    repository,
-                    "finding",
-                    planned["external_id"],
-                    planned["title"],
-                    planned["files"],
-                    planned["sources"],
-                    owner=owner,
-                    authority="observed",
-                    goal=planned["goal"],
-                )
-                updated = update_record(
+            updated = update_record(
+                repository,
+                created["id"],
+                expected_revision=created["revision"],
+                progress=planned["progress"],
+                next_steps=[],
+                files=[],
+                sources=[],
+                actor=owner,
+                transition_to="resolved",
+                reason=f"Consolidated {planned['events']} completed events",
+            )
+            if verify:
+                update_record(
                     repository,
                     created["id"],
-                    expected_revision=created["revision"],
-                    progress=planned["progress"],
+                    expected_revision=updated["revision"],
+                    progress=None,
                     next_steps=[],
                     files=[],
                     sources=[],
                     actor=owner,
-                    transition_to="resolved",
-                    reason=f"Consolidated {planned['events']} completed events",
+                    authority="verified",
+                    attestation="agent",
+                    reason="Every consolidated event recorded verification",
                 )
-                if (
-                    verify_consolidated
-                    and planned["all_verified"]
-                    and planned["sources"]
-                ):
-                    updated = update_record(
-                        repository,
-                        created["id"],
-                        expected_revision=updated["revision"],
-                        progress=None,
-                        next_steps=[],
-                        files=[],
-                        sources=[],
-                        actor=owner,
-                        authority="verified",
-                        attestation="agent",
-                        reason="Every consolidated event recorded verification",
-                    )
-                for _, record, _ in events:
+        except Exception as error:
+            if created is not None:
+                try:
+                    rollback_created_record(repository, created["id"])
+                except BrainError:
+                    pass
+            restore_files(snapshot)
+            entry.update(state="blocked", reason=str(error))
+            return False
+    entry.update(state="created", verified=verify)
+    return True
+
+
+def _extend_consolidated(
+    repository: Path, path: Path, summary: dict[str, Any], ticket: str,
+    events: list[tuple[Path, dict[str, Any], str]], related: list[str],
+    entry: dict[str, Any], report: dict[str, Any], *,
+    apply: bool, owner: str, verify_consolidated: bool,
+) -> None:
+    """Add events that reached a ticket after its active finding was written.
+
+    An observed finding takes them as they are, and becomes verified once
+    every line it carries recorded a verification. A verified finding is a
+    checked claim: it takes new events only when each recorded its own
+    verification, as a revised claim the agent attests; otherwise they stay
+    recorded until the finding is archived and a new one takes them.
+    """
+    entry["finding"] = summary.get("external_id")
+    records = [record for _, record, _ in events]
+    verified = summary.get("authority") == "verified"
+    if owner not in (summary.get("authorized_owners") or []):
+        entry.update(
+            state="skipped",
+            reason=f"the finding belongs to {summary.get('owner')}; the events stay recorded",
+        )
+        return
+    if verified and not (
+        verify_consolidated and all(_event_verification(record) for record in records)
+    ):
+        entry.update(
+            state="skipped",
+            reason="the verified finding takes only verified events; they stay recorded",
+        )
+        return
+    progress = _consolidated_progress(
+        ticket, str(summary.get("progress") or ""),
+        [_consolidation_entry(record) for record in records], related,
+    )
+    sources = _local_sources(repository, records)
+    # Every line after the head must be an event line that recorded its
+    # verification: text a finding carried from before those lines existed
+    # says nothing of whether its earlier events were verified.
+    carried = progress.splitlines()[1:]
+    if carried and carried[-1].startswith("Related findings: "):
+        carried = carried[:-1]
+    harden = bool(
+        not verified
+        and verify_consolidated
+        and (summary.get("sources") or sources)
+        and carried
+        and all(
+            _CONSOLIDATED_ENTRY.fullmatch(line) and " Verification: " in line
+            for line in carried
+        )
+    )
+    entry.update(state="planned-update", adds=len(records))
+    if not apply:
+        return
+    files = list(dict.fromkeys(
+        item for record in records for item in record.get("files") or []
+        if isinstance(item, str) and item
+    ))
+    with mutation_lock(repository):
+        snapshot = snapshot_files([path, *index_paths(repository)])
+        try:
+            update_record(
+                repository,
+                summary["id"],
+                expected_revision=summary["revision"],
+                progress=progress,
+                next_steps=[],
+                files=files,
+                sources=sources,
+                actor=owner,
+                authority="verified" if harden else None,
+                attestation="agent" if harden or verified else None,
+                reverify=verified,
+                reason=f"Added {len(records)} completed event(s) of {ticket}",
+            )
+        except Exception as error:
+            restore_files(snapshot)
+            entry.update(state="blocked", reason=str(error))
+            report["blocked"] += 1
+            return
+    entry.update(state="updated", verified=verified or harden)
+    report["updated"] += 1
+    if harden:
+        report["verified"] += 1
+
+
+def _retire_consolidated_events(
+    repository: Path,
+    retiring: list[tuple[dict[str, Any], str, list[tuple[Path, dict[str, Any], str]]]],
+    owner: str,
+    entry: dict[str, Any],
+) -> Optional[int]:
+    """Supersede the events whose finding a chunk now carries, as the
+    operator: how many, or None with a blocked entry."""
+    with mutation_lock(repository):
+        snapshot = snapshot_files(
+            [path for _, _, members in retiring for path, _, _ in members]
+            + list(index_paths(repository))
+        )
+        count = 0
+        try:
+            for volume, memory_id, members in retiring:
+                for _, record, _ in members:
                     update_record(
                         repository,
                         record["id"],
@@ -3154,44 +3500,34 @@ def consolidate(
                         next_steps=[],
                         files=[],
                         sources=[],
-                        # The event's own owner is the actor authorized to
-                        # supersede it; the operator consolidating may differ.
-                        actor=str(record.get("owner") or owner),
+                        actor=owner,
                         transition_to="superseded",
-                        reason=f"Consolidated into {planned['external_id']}",
+                        reason=(
+                            f"Consolidated into {volume.get('external_id')}, "
+                            f"carried by {memory_id}"
+                        ),
                     )
-            except Exception as error:
-                if created is not None:
-                    try:
-                        rollback_created_record(repository, created["id"])
-                    except BrainError:
-                        pass
-                restore_files(snapshot)
-                entry.update(state="blocked", reason=str(error))
-                report["blocked"] += 1
-                continue
-        entry["state"] = "created"
-        report["created"] += 1
-        entry["verified"] = bool(
-            verify_consolidated and planned["all_verified"] and planned["sources"]
-        )
-        if entry["verified"]:
-            report["verified"] += 1
-        report["superseded"] += len(events)
-    return report
+                    count += 1
+        except Exception as error:
+            restore_files(snapshot)
+            entry.update(state="blocked", reason=str(error))
+            return None
+    return count
 
 
 def _retain_consolidated(record: dict[str, Any]) -> bool:
-    """Whether a consolidated, still-observed finding must stay active.
+    """Whether a consolidated, still-observed finding must stay in dynamic.
 
-    Consolidation writes an observed finding on the turn boundary; the
-    automatic compaction that follows would immediately move it to the
-    archive, where a capsule cannot reach it. It stays in dynamic until a
-    person or agent verifies it (and promotion has had its chance).
+    Resolved is terminal, so the automatic compaction on the same turn
+    boundary would archive the finding the moment consolidation wrote it.
+    Retrieval serves neither copy - the ticket's events stay recorded for
+    that - but the active one is where the ticket's later events are added
+    and where a reviewer finds it. It stays until it is verified, when
+    promotion carries it into the Memory Bank.
     """
     return (
         record.get("type") == "finding"
-        and str(record.get("external_id") or "").startswith("CONSOLIDATED-")
+        and str(record.get("external_id") or "").startswith(CONSOLIDATED_PREFIX)
         and record.get("authority") != "verified"
     )
 
@@ -3758,6 +4094,22 @@ _PROVENANCE_INSTRUCTION_PATTERNS = (
 )
 
 
+def provenance_policy_fingerprint() -> str:
+    """Identity of the instruction patterns. An index that screened a chunk
+    under other patterns has not screened it under these."""
+    return hashlib.sha256(
+        "\n".join(
+            f"{pattern.flags}:{pattern.pattern}" for pattern in _PROVENANCE_INSTRUCTION_PATTERNS
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def instruction_like(title: object, content: object) -> bool:
+    """Whether a title or text reads like an instruction to an agent."""
+    text = "\n".join(part for part in (str(title or ""), str(content or "")) if part)
+    return any(pattern.search(text) for pattern in _PROVENANCE_INSTRUCTION_PATTERNS)
+
+
 def provenance_problems(record: dict[str, Any], content: Optional[str] = None) -> list[str]:
     """Why an automatic promotion may not carry this record, if it may not."""
     problems: list[str] = []
@@ -3767,10 +4119,7 @@ def provenance_problems(record: dict[str, Any], content: Optional[str] = None) -
         problems.append(
             "external source requires review: " + external[0]
         )
-    text = "\n".join(
-        part for part in (str(record.get("title") or ""), str(content or "")) if part
-    )
-    if any(pattern.search(text) for pattern in _PROVENANCE_INSTRUCTION_PATTERNS):
+    if instruction_like(record.get("title"), content):
         problems.append("instruction-like content requires review")
     return problems
 
@@ -4261,13 +4610,15 @@ def auto_consolidate(repository: Path, *, owner: str = "local") -> dict[str, Any
     """Collapse completed events on the turn boundary, without a user command.
 
     The same boundary that promotes durable memory and archives terminal
-    records first turns a ticket's completed-event series into one finding.
-    A failure is reported, never raised: the checkpoint that already landed
-    must not be presented as a failed turn because maintenance could not run.
+    records first turns a ticket's completed-event series into one finding,
+    and lets events leave the diary once a chunk carries their finding. Off
+    unless `automatic_consolidation` is set. A failure is reported, never
+    raised: the checkpoint that already landed must not be presented as a
+    failed turn because maintenance could not run.
     """
     config = load_config(repository)
     empty = {
-        "enabled": False, "created": 0, "superseded": 0,
+        "enabled": False, "created": 0, "updated": 0, "superseded": 0,
         "blocked": 0, "tickets": 0, "error": None,
     }
     if not config.get("automatic_consolidation"):
@@ -4279,6 +4630,7 @@ def auto_consolidate(repository: Path, *, owner: str = "local") -> dict[str, Any
     return {
         "enabled": True,
         "created": result["created"],
+        "updated": result["updated"],
         "superseded": result["superseded"],
         "blocked": result["blocked"],
         "tickets": len(result["tickets"]),
@@ -4548,7 +4900,7 @@ def audit_bank(repository: Path, *, provenance: bool = False) -> dict[str, Any]:
     undigested: list[str] = []
     auto_promoted: list[dict[str, Any]] = []
     external_sources: list[dict[str, Any]] = []
-    instruction_like: list[str] = []
+    instructions: list[str] = []
     total = 0
     if chunks.is_dir():
         for path in sorted(chunks.glob("*.md")):
@@ -4581,11 +4933,8 @@ def audit_bank(repository: Path, *, provenance: bool = False) -> dict[str, Any]:
                 external_sources.append(
                     {"chunk": relative, "id": metadata.get("id"), "sources": urls}
                 )
-            text = str(metadata.get("title") or "") + "\n" + body
-            if provenance and any(
-                pattern.search(text) for pattern in _PROVENANCE_INSTRUCTION_PATTERNS
-            ):
-                instruction_like.append(relative)
+            if provenance and instruction_like(metadata.get("title"), body):
+                instructions.append(relative)
             digests = metadata.get("source_digests")
             if not isinstance(digests, list) or not digests:
                 if digestible_sources(metadata.get("sources")):
@@ -4655,7 +5004,7 @@ def audit_bank(repository: Path, *, provenance: bool = False) -> dict[str, Any]:
         result["provenance"] = {
             "auto_promoted": auto_promoted,
             "external_sources": external_sources,
-            "instruction_like": instruction_like,
+            "instruction_like": instructions,
         }
     return result
 

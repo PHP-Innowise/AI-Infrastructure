@@ -1,11 +1,11 @@
 ---
 name: skill-creator
-description: "Spawn skill-creator agent to create or update Claude skills."
+description: "Spawn skill-creator agent to create or update Cursor skills."
 ---
 
 # Skill Creator
 
-Spawn skill-creator agent to create or update Claude skills.
+Spawn skill-creator agent to create or update Cursor skills.
 
 ## Input
 $ARGUMENTS
@@ -14,7 +14,7 @@ $ARGUMENTS
 
 Use the Task tool to spawn a sub-agent:
 - **subagent_type:** `skill-creator`
-- **description:** `Create Claude skill`
+- **description:** `Create Cursor skill`
 - **prompt:** `$ARGUMENTS`
 
 The agent will use the skill-creator skill and suggest next steps when done.

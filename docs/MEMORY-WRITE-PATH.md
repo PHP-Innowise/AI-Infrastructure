@@ -31,46 +31,76 @@ python3 memory-bank/scripts/context.py consolidate --ticket CMS-741          # d
 python3 memory-bank/scripts/context.py consolidate --ticket CMS-741 --apply
 ```
 
-The turn boundary runs this automatically when `automatic_consolidation` is
-enabled (the shipped default); the command is the explicit replay. A
-`CONSOLIDATED-*` finding stays in `dynamic/findings` until its authority is
-`verified`, even when automatic compaction runs on the same boundary: resolved
-is terminal, but an unverified conclusion archived before anyone could read it
-is not durable memory. It groups
-**recorded events whose title says `Completed`** by the first ticket they name,
-and only when at least two events share it. For each
-group it creates one `finding`:
+The turn boundary runs the same pass when a project sets
+`automatic_consolidation` in `runtime.json`. It is off by default and in the
+shipped configuration (see "Why it is off by default" below); the command is
+the explicit replay. It groups the operator's own **recorded events whose title
+says `Completed`** by the ticket the title names - `Completed CMS-741: ...` -
+and, for a ticket with at least two of them, creates one `finding`:
 
 - `external_id` = `CONSOLIDATED-<ticket>`;
-- title and `goal` from the latest event's first outcome sentence;
+- title and `goal` from the latest event's descriptive title (what follows
+  `Completed <ticket>:`), falling back to its outcome's first sentence;
+- `progress` carries **every** event on a line of its own - what was done,
+  the outcome and the event's `Verification:` - ending with the event's UUID,
+  then the external ids and UUIDs of the ticket's other findings;
 - `sources` = the union of the events' **local, existing** sources (remote URLs
   are not fingerprinted, so they are left out rather than making the new record
   unvalidatable);
-- `progress` records the source event IDs and up to three `Verification:`
-  sentences;
-- status `resolved`, authority `observed` by default - mechanical consolidation
-  is not a verification. With `automatic_consolidation_verification` (shipped
-  on), it becomes `verified` only when every source event recorded a
-  `Verification:` line and at least one local source was fingerprinted; the
-  authority transition is agent-attested and the same boundary may promote the
-  summary into a durable chunk.
+- status `resolved`, authority `observed` - mechanical consolidation is not a
+  verification. With `automatic_consolidation_verification`, it becomes
+  `verified` only when every source event recorded a `Verification:` line
+  (counted per event: two events that both say "unit tests passed" are two)
+  and at least one local source was fingerprinted; the authority transition is
+  agent-attested, and the same boundary's automatic promotion may then carry
+  the summary into a durable chunk.
 
-The source events are transitioned to `superseded` with their own owner as the
-actor; they are **not** archived. Archiving is the operator's decision and
-`compact` remains the command that moves terminal records. A private or
-restricted event is never folded into the team-visible finding. A second run is
-idempotent and reports `skipped` for an existing consolidated finding. When the
-ticket already has other findings, including an open/investigating one, their
-external ids and UUIDs are named in the summary's `progress` after the event
-ids; the records stay distinct, but the capsule text carries the link. If the
-ticket already has a different **resolved** finding, consolidation creates no
-second conclusion: it supersedes the events with that finding named in the
-reason and reports the ticket as `existing`. An open or investigating finding
-is a specific work item, not a conclusion, so it does not suppress the summary.
+Retrieval serves no resolved finding, so the events are **not** superseded
+when the finding is written: they stay `recorded`, and on a fresh clone they
+are where their outcomes are found. Once the finding's current revision is an
+active Memory Bank chunk, the next pass marks them `superseded` - the operator
+is the actor, never the event's owner - and `compact` moves them. The first
+version superseded the events at once, into a finding that carried only the
+latest event's topic: on a fresh clone a question about an earlier event of
+the series found nothing.
+
+Events that reach the ticket later are added to its active `observed`
+finding; a `verified` finding takes only events that recorded their own
+verification, as a revised claim the agent attests again. A `CONSOLIDATED-*`
+finding stays in `dynamic/findings` until it is verified, even when automatic
+compaction runs on the same boundary; once it is archived, a new finding takes
+the ticket's later events. One pass reads the archive and the promotion ledger
+at most once, and not at all when every ticket's active finding already covers
+its events - the earlier pass read the archive once per ticket on every flush
+(0.58 s at 40 tickets and 2,000 archived records).
+
+Only the operator's own events are folded in: another owner's are theirs to
+supersede. A private or restricted event is never folded into the team-visible
+finding. If the ticket already has a different **resolved** finding,
+consolidation creates no second conclusion and leaves the events recorded: that
+finding does not carry their text. An open or investigating finding is a
+specific work item, not a conclusion, so it does not suppress the summary.
 
 The finding cites the events' canonical sources, not the event files, so a
 later `compact` cannot turn the durable conclusion stale by moving its cited
 events.
+
+A ticket here is an uppercase prefix, a hyphen and a number. "PHP 8.2" (a
+space) and a standard's number - `UTF-8`, `PSR-4`, `SHA-256`, `ISO-8601` - are
+not tickets: the first version grouped two unrelated events under "UTF-8".
+Retrieval uses the same rule, and, once the index has seen the prefixes the
+project files its work under (its tasks' IDs and the tasks its completion
+events name), counts only those.
+
+### Why it is off by default
+
+The pass rewrites the team's tracked Project Brain on its first flush - 27 of
+28 events on the evaluated project - and a verified summary becomes an
+agent-attested chunk no person reviewed. The redesigned pass above has
+deterministic tests but has not been measured on that project, so a project
+turns it on deliberately (`automatic_consolidation`, and
+`automatic_consolidation_verification` for the verified path) rather than
+receiving it with an update.
 
 ## 2. Provenance and poisoning
 
@@ -120,13 +150,17 @@ injection that disappears with the session.
 
 The evaluated project's real prompts include Russian questions while the indexed
 source is English. Three of them previously selected nothing. `query_tokens`
-now carries a small prefix-based seed glossary for common software terms
-(`путь` → path, `лог` → log, `отбрасывание` → drop, `свойства` → properties,
-`сущности` → entity, `срок` → ttl, `просмотр` → preview, …). It rewrites only
-Cyrillic words; English text, identifiers and tickets pass through unchanged.
-On those three prompts the same corpus now returns 2–3 semantic documents and
-the changelog, including the exact TTL-preview chunk for one of them. The
-12-prompt English stand is unchanged.
+now carries a small seed glossary for common software terms (`путь` → path,
+`лог` → log, `отбрасывание` → drop, `свойства` → properties, `сущности` →
+entity, `срок` → ttl, `просмотр` → preview, …). It adds the English term
+**beside** a Cyrillic word, which stays in the query, so a Russian document is
+still found by its own words; the first version replaced the word and lost
+them. Each entry matches the whole word form: a bare prefix took `логика` and
+`логин` for log, `старт` for legacy, `действительно` for validity and
+`полезно` for field. English text, identifiers and tickets pass through
+unchanged. On those three prompts the same corpus returned 2–3 semantic
+documents and the changelog, including the exact TTL-preview chunk for one of
+them. The 12-prompt English stand is unchanged.
 
 The glossary is a bridge, not a translation service: it is deliberately small,
 local, dependency-free and extendable in one table.
@@ -159,9 +193,11 @@ timestamp and belongs at the consolidation boundary.
 On the evaluated project's 28 events, 27 were titled `Completed` and named one
 of eight tickets. `consolidate --json` planned **seven findings covering 27
 events**; `CMS-748` had a single event and stayed `skipped`. On a copy with the
-cited local sources present, `--apply` created those seven findings, superseded
-27 events, blocked none, and `validate` passed. The dry run was never applied to
-the original project.
+cited local sources present, the first version's `--apply` created those seven
+findings, superseded 27 events, blocked none, and `validate` passed - and lost
+every outcome but each ticket's latest from retrieval, which is what the
+current rules prevent. The dry run was never applied to the original project,
+and the current rules have not been run on it.
 
 The first copy exposed a title-quality defect: a latest goal that is literally
 `completed Verification: ...` produced titles like `CMS-744: completed
@@ -204,9 +240,11 @@ maintainer-only and fails closed; the runtime never imports it. See
 
 ## What is not claimed
 
-- Consolidation creates an `observed` finding, not a verified conclusion and
-  not a durable chunk. Promotion still requires `verified` authority and fresh
-  sources.
+- Consolidation is not a verification: a finding is `verified` only when the
+  project enabled `automatic_consolidation_verification` and every event it
+  covers recorded its own verification; otherwise it stays `observed` and is
+  never promoted. Promotion still requires `verified` authority and fresh
+  sources, and only a promoted finding lets its events leave the diary.
 - No retrieval filter was added in this layer. The remaining 10/31 noise
   documents on the 12-prompt stand are unchanged.
 - The feature tests are deterministic unit/integration tests. The end-to-end
