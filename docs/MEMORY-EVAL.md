@@ -613,6 +613,14 @@ None says whether delivery changes what an agent does.
 
   The arms therefore differ by the Task Capsule alone. The policy's own
   `context.py retrieve` stays available in both.
+- **The `navigation` arm** runs the same hook with `capsule_profile:
+  navigation` in the corpus: working state and recent files, no documents.
+  It writes no manifest, so its runs are recognised by the line every hook
+  refresh appends to `refresh-health.ndjson`.
+- **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
+  arms of a result. The rule below then reads `<treatment>-helps` /
+  `<treatment>-hurts`. Each run also records the token estimate of the
+  documents the hook's manifest delivered.
 - **Repeats:** `--repeat` runs each arm several times; the order alternates by
   task and repeat.
 
