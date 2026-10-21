@@ -591,6 +591,63 @@ requests with the same clock and cache warmth. Host contention can affect even
 the unchanged baseline; p95 values from separate batches do not by themselves
 identify the CPU cost of a selector change.
 
+## Measuring task outcomes
+
+Every number above scores what a capsule delivers against relevance labels.
+None says whether delivery changes what an agent does.
+`scripts/memory_outcome_ab.py` measures that on tasks that really happened.
+
+**What a pair is.**
+- **The task:** the first prompt of a recorded Claude Code session whose turn
+  changed at least one file the prompt does not name. Its *gold* files are
+  those changed files. Each one must be:
+  - a path the project's Git has known;
+  - kept by the runtime's recent-files filter;
+  - not part of the memory system itself.
+- **The corpus:** the project rebuilt as of the prompt with this stand's
+  reconstruction. Recent files are seeded from the project's earlier sessions,
+  as the Stop hook would have recorded them.
+- **The arms:** a headless `codex exec` session runs the same prompt twice:
+  - `off`, with no hooks;
+  - `capsule`, with only the memory prompt hook (`working-memory-read.sh`).
+
+  The arms therefore differ by the Task Capsule alone. The policy's own
+  `context.py retrieve` stays available in both.
+- **Repeats:** `--repeat` runs each arm several times; the order alternates by
+  task and repeat.
+
+**What is counted.**
+- **The metric:** tool calls (commands, file changes, MCP and web calls)
+  before the agent first touches a gold file, in a command it runs or a change
+  it makes.
+- **Stopping:** a run stops at that touch, at `--cap` calls or at `--timeout`.
+  A run that never touched a gold file counts one past the cap.
+- **Validity:** a pair counts only if the hook's own manifest (`refresh` or
+  `hook-context`) shows that the capsule arm received a capsule in every repeat
+  and the `off` arm received none.
+
+**The verdict.** `report` prints the mean difference capsule − off, a
+bootstrap 95% interval and an exact sign test, then applies the rule:
+- **insufficient:** fewer than 20 valid pairs;
+- **capsule-helps:** the interval lies below zero and the capsule arm touches
+  gold no less often (one task of slack);
+- **capsule-hurts:** the interval lies above zero;
+- **no-difference-shown:** anything else.
+
+Write the sample, the arms and this rule down before a run, with a digest of
+the note.
+
+**Limits.**
+- The working tree at the prompt is not rebuilt. A task that reviewed
+  uncommitted changes may not reproduce; this hits both arms alike.
+- The agent is Codex, whatever host the original session used.
+- Long prompts that name components leave few calls to save, which bounds any
+  effect from above.
+
+**Privacy.** Sets carry prompts and results name client paths. Both are
+written owner-only and are refused inside the clone. `--events` keeps raw
+sessions for a pilot and belongs in a private folder.
+
 ## Optional ONNX excerpt experiment
 
 Use a reranker when an eligible document is already found but its ranking or

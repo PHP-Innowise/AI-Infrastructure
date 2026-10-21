@@ -235,7 +235,7 @@ jobs:
         # The stand runs on client prompts and stays out of CI; its as-of
         # reconstruction, edition overlay, scoring, report and transcript
         # parsing run here on a synthetic project, with one real refresh.
-        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot tests.test_memory_miss_audit tests.test_memory_onnx tests.test_memory_onnx_pilot
+        run: python3 -m unittest tests.test_memory_eval tests.test_memory_graph_pilot tests.test_memory_miss_audit tests.test_memory_onnx tests.test_memory_onnx_pilot tests.test_memory_outcome_ab tests.test_memory_rerank_pilot tests.test_memory_sqlite_vec_pilot tests.test_memory_fact_consolidation tests.test_memory_history_series
       - name: Memory snapshot and failed-refresh boundaries
         run: python3 -m unittest tests.test_memory_runtime_reliability
       - name: Native memory source diagnostics and complete-governance boundaries
