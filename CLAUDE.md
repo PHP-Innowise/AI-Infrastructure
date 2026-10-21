@@ -139,6 +139,17 @@ A change to `memory-bank/scripts/`, `memory-bank/templates/` or
 the editions identical to each other, the second carries the same change into
 the projects the generator builds.
 
+Make a core change in `PHP Core/` only, then write it to every copy:
+
+```bash
+python3 scripts/core_sync.py --write   # the other editions, then asset_parity.py --write and build_mirrors.py --write
+python3 scripts/core_sync.py --check   # which copies differ from PHP Core
+```
+
+The copies are marked `linguist-generated` in `.gitattributes`, so a pull
+request shows the canonical change once; the parity gates above still hold
+every copy byte-identical.
+
 `bash-validator.sh` is framework-shaped and excluded from cross-edition
 parity, but its generic section (between the `bash-validator generic section`
 markers) is byte-identical in the four editions and Infrastructure-Creator.

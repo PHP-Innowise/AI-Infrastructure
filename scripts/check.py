@@ -412,6 +412,7 @@ def _parity_commands(edition: str) -> List[Command]:
         commands += [
             step("Generator-asset parity", "python3 scripts/asset_parity.py --check", leg=edition),
             unittests("Generator-asset parity regression tests", ["tests.test_asset_parity"], leg=edition),
+            unittests("Core single-source sync regression tests", ["tests.test_core_sync"], leg=edition),
         ]
     return commands
 
