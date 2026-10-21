@@ -76,6 +76,17 @@ python3 scripts/build_mirrors.py --write --edition Laravel --edition "PHP Core" 
 (cd "PHP Core" && python3 memory-bank/scripts/context.py parity && python3 memory-bank/scripts/context.py parity --cross-edition)
 ```
 
+Make a core change in `PHP Core/` only, then write it to every copy:
+
+```bash
+python3 scripts/core_sync.py --write   # the other editions, then asset_parity.py --write and build_mirrors.py --write
+python3 scripts/core_sync.py --check   # which copies differ from PHP Core
+```
+
+The copies are marked `linguist-generated` in `.gitattributes`, so a pull
+request shows the canonical change once; the parity gates still hold every
+copy byte-identical.
+
 ### Installer inventory verification
 
 ```bash

@@ -115,6 +115,11 @@ jobs:
       - name: Generator-asset parity regression tests
         if: matrix.edition == 'Laravel'
         run: python3 -m unittest tests.test_asset_parity
+      # PHP Core is the one place a core change is made; core_sync.py writes
+      # it to the other editions and the generator asset.
+      - name: Core single-source sync regression tests
+        if: matrix.edition == 'Laravel'
+        run: python3 -m unittest tests.test_core_sync
 
   mirrors:
     name: mirrors
