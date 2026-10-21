@@ -958,11 +958,18 @@ and Cursor hooks run, and Claude's `hook-context`). An explicit
 `context.py retrieve` always searches. Any other value leaves the turn without
 a capsule and says why, as a broken index does.
 
-`navigation` is an experiment switch, not a recommendation. The task-outcome
-measurement of 2026-10-21 (`docs/MEMORY-EVAL.md`, "Measuring task outcomes")
-found no difference between the full capsule and none. A capsule without the
-document layers has to be measured the same way before it could become the
-default.
+`navigation` is an opt-in profile, not the default. On 30 client tasks it
+reached the file a task changed in fewer calls than the full capsule
+(`docs/MEMORY-EVAL.md`, "Measuring task outcomes"). It also turns off
+everything the hook delivers through the document layers:
+- a result saved in one session is no longer recalled by the next session's
+  capsule;
+- source hints are not delivered;
+- the Cursor rule carries no documents.
+
+An agent can still pull all of these with `context.py retrieve` or the MCP
+`memory_retrieve` tool. The navigation measurement did not cover recall, so the
+default stays `full`.
 
 `retrieval-report` keeps shadow `would_skip` distinct from context actually
 `withheld` in `enforce`. It slices gate results by `mode`, `query_source`,

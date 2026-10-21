@@ -680,6 +680,33 @@ What follows: the document layers have not shown that they change what an
 agent does. A capsule reduced to the working state and navigation is the next
 candidate default, measured the same way against this one.
 
+**The second measurement (2026-10-21): three arms.**
+
+Setup:
+- 30 fresh tasks from the same pool, with the pilot and the first sample
+  left out;
+- seed 2027, rule sealed before the run;
+- arms `off`, `capsule` and `navigation` (`capsule_profile: navigation`), two
+  repeats each.
+
+Results:
+
+| comparison | means | difference, 95% CI | gold reached | verdict |
+|---|---|---|---|---|
+| navigation against capsule | 21.80 → 18.88 | −2.92 [−6.25, −0.40] | 14 → 17 | navigation-helps |
+| navigation against off | 21.67 → 18.88 | −2.78 [−6.82, +0.42] | 16 → 17 | no difference shown |
+| capsule against off | 21.67 → 21.80 | +0.13 [−2.72, +3.18] | 16 → 14 | no difference shown |
+
+The sealed rule made navigation a candidate default, but it is not the
+default. Shipping it turned red 23 suites that pin what the document layers
+deliver:
+- a result saved in one session recalled by the next session's capsule;
+- source hints;
+- documents in the Cursor rule.
+
+This metric counts calls to a file, not recall. A smaller capsule that keeps
+recall needs its own arm and its own measurement before the default moves.
+
 **Privacy.** Sets carry prompts and results name client paths. Both are
 written owner-only and are refused inside the clone. `--events` keeps raw
 sessions for a pilot and belongs in a private folder.
