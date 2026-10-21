@@ -229,3 +229,7 @@ custom architecture — see `install/README.md`.
   root `scripts/`) go in the root `CHANGELOG.md` instead — CI's `changelog`
   job enforces this on PRs via `scripts/check_core_changelog.sh`.
 - Run the affected edition's `DOD.md` verification after a change.
+- Memory retrieval takes fixes only until a measurement of task outcomes
+  exists (capsule on against off, on replayed or real tasks). A new
+  ranking, admission or capsule heuristic is not merged on stand numbers;
+  see `docs/MEMORY-EVAL.md` ("Accepting a retrieval change").

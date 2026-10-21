@@ -72,6 +72,20 @@ So:
 - Insufficient and negative held-out results are reported as they are.
   "Unchanged on the stand" is not evidence that a change is safe.
 
+Retrieval is frozen to fixes until task outcomes are measured: a capsule
+against no capsule, on replayed or real tasks, counting the calls before the
+first touch of the file the task changed and whether the task got done. All
+of the earlier measures score relevance labels, and real use has not shown
+that relevant delivery changes what an agent does. In September one of 287
+delivered documents was opened.
+- A **fix** makes the runtime do what its contract already says. Examples: a
+  crash, a secret or privacy leak, a filter that withholds what its own
+  documentation keeps, a lost write, a performance regression.
+- A **heuristic** changes what a capsule selects, ranks or spends. Examples:
+  a new boost, floor, slot, alias, expansion or budget rule.
+- Fixes merge with their tests. Heuristics wait for the outcome measurement,
+  and an experiment switch must leave the default unchanged.
+
 ## What a run does, per prompt
 
 Nothing is written into the project. All work happens in the cache (default
