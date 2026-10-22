@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded memory reads a Codex turn's files again — 2026-10-22
+
+- memory-seed's `context.py` reads the files of a Codex turn from its `exec`
+  cell (`tools.exec_command`, `tools.apply_patch`), the only form Codex 0.162
+  and later write; until now such a turn recorded none. The policy lock and
+  mirrors were regenerated for the changed asset.
+
 ### Memory stands down for a session in another worktree — 2026-10-22
 
 - hook-forge: a Claude Code desktop session in its own worktree, and any

@@ -28,6 +28,28 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A Codex turn records its files again — 2026-10-22
+
+Codex 0.162 and later run every tool from one JavaScript cell, the custom
+tool `exec`: a shell command is `tools.exec_command({cmd: "...", workdir:
+"..."})`, a patch `tools.apply_patch("*** Begin Patch ...")`. The Stop hook's
+transcript reader knew Codex's `function_call`, `local_shell_call` and the
+`apply_patch` custom tool, none of which those versions write, so a Codex turn
+recorded none of its files and the next session's `recent files` line stayed
+empty. On this machine's 154 October rollouts (Codex Desktop and the TUI,
+0.162 and 0.163) the reader found 0 files in 650 turns.
+
+- `_transcript_calls` reads an `exec` cell's `tools.exec_command` and
+  `tools.apply_patch` calls: their string literals - double, single or
+  backtick quoted, `String.raw` included, JavaScript escapes decoded - go
+  through the same shell and patch readers as before, from the cell's
+  `workdir` when it is an absolute literal. A command built from a variable or
+  a `${}` substitution names nothing the text can show and is passed over.
+- On the same rollouts 42 turns record 90 files; most of those sessions worked
+  in other checkouts and in `~/.codex`, whose files are not the project's.
+- `test_codex_exec_cells_name_their_files` in
+  `project-brain/tests/test_runtime.py` fails on `f6876f7d`.
+
 ### A session in another worktree is not served this checkout's memory — 2026-10-22
 
 A Claude Code desktop session in its own worktree - and any session after

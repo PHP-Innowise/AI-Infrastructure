@@ -14805,6 +14805,37 @@ class RecentProjectFilesTest(RuntimeHarness):
         self.assertEqual(3, self.turn(transcript)["recent_files"])
         self.assertEqual("recent files: src/Guard.php, src/Refund.php, src/Ledger.php", self.recent_line())
 
+    def test_codex_exec_cells_name_their_files(self) -> None:
+        # Codex 0.162 and later run every tool from one JavaScript cell, the
+        # custom tool `exec`; its shell commands and patches are string
+        # literals in that program, and none of their files was recorded.
+        def item(payload: dict) -> dict:
+            return {"type": "response_item", "payload": payload}
+
+        def cell(code: str) -> dict:
+            return item({"type": "custom_tool_call", "name": "exec", "call_id": "c", "input": code})
+
+        repository = json.dumps(str(self.repository))
+        transcript = Path(self.temporary.name) / "exec-rollout.jsonl"
+        records = [
+            item({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the refund"}]}),
+            cell("const r = await tools.exec_command({cmd: \"sed -n '1,40p' \\\"src/Refund.php\\\" && "
+                 "rg -n settle src/Ledger.php\", workdir: " + repository + ", max_output_tokens: 4000});\ntext(r);"),
+            cell("const base = " + repository + ";\n"
+                 "await tools.exec_command({max_output_tokens: 2000, cmd: 'cat src/Export.php', workdir: base});\n"
+                 "await tools.exec_command({cmd: `head -5 ${base}/src/Reader.php`});\n"
+                 "const command = 'cat src/Writer.php';\nawait tools.exec_command({cmd: command});"),
+            cell("await tools.apply_patch(\"*** Begin Patch\\n*** Update File: src/Guard.php\\n@@\\n-a\\n+b\\n"
+                 "*** End Patch\\n\");\n"
+                 "await tools.apply_patch(String.raw`*** Begin Patch\n*** Add File: src/Query.php\n+<?php\n"
+                 "*** End Patch`);"),
+        ]
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        # A command from a variable or a `${}` template names nothing knowable.
+        self.assertEqual(5, self.turn(transcript)["recent_files"])
+        self.assertEqual("recent files: src/Guard.php, src/Query.php, src/Refund.php, src/Ledger.php, src/Export.php",
+                         self.recent_line())
+
     def test_codex_powershell_calls_name_their_files(self) -> None:
         transcript = Path(self.temporary.name) / "windows-rollout.jsonl"
         records = [
