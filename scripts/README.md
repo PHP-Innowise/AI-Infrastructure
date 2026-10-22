@@ -292,6 +292,16 @@ adds no `ACCELERATOR.md`. After a sync, adding a tool with
 unchanged; before, a release that changed the README made that install
 refuse it (`accelerator-readme-exists`) until the file was moved aside.
 
+An install writes the same record (`memory-bank/local/accelerator-install.json`,
+ignored local state) for every file it leaves holding the release byte for
+byte - copied, already identical, or given only its executable bit - and
+keeps the entries of a record the project already has. A file it merged into
+the project's own (`AGENTS.md`, `.gitignore`, an MCP configuration) is not
+named: it is the project's, and a sync never replaces it whole. With the
+record from the start, the first sync tells untouched files from edited ones
+without the clone's history, and the memory runtime leaves the untracked
+install out of a task's changed files (`changed_paths`) from the first turn.
+
 A project that commits its accelerator takes a release through a commit:
 `--sync --update-tracked --target DIR` (`--dry-run` first) writes the files
 the project's Git tracks too, by the same rules - a file still holding a

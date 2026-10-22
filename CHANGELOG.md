@@ -28,6 +28,35 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### An install records what it wrote — 2026-10-22
+
+- Why: the record of the accelerator's own files
+  (`memory-bank/local/accelerator-install.json`) was written by `--sync`
+  only. Until a project's first sync, the memory runtime could not tell the
+  untracked install from the task's work. A fresh install's Cursor rule
+  opened with "warming: task checkpoint pending" on a project where nothing
+  had changed. The first sync also had to recognise untouched files from the
+  clone's history, and without that history (a source from an archive) an
+  untouched `ACCELERATOR.md` stayed behind as edited.
+- `install_accelerator.py` now writes the record after an install. It names
+  every file the install leaves holding the release byte for byte (copied,
+  already identical, or given its executable bit) and keeps the entries of a
+  record the project already has. A merge into the project's own file
+  (`AGENTS.md`, `.gitignore`, an MCP configuration) is not named. A dry run
+  writes nothing, and a record that cannot be read or written safely is left
+  to the next sync. The Harness applies only the reviewed files of its
+  staged install and leaves the record to its first sync.
+- Tests (`tests/test_installation.py`):
+  - an install records the runtime by its blob id and names neither its
+    merged `AGENTS.md` nor its merged `.mcp.json`; a dry run leaves the
+    record as it was;
+  - the first sync takes the recorded `ACCELERATOR.md` to the next release
+    without the clone's history. A copy from an install made before records
+    still stays as edited; that test now removes the record first.
+  - a dry-run sync leaves the install's record unchanged;
+  - `tests/test_harness_setup.py` compares the Harness's and the CLI's file
+    modes outside `memory-bank/local`, where only the CLI's record lies.
+
 ### A client's sync rehearsed on a copy — 2026-10-22
 
 - Why: `--sync` updates an installed project in place, and whether the

@@ -1025,6 +1025,39 @@ class InstallSyncTest(unittest.TestCase):
         self.assertEqual([], report["changed"])
         self.assertTrue((self.target / "memory-bank/local/accelerator-install.json").is_file())
 
+    def test_an_install_records_what_it_wrote_and_not_what_it_merged(self) -> None:
+        # Until a project's first sync nothing on disk told the accelerator's
+        # files from the project's work: the memory runtime took an untracked
+        # install for a task's changes on every turn.
+        record = json.loads((self.target / "memory-bank/local/accelerator-install.json").read_text(encoding="utf-8"))
+        self.assertEqual(("Symfony", 1), (record["edition"], record["schema"]))
+        runtime = "memory-bank/scripts/context.py"
+        self.assertEqual(install_accelerator.git_blob_id((self.target / runtime).read_bytes()),
+                         record["files"][runtime])
+        project = Path(self._tmp.name) / "merged"
+        project.mkdir()
+        run("git", "init", "--quiet", str(project))
+        (project / "AGENTS.md").write_text("# Team rules\n\nShip small.\n", encoding="utf-8")
+        (project / ".mcp.json").write_text(json.dumps({"mcpServers": {"team": {"command": "team-mcp"}}}) + "\n",
+                                           encoding="utf-8")
+        installed = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone), "--edition", "Symfony",
+            "--tool", "claude", "--merge-existing", "--target", str(project),
+        )
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        self.assertIn("MERGE\tshared\tAGENTS.md", installed.stdout)
+        files = json.loads((project / "memory-bank/local/accelerator-install.json").read_text(encoding="utf-8"))["files"]
+        self.assertIn(runtime, files)
+        # A merge holds the project's own content: no sync may take it for an
+        # untouched release and replace it whole.
+        self.assertNotIn("AGENTS.md", files)
+        self.assertNotIn(".mcp.json", files)
+        dry = run(sys.executable, str(INSTALLER), "--source-root", str(self.clone), "--edition", "Symfony",
+                  "--tool", "codex", "--dry-run", "--merge-existing", "--target", str(project))
+        self.assertEqual(0, dry.returncode, dry.stderr)
+        self.assertEqual(files, json.loads(
+            (project / "memory-bank/local/accelerator-install.json").read_text(encoding="utf-8"))["files"])
+
     def test_a_new_release_reaches_untouched_files_only(self) -> None:
         self.sync()  # records what the install wrote
         skill = ".agents/skills/memory/SKILL.md"
@@ -1160,11 +1193,13 @@ class InstallSyncTest(unittest.TestCase):
     def test_a_dry_run_writes_nothing(self) -> None:
         runtime = self.target / "memory-bank/scripts/context.py"
         runtime.write_text("# edited\n", encoding="utf-8")
+        record = self.target / "memory-bank/local/accelerator-install.json"
+        before = record.read_bytes()  # the install's own record
         report = self.sync("--dry-run")
         self.assertTrue(report["dry_run"])
         self.assertIn("memory-bank/scripts/context.py", self.actions(report))
         self.assertEqual("# edited\n", runtime.read_text(encoding="utf-8"))
-        self.assertFalse((self.target / "memory-bank/local/accelerator-install.json").exists())
+        self.assertEqual(before, record.read_bytes())
 
     def test_a_linked_tool_folder_is_not_written_through(self) -> None:
         # A checkout can carry a link where `.cursor` was. Only the last
@@ -1679,13 +1714,28 @@ class AcceleratorReadmeSyncTest(unittest.TestCase):
         self.assertEqual(written, self.recorded())
 
     def test_a_copy_nothing_identifies_is_not_overwritten(self) -> None:
-        # No record names it, and without the clone's history (a source from
-        # an archive) nothing says these bytes are a release's README.
+        # An install made before installs kept a record: no record names it,
+        # and without the clone's history (a source from an archive) nothing
+        # says these bytes are a release's README.
+        (self.target / "memory-bank/local/accelerator-install.json").unlink()
         released = self.release("\nRelease note.\n")
         report = self.sync()
         self.assertEqual("edited in the project", self.kept(report).get("ACCELERATOR.md"))
         self.assertNotEqual(released, self.accelerator.read_bytes())
         self.assertIsNone(self.recorded())
+
+    def test_the_install_records_the_copy_for_the_first_sync(self) -> None:
+        # The install's own record names the copy it wrote, so the first sync
+        # takes it to the release without the clone's history.
+        self.assertEqual(install_accelerator.git_blob_id(self.accelerator.read_bytes()), self.recorded())
+        released = self.release("\nRelease note.\n")
+        report = self.sync()
+        self.assertEqual("updated", self.actions(report).get("ACCELERATOR.md"))
+        self.assertEqual(released, self.accelerator.read_bytes())
+        # The project's own README was never the release's, and no merge is
+        # named in the record.
+        record = json.loads((self.target / "memory-bank/local/accelerator-install.json").read_text(encoding="utf-8"))
+        self.assertNotIn("README.md", record["files"])
 
     def test_a_copy_the_projects_git_tracks_waits_for_update_tracked(self) -> None:
         self.sync()
