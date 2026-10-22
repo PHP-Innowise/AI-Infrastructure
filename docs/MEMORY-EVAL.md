@@ -613,6 +613,14 @@ None says whether delivery changes what an agent does.
 
   The arms therefore differ by the Task Capsule alone. The policy's own
   `context.py retrieve` stays available in both.
+- **The `navigation` arm** runs the same hook with `capsule_profile:
+  navigation` in the corpus: working state and recent files, no documents.
+  It writes no manifest, so its runs are recognised by the line every hook
+  refresh appends to `refresh-health.ndjson`.
+- **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
+  arms of a result. The rule below then reads `<treatment>-helps` /
+  `<treatment>-hurts`. Each run also records the token estimate of the
+  documents the hook's manifest delivered.
 - **Repeats:** `--repeat` runs each arm several times; the order alternates by
   task and repeat.
 
@@ -671,6 +679,33 @@ part of the rule.
 What follows: the document layers have not shown that they change what an
 agent does. A capsule reduced to the working state and navigation is the next
 candidate default, measured the same way against this one.
+
+**The second measurement (2026-10-21): three arms.**
+
+Setup:
+- 30 fresh tasks from the same pool, with the pilot and the first sample
+  left out;
+- seed 2027, rule sealed before the run;
+- arms `off`, `capsule` and `navigation` (`capsule_profile: navigation`), two
+  repeats each.
+
+Results:
+
+| comparison | means | difference, 95% CI | gold reached | verdict |
+|---|---|---|---|---|
+| navigation against capsule | 21.80 → 18.88 | −2.92 [−6.25, −0.40] | 14 → 17 | navigation-helps |
+| navigation against off | 21.67 → 18.88 | −2.78 [−6.82, +0.42] | 16 → 17 | no difference shown |
+| capsule against off | 21.67 → 21.80 | +0.13 [−2.72, +3.18] | 16 → 14 | no difference shown |
+
+The sealed rule made navigation a candidate default, but it is not the
+default. Shipping it turned red 23 suites that pin what the document layers
+deliver:
+- a result saved in one session recalled by the next session's capsule;
+- source hints;
+- documents in the Cursor rule.
+
+This metric counts calls to a file, not recall. A smaller capsule that keeps
+recall needs its own arm and its own measurement before the default moves.
 
 **Privacy.** Sets carry prompts and results name client paths. Both are
 written owner-only and are refused inside the clone. `--events` keeps raw

@@ -1371,6 +1371,15 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
         self.assertNotIn(token, stored)
         self.assertNotIn("10492", stored)
 
+    def test_a_capsule_without_documents_needs_no_manifest(self):
+        # capsule_profile: navigation delivers the working state and recent
+        # files and writes no manifest; automatic memory refused the turn.
+        empty = {'manifest': None, 'procedural': [], 'semantic': [], 'episodic': [], 'selected': []}
+        self.assertEqual({}, TaskContext._source_hashes(Path('/nonexistent'), empty))
+        with_document = {**empty, 'semantic': [{'path': 'memory-bank/chunks/MEM-1.md'}]}
+        with self.assertRaisesRegex(sessions.SessionError, 'no valid source manifest'):
+            TaskContext._source_hashes(Path('/nonexistent'), with_document)
+
     def test_pii_only_turn_skips_memory_and_does_not_create_a_task_or_manifest(self):
         store = self.manager()
         for private_only in ("person@example.test", "Customer email: person@example.test", "Call +370 600 12345",

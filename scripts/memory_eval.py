@@ -1184,6 +1184,10 @@ def runtime_env(cache: Path, stamp: datetime, clock: Optional[datetime]) -> Dict
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
+            # The stand measures document retrieval, which an explicit request
+            # and the `full` profile still use, whatever profile a project's
+            # hooks push. A runtime older than the switch ignores the name.
+            "CONTEXT_CAPSULE_PROFILE": "full",
         }
     )
     if clock is not None:

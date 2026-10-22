@@ -28,6 +28,50 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A navigation-only capsule, behind an experiment switch — 2026-10-21
+
+- `capsule_profile` in `runtime.json` (or `CONTEXT_CAPSULE_PROFILE`) chooses
+  what the automatic capsule carries:
+  - `full`, the default, is unchanged;
+  - `navigation` keeps the working state and the recent files and neither
+    searches nor records a delivery.
+- Only the automatic entry points read the switch (`refresh` and
+  `hook-context`); an explicit `context.py retrieve` still searches. An
+  unknown value leaves the turn without a capsule and names the setting, as a
+  bad retrieval gate does.
+- Harness automatic memory accepts a capsule that carries no document. It
+  refused the turn ("no valid source manifest") whenever the runtime wrote
+  no manifest, which `navigation` never writes; a capsule with documents and
+  no manifest is still refused.
+- `refresh --capsule-profile full|navigation` overrides the environment and
+  the config for one call. The MCP `memory_retrieve` tool reaches the capsule
+  through `refresh`, but it is the agent's own request, so it passes `full`;
+  the evaluation stand pins `full` in its runtime environment because it
+  measures document retrieval.
+- Why a switch and not a default:
+  - The second, three-arm measurement (30 fresh client tasks, rule sealed
+    before the run) found that the navigation capsule reached the file a task
+    changed in 2.92 fewer calls than the full one (95% CI [−6.25, −0.40]); the
+    full capsule against none again showed no difference.
+  - Shipping navigation would also turn off what the hook delivers through
+    the document layers: recall of a saved result in the next session, source
+    hints, documents in the Cursor rule. Twenty-three suites pin those, and
+    the measurement does not cover recall.
+  - The default therefore stays `full`; `navigation` is opt-in.
+- `scripts/memory_outcome_ab.py` gains the matching arm:
+  - `navigation` runs the memory prompt hook with the profile set in the
+    corpus;
+  - a hook run is recognised by its `refresh-health.ndjson` line, since the
+    profile writes no manifest;
+  - `report --compare BASELINE,TREATMENT` compares any two arms;
+  - each run records the token estimate of the documents the hook delivered.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`.
+- Tests: the default capsule carries a matching chunk; `navigation` drops it
+  and keeps the `working:` line; the environment overrides the config; an
+  explicit retrieval still finds the chunk; an unknown profile degrades
+  without failing the turn.
+
 ### Task outcomes, measured: capsule on against off — 2026-10-21
 
 - `scripts/memory_outcome_ab.py` measures what the stand cannot: whether the

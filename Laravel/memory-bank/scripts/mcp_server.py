@@ -148,8 +148,11 @@ class Memory:
             query = text(data['query'], 'query', 4000)
             paths = strings(data.get('paths', []), 'paths', 10, 1024)
             for p in paths: self.path(p)
+            # An explicit request searches whatever the automatic capsule's
+            # profile is: the profile only shapes what a hook pushes.
             result = self.cli('refresh', '--task-id', task_id, '--host', self.host,
-                '--gate', 'off', '--ephemeral', *[f'--path={p}' for p in paths], '--query', query)
+                '--gate', 'off', '--ephemeral', '--capsule-profile', 'full',
+                *[f'--path={p}' for p in paths], '--query', query)
             if not isinstance(result.get('capsule'), dict):
                 raise BrainError('Memory capsule is unavailable; check runtime health')
             return result

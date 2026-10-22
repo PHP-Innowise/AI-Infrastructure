@@ -944,6 +944,33 @@ turn has to be countable. On the Cursor path a skip exits with a status the
 delivery hooks leave alone: rendering a withheld capsule would satisfy their
 `working:` check and replace Cursor's only memory channel with an empty rule.
 
+What the automatic capsule carries is a separate setting:
+`CONTEXT_CAPSULE_PROFILE`, then `capsule_profile` in `runtime.json`, defaulting
+to `full`.
+
+- **`full`:** the established capsule — working state, recent files and the
+  retrieved semantic and episodic documents.
+- **`navigation`:** the working state and the recent files only. It searches
+  nothing and records no delivery.
+
+The profile applies to the automatic entry points (`refresh`, which the Codex
+and Cursor hooks run, and Claude's `hook-context`). An explicit
+`context.py retrieve` always searches. Any other value leaves the turn without
+a capsule and says why, as a broken index does.
+
+`navigation` is an opt-in profile, not the default. On 30 client tasks it
+reached the file a task changed in fewer calls than the full capsule
+(`docs/MEMORY-EVAL.md`, "Measuring task outcomes"). It also turns off
+everything the hook delivers through the document layers:
+- a result saved in one session is no longer recalled by the next session's
+  capsule;
+- source hints are not delivered;
+- the Cursor rule carries no documents.
+
+An agent can still pull all of these with `context.py retrieve` or the MCP
+`memory_retrieve` tool. The navigation measurement did not cover recall, so the
+default stays `full`.
+
 `retrieval-report` keeps shadow `would_skip` distinct from context actually
 `withheld` in `enforce`. It slices gate results by `mode`, `query_source`,
 `host`, and `entry_point`, and separately aggregates `no_match` layers and

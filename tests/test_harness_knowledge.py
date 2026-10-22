@@ -534,9 +534,12 @@ class KnowledgeTests(unittest.TestCase):
                 for pid in json.loads(marker.read_text()):
                     deadline = time.monotonic() + 3
                     while time.monotonic() < deadline:
+                        # Reaped between the open and the read, the stat file
+                        # answers ESRCH (ProcessLookupError), not a missing
+                        # file: either way the process is gone.
                         try:
                             stopped = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
-                        except FileNotFoundError:
+                        except (FileNotFoundError, ProcessLookupError):
                             stopped = True
                         if stopped:
                             break

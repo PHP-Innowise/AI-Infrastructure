@@ -462,9 +462,11 @@ class FleetRuntimeTests(_FleetFixture, unittest.TestCase):
             self.wait_for_status(manager, sid, {"failed"})
 
             def stopped(pid):
+                # A process reaped between the open and the read answers
+                # ESRCH (ProcessLookupError): gone either way.
                 try:
                     return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     return True
 
             self.wait_until(lambda: stopped(call["pid"]) and stopped(call["child"]))

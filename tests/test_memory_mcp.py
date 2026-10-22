@@ -108,6 +108,19 @@ class MemoryMcpTests(unittest.TestCase):
         changed = self.call('memory_record_result', **{**draft, 'progress': 'Different result'})
         self.assertTrue(changed['isError'])
 
+    def test_memory_retrieve_searches_under_the_navigation_profile(self):
+        # The profile shapes what a hook pushes; memory_retrieve is the
+        # agent's own request and searches whatever the profile says.
+        draft = self.draft(self.start())
+        self.assertFalse(self.call('memory_record_result', **draft)['isError'])
+        config = self.root / 'project-brain/config/runtime.json'
+        values = json.loads(config.read_text(encoding='utf-8'))
+        config.write_text(json.dumps({**values, 'capsule_profile': 'navigation'}), encoding='utf-8')
+        found = self.call('memory_retrieve', task_id='TASK-MCP', query='cobalt allocation')
+        self.assertFalse(found['isError'], found)
+        paths = [item['path'] for item in found['structuredContent']['capsule']['semantic']]
+        self.assertTrue(any(path.startswith('memory-bank/chunks/') for path in paths), paths)
+
     def test_a_retrieved_memory_carries_its_finding_not_its_frontmatter(self):
         # The structured snippet was FTS snippet() over the whole file, and in
         # a promoted chunk the densest run of matches is the JSON block whose

@@ -557,6 +557,35 @@ def configured_mode(repository: Path, requested: Optional[str] = None) -> str:
     return mode
 
 
+CAPSULE_PROFILES = ("full", "navigation")
+
+
+def configured_capsule_profile(repository: Path, requested: Optional[str] = None) -> str:
+    """What the automatic capsule carries: flag, then env, then config, then `full`.
+
+    `full` is the established capsule: working state, navigation and the
+    retrieved semantic and episodic documents. `navigation` keeps the
+    working state and the recent files and searches nothing. It exists as an
+    experiment switch: the task-outcome measurement of 2026-10-21 showed no
+    difference between the full capsule and none, and a capsule without the
+    document layers has to be measured before it could become the default.
+    An explicit `retrieve` is never affected; only the automatic entry points
+    read this. A caller of `refresh` that is itself an explicit request - the
+    MCP `memory_retrieve` tool, the evaluation stand - passes
+    `--capsule-profile full`. A bad value is rejected here, like a bad
+    retrieval gate.
+    """
+    profile = (
+        requested
+        or os.environ.get("CONTEXT_CAPSULE_PROFILE")
+        or load_config(repository).get("capsule_profile")
+        or "full"
+    )
+    if profile not in CAPSULE_PROFILES:
+        raise BrainError("Capsule profile must be full or navigation")
+    return profile
+
+
 def configured_retrieval_gate(
     repository: Path, requested: Optional[str] = None
 ) -> str:
