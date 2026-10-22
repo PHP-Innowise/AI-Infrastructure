@@ -455,6 +455,38 @@ or carries a warning about the branch's task.
 On a detached HEAD there is no task, and the prompt hook stays silent -
 except during a rebase, where it reads the branch being rebased.
 
+## The Agent Saves After Every Answer
+
+### Symptom
+
+After each answer the agent runs one more shell command. The command pipes a
+JSON object into `context.py ... native-result`, and the agent then repeats
+its answer. Each turn takes noticeably longer and costs more.
+
+### Cause
+
+This is the automatic native result capture of governed mode. The Stop hook
+asks the same agent to save the result of the work it just did - progress,
+next steps and at most three source-backed learnings - so that the next
+session's capsule can recall them. The request follows every answer. The
+agent repeats its answer because a headless run (`codex exec`,
+`claude -p`) shows only the last message. On 21 Codex runs with one save
+each, the continuation cost a median of 10 seconds, 383 output and 59k
+mostly cached input tokens: about half of the answer's own.
+
+### Recover
+
+To keep the capsule but drop the request, set `"native_result_request": "off"`
+in `project-brain/config/runtime.json`, or `CONTEXT_NATIVE_RESULT_REQUEST=off`
+for one session.
+
+- `--sync` never rewrites `runtime.json`, so the setting stays.
+- Results then reach memory only when an agent or a person records them:
+  `context.py record-result`, the MCP `memory_record_result` tool, or the
+  Harness.
+- The native journal (`memory-bank/local/native-results.ndjson`) shows each
+  skipped prompt and Stop as `skipped` with the code `switched-off`.
+
 ## Promotion Review or Apply Fails
 
 ### Symptom

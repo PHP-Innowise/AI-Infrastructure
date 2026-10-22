@@ -28,6 +28,37 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The save after every answer can be switched off — 2026-10-22
+
+- Why: in governed mode every answer ends with the Stop hook asking the agent
+  to save its result, and that continuation is another model call. On 21
+  Codex runs with one native save each (16-19 October), it cost a median of
+  10 seconds, 383 output and 59k mostly cached input tokens: about half of
+  the answer's own time and tokens. No client has worked under it yet, and a
+  team that finds it too slow or costly had no way out but lightweight mode,
+  which gives up governance altogether.
+- `native_result_request` in `project-brain/config/runtime.json` (or
+  `CONTEXT_NATIVE_RESULT_REQUEST`): `every-turn`, the default and what ran
+  before, or `off`. Off, no prompt is armed and no Stop asks, including a
+  Stop whose prompt was armed before the switch. Each such prompt and Stop
+  is journaled as `skipped` with the code `switched-off`, and results still
+  reach memory through `record-result`, the MCP tool or the Harness. Any
+  other value refuses the arming with `native-result:invalid-request-setting`.
+  No edition ships the key, and `--sync` never changes `runtime.json`.
+  `docs/TROUBLESHOOTING.md` ("The Agent Saves After Every Answer") explains
+  what the step is, its cost and the switch.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was rewritten for its asset copies.
+- Tests (`NativeRequestSwitchTests` in `tests/test_memory_native_capture.py`):
+  - switched off, Codex, Claude Code and Cursor arm nothing and ask nothing,
+    with two `switched-off` lines each;
+  - a prompt armed before the switch asks nothing;
+  - the variable overrides the setting;
+  - an unknown value is refused and journaled.
+
+  Each fails without the change.
+
 ### An install records what it wrote — 2026-10-22
 
 - Why: the record of the accelerator's own files
