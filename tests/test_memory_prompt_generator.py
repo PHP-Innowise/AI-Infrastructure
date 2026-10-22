@@ -85,6 +85,25 @@ class GeneratorPromptReadTests(unittest.TestCase):
                 self.assertFalse(contract(source.replace(command,'obsolete-native-adapter'),host,name))
                 self.assertFalse(contract(source.replace("printf '%s' \"$HOOK_STDIN\" |",'echo ignored |'),host,name))
 
+    def test_documented_stop_journal_is_the_one_the_editions_ship(self):
+        # hook-forge's fragment for the Stop hook's line in the native result
+        # journal is, code line for code line, the block every edition's
+        # working-memory-write.sh carries, and every shipped copy passes the
+        # generator's journal contract for its own host.
+        text = (ROOT / "Infrastructure-Creator/.agents/skills/hook-forge/SKILL.md").read_text(encoding="utf-8")
+        fragments = [b for b in re.findall(r"```bash\n(.*?)\n```", text, re.S) if "native_journal() {" in b]
+        self.assertEqual(1, len(fragments))
+        contract = getattr(self.v, "native_journal_hook_contract", lambda *args: False)
+        for edition in ("PHP Core", "Laravel", "Symfony", "Cms/wordpress"):
+            for host, tool in (("claude", ".claude"), ("codex", ".codex"), ("cursor", ".cursor")):
+                with self.subTest(edition=edition, host=host):
+                    source = (ROOT / edition / tool / "hooks/working-memory-write.sh").read_text(encoding="utf-8")
+                    self.assertTrue(contract(source, host))
+                    documented = self.v.memory_hook_code_lines(fragments[0].replace("--host claude", "--host " + host))
+                    shipped = self.v.memory_hook_code_lines(source)
+                    start = shipped.index(documented[0])
+                    self.assertEqual(documented, shipped[start:start + len(documented)])
+
     def test_stop_rebase_fallback_is_immediate_and_unique(self):
         source = (ROOT / 'PHP Core/.cursor/hooks/working-memory-write.sh').read_text(encoding='utf-8')
         selector = 'TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"'

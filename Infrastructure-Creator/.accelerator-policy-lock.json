@@ -38,7 +38,7 @@
     ".agents/skills/bootstrap-verifier/scripts/publish_staging.py": "f3d6fe428803bf9cd4987d9fe68af20d0429a509714921befb90d4daa78cff02",
     ".agents/skills/bootstrap-verifier/scripts/validate_content_review.py": "47e544546476dcf74cc97f00fffcedc82696106cfa94a95015bf7c5e15a1cd43",
     ".agents/skills/bootstrap-verifier/scripts/validate_flow_contracts.py": "aa84fdaa8461e99e12c4104108ef8316c79bf2ff25ca068c55870dcd926811b3",
-    ".agents/skills/bootstrap-verifier/scripts/validate_generated.py": "f5b5963d3b6f3f8cb3843d926739ab732d11d46f7b5f43382ed3b93901cc74a2",
+    ".agents/skills/bootstrap-verifier/scripts/validate_generated.py": "aee1bd4e5ea61f692df377e1da5dcfd68ed21de40e1dde1033cc44e50c603307",
     ".agents/skills/bootstrap-verifier/scripts/validate_memory_content.py": "b2e75fdcd908494487d3f6f2f85bce813647ca4c6f90c595e05ceca583f682af",
     ".agents/skills/bootstrap-verifier/scripts/validate_plan_mutations.py": "a8c925e0b7979ba4004726834494fc6c88607d6b3e8a109f59960deb413cc354",
     ".agents/skills/bootstrap-verifier/scripts/validate_plan_review.py": "5592efabd9650913edfbbe2576599787303a62172a1182c7c5093b11a8efbb4b",
@@ -50,7 +50,7 @@
     ".agents/skills/content-reviewer/SKILL.md": "e3a251e3e17b2ba071e19e4e2b4effb6436914b976f97bb72a06417cdd29ae09",
     ".agents/skills/conventions-scanner/SKILL.md": "119cba519974503387230005f7b675a3538087954b48a5f99098745764588c3b",
     ".agents/skills/domain-behavior-scanner/SKILL.md": "9eabf86c922b5234fcb47c1ab6e2563e9935f9a7b382a75fe66347a997b738e6",
-    ".agents/skills/hook-forge/SKILL.md": "c88025c6f23eb99fb9f47cc90e566d8c76976089dca2885602f74243e4ecb9cf",
+    ".agents/skills/hook-forge/SKILL.md": "0bf9caee34dc0fcf17ded25afc72ec51300f6507013b3be89b733cbd45e210f0",
     ".agents/skills/infra-build/SKILL.md": "8f9b505b3bf22b742e83a897de2b12457371e8cec9f90551ce487351d11e8856",
     ".agents/skills/infra-generate/SKILL.md": "ce862c37391a5a27d4c8d5f43306465f687d25b888bfe9583c6cfbe9ae5fb559",
     ".agents/skills/infra-ops-scanner/SKILL.md": "1248ce50011d346ed1c05ddaf5493550b8146619ac151849d0702ab89c55fe93",
@@ -174,7 +174,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "96be3d97ffba3564cdf381bfec783d825a63f9e96202ca273f23c5e819f2f4ff",
+  "policy_digest": "7cb85004dc2b06a1871923bdddf1c3e2397852a32890b690a58d4f6a27b7d1dc",
   "release": "2.5.0",
   "schema_version": 1
 }

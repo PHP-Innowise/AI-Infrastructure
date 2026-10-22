@@ -17,7 +17,10 @@ Checks:
     runs on beforeSubmitPrompt and must answer {"continue": true}). The memory
     read hooks point CONTEXT_CLI only at memory-bank/scripts/context_cli.py
     with its context.py fallback, or - generated before the loader - at
-    context.py itself.
+    context.py itself. Where the seeded runtime ships native_results.py,
+    both working-memory hooks carry the bounded native result adapter, and
+    once that runtime journals (native-results.ndjson), working-memory-write.sh
+    carries hook-forge's journal fragment for its host, line for line.
   - Every flow command's stages name agents that were generated, no parallel
     stage holds two write-capable agents (the gate runs those one at a time),
     and a multi-stage flow declares at least one checkpoint.
@@ -900,6 +903,87 @@ def native_capture_hook_contract(source: str, edition: str, name: str) -> bool:
             and any('NATIVE_STATUS=$?' in line for line in lines))
 
 
+# The Stop hook's line in the native result journal (hook-forge step 6). The
+# seeded runtime journals every prompt, Stop and save; the line it cannot
+# write is the one a save request killed at the hook's budget (status 124) or
+# failed before its own line leaves - so the shell appends the request's exit
+# status, or the Harness skip. A runtime seeded before the journal has no
+# such file name, and its project's hooks are not held to the line.
+NATIVE_RUNTIME = "memory-bank/scripts/native_results.py"
+NATIVE_JOURNAL = "native-results.ndjson"
+NATIVE_JOURNAL_WRITE = ('printf \'{"at":"%s","host":"%s","stage":"stop-hook",%s}\\n\' '
+                        '"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${NATIVE_HOST[1]}" "$1" '
+                        '>> "$directory/native-results.ndjson" 2>/dev/null || true')
+NATIVE_JOURNAL_FUNCTION = (
+    'native_journal() {',
+    'local directory="$STATE_DIR/memory-bank/local" entry entries',
+    'entries=("$directory/native-results.ndjson")',
+    '[ "$STATE_DIR" = "$ROOT_DIR" ] || entries+=("${STATE_DIR%/}" "$STATE_DIR/memory-bank" "$directory")',
+    'for entry in "${entries[@]}"; do',
+    '[ -L "$entry" ] && return 0',
+    'done',
+    '{ [ -d "$directory" ] || mkdir -p "$directory" 2>/dev/null; } || return 0',
+    NATIVE_JOURNAL_WRITE,
+    '}',
+)
+NATIVE_STOP_GUARD = ('if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] '
+                     '&& [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then')
+NATIVE_JOURNAL_CALLS = (
+    'native_journal \'"event":"exited","status":\'"$NATIVE_STATUS"',
+    'elif [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then',
+    'native_journal \'"event":"skipped","code":"capsule-delivered"\'',
+    'fi',
+)
+
+
+def native_journal_runtime(target: Path, files: dict) -> bool:
+    """Whether the generator-owned native result runtime keeps the journal."""
+    if not is_owned(files, NATIVE_RUNTIME):
+        return False
+    try:
+        return NATIVE_JOURNAL in (target / NATIVE_RUNTIME).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def native_journal_hook_contract(source: str, edition: str) -> bool:
+    """The Stop hook's journal fragment, line for line; never executed.
+
+    Lexical, as the identity contract: the function with both link checks
+    and its append, the host, the state directory assigned before it, and
+    the two calls in place - the request's status after the request, the
+    Harness skip in the arm that requests nothing. Nothing else names the
+    journal or calls the function, so no other line carries a payload. The
+    append keeps its clock on its own physical line, as the editions do.
+    """
+    lines = memory_hook_code_lines(source)
+    if lines is None:
+        return False
+    host = "NATIVE_HOST=(--host " + edition + ")"
+    fixed = (host, NATIVE_STOP_GUARD, *NATIVE_JOURNAL_FUNCTION, *NATIVE_JOURNAL_CALLS)
+    if any(lines.count(line) != 1 for line in fixed if line not in ("done", "}", "fi")):
+        return False
+    function = lines.index(NATIVE_JOURNAL_FUNCTION[0])
+    calls = lines.index(NATIVE_JOURNAL_CALLS[0])
+    if (lines[function:function + len(NATIVE_JOURNAL_FUNCTION)] != list(NATIVE_JOURNAL_FUNCTION)
+            or lines[calls:calls + len(NATIVE_JOURNAL_CALLS)] != list(NATIVE_JOURNAL_CALLS)):
+        return False
+    requests = [index for index, line in enumerate(lines) if re.search(r"\bnative-stop\b", line)]
+    status = [index for index, line in enumerate(lines) if line == "NATIVE_STATUS=$?"]
+    if not (requests and len(status) == 1
+            and lines.index(host) < calls and function + len(NATIVE_JOURNAL_FUNCTION) <= lines.index(NATIVE_STOP_GUARD)
+            and lines.index(NATIVE_STOP_GUARD) < requests[0] and requests[-1] < status[0] < calls):
+        return False
+    if not any(line in ("STATE_DIR=$ROOT_DIR", 'STATE_DIR="$ROOT_DIR"') for line in lines[:function]):
+        return False
+    journal = [line for line in lines if NATIVE_JOURNAL in line]
+    called = [line for line in lines if re.search(r"\bnative_journal\b", line)]
+    if (journal != [NATIVE_JOURNAL_FUNCTION[2], NATIVE_JOURNAL_WRITE]
+            or called != [NATIVE_JOURNAL_FUNCTION[0], NATIVE_JOURNAL_CALLS[0], NATIVE_JOURNAL_CALLS[2]]):
+        return False
+    return NATIVE_JOURNAL_WRITE in (physical.strip(" \t") for physical in source.split("\n"))
+
+
 def hook_shell() -> str | None:
     """The bash that hosts start hook scripts with, which checks their syntax.
 
@@ -948,6 +1032,11 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
                 if is_owned(files, relative) and not native_capture_hook_contract(
                         (target / relative).read_text(encoding="utf-8", errors="replace"), edition, name):
                     errors.append(f"[{edition}] {relative} lacks the bounded native result adapter (hook-forge step 6)")
+            relative = f"{hooks_rel}/working-memory-write.sh"
+            if (is_owned(files, relative) and native_journal_runtime(target, files)
+                    and not native_journal_hook_contract(
+                        (target / relative).read_text(encoding="utf-8", errors="replace"), edition)):
+                errors.append(f"[{edition}] {relative} lacks the native result journal line (hook-forge step 6)")
         continuity_rel = f"{hooks_rel}/{CONTINUITY_HOOK}"
         if is_owned(files, continuity_rel):
             # One unargumented script serves every event, so it must hand the

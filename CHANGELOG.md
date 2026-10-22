@@ -75,6 +75,12 @@ edition's own files remain in that edition's changelog.
 - The core change was made in `PHP Core/` and written to the other editions,
   the generator asset and the mirrors by `scripts/core_sync.py --write`; the
   generator's policy lock was rewritten for its asset copies.
+- Generated projects write the Stop hook's line too: Infrastructure-Creator's
+  hook-forge documents this Stop block as a mandatory fragment, and
+  bootstrap-verifier requires it in a generated `working-memory-write.sh`
+  once the seeded runtime journals (see `Infrastructure-Creator/CHANGELOG.md`).
+  The generator's skill-body ceiling in `scripts/token_budget.json` rises by
+  the 3,133 bytes that text added, to 302,433.
 - Tests (`tests/test_memory_native_capture.py`, `NativeFunnelJournalTests`,
   and `tests/test_memory_eval.py`): every prompt, Stop and save path writes
   exactly one line with its code and no content; the Stop hook's line on

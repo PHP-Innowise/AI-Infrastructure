@@ -162,6 +162,58 @@ arbitrary control flow, sourced code, eval, runtime redefinition, atomic branch
 epochs or a whole-hook deadline. Never execute unchecked generated hooks in
 the structural verifier to fill those gaps.
 
+## Native result journal (mandatory)
+
+memory-seed's `native_results.py` journals every prompt, Stop and save to
+ignored `memory-bank/local/native-results.ndjson`, so how far automatic saves
+get is counted from disk; a save request killed at the hook's budget, or
+failed before its own line, leaves nothing there. So `working-memory-write.sh`
+runs `native-stop` through this fragment, verbatim; Codex and Cursor change
+only the host. It expects `ROOT_DIR`, `PYTHON`, `CONTEXT_CLI`,
+`BUDGET_SECONDS`, `TASK_ID`, the Stop payload in `HOOK_STDIN` and `STATE_DIR`
+assigned as in `context-continuity.sh` (`STATE_DIR=$ROOT_DIR`, then
+`ACCELERATOR_STATE_DIR` when attached), so the line lands beside the runtime's.
+
+```bash
+NATIVE_HOST=(--host claude)
+native_journal() {
+  local directory="$STATE_DIR/memory-bank/local" entry entries
+  entries=("$directory/native-results.ndjson")
+  [ "$STATE_DIR" = "$ROOT_DIR" ] || entries+=("${STATE_DIR%/}" "$STATE_DIR/memory-bank" "$directory")
+  for entry in "${entries[@]}"; do
+    [ -L "$entry" ] && return 0
+  done
+  { [ -d "$directory" ] || mkdir -p "$directory" 2>/dev/null; } || return 0
+  printf '{"at":"%s","host":"%s","stage":"stop-hook",%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${NATIVE_HOST[1]}" "$1" >> "$directory/native-results.ndjson" 2>/dev/null || true
+}
+if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] && [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
+  if command -v timeout > /dev/null 2>&1; then
+    NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
+      --host claude --task-id "$TASK_ID" 2>/dev/null)
+  else
+    NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
+      --host claude --task-id "$TASK_ID" 2>/dev/null)
+  fi
+  NATIVE_STATUS=$?
+  [ "$NATIVE_STATUS" -eq 0 ] && [ -n "$NATIVE_RESPONSE" ] && printf '%s\n' "$NATIVE_RESPONSE"
+  native_journal '"event":"exited","status":'"$NATIVE_STATUS"
+elif [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
+  native_journal '"event":"skipped","code":"capsule-delivered"'
+fi
+```
+
+Each Stop appends one line, `{"at":"<UTC>","host":"<host>","stage":"stop-hook","event":"exited","status":N}`
+with the request's exit status (124: killed at the budget), or
+`"event":"skipped","code":"capsule-delivered"` when `CONTEXT_CAPSULE_DELIVERED=1`
+asks for no save: a status and nothing else - no payload, path, task or
+session. It never writes through a linked journal file nor, attached, through
+a linked state directory, `memory-bank` or `memory-bank/local`; a failed write
+is silent and the hook still exits 0. The append keeps its clock on one
+physical line, the one clock the editions' Cursor render guards admit: it
+stamps a local file no rule is made from. bootstrap-verifier holds a
+manifest-owned Stop hook to this fragment once the seeded runtime journals; a
+project seeded before the journal keeps its hooks.
+
 ## Process
 
 1. **Read the profile.** Confirm selected editions (section 1). Build the context payload from section 2 (framework/version, test/lint/static tools). Build the risk list ONLY from what is present: section 5 (containers/CI/IaC), section 4 (integrations), section 6 (secrets/destructive ops).
@@ -176,7 +228,7 @@ the structural verifier to fill those gaps.
    - **Cursor runs the Claude hooks too** (third-party hooks are on by default, and every matching hook from every source runs). The Claude copies of `working-memory-read.sh`, `working-memory-write.sh` and `context-continuity.sh` read their stdin payload and exit 0 when it carries `cursor_version` (which Claude Code never sends; an environment variable could leak into a Claude Code session started from Cursor's terminal) and the project has `.cursor/hooks.json`; the Cursor and Codex copies carry no such check. Running both doubled every checkpoint and wrote retrievals nobody received.
    - **A session in another worktree** (a Claude Code desktop worktree session, any session after `EnterWorktree`) runs the hooks of the checkout it started from; only the payload's `cwd` names its own. Both working-memory hooks read `cwd` with their other fields (absolute, at most 4,096 characters, no newline). When `git -C <cwd> rev-parse --show-toplevel --git-common-dir` gives another top level and the same common directory as the project's, the read hook prints `Memory not consulted: this session works in another worktree of the repository (branch <name>), and this memory follows the checkout its hooks are installed in.` and the NOT-consulted line (Cursor: only its JSON answer), and the write hook exits 0 before `turn` and `native-stop`.
    - **`context-continuity.sh` (chat snapshots; one script, three events, no argument):** same `CONTEXT_MEMORY_RECOVERY`, Python (`resolve_python`), `timeout` and `ROOT_DIR` handling, silent when `memory-bank/scripts/context_continuity.py` is missing; pipe stdin to `context_continuity.py --root "$STATE_DIR" --host <claude|codex|cursor> --event hook`, stderr discarded; always `exit 0`. `STATE_DIR` is `ROOT_DIR`, or `ACCELERATOR_STATE_DIR` in attached mode (`ACCELERATOR_HOME` resolves to `ROOT_DIR`, state and project dirs absolute). The runtime reads `hook_event_name`: a session start delivers only a merge prepared for that new task (again on its resume or compaction); a prompt or final answer is appended to the chat's snapshot. The runtime itself honours `CONTEXT_CONTINUITY_DISABLED=1` (both halves) and `CONTEXT_CONTINUITY_RESTORE_DISABLED=1` (delivery).
-   - **Native result capture:** pipe prompt JSON to bounded `context.py native-prompt --host <host> --task-id "$TASK_ID"` before refresh; pipe Stop JSON to `native-stop` after checkpoint. Capture output and emit only after exit 0; never emit a timed-out prefix. Cursor warnings belong in its capsule, never mixed with response JSON. These commands use memory-seed's required `native_results.py` to request one same-agent `native-result`; no transcript adoption, new model process or task completion. Set `loop_limit: 1` on Cursor's working-memory-write Stop entry. Keep the canonical Cursor rule-maintenance block.
+   - **Native result capture:** pipe prompt JSON to bounded `context.py native-prompt --host <host> --task-id "$TASK_ID"` before refresh; pipe Stop JSON to `native-stop` after checkpoint through the native result journal fragment above, which appends the Stop hook's `stop-hook` line - the request's exit status, or the Harness skip - to `memory-bank/local/native-results.ndjson`. Capture output and emit only after exit 0; never emit a timed-out prefix. Cursor warnings belong in its capsule, never mixed with response JSON. These commands use memory-seed's required `native_results.py` to request one same-agent `native-result`; no transcript adoption, new model process or task completion. Set `loop_limit: 1` on Cursor's working-memory-write Stop entry. Keep the canonical Cursor rule-maintenance block.
 7. **Author `subagent-gate.sh` per edition** (tool-owned variants, one contract each):
    - **Claude variant:** self-filter to `tool_name` Agent/Task; extract `tool_input.subagent_type` (jq/php/python3 fallback chain); allow only names found as frontmatter `name:` in the target's `.claude/agents/*.md`; deny everything else with a reason on stderr and exit 2; fail open (exit 0) on missing payload fields or an unreadable roster.
    - **Cursor variant:** `subagentStart` contract - read top-level `subagent_type`, allowlist against `.cursor/agents/*.md` frontmatter names, answer `{"permission":"allow"}` or `{"permission":"deny","user_message":"..."}` on stdout, always exit 0.
