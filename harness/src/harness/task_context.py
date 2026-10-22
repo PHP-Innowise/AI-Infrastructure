@@ -236,6 +236,16 @@ class TaskContext:
         manifest = capsule.get('manifest')
         if manifest is None and allow_local:
             return TaskContext._inline_source_hashes(capsule, provenance, home)
+        if manifest is None and not any(
+            isinstance(item, dict) and isinstance(item.get('path'), str)
+            for layer in ('procedural', 'semantic', 'episodic', 'selected')
+            for item in capsule.get(layer, [])
+        ):
+            # A capsule that carries no document - the navigation profile's
+            # working state and recent files, or a turn whose index could not
+            # be trusted - selected nothing to fingerprint, and the runtime
+            # records no delivery for it. There is nothing to approve.
+            return {}
         if not isinstance(manifest, str) or not re.fullmatch(
             r'(?:project-brain/control|memory-bank/local)/retrieval-manifests/'
             r'[0-9a-f-]{36}\.json', manifest,

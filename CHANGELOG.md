@@ -39,6 +39,10 @@ edition's own files remain in that edition's changelog.
   `hook-context`); an explicit `context.py retrieve` still searches. An
   unknown value leaves the turn without a capsule and names the setting, as a
   bad retrieval gate does.
+- Harness automatic memory accepts a capsule that carries no document. It
+  refused the turn ("no valid source manifest") whenever the runtime wrote
+  no manifest, which `navigation` never writes; a capsule with documents and
+  no manifest is still refused.
 - `refresh --capsule-profile full|navigation` overrides the environment and
   the config for one call. The MCP `memory_retrieve` tool reaches the capsule
   through `refresh`, but it is the agent's own request, so it passes `full`;
