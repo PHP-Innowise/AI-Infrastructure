@@ -1315,6 +1315,37 @@ class FirstTouchHookTest(unittest.TestCase):
         self.assertEqual((0, ""), (result.returncode, result.stdout))
         self.assertEqual([], self.calls(recovering))
 
+    def test_switched_off_it_still_reads_a_large_call_to_the_end(self) -> None:
+        # A Write of a big file is a payload larger than a pipe holds. A hook
+        # that left without reading it broke the host's write, and Claude Code
+        # reports that as a hook error ("closed stdin before hook input was
+        # fully written (EPIPE)") on every such call while the switch is off.
+        content = "x" * (2 * 1024 * 1024)
+        for tool in ("claude", "codex", "cursor"):
+            for env in ({}, {"CONTEXT_FIRST_TOUCH_DELIVERY": "0"}, {"CONTEXT_MEMORY_RECOVERY": "1"}):
+                with self.subTest(tool=tool, env=env):
+                    project = self.project(tool, switched=False)
+                    payload = json.dumps({"session_id": "ses-1", "cwd": str(project), "tool_name": "Write",
+                                          "tool_input": {"file_path": str(project / self.SOURCE),
+                                                         "content": content}}).encode()
+                    environment = {key: value for key, value in os.environ.items()
+                                   if key not in ("CONTEXT_FIRST_TOUCH_DELIVERY", "CONTEXT_MEMORY_RECOVERY")}
+                    environment.update(env)
+                    process = subprocess.Popen(
+                        [BASH, str(project / MIRRORS[tool][0] / self.HOOK)], stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(project), env=environment,
+                    )
+                    try:
+                        process.stdin.write(payload)
+                        process.stdin.close()
+                    except BrokenPipeError:
+                        process.kill()
+                        process.wait()
+                        self.fail("the hook closed its input before the call was written")
+                    stdout, stderr = process.communicate(timeout=HOOK_TIMEOUT)
+                    self.assertEqual((0, b"", b""), (process.returncode, stdout, stderr))
+                    self.assertEqual([], self.calls(project))
+
     def test_each_host_hands_its_call_and_session_to_the_runtime(self) -> None:
         for tool, key in (("claude", "session_id"), ("codex", "session_id"), ("cursor", "conversation_id")):
             with self.subTest(tool=tool):

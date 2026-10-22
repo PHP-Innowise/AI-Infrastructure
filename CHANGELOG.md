@@ -106,6 +106,26 @@ edition's own files remain in that edition's changelog.
   changes nothing, and an edited generated file is reported. It fails
   without the change.
 
+### The first-touch hook switched off reads its call to the end — 2026-10-22
+
+- Why: the editions wire `first-touch.sh` on every Read, Edit, Write,
+  MultiEdit, NotebookEdit and Bash call and ship it switched off. Off, it
+  left before reading its input, and a call larger than a pipe holds - a
+  Write of a big file - could not be written to it. Claude Code reports
+  that as a hook error ("Hook command closed stdin before hook input was
+  fully written (EPIPE)"), so every installed project would have shown one
+  on such writes.
+- Every way out before the input is read - the switch off, the variable
+  set to anything but on, an internal recovery turn - now ends in
+  `exec cat > /dev/null`: the input is read to the end in the hook's own
+  process and still no interpreter starts (about half a millisecond more
+  on a small call).
+- The core change was made in `PHP Core/` and written to the other editions
+  and the mirrors by `scripts/core_sync.py --write`.
+- Test (`FirstTouchHookTest`): a 2 MB Write call to the Claude Code, Codex
+  and Cursor copies, switched off three ways, is read whole and the hook
+  exits 0 with no output; it fails without the change.
+
 ### A first-touch arm in the outcome A/B, and an exposure check — 2026-10-22
 
 - `scripts/memory_outcome_ab.py run --arms …,first-touch` adds the arm the

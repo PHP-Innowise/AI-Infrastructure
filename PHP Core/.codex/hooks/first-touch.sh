@@ -66,7 +66,11 @@ resolve_python() {
 }
 
 # An internal draft-only follow-up must not create another memory turn.
-[ "${CONTEXT_MEMORY_RECOVERY:-}" = "1" ] && exit 0
+# A hook that leaves before reading its input breaks the host's write of a
+# large call - a Write of a big file - which Claude Code then reports as a
+# hook error (EPIPE). Every way out before the input is read drains it:
+# `exec cat` reads it to the end in this process, no interpreter started.
+[ "${CONTEXT_MEMORY_RECOVERY:-}" = "1" ] && exec cat > /dev/null
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # Installed, the accelerator, the project and its state are all ROOT_DIR.
@@ -89,9 +93,9 @@ case "${CONTEXT_FIRST_TOUCH_DELIVERY:-}" in
   1|[Tt][Rr][Uu][Ee]) ;;
   '')
     grep -Eq '"first_touch_delivery"[[:space:]]*:[[:space:]]*true' \
-      "$STATE_DIR/project-brain/config/runtime.json" 2> /dev/null || exit 0
+      "$STATE_DIR/project-brain/config/runtime.json" 2> /dev/null || exec cat > /dev/null
     ;;
-  *) exit 0 ;;
+  *) exec cat > /dev/null ;;
 esac
 
 # context_cli.py runs context.py from its cached bytecode - run as a script,
