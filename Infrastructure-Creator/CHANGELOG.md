@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded retrieval finds a path written out under the project root — 2026-10-22
+
+- memory-seed's `context_retrieval.py` finds an absolute path a prompt names
+  under the project root when the root holds a space ("My Projects") or is
+  written the Windows way (`C:\Users\...`); before, such a path seeded
+  nothing. The policy lock and mirrors were regenerated for the changed
+  asset.
+
 ### Seeded memory serves a chunk written today west of UTC — 2026-10-22
 
 - memory-seed's `validate.py` takes a date as in the future only past today

@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A path written out under the project root is found — 2026-10-22
+
+- A prompt that names a file by its absolute path seeds the documents linked
+  to it (`prompt_path_seeds`). The path was found by one pattern for the whole
+  of it, which stopped at a space: under a root such as
+  `/Users/ann/My Projects/shop` every such path was lost, and
+  `test_prompt_paths_are_extracted_normalised_and_screened` fails whenever the
+  temporary directory holds a space. The root is known, so a path under it is
+  found by that prefix now; the character before the prefix is checked as the
+  old pattern did.
+- On Windows the root is also looked for as Windows writes it,
+  `C:\Users\...\shop\src\...`; only its slash form was. On other systems
+  the two forms are one and nothing changes.
+- `test_a_path_under_a_root_with_a_space_is_found` and
+  `test_a_windows_path_under_the_root_is_found` fail on `1b010289`.
+
 ### A chunk written today is served west of UTC — 2026-10-22
 
 - The runtime writes chunk dates as UTC calendar dates - promotion,

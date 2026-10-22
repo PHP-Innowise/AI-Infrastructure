@@ -6929,6 +6929,28 @@ class FileLinkSeedTest(RuntimeHarness):
             retrieval.prompt_path_seeds(connection, self.repository, text),
         )
 
+    def test_a_path_under_a_root_with_a_space_is_found(self) -> None:
+        # A root such as "/Users/ann/My Projects/shop": the pattern for the
+        # whole path stopped at the space and lost every path under it.
+        connection = self.link_table("src/Http/Kernel.php", "composer.json")
+        project = self.repository / "My Projects" / "shop"
+        project.mkdir(parents=True)
+        root = project.as_posix()
+        text = f"the error is in {root}/src/Http/Kernel.php:40, after {root}/composer.json changed"
+        self.assertEqual(["src/Http/Kernel.php", "composer.json"],
+                         retrieval.prompt_path_seeds(connection, project, text))
+
+    def test_a_windows_path_under_the_root_is_found(self) -> None:
+        # Windows writes the root with backslashes - C:\work\ann lee\shop -
+        # and only its slash form was looked for.
+        from pathlib import PureWindowsPath
+        connection = self.link_table("src/http/kernel.php")
+        root = PureWindowsPath("C:/work/ann lee/shop")
+        with mock.patch.object(retrieval.workspace_roots, "project_root", return_value=root):
+            seeds = retrieval.prompt_path_seeds(
+                connection, self.repository, "it fails in C:\\work\\ann lee\\shop\\src\\http\\kernel.php:40")
+        self.assertEqual(["src/http/kernel.php"], seeds)
+
     def test_fqcn_maps_through_psr4_autoload_and_autoload_dev(self) -> None:
         connection = self.link_table("app/Billing/InvoiceTotal.php", "extra/Money.php", "tests/Unit/FooTest.php")
         self.repository.joinpath("composer.json").write_text(json.dumps({
