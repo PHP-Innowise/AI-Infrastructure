@@ -250,6 +250,34 @@ class ContextContinuityTest(unittest.TestCase):
         self.assertIn("The pasted stack trace.", content)
         self.assertIn("Answer to rounding.", content)
 
+    def test_a_stop_hook_continuation_is_not_part_of_the_chat(self) -> None:
+        """Codex 0.162 and later write a Stop hook's continuation into the
+        conversation as a <hook_prompt> user message. The native result's own,
+        the request to save the turn, came into every Codex snapshot taken
+        where it ran."""
+        continuation = ("INTERNAL_NATIVE_MEMORY_RESULT " + "0123456789abcdef" * 2 + "\n"
+                        "Save only the result of the work already performed in this session.")
+
+        def message(role: str, text: str) -> dict[str, object]:
+            return {"type": "response_item", "payload": {"type": "message", "role": role, "content": [
+                {"type": "input_text" if role == "user" else "output_text", "text": text}]}}
+        rollout = self.root / "rollout.jsonl"
+        rollout.write_text("\n".join(json.dumps(record) for record in [
+            {"type": "session_meta", "payload": {"id": "rounding", "cwd": str(self.root)}},
+            message("user", "How should invoice totals round?"),
+            message("assistant", "Half-up, at the line level."),
+            message("user", f'<hook_prompt hook_run_id="stop:9:/work/.codex/hooks.json">{continuation}</hook_prompt>'),
+            message("assistant", "Saved the result."),
+        ]) + "\n", encoding="utf-8")
+        result = self.invoke("codex", "hook", {"hook_event_name": "Stop", "session_id": "rounding",
+                                               "transcript_path": str(rollout)})
+        self.assertEqual(0, result.returncode, result.stderr)
+        content = json.loads(runtime._snapshot_path(self.root, runtime._branch(self.root), "codex:rounding").read_text())["content"]
+        self.assertEqual("User:\nHow should invoice totals round?\n\nAssistant:\nHalf-up, at the line level."
+                         "\n\nAssistant:\nSaved the result.", content)
+        # The person's own words about the tag are still theirs.
+        self.assertFalse(runtime._codex_injected("Why does <hook_prompt>Continue.</hook_prompt> show up here?"))
+
     def test_codex_global_policy_is_filtered_but_user_markup_stays(self) -> None:
         self.assertTrue(runtime._codex_injected("# AGENTS.md instructions\n\n<INSTRUCTIONS>Global policy.</INSTRUCTIONS>"))
         self.assertTrue(runtime._codex_injected("<task-notification>Finished.</task-notification>"))

@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded continuity leaves a Stop hook's continuation out — 2026-10-22
+
+- memory-seed's `context_continuity.py` leaves a Stop hook's continuation
+  (`<hook_prompt>`, Codex 0.162 and later) out of a Codex snapshot, as its
+  comment always said; the native result's own took most of every snapshot
+  taken where it ran. The policy lock and mirrors were regenerated for the
+  changed asset.
+
 ### Seeded memory reads a Codex turn's files again — 2026-10-22
 
 - memory-seed's `context.py` reads the files of a Codex turn from its `exec`

@@ -67,12 +67,15 @@ CAPTURE_EVENTS = {"UserPromptSubmit", "Stop", "beforeSubmitPrompt", "afterAgentR
 # skills, hook prompts and notifications. None of it is what the person typed,
 # and the AGENTS.md text would open every Codex snapshot of a project alike.
 # Only known injected envelopes are filtered. User markup and pasted content
-# stay even when they occupy one complete tagged text part.
+# stay even when they occupy one complete tagged text part. A Stop hook's
+# continuation is a hook prompt (<hook_prompt hook_run_id="...">, Codex 0.162
+# and later): the native result's own, some 2,600 characters, came into every
+# Codex snapshot taken where it ran.
 CODEX_INSTRUCTIONS_HEADER = "# AGENTS.md instructions"
 CODEX_ENVELOPE = re.compile(r"\s*<([a-z][a-z0-9_-]*)(?:\s[^<>]*)?>.*</\1(?:\s[^<>]*)?>\s*", re.DOTALL)
 CODEX_INJECTED_ENVELOPES = {
     "environment_context", "skill", "task-notification", "system-reminder",
-    "turn_aborted", "external_codex_apps_open_page",
+    "turn_aborted", "external_codex_apps_open_page", "hook_prompt",
 }
 KINDS = {
     kind + suffix

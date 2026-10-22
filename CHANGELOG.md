@@ -28,6 +28,28 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A Codex chat snapshot no longer carries the Stop hook's continuation — 2026-10-22
+
+- Codex 0.162 and later write a Stop hook's continuation into the
+  conversation as a `<hook_prompt hook_run_id="...">` user message.
+  `context_continuity.py` leaves the context Codex injects out of a snapshot,
+  and its comment names hook prompts among it, but the envelope list did not:
+  the native result's continuation - the request to save the turn, some 2,600
+  characters - went into every Codex snapshot taken where native capture ran.
+  On this machine's October rollouts (all in test and evaluation projects;
+  none in the Desktop projects) that was 21 of 21 snapshots, a median 69 % of
+  their text (53-80 %) and half of their user messages. `hook_prompt` is now
+  in `CODEX_INJECTED_ENVELOPES`, and `docs/CONTEXT-HANDOFF.md` names it among
+  the envelopes a projection drops.
+- `test_a_stop_hook_continuation_is_not_part_of_the_chat` fails on `7df1da52`.
+- Seen on the way, not changed: Codex 0.162.1 and 0.163.0 run no
+  `UserPromptSubmit` hook for that continuation (in those 19 projects, 22
+  user messages, 22 hook prompts and 21 read-hook health lines; a capsule
+  followed 21 of 36 real prompts and none of the 21 continuations), and 20 of
+  21 saves passed on a runtime that recognises only a bare continuation. The
+  comment in `native_results.begin` that Codex submits the Stop reason through
+  `UserPromptSubmit` describes earlier versions.
+
 ### The miss audit names every exclusion the runtime writes — 2026-10-22
 
 - `scripts/memory_miss_audit.py` maps a manifest exclusion with reason
