@@ -27,6 +27,12 @@ The capsule is retrieved context, not authority. It never outranks the source it
 
 Buffering is what keeps per-turn continuity affordable: without it, every turn would cost one governed revision and one rewritten handoff.
 
+### PreToolUse (Read|Edit|Write|MultiEdit|NotebookEdit|Bash): Knowledge at First Touch
+**Script:** `first-touch.sh`
+**Purpose:** Off unless `first_touch_delivery` is `true` in `project-brain/config/runtime.json` (or `CONTEXT_FIRST_TOUCH_DELIVERY=1`); switched off it reads that one setting and starts no interpreter. On, the first time a session (`session_id`) reads or edits a file - with a file tool, or in a shell read or write command - it hands the agent, as `hookSpecificOutput.additionalContext` beside the tool result, the Memory Bank chunks, findings and decisions whose sources name the file and the specs that write its path. At most three documents and 1,200 characters a call, each quoted by the section about the file, filtered as the Task Capsule is (privacy, secrets, review dates, changed or missing cited files); a file nothing cites delivers nothing, and a document comes once a session. The session's first call builds a baseline of the cited files from the index; a call naming none of them, and every later touch of a delivered file, ends in the shell. State: the ignored `memory-bank/local/first-touch/<session>/`, removed a day after its last write. `docs/CONTEXT-AND-MEMORY.md` ("Knowledge at first touch") in the accelerator repository has the design.
+**Return:** Always 0 (it never blocks a tool call and sets no permission decision)
+**Budget:** `CONTEXT_FIRST_TOUCH_BUDGET` seconds, default 3; a run past it turns delivery off for the rest of the session.
+
 ### PreToolUse (Write|Edit): File Naming Validator
 **Script:** `file-naming-validator.sh`
 **Purpose:** Enforces discovered skill prefixes, zero-padded `tasks/TASK-001/` directories, and `memory-bank/chunks/MEM-0001-short-slug.md` naming.

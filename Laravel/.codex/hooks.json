@@ -58,6 +58,10 @@
           {
             "type": "command",
             "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh subagent-gate.sh"
+          },
+          {
+            "type": "command",
+            "command": "sh -c 'd=$(pwd); until [ -f \"$d/.codex/hooks.json\" ]; do [ -n \"$d\" ] || { echo \"$1: no .codex/hooks.json at or above the working directory\" >&2; exit 127; }; d=${d%/*}; done; exec \"$d/.codex/hooks/$1\"' sh first-touch.sh"
           }
         ]
       }

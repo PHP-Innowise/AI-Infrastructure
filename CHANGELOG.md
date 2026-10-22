@@ -106,6 +106,55 @@ edition's own files remain in that edition's changelog.
   changes nothing, and an edited generated file is reported. It fails
   without the change.
 
+### Knowledge at first touch, behind a switch that ships off — 2026-10-22
+
+- A new hook, `first-touch.sh`, hands the agent the memory that cites a file
+  when the agent first reads or edits that file in a session. The capsule
+  predicts from the prompt what a turn will need; this waits for the file.
+  It delivers:
+  - Memory Bank chunks, findings and decisions whose sources name the file;
+  - specs that write its path from the project root.
+- Off unless `first_touch_delivery` is `true` in `runtime.json`, or
+  `CONTEXT_FIRST_TOUCH_DELIVERY=1`. The four editions and the generator's
+  template ship `false`; the code's default is off. Switched off, the hook
+  reads one setting and starts no interpreter, so shipped behaviour does not
+  change. The setting waits for a task-outcome measurement
+  (`docs/MEMORY-EVAL.md`, "Accepting a retrieval change").
+- Bounded:
+  - once per file per session, and a document once per session;
+  - at most three documents and 1,200 characters a call, one of each kind
+    before a second of any;
+  - at most 20 deliveries a session.
+
+  Every document passes the capsule's runtime filter (privacy, owner,
+  authority, lifecycle, secret screen, current index, review dates, cited
+  files present). A changed cited file is marked, a conflicted record is
+  held back, and a file nothing cites delivers nothing.
+- Per host:
+  - Claude Code: `PreToolUse` for `Read|Edit|Write|MultiEdit|NotebookEdit|Bash`,
+    as `additionalContext` beside the tool result;
+  - Codex: `PreToolUse` without a matcher; shell commands and `apply_patch`
+    name the files;
+  - Cursor: `postToolUse` for `Read|Write|Shell`, `additional_context` after
+    the result. Cursor's `preToolUse` answers with a permission decision and
+    `beforeReadFile` only allows or denies. Cursor staff confirmed
+    `postToolUse` context was not injected through 3.7.36, so delivery there
+    is unverified.
+- The session's first call builds a baseline of the cited files from the
+  index. A call naming none of them ends in the shell with one `grep`:
+  5–7 ms, against 120–150 ms for a first touch that delivers. State lives
+  in the ignored `memory-bank/local/first-touch/<session>/` and is pruned
+  after a day.
+- New: `context.py first-touch`, `first_touch_documents` and
+  `first_touch_baseline` (`context_retrieval.py`), and
+  `configured_first_touch` (`brain_runtime.py`). Mirror rules give the Cursor
+  and Codex copies their event headers. The hook is wired in each edition's
+  `.claude/settings.json`, `.codex/hooks.json` and `.cursor/hooks.json`.
+- Made in PHP Core and written to every copy by `core_sync`. Policy locks and
+  installer inventories regenerated. `FirstTouchTest` (runtime) and
+  `FirstTouchHookTest` (hooks) fail on `a9277c8f`; `PythonResolutionTest`
+  holds the new hook to the single Python resolver.
+
 ### The save after every answer can be switched off — 2026-10-22
 
 - Why: in governed mode every answer ends with the Stop hook asking the agent

@@ -50,6 +50,13 @@
         "timeout": 5
       }
     ],
+    "postToolUse": [
+      {
+        "command": ".cursor/hooks/first-touch.sh",
+        "matcher": "Read|Write|Shell",
+        "timeout": 5
+      }
+    ],
     "afterAgentResponse": [
       {
         "command": ".cursor/hooks/context-continuity.sh",

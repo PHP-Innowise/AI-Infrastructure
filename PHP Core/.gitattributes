@@ -97,6 +97,7 @@
 .codex/hooks/bash-validator.sh -diff linguist-generated=true
 .codex/hooks/context-continuity.sh -diff linguist-generated=true
 .codex/hooks/file-naming-validator.sh -diff linguist-generated=true
+.codex/hooks/first-touch.sh -diff linguist-generated=true
 .codex/hooks/local-context.sh -diff linguist-generated=true
 .codex/hooks/loop-detection.sh -diff linguist-generated=true
 .codex/hooks/subagent-dispatch.sh -diff linguist-generated=true
@@ -175,6 +176,7 @@
 .cursor/hooks/bash-validator.sh -diff linguist-generated=true
 .cursor/hooks/context-continuity.sh -diff linguist-generated=true
 .cursor/hooks/file-naming-validator.sh -diff linguist-generated=true
+.cursor/hooks/first-touch.sh -diff linguist-generated=true
 .cursor/hooks/local-context.sh -diff linguist-generated=true
 .cursor/hooks/loop-detection.sh -diff linguist-generated=true
 .cursor/hooks/subagent-dispatch.sh -diff linguist-generated=true

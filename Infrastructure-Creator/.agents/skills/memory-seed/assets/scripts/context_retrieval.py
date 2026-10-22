@@ -265,6 +265,29 @@ _GUARD_WARNING_CURSOR = r'''  # Cursor documents no channel that shows the agent
   exit 1
 '''
 
+# first-touch.sh: Claude Code and Codex put a PreToolUse hook's
+# additionalContext beside the tool result. Cursor's preToolUse returns no
+# context (its agent_message accompanies a denial) and beforeReadFile only
+# allows or denies, so the Cursor copy runs on postToolUse, whose
+# additional_context Cursor puts after the tool result; the runtime writes
+# each host's shape (`first-touch --host`). Codex wires it without a matcher,
+# like all its hooks, and the script filters itself.
+_FT_HEADER = "# Hook type: PreToolUse (Read|Edit|Write|MultiEdit|NotebookEdit|Bash)\n"
+_FT_HEADER_CURSOR = (
+    "# Cursor hook event: postToolUse (Read|Write|Shell) - Cursor's preToolUse\n"
+    "# adds no context, so the knowledge follows the tool result.\n"
+)
+_FT_HEADER_CODEX = (
+    "# Codex hook event: PreToolUse (self-filters to shell and apply_patch calls).\n"
+)
+_FT_OUTPUT = r'''# Output: hookSpecificOutput.additionalContext JSON, which Claude Code and
+# Codex place beside the tool result. Plain stdout from a PreToolUse hook
+# reaches neither model.
+'''
+_FT_OUTPUT_CURSOR = r'''# Output: postToolUse additional_context JSON, which Cursor adds to the
+# conversation after the tool result.
+'''
+
 # Cursor's beforeSubmitPrompt cannot inject context through hook output.
 # Native hooks therefore maintain an ignored alwaysApply rule, while a
 # Harness capsules retire only the registered generated slot.
@@ -665,6 +688,10 @@ MIRROR_RULES: dict[str, Any] = {
                         [_WM_DELIVERY_PROMPT, _WM_DELIVERY_PROMPT_CURSOR],
                         [_WM_HOST_DELIVERED, _WM_HOST_DELIVERED_CURSOR],
                         [_WM_THIRD_PARTY, ""],
+                        # The first-touch hook runs on postToolUse here (see
+                        # the _FT_* constants above).
+                        [_FT_HEADER, _FT_HEADER_CURSOR],
+                        [_FT_OUTPUT, _FT_OUTPUT_CURSOR],
                     ],
                 },
                 ".codex/hooks": {
@@ -706,6 +733,7 @@ MIRROR_RULES: dict[str, Any] = {
                             "If it keeps failing, systematic-debugger instead",
                         ],
                         [_WM_THIRD_PARTY, ""],
+                        [_FT_HEADER, _FT_HEADER_CODEX],
                     ],
                 },
             },
@@ -6830,6 +6858,135 @@ def linked_documents(
             trace.observe(item, "source-link", "hydrated")
     return _runtime_filter(repository, candidates, config, trace=trace, connection=connection,
                            source_policy=_CurrentSourcePolicy(connection, repository))
+
+
+# Knowledge at first touch (context.py `first-touch`, off unless
+# `first_touch_delivery`): what a file's first read or edit in a session hands
+# the agent. Declared citations - Memory Bank chunks, findings and decisions
+# whose sources name the file - and specs that write its path; never a task
+# that merely touched it, and nothing reached through a shared source.
+FIRST_TOUCH_KINDS = ("memory", "brain-decision", "brain-finding")
+FIRST_TOUCH_SPEC_ROW_LIMIT = 64
+# A spec names a file by its path from the project root, with a directory:
+# `src/Billing/Invoice.php`, also as `./src/...` or in backticks. A bare
+# `composer.json` or `Invoice.php` is a word too common to stand for one file.
+FIRST_TOUCH_SPEC_PATH = re.compile(r"(?<![\w./\\-])(?:\./)?((?:[\w.-]+/)+[\w.-]*\w)")
+
+
+def _spec_names(text: str, path: str) -> bool:
+    """Whether prose names `path` as a whole path, not inside a longer one."""
+    return re.search(
+        r"(?<![\w./\\-])(?:\./)?" + re.escape(path) + r"(?![\w/\\-]|\.\w)", text
+    ) is not None
+
+
+def first_touch_documents(
+    connection: sqlite3.Connection, repository: Path, config: dict[str, Any], path: str,
+) -> list[dict[str, Any]]:
+    """Eligible knowledge citing `path` and specs naming it, in delivery order.
+
+    Every item passes the capsule's runtime filter: privacy, owner, authority,
+    lifecycle, the secret screen, the indexed image still being the file,
+    temporal review bounds and cited files present; an item whose cited file
+    changed since verification stays, marked `source_changed`. A conflicted
+    item is held back, as the automatic link channels hold it - its partner
+    would have to come with it - and a Brain record yields to the chunk it was
+    promoted to. The order: one of each kind before a second of any - a chunk,
+    a decision, a finding, a spec - so chunks citing a busy file cannot hide
+    the decision that cites it too; within a kind, items whose cited files are
+    unchanged first, then the newest.
+    """
+    linked, _ = linked_documents(connection, repository, config, path, ref_kinds=("source",))
+    cited = [
+        item for item in linked
+        if item["kind"] in FIRST_TOUCH_KINDS
+        and not item["conflicts"] and not _has_incoming_conflict(connection, item.get("record_id"))
+    ]
+    promoted_from = {
+        str(source.get("path"))
+        for item in cited if item["kind"] == "memory"
+        for source in item.get("source_fingerprints") or [] if isinstance(source, dict)
+    }
+    cited = [item for item in cited if not (item["kind"] != "memory" and item["path"] in promoted_from)]
+    specs: list[dict[str, Any]] = []
+    if "/" in path:
+        rows = connection.execute(
+            """
+            SELECT
+                d.path, d.layer, d.kind, d.title, d.summary, d.content,
+                m.category, m.privacy, m.owner, m.authority, m.lifecycle,
+                m.source_hash, m.record_id, m.conflicts, m.source_fingerprints,
+                m.updated_at, m.confidence, m.attestation
+            FROM documents AS d
+            JOIN document_metadata AS m ON m.path = d.path
+            WHERE d.kind = 'spec' AND d.path != ? AND instr(d.content, ?) > 0
+            ORDER BY d.path
+            LIMIT ?
+            """,
+            (path, path, FIRST_TOUCH_SPEC_ROW_LIMIT),
+        ).fetchall()
+        for row in rows:
+            item = dict(row)
+            content = str(item.pop("content") or "")
+            summary = str(item.pop("summary") or "")
+            if not _spec_names(content, path):
+                continue
+            item["_indexed_policy_image"] = (str(item["title"] or ""), summary, content)
+            item["conflicts"] = json.loads(item["conflicts"])
+            item["source_fingerprints"] = json.loads(item["source_fingerprints"])
+            specs.append(item)
+        specs, _ = _runtime_filter(repository, specs, config, connection=connection,
+                                   source_policy=_CurrentSourcePolicy(connection, repository))
+    group = {kind: rank for rank, kind in enumerate((*FIRST_TOUCH_KINDS, "spec"))}
+
+    def newest(value: object) -> str:
+        return "".join(chr(0x10FFFF - ord(char)) for char in str(value or ""))
+
+    ranked = sorted(
+        [*cited, *specs],
+        key=lambda item: (group[item["kind"]], bool(item.get("source_changed")),
+                          newest(item.get("updated_at")), newest(item["path"])),
+    )
+    turns: dict[str, int] = {}
+    rounds: list[int] = []
+    for item in ranked:
+        rounds.append(turns.get(item["kind"], 0))
+        turns[item["kind"]] = rounds[-1] + 1
+    ordered = [item for _, item in sorted(zip(rounds, ranked),
+                                          key=lambda pair: (pair[0], group[pair[1]["kind"]]))]
+    for item in ordered:
+        item["selection"] = "first-touch"
+        item["via"] = path
+    return ordered
+
+
+def first_touch_baseline(connection: sqlite3.Connection, repository: Path) -> list[str]:
+    """Every project path a first touch could deliver for, from the index.
+
+    The paths chunks, findings and decisions cite, and the project files specs
+    name, each screened like a touch seed (`_file_link_problem`). A superset:
+    what one touch delivers is decided by `first_touch_documents` and the
+    runtime filter, against the files as they are then.
+    """
+    found: set[str] = set()
+    for (reference,) in connection.execute(
+        "SELECT DISTINCT l.ref_path FROM document_links AS l JOIN documents AS d ON d.path = l.path "
+        "WHERE l.ref_kind = 'source' AND d.kind IN ({})".format(", ".join("?" for _ in FIRST_TOUCH_KINDS)),
+        FIRST_TOUCH_KINDS,
+    ):
+        reference = str(reference)
+        found.add(reference[2:] if reference.startswith("./") else reference)
+    project = workspace_roots.project_root(repository)
+    named: set[str] = set()
+    for (content,) in connection.execute("SELECT content FROM documents WHERE kind = 'spec'"):
+        named.update(FIRST_TOUCH_SPEC_PATH.findall(str(content or "")[:MARKED_DOCUMENT_CHARACTERS * 4]))
+    for name in named - found:
+        try:
+            if (project / name).is_file():
+                found.add(name)
+        except (OSError, ValueError):
+            continue
+    return sorted(path for path in found if _file_link_problem(path) is None)
 
 
 _PROMPT_PATH = re.compile(

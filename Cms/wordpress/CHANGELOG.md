@@ -5,6 +5,12 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- A first-touch hook (`first-touch.sh`) can hand the agent the memory citing a
+  file at the file's first touch in a session; it is wired for Claude Code,
+  Codex and Cursor and does nothing unless `first_touch_delivery` is turned
+  on. `runtime.json` ships it `false`. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
+
 - `runtime.json` ships `capsule_profile: recall`: the automatic Task Capsule
   carries the working state, the recent files and what the task itself
   saved, and `AGENTS.md` says so; `retrieve` still searches everything.
