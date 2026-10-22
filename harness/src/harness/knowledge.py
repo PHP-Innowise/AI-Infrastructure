@@ -681,13 +681,20 @@ class KnowledgeManager:
                 os.close(descriptor)
 
     def supports_capsule_profile(self, project_id, info, _root=None):
-        """Whether this runtime's refresh takes --capsule-profile (marker, as above)."""
+        """Whether this runtime's refresh takes --capsule-profile (marker, as above).
+
+        The marker only widens a person's refresh, so a platform without
+        O_NOFOLLOW (Windows) reads it too, from a regular file that is not a link.
+        """
         descriptor = None
         try:
-            if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_NONBLOCK'):
-                return False
             layout = self.layout(project_id, _root)
             scripts = layout['scripts'] or layout['folder'] / info['root'] / 'memory-bank/scripts'
+            if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_NONBLOCK'):
+                if not stat.S_ISREG(os.lstat(scripts / 'context.py').st_mode):
+                    return False
+                with open(scripts / 'context.py', 'rb') as handle:
+                    return b'CAPSULE_PROFILE_FLAG = "capsule-profile-v1"' in handle.read(8192)
             descriptor = os.open(scripts / 'context.py', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:

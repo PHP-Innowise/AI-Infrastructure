@@ -28,6 +28,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A person's refresh asks for the full capsule on Windows too — 2026-10-22
+
+- Harness read the `CAPSULE_PROFILE_FLAG` marker through `O_NOFOLLOW`, as it
+  reads the source-hint and provenance markers, and Windows has no
+  `O_NOFOLLOW`: there the marker counted as absent, and a person's knowledge
+  `refresh` ran under the shipped `recall` and searched only the task's own
+  saves. The marker only widens that refresh, so without `O_NOFOLLOW` it is
+  read from a regular file that is not a link.
+- `test_an_explicit_refresh_searches_everything_without_o_nofollow` fails on
+  `46db067e`.
+
 ### The editions ship the recall capsule — 2026-10-22
 
 - The four editions' `project-brain/config/runtime.json` and the generator's
