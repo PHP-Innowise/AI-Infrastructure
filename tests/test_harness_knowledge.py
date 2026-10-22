@@ -298,6 +298,18 @@ class KnowledgeTests(unittest.TestCase):
         self.assertEqual(retried["task_uuid"], started["task_uuid"])
         self.native.assert_not_called()
 
+    def test_an_explicit_refresh_searches_whatever_the_automatic_capsule_carries(self):
+        # A person's refresh is an explicit request; the project's automatic
+        # capsule may be set to carry no document at all.
+        self.install()
+        config = self.project / "project-brain/config/runtime.json"
+        settings = json.loads(config.read_text(encoding="utf-8"))
+        config.write_text(json.dumps({**settings, "capsule_profile": "navigation"}), encoding="utf-8")
+        self.run_action("start", task_id="TASK-RETRIEVAL", goal="Verify cobalt allocation",
+                        sources=["specs/authority.md"])
+        refreshed = self.run_action("refresh", task_id="TASK-RETRIEVAL", query="cobalt allocation")
+        self.assertIn("one owner", json.dumps(refreshed))
+
     def test_durable_promotion_requires_eligible_sources_independent_review_and_pinned_revision(self):
         self.install()
         # The reviewed path is the one a project takes with automatic promotion

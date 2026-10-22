@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded runtime names its capsule profile flag — 2026-10-22
+
+- memory-seed's `context.py` carries the `CAPSULE_PROFILE_FLAG` marker, by
+  which a helper such as Harness tells that `refresh` takes
+  `--capsule-profile`. The policy lock was regenerated for the changed asset.
+
 ### Seeded excerpts quote a chunk's rule, not its Sources footer — 2026-10-22
 
 - memory-seed's `context_retrieval.py` skips a Memory Bank chunk's

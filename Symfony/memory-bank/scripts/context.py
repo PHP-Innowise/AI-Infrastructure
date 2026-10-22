@@ -5,6 +5,9 @@ from __future__ import annotations
 
 SOURCE_HINT_PROFILE = "source-hints-v1"
 SOURCE_PROVENANCE_PROFILE = "local-source-provenance-v1"
+# For helpers that read these markers instead of starting the CLI: refresh
+# takes --capsule-profile, so an explicit request can ask for the full capsule.
+CAPSULE_PROFILE_FLAG = "capsule-profile-v1"
 
 import argparse
 import hashlib

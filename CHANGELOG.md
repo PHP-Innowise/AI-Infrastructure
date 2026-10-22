@@ -28,6 +28,32 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Harness works under a capsule without documents — 2026-10-22
+
+Under the navigation and recall profiles a capsule may carry no document -
+recall's whenever none of the task's own saves matches - and Harness assumed
+one in three places.
+
+- **Automatic memory.** `3ea0b262` let a capsule with no document through
+  only off the local transport. On POSIX, where Harness asks the runtime for
+  a source proof and runs the turn ephemeral, such a capsule still went to
+  the proof check, and the runtime sends no proof when there is no document
+  to prove: every such turn failed `prepare` with "The local source
+  provenance is unavailable or invalid". A capsule with no document and no
+  proof needs no fingerprints on either path now; a proof that does arrive is
+  checked as before, and a document without one is still refused.
+- **A person's refresh.** The knowledge `refresh` action ran under the
+  project's automatic profile. It is an explicit request, like MCP
+  `memory_retrieve`, and passes `--capsule-profile full` when the runtime
+  takes it - `context.py` names that with a `CAPSULE_PROFILE_FLAG` marker, read
+  the way Harness reads the source-hint and provenance markers.
+- **The LongMemEval bridge** measures retrieval and asks `assemble_capsule`
+  for the full capsule when the runtime knows the profile.
+- `test_no_document_and_no_proof_need_no_fingerprints`,
+  `test_an_explicit_refresh_searches_whatever_the_automatic_capsule_carries`
+  and `test_the_bridge_measures_the_full_capsule_whatever_the_project_ships`
+  fail on `60be9fb8`.
+
 ### A Memory Bank chunk is quoted by its rule, not its Sources footer — 2026-10-22
 
 - `excerpt_section` skipped a citation-only `## Sources` footer for linked

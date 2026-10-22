@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -471,7 +472,11 @@ class NativeProjectionMemory:
                     phase_seconds=indexed.get('phase_seconds'), index_warnings=warnings,
                     gate_mode=gate,
                     host='cli', entry_point='refresh', allow_unprovisioned=True,
-                    render=True, prompt=prompt, automatic_links=True)
+                    render=True, prompt=prompt, automatic_links=True,
+                    # The bridge measures retrieval: it asks for everything,
+                    # whatever the project's automatic capsule is set to carry.
+                    **({'capsule_profile': 'full'} if 'capsule_profile' in inspect.signature(
+                        self.native.assemble_capsule).parameters else {}))
                 trace = {}
                 body = '\n'.join(self.native.render_capsule_lines(
                     capsule, self.native.capsule_excerpts(conn, capsule), trace=trace))

@@ -680,6 +680,25 @@ class KnowledgeManager:
             if descriptor is not None:
                 os.close(descriptor)
 
+    def supports_capsule_profile(self, project_id, info, _root=None):
+        """Whether this runtime's refresh takes --capsule-profile (marker, as above)."""
+        descriptor = None
+        try:
+            if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_NONBLOCK'):
+                return False
+            layout = self.layout(project_id, _root)
+            scripts = layout['scripts'] or layout['folder'] / info['root'] / 'memory-bank/scripts'
+            descriptor = os.open(scripts / 'context.py', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                return False
+            return b'CAPSULE_PROFILE_FLAG = "capsule-profile-v1"' in os.read(descriptor, 8192)
+        except (OSError, KeyError, TypeError):
+            return False
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
     def supports_provenance_response(self, project_id, info, _root=None):
         """Versioned helper interface marker; not runtime/source authentication."""
         descriptor = None
@@ -748,6 +767,10 @@ class KnowledgeManager:
                         # runtime cuts private data and pasted transcript prefixes
                         # out instead of refusing the turn its memory.
                         options.append('--sanitize')
+                if action == 'refresh' and _host is None and self.supports_capsule_profile(project_id, info, _root):
+                    # A person's refresh is an explicit request: it searches
+                    # everything, whatever the automatic capsule is set to carry.
+                    options.append('--capsule-profile=full')
                 if _source_hints is not None and self._supports_source_hints(project_id, info, _root):
                     hints_json = self._source_hints_json(_source_hints)
                     if hints_json is not None:
