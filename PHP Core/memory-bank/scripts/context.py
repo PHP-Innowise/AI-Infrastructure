@@ -6653,6 +6653,12 @@ def _call_file_words(name: str, data: dict[str, object], base: str) -> list[tupl
         return [(value, False, base)] if isinstance(value, str) else []
     if name == "Bash" and isinstance(data.get("command"), str):
         return _shell_file_words(data["command"], base, dialect=str(data.get("dialect") or "sh"))
+    if name == "PowerShell" and isinstance(data.get("command"), str):
+        # Claude Code runs shell commands through this tool on Windows while
+        # it is on - by default for claude.ai and Console accounts, unless a
+        # Bash deny rule turns it off; its input has the Bash tool's fields.
+        # Unread, such a session recorded none of the files its commands read.
+        return _shell_file_words(data["command"], base, dialect="powershell")
     if name == "apply_patch" and isinstance(data.get("patch"), str):
         return [((update or moved).strip(), True, base) for update, moved in _PATCH_FILE_LINE.findall(data["patch"])]
     return []

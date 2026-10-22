@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded memory reads a Windows session's PowerShell commands — 2026-10-22
+
+- memory-seed's `context.py` reads Claude Code's `PowerShell` tool calls for
+  the `recent files` line of a Windows session that has that tool on. The
+  policy lock and mirrors were regenerated for the changed asset.
+
 ### Seeded continuity leaves a Stop hook's continuation out — 2026-10-22
 
 - memory-seed's `context_continuity.py` leaves a Stop hook's continuation

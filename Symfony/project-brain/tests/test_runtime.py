@@ -14836,6 +14836,17 @@ class RecentProjectFilesTest(RuntimeHarness):
         self.assertEqual("recent files: src/Guard.php, src/Query.php, src/Refund.php, src/Ledger.php, src/Export.php",
                          self.recent_line())
 
+    def test_claude_powershell_tool_calls_name_their_files(self) -> None:
+        # On Windows Claude Code runs shell commands through its PowerShell
+        # tool by default; only the Bash tool was read.
+        transcript = self.claude(
+            self.prompt("fix the refund"),
+            self.call("PowerShell", {"command": "Get-Content src/Refund.php | Select-String total; "
+                                                "Set-Content src/Guard.php '<?php'"}),
+        )
+        self.assertEqual(2, self.turn(transcript)["recent_files"])
+        self.assertEqual("recent files: src/Guard.php, src/Refund.php", self.recent_line())
+
     def test_codex_powershell_calls_name_their_files(self) -> None:
         transcript = Path(self.temporary.name) / "windows-rollout.jsonl"
         records = [

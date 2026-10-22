@@ -28,6 +28,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A Windows session's PowerShell commands name their files — 2026-10-22
+
+- Claude Code can run shell commands through its `PowerShell` tool on
+  Windows (code.claude.com/docs/en/tools-reference): on by default without
+  Git Bash, and with Git Bash for claude.ai and Console accounts. Its input
+  has the Bash tool's `command`, but the transcript reader took only `Bash`,
+  so a session that used it recorded none of the files its commands read -
+  the main source of the `recent files` line. `PowerShell` calls are now read
+  with the PowerShell dialect the Codex Windows path already uses.
+- Where it applies: the editions' settings deny scoped `Bash(...)` rules, and
+  on Windows with Git Bash - which the hooks need - Claude Code then turns
+  the PowerShell tool off for the session unless
+  `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` or a `PowerShell(...)` rule turns it
+  on. This reaches the sessions that turn it on.
+- `test_claude_powershell_tool_calls_name_their_files` fails on `8caa2869`.
+- Not changed, needs a decision: `bash-validator.sh` is wired on `Bash` only,
+  while the documentation asks hooks that inspect shell commands to match
+  `Bash|PowerShell`, so a session with the PowerShell tool on passes around
+  it; and the memory CLI is allowed only as `Bash(...)` rules.
+
 ### A Codex chat snapshot no longer carries the Stop hook's continuation — 2026-10-22
 
 - Codex 0.162 and later write a Stop hook's continuation into the
