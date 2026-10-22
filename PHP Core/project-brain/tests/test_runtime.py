@@ -12538,11 +12538,19 @@ class LinkedMemoryExcerptTest(unittest.TestCase):
         self.assertIn("src/continuity.py", excerpts[self.PATH])
         self.assertEqual("Sources", excerpts[self.PATH].heading)
 
-    def test_lexical_selection_and_distinctive_pointer_are_unchanged(self) -> None:
+    def test_a_chunk_found_by_its_own_words_quotes_its_rule_too(self) -> None:
+        # Found by the cited filenames in its own text, a chunk was quoted by
+        # that footer - the paths without the rule. It is held to the linked
+        # records' rule now; a question about the sources still gets them, and
+        # a distinctive pointer still carries no excerpt.
         self.document("# Safety boundary\n\n" + self.RULE + "\n\n## Sources\n- src/continuity.py\n- src/rejection.py\n")
         capsule = self.capsule(selection="")
         excerpts = context_cli.capsule_excerpts(self.connection, capsule)
-        self.assertEqual("Sources", excerpts[self.PATH].heading)
+        self.assertNotEqual("Sources", excerpts[self.PATH].heading)
+        self.assertIn("A safe current event is independently scanned and appended.", excerpts[self.PATH])
+        asked = context_cli.capsule_excerpts(self.connection, self.capsule(
+            selection="", query="Sources src/continuity.py src/rejection.py"))
+        self.assertEqual("Sources", asked[self.PATH].heading)
         capsule["semantic"][0]["match"] = "distinctive"
         self.assertEqual({}, context_cli.capsule_excerpts(self.connection, capsule))
 

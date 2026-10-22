@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded excerpts quote a chunk's rule, not its Sources footer — 2026-10-22
+
+- memory-seed's `context_retrieval.py` skips a Memory Bank chunk's
+  citation-only `## Sources` footer whatever selected it, as it did for linked
+  selections: a request naming a cited file got the paths without the rule.
+  The policy lock was regenerated for the changed asset.
+
 ### Seeded memory consolidates only on request — 2026-10-21
 
 - memory-seed's `runtime.json.template` ships `automatic_consolidation` and

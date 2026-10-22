@@ -5182,7 +5182,12 @@ def excerpt_section(
     """
     title = str(item.get("title") or "")
     prefer_head = prefer_head or item.get("kind") == "changelog"
-    if item.get("selection") in ("path-link", "source-link", "source-hint", *AUTOMATIC_LINK_SELECTIONS) and item.get("kind") != "brain-task":
+    # A Memory Bank chunk found by its own words is held to the same rule: a
+    # request naming the file it cites matched its Sources footer best, and
+    # the chunk - a corrected learning among them - arrived as a list of
+    # paths without the consequence it records.
+    if ((item.get("selection") in ("path-link", "source-link", "source-hint", *AUTOMATIC_LINK_SELECTIONS)
+            and item.get("kind") != "brain-task") or item.get("kind") == "memory"):
         requested = {
             heading for heading in ("sources", "references")
             if re.search(r"(?<![\w/\\.-])" + heading + r"(?![\w/\\.-])", query, re.IGNORECASE)

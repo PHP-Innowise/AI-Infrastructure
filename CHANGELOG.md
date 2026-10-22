@@ -28,6 +28,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A Memory Bank chunk is quoted by its rule, not its Sources footer — 2026-10-22
+
+- `excerpt_section` skipped a citation-only `## Sources` footer for linked
+  selections only. A chunk found by its own words - a request naming the
+  file it cites - was quoted by that footer: the paths without the rule.
+- The Harness recall suite showed it under the recall capsule: the corrected
+  learning reached the next message as a list of sources. Under `full` the
+  same chunk was quoted the same way, and the learning arrived only because
+  the cited file came along.
+- Every Memory Bank chunk is held to the linked selections' rule now; a
+  request about the sources still gets them, and a distinctive pointer still
+  carries no excerpt.
+- `test_a_chunk_found_by_its_own_words_quotes_its_rule_too` replaces
+  `test_lexical_selection_and_distinctive_pointer_are_unchanged`, which pinned
+  the old quote, and fails on `1d4f4af5`.
+- The 327-prompt stand under `full` does not move: the same documents, 217
+  useful, the same capsule characters on every prompt.
+
 ### A recall capsule: navigation plus the task's own saves — 2026-10-22
 
 - `capsule_profile: recall` (also `CONTEXT_CAPSULE_PROFILE` and
