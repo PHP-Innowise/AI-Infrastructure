@@ -1420,8 +1420,11 @@ the **Memory** chip shows **Automatic**. Nothing waits for a person. The first m
 the first and each follow-up, is the retrieval query for its own turn: the server
 runs the project's `context.py refresh` with the provider as host, so instruction
 files the provider loads by itself (`CLAUDE.md`, `AGENTS.md`) stay out of the
-capsule, and puts the capsule into the launch. The retrieval manifest stays in the
-ignored `memory-bank/local/`, as the project's own hooks keep theirs. The launch
+capsule, and puts the capsule into the launch. What it carries is the project's
+`capsule_profile`: the editions ship `recall` - the working state, recent files
+and what the task itself saved (`docs/CONTEXT-AND-MEMORY.md`). A capsule with
+documents leaves its retrieval manifest in the ignored `memory-bank/local/`, as
+the project's own hooks keep theirs; one without documents writes none. The launch
 sets `CONTEXT_TASK_ID` to the task and `CONTEXT_CAPSULE_DELIVERED=1`, so the
 project's read hook does not build a second capsule from the whole prompt; its
 Stop hook still checkpoints the task. A line in the conversation says what each

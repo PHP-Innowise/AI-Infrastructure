@@ -813,8 +813,33 @@ Two blockers remain:
   documents - navigation always, `recall` without a match of its own -
   fails its `prepare`.
 
-So (a) and (b) hold and (c) does not. The default stays `full`, and
-`recall` is opt-in until both blockers are fixed and (c) is run again.
+So (a) and (b) held and (c) did not, and the default stayed `full`.
+
+**(c) run again (2026-10-22).** Both blockers are fixed:
+- `excerpt_section` skips a citation-only footer for every Memory Bank chunk,
+  whatever selected it, so the corrected learning reaches the next message as
+  its rule. The 327-prompt stand under `full` delivered the same documents at
+  the same sizes before and after the change (217 useful).
+- In Harness a capsule with no document and no source proof needs no
+  fingerprints; a proof that does arrive is checked as before. Harness's
+  explicit `refresh` and the LongMemEval bridge ask for `full`.
+
+The tests that check a layer `recall` leaves out on purpose pin `full` in
+their fixtures:
+- the shared document in the Cursor rule;
+- the document beside broken UTF-8;
+- Hindsight's source hints;
+- the Git calls and the working record re-read on the full search path;
+- the membership index's full capsule render;
+- Harness's first-message document, funnel diagnosis, ordinary receipt and
+  opened-memory report.
+
+With `recall` shipped, `check.py` passed 235 commands and failed none, the
+Harness recall suite among them. The 7 it skipped need what that machine
+lacked: ShellCheck, the Harness graph and QA venvs, and Windows. So (c)
+holds: the four editions and the generator's template ship `recall`. The
+code's default stays `full` for a project whose `runtime.json` names no
+profile.
 
 **Privacy.** Sets carry prompts and results name client paths. Both are
 written owner-only and are refused inside the clone. `--events` keeps raw

@@ -50,6 +50,20 @@ def manifest(project, result):
     return json.loads((project / result['manifest']).read_text())
 
 
+def full_capsule(root):
+    """Pin the full automatic capsule in a fixture project.
+
+    The editions ship the recall capsule - working state, recent files and
+    the task's own saves. A test of a layer only the full capsule carries -
+    shared documents and what is built on them - pins `full`, which a
+    project can still choose.
+    """
+    config = Path(root) / 'project-brain/config/runtime.json'
+    data = json.loads(config.read_text(encoding='utf-8'))
+    data['capsule_profile'] = 'full'
+    config.write_text(json.dumps(data), encoding='utf-8')
+
+
 class NativeHints(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -442,6 +456,7 @@ class HarnessHints(unittest.TestCase):
         self.context = TaskContext(self.manager, observation=self.observed)
 
     def test_real_prepare_refresh_render_manifest_and_prompt(self):
+        full_capsule(self.project)  # source hints ride the full capsule's manifest
         commands = []
         execute = self.manager._execute
         def traced(command, *args, **kwargs):

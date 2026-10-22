@@ -5,6 +5,11 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- `runtime.json` ships `capsule_profile: recall`: the automatic Task Capsule
+  carries the working state, the recent files and what the task itself
+  saved, and `AGENTS.md` says so; `retrieve` still searches everything.
+  Details in the root [`CHANGELOG.md`](../../CHANGELOG.md). Policy lock regenerated.
+
 - `runtime.json` ships `automatic_consolidation` and
   `automatic_consolidation_verification` off; `AGENTS.md`, the `project-brain`
   skill, `PROTOCOL.md` and the READMEs say the capsule's episodic layer holds

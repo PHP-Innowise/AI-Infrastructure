@@ -24,6 +24,20 @@ TASK = 'feature/heron-git'
 QUERY = 'Which rounding does the heron ledger use?'
 
 
+def full_capsule(root):
+    """Pin the full automatic capsule in a fixture project.
+
+    The editions ship the recall capsule - working state, recent files and
+    the task's own saves. A test of a layer only the full capsule carries -
+    shared documents and what is built on them - pins `full`, which a
+    project can still choose.
+    """
+    config = Path(root) / 'project-brain/config/runtime.json'
+    data = json.loads(config.read_text(encoding='utf-8'))
+    data['capsule_profile'] = 'full'
+    config.write_text(json.dumps(data), encoding='utf-8')
+
+
 @unittest.skipUnless(os.name == 'posix' and shutil.which('git') and shutil.which('bash'), 'POSIX Git shim')
 class GitReuseTests(unittest.TestCase):
     def setUp(self):
@@ -86,6 +100,7 @@ exit $status
         return self.log.read_text(encoding='utf-8').splitlines() if self.log.exists() else []
 
     def test_a_prompt_asks_the_branch_once_and_the_frame_twice(self):
+        full_capsule(self.root)  # counts the Git calls of the full search path
         result = self.refresh(self.shim())
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn('working: ' + TASK, result.stdout)
@@ -130,6 +145,7 @@ exit $status
         self.assertGreaterEqual(sum('symbolic-ref' in call for call in self.calls()), 2)
 
     def test_a_repository_retargeted_during_the_reused_frame_is_refused(self):
+        full_capsule(self.root)  # counts the Git calls of the full search path
         foreign = self.base / 'foreign'
         foreign.mkdir()
         self.git('init', '-q', '-b', TASK, cwd=foreign)

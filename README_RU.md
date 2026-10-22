@@ -272,9 +272,11 @@ python3 memory-bank/scripts/context.py retrieve \
   платит за них заново;
 - хук отправки запроса (`UserPromptSubmit` в Claude Code и Codex) вызывает
   `context.py refresh --sanitize`: он инкрементально обновляет три слоя индекса
-  и подставляет Task Capsule в запрос. В Cursor тот же хук работает на
-  `beforeSubmitPrompt` и вместо этого записывает капсулу в правило
-  `working-memory.mdc`;
+  и подставляет Task Capsule в запрос - рабочее состояние задачи, её недавние
+  файлы и то, что сохранила сама задача, если `capsule_profile` в
+  `runtime.json` не просит полного поиска (`docs/CONTEXT-AND-MEMORY.md`).
+  В Cursor тот же хук работает на `beforeSubmitPrompt` и вместо этого
+  записывает капсулу в правило `working-memory.mdc`;
 - хук конца хода (`Stop`) вызывает `context.py turn`: изменённые пути
   буферизуются в игнорируемом локальном состоянии и раз в пять ходов
   сбрасываются в авторитетную задачу. На этой же границе выполняется

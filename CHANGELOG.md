@@ -28,6 +28,33 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The editions ship the recall capsule — 2026-10-22
+
+- The four editions' `project-brain/config/runtime.json` and the generator's
+  `runtime.json.template` set `capsule_profile: recall`: the automatic capsule
+  carries the working state, the recent files and what the task's own saves
+  recorded. The code's default stays `full`, so a project whose `runtime.json`
+  names no profile keeps the capsule it had. An explicit `retrieve`, MCP
+  `memory_retrieve`, Harness's explicit `refresh` and the LongMemEval bridge
+  still search everything.
+- The third task-outcome measurement sealed three conditions
+  (`docs/MEMORY-EVAL.md`). On recall sets `recall` was not worse than `full`;
+  on cold starts it was navigation byte for byte, and navigation had reached
+  the changed file in 2.92 fewer calls than `full` on 30 client tasks. The
+  third condition - every suite that saves a result and expects the next
+  capsule to carry it stays green with `recall` shipped - failed on the two
+  blockers the next two entries fix. Run again with `recall` shipped,
+  `check.py` passed every job it ran.
+- Tests that check a layer `recall` leaves out on purpose pin `full` in their
+  fixtures: the shared document in the Cursor rule, the document beside
+  broken UTF-8, Hindsight's source hints, the Git calls and the working
+  record re-read on the full search path, the membership index's full capsule
+  render, and Harness's first-message document, funnel diagnosis, ordinary
+  receipt and opened-memory report.
+- `AGENTS.md` in the four editions, `README_EN.md`, `README_RU.md`,
+  `harness/README.md` and `docs/CONTEXT-AND-MEMORY.md` say what the automatic
+  capsule carries.
+
 ### Harness works under a capsule without documents — 2026-10-22
 
 Under the navigation and recall profiles a capsule may carry no document -

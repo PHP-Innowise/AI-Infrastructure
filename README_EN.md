@@ -287,9 +287,12 @@ Alongside the explicit command, the hooks run an automatic memory loop:
   repository state, so a second start does not pay for them again;
 - the prompt hook (`UserPromptSubmit` in Claude Code and Codex) runs
   `context.py refresh --sanitize`: it incrementally refreshes the three index
-  layers and injects the Task Capsule into the prompt. On Cursor the same hook
-  runs on `beforeSubmitPrompt` and writes the capsule into the
-  `working-memory.mdc` rule instead;
+  layers and injects the Task Capsule into the prompt - the task's working
+  state, its recent files and what the task itself saved, unless
+  `capsule_profile` in `runtime.json` asks for the full search
+  (`docs/CONTEXT-AND-MEMORY.md`). On Cursor the same hook runs on
+  `beforeSubmitPrompt` and writes the capsule into the `working-memory.mdc`
+  rule instead;
 - the turn-end hook (`Stop`) runs `context.py turn`: changed paths are buffered
   in ignored local state and flushed into the authoritative task every fifth
   turn. Maintenance — promoting anything still eligible, compaction, and
