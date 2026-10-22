@@ -106,6 +106,33 @@ edition's own files remain in that edition's changelog.
   changes nothing, and an edited generated file is reported. It fails
   without the change.
 
+### A first-touch arm in the outcome A/B, and an exposure check — 2026-10-22
+
+- `scripts/memory_outcome_ab.py run --arms …,first-touch` adds the arm the
+  first-touch switch waits for. It is `recall` with `first_touch_delivery:
+  true` in the corpus and the corpus's `first-touch.sh` passed to `codex exec`
+  on `PreToolUse` beside the prompt hook, so against `recall` it differs only
+  by what a file's first touch hands over.
+- A run of the arm is valid when the prompt hook ran and, wherever the agent
+  made a call, the first-touch hook built its session baseline. Each run
+  records:
+  - the deliveries and their characters;
+  - the files whose first touch delivered;
+  - whether one of those came before the gold touch that ends the run;
+  - on a recall set, whether a first touch handed over the save.
+
+  `report` counts the exposed pairs beside the verdict.
+- A run takes every arm's settings from the corpus:
+  `CONTEXT_CAPSULE_PROFILE` and `CONTEXT_FIRST_TOUCH_DELIVERY` in the
+  operator's shell no longer reach the session.
+- `exposure` answers without an agent whether the arm can differ from
+  `recall` on a cold-start set. It replays the original session's first-turn
+  touches, up to its first gold file, through the corpus's runtime with
+  first-touch on, and counts what they delivered.
+- Nothing has run. The preregistration against `recall` is drafted outside
+  the clone and not sealed; running agents for it waits for the maintainer.
+  The new tests in `tests/test_memory_outcome_ab.py` fail on `a9277c8f`.
+
 ### Knowledge at first touch, behind a switch that ships off — 2026-10-22
 
 - A new hook, `first-touch.sh`, hands the agent the memory that cites a file

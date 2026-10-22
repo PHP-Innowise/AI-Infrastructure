@@ -1118,7 +1118,9 @@ step on the way turns the hook off.
 
 The setting is off because retrieval is frozen to fixes until a task-outcome
 measurement accepts a change ("Accepting a retrieval change" in
-[MEMORY-EVAL.md](MEMORY-EVAL.md)).
+[MEMORY-EVAL.md](MEMORY-EVAL.md)). `scripts/memory_outcome_ab.py` has a
+`first-touch` arm: the `recall` capsule plus this hook. Its preregistration
+against `recall` is drafted and not sealed, and no agent has run it.
 
 `retrieval-report` keeps shadow `would_skip` distinct from context actually
 `withheld` in `enforce`. It slices gate results by `mode`, `query_source`,
