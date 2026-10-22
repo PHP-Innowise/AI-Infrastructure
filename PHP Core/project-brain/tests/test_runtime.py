@@ -7437,6 +7437,27 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
                 sorted(paths),
             )
 
+    def test_a_generated_projects_manifest_marks_its_files_the_same_way(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="generated-project-test-") as temporary:
+            project = Path(temporary)
+            git = ["git", "-C", str(project)]
+            subprocess.run(["git", "init", "--quiet", str(project)], check=True, capture_output=True)
+            (project / "app.php").write_text("<?php\n", encoding="utf-8")
+            subprocess.run([*git, "add", "."], check=True, capture_output=True)
+            subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                            "commit", "-qm", "base"], check=True, capture_output=True)
+            generated = {".claude/settings.json": "{}\n", "AGENTS.md": "# Generated policy\n"}
+            for name, text in generated.items():
+                (project / name).parent.mkdir(parents=True, exist_ok=True)
+                (project / name).write_text(text, encoding="utf-8")
+            # The generator's manifest: sha256 of each file it owns.
+            (project / ".infra-manifest.json").write_text(json.dumps({"files": {
+                name: hashlib.sha256(text.encode()).hexdigest() for name, text in generated.items()
+            }}), encoding="utf-8")
+            self.assertEqual(([], []), context_cli.changed_paths(project))
+            (project / "AGENTS.md").write_text("# Generated policy\n\nOur addition.\n", encoding="utf-8")
+            self.assertEqual(["AGENTS.md"], context_cli.changed_paths(project)[0])
+
     def test_a_turn_in_an_untouched_untracked_install_buffers_nothing(self) -> None:
         git = ["git", "-C", str(self.repository)]
         self.repository.joinpath(".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")

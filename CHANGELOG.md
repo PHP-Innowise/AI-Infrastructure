@@ -28,6 +28,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A generated project's manifest marks its accelerator files too — 2026-10-23
+
+- Why: a checkpoint leaves out the accelerator's own untracked files by the
+  install record, which only `install_accelerator.py` writes. A project the
+  generator built has no such record, so while its team had neither
+  committed nor ignored the result, `.claude/`, `AGENTS.md` and the rest -
+  and `.infra-manifest.json` itself - still counted as the task's work on
+  every turn.
+- Where there is no install record, `installed_footprint` reads the
+  generator's `.infra-manifest.json` (sha256 of every file it owns). A file
+  is the generator's while its sha256 still matches. The manifest itself
+  never counts.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset (so generated projects get it) and the mirrors by
+  `scripts/core_sync.py --write`; the generator's policy lock was rewritten.
+- Test (`AutomaticWorkingMemoryTest`): an untracked generated install
+  changes nothing, and an edited generated file is reported. It fails
+  without the change.
+
 ### The save after every answer can be switched off — 2026-10-22
 
 - Why: in governed mode every answer ends with the Stop hook asking the agent

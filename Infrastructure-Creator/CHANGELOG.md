@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### A generated project's own files are not taken for a task's work — 2026-10-23
+
+- The seeded memory runtime (memory-seed) reads `.infra-manifest.json` where
+  no install record exists. Until the team commits or ignores what the
+  generator wrote, the generator's files and the manifest itself no longer
+  count as changes on every turn, while a file the team edits still does.
+  The root `CHANGELOG.md` entry of the same day has the details.
+
 ### Generated Stop hooks journal their save request — 2026-10-22
 
 - The seeded runtime journals every prompt, Stop and save to ignored

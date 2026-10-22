@@ -6042,30 +6042,36 @@ def merge_completion_candidates(
     return completion_candidates
 
 
-# What `scripts/install_accelerator.py --sync` records of the files it wrote:
-# each path's Git blob id, in the project's ignored local state.
+# What wrote the accelerator into this project, and with which bytes: the
+# record `scripts/install_accelerator.py` keeps of what an install or a sync
+# wrote (Git blob ids, in ignored local state), or for a project the
+# generator built, its `.infra-manifest.json` (sha256 of each file it owns).
 INSTALL_RECORD = "memory-bank/local/accelerator-install.json"
+GENERATOR_MANIFEST = ".infra-manifest.json"
 INSTALL_RECORD_BYTES = 4 * 1024 * 1024
 INSTALLED_FILE_BYTES = 1024 * 1024
 
 
 def installed_footprint(repository: Path) -> dict[str, str]:
-    """The accelerator's files as its last install or sync wrote them: Git
-    blob ids by project-relative path, from the install record. Empty where
-    there is none - attached, generated, or installed before the record."""
-    record_path = repository / INSTALL_RECORD
-    try:
-        if (record_path.is_symlink() or not record_path.is_file()
-                or record_path.stat().st_size > INSTALL_RECORD_BYTES):
-            return {}
-        record = json.loads(record_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError):
-        return {}
-    files = record.get("files") if isinstance(record, dict) else None
-    if not isinstance(files, dict):
-        return {}
-    return {path: blob for path, blob in files.items()
-            if isinstance(path, str) and isinstance(blob, str)}
+    """The accelerator's files as its last install, sync or generation wrote
+    them: their hashes by project-relative path - a 40-hex Git blob id from
+    the install record, a 64-hex sha256 from the generator's manifest. Empty
+    where there is neither: attached, or installed before either existed."""
+    for name in (INSTALL_RECORD, GENERATOR_MANIFEST):
+        record_path = repository / name
+        try:
+            if (record_path.is_symlink() or not record_path.is_file()
+                    or record_path.stat().st_size > INSTALL_RECORD_BYTES):
+                continue
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        files = record.get("files") if isinstance(record, dict) else None
+        if not isinstance(files, dict):
+            continue
+        return {path: value for path, value in files.items()
+                if isinstance(path, str) and isinstance(value, str) and len(value) in (40, 64)}
+    return {}
 
 
 def _installed_as_written(repository: Path, path: str, footprint: dict[str, str]) -> bool:
@@ -6074,8 +6080,10 @@ def _installed_as_written(repository: Path, path: str, footprint: dict[str, str]
     ones it recorded."""
     if path.endswith("/"):
         return any(name.startswith(path) for name in footprint)
-    blob = footprint.get(path)
-    if blob is None:
+    if path == GENERATOR_MANIFEST:
+        return True  # the generator's own list of what it wrote
+    recorded = footprint.get(path)
+    if recorded is None:
         return False
     target = repository / path
     try:
@@ -6085,7 +6093,9 @@ def _installed_as_written(repository: Path, path: str, footprint: dict[str, str]
         data = target.read_bytes()
     except OSError:
         return False
-    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest() == blob
+    if len(recorded) == 64:
+        return hashlib.sha256(data).hexdigest() == recorded
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest() == recorded
 
 
 def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
