@@ -28,6 +28,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The accelerator's block in .gitignore and .gitattributes follows the release — 2026-10-23
+
+- Why: `--sync` kept `.gitignore` and `.gitattributes` whole as the
+  project's own files, including the block between the accelerator's
+  `# BEGIN/END ACCELERATOR MANAGED ENTRIES` markers. A client installed
+  before the client `.gitattributes` override therefore kept the edition's
+  own block, which marks every skill and hook `-diff linguist-generated`. An
+  edited hook - a safety control - showed as "Binary files differ" in review,
+  and no sync, `--update-tracked` included, ever replaced it. The rehearsal
+  of the rollout found it on scb.
+- The sync now rebuilds that block from the release with the merge an
+  install uses (`merge_additive_file`): the project's own lines stay, and a
+  directive they already hold is not repeated. A tracked file waits for
+  `--update-tracked` as before, and a file without the block stays the
+  project's.
+- Test (`InstallSyncTest`): an old `-diff` block is replaced by the release's
+  `*.sh text eol=lf` while the project's line stays; a tracked file changes
+  only with `--update-tracked`; a file without the block is kept. It fails
+  without the change.
+
 ### A memory line the hooks cannot write is lost quietly — 2026-10-23
 
 - Why: the prompt hook appends a health line and the Stop hook a journal line

@@ -2217,6 +2217,23 @@ def sync_installation(
                 keep(path, "the project's own file")
             continue
         if path in ADDITIVE_FILES:
+            # The project's file, but the block between the accelerator's
+            # markers is the accelerator's: it follows the release, as the
+            # AGENTS.md block does. An install made before the client
+            # `.gitattributes` override kept marking every skill and hook
+            # `-diff`, so an edited hook showed as "Binary files differ" in
+            # review, and no sync ever replaced that block. A file without
+            # the block - every directive was the project's already - stays.
+            text = current.decode("utf-8", "surrogateescape")
+            if ENTRIES_BEGIN in text and ENTRIES_END in text:
+                try:
+                    merged = merge_additive_file(text, payload.decode("utf-8")).encode("utf-8", "surrogateescape")
+                except (InventoryError, UnicodeError):
+                    keep(path, "managed block is malformed")
+                    continue
+                if merged != current:
+                    write(path, merged, "managed block updated", executable, durable=True)
+                continue
             keep(path, "the project's own file")
             continue
         if pristine:

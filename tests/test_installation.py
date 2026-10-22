@@ -1025,6 +1025,43 @@ class InstallSyncTest(unittest.TestCase):
         self.assertEqual([], report["changed"])
         self.assertTrue((self.target / "memory-bank/local/accelerator-install.json").is_file())
 
+    def test_the_accelerators_block_in_an_additive_file_follows_the_release(self) -> None:
+        # An install before the client .gitattributes override wrote the
+        # edition's own block, which marks every skill and hook `-diff`: an
+        # edited hook showed as "Binary files differ" in review, and the
+        # sync kept the whole file as the project's.
+        attributes = self.target / ".gitattributes"
+        attributes.write_text(
+            "*.php text eol=lf\n\n"
+            "# BEGIN ACCELERATOR MANAGED ENTRIES\n"
+            ".claude/hooks/bash-validator.sh -diff linguist-generated=true\n"
+            ".claude/skills/coder/SKILL.md -diff linguist-generated=true\n"
+            "# END ACCELERATOR MANAGED ENTRIES\n",
+            encoding="utf-8",
+        )
+        report = self.sync()
+        self.assertEqual("managed block updated", self.actions(report).get(".gitattributes"))
+        text = attributes.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("*.php text eol=lf\n"))
+        self.assertNotIn("-diff", text)
+        self.assertIn("# BEGIN ACCELERATOR MANAGED ENTRIES\n*.sh text eol=lf\n# END ACCELERATOR MANAGED ENTRIES\n", text)
+        self.assertNotIn(".gitattributes", self.actions(self.sync()))
+
+        # Tracked by the project's Git, the block waits for --update-tracked.
+        attributes.write_text(text.replace("*.sh text eol=lf\n", "*.sh -diff\n"), encoding="utf-8")
+        run("git", "-C", str(self.target), "add", "--", ".gitattributes")
+        report = self.sync()
+        self.assertIn("tracked by the project's Git", self.kept(report).get(".gitattributes", ""))
+        report = self.sync("--update-tracked")
+        self.assertEqual("managed block updated", self.actions(report).get(".gitattributes"))
+        self.assertIn("\n*.sh text eol=lf\n", attributes.read_text(encoding="utf-8"))
+
+        # Without the accelerator's block the file stays the project's.
+        ignore = self.target / ".gitignore"
+        ignore.write_text("/vendor/\n", encoding="utf-8")
+        self.assertEqual("the project's own file", self.kept(self.sync()).get(".gitignore"))
+        self.assertEqual("/vendor/\n", ignore.read_text(encoding="utf-8"))
+
     def test_an_install_records_what_it_wrote_and_not_what_it_merged(self) -> None:
         # Until a project's first sync nothing on disk told the accelerator's
         # files from the project's work: the memory runtime took an untracked

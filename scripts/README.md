@@ -307,9 +307,12 @@ A project that commits its accelerator takes a release through a commit:
 the project's Git tracks too, by the same rules - a file still holding a
 released version, the runtime (a local edit backed up under
 `memory-bank/local`), the managed blocks of `AGENTS.md` and
-`.claude/CLAUDE.md` - and leaves every edited file, the project's own
-`README.md` and `.gitignore`, its seeded state and the tools it did not
-install as they are. Add `--rewire-codex` when the project uses Codex and
+`.claude/CLAUDE.md`, and the accelerator's marked block in `.gitignore` and
+`.gitattributes` - and leaves every edited file, the project's own
+`README.md` and the rest of `.gitignore` and `.gitattributes`, its seeded
+state and the tools it did not install as they are. Without `--update-tracked`
+the marked block of an untracked `.gitignore` or `.gitattributes` follows the
+release too; a file without the block stays the project's. Add `--rewire-codex` when the project uses Codex and
 approve the hooks again in Codex `/hooks`. Then review the report and
 `git diff` and commit. Do not reinstall with `--overwrite` for this: it
 replaces the project's own `AGENTS.md`, `README.md` and `.gitignore` and its
