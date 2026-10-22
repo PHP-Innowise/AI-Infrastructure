@@ -70,6 +70,19 @@ edition's own files remain in that edition's changelog.
   - a later question's task ID includes its source: several sources asked at
     the same later session shared one ID, and `run`, which now refuses a set
     with a repeated ID, kept only the last of their results.
+- The measurement, under a rule sealed before the run
+  (`docs/MEMORY-EVAL.md`, "The third measurement"):
+  - On 30 recall scenarios in two regimes, `recall` was as good as `full`:
+    - next: 0.00 calls [−0.26, +0.28];
+    - later: −0.21 [−0.42, −0.02], and −0.11 [−0.32, +0.11] with four
+      results recovered.
+  - The hook delivered the save in every pair.
+  - On 14 cold starts the `recall` capsule equals navigation's byte for byte.
+  - With `recall` shipped, the three runtime recall suites navigation breaks
+    pass. But the Harness recall suite fails: a promoted chunk is quoted by its
+    `Sources` footer, which `full` hides by delivering the cited file beside
+    it. The Harness's automatic memory also fails on a capsule without a
+    manifest. `recall` therefore stays opt-in and the default stays `full`.
 - The core change was made in `PHP Core/` and written to the other editions,
   the generator asset and the mirrors by `scripts/core_sync.py --write`; the
   generator's policy lock was regenerated.

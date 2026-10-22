@@ -740,6 +740,82 @@ deliver:
 This metric counts calls to a file, not recall. A smaller capsule that keeps
 recall needs its own arm and its own measurement before the default moves.
 
+**The third measurement (2026-10-22): four arms and recall.**
+
+The candidate is `capsule_profile: recall`: navigation plus the task's own
+saves. The rule was sealed before the run and asked three things:
+- **(a)** on recall sets, `recall` is not worse than `full`;
+- **(b)** on cold starts, `recall` is navigation;
+- **(c)** with `recall` shipped, every suite that saves a result and expects
+  the next automatic capsule to carry it stays green.
+
+Setup:
+- **Recall sets.** 30 scenarios, seed 2028, from 105 client first turns that
+  answered from files they read. The learning and the question were written
+  by an AI author from each turn's own answer. Real pairs - a result saved
+  through `record-result` or `native-result` and asked about later - do not
+  exist in the four clients: none was ever saved there.
+- **Two regimes:** `next` and `later`, the same 30 sources.
+- **Arms:** `off`, `capsule`, `navigation`, `recall`, two repeats each;
+  runtime `fb197740`.
+- **Cold starts:** the 14 left unused by the earlier samples.
+
+Results on the recall sets (calls to the save's subject):
+
+| regime | comparison | pairs | means | difference, 95% CI | verdict |
+|---|---|---|---|---|---|
+| next | recall against capsule | 25 | 2.70 → 2.70 | 0.00 [−0.26, +0.28] | no difference shown |
+| next | recall against navigation | 25 | 2.60 → 2.66 | +0.06 [−1.08, +2.02] | no difference shown |
+| later | recall against capsule | 24 | 4.19 → 3.98 | −0.21 [−0.42, −0.02] | recall-helps |
+| later | recall against navigation | 24 | 4.58 → 3.98 | −0.60 [−3.54, +3.21] | no difference shown |
+
+What the rows show:
+- The hook delivered the save in every pair with `recall` and with `full`,
+  and never with `navigation`.
+- Reached within the cap, `recall` against `capsule`: next 24 → 24, later
+  23 → 23.
+- **Lost results:** the `later` run lost five results to a task-ID collision,
+  now fixed. A sealed amendment reran four of them. With those 28 pairs the
+  first `later` row is no difference shown (−0.11 [−0.32, +0.11]): `recall` is
+  as good as `full` here, not better.
+- **Navigation:** against it the mean difference is not shown. By sign,
+  `recall` was faster on 19 of 23 tasks without a tie (next) and 21 of 23
+  (later), with a median of one call. That is exploratory: a few censored
+  runs set the means, and every arm reaches the subject in two to six calls.
+
+On cold starts, the `recall` capsule was byte-identical to navigation's on
+all 14 tasks: a new branch has no saves of its own. The agent runs there
+(n = 14) are insufficient by the rule. Their two identical arms differed by
++1.57 calls [+0.07, +4.32] - a reminder of why the rule wants 20 pairs.
+
+The suites, with `recall` shipped in the four editions and the generator
+template:
+
+| shipped default | passed | failed |
+|---|---|---|
+| `full` | 235 | 0 |
+| `navigation` | 212 | 23 |
+| `recall` | 214 | 21 |
+
+`recall` turns green the three runtime recall suites navigation breaks:
+- native save, then a new session's `refresh`;
+- MCP save, then CLI recall;
+- the hook outputs of a saved fact.
+
+Two blockers remain:
+- **The Harness recall suite.** It expects a corrected learning in the
+  next message, and the learning arrives as a chunk quoted by its
+  `## Sources` footer. Under `full` the chunk is quoted the same way; the
+  suite passes only because the cited source file comes along, which
+  `recall` does not deliver. `excerpt_section` skips a citation-only footer
+  for linked selections only.
+- **Harness automatic memory requires a manifest.** A capsule without
+  documents - navigation always, `recall` without a match of its own -
+  fails its `prepare`.
+
+So (a) and (b) hold and (c) does not. The default stays `full`, and
+`recall` is opt-in until both blockers are fixed and (c) is run again.
+
 **Privacy.** Sets carry prompts and results name client paths. Both are
 written owner-only and are refused inside the clone. `--events` keeps raw
 sessions for a pilot and belongs in a private folder.

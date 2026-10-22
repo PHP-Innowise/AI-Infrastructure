@@ -987,9 +987,17 @@ everything the hook delivers through the document layers:
 An agent can still pull all of these with `context.py retrieve` or the MCP
 `memory_retrieve` tool. The navigation measurement did not cover recall, so the
 default stays `full`. `recall` keeps the first of them - a session's saved
-result in the next session's capsule - and drops the other two; it is the
-candidate measured against both (`docs/MEMORY-EVAL.md`, "Measuring task
-outcomes").
+result in the next session's capsule - and drops the other two.
+
+Measured against both (`docs/MEMORY-EVAL.md`, "Measuring task outcomes"):
+- on questions about a saved result, `recall` was as good as `full`;
+- on cold starts it is navigation, byte for byte.
+
+It stays opt-in for two reasons:
+- the Harness's automatic memory still requires a manifest, which a capsule
+  without documents does not write;
+- a promoted chunk can be quoted by its `Sources` footer, which `full` hides
+  by delivering the cited file beside it.
 
 `retrieval-report` keeps shadow `would_skip` distinct from context actually
 `withheld` in `enforce`. It slices gate results by `mode`, `query_source`,
