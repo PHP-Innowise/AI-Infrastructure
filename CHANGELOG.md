@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The miss audit names every exclusion the runtime writes — 2026-10-22
+
+- `scripts/memory_miss_audit.py` maps a manifest exclusion with reason
+  `ticket-mismatch`, `invalid` or `explicit-context-only` to
+  `runtime-exclusion`, and `path-link-limit` beside `file-link-limit` to
+  `automatic-link-limit`. They read as `unknown`: on the 327-prompt implicit
+  set, 43 of the 50 changelogs `main` withholds (the ticket filter: a changelog
+  naming only other tickets than the request's) showed as unexplained misses;
+  with the map they are runtime exclusions, the other 7 capsule losses.
+- `test_every_manifest_exclusion_the_runtime_writes_has_a_stage` fails on
+  `a54143b8`.
+
 ### A Codex turn records its files again — 2026-10-22
 
 Codex 0.162 and later run every tool from one JavaScript cell, the custom
