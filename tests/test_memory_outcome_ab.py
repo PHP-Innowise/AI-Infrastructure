@@ -422,7 +422,7 @@ class RecallSourcesTest(DemoProject):
                                      *root, "--regime", "later", "--n", "5", "--seed", "1", "--out", str(later)]))
         moved = json.loads(later.read_text(encoding="utf-8"))["tasks"][0]
         self.assertEqual(("2026-09-06T09:00:00Z", "later", task["id"]), (moved["ts"], moved["regime"], moved["source"]))
-        self.assertEqual(ab.task_id("demo", "2026-09-06T09:00:00Z"), moved["id"])
+        self.assertEqual(ab.task_id("demo", f"2026-09-06T09:00:00Z#{task['id']}"), moved["id"])
         self.assertEqual(task["saves"], moved["saves"])
         excluded = base / "excluded.json"
         self.assertEqual(0, ab.main(["recall-set", "--sources", str(sources_path), "--scenarios", str(authored),
@@ -595,6 +595,24 @@ class RunArmTest(unittest.TestCase):
         outcome = ab.run_arm(command, self.corpus, ["src/Missing.php"], cap=40, timeout=2)
         self.assertEqual("timeout", outcome["stopped"])
         self.assertIsNone(outcome["calls_to_gold"])
+
+
+class RunRefusesTest(unittest.TestCase):
+    def test_a_set_with_one_id_twice_is_refused_before_any_run(self) -> None:
+        # Two sources asked at the same later session once shared an ID, and
+        # the second result overwrote the first.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            task = {"id": "T1", "project": "demo", "ts": "2026-09-06T09:00:00Z", "prompt": "q", "gold": ["a"]}
+            (base / "set.json").write_text(json.dumps({"kind": "recall", "tasks": [task, dict(task)]}),
+                                           encoding="utf-8")
+            fake = base / "codex"
+            fake.write_text("#!/bin/sh\necho codex-cli 0\n", encoding="utf-8")
+            fake.chmod(0o755)
+            code = ab.main(["run", "--set", str(base / "set.json"), "--out", str(base / "result.json"),
+                            "--codex", str(fake), "--cache", str(base / "cache")])
+            self.assertEqual(2, code)
+            self.assertFalse((base / "result.json").exists())
 
 
 class OutputsStayOutsideTheCloneTest(unittest.TestCase):

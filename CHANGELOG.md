@@ -66,7 +66,10 @@ edition's own files remain in that edition's changelog.
   - `--exclude-set` also takes a sample this tool made;
   - `recall-set` refuses a learning that cites a file the corpus at the
     question lacks - a file the source turn read before it was committed -
-    which `record-result` would refuse when the save is planted.
+    which `record-result` would refuse when the save is planted;
+  - a later question's task ID includes its source: several sources asked at
+    the same later session shared one ID, and `run`, which now refuses a set
+    with a repeated ID, kept only the last of their results.
 - The core change was made in `PHP Core/` and written to the other editions,
   the generator asset and the mirrors by `scripts/core_sync.py --write`; the
   generator's policy lock was regenerated.

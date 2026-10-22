@@ -628,7 +628,10 @@ def command_recall_set(arguments: argparse.Namespace) -> int:
             refused[identity] = "learning sources missing from the corpus: " + ", ".join(missing)
             continue
         valid.append({
-            "id": identity if arguments.regime == "next" else task_id(source["project"], moment),
+            # Several sources can share one later session start: the source
+            # is part of a later task's identity, or their results overwrite
+            # each other under one key.
+            "id": identity if arguments.regime == "next" else task_id(source["project"], f"{moment}#{identity}"),
             "source": identity, "regime": arguments.regime,
             "project": source["project"], "ts": moment, "session": source["session"],
             "prompt": scenario["prompt"].strip(), "gold": list(scenario["needed"]),
@@ -1035,6 +1038,9 @@ def command_run(arguments: argparse.Namespace) -> int:
     if not isinstance(tasks, list):
         raise OutcomeError("--set is not a sample made by this tool")
     kind = "recall" if document.get("kind") == "recall" else "cold-start"
+    identities = [str(task.get("id")) for task in tasks if isinstance(task, dict)]
+    if len(set(identities)) != len(tasks):
+        raise OutcomeError("--set holds tasks without an ID or with the same ID; their results would overwrite each other")
     wanted = set(arguments.ids.split(",")) if arguments.ids else None
     arms = [arm.strip() for arm in arguments.arms.split(",") if arm.strip()]
     if not arms or any(arm not in ARMS for arm in arms):
