@@ -44,13 +44,17 @@ edition's own files remain in that edition's changelog.
   installed into, and a file whose bytes still have the recorded Git blob id.
   A file the team has edited differs from the record and stays a change;
   without a record - attached, generated, or never synced - nothing changes.
+- A checkpoint flush applies the same test to the turns it consolidates:
+  turns buffered before the update still name the install, and the first
+  flush after it would otherwise have made them the task's newest files.
 - The core change was made in `PHP Core/` and written to the other editions,
   the generator asset and the mirrors by `scripts/core_sync.py --write`; the
   generator's policy lock was rewritten for its asset copies.
 - Tests (`AutomaticWorkingMemoryTest`): an untouched untracked install changes
   nothing, an edited installed file and the project's own work stay, no record
   keeps the old report; a turn in such a project buffers no delta and the
-  branch has no context. Both fail without the change.
+  branch has no context; a flush leaves the install a buffered turn named
+  out of the task's files. Each fails without the change.
 
 ### The automatic native save funnel, counted from disk — 2026-10-22
 

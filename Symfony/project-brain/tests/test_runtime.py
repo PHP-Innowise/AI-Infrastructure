@@ -7464,6 +7464,33 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         warming = self.run_cli("hook-context", "--task-id", "feature/read-only", "--json")
         self.assertEqual(3, warming.returncode, warming.stdout + warming.stderr)
 
+    def test_a_flush_drops_the_install_turns_buffered_before_the_record(self) -> None:
+        git = ["git", "-C", str(self.repository)]
+        self.repository.joinpath(".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")
+        subprocess.run([*git, "add", "."], check=True, capture_output=True)
+        subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                        "commit", "-qm", "base"], check=True, capture_output=True)
+        installed = {"AGENTS.md": "# Policy\n", ".claude/settings.json": "{}\n"}
+        for name, text in installed.items():
+            self.repository.joinpath(name).parent.mkdir(parents=True, exist_ok=True)
+            self.repository.joinpath(name).write_text(text, encoding="utf-8")
+        self.repository.joinpath("app.php").write_text("<?php\n", encoding="utf-8")
+        # A turn buffered by a runtime that took the install for work.
+        buffered = self.run_cli("turn", "--task-id", "feature/legacy", "--flush-after", "5", "--json")
+        self.assertEqual(0, buffered.returncode, buffered.stderr)
+        self.assertEqual(3, json.loads(buffered.stdout)["files"])
+        record = self.repository / "memory-bank/local/accelerator-install.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"schema": 1, "files": {
+            name: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()
+            for name, text in installed.items()
+        }}), encoding="utf-8")
+        flushed = self.run_cli("turn", "--task-id", "feature/legacy", "--flush", "--json")
+        self.assertEqual(0, flushed.returncode, flushed.stderr)
+        capsule = self.run_cli("hook-context", "--task-id", "feature/legacy", "--json")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertEqual(["app.php"], json.loads(capsule.stdout)["working"]["files"])
+
     def test_hook_context_warms_four_turns_then_switches_to_governed(self) -> None:
         self.repository.joinpath("safe.php").write_text(
             "<?php // work\n", encoding="utf-8"

@@ -7112,6 +7112,11 @@ def flush_turn_deltas(
     files: list[str] = []
     for row in pending:
         files = merge_unique(files, json.loads(row["files"]))
+    footprint = installed_footprint(repository)
+    if footprint:
+        # Turns buffered before `changed_paths` knew the install still name
+        # it; the first flush after an update would make it the newest files.
+        files = [path for path in files if not _installed_as_written(repository, path, footprint)]
     omitted = max(0, len(files) - file_limit)
     checkpoint = (
         f"Auto-checkpoint: {len(pending)} turn(s) since {_checkpoint_time(pending[0]['created_at'])}, "
