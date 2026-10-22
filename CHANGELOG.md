@@ -28,6 +28,30 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A checkpoint leaves out the accelerator's own untracked install — 2026-10-22
+
+- Why: a project that neither commits nor ignores the accelerator shows
+  `.claude/`, `.codex/`, `memory-bank/`, `specs/`, `AGENTS.md`, `VERSION` and
+  the rest as untracked in `git status` on every turn, and `changed_paths`
+  took them for the task's work. On copies of the four client installations
+  83 of the 223 files the tasks of one client recorded were those (8 of 60 on
+  another); its capsule offered `memory-bank/` as a recent file; and a turn
+  that changed nothing still buffered a turn delta, so read-only sessions
+  reached the five-turn checkpoint and showed a warming line.
+- `changed_paths` now drops what the install record
+  (`memory-bank/local/accelerator-install.json`, written by `--sync`) says the
+  accelerator wrote and nobody has touched since: an untracked directory it
+  installed into, and a file whose bytes still have the recorded Git blob id.
+  A file the team has edited differs from the record and stays a change;
+  without a record - attached, generated, or never synced - nothing changes.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was rewritten for its asset copies.
+- Tests (`AutomaticWorkingMemoryTest`): an untouched untracked install changes
+  nothing, an edited installed file and the project's own work stay, no record
+  keeps the old report; a turn in such a project buffers no delta and the
+  branch has no context. Both fail without the change.
+
 ### The automatic native save funnel, counted from disk — 2026-10-22
 
 - Why: why installed projects held no saved result had to be reconstructed

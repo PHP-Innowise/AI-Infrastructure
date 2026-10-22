@@ -6042,16 +6042,72 @@ def merge_completion_candidates(
     return completion_candidates
 
 
+# What `scripts/install_accelerator.py --sync` records of the files it wrote:
+# each path's Git blob id, in the project's ignored local state.
+INSTALL_RECORD = "memory-bank/local/accelerator-install.json"
+INSTALL_RECORD_BYTES = 4 * 1024 * 1024
+INSTALLED_FILE_BYTES = 1024 * 1024
+
+
+def installed_footprint(repository: Path) -> dict[str, str]:
+    """The accelerator's files as its last install or sync wrote them: Git
+    blob ids by project-relative path, from the install record. Empty where
+    there is none - attached, generated, or installed before the record."""
+    record_path = repository / INSTALL_RECORD
+    try:
+        if (record_path.is_symlink() or not record_path.is_file()
+                or record_path.stat().st_size > INSTALL_RECORD_BYTES):
+            return {}
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return {}
+    files = record.get("files") if isinstance(record, dict) else None
+    if not isinstance(files, dict):
+        return {}
+    return {path: blob for path, blob in files.items()
+            if isinstance(path, str) and isinstance(blob, str)}
+
+
+def _installed_as_written(repository: Path, path: str, footprint: dict[str, str]) -> bool:
+    """Whether a changed path is the accelerator's install, untouched since:
+    an untracked directory it installed into, or a file whose bytes are the
+    ones it recorded."""
+    if path.endswith("/"):
+        return any(name.startswith(path) for name in footprint)
+    blob = footprint.get(path)
+    if blob is None:
+        return False
+    target = repository / path
+    try:
+        if (target.is_symlink() or not target.is_file()
+                or target.stat().st_size > INSTALLED_FILE_BYTES):
+            return False
+        data = target.read_bytes()
+    except OSError:
+        return False
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest() == blob
+
+
 def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     """Return sanitized changed paths from Git porcelain metadata alone.
 
-    Working-tree contents are never read here. A path list is everything the
-    short-term buffer needs, and reading the files would bypass the secret and
-    privacy gates that the indexer applies to sources it does read.
+    Working-tree contents are never read here, except the bytes of the
+    accelerator's own installed files, hashed to compare with the install
+    record and never kept. A path list is everything the short-term buffer
+    needs, and reading the files would bypass the secret and privacy gates
+    that the indexer applies to sources it does read.
 
     Paths the runtime writes itself are dropped rather than reported: a task
     recording its own record, handoff, and index churn as user work would grow
     without ever describing anything the user changed.
+
+    So is the accelerator's own install while it is as the install record
+    says it was written. A project that neither commits nor ignores it shows
+    `.claude/`, `memory-bank/`, `AGENTS.md` and the rest as untracked on every
+    turn: on one client 83 of the 223 files its tasks recorded were those, the
+    capsule offered `memory-bank/` as a recent file, and a turn that changed
+    nothing still counted toward a checkpoint. A file the team has edited
+    since differs from the record and stays.
     """
     prefix = os.fsdecode(
         git_output(repository, ["rev-parse", "--show-prefix"], "Git prefix probe")
@@ -6059,6 +6115,7 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     runtime_owned = re.compile(
         rf"^project-brain/({'|'.join(TURN_RUNTIME_DIRECTORIES)})/"
     )
+    footprint = installed_footprint(repository)
     fields = git_output(
         repository,
         [
@@ -6079,8 +6136,11 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
         path = os.fsdecode(entry[3:])
         if prefix and path.startswith(prefix):
             path = path[len(prefix):]
-        if path != "project-brain/" and not runtime_owned.match(path):
-            paths.append(path)
+        if path == "project-brain/" or runtime_owned.match(path):
+            continue
+        if footprint and _installed_as_written(repository, path, footprint):
+            continue
+        paths.append(path)
     excluded = sorted({item for item in paths if TURN_PATH_DENYLIST.search(item)})
     allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
     return allowed, excluded

@@ -7386,6 +7386,84 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.assertLessEqual(len(paths) + len(excluded), 4)
         self.assertNotIn("sibling/outside.txt", paths)
 
+    def test_changed_paths_leave_out_the_install_as_its_record_wrote_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="untracked-install-test-") as temporary:
+            project = Path(temporary)
+            git = ["git", "-C", str(project)]
+            subprocess.run(["git", "init", "--quiet", str(project)], check=True, capture_output=True)
+            (project / ".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")
+            (project / "app.php").write_text("<?php\n", encoding="utf-8")
+            subprocess.run([*git, "add", "."], check=True, capture_output=True)
+            subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                            "commit", "-qm", "base"], check=True, capture_output=True)
+            installed = {
+                ".claude/settings.json": "{}\n",
+                ".claude/hooks/working-memory-read.sh": "#!/bin/bash\n",
+                "memory-bank/scripts/context.py": "# runtime\n",
+                "AGENTS.md": "# Policy\n",
+                "VERSION": "2.0.0\n",
+                "ACCELERATOR.md": "# Accelerator\n",
+            }
+            for name, text in installed.items():
+                (project / name).parent.mkdir(parents=True, exist_ok=True)
+                (project / name).write_text(text, encoding="utf-8")
+            record = {
+                name: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()
+                for name, text in installed.items()
+            }
+            (project / "memory-bank/local").mkdir(parents=True)
+            record_file = project / "memory-bank/local/accelerator-install.json"
+            record_file.write_text(json.dumps({"schema": 1, "files": record}), encoding="utf-8")
+
+            # Nothing but the install: a turn has changed nothing.
+            self.assertEqual(([], []), context_cli.changed_paths(project))
+
+            # The team edits one installed file and adds its own work.
+            (project / "ACCELERATOR.md").write_text("# Accelerator, our notes\n", encoding="utf-8")
+            (project / "app.php").write_text("<?php // changed\n", encoding="utf-8")
+            (project / "src").mkdir()
+            (project / "src/Report.php").write_text("<?php\n", encoding="utf-8")
+            paths, excluded = context_cli.changed_paths(project)
+            self.assertEqual(["ACCELERATOR.md", "app.php", "src/"], sorted(paths))
+            self.assertEqual([], excluded)
+
+            # Without a record every untracked entry is reported, as before.
+            record_file.unlink()
+            paths, _ = context_cli.changed_paths(project)
+            self.assertEqual(
+                [".claude/", "ACCELERATOR.md", "AGENTS.md", "VERSION", "app.php", "memory-bank/", "src/"],
+                sorted(paths),
+            )
+
+    def test_a_turn_in_an_untouched_untracked_install_buffers_nothing(self) -> None:
+        git = ["git", "-C", str(self.repository)]
+        self.repository.joinpath(".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")
+        subprocess.run([*git, "add", "."], check=True, capture_output=True)
+        subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                        "commit", "-qm", "base"], check=True, capture_output=True)
+        installed = {"AGENTS.md": "# Policy\n", "VERSION": "2.0.0\n",
+                     ".claude/settings.json": "{}\n"}
+        for name, text in installed.items():
+            self.repository.joinpath(name).parent.mkdir(parents=True, exist_ok=True)
+            self.repository.joinpath(name).write_text(text, encoding="utf-8")
+        record = self.repository / "memory-bank/local/accelerator-install.json"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({"schema": 1, "files": {
+            name: hashlib.sha1(b"blob %d\0" % len(text.encode()) + text.encode()).hexdigest()
+            for name, text in installed.items()
+        }}), encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", "feature/read-only", "--flush-after", "5", "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        report = json.loads(turn.stdout)
+        self.assertEqual(0, report["files"])
+        self.assertIsNone(report["delta_id"])
+        # A branch with no meaningful change has no context (code 3), not a
+        # warming capsule counting the install as changed files.
+        warming = self.run_cli("hook-context", "--task-id", "feature/read-only", "--json")
+        self.assertEqual(3, warming.returncode, warming.stdout + warming.stderr)
+
     def test_hook_context_warms_four_turns_then_switches_to_governed(self) -> None:
         self.repository.joinpath("safe.php").write_text(
             "<?php // work\n", encoding="utf-8"
