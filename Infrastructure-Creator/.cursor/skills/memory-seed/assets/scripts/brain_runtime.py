@@ -883,12 +883,23 @@ def cited_file_memo() -> Iterator[None]:
     rebuild's eligibility cost. The answers live only inside the `with`,
     where nothing creates, moves or removes a file.
     """
-    previous = getattr(_CITED_FILES, "memo", None)
-    _CITED_FILES.memo = {}
+    previous = getattr(_CITED_FILES, "memo", None), getattr(_CITED_FILES, "roots", None)
+    _CITED_FILES.memo, _CITED_FILES.roots = {}, {}
     try:
         yield
     finally:
-        _CITED_FILES.memo = previous
+        _CITED_FILES.memo, _CITED_FILES.roots = previous
+
+
+def _resolved_roots(repository: Path) -> tuple[Path, ...]:
+    """The roots a citation is measured against, resolved once a pass."""
+    memo = getattr(_CITED_FILES, "roots", None)
+    key = os.fspath(repository)
+    if memo is None:
+        return workspace_roots.resolved_roots(repository)
+    if key not in memo:
+        memo[key] = workspace_roots.resolved_roots(repository)
+    return memo[key]
 
 
 def _cited_file(repository: Path, source: str) -> Path:
@@ -903,7 +914,7 @@ def _cited_file(repository: Path, source: str) -> Path:
         raise BrainError(answer)
     try:
         path = workspace_roots.resolve(repository, relative).resolve()
-        if not workspace_roots.contains(repository, path):
+        if not workspace_roots.within(path, _resolved_roots(repository)):
             raise BrainError(f"Source escapes repository: {relative}")
         if not path.is_file() or path.is_symlink():
             raise BrainError(f"Source does not exist or is not a regular file: {relative}")
@@ -964,10 +975,11 @@ def _line_ending_neutral(data: bytes) -> bytes:
 
 def source_fingerprints(repository: Path, sources: list[str]) -> list[dict[str, str]]:
     fingerprints = []
+    bases = _resolved_roots(repository)
     for source in sorted(set(sources)):
         relative = source.split("#", 1)[0]
         path = workspace_roots.resolve(repository, relative).resolve()
-        if not workspace_roots.contains(repository, path):
+        if not workspace_roots.within(path, bases):
             raise BrainError(f"Source escapes repository: {relative}")
         if not path.is_file() or path.is_symlink():
             raise BrainError(

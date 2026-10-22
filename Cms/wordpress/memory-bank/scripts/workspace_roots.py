@@ -280,15 +280,49 @@ def key_for(repository: Path, base: Path, path: Path) -> str:
 def contains(repository: Path, path: Path) -> bool:
     """Whether `path` lies in a root a key may name: the installed root, or
     in attached mode the project, the state or the tooling."""
-    layout = roots(repository)
     try:
         resolved = path.resolve()
     except OSError:
         return False
+    return within(resolved, resolved_roots(repository))
+
+
+def resolved_roots(repository: Path) -> tuple[Path, ...]:
+    """The roots `contains` measures against, each resolved. A root that
+    cannot be resolved is left out, as `contains` always left it out."""
+    layout = roots(repository)
+    resolved = []
     for base in dict.fromkeys((layout.project, layout.state, layout.tooling)):
         try:
-            resolved.relative_to(base.resolve())
-        except (OSError, ValueError):
+            resolved.append(base.resolve())
+        except OSError:
+            continue
+    return tuple(resolved)
+
+
+def within(resolved: Path, bases: tuple[Path, ...]) -> bool:
+    """`contains` for a path its caller has just resolved, against
+    `resolved_roots`.
+
+    Every citation check resolves the source it tests, and a pass over the
+    Memory Bank tests hundreds: resolving each source again and every root
+    once more per citation, then pathlib's relative_to walking the parents,
+    took three quarters of a prompt's eligibility pass at 200 chunks. A pass
+    resolves its roots once. The spelling decides first, as in `key_for`;
+    any other spelling takes pathlib's answer.
+    """
+    text = str(resolved)
+    for base in bases:
+        prefix = str(base)
+        if text == prefix or (
+            len(text) > len(prefix) + 1 and text.startswith(prefix)
+            and text[len(prefix)] == os.sep and not prefix.endswith(os.sep)
+            and resolved.drive == base.drive
+        ):
+            return True
+        try:
+            resolved.relative_to(base)
+        except ValueError:
             continue
         return True
     return False

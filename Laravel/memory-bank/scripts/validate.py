@@ -264,12 +264,12 @@ def source_fact_memo():
     source once: thousands of chunks citing the same files resolved and
     checked them again chunk by chunk, on every prompt. The answers live only
     inside the `with`, where no file is created, moved or removed."""
-    previous = getattr(_SOURCE_FACTS, "memo", None)
-    _SOURCE_FACTS.memo = {}
+    previous = getattr(_SOURCE_FACTS, "memo", None), getattr(_SOURCE_FACTS, "roots", None)
+    _SOURCE_FACTS.memo, _SOURCE_FACTS.roots = {}, {}
     try:
         yield
     finally:
-        _SOURCE_FACTS.memo = previous
+        _SOURCE_FACTS.memo, _SOURCE_FACTS.roots = previous
 
 
 def _source_facts(repository_root: Path, source_path: str) -> tuple[bool, bool]:
@@ -280,7 +280,14 @@ def _source_facts(repository_root: Path, source_path: str) -> tuple[bool, bool]:
         return memo[key]
     if workspace_roots is not None:
         resolved_source = workspace_roots.resolve(repository_root, source_path).resolve()
-        inside = workspace_roots.contains(repository_root, resolved_source)
+        # The roots it is measured against are resolved once a pass as well.
+        roots_memo = getattr(_SOURCE_FACTS, "roots", None)
+        bases = roots_memo.get(key[0]) if roots_memo is not None else None
+        if bases is None:
+            bases = workspace_roots.resolved_roots(repository_root)
+            if roots_memo is not None:
+                roots_memo[key[0]] = bases
+        inside = workspace_roots.within(resolved_source, bases)
     else:
         resolved_source = (repository_root / source_path).resolve()
         inside = resolved_source.is_relative_to(repository_root.resolve())
