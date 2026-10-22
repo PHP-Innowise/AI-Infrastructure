@@ -646,7 +646,8 @@ earlier session saved instead of investigating again.
   files the turn read - and a question a new session asks that needs it, not
   naming the *needed* files. Both are written outside the tool for each
   source, and `recall-set` checks them: the learning is one `record-result`
-  accepts, the needed files are among its sources, the question names none.
+  accepts, every file it cites is in the corpus at the question, the needed
+  files are among its sources, and the question names none.
 - **The corpus:** the project at the moment of the question, with its recent
   files. Before any arm runs, `run` records the save on the corpus branch's
   task through `record-result`, with the project's own promotion settings,

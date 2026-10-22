@@ -399,26 +399,34 @@ class RecallSourcesTest(DemoProject):
     def test_recall_set_keeps_valid_scenarios_with_their_save(self) -> None:
         base = Path(self.directory.name)
         sources_path, authored, out = base / "sources.json", base / "authored.json", base / "set.json"
-        ab.stand.write_json(sources_path, {"sources": self.sources()})
-        ab.stand.write_json(authored, [self.scenario(), {"id": "T-unknown", "skip": "no"}])
+        sources = self.sources()
+        # A file the turn read but the corpus does not hold: record-result
+        # would refuse a learning that cites it.
+        ghost = {**sources[0], "id": "T-ghost", "read": [*sources[0]["read"], "src/Ghost.php"]}
+        ab.stand.write_json(sources_path, {"sources": [*sources, ghost]})
+        cites_ghost = self.scenario(id="T-ghost", learning={**self.scenario()["learning"],
+                                                             "sources": ["src/Gold.php", "src/Ghost.php"]})
+        ab.stand.write_json(authored, [self.scenario(), {"id": "T-unknown", "skip": "no"}, cites_ghost])
+        root = ["--projects-root", str(Path(self.directory.name) / "Desktop")]
         self.assertEqual(0, ab.main(["recall-set", "--sources", str(sources_path), "--scenarios", str(authored),
-                                     "--n", "5", "--seed", "1", "--out", str(out)]))
+                                     *root, "--n", "5", "--seed", "1", "--out", str(out)]))
         document = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual("recall", document["kind"])
-        self.assertEqual({"T-unknown": "no such source"}, document["refused"])
+        self.assertEqual({"T-unknown": "no such source",
+                          "T-ghost": "learning sources missing from the corpus: src/Ghost.php"}, document["refused"])
         task = document["tasks"][0]
         self.assertEqual(["src/Gold.php"], task["gold"])
         self.assertEqual([{"learnings": [self.scenario()["learning"]], "verified": True}], task["saves"])
         later = base / "later.json"
         self.assertEqual(0, ab.main(["recall-set", "--sources", str(sources_path), "--scenarios", str(authored),
-                                     "--regime", "later", "--n", "5", "--seed", "1", "--out", str(later)]))
+                                     *root, "--regime", "later", "--n", "5", "--seed", "1", "--out", str(later)]))
         moved = json.loads(later.read_text(encoding="utf-8"))["tasks"][0]
         self.assertEqual(("2026-09-06T09:00:00Z", "later", task["id"]), (moved["ts"], moved["regime"], moved["source"]))
         self.assertEqual(ab.task_id("demo", "2026-09-06T09:00:00Z"), moved["id"])
         self.assertEqual(task["saves"], moved["saves"])
         excluded = base / "excluded.json"
         self.assertEqual(0, ab.main(["recall-set", "--sources", str(sources_path), "--scenarios", str(authored),
-                                     "--exclude-id", task["id"], "--n", "5", "--seed", "1", "--out", str(excluded)]))
+                                     *root, "--exclude-id", task["id"], "--n", "5", "--seed", "1", "--out", str(excluded)]))
         self.assertEqual([], json.loads(excluded.read_text(encoding="utf-8"))["tasks"])
 
 

@@ -566,6 +566,20 @@ def recall_problem(source: Dict[str, Any], scenario: Dict[str, Any]) -> Optional
     return None
 
 
+def absent_sources(project: Path, moment: str, paths: Sequence[str]) -> Optional[List[str]]:
+    """The paths the corpus at `moment` lacks - the project's tree in the
+    commit before it - or None when that cannot be told."""
+    repository = stand.Repository(project)
+    when = stand.parse_instant(moment)
+    commit = repository.commit_before(when) if when is not None and repository.prefix is not None else None
+    tree = repository.tree(commit) if commit else None
+    listing = stand.read_git(project, "ls-tree", "-r", "--name-only", tree) if tree else None
+    if listing is None:
+        return None
+    present = set(listing.splitlines())
+    return [path for path in paths if path not in present]
+
+
 def command_recall_set(arguments: argparse.Namespace) -> int:
     out = arguments.out.expanduser()
     if stand.inside_clone(out):
@@ -603,6 +617,16 @@ def command_recall_set(arguments: argparse.Namespace) -> int:
                 refused[identity] = "no later session without the named files in its recent files"
                 continue
             moment = source["later"]
+        # record-result refuses a learning that cites a file the corpus does
+        # not hold; a file the turn read may have been uncommitted then.
+        project = stand.resolve_project(source["project"], arguments.projects_root.expanduser())
+        missing = absent_sources(project, moment, scenario["learning"]["sources"]) if project else None
+        if missing is None:
+            refused[identity] = "the corpus at the question cannot be read"
+            continue
+        if missing:
+            refused[identity] = "learning sources missing from the corpus: " + ", ".join(missing)
+            continue
         valid.append({
             "id": identity if arguments.regime == "next" else task_id(source["project"], moment),
             "source": identity, "regime": arguments.regime,
@@ -1274,6 +1298,7 @@ def build_parser() -> argparse.ArgumentParser:
     sources.add_argument("--out", type=Path, required=True)
     recall = commands.add_parser("recall-set", help="check authored recall scenarios against their sources and sample them")
     recall.add_argument("--sources", type=Path, required=True)
+    recall.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
     recall.add_argument("--scenarios", type=Path, required=True,
                         help="JSON list of {id, learning, needed, prompt} or {id, skip}")
     recall.add_argument("--regime", choices=("next", "later"), default="next",

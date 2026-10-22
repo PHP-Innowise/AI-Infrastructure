@@ -63,7 +63,10 @@ edition's own files remain in that edition's changelog.
   - the recall metric: calls to the first touch of a file the save cites, or
     to an answer naming one; `report --metric`;
   - each run records whether the hook delivered the save;
-  - `--exclude-set` also takes a sample this tool made.
+  - `--exclude-set` also takes a sample this tool made;
+  - `recall-set` refuses a learning that cites a file the corpus at the
+    question lacks - a file the source turn read before it was committed -
+    which `record-result` would refuse when the save is planted.
 - The core change was made in `PHP Core/` and written to the other editions,
   the generator asset and the mirrors by `scripts/core_sync.py --write`; the
   generator's policy lock was regenerated.
