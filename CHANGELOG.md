@@ -28,6 +28,34 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A client's sync rehearsed on a copy — 2026-10-22
+
+- Why: `--sync` updates an installed project in place, and whether the
+  memory hooks still saved and recalled afterwards showed only in the first
+  real session there. Rehearsing it on copies of the four client
+  installations by hand found that the sync leaves `runtime.json` - and so
+  the capsule profile - as it was, holds back Codex's new hook while
+  `.codex/hooks.json` waits for re-approval, and that a project whose
+  accelerator is untracked fed `.claude/`, `memory-bank/` and the rest into
+  its tasks' files.
+- `scripts/memory_rollout_rehearsal.py --target DIR` repeats that rehearsal.
+  It copies the project without dependency and worktree trees and syncs the
+  copy. Then, for each host (Claude Code, Codex; Cursor on request) and
+  capsule profile on a copy of its own, it runs the installed session-start,
+  prompt and Stop hooks, the save the Stop request names, the closing Stop
+  and a new session's prompt. It reports the
+  sync, the profile `runtime.json` selects, every hook's exit and time, the
+  save or its refusal code, the native journal and whether the next capsule
+  recalled the save. No model runs, HOME and TMPDIR stay in the work
+  directory, and the project is never written. A link out of the project is
+  left out of the copy, and a Git worktree or submodule is refused.
+- Tests (`tests/test_memory_rollout_rehearsal.py`, `installation` job; also
+  in `scripts/check.py`): on a fresh PHP Core install, Claude Code, Codex
+  and Cursor under `config` and `recall` each save and recall, the project is byte for
+  byte unchanged, the copy leaves out `node_modules` and a link out of the
+  project but keeps a link inside it, and this clone, a folder without an
+  install and a worktree are refused.
+
 ### A checkpoint leaves out the accelerator's own untracked install — 2026-10-22
 
 - Why: a project that neither commits nor ignores the accelerator shows

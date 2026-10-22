@@ -206,6 +206,11 @@ jobs:
         run: python3 -m unittest tests.test_hook_wiring
       - name: Attach an edition without copying it
         run: python3 -m unittest tests.test_accelerator_attach
+      - name: Rehearse a sync and one turn of hooks on a copy
+        # A sync, the prompt and Stop hooks, the save they ask for and the
+        # next capsule's recall, run on a copy of a fresh install; the
+        # project itself must be left byte for byte as it was.
+        run: python3 -m unittest tests.test_memory_rollout_rehearsal
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.

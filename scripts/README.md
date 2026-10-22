@@ -529,6 +529,61 @@ python3 scripts/memory_outcome_ab.py recall-set --sources OUTSIDE/recall-sources
   parsing, stopping, hook flags, the statistics and sampling, recall sources,
   scenario checks and a save recorded through the runtime, without a model.
 
+### `memory_rollout_rehearsal.py`
+
+**Purpose and status.** A maintainer-only rehearsal of `install_accelerator.py
+--sync` on a copy of an installed project, before the project itself is
+synced.
+
+For each `--target` it does the following:
+- copies the project with its Git history, leaving out `node_modules`,
+  `vendor` and `var` at any depth and `.worktrees` and `.claude/worktrees` at
+  the root (`--exclude` adds more);
+- syncs the copy from this clone;
+- for each host (`claude`, `codex`, and `cursor` when asked) and capsule
+  profile, on a copy of its own, runs the installed hooks as the host would
+  on one turn:
+  - the session-start and prompt hooks;
+  - the Stop hook and the save its request names, carrying one learning that
+    cites a tracked project file;
+  - the closing Stop;
+  - a new session's prompt, whose capsule must recall the learning.
+
+No model runs. HOME and TMPDIR point into the work directory, the copies are
+removed unless `--keep`, and the project is never written. A symbolic link
+that leads out of the project is left out of the copy, because a hook would
+write through it. A Git worktree or submodule is refused, because its Git
+directory belongs to another checkout. The `config` profile
+is the one the project's own `runtime.json` selects; `--sync` does not change
+that file. Any other profile is forced through `CONTEXT_CAPSULE_PROFILE`.
+
+```bash
+python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
+  [--hosts claude,codex,cursor] [--profiles config,recall] [--work DIR] [--exclude NAME] \
+  [--timeout 60] [--keep] [--json]
+```
+
+- **Outputs:**
+  - what the sync changed and kept;
+  - the profile `runtime.json` selects;
+  - for each run:
+    - every hook's exit and time;
+    - whether the save was requested, made or refused (with its code);
+    - the native journal's lines;
+    - whether the next capsule recalled the save.
+
+  Exit 0 when every run saved and recalled with every hook exiting 0, 1
+  otherwise, 2 for a target it will not copy (this clone, a folder with no
+  installed runtime, a Git worktree or submodule).
+- **Writes:** copies under `--work`; the default is `/dev/shm` when writable,
+  otherwise the system temp directory.
+- **CI relationship:** `tests/test_memory_rollout_rehearsal.py` in the
+  `installation` job rehearses a fresh PHP Core install. Each of the three
+  hosts under each profile must save and recall, the project must stay byte
+  for byte as it was, and the copy must leave out dependency trees. Cursor's
+  capsule is the rule file its prompt hook renders, and its Stop request
+  arrives as `followup_message`.
+
 ### `memory_rerank_pilot.py`
 
 **Purpose and status.** Optional, source-only maintainer pilot. It compares the

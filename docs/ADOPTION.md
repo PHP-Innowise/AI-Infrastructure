@@ -302,6 +302,15 @@ under `kept`. Review that report and `git diff`, then commit. A reinstall with
 `AGENTS.md`, `README.md`, `.gitignore` and edited skills. See
 [`scripts/README.md`](../scripts/README.md).
 
+Before syncing a project people already work in, rehearse it:
+`python3 scripts/memory_rollout_rehearsal.py --target DIR` copies the project
+(without dependency and worktree trees), syncs the copy, and runs one turn of
+the installed memory hooks as Claude Code and Codex would - the capsule, the
+Stop hook's save request, the save itself and the next session's recall -
+without starting a model or writing to the project. `--sync` never changes
+`project-brain/config/runtime.json`, so the rehearsal's `config` profile is
+the capsule the project will run.
+
 For heavily adapted or drifting installations, regenerate from current
 project evidence with Infrastructure-Creator rather than repeatedly layering
 generic files over the project.
