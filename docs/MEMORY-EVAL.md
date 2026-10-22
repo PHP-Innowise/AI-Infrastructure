@@ -617,6 +617,9 @@ None says whether delivery changes what an agent does.
   navigation` in the corpus: working state and recent files, no documents.
   It writes no manifest, so its runs are recognised by the line every hook
   refresh appends to `refresh-health.ndjson`.
+- **The `recall` arm** runs it with `capsule_profile: recall`: navigation plus
+  the task's own saves. It writes a manifest only on a turn one of them
+  matched, so a run is valid when the hook ran.
 - **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the
@@ -633,6 +636,35 @@ None says whether delivery changes what an agent does.
 - **Validity:** a pair counts only if the hook's own manifest (`refresh` or
   `hook-context`) shows that the capsule arm received a capsule in every repeat
   and the `off` arm received none.
+
+**Recall sets.** A cold start has no earlier save to recall, so the metric
+above cannot see recall. A recall set asks whether the agent uses what an
+earlier session saved instead of investigating again.
+- **The source:** a session's first turn that read project files, changed
+  none, and answered at length naming files it read (`recall-sources`).
+- **The scenario:** what that session would have saved - one learning citing
+  files the turn read - and a question a new session asks that needs it, not
+  naming the *needed* files. Both are written outside the tool for each
+  source, and `recall-set` checks them: the learning is one `record-result`
+  accepts, the needed files are among its sources, the question names none.
+- **The corpus:** the project at the moment of the question, with its recent
+  files. Before any arm runs, `run` records the save on the corpus branch's
+  task through `record-result`, with the project's own promotion settings,
+  then commits and indexes it: every arm, `off` included, starts from the
+  same tree, and the agent's own `retrieve` can find the save in any arm.
+- **The regime (`recall-set --regime`):**
+  - `next`: the question comes a minute after the source turn ended. The
+    recent files then usually show the files the turn read, so every hooked
+    arm has a pointer to the subject.
+  - `later`: the same save and question, asked at the start of the first
+    later real session whose recent files - replayed from every turn before
+    it - show none of the files the answer named. Navigation then has nothing
+    to point at, and only the save can.
+- **The metric (`report --metric recall`, a recall result's default):** calls
+  before the agent first touches a needed file, or - a turn that finished
+  without one - before an answer that names one. A run that reached neither
+  counts one past the cap. Each run also records whether the hook's capsule
+  delivered the save.
 
 **The verdict.** `report` prints the mean difference capsule − off, a
 bootstrap 95% interval and an exact sign test, then applies the rule:

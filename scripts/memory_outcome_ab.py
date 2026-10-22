@@ -18,6 +18,18 @@ not two finished tasks. Recent-files history is seeded into the corpus from
 the project's own sessions before the prompt, as the Stop hook would have
 recorded it.
 
+The `navigation` and `recall` arms run the same hook with that
+`capsule_profile` in the corpus.
+
+A *recall* set measures something else: whether an agent uses what an
+earlier session saved instead of investigating again. A session whose first
+turn read project files and answered with a conclusion is the source
+(`recall-sources`); the conclusion, as a result save would record it, and a
+follow-up question that needs it are written outside this tool and checked
+by `recall-set`. `run` records the save on the corpus branch's task through
+`record-result` before any arm runs, and counts the calls until the agent
+touches a file the save cites (*needed*) or answers naming one.
+
 Maintainer-only and standard library only; never installed into a project.
 Sets and results name client paths and carry prompts: keep them outside this
 repository (the tool refuses an output inside the clone). The agent runs in
@@ -28,6 +40,13 @@ Codex's read-only sandbox with `--ephemeral`, so neither the corpus nor
         --n 30 --seed 1 --exclude-set tuning-set.json --out ~/ab/set.json
     memory_outcome_ab.py run --set ~/ab/set.json --out ~/ab/result.json
     memory_outcome_ab.py report ~/ab/result.json
+
+    memory_outcome_ab.py recall-sources --projects next,scb --before 2026-10-07 \\
+        --out ~/ab/recall-sources.json
+    memory_outcome_ab.py recall-set --sources ~/ab/recall-sources.json \\
+        --scenarios ~/ab/recall-authored.json --n 30 --seed 2028 --out ~/ab/recall-set.json
+    memory_outcome_ab.py run --set ~/ab/recall-set.json --arms off,capsule,navigation,recall \\
+        --out ~/ab/recall-result.json
 
 See docs/MEMORY-EVAL.md ("Measuring task outcomes").
 """
@@ -59,11 +78,17 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import memory_eval as stand  # noqa: E402
 from accelerator_attach import _toml  # noqa: E402
 
-ARMS = ("off", "capsule", "navigation")
+ARMS = ("off", "capsule", "navigation", "recall")
 DEFAULT_ARMS = ("off", "capsule")
-# `navigation` runs the same prompt hook with `capsule_profile: navigation` in
-# the corpus: working state and recent files, no documents and no manifest.
-HOOKED_ARMS = ("capsule", "navigation")
+# `navigation` and `recall` run the same prompt hook with that
+# `capsule_profile` in the corpus. Navigation: working state and recent files,
+# no documents and no manifest. Recall adds the task's own saves, with a
+# manifest only on a turn one of them matched.
+HOOKED_ARMS = ("capsule", "navigation", "recall")
+PROFILE_ARMS = ("navigation", "recall")
+# What a run counts: calls to the first gold touch, or for a recall set to the
+# first needed touch or an answer naming a needed file.
+METRICS = ("gold", "recall")
 DEFAULT_CAP = 40
 DEFAULT_TIMEOUT = 900.0
 TOOL_ITEMS = ("command_execution", "file_change", "mcp_tool_call", "web_search")
@@ -76,6 +101,16 @@ NOT_GOLD = re.compile(
 PROMPT_HOOK = "working-memory-read.sh"
 HOOK_ENTRY_POINTS = ("refresh", "hook-context")
 SEEDED_TURNS = 400
+# A recall source: a first turn that answered at this length or more.
+RECALL_ANSWER_MINIMUM = 300
+RECALL_ANSWER_LIMIT = 6000
+# The question comes after the session that saved: a minute after its first
+# turn's last record, so the corpus and the recent files are the ones then.
+RECALL_GAP_SECONDS = 60
+# The runtime's own limits for one learning (memory_results.normalize).
+LEARNING_TITLE_LIMIT = 200
+LEARNING_CONSEQUENCE_LIMIT = 1000
+LEARNING_SOURCE_LIMIT = 10
 _RUNTIME: Any = None
 
 
@@ -215,10 +250,14 @@ def named_in(prompt: str, path: str) -> bool:
 
 
 def excluded_moments(paths: Sequence[Path]) -> Dict[str, List[datetime]]:
+    """When the prompts of earlier sets were asked, per project: a memory_eval
+    set, or a sample this tool made."""
     moments: Dict[str, List[datetime]] = {}
     for path in paths:
         try:
-            items = stand.load_set(path)
+            document = json.loads(path.read_text(encoding="utf-8"))
+            items = (document["tasks"] if isinstance(document, dict) and isinstance(document.get("tasks"), list)
+                     else stand.load_set(path))
         except (OSError, ValueError, stand.EvalError) as error:
             raise OutcomeError(f"--exclude-set {path}: {error}") from error
         for item in items:
@@ -323,7 +362,270 @@ def command_sample(arguments: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# run: corpus, recent files, one arm
+# recall-sources and recall-set
+# ---------------------------------------------------------------------------
+
+
+def first_turn(path: Path, root: str) -> Optional[Dict[str, Any]]:
+    """A session's first human turn: its prompt, the files its calls changed
+    and read, its last answer and the time of its last record."""
+    rt = runtime()
+    turn: Optional[Dict[str, Any]] = None
+    for record in read_records(path):
+        if rt._transcript_prompt(record):
+            if turn is not None:
+                break
+            turn = {"prompt": prompt_text(record), "ts": record.get("timestamp"),
+                    "end": record.get("timestamp"), "changed": [], "read": [], "answer": ""}
+            continue
+        if turn is None:
+            continue
+        if isinstance(record.get("timestamp"), str):
+            turn["end"] = record["timestamp"]
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        if record.get("type") == "assistant" and isinstance(message.get("content"), list):
+            texts = [part["text"] for part in message["content"]
+                     if isinstance(part, dict) and part.get("type") == "text"
+                     and isinstance(part.get("text"), str) and part["text"].strip()]
+            if texts:
+                turn["answer"] = texts[-1]
+        for name, data, base in rt._transcript_calls(record, root):
+            for relative, changed in call_paths(name, data, base, root):
+                (turn["changed"] if changed else turn["read"]).append(relative)
+    return turn
+
+
+def later_moment(project: Path, repository: Any, history: List[Tuple[datetime, List[str]]],
+                 starts: List[datetime], moment: datetime, named: Sequence[str],
+                 before: datetime) -> Optional[str]:
+    """The first later session start whose recent files show none of `named`.
+
+    The recent files are replayed from every human turn before that start,
+    as the Stop hook kept them (record_recent_files), and shown as the capsule
+    shows them: the first RECENT_FILES_LIMIT kept that exist in the corpus,
+    the project's tree in the commit before that start. Asked then, a question
+    about the save finds no pointer to its subject in the navigation capsule.
+    Every named file must still exist in that tree.
+    """
+    rt = runtime()
+    wanted = set(named)
+    recent: List[str] = []
+    position = 0
+    for start in starts:
+        while position < len(history) and history[position][0] < start:
+            recent = list(dict.fromkeys([*history[position][1], *recent]))[:rt.RECENT_FILES_KEPT]
+            position += 1
+        if start <= moment or start >= before:
+            continue
+        commit = repository.commit_before(start)
+        tree = repository.tree(commit) if commit else None
+        listing = stand.read_git(project, "ls-tree", "-r", "--name-only", tree) if tree else None
+        if listing is None:
+            continue
+        present = set(listing.splitlines())
+        if not wanted <= present:
+            continue
+        shown = [item for item in recent if rt._recent_file_kept(item) and item in present][:rt.RECENT_FILES_LIMIT]
+        if not wanted & set(shown):
+            return start.isoformat().replace("+00:00", "Z")
+    return None
+
+
+def recall_sources(project: Path, transcripts: Path, after: Optional[datetime], before: datetime,
+                   exclude: Optional[Dict[str, List[datetime]]] = None) -> Iterator[Dict[str, Any]]:
+    """First turns that read project files and answered with a conclusion
+    naming one of them: what a session would save as a learning.
+
+    A turn that changed a file is left out - its conclusion describes code
+    the corpus a minute later may not hold yet - and so is a sampled cold
+    start. The question comes RECALL_GAP_SECONDS after the turn's last record;
+    every file the answer names must exist in the commit the corpus is built
+    from then. `later` is the start of the first later session at which the
+    recent files no longer show any of them (later_moment), or None.
+    """
+    root = os.path.realpath(str(project))
+    known = git_paths(project)
+    repository = stand.Repository(project)
+    history: List[Tuple[datetime, List[str]]] = []
+    starts: List[datetime] = []
+    for path in session_files(transcripts, project):
+        for number, turn in enumerate(session_turns(path, root)):
+            when = stand.parse_instant(turn["ts"])
+            if when is None:
+                continue
+            if number == 0:
+                starts.append(when)
+            files = [item for item in dict.fromkeys(turn["changed"] + turn["read"]) if item in known]
+            if files:
+                history.append((when, files))
+    history.sort(key=lambda entry: entry[0])
+    starts.sort()
+    for path in session_files(transcripts, project):
+        turn = first_turn(path, root)
+        if turn is None or not turn["prompt"].strip():
+            continue
+        asked, ended = stand.parse_instant(turn["ts"]), stand.parse_instant(turn["end"])
+        if asked is None or ended is None or asked >= before or (after is not None and asked < after):
+            continue
+        if any(abs((asked - other).total_seconds()) <= 5 for other in (exclude or {}).get(project.name, [])):
+            continue
+
+        def kept(item: str) -> bool:
+            return item in known and not SHELL_SYNTAX.search(item) and not NOT_GOLD.match(item)
+
+        if any(kept(item) for item in turn["changed"]):
+            continue
+        answer = turn["answer"].strip()
+        read = [item for item in dict.fromkeys(turn["read"]) if kept(item) and runtime()._recent_file_kept(item)]
+        named = [item for item in read if named_in(answer, item)]
+        if len(answer) < RECALL_ANSWER_MINIMUM or not named:
+            continue
+        moment = ended.timestamp() + RECALL_GAP_SECONDS
+        stamp = datetime.fromtimestamp(moment, timezone.utc).isoformat().replace("+00:00", "Z")
+        commit = repository.commit_before(stand.parse_instant(stamp)) if repository.prefix is not None else None
+        if commit is None:
+            continue
+        present = [item for item in named if stand.read_git(project, "cat-file", "-e", f"{commit}:{item}") is not None]
+        if present != named:
+            continue
+        yield {
+            "id": task_id(project.name, stamp),
+            "project": project.name,
+            "ts": stamp,
+            "asked": str(turn["ts"]),
+            "session": path.stem,
+            "prompt": turn["prompt"],
+            "answer": answer[:RECALL_ANSWER_LIMIT],
+            "read": read[:20],
+            "named": named,
+            "later": later_moment(project, repository, history, starts,
+                                  stand.parse_instant(stamp), named, before),
+        }
+
+
+def command_recall_sources(arguments: argparse.Namespace) -> int:
+    out = arguments.out.expanduser()
+    if stand.inside_clone(out):
+        raise OutcomeError(f"--out {out} is inside this clone: sources carry client prompts and answers")
+    before = instant(arguments.before)
+    after = instant(arguments.after) if arguments.after else None
+    if before is None or (arguments.after and after is None):
+        raise OutcomeError("--before/--after must be ISO dates or timestamps")
+    exclude = excluded_moments([Path(path).expanduser() for path in arguments.exclude_set or []])
+    projects_root = arguments.projects_root.expanduser()
+    sources: List[Dict[str, Any]] = []
+    for name in [value.strip() for value in arguments.projects.split(",") if value.strip()]:
+        project = stand.resolve_project(name, projects_root)
+        if project is None:
+            raise OutcomeError(f"no project {name} under {projects_root}")
+        sources.extend(recall_sources(project, arguments.transcripts.expanduser(), after, before, exclude))
+    sources.sort(key=lambda source: (source["project"], source["ts"]))
+    stand.write_json(out, {
+        "version": 1, "kind": "recall-sources",
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "before": arguments.before, "after": arguments.after, "sources": sources,
+    })
+    os.chmod(out, 0o600)
+    print(f"{len(sources)} first turns that answered from files they read -> {out}")
+    return 0
+
+
+def recall_problem(source: Dict[str, Any], scenario: Dict[str, Any]) -> Optional[str]:
+    """Why an authored scenario cannot run on its source, or None.
+
+    The learning must be one `record-result` accepts and cite only files the
+    source turn read; the needed files are among those it cites; the question
+    names none of them, so an agent either recalls the save or searches.
+    """
+    learning = scenario.get("learning")
+    if not isinstance(learning, dict) or set(learning) != {"type", "title", "consequence", "sources"}:
+        return "learning needs exactly type, title, consequence and sources"
+    if learning["type"] not in ("finding", "decision"):
+        return "learning type is finding or decision"
+    for key, limit in (("title", LEARNING_TITLE_LIMIT), ("consequence", LEARNING_CONSEQUENCE_LIMIT)):
+        if not isinstance(learning[key], str) or not learning[key].strip() or len(learning[key]) > limit:
+            return f"learning {key} is text within {limit} characters"
+    cited = learning["sources"]
+    if (not isinstance(cited, list) or not 1 <= len(cited) <= LEARNING_SOURCE_LIMIT
+            or any(item not in source["read"] for item in cited)):
+        return "learning sources are files the source turn read"
+    needed = scenario.get("needed")
+    if not isinstance(needed, list) or not needed or any(item not in cited for item in needed):
+        return "needed files are among the learning's sources"
+    question = scenario.get("prompt")
+    if not isinstance(question, str) or not question.strip():
+        return "the question is missing"
+    if any(named_in(question, item) for item in needed):
+        return "the question names a needed file"
+    try:
+        runtime()
+        import memory_results  # noqa: E402 - the runtime put its folder on the path
+        memory_results.normalize(ROOT, {"learnings": [learning], "verified": True}, check_files=False)
+    except Exception as error:  # noqa: BLE001 - any refusal is the reason
+        return f"record-result refuses the learning: {error}"
+    return None
+
+
+def command_recall_set(arguments: argparse.Namespace) -> int:
+    out = arguments.out.expanduser()
+    if stand.inside_clone(out):
+        raise OutcomeError(f"--out {out} is inside this clone: a set carries client prompts")
+    document = json.loads(arguments.sources.expanduser().read_text(encoding="utf-8"))
+    sources = {item["id"]: item for item in document.get("sources") or []} if isinstance(document, dict) else {}
+    authored = json.loads(arguments.scenarios.expanduser().read_text(encoding="utf-8"))
+    scenarios = authored.get("scenarios") if isinstance(authored, dict) else authored
+    if not sources or not isinstance(scenarios, list):
+        raise OutcomeError("--sources and --scenarios must be made for this tool")
+    valid: List[Dict[str, Any]] = []
+    refused: Dict[str, str] = {}
+    left_out = set(arguments.exclude_id.split(",")) if arguments.exclude_id else set()
+    for scenario in scenarios:
+        identity = str(scenario.get("id")) if isinstance(scenario, dict) else ""
+        if identity in left_out:
+            refused[identity] = "left out (--exclude-id)"
+            continue
+        if identity not in sources:
+            refused[identity or "?"] = "no such source"
+            continue
+        if scenario.get("skip"):
+            refused[identity] = f"skipped: {scenario['skip']}"
+            continue
+        problem = recall_problem(sources[identity], scenario)
+        if problem:
+            refused[identity] = problem
+            continue
+        source = sources[identity]
+        moment = source["ts"]
+        if arguments.regime == "later":
+            # The same save and question, asked once other work has pushed
+            # the subject out of the recent files.
+            if not source.get("later"):
+                refused[identity] = "no later session without the named files in its recent files"
+                continue
+            moment = source["later"]
+        valid.append({
+            "id": identity if arguments.regime == "next" else task_id(source["project"], moment),
+            "source": identity, "regime": arguments.regime,
+            "project": source["project"], "ts": moment, "session": source["session"],
+            "prompt": scenario["prompt"].strip(), "gold": list(scenario["needed"]),
+            "needed": list(scenario["needed"]),
+            "saves": [{"learnings": [scenario["learning"]], "verified": True}],
+        })
+    valid.sort(key=lambda task: (task["project"], task["ts"]))
+    chosen = valid if arguments.n >= len(valid) else random.Random(arguments.seed).sample(valid, arguments.n)
+    chosen.sort(key=lambda task: (task["project"], task["ts"]))
+    stand.write_json(out, {
+        "version": 1, "kind": "recall", "regime": arguments.regime,
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "seed": arguments.seed, "candidates": len(valid), "refused": refused, "tasks": chosen,
+    })
+    os.chmod(out, 0o600)
+    print(f"{len(chosen)} of {len(valid)} valid scenarios ({len(refused)} refused) -> {out}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# run: corpus, recent files, saves, one arm
 # ---------------------------------------------------------------------------
 
 
@@ -391,6 +693,64 @@ def seed_recent_files(task: Dict[str, Any], corpus: Path, project: Path, transcr
     return len(shown)
 
 
+def corpus_branch(task: Dict[str, Any]) -> str:
+    """The branch commit_corpus leaves the corpus on, which the prompt hook
+    takes for the task ID."""
+    return f"ab/{stand.safe_name(str(task['id']))}"
+
+
+def saved_documents(corpus: Path) -> Set[str]:
+    """What a save can add that retrieval delivers: chunks and dynamic records."""
+    found: Set[str] = set()
+    for folder in (corpus / "memory-bank" / "chunks", corpus / "project-brain" / "dynamic"):
+        if folder.is_dir():
+            found.update(path.relative_to(corpus).as_posix() for path in folder.rglob("*.md"))
+    return found
+
+
+def plant_saves(task: Dict[str, Any], corpus: Path, env: Dict[str, str], timeout: float,
+                scratch: Path) -> Dict[str, Any]:
+    """Record the task's saved results in the corpus, as the session before
+    the question would have: on the branch's task, through `record-result`,
+    with the project's own promotion settings, then committed and indexed so
+    every arm starts from the same tree.
+
+    The task gets the goal the runtime gives a task it provisions for a
+    branch, so its working state says nothing the save does not.
+    """
+    saves = task.get("saves") or []
+    if not saves:
+        return {}
+    branch = corpus_branch(task)
+    before = saved_documents(corpus)
+    started = stand.run_runtime(corpus, ["start", "--task-id", branch, "--goal",
+                                         runtime().derive_goal(branch), "--json"], env, timeout)
+    if started["exit"] != 0:
+        raise stand.Skip("plant-start-failed")
+    planted = {"records": 0, "promoted": 0}
+    scratch.mkdir(parents=True, exist_ok=True)
+    for number, save in enumerate(saves, start=1):
+        request = scratch / f"{stand.safe_name(str(task['id']))}-save-{number}.json"
+        request.write_text(json.dumps(save), encoding="utf-8")
+        saved = stand.run_runtime(corpus, ["record-result", "--task-id", branch, "--result-id", f"save-{number}",
+                                           "--revision", "auto", "--input", str(request), "--json"], env, timeout)
+        request.unlink()
+        if saved["exit"] != 0:
+            raise stand.Skip("plant-save-failed")
+        report = json.loads(saved["stdout"])
+        planted["records"] += sum(1 for record in report.get("records") or [] if record.get("state") == "created")
+        planted["promoted"] += len(((report.get("promotion") or {}).get("promoted")) or [])
+    for arguments in (["add", "-A"], ["commit", "-q", "--no-verify", "-m", "memory: saved results"]):
+        committed = subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.fsmonitor=false", *arguments],
+                                   cwd=str(corpus), env=env, capture_output=True)
+        if committed.returncode != 0:
+            raise stand.Skip("plant-commit-failed")
+    if stand.run_runtime(corpus, ["index"], env, timeout)["exit"] != 0:
+        raise stand.Skip("index-failed")
+    planted["documents"] = sorted(saved_documents(corpus) - before)
+    return planted
+
+
 def hook_arguments(corpus: Path) -> List[str]:
     """Codex session flags that run the corpus's memory prompt hook alone."""
     hooks = json.loads((corpus / ".codex" / "hooks.json").read_text(encoding="utf-8")).get("hooks") or {}
@@ -455,6 +815,7 @@ class Counter:
         self.numbers: Dict[str, int] = {}
         self.usage: Optional[Dict[str, Any]] = None
         self.finished = False
+        self.message = ""
 
     def feed(self, event: Dict[str, Any]) -> Optional[str]:
         """'gold' or 'cap' when the run should stop now, else None."""
@@ -464,6 +825,9 @@ class Counter:
             self.finished = True
             return None
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        if kind == "item.completed" and item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+            # The last one is the answer a finished turn gave.
+            self.message = item["text"]
         if kind not in ("item.started", "item.completed") or item.get("type") not in TOOL_ITEMS:
             return None
         identity = str(item.get("id") or "")
@@ -479,6 +843,11 @@ class Counter:
         if self.calls >= self.cap:
             return "cap"
         return None
+
+    def answered(self) -> bool:
+        """Whether the turn finished, without a gold touch, on an answer that
+        names a gold file: what a recall run counts as reaching it."""
+        return self.finished and self.first_gold is None and any(named_in(self.message, path) for path in self.gold)
 
 
 def stop(process: subprocess.Popen) -> None:
@@ -519,9 +888,13 @@ def set_capsule_profile(corpus: Path, profile: str) -> None:
 
 
 def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
-            timeout: float, events: Optional[Path] = None) -> Dict[str, Any]:
+            timeout: float, events: Optional[Path] = None,
+            saved: Optional[Sequence[str]] = None) -> Dict[str, Any]:
     """One headless session, stopped at the first gold touch, the cap or the
-    deadline. Only counts leave this function."""
+    deadline. Only counts leave this function.
+
+    ``saved`` names the documents a recall set's save added; the outcome says
+    whether a hook capsule delivered one."""
     manifests = corpus / "memory-bank" / "local" / "retrieval-manifests"
     before = set(manifests.glob("*.json")) if manifests.is_dir() else set()
     health = corpus / "memory-bank" / "local" / "refresh-health.ndjson"
@@ -588,6 +961,7 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
     # arm. The Codex prompt hook runs `refresh`; Claude's runs `hook-context`.
     entry_points: Dict[str, int] = {}
     capsule_tokens = 0
+    saved_delivered = False
     for path in after - before:
         try:
             manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -599,11 +973,19 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
             estimates = manifest.get("token_estimates") if isinstance(manifest, dict) else None
             if isinstance(estimates, dict) and isinstance(estimates.get("total"), (int, float)):
                 capsule_tokens += int(estimates["total"])
+            selected = manifest.get("selected") if isinstance(manifest, dict) else None
+            if saved and isinstance(selected, list):
+                saved_delivered = saved_delivered or any(
+                    isinstance(entry, dict) and entry.get("path") in saved for entry in selected)
     delivered = sum(count for point, count in entry_points.items() if point in HOOK_ENTRY_POINTS)
     return {
         "stopped": reason,
         "calls": counter.calls,
         "calls_to_gold": counter.first_gold,
+        # A recall run reaches the save's subject by touching a needed file or
+        # by answering with one named; calls before that answer.
+        "calls_to_answer": counter.calls if counter.answered() else None,
+        "saved_delivered": saved_delivered,
         "seconds": round(time.monotonic() - started, 1),
         "usage": counter.usage,
         "capsule_delivered": delivered > 0,
@@ -628,6 +1010,7 @@ def command_run(arguments: argparse.Namespace) -> int:
     tasks = document.get("tasks") if isinstance(document, dict) else None
     if not isinstance(tasks, list):
         raise OutcomeError("--set is not a sample made by this tool")
+    kind = "recall" if document.get("kind") == "recall" else "cold-start"
     wanted = set(arguments.ids.split(",")) if arguments.ids else None
     arms = [arm.strip() for arm in arguments.arms.split(",") if arm.strip()]
     if not arms or any(arm not in ARMS for arm in arms):
@@ -647,6 +1030,7 @@ def command_run(arguments: argparse.Namespace) -> int:
             "timeout": arguments.timeout, "model": arguments.model, "repeat": arguments.repeat,
             "codex": subprocess.run([arguments.codex, "--version"], capture_output=True, text=True).stdout.strip(),
             "runtime": stand.read_git(ROOT, "rev-parse", "HEAD"),
+            "kind": kind, "metric": "recall" if kind == "recall" else "gold",
         },
         "items": {},
     }
@@ -660,6 +1044,11 @@ def command_run(arguments: argparse.Namespace) -> int:
             built = build_corpus(task, base, cache, projects_root, editions, arguments.timeout)
             item.update(commit=built["commit"], edition=built["edition"])
             item["recent_files"] = seed_recent_files(task, base, built["project"], transcripts)
+            planted = plant_saves(task, base, stand.runtime_env(cache, stand.parse_instant(task["ts"]), None),
+                                  arguments.timeout, work / "saves")
+            if planted:
+                item["planted"] = {key: len(value) if isinstance(value, list) else value
+                                   for key, value in planted.items()}
             # Alternate which arm goes first, so a time-of-day effect on the
             # model cannot favour one arm.
             for replicate in range(arguments.repeat):
@@ -667,14 +1056,15 @@ def command_run(arguments: argparse.Namespace) -> int:
                 for arm in order:
                     corpus = work / f"{stand.safe_name(str(task.get('id')))}-{arm}-{replicate}"
                     shutil.copytree(base, corpus, symlinks=True)
-                    if arm == "navigation":
-                        set_capsule_profile(corpus, "navigation")
+                    if arm in PROFILE_ARMS:
+                        set_capsule_profile(corpus, arm)
                     try:
                         outcome = run_arm(
                             codex_command(arguments.codex, corpus, arm, task["prompt"], arguments.model),
                             corpus, task.get("gold") or [], arguments.cap, arguments.timeout,
                             events=(arguments.events.expanduser() / f"{task.get('id')}-{arm}-{replicate}.jsonl"
                                     if arguments.events else None),
+                            saved=planted.get("documents") if planted else None,
                         )
                     finally:
                         if not arguments.keep:
@@ -691,7 +1081,9 @@ def command_run(arguments: argparse.Namespace) -> int:
         os.chmod(out, 0o600)
         arms_done = ", ".join(
             f"{arm} " + "/".join(
-                str(run['calls_to_gold']) if run['calls_to_gold'] is not None else run['stopped']
+                str(run['calls_to_gold']) if run['calls_to_gold'] is not None
+                else f"answer@{run['calls_to_answer']}" if run.get('calls_to_answer') is not None
+                else run['stopped']
                 for run in runs
             )
             for arm, runs in item["arms"].items()
@@ -708,11 +1100,23 @@ def command_run(arguments: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def censored(arm: Dict[str, Any], cap: int) -> int:
-    """Calls to the first gold touch; a run that never touched one counts
-    one past the cap, whatever stopped it."""
+def reached(arm: Dict[str, Any], metric: str = "gold") -> Optional[int]:
+    """Calls before the run reached what its metric counts, or None.
+
+    `gold`: the first gold touch. `recall`: the first touch of a needed file,
+    or - a run that finished without one - an answer naming one.
+    """
     value = arm.get("calls_to_gold")
-    return int(value) if isinstance(value, int) else cap + 1
+    if not isinstance(value, int) and metric == "recall":
+        value = arm.get("calls_to_answer")
+    return value if isinstance(value, int) else None
+
+
+def censored(arm: Dict[str, Any], cap: int, metric: str = "gold") -> int:
+    """Calls to what the metric counts; a run that never reached it counts
+    one past the cap, whatever stopped it."""
+    value = reached(arm, metric)
+    return int(value) if value is not None else cap + 1
 
 
 def bootstrap(values: Sequence[float], rounds: int = 10000, seed: int = 20261021) -> Tuple[float, float]:
@@ -747,14 +1151,19 @@ def valid_arm(arm: str, runs: Sequence[Dict[str, Any]]) -> bool:
         return all(delivered)
     if arm == "navigation":
         return all(value is True for value in ran) and not any(delivered)
+    if arm == "recall":
+        # A manifest only on a turn one of the task's saves matched.
+        return all(value is True for value in ran)
     return not any(delivered) and not any(value is True for value in ran)
 
 
-def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS) -> Dict[str, Any]:
-    """Paired calls to the first gold file, treatment `compare[1]` against
-    baseline `compare[0]`."""
+def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS,
+              metric: Optional[str] = None) -> Dict[str, Any]:
+    """Paired calls to the first gold file - or, for the recall metric, to the
+    save's subject - treatment `compare[1]` against baseline `compare[0]`."""
     baseline, treatment = compare
     cap = int(result.get("meta", {}).get("cap") or DEFAULT_CAP)
+    metric = metric or str(result.get("meta", {}).get("metric") or "gold")
     pairs = []
     for task_key, item in sorted((result.get("items") or {}).items()):
         arms = {arm: runs if isinstance(runs, list) else [runs] for arm, runs in (item.get("arms") or {}).items()}
@@ -766,14 +1175,17 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS) -
             continue
         pairs.append({
             "id": task_key,
-            baseline: sum(censored(run, cap) for run in arms[baseline]) / len(arms[baseline]),
-            treatment: sum(censored(run, cap) for run in arms[treatment]) / len(arms[treatment]),
-            f"{baseline}_touched": all(run.get("calls_to_gold") is not None for run in arms[baseline]),
-            f"{treatment}_touched": all(run.get("calls_to_gold") is not None for run in arms[treatment]),
+            baseline: sum(censored(run, cap, metric) for run in arms[baseline]) / len(arms[baseline]),
+            treatment: sum(censored(run, cap, metric) for run in arms[treatment]) / len(arms[treatment]),
+            f"{baseline}_touched": all(reached(run, metric) is not None for run in arms[baseline]),
+            f"{treatment}_touched": all(reached(run, metric) is not None for run in arms[treatment]),
+            f"{baseline}_saved": any(run.get("saved_delivered") for run in arms[baseline]),
+            f"{treatment}_saved": any(run.get("saved_delivered") for run in arms[treatment]),
         })
     differences = [pair[treatment] - pair[baseline] for pair in pairs]
     summary: Dict[str, Any] = {
         "compare": [baseline, treatment],
+        "metric": metric,
         "tasks": len(result.get("items") or {}),
         "pairs": len(pairs),
         "cap": cap,
@@ -787,6 +1199,11 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS) -
         f"touched_{baseline}": sum(1 for p in pairs if p[f"{baseline}_touched"]),
         f"touched_{treatment}": sum(1 for p in pairs if p[f"{treatment}_touched"]),
     }
+    if metric == "recall":
+        # How often a hook capsule handed the save over, in any repeat: the
+        # mechanism the arms differ by. Not part of the verdict.
+        summary[f"saved_delivered_{baseline}"] = sum(1 for p in pairs if p[f"{baseline}_saved"])
+        summary[f"saved_delivered_{treatment}"] = sum(1 for p in pairs if p[f"{treatment}_saved"])
     summary["verdict"] = verdict(summary)
     return summary
 
@@ -810,19 +1227,25 @@ def command_report(arguments: argparse.Namespace) -> int:
     if len(compare) != 2 or any(arm not in ARMS for arm in compare) or compare[0] == compare[1]:
         raise OutcomeError(f"--compare takes two different arms of {', '.join(ARMS)}")
     baseline, treatment = compare
-    summary = summarize(result, compare)
+    if arguments.metric is not None and arguments.metric not in METRICS:
+        raise OutcomeError(f"--metric is one of {', '.join(METRICS)}")
+    summary = summarize(result, compare, arguments.metric)
     if arguments.json:
         print(json.dumps(summary, indent=1))
         return 0
-    print(f"pairs {summary['pairs']} of {summary['tasks']} tasks; a run without a gold touch counts {summary['cap'] + 1}")
+    target = "the save's subject (needed file or an answer naming it)" if summary["metric"] == "recall" else "the first gold file"
+    print(f"pairs {summary['pairs']} of {summary['tasks']} tasks; a run that never reached it counts {summary['cap'] + 1}")
     if summary["pairs"]:
-        print(f"calls to the first gold file: {baseline} {summary[f'mean_{baseline}']}, "
+        print(f"calls to {target}: {baseline} {summary[f'mean_{baseline}']}, "
               f"{treatment} {summary[f'mean_{treatment}']}")
         print(f"{treatment} - {baseline}: {summary['mean_difference']} (95% CI {summary['ci95']}), "
               f"fewer {summary[f'{treatment}_fewer']} / more {summary[f'{treatment}_more']}, "
               f"sign test p {summary['sign_test_p']}")
-        print(f"gold touched within the cap: {baseline} {summary[f'touched_{baseline}']}, "
+        print(f"reached within the cap: {baseline} {summary[f'touched_{baseline}']}, "
               f"{treatment} {summary[f'touched_{treatment}']}")
+        if summary["metric"] == "recall":
+            print(f"save delivered by the hook: {baseline} {summary[f'saved_delivered_{baseline}']}, "
+                  f"{treatment} {summary[f'saved_delivered_{treatment}']}")
     print(f"verdict: {summary['verdict']}")
     return 0
 
@@ -840,6 +1263,26 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--n", type=int, required=True)
     sample.add_argument("--seed", type=int, required=True)
     sample.add_argument("--out", type=Path, required=True)
+    sources = commands.add_parser("recall-sources",
+                                  help="first turns that answered from files they read: what a session would save")
+    sources.add_argument("--projects", required=True, help="comma-separated project folder names")
+    sources.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
+    sources.add_argument("--transcripts", type=Path, default=Path.home() / ".claude" / "projects")
+    sources.add_argument("--before", required=True)
+    sources.add_argument("--after")
+    sources.add_argument("--exclude-set", action="append", help="a set whose sessions are left out")
+    sources.add_argument("--out", type=Path, required=True)
+    recall = commands.add_parser("recall-set", help="check authored recall scenarios against their sources and sample them")
+    recall.add_argument("--sources", type=Path, required=True)
+    recall.add_argument("--scenarios", type=Path, required=True,
+                        help="JSON list of {id, learning, needed, prompt} or {id, skip}")
+    recall.add_argument("--regime", choices=("next", "later"), default="next",
+                        help="ask a minute after the source turn, or at the first later session start "
+                             "whose recent files no longer show the files the answer named")
+    recall.add_argument("--exclude-id", help="comma-separated source IDs to leave out (a pilot)")
+    recall.add_argument("--n", type=int, required=True)
+    recall.add_argument("--seed", type=int, required=True)
+    recall.add_argument("--out", type=Path, required=True)
     run = commands.add_parser("run", help="each task with and without the capsule")
     run.add_argument("--set", type=Path, required=True)
     run.add_argument("--out", type=Path, required=True)
@@ -861,6 +1304,7 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--json", action="store_true")
     report.add_argument("--compare", default=",".join(DEFAULT_ARMS),
                         help="baseline,treatment: two arms of the result")
+    report.add_argument("--metric", help=f"one of {', '.join(METRICS)}; the result's own by default")
     return parser
 
 
@@ -869,6 +1313,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if arguments.command == "sample":
             return command_sample(arguments)
+        if arguments.command == "recall-sources":
+            return command_recall_sources(arguments)
+        if arguments.command == "recall-set":
+            return command_recall_set(arguments)
         if arguments.command == "run":
             return command_run(arguments)
         return command_report(arguments)

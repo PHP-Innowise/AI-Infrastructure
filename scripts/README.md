@@ -479,13 +479,31 @@ Runs stop at that touch, so a pair costs the start of two sessions. It is never
 installed and never run by CI; it spends model calls through the
 maintainer's signed-in Codex CLI.
 
+A *recall* set asks whether an agent uses what an earlier session saved:
+- `recall-sources` lists first turns that read project files and answered
+  with a conclusion naming one;
+- the saved learning and a follow-up question are written outside the tool
+  for each source, and `recall-set` checks them against it;
+- `run` records the save on the corpus branch's task through `record-result`
+  before any arm, and counts the calls until the agent touches a file the save
+  cites or answers naming one;
+- `--regime next` asks a minute after the source turn; `--regime later` asks
+  at the first later session start whose recent files no longer show the files
+  the answer named.
+
 ```bash
 python3 scripts/memory_outcome_ab.py sample --projects next,scb --before 2026-10-07 \
   --n 30 --seed 1 [--exclude-set TUNING_SET] --out OUTSIDE/set.json
 python3 scripts/memory_outcome_ab.py run --set OUTSIDE/set.json --out OUTSIDE/result.json \
-  [--arms off,capsule,navigation] [--repeat 2] [--cap 40] [--timeout 900] [--ids ID,...] \
+  [--arms off,capsule,navigation,recall] [--repeat 2] [--cap 40] [--timeout 900] [--ids ID,...] \
   [--events OUTSIDE/events]
-python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--compare off,capsule] [--json]
+python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--compare off,capsule] \
+  [--metric gold|recall] [--json]
+python3 scripts/memory_outcome_ab.py recall-sources --projects next,scb --before 2026-10-07 \
+  [--exclude-set SET] --out OUTSIDE/recall-sources.json
+python3 scripts/memory_outcome_ab.py recall-set --sources OUTSIDE/recall-sources.json \
+  --scenarios OUTSIDE/authored.json [--regime next|later] [--exclude-id ID,...] \
+  --n 30 --seed 1 --out OUTSIDE/recall-set.json
 ```
 
 - **Inputs:**
@@ -494,7 +512,10 @@ python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--compare off,c
   - for `run`, a signed-in `codex` on PATH.
 - **Outputs:**
   - `sample`: a set with prompts and gold paths;
-  - `run`: per-task counts, stop reasons and whether the hook delivered;
+  - `recall-sources`: first turns with their prompts and answers;
+  - `recall-set`: the checked scenarios, each with its save, and the refusals;
+  - `run`: per-task counts, stop reasons, whether the hook delivered and, for
+    a recall set, whether it delivered the save;
   - `report`: paired differences, a bootstrap interval, a sign test and the
     verdict rule documented in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md).
 - **Dependencies:** Python 3.9+ standard library, `memory_eval.py`,
@@ -505,7 +526,8 @@ python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--compare off,c
 
   Sessions are `--ephemeral`, so `~/.codex/sessions` keeps nothing.
 - **CI relationship:** `tests/test_memory_outcome_ab.py` covers path and event
-  parsing, stopping, hook flags, the statistics and sampling, without a model.
+  parsing, stopping, hook flags, the statistics and sampling, recall sources,
+  scenario checks and a save recorded through the runtime, without a model.
 
 ### `memory_rerank_pilot.py`
 
