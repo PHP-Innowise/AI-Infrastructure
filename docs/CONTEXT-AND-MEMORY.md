@@ -952,6 +952,23 @@ to `full`.
   retrieved semantic and episodic documents.
 - **`navigation`:** the working state and the recent files only. It searches
   nothing and records no delivery.
+- **`recall`:** navigation plus what the task's own saves recorded, and
+  nothing else. The request is searched only among those documents; without
+  one of them indexed, the capsule is navigation's. The task's own saves are
+  the findings and decisions:
+  - whose name is the one a result of this task gives a learning
+    (`record-result`, `native-result`, MCP `memory_record_result`);
+  - or whose name starts with the task's external ID or a ticket it names
+    (a Harness draft `<task>-finding-<hex>`, a finding an agent filed as
+    `CMS-739-review-4` on `feature/CMS-739-…`).
+
+  A saved finding is resolved as it is written and no resolved finding is
+  indexed, so what the capsule finds is the Memory Bank chunk it was promoted
+  to: a chunk counts when a record it cites is one of these, before or after
+  compaction archives the record. An open finding or an accepted decision
+  counts itself. Recorded history, path and file links, related knowledge
+  and source hints are left out; a conflict partner is still delivered.
+  Lightweight mode has no governed saves, so there `recall` is navigation.
 
 The profile applies to the automatic entry points (`refresh`, which the Codex
 and Cursor hooks run, and Claude's `hook-context`). An explicit
@@ -969,7 +986,10 @@ everything the hook delivers through the document layers:
 
 An agent can still pull all of these with `context.py retrieve` or the MCP
 `memory_retrieve` tool. The navigation measurement did not cover recall, so the
-default stays `full`.
+default stays `full`. `recall` keeps the first of them - a session's saved
+result in the next session's capsule - and drops the other two; it is the
+candidate measured against both (`docs/MEMORY-EVAL.md`, "Measuring task
+outcomes").
 
 `retrieval-report` keeps shadow `would_skip` distinct from context actually
 `withheld` in `enforce`. It slices gate results by `mode`, `query_source`,

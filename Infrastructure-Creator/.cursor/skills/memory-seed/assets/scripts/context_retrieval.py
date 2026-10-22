@@ -54,6 +54,7 @@ from brain_runtime import (
     validate_schema_file,
 )
 from automatic_query import SECRET_PATTERNS, source_path_problem
+from memory_results import learning_id
 from validate import indexed_secret_policy_reason, memory_temporal_reason, secret_policy_fingerprint
 
 
@@ -5478,8 +5479,12 @@ def ranking_weight(
 def _candidates(
     connection: sqlite3.Connection, query: str, limit: int = 100,
     *, trace: Optional[RetrievalTrace] = None,
+    scope: Optional[list[str]] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Ranked candidates, plus what the ranking knew about the query.
+
+    ``scope`` restricts the search to those indexed paths (the recall
+    capsule's own saves); relevance is still judged against the whole index.
 
     The diagnostics are computed here anyway and were discarded at the end of
     the call. A gate that has to decide whether this turn is worth retrieving
@@ -5519,8 +5524,13 @@ def _candidates(
         for path, record in trace.records.items():
             if record["state"] != "unavailable":
                 record["evidence_matched_terms"] = coverage.get(path, 0)
+    scoped: list[str] = []
+    restriction = ""
+    if scope is not None:
+        scoped = list(dict.fromkeys(scope))[:DELETE_CHUNK]
+        restriction = ("AND d.path IN (" + ", ".join("?" for _ in scoped) + ")") if scoped else "AND 0"
     rows = connection.execute(
-        """
+        f"""
         SELECT
             d.rowid AS document_rowid, d.path, d.layer, d.kind, d.title,
             m.category, m.privacy, m.owner, m.authority, m.lifecycle,
@@ -5529,11 +5539,11 @@ def _candidates(
             bm25(documents, ?, ?, ?, ?, ?, ?) AS score
         FROM documents AS d
         JOIN document_metadata AS m ON m.path = d.path
-        WHERE documents MATCH ? AND d.kind != ?
+        WHERE documents MATCH ? AND d.kind != ? {restriction}
         ORDER BY score, d.path
         LIMIT ?
         """,
-        (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), HISTORY_KIND, limit),
+        (*BM25_WEIGHTS, " OR ".join(f'"{token}"' for token in tokens), HISTORY_KIND, *scoped, limit),
     ).fetchall()
     result = []
     observed_rank = 0
@@ -8496,6 +8506,101 @@ def _working_record_image(record, body):
         sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
 
 
+# What a result writes - a finding or a decision - and so all the recall
+# capsule searches (own_saved_documents).
+SAVED_RECORD_TYPES = ("finding", "decision")
+# A saved record a chunk cites: its path while it is active, and the archive
+# path compaction repoints the citation to (promoted_source_rewrites).
+_SAVED_RECORD_PATH = re.compile(
+    r"project-brain/(?:dynamic/(?:findings|decisions)|archive/(?:finding|decision))/"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.md"
+)
+# Record files one recall capsule may read to tell the task's own saves from
+# the rest; a Brain past it has the rest of its records left unsearched.
+SAVED_RECORD_READ_LIMIT = 512
+
+
+def _saved_by(record: dict[str, Any], task_ids: list[str], names: tuple[str, ...]) -> bool:
+    """Whether a finding or decision is one the task saved.
+
+    A result names each learning after the task's UUID and the learning's
+    type, title and sources (memory_results.learning_id), so the name is
+    checked by computing it again. A Harness draft names it
+    `<task>-<kind>-<hex>`, and agents file findings under the task or its
+    ticket (`CMS-739-review-4`): a name that starts with the task's.
+    """
+    external = record.get("external_id")
+    if record.get("type") not in SAVED_RECORD_TYPES or not isinstance(external, str):
+        return False
+    if any(external == name or external.startswith(f"{name}-") for name in names):
+        return True
+    if not external.startswith("learning-"):
+        return False
+    sources = record.get("sources")
+    learning = {
+        "type": record["type"], "title": str(record.get("title") or ""),
+        "sources": [value for value in sources if isinstance(value, str)] if isinstance(sources, list) else [],
+    }
+    return any(learning_id(task_id, learning) == external for task_id in task_ids)
+
+
+def own_saved_documents(
+    connection: sqlite3.Connection, repository: Path, task_uuid: str
+) -> list[str]:
+    """The indexed documents that hold what the task's own saves recorded.
+
+    The recall capsule searches these and nothing else. A finding a result
+    saves is resolved as it is written, and no resolved finding is indexed:
+    what reaches retrieval is the Memory Bank chunk it was promoted to, which
+    cites the record. So a chunk counts when a record it cites is the task's,
+    active or archived; an open finding or an accepted decision counts itself.
+    The task is its UUID and any twin's under the same external ID, the
+    external ID and the tickets it names (`feature/CMS-739-x` files under
+    `CMS-739`). Reads each candidate record once; an unreadable one is not
+    the task's.
+    """
+    try:
+        _, task, _ = find_task(repository, task_uuid)
+        twins = json.loads(load_index_state(connection).get(TASK_TWINS_KEY) or "{}")
+    except (BrainError, OSError, UnicodeError, ValueError, sqlite3.Error):
+        return []
+    external = str(task.get("external_id") or "")
+    task_ids = list(dict.fromkeys([
+        str(task["id"]),
+        *(value for value in (twins.get(external) or [] if isinstance(twins, dict) else [])
+          if isinstance(value, str)),
+    ]))
+    names = tuple(dict.fromkeys(value for value in (external, *brain_runtime.ticket_ids(external)) if value))
+    records = [row[0] for row in connection.execute(
+        "SELECT path FROM documents WHERE kind IN (?, ?) ORDER BY path",
+        tuple(f"brain-{kind}" for kind in SAVED_RECORD_TYPES),
+    ).fetchall()]
+    citations = connection.execute(
+        "SELECT l.path, l.ref_path FROM document_links AS l JOIN documents AS d ON d.path = l.path "
+        "WHERE d.kind = 'memory' AND l.ref_kind = 'source' ORDER BY l.path, l.ref_path"
+    ).fetchall()
+    verdicts: dict[str, bool] = {}
+
+    def saved(path: str) -> bool:
+        if path not in verdicts:
+            if len(verdicts) >= SAVED_RECORD_READ_LIMIT:
+                return False
+            try:
+                record_path = repository / path
+                record, _ = parse_markdown_record(record_path, text=read_record_text(record_path))
+                verdicts[path] = _saved_by(record, task_ids, names)
+            except (BrainError, OSError, UnicodeError, ValueError, TypeError, KeyError):
+                verdicts[path] = False
+        return verdicts[path]
+
+    documents = {path for path in records if saved(path)}
+    documents.update(
+        chunk for chunk, cited in citations
+        if _SAVED_RECORD_PATH.fullmatch(str(cited)) and saved(str(cited))
+    )
+    return sorted(documents)
+
+
 def retrieve(
     connection: sqlite3.Connection,
     repository: Path,
@@ -8524,6 +8629,7 @@ def retrieve(
     delivery_profile: str = 'ordinary',
     source_provenance_sink: Optional[dict[str, Any]] = None,
     admit_delivery: Optional[Callable[[], None]] = None,
+    scope: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Assemble governed context and record the manifest that justifies it.
 
@@ -8548,6 +8654,11 @@ def retrieve(
     the request mentions (`prompt`) and the current task touched (`touched`);
     one document linked to them may join the semantic layer after the strong
     matches (`_automatic_link_candidates`).
+
+    ``scope`` - the recall capsule passes the task's own saves
+    (own_saved_documents) - is all the query searches: recorded history,
+    path and file links, related knowledge and source hints are left out.
+    A conflict partner is still delivered with the record it contradicts.
 
     ``pack`` turns the result into the capsule as the caller delivers it -
     the layer and character limits of its JSON, the ceiling of its rendered
@@ -8617,13 +8728,14 @@ def retrieve(
         # A failed observational lookup must not prevent the existing search.
         pass
     trace.search_limit = max(20, limit * 10)
-    candidates, diagnostics = _candidates(connection, query, max(20, limit * 10), trace=trace)
+    candidates, diagnostics = _candidates(connection, query, max(20, limit * 10), trace=trace,
+                                          scope=scope)
     # Recorded history has its own search over the whole request: events and
     # local episodes share one slot beside the changelog's.
     request_text = query if history_text is None else history_text
     known_tickets = _known_ticket_prefixes(connection, task)
     request_tickets = _request_tickets(request_text, task, known_tickets)
-    history = history_query(connection, request_text)
+    history = history_query(connection, request_text) if scope is None else None
     if history is not None:
         history["tickets"] = request_tickets
         history["known_tickets"] = known_tickets
@@ -8679,7 +8791,7 @@ def retrieve(
     # the caller's words found nothing there, the second says the caller's
     # path did.
     path_matched_count = 0
-    if paths:
+    if paths and scope is None:
         linked, link_excluded = _path_candidates(
             connection,
             repository,
@@ -8693,7 +8805,7 @@ def retrieve(
         # Ahead of the query's own matches, because `_apply_budgets` and the
         # per-layer ladder both honour input order and the caller named these.
         filtered = [*linked, *filtered]
-    if automatic_seeds is not None:
+    if automatic_seeds is not None and scope is None:
         own_paths: set[str] = set()
         if task_path is not None and task is not None:
             own_paths = {
@@ -8718,7 +8830,7 @@ def retrieve(
         filter_excluded.extend(automatic_excluded)
         filtered = _insert_automatic_links(filtered, automatic_linked)
     graph_candidates, graph_stats = _source_link_candidates(
-        connection, repository, config, graph_anchors,
+        connection, repository, config, graph_anchors if scope is None else [],
         {item["path"] for item in filtered} | history_paths,
         trace=trace,
     )
@@ -8735,7 +8847,7 @@ def retrieve(
     filtered = [*chosen_event, *filtered]
     hint_candidates = []
     hint_stats = None
-    if source_hints is not None:
+    if source_hints is not None and scope is None:
         references, hint_state = normalize_source_hints(source_hints)
         if not _source_hint_schema_supported(repository):
             references, hint_state = [], "unsupported"

@@ -557,7 +557,7 @@ def configured_mode(repository: Path, requested: Optional[str] = None) -> str:
     return mode
 
 
-CAPSULE_PROFILES = ("full", "navigation")
+CAPSULE_PROFILES = ("full", "navigation", "recall")
 
 
 def configured_capsule_profile(repository: Path, requested: Optional[str] = None) -> str:
@@ -569,6 +569,11 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     experiment switch: the task-outcome measurement of 2026-10-21 showed no
     difference between the full capsule and none, and a capsule without the
     document layers has to be measured before it could become the default.
+    `recall` is navigation plus what the task's own saves recorded - the
+    findings and decisions its results wrote, and records filed under its
+    name or ticket - searched by the request among themselves and nothing
+    else (see context_retrieval.own_saved_documents): the navigation capsule
+    lost the saved result a next session asks about.
     An explicit `retrieve` is never affected; only the automatic entry points
     read this. A caller of `refresh` that is itself an explicit request - the
     MCP `memory_retrieve` tool, the evaluation stand - passes
@@ -582,7 +587,7 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
         or "full"
     )
     if profile not in CAPSULE_PROFILES:
-        raise BrainError("Capsule profile must be full or navigation")
+        raise BrainError("Capsule profile must be full, navigation or recall")
     return profile
 
 

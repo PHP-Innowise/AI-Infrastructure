@@ -46,6 +46,7 @@ from brain_runtime import (
     close_task,
     compact,
     consolidate,
+    CAPSULE_PROFILES,
     configured_capsule_profile,
     configured_mode,
     configured_retrieval_gate,
@@ -133,6 +134,7 @@ from context_retrieval import (
     source_link_candidates,
     marked_document,
     match_strength,
+    own_saved_documents,
     quoted_section,
     refresh_health_retention,
     RETRIEVAL_GATE_DEFAULT,
@@ -3233,20 +3235,24 @@ def assemble_capsule(
     # summary itself is bounded, and the lightweight budget below may still
     # drop it first.
     last_turn = last_turn_section(repository, routine=delivery_profile != 'cursor-rule')
-    # The automatic capsule may be configured to carry navigation only; an
-    # explicit retrieval always searches.
-    navigation_only = (
-        entry_point in AUTOMATIC_ENTRY_POINTS
-        and configured_capsule_profile(repository, capsule_profile) == "navigation"
+    # The automatic capsule may be configured to carry navigation only, or
+    # navigation and the task's own saves; an explicit retrieval always
+    # searches everything.
+    profile = (
+        configured_capsule_profile(repository, capsule_profile)
+        if entry_point in AUTOMATIC_ENTRY_POINTS
+        else "full"
     )
     if mode == "lightweight":
+        # Local-only work has no governed task whose saves recall could keep,
+        # so a recall capsule here is a navigation one.
         result = build_context_packet(
             connection,
             repository,
             query,
             task_id,
             limit,
-            include_retrieval=not warnings and not navigation_only,
+            include_retrieval=not warnings and profile == "full",
             warnings=warnings,
             delivery_profile=delivery_profile, query_source=query_source,
         )
@@ -3335,7 +3341,12 @@ def assemble_capsule(
         except (ContextError, RetrievalError, KeyError, TypeError, ValueError):
             query_fallback = None
     request_query = build_capsule_query(query, None)
-    if warnings or navigation_only:
+    # The recall profile searches only what the served task's own saves
+    # recorded; with none indexed it is a navigation capsule.
+    own_saves: Optional[list[str]] = None
+    if profile == "recall" and not warnings and served is not None:
+        own_saves = own_saved_documents(connection, repository, served)
+    if warnings or profile == "navigation" or (profile == "recall" and not own_saves):
         # The previous index is not evidence of current eligibility. Keep
         # only fresh authoritative working state; do not search or record a
         # delivery, even if old document bytes still match their hashes.
@@ -3378,7 +3389,7 @@ def assemble_capsule(
             delivery_admission()
         return result
     seeds: Optional[dict[str, list[str]]] = None
-    if automatic_links:
+    if automatic_links and own_saves is None:
         seeds = {"prompt": [], "touched": recent_touched_paths(connection, task_id)}
         if prompt:
             try:
@@ -3440,6 +3451,7 @@ def assemble_capsule(
         describe_windows=describe_excerpt_windows,
         source_provenance_sink=source_provenance_sink,
         admit_delivery=delivery_admission,
+        scope=own_saves,
     )
 
 
@@ -7497,7 +7509,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refresh.add_argument(
         "--capsule-profile",
-        choices=("full", "navigation"),
+        choices=CAPSULE_PROFILES,
         default=None,
         help=(
             "what this capsule carries, over CONTEXT_CAPSULE_PROFILE and "

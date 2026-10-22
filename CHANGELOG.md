@@ -28,6 +28,52 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A recall capsule: navigation plus the task's own saves — 2026-10-22
+
+- `capsule_profile: recall` (also `CONTEXT_CAPSULE_PROFILE` and
+  `refresh --capsule-profile recall`) is the navigation capsule plus what the
+  task's own saves recorded, searched by the request among themselves. The
+  default stays `full`, and an explicit `retrieve` or MCP `memory_retrieve`
+  still searches everything.
+- What counts as the task's own:
+  - a finding or decision whose name is the one a result of this task gives
+    a learning (`record-result`, `native-result`, MCP
+    `memory_record_result`): the name is computed again from the task's UUID
+    and the record's type, title and sources;
+  - a finding or decision whose name starts with the task's external ID or a
+    ticket it names: a Harness draft (`<task>-finding-<hex>`), or findings an
+    agent filed as `CMS-739-review-4` while on `feature/CMS-739-…`;
+  - the Memory Bank chunk any of these was promoted to, found by the record
+    it cites, also after compaction archives the record. A saved finding is
+    resolved as it is written and no resolved finding is indexed, so for a
+    finding the chunk is what the capsule can deliver.
+- With none of them indexed the capsule is navigation's: no search and no
+  delivery record. Recorded history, path and file links, related knowledge
+  and source hints are left out; a conflict partner is still delivered.
+  Lightweight mode has no governed saves, so there `recall` is navigation.
+- `scripts/memory_outcome_ab.py`:
+  - a `recall` arm;
+  - recall sets: `recall-sources` lists first turns that answered from files
+    they read, `recall-set` checks the learning and the follow-up question
+    written for each against it, and `run` records the save on the corpus
+    branch's task through `record-result` before any arm;
+  - two regimes: the question a minute after the source turn (`next`), or at
+    the first later session whose recent files no longer show the files the
+    answer named (`later`);
+  - the recall metric: calls to the first touch of a file the save cites, or
+    to an answer naming one; `report --metric`;
+  - each run records whether the hook delivered the save;
+  - `--exclude-set` also takes a sample this tool made.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was regenerated.
+- Tests: a saved result reaches the next capsule under `recall` and the bank's
+  other matching chunk does not; another task's save does not, and without
+  its own the capsule is navigation's; records filed under the task or its
+  ticket count and a longer ticket number does not; a promoted save is still
+  found after compaction; the refresh flag selects `recall`; an explicit
+  retrieval still searches.
+
 ### A navigation-only capsule, behind an experiment switch — 2026-10-21
 
 - `capsule_profile` in `runtime.json` (or `CONTEXT_CAPSULE_PROFILE`) chooses

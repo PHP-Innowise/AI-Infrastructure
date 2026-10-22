@@ -15280,21 +15280,39 @@ class AnchorSpecificityTest(unittest.TestCase):
 
 class CapsuleProfileTest(BankFixture):
     """`capsule_profile: navigation` keeps the automatic capsule to working
-    state and recent files; the default and explicit retrieval are unchanged."""
+    state and recent files, `recall` adds the task's own saves; the default
+    and explicit retrieval are unchanged."""
+
+    LEARNING = {
+        "type": "finding",
+        "title": "Cerulean rollout waits for the cobalt authority",
+        "consequence": "The cerulean rollout ships only once the cobalt authority rule allows it.",
+        "sources": ["specs/authority.md"],
+    }
 
     def configure(self, **values: object) -> None:
         config = self.repository / "project-brain/config/runtime.json"
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(json.dumps({"mode": "governed", **values}), encoding="utf-8")
 
-    def refresh_text(self, env: Optional[dict] = None) -> str:
+    def refresh_text(self, env: Optional[dict] = None, task_id: str = "TASK-1") -> str:
         result = subprocess.run(
             [sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository), "refresh",
-             "--query", "cerulean rollout", "--task-id", "TASK-1", "--ephemeral", "--json"],
+             "--query", "cerulean rollout", "--task-id", task_id, "--ephemeral", "--json"],
             text=True, capture_output=True, env={**os.environ, **(env or {})},
         )
         self.assertEqual(0, result.returncode, result.stderr)
         return json.loads(result.stdout)["capsule_text"]
+
+    def save(self, task_id: str = "TASK-1", result_id: str = "run-1", **learning: object) -> None:
+        """What a session's result save writes: the learning, then its chunk."""
+        request = self.repository / f"{result_id}.json"
+        request.write_text(json.dumps({"learnings": [{**self.LEARNING, **learning}], "verified": True}),
+                           encoding="utf-8")
+        result = self.run_cli("record-result", "--task-id", task_id, "--result-id", result_id,
+                              "--revision", "auto", "--input", str(request), "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["created"], [item["state"] for item in json.loads(result.stdout)["records"]])
 
     def test_the_default_capsule_carries_the_matching_chunk(self) -> None:
         self.start()
@@ -15327,11 +15345,82 @@ class CapsuleProfileTest(BankFixture):
 
     def test_an_explicit_retrieval_still_searches(self) -> None:
         self.start()
-        self.configure(capsule_profile="navigation")
-        result = self.run_cli("retrieve", "cerulean rollout", "--task-id", "TASK-1", "--ephemeral", "--json")
+        for profile in ("navigation", "recall"):
+            with self.subTest(profile=profile):
+                self.configure(capsule_profile=profile)
+                result = self.run_cli("retrieve", "cerulean rollout", "--task-id", "TASK-1",
+                                      "--ephemeral", "--json")
+                self.assertEqual(0, result.returncode, result.stderr)
+                paths = [item["path"] for item in json.loads(result.stdout)["semantic"]]
+                self.assertTrue(any("MEM-20260101-aaaaaaaa" in path for path in paths), paths)
+
+    def test_recall_keeps_the_tasks_saved_result_and_drops_the_rest(self) -> None:
+        # The next session asks about what this task saved: the navigation
+        # capsule had dropped it with the rest of the document layers.
+        self.start()
+        self.configure(capsule_profile="recall", automatic_promotion=True)
+        self.save()
+        text = self.refresh_text()
+        self.assertIn("Cerulean rollout waits for the cobalt authority", text)
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
+        self.assertTrue(text.startswith("working: TASK-1"), text)
+        full = self.refresh_text({"CONTEXT_CAPSULE_PROFILE": "full"})
+        self.assertIn("MEM-20260101-aaaaaaaa", full)
+        self.assertIn("Cerulean rollout waits for the cobalt authority", full)
+        self.assertNotIn("Cerulean rollout waits for the cobalt authority",
+                         self.refresh_text({"CONTEXT_CAPSULE_PROFILE": "navigation"}))
+
+    def test_recall_leaves_another_tasks_save_out_and_is_navigation_without_its_own(self) -> None:
+        self.start()
+        self.start("TASK-2")
+        self.configure(capsule_profile="recall", automatic_promotion=True)
+        self.save(task_id="TASK-2")
+        text = self.refresh_text()
+        self.assertNotIn("Cerulean rollout waits for the cobalt authority", text)
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
+        self.assertTrue(text.startswith("working: TASK-1"), text)
+        self.assertFalse(list((self.repository / "memory-bank/local/retrieval-manifests").glob("*.json")))
+        self.assertIn("Cerulean rollout waits for the cobalt authority", self.refresh_text(task_id="TASK-2"))
+
+    def test_recall_keeps_records_filed_under_the_task_or_its_ticket(self) -> None:
+        # Agents file findings under the ticket the branch names, and a
+        # Harness draft names a learning after its task; a longer ticket
+        # number is another ticket.
+        task = "feature/CMS-739-embedded"
+        self.start(task)
+        self.configure(capsule_profile="recall")
+        for external in ("CMS-739-review-1", f"{task}-finding-0a1b2c3d", "CMS-7391-review-1"):
+            created = self.run_cli("brain-create", "finding", "--external-id", external,
+                                   "--title", f"Cerulean rollout note {external}",
+                                   "--source", "specs/authority.md", "--json")
+            self.assertEqual(0, created.returncode, created.stderr)
+        text = self.refresh_text(task_id=task)
+        self.assertIn("Cerulean rollout note CMS-739-review-1", text)
+        self.assertIn(f"Cerulean rollout note {task}-finding-0a1b2c3d", text)
+        self.assertNotIn("CMS-7391-review-1", text)
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
+
+    def test_recall_follows_a_promoted_save_into_the_archive(self) -> None:
+        # Compaction moves the resolved record and repoints the chunk's
+        # citation; the chunk is still this task's.
+        self.start()
+        self.configure(capsule_profile="recall", automatic_promotion=True)
+        self.save()
+        compacted = self.run_cli("compact", "--json")
+        self.assertEqual(0, compacted.returncode, compacted.stderr)
+        self.assertTrue(list((self.repository / "project-brain/archive/finding").glob("*.md")))
+        self.assertIn("Cerulean rollout waits for the cobalt authority", self.refresh_text())
+
+    def test_the_refresh_flag_selects_recall(self) -> None:
+        self.start()
+        self.configure(automatic_promotion=True)
+        self.save()
+        result = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
+                              "--ephemeral", "--json", "--capsule-profile", "recall")
         self.assertEqual(0, result.returncode, result.stderr)
-        paths = [item["path"] for item in json.loads(result.stdout)["semantic"]]
-        self.assertTrue(any("MEM-20260101-aaaaaaaa" in path for path in paths), paths)
+        text = json.loads(result.stdout)["capsule_text"]
+        self.assertIn("Cerulean rollout waits for the cobalt authority", text)
+        self.assertNotIn("MEM-20260101-aaaaaaaa", text)
 
     def test_an_unknown_profile_is_refused_without_failing_the_turn(self) -> None:
         # The prompt hook never fails a turn: a bad profile leaves the turn
@@ -15343,7 +15432,7 @@ class CapsuleProfileTest(BankFixture):
         self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
         self.assertIsNone(payload["capsule"])
-        self.assertTrue(any("Capsule profile must be full or navigation" in warning
+        self.assertTrue(any("Capsule profile must be full, navigation or recall" in warning
                             for warning in payload["warnings"]), payload["warnings"])
 
 
