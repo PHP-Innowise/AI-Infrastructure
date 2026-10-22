@@ -28,6 +28,36 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A session in another worktree is not served this checkout's memory — 2026-10-22
+
+A Claude Code desktop session in its own worktree - and any session after
+`EnterWorktree` - runs the hooks installed in the checkout it started from:
+`${CLAUDE_PROJECT_DIR}` stays there, and the session's own checkout arrives
+only in the input's `cwd` (code.claude.com/docs/en/worktrees, "What worktrees
+share with the main checkout"). The memory hooks took their project and branch
+from their own location, so such a session was handed the other branch's task
+as its state, its turns were recorded into that task (`turn`, `native-stop`),
+and its chats were captured as that branch's snapshots - a new worktree session
+could even claim the merge prepared for that branch's next task. In the client
+projects the accelerator is untracked, so a worktree holds no memory of its own.
+
+- `working-memory-read.sh` and `working-memory-write.sh` read `cwd` with their
+  other fields. When it is another worktree of the repository (another top
+  level, the same Git common directory), the read hook prints that memory was
+  not consulted, and the write hook records nothing; Cursor's read hook only
+  answers `{"continue": true}`. `context_continuity.py` makes the same check
+  and neither captures nor restores. A `cwd` equal to the project costs no Git
+  call; a subdirectory of the project or another repository changes nothing.
+- Tests: `OtherWorktreeTest` in `memory-bank/tests/test_hooks.py` (all three
+  hosts) and `test_a_session_in_another_worktree_neither_captures_nor_claims_a_merge`
+  fail on `a9277c8f`.
+- `hook-forge` describes the check for generated projects; the hooks README of
+  each edition names it. `scripts/token_budget.json` raises the
+  Infrastructure-Creator `body_bytes` ceiling from 299,300 to 300,000 for that
+  752-byte requirement: the skill bodies were 151 bytes under it.
+- Serving such a session with its own branch's task and files (`--checkout`
+  through the runtime's branch observations) is a separate change.
+
 ### A person's refresh asks for the full capsule on Windows too — 2026-10-22
 
 - Harness read the `CAPSULE_PROFILE_FLAG` marker through `O_NOFOLLOW`, as it

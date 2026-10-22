@@ -1586,6 +1586,106 @@ class RebaseIdentityTest(unittest.TestCase):
         self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
 
 
+class OtherWorktreeTest(unittest.TestCase):
+    """A Claude Code desktop session in its own worktree - and a session after
+    EnterWorktree - runs the hooks installed in the checkout it started from
+    and names its own checkout in the input's "cwd". The memory here follows
+    this checkout's branch: handed over, its task read as the other branch's
+    state, and that session's turns were recorded into this branch's task."""
+
+    PROMPT = "Why does the invoice total drift by a cent after the discount?"
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory(prefix="other worktree ")
+        self.addCleanup(directory.cleanup)
+        self.base = Path(directory.name)
+        self.project = self.base / "project"
+        self.project.mkdir()
+        self.calls = self.base / "argv.ndjson"
+        cli = self.project / "memory-bank/scripts/context.py"
+        cli.parent.mkdir(parents=True)
+        cli.write_text("import json, pathlib, sys\n"
+                       f"with pathlib.Path({str(self.calls)!r}).open('a') as out:\n"
+                       "    out.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                       "print('working: main-line')\n", encoding="utf-8")
+        for tool in MIRRORS:
+            hooks = self.project / MIRRORS[tool][0]
+            hooks.mkdir(parents=True)
+            for name in ("working-memory-read.sh", "working-memory-write.sh"):
+                shutil.copy(hook_path(tool, name), hooks)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_"))}
+        self.env.update(GIT_CONFIG_NOSYSTEM="1", GIT_OPTIONAL_LOCKS="0", HOME=str(self.base))
+        self.git(self.project, "init", "-q", "-b", "main-line")
+        self.git(self.project, "-c", "user.email=w@example.invalid", "-c", "user.name=W",
+                 "commit", "-q", "--allow-empty", "-m", "base")
+        # Where the desktop app puts a session's worktree, and one beside the project.
+        self.nested = self.project / ".claude/worktrees/bright fox"
+        self.beside = self.base / "beside checkout"
+        self.git(self.project, "worktree", "add", "-q", "-b", "feature/nested", str(self.nested))
+        self.git(self.project, "worktree", "add", "-q", "-b", "feature/beside", str(self.beside))
+        (self.nested / "src").mkdir()
+        (self.project / "src").mkdir()
+        self.foreign = self.base / "another repository"
+        self.foreign.mkdir()
+        self.git(self.foreign, "init", "-q")
+
+    def git(self, directory: Path, *args: str) -> None:
+        subprocess.run(["git", "-C", str(directory), *args], env=self.env, check=True,
+                       capture_output=True, timeout=HOOK_TIMEOUT)
+
+    def hook(self, tool: str, name: str, cwd: Path | None):
+        self.calls.unlink(missing_ok=True)
+        payload: dict[str, object] = {"prompt": self.PROMPT, "session_id": "session-1"}
+        if cwd is not None:
+            payload["cwd"] = str(cwd)
+        if tool == "cursor":
+            payload.update(conversation_id="conversation-1", generation_id="generation-1", cursor_version="2.9.1")
+        directory = cwd if cwd is not None and cwd.is_dir() else self.project
+        result = subprocess.run([BASH, str(self.project / MIRRORS[tool][0] / name)], input=json.dumps(payload),
+                                capture_output=True, text=True, cwd=str(directory), env=self.env,
+                                timeout=HOOK_TIMEOUT)
+        self.assertEqual(0, result.returncode, result.stderr)
+        calls = [json.loads(line) for line in self.calls.read_text(encoding="utf-8").splitlines()] \
+            if self.calls.exists() else []
+        return result.stdout, calls
+
+    def test_a_session_in_another_worktree_gets_no_capsule_of_this_branch(self) -> None:
+        for tool in MIRRORS:
+            for cwd, branch in ((self.nested, "feature/nested"), (self.nested / "src", "feature/nested"),
+                                (self.beside, "feature/beside")):
+                with self.subTest(tool=tool, cwd=cwd.name):
+                    stdout, calls = self.hook(tool, "working-memory-read.sh", cwd)
+                    self.assertEqual([], calls)
+                    if tool == "cursor":
+                        # Cursor reads only the JSON answer; the rule is left as it is.
+                        self.assertEqual('{"continue": true}\n', stdout)
+                    else:
+                        self.assertIn(f"another worktree of the repository (branch {branch})", stdout)
+                        self.assertIn("Working memory was NOT consulted this turn.", stdout)
+                        self.assertNotIn("working: main-line", stdout)
+
+    def test_a_turn_in_another_worktree_is_not_recorded_into_this_task(self) -> None:
+        for tool in MIRRORS:
+            for cwd in (self.nested, self.beside):
+                with self.subTest(tool=tool, cwd=cwd.name):
+                    _, calls = self.hook(tool, "working-memory-write.sh", cwd)
+                    self.assertEqual([], [args for args in calls if args and args[0] == "turn"])
+
+    def test_this_checkout_its_subdirectories_and_other_repositories_keep_their_memory(self) -> None:
+        for tool in MIRRORS:
+            for cwd in (None, self.project, self.project / "src", self.foreign, self.base / "absent"):
+                with self.subTest(tool=tool, cwd=None if cwd is None else cwd.name):
+                    _, calls = self.hook(tool, "working-memory-read.sh", cwd)
+                    refresh = [args for args in calls if args and args[0] == "refresh"]
+                    self.assertEqual(1, len(refresh), calls)
+                    self.assertEqual("main-line", refresh[0][refresh[0].index("--task-id") + 1])
+                    _, calls = self.hook(tool, "working-memory-write.sh", cwd)
+                    turns = [args for args in calls if args and args[0] == "turn"]
+                    self.assertEqual(1, len(turns), calls)
+                    self.assertEqual("main-line", turns[0][turns[0].index("--task-id") + 1])
+
+
 @unittest.skipUnless(os.name == "posix", "Anchored Cursor custody requires POSIX")
 class CursorPromptHookTest(unittest.TestCase):
     """Cursor's beforeSubmitPrompt hook: the prompt's capsule goes into the rule.

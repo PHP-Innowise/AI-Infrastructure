@@ -119,13 +119,48 @@ active = (type(payload.get("loop_count")) is int and payload["loop_count"] > 0
 transcript = payload.get("transcript_path", "")
 if not isinstance(transcript, str) or len(transcript) > 4096 or "\n" in transcript or not os.path.isabs(transcript):
     transcript = ""
-sys.stdout.write(("1" if active else "0") + "\n" + transcript + "\n.")
+cwd = payload.get("cwd", "")
+if not isinstance(cwd, str) or len(cwd) > 4096 or "\n" in cwd or "\0" in cwd or not os.path.isabs(cwd):
+    cwd = ""
+sys.stdout.write(("1" if active else "0") + "\n" + transcript + "\n" + cwd + "\n.")
 ' --host claude 2>/dev/null)
 MEMORY_RECOVERY=${HOOK_FIELDS%%$'\n'*}
 TRANSCRIPT=
+SESSION_DIR=
 case "$HOOK_FIELDS" in
-  *$'\n'*$'\n'*) TRANSCRIPT=${HOOK_FIELDS#*$'\n'}; TRANSCRIPT=${TRANSCRIPT%%$'\n'*} ;;
+  *$'\n'*$'\n'*$'\n'*)
+    TRANSCRIPT=${HOOK_FIELDS#*$'\n'}
+    SESSION_DIR=${TRANSCRIPT#*$'\n'}; SESSION_DIR=${SESSION_DIR%%$'\n'*}
+    TRANSCRIPT=${TRANSCRIPT%%$'\n'*} ;;
 esac
+
+# A Claude Code desktop session in its own worktree - and any session after
+# EnterWorktree - runs the hooks of the checkout they are installed in and
+# names its own checkout in the input's "cwd". This checkout's task is its
+# own branch's: a turn recorded from another checkout of the same repository
+# would land in a task that session never worked on, so none is recorded. A
+# subdirectory of this checkout, or a directory of another repository,
+# changes nothing.
+checkout_identity() {
+  local directory=$1 output top common
+  output=$(git -C "$directory" rev-parse --show-toplevel --git-common-dir 2>/dev/null) || return 1
+  case "$output" in *$'\n'*) ;; *) return 1 ;; esac
+  top=${output%%$'\n'*}
+  common=${output#*$'\n'}
+  case "$common" in /*|[A-Za-z]:[\\/]*) ;; *) common="$directory/$common" ;; esac
+  top=$(cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  common=$(cd -- "$common" 2>/dev/null && pwd -P) || return 1
+  printf '%s\n%s' "$top" "$common"
+}
+in_other_worktree() {
+  local session=$1 mine theirs
+  [ -n "$session" ] && [ "$session" != "$PROJECT_DIR" ] && [ -d "$session" ] || return 1
+  theirs=$(checkout_identity "$session") || return 1
+  mine=$(checkout_identity "$PROJECT_DIR") || return 1
+  [ "${theirs%%$'\n'*}" != "${mine%%$'\n'*}" ] && [ "${theirs#*$'\n'}" = "${mine#*$'\n'}" ]
+}
+in_other_worktree "$SESSION_DIR" && exit 0
+
 TURN_ARGUMENTS=(turn --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER")
 [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && TURN_ARGUMENTS+=(--transcript "$TRANSCRIPT")
 

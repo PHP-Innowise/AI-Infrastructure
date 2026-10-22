@@ -350,6 +350,48 @@ class ContextContinuityTest(unittest.TestCase):
         listing = json.loads(self.invoke("codex", "list").stdout)
         self.assertNotIn("ignored", json.dumps(listing))
 
+    def test_a_session_in_another_worktree_neither_captures_nor_claims_a_merge(self) -> None:
+        """A Claude Code desktop session in its own worktree - and a session after
+        EnterWorktree - runs the hooks of the checkout it started from and names
+        its own checkout in "cwd". Its chat is another branch's, and the merge
+        prepared for this branch's next task is not its to take."""
+        nested = self.root / ".claude" / "worktrees" / "bright fox"
+        beside = Path(self.tmp.name + " beside")
+        self.addCleanup(shutil.rmtree, beside, True)
+        environment = clean_environment()
+        for path, branch in ((nested, "feature/nested"), (beside, "feature/beside")):
+            subprocess.run(["git", "-C", str(self.root), "worktree", "add", "-q", "-b", branch, str(path)],
+                           check=True, capture_output=True, env=environment)
+        (nested / "src").mkdir()
+        self.invoke("claude", "capture", {"session_id": "one", "prompt": "First chat."})
+        self.invoke("claude", "capture", {"session_id": "two", "prompt": "Second chat."})
+        self.assertEqual(0, self.prepare("claude:one", "claude:two", host="claude").returncode)
+        pending = runtime._pending_path(self.root, runtime._branch(self.root), "claude")
+        self.assertTrue(pending.exists())
+        before = self.snapshots()
+        for cwd in (nested, nested / "src", beside):
+            with self.subTest(cwd=cwd.name):
+                for event in ("UserPromptSubmit", "Stop"):
+                    result = self.invoke("claude", "hook", {"hook_event_name": event, "session_id": "elsewhere",
+                                                            "cwd": str(cwd), "prompt": "Elsewhere.",
+                                                            "last_assistant_message": "Elsewhere."})
+                    self.assertEqual((0, b"", b""), (result.returncode, result.stdout, result.stderr))
+                started = self.invoke("claude", "hook", {"hook_event_name": "SessionStart", "session_id": "elsewhere-new",
+                                                         "cwd": str(cwd), "source": "startup"})
+                self.assertEqual((0, b""), (started.returncode, started.stdout))
+                self.assertEqual(before, self.snapshots())
+                self.assertTrue(pending.exists())
+        # This checkout, from any directory below it, still captures and receives its merge.
+        (self.root / "src").mkdir()
+        here = self.invoke("claude", "hook", {"hook_event_name": "UserPromptSubmit", "session_id": "here",
+                                              "cwd": str(self.root / "src"), "prompt": "Here."})
+        self.assertEqual(0, here.returncode)
+        self.assertEqual(len(before) + 1, len(self.snapshots()))
+        started = self.invoke("claude", "hook", {"hook_event_name": "SessionStart", "session_id": "target",
+                                                 "cwd": str(self.root), "source": "startup"})
+        self.assertIn("First chat.", json.loads(started.stdout)["hookSpecificOutput"]["additionalContext"])
+        self.assertFalse(pending.exists())
+
     def test_disabled_environment_neither_captures_nor_restores(self) -> None:
         environment = clean_environment(CONTEXT_CONTINUITY_DISABLED="1")
         result = self.invoke("codex", "capture", {"session_id": "a", "last_assistant_message": "Visible."}, environment=environment)

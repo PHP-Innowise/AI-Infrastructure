@@ -4,6 +4,19 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Memory stands down for a session in another worktree — 2026-10-22
+
+- hook-forge: a Claude Code desktop session in its own worktree, and any
+  session after `EnterWorktree`, runs the hooks of the checkout it started from
+  and names its own checkout only in the payload's `cwd`. The generated
+  working-memory hooks read `cwd`; when it is another worktree of the
+  repository, the read hook says memory was not consulted instead of handing
+  over this branch's task, and the write hook records no turn.
+- memory-seed carries `context_continuity.py` with the same check: such a
+  session neither captures a snapshot nor claims a merge prepared for this
+  branch.
+- the policy lock and mirrors were regenerated for the changed skill and assets.
+
 ### Seeded projects ship the recall capsule — 2026-10-22
 
 - memory-seed's `runtime.json.template` sets `capsule_profile: recall`, as
