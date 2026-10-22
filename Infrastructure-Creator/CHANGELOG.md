@@ -4,6 +4,15 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded memory serves a chunk written today west of UTC — 2026-10-22
+
+- memory-seed's `validate.py` takes a date as in the future only past today
+  by both the local and the UTC calendar, and `context.py bank-quarantine`
+  writes the UTC date: west of UTC every evening the chunks the runtime
+  promoted or re-verified were "in the future" and left retrieval until local
+  midnight. The policy lock and mirrors were regenerated for the changed
+  assets.
+
 ### Seeded memory reads a Windows session's PowerShell commands — 2026-10-22
 
 - memory-seed's `context.py` reads Claude Code's `PowerShell` tool calls for

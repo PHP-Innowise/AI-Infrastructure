@@ -12,7 +12,7 @@ import re
 import subprocess
 import sys
 import threading
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -206,6 +206,19 @@ def require_date(metadata: dict, key: str) -> date:
         raise ValidationError(f"{key} must use YYYY-MM-DD") from error
 
 
+def latest_today() -> date:
+    """Today by whichever calendar is further ahead: this machine's or UTC.
+
+    The runtime writes chunk dates as UTC calendar dates - promotion,
+    re-verification and supersession do, and an ID is minted from today's UTC
+    date - while a person editing by hand writes the local one. West of UTC
+    the evening's UTC date is the local tomorrow: judged by the local calendar
+    alone, every chunk the runtime wrote then was "in the future", failed
+    validation and left retrieval until local midnight.
+    """
+    return max(date.today(), datetime.now(timezone.utc).date())
+
+
 def memory_temporal_reason(metadata: dict) -> Optional[str]:
     """Current expiry of declared bounds, using one calendar observation.
 
@@ -328,7 +341,7 @@ def validate_metadata(
     review_after = require_date(metadata, "review_after")
     if created > last_verified:
         raise ValidationError("created must not be later than last_verified")
-    if last_verified > date.today():
+    if last_verified > latest_today():
         raise ValidationError("last_verified must not be in the future")
     if review_after < last_verified:
         raise ValidationError("review_after must not be earlier than last_verified")

@@ -9945,7 +9945,8 @@ def _command() -> int:
                 result = retire_chunk(
                     repository,
                     arguments.memory_id,
-                    valid_to=date.today().isoformat(),
+                    # A UTC calendar date, like every date the runtime writes.
+                    valid_to=datetime.now(timezone.utc).date().isoformat(),
                     reason=arguments.reason or "quarantined",
                 )
                 if arguments.json:

@@ -102,6 +102,15 @@ class DirectQueryPrivacyBoundaryTest(unittest.TestCase):
                             )
 
 
+def calendar_shifted(days: int) -> dict[str, str] | None:
+    """An environment whose local date is a day after (+1) or before (-1)
+    the UTC date, at any hour: a POSIX TZ offset runs to 24 hours. Elsewhere
+    there is no such offset, and the caller skips."""
+    if os.name != "posix":
+        return None
+    return {**os.environ, "TZ": "XXX-24" if days > 0 else "XXX+24"}
+
+
 class RuntimeHarness(unittest.TestCase):
     """Temporary governed repository shared by the runtime test classes."""
 
@@ -131,7 +140,9 @@ class RuntimeHarness(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_cli(
+        self, *arguments: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
@@ -142,6 +153,7 @@ class RuntimeHarness(unittest.TestCase):
             ],
             text=True,
             capture_output=True,
+            env=env,
         )
 
     def run_main(self, *arguments: str) -> tuple[int, str, str]:
@@ -5919,9 +5931,11 @@ class ProvenanceAuditTest(BankFixture):
         )
 
     def test_quarantine_stops_serving_and_closes_validity(self) -> None:
+        # East of UTC after midnight the local date runs a day ahead; the
+        # date written is the UTC one, as every other date the runtime writes.
         result = self.run_cli(
             "bank-quarantine", "--id", "MEM-20260101-aaaaaaaa",
-            "--reason", "suspected poisoning", "--json",
+            "--reason", "suspected poisoning", "--json", env=calendar_shifted(+1),
         )
         self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
@@ -6130,6 +6144,45 @@ class ChunkSourceDigestTest(BankFixture):
             [item["path"] for item in capsule["selected"]],
             capsule,
         )
+
+
+class ChunkCalendarTest(BankFixture):
+    """Chunk dates are UTC calendar dates - promotion and re-verification
+    write them so - and west of UTC the evening's UTC date is the local
+    tomorrow. Judged by the local calendar, such a chunk was "in the future":
+    it failed validation and left retrieval until local midnight."""
+
+    def test_a_chunk_dated_today_in_utc_is_served_where_it_is_still_yesterday(self) -> None:
+        behind = calendar_shifted(-1)
+        if behind is None:
+            self.skipTest("the local calendar is set through a POSIX TZ offset")
+        # The fixture's chunk was verified today by the UTC calendar.
+        self.assertEqual(0, self.run_cli("index", "--json", env=behind).returncode)
+        started = self.run_cli(
+            "start", "--task-id", "TASK-WEST", "--goal", "Apply the cobalt authority rule.",
+            "--source", "specs/authority.md", "--json", env=behind,
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-WEST",
+                "--ephemeral", "--json", env=behind,
+            ).stdout
+        )
+        self.assertIn(
+            "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md",
+            [item["path"] for item in capsule["selected"]],
+            capsule,
+        )
+        # A date ahead of both calendars is still refused.
+        later = (datetime.now(timezone.utc).date() + timedelta(days=2)).isoformat()
+        future = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "later-rule", "The cobalt rollout is later.",
+            last_verified=later, review_after=later,
+        )
+        metadata = json.loads(future.read_text(encoding="utf-8")[4:].split("\n---\n", 1)[0])
+        with self.assertRaisesRegex(brain.BankValidationError, "must not be in the future"):
+            brain.validate_bank_metadata(future, metadata, self.repository)
 
 
 class OverdueBankWriteTest(BankFixture):

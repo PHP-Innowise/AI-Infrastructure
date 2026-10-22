@@ -28,6 +28,31 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A chunk written today is served west of UTC — 2026-10-22
+
+- The runtime writes chunk dates as UTC calendar dates - promotion,
+  re-verification and supersession do, and an ID is minted from today's UTC
+  date - but `validate.py` judged `last_verified` against the machine's local
+  date. West of UTC the UTC date is the local tomorrow every evening (in New
+  York from 20:00, in San Francisco from 17:00, summer time): every chunk
+  promoted or re-verified then was "in the future", failed validation and
+  left retrieval until local midnight. With the local calendar a day behind
+  UTC, 120 of the 722 tests in `project-brain/tests/test_runtime.py` failed;
+  now none does. A date is in the future only past today by both calendars
+  (`validate.latest_today`).
+- `bank-quarantine` dated its `valid_to` by the local calendar, unlike every
+  other date the runtime writes; east of UTC after midnight that was the UTC
+  tomorrow, and `test_quarantine_stops_serving_and_closes_validity` failed
+  there every night between local and UTC midnight (00:00-03:00 in EEST,
+  where the night check of this branch met it). It writes the UTC date
+  now, and the test runs with the local calendar a day ahead
+  (`calendar_shifted`, a 24-hour POSIX TZ offset), so it fails on a
+  regression at any hour on a POSIX runner.
+- `ChunkCalendarTest` and the quarantine test fail on `256c1c4b`.
+- Not changed: the overdue-review, past-`valid_to` and terminal-chunk
+  comparisons still read the local date. They move a boundary by hours once
+  in a chunk's life rather than hiding the day's new chunks.
+
 ### A Windows session's PowerShell commands name their files — 2026-10-22
 
 - Claude Code can run shell commands through its `PowerShell` tool on
