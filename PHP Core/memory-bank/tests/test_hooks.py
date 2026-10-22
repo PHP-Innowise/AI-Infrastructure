@@ -1439,6 +1439,49 @@ class PythonResolutionTest(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("git"), "Git")
+class ReadOnlyStateTest(unittest.TestCase):
+    """A state directory the hooks cannot write to costs its lines, silently.
+
+    The prompt hook appends a health line and the Stop hook a journal line
+    with `>> file 2>/dev/null`; bash opens redirections left to right, so a
+    file it could not open printed "Permission denied" before stderr went to
+    /dev/null - on every turn of a project whose memory-bank/local is
+    read-only."""
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root writes through read-only modes")
+    def test_the_memory_hooks_lose_their_lines_quietly(self) -> None:
+        for tool in ("claude", "codex", "cursor"):
+            for name in ("working-memory-read.sh", "working-memory-write.sh"):
+                with self.subTest(tool=tool, hook=name):
+                    temporary = tempfile.TemporaryDirectory(prefix="read-only-state-")
+                    self.addCleanup(temporary.cleanup)
+                    project = Path(temporary.name)
+                    hooks = project / MIRRORS[tool][0]
+                    hooks.mkdir(parents=True)
+                    shutil.copy(hook_path(tool, name), hooks)
+                    scripts = project / "memory-bank/scripts"
+                    scripts.mkdir(parents=True)
+                    (scripts / "context.py").write_text("print('working: TASK-RO')\n", encoding="utf-8")
+                    (scripts / "native_results.py").write_text("", encoding="utf-8")
+                    local = project / "memory-bank/local"
+                    local.mkdir()
+                    local.chmod(0o555)
+                    self.addCleanup(local.chmod, 0o755)
+                    payload = ({"conversation_id": "ro", "hook_event_name": "stop", "status": "completed"}
+                               if tool == "cursor" and name == "working-memory-write.sh"
+                               else {"session_id": "ro", "prompt": "cobalt allocation",
+                                     "hook_event_name": "Stop" if name == "working-memory-write.sh"
+                                     else "UserPromptSubmit"})
+                    result = subprocess.run(
+                        [BASH, str(hooks / name)], input=json.dumps(payload), capture_output=True, text=True,
+                        cwd=str(project), timeout=HOOK_TIMEOUT,
+                        env={**os.environ, "CONTEXT_TASK_ID": "TASK-RO", "CONTEXT_CAPSULE_DELIVERED": ""},
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertNotIn("Permission denied", result.stderr)
+                    self.assertEqual([], list(local.iterdir()))
+
+
 class RebaseIdentityTest(unittest.TestCase):
     """A rebase detaches HEAD on the commits it replays, and the branch being
     rebased is still the work in hand - often the conflict a turn asks about.

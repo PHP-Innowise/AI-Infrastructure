@@ -4,6 +4,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### A generated Stop hook's journal line is lost quietly — 2026-10-23
+
+- The hook-forge journal fragment appended its line with `>> file
+  2>/dev/null`. A project whose `memory-bank/local` is read-only then
+  printed "Permission denied" on every Stop, because bash opens the file
+  before stderr reaches `/dev/null`. The fragment, and the line
+  `validate_generated.py` requires verbatim, now redirect stderr first, as
+  the editions' hooks do (root `CHANGELOG.md`, same day).
+  `test_native_journal_generator.py` finds the line by its file name.
+
 ### A generated project's own files are not taken for a task's work — 2026-10-23
 
 - The seeded memory runtime (memory-seed) reads `.infra-manifest.json` where

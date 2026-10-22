@@ -28,6 +28,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A memory line the hooks cannot write is lost quietly — 2026-10-23
+
+- Why: the prompt hook appends a health line and the Stop hook a journal line
+  with `>> file 2>/dev/null`. Bash opens redirections left to right, so in a
+  project whose `memory-bank/local` was read-only, every turn printed
+  "Permission denied" before stderr reached `/dev/null`. The rehearsal on a
+  copy of a client showed it; the hooks themselves still exited 0 and served.
+- Both lines now redirect stderr first. The Claude Code, Codex and Cursor
+  copies of `working-memory-read.sh` and `working-memory-write.sh` change in
+  every edition, through `scripts/core_sync.py --write` and the mirrors. The
+  generator's hook-forge fragment and the verifier line it is held to
+  (`validate_generated.py`) take the same order, so generated Stop hooks
+  stay quiet too; the generator's policy lock was rewritten.
+- Test (`ReadOnlyStateTest` in `test_hooks.py`): with a read-only
+  `memory-bank/local`, both hooks of each host exit 0, print no "Permission
+  denied" and write nothing. It fails without the change; it is skipped
+  under root.
+
 ### The cost of the save after every answer, read from the transcripts — 2026-10-23
 
 - Why: the native journal counts the Stop hook's save requests, but whether

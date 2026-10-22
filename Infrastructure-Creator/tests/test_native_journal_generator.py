@@ -328,7 +328,8 @@ class VerifierRequiresTheJournalTest(FragmentCase):
     def test_rewritten_journals_are_rejected(self) -> None:
         base = self.hook()
         self.assertTrue(journal_contract(base, "claude"))
-        write = next(line for line in base.splitlines() if "native-results.ndjson\" 2>" in line)
+        write = next(line for line in base.splitlines()
+                     if line.lstrip().startswith("printf") and '>> "$directory/native-results.ndjson"' in line)
         exited = "  native_journal '\"event\":\"exited\",\"status\":'\"$NATIVE_STATUS\"\n"
         skipped = "  native_journal '\"event\":\"skipped\",\"code\":\"capsule-delivered\"'\n"
         elif_arm = 'elif [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then\n'

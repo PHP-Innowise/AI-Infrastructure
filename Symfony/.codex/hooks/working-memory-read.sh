@@ -263,9 +263,11 @@ if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
   done
 fi
 if [ -n "$HEALTH_DIR" ] && { [ -d "$HEALTH_DIR" ] || mkdir -p "$HEALTH_DIR" 2>/dev/null; }; then
+  # 2>/dev/null before >>: bash opens redirections left to right, and a file
+  # it cannot open (a read-only state directory) printed its error first.
   printf '{"at":"%s","hook_status":%s,"source":"hook"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOOK_STATUS" \
-    >> "$HEALTH_DIR/refresh-health.ndjson" 2>/dev/null || true
+    2>/dev/null >> "$HEALTH_DIR/refresh-health.ndjson" || true
 fi
 
 if [ -z "$REPORT" ]; then

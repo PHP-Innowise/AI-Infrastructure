@@ -184,7 +184,7 @@ native_journal() {
     [ -L "$entry" ] && return 0
   done
   { [ -d "$directory" ] || mkdir -p "$directory" 2>/dev/null; } || return 0
-  printf '{"at":"%s","host":"%s","stage":"stop-hook",%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${NATIVE_HOST[1]}" "$1" >> "$directory/native-results.ndjson" 2>/dev/null || true
+  printf '{"at":"%s","host":"%s","stage":"stop-hook",%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${NATIVE_HOST[1]}" "$1" 2>/dev/null >> "$directory/native-results.ndjson" || true
 }
 if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] && [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
   if command -v timeout > /dev/null 2>&1; then
