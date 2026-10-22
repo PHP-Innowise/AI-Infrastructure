@@ -483,7 +483,15 @@ report them too.
   agent; and, as a baseline, documents of those kinds the agent opened that
   the capsule did not deliver. From the native result journal, per host: the
   automatic save funnel from prompt hook run to promoted chunk, and the codes
-  of every skip, refusal and failure.
+  of every skip, refusal and failure. From the transcripts, per host: how many
+  save requests the Stop hook made and, as medians, the seconds and output
+  tokens from each request to the next human prompt, beside those of the
+  answer before it. The journal counts requests, but only the transcript
+  shows what each one cost. A request is found by its
+  `INTERNAL_NATIVE_MEMORY_RESULT <token>` marker wherever the host recorded
+  it, never in the agent's own text. On 21 Codex runs (16-19 October 2026) it
+  was +9.9 s and +383 output tokens after a 17.5 s answer of 701 tokens. The
+  team decides on `native_result_request` from that line.
 
 `realized` records a tool's path references without checking whether the tool
 successfully read that file; mentions are textual matches. Neither measures

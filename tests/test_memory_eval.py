@@ -2501,5 +2501,69 @@ class OptionalRuntimeDeadlineTests(unittest.TestCase):
         self.assertEqual(0, result["exit"])
         self.assertEqual(["refresh", "--json"], json.loads(result["stdout"]))
 
+
+class SaveContinuationCostTest(unittest.TestCase):
+    """What the Stop hook's save request after every answer costs, read from
+    the transcripts: the journal counts requests, only a transcript has the
+    time and the tokens."""
+
+    TOKEN = "INTERNAL_NATIVE_MEMORY_RESULT 0123456789abcdef0123456789abcdef"
+
+    def write_lines(self, records: List[Dict[str, Any]]) -> Path:
+        directory = tempfile.TemporaryDirectory(prefix="continuation-cost-")
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "session.jsonl"
+        path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        return path
+
+    @staticmethod
+    def at(seconds: int) -> str:
+        return f"2026-10-23T10:{seconds // 60:02d}:{seconds % 60:02d}.000Z"
+
+    def test_a_codex_request_costs_the_time_and_tokens_to_the_next_prompt(self) -> None:
+        def message(seconds: int, role: str, text: str) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "response_item",
+                    "payload": {"type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+
+        def tokens(seconds: int, output: int) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": {"output_tokens": output}}}}
+
+        path = self.write_lines([
+            tokens(0, 100), message(1, "user", "Where is the report cache cleared?"),
+            message(15, "assistant", "In ReportService."), tokens(20, 700),
+            message(21, "user", self.TOKEN + "\nThis is an internal continuation"),
+            message(25, "assistant", "Saved; the cache is cleared in ReportService."), tokens(31, 1100),
+            message(40, "user", "Next question"), message(45, "assistant", "Mentions " + self.TOKEN),
+            tokens(46, 1300),
+        ])
+        [cost] = memory_eval.continuation_costs(path, "codex")
+        self.assertEqual({"answer_seconds": 20.0, "answer_output_tokens": 600,
+                          "save_seconds": 10.0, "save_output_tokens": 400}, cost)
+
+    def test_a_claude_request_counts_each_response_once(self) -> None:
+        def assistant(seconds: int, identifier: str, output: int) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "assistant",
+                    "message": {"id": identifier, "role": "assistant", "content": [{"type": "text", "text": "x"}],
+                                "usage": {"output_tokens": output}}}
+
+        path = self.write_lines([
+            {"timestamp": self.at(0), "type": "user", "message": {"role": "user", "content": "Explain the import"}},
+            assistant(10, "msg-1", 500), assistant(11, "msg-1", 500),
+            {"timestamp": self.at(12), "type": "attachment",
+             "attachment": {"type": "hook_blocking_error", "hookEvent": "Stop", "blockingError": self.TOKEN}},
+            assistant(18, "msg-2", 300), assistant(19, "msg-2", 300),
+            {"timestamp": self.at(30), "type": "user", "message": {"role": "user", "content": "Thanks"}},
+        ])
+        [cost] = memory_eval.continuation_costs(path, "claude")
+        self.assertEqual({"answer_seconds": 12.0, "answer_output_tokens": 500,
+                          "save_seconds": 7.0, "save_output_tokens": 300}, cost)
+        summary = memory_eval.continuation_summary([cost])
+        self.assertEqual((1, 0.58), (summary["requests"], summary["time_share"]))
+        self.assertEqual({"requests": 0}, memory_eval.continuation_summary([]))
+        self.assertIn("1 request(s): +7.0 s and +300 output tokens",
+                      "\n".join(memory_eval.format_continuations({"claude": summary,
+                                                                   "codex": memory_eval.continuation_summary([])})))
+
 if __name__ == "__main__":
     unittest.main()

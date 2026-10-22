@@ -71,6 +71,7 @@ import math
 import os
 import platform
 import re
+import statistics
 import shutil
 import sqlite3
 import stat
@@ -3391,6 +3392,90 @@ def native_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
     }
 
 
+# The Stop hook's save request opens with this marker and its challenge's token.
+NATIVE_CONTINUATION = re.compile(r"INTERNAL_NATIVE_MEMORY_RESULT [0-9a-f]{32}")
+
+
+def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
+    """What each native save continuation in one transcript cost.
+
+    In governed mode the Stop hook asks the agent, after every answer, to save
+    its result: one more model call. The journal counts the requests; only
+    the transcript says what they cost. For each request this reads the time
+    and the output tokens from it to the next human prompt (the save, and the
+    answer the agent repeats), beside the same for the answer before it, from
+    its prompt to the request. Claude Code's output tokens are each response's
+    `usage` (one response spans several records); Codex's, the cumulative
+    `token_count`. A request is found by its marker wherever the host records
+    it, never in the agent's own messages.
+    """
+    costs: List[Dict[str, Any]] = []
+    prompt: Optional[Tuple[datetime, int]] = None
+    pending: Optional[Dict[str, Any]] = None
+    last: Optional[datetime] = None
+    output = 0
+    seen: set = set()
+
+    def close() -> None:
+        if pending is not None and last is not None:
+            pending["save_seconds"] = max(0.0, (last - pending["at"]).total_seconds())
+            pending["save_output_tokens"] = output - pending["output_at"]
+            costs.append(pending)
+
+    for record in read_records(path):
+        at = parse_instant(record.get("timestamp"))
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        if host == "codex":
+            if payload.get("type") == "token_count" and isinstance(payload.get("info"), dict):
+                total = payload["info"].get("total_token_usage")
+                if isinstance(total, dict) and isinstance(total.get("output_tokens"), int):
+                    output = total["output_tokens"]
+            role = payload.get("role") if payload.get("type") == "message" else None
+            text = json.dumps(payload.get("content")) if role else ""
+            human = role == "user" and not NATIVE_CONTINUATION.search(text) and not \
+                "".join(part.get("text", "") for part in payload.get("content") or []
+                        if isinstance(part, dict)).lstrip().startswith("<")
+            request = role == "user" and bool(NATIVE_CONTINUATION.search(text))
+        else:
+            message = record.get("message") if isinstance(record.get("message"), dict) else {}
+            if record.get("type") == "assistant":
+                usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+                identifier = message.get("id")
+                if identifier not in seen and isinstance(usage.get("output_tokens"), int):
+                    seen.add(identifier)
+                    output += usage["output_tokens"]
+            human = (record.get("type") == "user" and not record.get("toolUseResult")
+                     and not record.get("isMeta") and isinstance(message.get("content"), str)
+                     and not NATIVE_CONTINUATION.search(message["content"]))
+            request = record.get("type") != "assistant" and bool(NATIVE_CONTINUATION.search(json.dumps(record)))
+        if at is None:
+            continue
+        if human:
+            close()
+            pending, prompt = None, (at, output)
+        elif request and pending is None and prompt is not None:
+            pending = {"at": at, "output_at": output,
+                       "answer_seconds": max(0.0, (at - prompt[0]).total_seconds()),
+                       "answer_output_tokens": output - prompt[1]}
+        last = at
+    close()
+    return [{key: value for key, value in cost.items() if key not in ("at", "output_at")} for cost in costs]
+
+
+def continuation_summary(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not costs:
+        return {"requests": 0}
+
+    def median(key: str) -> float:
+        return round(statistics.median(cost[key] for cost in costs), 1)
+
+    shares = [cost["save_seconds"] / cost["answer_seconds"] for cost in costs if cost["answer_seconds"] > 0]
+    return {"requests": len(costs), "save_seconds": median("save_seconds"),
+            "save_output_tokens": median("save_output_tokens"),
+            "answer_seconds": median("answer_seconds"), "answer_output_tokens": median("answer_output_tokens"),
+            "time_share": round(statistics.median(shares), 2) if shares else None}
+
+
 def command_realized(arguments: argparse.Namespace) -> int:
     project = Path(arguments.project).expanduser().resolve()
     if not project.is_dir():
@@ -3433,6 +3518,10 @@ def command_realized(arguments: argparse.Namespace) -> int:
         "codex": {"transcripts": len(codex_used), **tally(codex_all, paths)},
         "total": {"transcripts": len(claude_used) + len(codex_used), **tally(claude_all + codex_all)},
         "native": native_funnel(state, since),
+        "continuations": {
+            "claude": continuation_summary([cost for path in claude_used for cost in continuation_costs(path, "claude")]),
+            "codex": continuation_summary([cost for path in codex_used for cost in continuation_costs(path, "codex")]),
+        },
     }
     if paths is not None:
         report["paths"] = {
@@ -3482,6 +3571,7 @@ def format_realized(report: Dict[str, Any]) -> str:
         if counts["delivered"]:
             lines.append(f"  {kind:<10} {counts['delivered']:>6} {counts['touched']:>6} {counts['mentioned']:>6}")
     lines.extend(format_native(report["native"]))
+    lines.extend(format_continuations(report["continuations"]))
     if "paths" in report:
         lines.append("")
         lines.append("by path: delivered / touched / mentioned")
@@ -3511,6 +3601,19 @@ NATIVE_ROWS = (
     ("learnings written", "learnings_written"),
     ("chunks promoted", "chunks_promoted"),
 )
+
+
+def format_continuations(continuations: Dict[str, Any]) -> List[str]:
+    lines = ["", "Native save requests in the transcripts (median per request):"]
+    for host, summary in continuations.items():
+        if not summary["requests"]:
+            lines.append(f"  {host:<7} none")
+            continue
+        share = f", {summary['time_share']:.0%} of the answer's time" if summary["time_share"] is not None else ""
+        lines.append(f"  {host:<7} {summary['requests']} request(s): +{summary['save_seconds']} s and"
+                     f" +{summary['save_output_tokens']:.0f} output tokens after an answer of"
+                     f" {summary['answer_seconds']} s and {summary['answer_output_tokens']:.0f} tokens{share}")
+    return lines
 
 
 def format_native(native: Dict[str, Any]) -> List[str]:

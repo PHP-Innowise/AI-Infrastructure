@@ -28,6 +28,27 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The cost of the save after every answer, read from the transcripts — 2026-10-23
+
+- Why: the native journal counts the Stop hook's save requests, but whether
+  to keep `native_result_request: every-turn` turns on what each request
+  costs. Only the session transcript shows that, and nothing read it.
+- `scripts/memory_eval.py realized` also prints, per host, the save requests
+  in the project's Claude Code transcripts and Codex rollouts. As medians:
+  the seconds and output tokens from each request to the next human prompt,
+  and those of the answer before it.
+  - A request is found by its `INTERNAL_NATIVE_MEMORY_RESULT <token>` marker
+    wherever the host recorded it, never in the agent's own messages.
+  - Claude Code's tokens are each response's `usage`, counted once per
+    response; Codex's are the cumulative `token_count`.
+  - `--json` carries the same under `continuations`.
+  - On the 21 Codex runs of 16-19 October that made one request each: +9.9 s
+    and +383 output tokens after a 17.5 s answer of 701 tokens.
+- Tests (`SaveContinuationCostTest` in `tests/test_memory_eval.py`): a Codex
+  request and a Claude Code request cost exactly the time and the tokens to
+  the next prompt; a response split into several records counts once; a
+  mention of the marker in a later answer is not a request.
+
 ### A generated project's manifest marks its accelerator files too — 2026-10-23
 
 - Why: a checkpoint leaves out the accelerator's own untracked files by the
