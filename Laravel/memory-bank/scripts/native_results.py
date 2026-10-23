@@ -181,6 +181,70 @@ def configured_request(root):
     return value
 
 
+# How the continuation ends once the save is made. A headless run - `codex
+# exec`, `claude -p` - hands its caller only the final message, so there the
+# agent returns its answer again. In a session a person reads as it goes the
+# answer is already on screen above the continuation, and the repeat doubled
+# it: on nine Codex runs the message after the save was 93 % of the answer's
+# length, 21 % before the repeat was asked for. `auto`, the default, ends a
+# session its host marks as attended with at most one short line and repeats
+# everywhere else; `repeat` always repeats, `brief` never does.
+# CONTEXT_NATIVE_RESULT_ANSWER overrides `native_result_answer` in runtime.json.
+NATIVE_ANSWERS = ('auto', 'repeat', 'brief')
+# Claude Code marks the processes of a session a person attends with
+# CLAUDE_CODE_SESSION_ATTENDED=1. A `claude -p` started from such a session
+# inherits its entrypoint, but it is a child session, which Claude Code never
+# marks attended. The entrypoint then names an interface that shows the whole
+# conversation; Slack and Teams sessions are attended too, but may show less.
+ATTENDED_ENTRYPOINTS = frozenset({'cli', 'claude-vscode', 'claude-desktop'})
+# Codex writes where a session came from into the first line of its rollout:
+# `vscode` for the app, the IDE extension and the terminal UI (`cli` before
+# them), `exec` for `codex exec`, an object for a subagent.
+ATTENDED_SOURCES = frozenset({'cli', 'vscode'})
+ROLLOUT_HEAD_BYTES = 256 * 1024
+
+
+def configured_answer(root):
+    """The native result answer setting, or BrainError for an unknown one."""
+    value = (os.environ.get('CONTEXT_NATIVE_RESULT_ANSWER')
+             or load_config(root).get('native_result_answer') or 'auto')
+    if value not in NATIVE_ANSWERS:
+        raise BrainError('native-result:invalid-answer-setting')
+    return value
+
+
+def _rollout_source(payload):
+    """Where the Codex session behind this Stop came from, or None."""
+    path = payload.get('transcript_path')
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return None
+        with open(path, 'rb') as handle:
+            head = handle.readline(ROLLOUT_HEAD_BYTES + 1)
+        record = json.loads(head) if len(head) <= ROLLOUT_HEAD_BYTES else None
+    except (OSError, ValueError, RecursionError):
+        return None
+    meta = record.get('payload') if isinstance(record, dict) and record.get('type') == 'session_meta' else None
+    source = meta.get('source') if isinstance(meta, dict) else None
+    return source if isinstance(source, str) else None
+
+
+def attended(root, host, payload):
+    """Whether a person reads this Stop's session as it goes, by the setting
+    or, under `auto`, by what the host itself says about the session."""
+    setting = configured_answer(root)
+    if setting != 'auto':
+        return setting == 'brief'
+    if host == 'claude':
+        return (os.environ.get('CLAUDE_CODE_SESSION_ATTENDED') == '1'
+                and os.environ.get('CLAUDE_CODE_ENTRYPOINT') in ATTENDED_ENTRYPOINTS)
+    if host == 'codex':
+        return _rollout_source(payload) in ATTENDED_SOURCES
+    return False
+
+
 def _disabled(mode):
     """Why _enabled is false, as the code a journal line carries."""
     if mode != 'governed': return 'not-governed'
@@ -314,7 +378,7 @@ def _adapter():
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
-def _instruction(root,key,state):
+def _instruction(root,key,state,*,brief=False):
     tooling=Path(__file__).resolve().parents[2]
     interpreter=['python3']
     if os.name == 'nt':
@@ -342,11 +406,15 @@ def _instruction(root,key,state):
         'only when you personally checked every learning against current sources; this is agent '
         'attestation, never human review. Empty learnings is valid. No raw requests, transcripts, '
         'logs, credentials or personal data. If no project result is safe to save, use the same '
-        'command replacing --input - with --skip. Check the command result. After a successful save or skip, '
-        'return the substantive answer to the original user request, retaining its facts, source citations '
-        'and requested format; do not replace that answer with a save acknowledgement or mention routine '
-        'memory operations. If a save is refused, retain the substantive answer and briefly report the held save. '
-        'If JSON/schema is refused before any write, correct its format once in this continuation. '
+        'command replacing --input - with --skip. Check the command result. '
+        +('The person has already read your answer above this continuation: after a successful save or skip, '
+          'do not repeat it or mention routine memory operations; end with no further text or one short line. '
+          'If a save is refused, briefly report the held save. ' if brief else
+          'After a successful save or skip, '
+          'return the substantive answer to the original user request, retaining its facts, source citations '
+          'and requested format; do not replace that answer with a save acknowledgement or mention routine '
+          'memory operations. If a save is refused, retain the substantive answer and briefly report the held save. ')
+        +'If JSON/schema is refused before any write, correct its format once in this continuation. '
         'On stale revision, scope or ownership refusal, stop and report the held save; never override '
         'newer work or repeat the user task.')
 
@@ -373,6 +441,9 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
     if key is None: return step({},'skipped','no-session-id')
     if host=='cursor' and payload.get('status') != 'completed': return step({},'skipped','not-completed')
     if host!='cursor' and payload.get('hook_event_name','Stop') != 'Stop': return step({},'skipped','not-stop-event')
+    # An unknown answer setting costs the turn its short ending, never its save.
+    try: brief,code=attended(root,host,payload),None
+    except BrainError as error: brief,code=False,refusal_code(error)
     with mutation_lock(root):
         state=_read(root,key)
         if state is None: return step({},'skipped','not-armed')
@@ -396,9 +467,9 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         state.update(phase='requested',scope=prepared_scope(root,owner,REASON,'agent'),
                      checkout=_checkout(root),adapter=_adapter(),updated=time.time())
         _write(root,key,state)
-        instruction=_instruction(root,key,state)
+        instruction=_instruction(root,key,state,brief=brief)
     return step({'followup_message':instruction} if host=='cursor' else {'decision':'block','reason':instruction},
-                'requested')
+                'requested',code,answer='brief' if brief else 'repeat')
 
 
 def save(root,key,token,data,*,owner,mode,provision,skip=False):

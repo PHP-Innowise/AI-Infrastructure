@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime ends an attended session's save briefly — 2026-10-23
+
+- The memory runtime memory-seed copies asks a session a person reads as it
+  goes not to repeat its answer after the save, and keeps the repeat for
+  headless runs, as the editions' runtime does (root `CHANGELOG.md`, same
+  day). `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
 ### The seeded runtime checks a citation with one resolve — 2026-10-23
 
 - The memory runtime memory-seed copies resolves the roots once per pass

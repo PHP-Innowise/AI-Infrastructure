@@ -491,7 +491,13 @@ report them too.
   `INTERNAL_NATIVE_MEMORY_RESULT <token>` marker wherever the host recorded
   it, never in the agent's own text. On 21 Codex runs (16-19 October 2026) it
   was +9.9 s and +383 output tokens after a 17.5 s answer of 701 tokens. The
-  team decides on `native_result_request` from that line.
+  team decides on `native_result_request` from that line. Once a runtime
+  names how its request ends, the line is also split by the ending, read
+  from the request's own words: `brief` (a session a person reads as it goes),
+  `repeat` (the answer again) and `earlier` (a runtime that asked neither); on
+  the same runs the 9 `repeat` requests cost +408 output tokens, the 12
+  `earlier` ones +360. The funnel counts the requests that asked for the
+  brief ending beside all of them.
 
 `realized` records a tool's path references without checking whether the tool
 successfully read that file; mentions are textual matches. Neither measures

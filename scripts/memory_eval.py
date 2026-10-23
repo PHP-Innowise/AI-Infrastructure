@@ -3307,7 +3307,7 @@ NATIVE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}")
 NATIVE_COUNTERS = (
     "prompt_hook_runs", "armed", "armed_after_incomplete", "continuations",
     "stop_hook_runs", "stop_hook_timeouts", "stop_hook_failures", "requested",
-    "saved", "held", "omitted", "failed", "refused", "errors",
+    "requested_brief", "saved", "held", "omitted", "failed", "refused", "errors",
     "learnings_written", "chunks_promoted",
 )
 
@@ -3334,6 +3334,7 @@ def native_step(counts: Counter, reasons: Dict[str, Counter], record: Dict[str, 
         counts["stop_hook_failures"] += event == "exited" and code not in (None, "0", "124")
     elif stage == "stop":
         counts["requested"] += event == "requested"
+        counts["requested_brief"] += event == "requested" and record.get("answer") == "brief"
         counts["failed"] += event == "failed"
         counts["held"] += event == "held"
     elif stage == "save":
@@ -3394,6 +3395,15 @@ def native_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
 
 # The Stop hook's save request opens with this marker and its challenge's token.
 NATIVE_CONTINUATION = re.compile(r"INTERNAL_NATIVE_MEMORY_RESULT [0-9a-f]{32}")
+# How a request asks the agent to end, by its own words: `brief` in a session a
+# person reads as it goes, `repeat` (the answer again) elsewhere, `earlier` for
+# a runtime that asked neither.
+CONTINUATION_ENDINGS = (("brief", "has already read your answer above"),
+                        ("repeat", "return the substantive answer"))
+
+
+def continuation_ending(text: str) -> str:
+    return next((name for name, words in CONTINUATION_ENDINGS if words in text), "earlier")
 
 
 def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
@@ -3432,6 +3442,7 @@ def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
                     output = total["output_tokens"]
             role = payload.get("role") if payload.get("type") == "message" else None
             text = json.dumps(payload.get("content")) if role else ""
+            asked = text
             human = role == "user" and not NATIVE_CONTINUATION.search(text) and not \
                 "".join(part.get("text", "") for part in payload.get("content") or []
                         if isinstance(part, dict)).lstrip().startswith("<")
@@ -3447,14 +3458,15 @@ def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
             human = (record.get("type") == "user" and not record.get("toolUseResult")
                      and not record.get("isMeta") and isinstance(message.get("content"), str)
                      and not NATIVE_CONTINUATION.search(message["content"]))
-            request = record.get("type") != "assistant" and bool(NATIVE_CONTINUATION.search(json.dumps(record)))
+            asked = json.dumps(record) if record.get("type") != "assistant" else ""
+            request = bool(NATIVE_CONTINUATION.search(asked))
         if at is None:
             continue
         if human:
             close()
             pending, prompt = None, (at, output)
         elif request and pending is None and prompt is not None:
-            pending = {"at": at, "output_at": output,
+            pending = {"at": at, "output_at": output, "ending": continuation_ending(asked),
                        "answer_seconds": max(0.0, (at - prompt[0]).total_seconds()),
                        "answer_output_tokens": output - prompt[1]}
         last = at
@@ -3462,7 +3474,7 @@ def continuation_costs(path: Path, host: str) -> List[Dict[str, Any]]:
     return [{key: value for key, value in cost.items() if key not in ("at", "output_at")} for cost in costs]
 
 
-def continuation_summary(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def continuation_medians(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not costs:
         return {"requests": 0}
 
@@ -3474,6 +3486,18 @@ def continuation_summary(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
             "save_output_tokens": median("save_output_tokens"),
             "answer_seconds": median("answer_seconds"), "answer_output_tokens": median("answer_output_tokens"),
             "time_share": round(statistics.median(shares), 2) if shares else None}
+
+
+def continuation_summary(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The medians over all requests and, once a runtime names how a request
+    ends, per ending: a change of the ending reads as a before and after."""
+    summary = continuation_medians(costs)
+    endings = sorted({cost.get("ending", "earlier") for cost in costs})
+    if endings and endings != ["earlier"]:
+        summary["endings"] = {name: continuation_medians([cost for cost in costs
+                                                          if cost.get("ending", "earlier") == name])
+                              for name in endings}
+    return summary
 
 
 def command_realized(arguments: argparse.Namespace) -> int:
@@ -3592,6 +3616,7 @@ NATIVE_ROWS = (
     ("  timed out", "stop_hook_timeouts"),
     ("  exited non-zero", "stop_hook_failures"),
     ("save requested", "requested"),
+    ("  to end without repeating", "requested_brief"),
     ("saved", "saved"),
     ("held", "held"),
     ("omitted", "omitted"),
@@ -3613,6 +3638,9 @@ def format_continuations(continuations: Dict[str, Any]) -> List[str]:
         lines.append(f"  {host:<7} {summary['requests']} request(s): +{summary['save_seconds']} s and"
                      f" +{summary['save_output_tokens']:.0f} output tokens after an answer of"
                      f" {summary['answer_seconds']} s and {summary['answer_output_tokens']:.0f} tokens{share}")
+        for ending, part in summary.get("endings", {}).items():
+            lines.append(f"    {ending + ':':<9} {part['requests']} request(s): +{part['save_seconds']} s and"
+                         f" +{part['save_output_tokens']:.0f} output tokens")
     return lines
 
 
