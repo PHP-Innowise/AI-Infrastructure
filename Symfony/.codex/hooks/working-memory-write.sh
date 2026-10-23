@@ -167,6 +167,26 @@ else
 fi
 fi
 
+# One line per Stop in the native result journal, beside refresh-health.ndjson:
+# the save request's exit status. The shell writes it because the case worth
+# counting is the one the runtime never finishes - killed at its budget (124)
+# or failed before its own line. A status and nothing else: no payload, no
+# paths, no task or session. As the prompt hook's health line, never through
+# a link in an attached state, and never through a linked journal file.
+NATIVE_HOST=(--host codex)
+native_journal() {
+  local directory="$STATE_DIR/memory-bank/local" entry entries
+  entries=("$directory/native-results.ndjson")
+  [ "$STATE_DIR" = "$ROOT_DIR" ] || entries+=("${STATE_DIR%/}" "$STATE_DIR/memory-bank" "$directory")
+  for entry in "${entries[@]}"; do
+    [ -L "$entry" ] && return 0
+  done
+  { [ -d "$directory" ] || mkdir -p "$directory" 2>/dev/null; } || return 0
+  # One physical line: the Cursor render guards admit a clock only on the
+  # line that writes the journal.
+  printf '{"at":"%s","host":"%s","stage":"stop-hook",%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${NATIVE_HOST[1]}" "$1" >> "$directory/native-results.ndjson" 2>/dev/null || true
+}
+
 # The payload travels on stdin; only a metadata challenge is kept. A supported
 # Stop requests one structured save from the same agent, never a new model.
 if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] && [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
@@ -179,6 +199,11 @@ if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] && [ -f "$ROOT_DIR/memory-bank/sc
   fi
   NATIVE_STATUS=$?
   [ "$NATIVE_STATUS" -eq 0 ] && [ -n "$NATIVE_RESPONSE" ] && printf '%s\n' "$NATIVE_RESPONSE"
+  native_journal '"event":"exited","status":'"$NATIVE_STATUS"
+elif [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
+  # A host that delivers the capsule itself (the Harness) is asked for no
+  # native save; the line keeps those turns from reading as no Stop at all.
+  native_journal '"event":"skipped","code":"capsule-delivered"'
 fi
 
 # Capsule delivery: this client receives the Task Capsule at prompt time

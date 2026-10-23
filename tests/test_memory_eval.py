@@ -2318,6 +2318,46 @@ class RealizedUseTest(unittest.TestCase):
                 codex_message("developer", "working: x\n- memory docs/z.md — Z"),
             ],
         )
+        local = self.project / "memory-bank" / "local"
+
+        def step(at: str, host: Optional[str], stage: str, event: str, **fields: Any) -> Dict[str, Any]:
+            return {"at": "2026-09-02T" + at + "Z", "host": host, "stage": stage, "event": event, **fields}
+
+        jsonl(
+            local / "native-results.ndjson",
+            [
+                # Before --since.
+                {"at": "2026-08-01T09:00:00Z", "host": "claude", "stage": "prompt", "event": "armed"},
+                step("10:00:01", "claude", "prompt", "armed"),
+                step("10:01:00", "claude", "stop", "requested"),
+                step("10:01:00", "claude", "stop-hook", "exited", status=0),
+                step("10:02:00", "claude", "save", "refused", code="memory-result-v1:unverified"),
+                step("10:02:30", "claude", "save", "saved", learnings=2, promoted=1),
+                step("10:03:00", "claude", "stop", "skipped", code="recovery-saved"),
+                step("10:03:00", "claude", "stop-hook", "exited", status=0),
+                step("10:05:01", "claude", "prompt", "armed", code="previous-failed"),
+                # A code is a fixed word; anything else is counted, never printed.
+                step("10:06:00", "claude", "prompt", "skipped", code=self.PROMPT),
+                step("11:00:00", "codex", "prompt", "armed"),
+                step("11:01:00", "codex", "stop", "requested"),
+                step("11:01:00", "codex", "stop-hook", "exited", status=124),
+                step("11:01:30", "codex", "prompt", "continuation"),
+                step("11:02:00", "codex", "stop", "failed", code="unsaved"),
+                step("11:03:00", "codex", "save", "saved", code="late", learnings=1, promoted=0),
+                step("11:04:00", "codex", "save", "saved", code="repeat", learnings=0, promoted=0),
+                step("11:05:00", "cursor", "stop-hook", "skipped", code="capsule-delivered"),
+                step("11:06:00", None, "save", "refused", code="native-result:invalid-token"),
+            ],
+        )
+        jsonl(
+            local / "refresh-health.ndjson",
+            [
+                {"at": "2026-08-01T09:00:00Z", "hook_status": 0, "source": "hook"},
+                {"at": "2026-09-02T10:00:00Z", "hook_status": 0, "source": "hook"},
+                {"at": "2026-09-02T11:00:00Z", "hook_status": 124, "source": "hook"},
+                {"at": "2026-09-02T11:30:00Z", "source": "cli"},
+            ],
+        )
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -2363,6 +2403,49 @@ class RealizedUseTest(unittest.TestCase):
         with_paths = self.realized("--paths")
         self.assertIn("docs/billing.md", with_paths["paths"])
         self.assertNotIn(self.PROMPT, json.dumps(with_paths))
+
+    NATIVE = ("prompt_hook_runs", "armed", "armed_after_incomplete", "continuations",
+              "stop_hook_runs", "stop_hook_timeouts", "stop_hook_failures", "requested",
+              "saved", "held", "omitted", "failed", "refused", "errors",
+              "learnings_written", "chunks_promoted")
+
+    def test_native_result_funnel_per_host(self) -> None:
+        native = self.realized("--since", "2026-09-01")["native"]
+        self.assertEqual((native["journal"], native["lines"], native["prompt_hook_health_lines"]), (True, 18, 2))
+        hosts = native["hosts"]
+        expected = {
+            "claude": [3, 2, 1, 0, 2, 0, 0, 1, 1, 0, 0, 0, 1, 0, 2, 1],
+            "codex": [2, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0],
+            "cursor": [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            "unknown": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+        }
+        for host, counts in expected.items():
+            with self.subTest(host=host):
+                self.assertEqual(counts, [hosts[host][key] for key in self.NATIVE])
+        self.assertEqual([5, 3, 1, 1, 4, 1, 0, 2, 2, 0, 0, 1, 2, 0, 3, 1],
+                         [native["total"][key] for key in self.NATIVE])
+        self.assertEqual(hosts["claude"]["reasons"], {
+            "prompt armed": {"previous-failed": 1}, "prompt skipped": {"other": 1},
+            "save refused": {"memory-result-v1:unverified": 1}, "stop skipped": {"recovery-saved": 1},
+            "stop-hook exited": {"0": 2}})
+        self.assertEqual(hosts["codex"]["reasons"], {
+            "save saved": {"late": 1, "repeat": 1}, "stop failed": {"unsaved": 1},
+            "stop-hook exited": {"124": 1}})
+        self.assertEqual(native["total"]["reasons"]["save refused"],
+                         {"memory-result-v1:unverified": 1, "native-result:invalid-token": 1})
+        everything = self.realized()["native"]
+        self.assertEqual((everything["lines"], everything["prompt_hook_health_lines"]), (19, 3))
+
+    def test_native_result_funnel_prints_counts_and_codes_only(self) -> None:
+        plain = main_output(*self.arguments(), "--since", "2026-09-01")
+        for row in ("prompt hook runs", "save requested", "saved", "refused saves",
+                    "learnings written", "chunks promoted", "memory-result-v1:unverified", "capsule-delivered"):
+            self.assertIn(row, plain)
+        self.assertNotIn(self.PROMPT, plain)
+        (self.project / "memory-bank" / "local" / "native-results.ndjson").unlink()
+        missing = main_output(*self.arguments())
+        self.assertIn("no native-results.ndjson", missing)
+        self.assertFalse(self.realized()["native"]["journal"])
 
 
 

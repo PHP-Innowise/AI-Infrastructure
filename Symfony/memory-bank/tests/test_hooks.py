@@ -967,8 +967,11 @@ class WorkingMemoryRuleTest(unittest.TestCase):
         for hook in self.RENDER_HOOKS:
             with self.subTest(hook=hook):
                 text = hook_path("cursor", hook).read_text(encoding="utf-8")
-                self.assertNotIn("date -u", text)
                 logical = text.replace("\\\n", " ")
+                # The one clock allowed stamps the Stop hook's line in the
+                # native result journal, a local file no rule is made from.
+                self.assertEqual([], [line for line in logical.splitlines()
+                                      if "date -u" in line and "native-results.ndjson" not in line])
                 capsule_calls = [
                     line
                     for line in logical.splitlines()

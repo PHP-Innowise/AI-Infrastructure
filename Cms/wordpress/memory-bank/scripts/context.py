@@ -8859,10 +8859,10 @@ def _command() -> int:
                     if arguments.skip:
                         data = None
                     elif arguments.input == "-":
-                        data = native_results.read_input(sys.stdin.buffer)
+                        data = native_results.read_input(sys.stdin.buffer, repository, arguments.request)
                     else:
                         with Path(arguments.input).open("rb") as stream:
-                            data = native_results.read_input(stream)
+                            data = native_results.read_input(stream, repository, arguments.request)
                     result = native_results.save(repository, arguments.request, arguments.token, data,
                         owner=owner, mode=mode, skip=arguments.skip,
                         provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner))

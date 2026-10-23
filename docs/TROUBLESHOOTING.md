@@ -590,6 +590,15 @@ blocked, or a hook times out.
    agent runs the memory CLI with it: Claude Code allows the CLI under
    `python3`, `python` and `py -3`, the Cursor CLI under `python3` and
    `python`.
+10. Automatic native saves that never land - no `learning-*` record after a
+    session: read `memory-bank/local/native-results.ndjson`, one line per
+    prompt, Stop and save with a fixed code. `stop-hook` `exited` with
+    `status` 124 is a save request killed at its budget; `stop-hook`
+    `skipped` `capsule-delivered` a Harness turn; `stop` `failed` `unsaved`
+    a request nobody answered; `save` `refused` carries the refusal's code
+    (`memory-result-v1:learning_fields` is usually `verified` put inside a
+    learning). From the repository, `python3 scripts/memory_eval.py realized
+    --project DIR` counts the lines per host.
 
 ### Recover
 

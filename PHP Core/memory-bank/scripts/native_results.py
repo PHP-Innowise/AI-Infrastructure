@@ -3,6 +3,8 @@
 No transcript or assistant prose is parsed into knowledge. The same agent is
 asked once to submit its result through memory_results. Local challenges are
 metadata only, disposable, scoped to one project/owner/host/session and prompt.
+Every prompt, Stop and save also leaves one metadata line in a local journal,
+so how far the saves get can be counted from disk (see _journal).
 """
 from __future__ import annotations
 
@@ -21,11 +23,11 @@ import time
 from uuid import uuid4
 
 import workspace_roots
-from brain_runtime import (BrainError, BrainRecordNotFound, atomic_json, brain_root,
-                           linked_reparse, mutation_lock)
+from brain_runtime import (BrainError, BrainRecordNotFound, atomic_json, atomic_write_bytes,
+                           brain_root, linked_reparse, load_config, mutation_lock)
 from memory_results import (PROOF_PROFILE, _text, _attempt, _read_attempt, _read_receipt,
                             check_task_id, normalize, prepared_scope, record_result,
-                            request_digest, writable_task)
+                            refusal_code, request_digest, writable_task)
 
 PROFILE = 'native-result-challenge-v1'
 REASON = 'Automatic native result; agent-attested, not reviewed by a person'
@@ -36,9 +38,113 @@ TOKEN = re.compile(r'[0-9a-f]{32}')
 FIELDS = {'profile','owner','host','session','project','task_id','token','phase',
           'task_uuid','revision','scope','digest','updated','checkout','adapter'}
 PHASES = {'armed','requested','saved','held','omitted','failed'}
+HOSTS = {'claude','codex','cursor'}
+JOURNAL = 'native-results.ndjson'
+# A fully exercised turn writes about six lines - armed; requested and the
+# Stop hook's exit; the save; the closing Stop and its exit - and Codex one
+# more for its continuation prompt. Eight per refresh-health record keeps at
+# least the turns that series keeps, so both read over one window.
+JOURNAL_LINES_PER_TURN = 8
+# Trimmed back to the kept lines once the file passes this many bytes a kept
+# line: an append stays one write, and a trim is rare.
+JOURNAL_LINE_BYTES = 128
 
 
-def read_input(stream):
+def _journal(root, host, stage, event, code=None, **counts):
+    """Append one line of the save funnel, or quietly nothing.
+
+    The challenge file is rewritten every turn and pruned to MAX_STATES, and
+    a refused save's code reached only the agent's tool output, so nothing on
+    disk said how many saves were requested, made or refused, or why not.
+    A line holds when, which host, which step, a fixed code and two counts -
+    never the payload, the result, a path, a task or a session. Beside
+    refresh-health.ndjson and like it: its directory is followed as the
+    runtime's other local files are, the file itself never through a link,
+    and a journal write never fails the step it records. A trim racing
+    another session's append may drop that one line.
+    """
+    record={'at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+            'host':host if host in HOSTS else None,'stage':stage,'event':event}
+    if code is not None: record['code']=code
+    record.update(counts)
+    try:
+        path=Path(root)/'memory-bank'/'local'/JOURNAL
+        if os.path.lexists(path):
+            image=path.lstat()
+            if stat.S_ISLNK(image.st_mode) or linked_reparse(image): return
+        path.parent.mkdir(parents=True,exist_ok=True)
+        descriptor=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_APPEND|getattr(os,'O_NOFOLLOW',0)
+                           |getattr(os,'O_BINARY',0),0o666)
+        try:
+            os.write(descriptor,(json.dumps(record,separators=(',',':'))+'\n').encode('utf-8'))
+            size=os.fstat(descriptor).st_size
+        finally:
+            os.close(descriptor)
+        from context_retrieval import refresh_health_retention
+        keep=refresh_health_retention(load_config(root))*JOURNAL_LINES_PER_TURN
+        if size>keep*JOURNAL_LINE_BYTES:
+            lines=path.read_bytes().splitlines(keepends=True)
+            if len(lines)>keep: atomic_write_bytes(path,b''.join(lines[-keep:]))
+    except (OSError,ValueError,BrainError,ImportError):
+        return
+
+
+def _peek_host(root, key):
+    """The host a challenge was armed for, best effort, for a refusal's line."""
+    try:
+        state=_read(root,key)
+    except (BrainError,OSError,ValueError,TypeError):
+        return None
+    return state['host'] if state else None
+
+
+class _Step:
+    """The one journal line of one prompt, Stop or save call.
+
+    The call names its outcome as it returns - `return step(result, event,
+    code)` - and an exception names itself on the way out, a refusal by its
+    machine code and anything else by its type, and still propagates. A call
+    that names no outcome leaves no line.
+    """
+
+    def __init__(self, root, stage, host=None, key=None):
+        self.root,self.stage,self.host,self.key=root,stage,host,key
+        self.outcome=None
+
+    def __call__(self, result, event, code=None, **counts):
+        self.outcome=(event,code,counts)
+        return result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, error, trace):
+        if kind is None:
+            if self.outcome is not None:
+                event,code,counts=self.outcome
+                _journal(self.root,self.host,self.stage,event,code,**counts)
+        elif issubclass(kind,Exception):
+            host=self.host if self.host is not None else _peek_host(self.root,self.key)
+            if isinstance(error,BrainError):
+                _journal(self.root,host,self.stage,'refused' if self.stage=='save' else 'error',
+                         refusal_code(error))
+            else:
+                _journal(self.root,host,self.stage,'error',type(error).__name__)
+        return False
+
+
+def read_input(stream, root=None, request=None):
+    """One JSON object from `stream`, or BrainError.
+
+    `root` and `request` name the save the object is for: an input refused
+    here never reaches save(), so its refusal is journaled here.
+    """
+    if root is None: return _parse_input(stream)
+    with _Step(root,'save',key=request):
+        return _parse_input(stream)
+
+
+def _parse_input(stream):
     raw = stream.read(MAX_INPUT + 1)
     if len(raw) > MAX_INPUT:
         raise BrainError('native-result:input-too-large')
@@ -54,6 +160,12 @@ def read_input(stream):
 def _enabled(mode):
     return mode == 'governed' and not any(os.environ.get(name) == '1' for name in
         ('CONTEXT_MEMORY_RECOVERY','CONTEXT_CAPSULE_DELIVERED'))
+
+
+def _disabled(mode):
+    """Why _enabled is false, as the code a journal line carries."""
+    if mode != 'governed': return 'not-governed'
+    return 'capsule-delivered' if os.environ.get('CONTEXT_CAPSULE_DELIVERED') == '1' else 'recovery-session'
 
 
 def _project(root):
@@ -132,10 +244,15 @@ def _prune(root, key):
 
 
 def begin(root, task_id, host, payload, *, owner, mode):
+    with _Step(root,'prompt',host) as step:
+        return _begin(step,root,task_id,host,payload,owner=owner,mode=mode)
+
+
+def _begin(step, root, task_id, host, payload, *, owner, mode):
     task_id=check_task_id(task_id)
-    if not _enabled(mode): return {'armed':False}
+    if not _enabled(mode): return step({'armed':False},'skipped',_disabled(mode))
     key=_key(root,host,payload,task_id,owner)
-    if key is None: return {'armed':False}
+    if key is None: return step({'armed':False},'skipped','no-session-id')
     with mutation_lock(root):
         previous=_read(root,key)
         # Codex submits the Stop reason through UserPromptSubmit too. It is
@@ -143,7 +260,7 @@ def begin(root, task_id, host, payload, *, owner, mode):
         prompt=payload.get('prompt')
         if (previous and previous['phase']=='requested' and isinstance(prompt,str)
                 and prompt.lstrip().startswith('INTERNAL_NATIVE_MEMORY_RESULT '+previous['token'])):
-            return {'armed':False,'continuation':True}
+            return step({'armed':False,'continuation':True},'continuation')
         warning = bool(previous and previous['phase'] in {'requested','failed','held'})
         state={'profile':PROFILE,'owner':owner,'host':host,
                'session':hashlib.sha256(str(payload.get('conversation_id' if host=='cursor' else 'session_id')).encode()).hexdigest(),
@@ -151,7 +268,9 @@ def begin(root, task_id, host, payload, *, owner, mode):
                'phase':'armed','task_uuid':None,'revision':None,'scope':None,'digest':None,
                'checkout':None,'adapter':None,'updated':time.time()}
         _write(root,key,state);_prune(root,key)
-    return {'armed':True,'request':key,**({'warning':'Previous native memory result was not saved completely.'} if warning else {})}
+    # The warning is counted by what the last request became.
+    return step({'armed':True,'request':key,**({'warning':'Previous native memory result was not saved completely.'} if warning else {})},
+                'armed','previous-'+previous['phase'] if warning else None)
 
 
 def recovery(host, payload):
@@ -222,44 +341,63 @@ def _proven(root,state):
 
 
 def stop(root, task_id, host, payload, *, owner, mode):
-    if not _enabled(mode): return {}
+    with _Step(root,'stop',host) as step:
+        return _stop(step,root,task_id,host,payload,owner=owner,mode=mode)
+
+
+def _stop(step, root, task_id, host, payload, *, owner, mode):
+    if not _enabled(mode): return step({},'skipped',_disabled(mode))
     task_id=check_task_id(task_id);key=_key(root,host,payload,task_id,owner)
-    if key is None: return {}
-    if host=='cursor' and payload.get('status') != 'completed': return {}
-    if host!='cursor' and payload.get('hook_event_name','Stop') != 'Stop': return {}
+    if key is None: return step({},'skipped','no-session-id')
+    if host=='cursor' and payload.get('status') != 'completed': return step({},'skipped','not-completed')
+    if host!='cursor' and payload.get('hook_event_name','Stop') != 'Stop': return step({},'skipped','not-stop-event')
     with mutation_lock(root):
         state=_read(root,key)
-        if state is None: return {}
+        if state is None: return step({},'skipped','not-armed')
         if recovery(host,payload):
             if state['phase']=='requested':
                 state['phase']='held' if _proven(root,state) else 'failed'
                 _write(root,key,state)
-            return {}
-        if state['phase'] != 'armed': return {}
+                # Held: a finished save the state never took. Failed: no
+                # save began, or one began and did not finish.
+                return step({},state['phase'],'unconfirmed' if state['phase']=='held'
+                            else 'incomplete' if state['digest'] else 'unsaved')
+            return step({},'skipped','recovery-'+state['phase'])
+        if state['phase'] != 'armed': return step({},'skipped','phase-'+state['phase'])
         try: task=writable_task(root,task_id,owner)
         except BrainRecordNotFound as error:
             if error.identifier != task_id: raise
             task=None
         if task is not None:
-            if task['status'] in {'completed','cancelled'}: return {}
+            if task['status'] in {'completed','cancelled'}: return step({},'skipped','task-'+task['status'])
             state.update(task_uuid=task['id'],revision=task['revision'])
         state.update(phase='requested',scope=prepared_scope(root,owner,REASON,'agent'),
                      checkout=_checkout(root),adapter=_adapter(),updated=time.time())
         _write(root,key,state)
         instruction=_instruction(root,key,state)
-    return {'followup_message':instruction} if host=='cursor' else {'decision':'block','reason':instruction}
+    return step({'followup_message':instruction} if host=='cursor' else {'decision':'block','reason':instruction},
+                'requested')
 
 
 def save(root,key,token,data,*,owner,mode,provision,skip=False):
+    with _Step(root,'save',key=key) as step:
+        return _save(step,root,key,token,data,owner=owner,mode=mode,provision=provision,skip=skip)
+
+
+def _save(step,root,key,token,data,*,owner,mode,provision,skip):
     if not _enabled(mode): raise BrainError('native-result:governed-session-required')
     if not isinstance(token,str) or not TOKEN.fullmatch(token): raise BrainError('native-result:invalid-token')
     with mutation_lock(root):
         state=_read(root,key)
+        if state is not None: step.host=state['host']
         if (state is None or state['token'] != token or state['owner'] != owner
                 or state['project'] != _project(root)
                 or state['phase'] not in {'requested','saved','held','failed'}):
             raise BrainError('native-result:request-unavailable')
         begun=state['digest'] is not None
+        # For the journal: a repeat of a finished save, or a begun save
+        # finished after the recovery Stop marked it failed.
+        repeat={'saved':'repeat','held':'repeat','failed':'late'}.get(state['phase'])
         if state['phase'] != 'requested' and not begun:
             raise BrainError('native-result:request-unavailable')
         if begun and (state['task_uuid'] is None or state['revision'] is None):
@@ -271,7 +409,7 @@ def save(root,key,token,data,*,owner,mode,provision,skip=False):
         if skip:
             if state['digest'] is not None: raise BrainError('native-result:save-already-started')
             state['phase']='omitted';_write(root,key,state)
-            return {'state':'omitted','attestation':'agent'}
+            return step({'state':'omitted','attestation':'agent'},'omitted')
         # A completed replay may outlive its sources or active task alias.
         # Only the canonical result protocol can admit such a replay; local
         # challenge metadata alone must never authorize a fresh write.
@@ -301,4 +439,6 @@ def save(root,key,token,data,*,owner,mode,provision,skip=False):
                              replay_only=begun)
         held=any(item['state'] in {'differs','archived-differs'} for item in result['records'])
         state['phase']='held' if held else 'saved';_write(root,key,state)
-        return result
+        return step(result,state['phase'],repeat,
+                    learnings=sum(item['state'] in {'created','completed','updated'} for item in result['records']),
+                    promoted=len((result['promotion'] or {}).get('promoted') or ()))

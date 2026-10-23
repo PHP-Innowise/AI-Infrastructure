@@ -13,9 +13,13 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
+JOURNAL = 'memory-bank/local/native-results.ndjson'
+# All a journal line may hold: when, which host, which step, a short code, the
+# Stop hook's exit status and two counts - never text, paths or identifiers.
+JOURNAL_FIELDS = {'at','host','stage','event','code','status','learnings','promoted'}
 
 
-class NativeCaptureTests(unittest.TestCase):
+class NativeCaptureFixture(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='native-semantic-capture-')
         self.addCleanup(temporary.cleanup)
@@ -120,6 +124,8 @@ class NativeCaptureTests(unittest.TestCase):
         self.stop(active=True)
         self.assertEqual('failed',self.state()[1]['phase'])
 
+
+class NativeCaptureTests(NativeCaptureFixture):
     def test_clean_research_creates_result_and_new_session_recalls_it(self):
         source=(self.root/'rules.md').read_bytes();self.assertEqual(b'',self.git('status','--porcelain'))
         self.begin();self.assertEqual([],self.records('tasks'))
@@ -479,6 +485,268 @@ class NativeCaptureTests(unittest.TestCase):
         result=self.call('native-prompt','--host','codex','--task-id','research','--json',data={
             'hook_event_name':'UserPromptSubmit','session_id':'session-a'},ok=False)
         self.assertNotEqual(0,result.returncode);self.assertEqual([],list(outside.iterdir()))
+
+
+class NativeFunnelJournalTests(NativeCaptureFixture):
+    """Each native step leaves one metadata line, so the save funnel reads from disk."""
+
+    STOP={'hook_event_name':'Stop','session_id':'session-a','stop_hook_active':False}
+
+    def journal(self):
+        path=self.root/JOURNAL
+        return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()] if path.exists() else []
+
+    def written(self,action):
+        before=len(self.journal());action()
+        return self.journal()[before:]
+
+    def one(self,lines,stage,event,code=None,host='codex'):
+        self.assertEqual(1,len(lines),lines)
+        line=lines[0]
+        self.assertEqual((host,stage,event,code),(line['host'],line['stage'],line['event'],line.get('code')))
+        self.assertLessEqual(set(line),JOURNAL_FIELDS)
+        self.assertRegex(line['at'],r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+        return line
+
+    def raw(self,*args,data):
+        return subprocess.run([sys.executable,'-B',str(self.root/'memory-bank/scripts/context.py'),
+            '--root',str(self.root),*args],cwd=self.root,env=self.env,input=data,capture_output=True)
+
+    def install_hooks(self,host):
+        tree={'claude':'.claude','codex':'.codex','cursor':'.cursor'}[host]
+        hooks=self.root/tree/'hooks';hooks.mkdir(parents=True,exist_ok=True)
+        for name in ('working-memory-read.sh','working-memory-write.sh'):
+            shutil.copy2(ROOT/'PHP Core'/tree/'hooks'/name,hooks/name)
+        self.git('add',tree);self.git('commit','-qm','Install public '+host+' hooks')
+        return hooks
+
+    def hook(self,hooks,name,payload,env=None):
+        result=subprocess.run(['bash',str(hooks/name)],cwd=self.root,env=env or self.env,
+                              input=json.dumps(payload).encode(),capture_output=True)
+        self.assertEqual(0,result.returncode,result.stderr.decode());return result
+
+    def test_each_prompt_path_writes_one_line_with_its_code(self):
+        prompt={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Inspect the retry policy.'}
+        def arm(payload=prompt,**values):
+            return self.call('native-prompt','--host','codex','--task-id','research','--json',
+                             data=payload,env=dict(self.env,**values))
+        for values,code in (({'PROJECT_BRAIN_MODE':'lightweight'},'not-governed'),
+                            ({'CONTEXT_CAPSULE_DELIVERED':'1'},'capsule-delivered'),
+                            ({'CONTEXT_MEMORY_RECOVERY':'1'},'recovery-session')):
+            with self.subTest(code=code):
+                self.one(self.written(lambda:arm(**values)),'prompt','skipped',code)
+        self.one(self.written(lambda:arm({'hook_event_name':'UserPromptSubmit'})),'prompt','skipped','no-session-id')
+        self.one(self.written(self.begin),'prompt','armed')
+        reason=json.loads(self.stop().stdout)['reason']
+        self.one(self.written(lambda:arm({**prompt,'prompt':reason})),'prompt','continuation')
+        self.stop(active=True)
+        # The warning the prompt hook prints, counted by what the last request became.
+        self.one(self.written(self.begin),'prompt','armed','previous-failed')
+
+    def test_each_stop_path_writes_one_line_with_its_code(self):
+        def request(payload=self.STOP,host='codex',**values):
+            return self.call('native-stop','--host',host,'--task-id','research',data=payload,
+                             env=dict(self.env,**values))
+        for values,code in (({'PROJECT_BRAIN_MODE':'lightweight'},'not-governed'),
+                            ({'CONTEXT_CAPSULE_DELIVERED':'1'},'capsule-delivered'),
+                            ({'CONTEXT_MEMORY_RECOVERY':'1'},'recovery-session')):
+            with self.subTest(code=code):
+                self.one(self.written(lambda:request(**values)),'stop','skipped',code)
+        for payload,code in (({'hook_event_name':'Stop'},'no-session-id'),
+                             ({**self.STOP,'hook_event_name':'SubagentStop'},'not-stop-event'),
+                             (self.STOP,'not-armed')):
+            with self.subTest(code=code):
+                self.one(self.written(lambda:request(payload)),'stop','skipped',code)
+        aborted={'conversation_id':'session-a','hook_event_name':'stop','status':'aborted','loop_count':0}
+        self.one(self.written(lambda:request(aborted,'cursor')),'stop','skipped','not-completed',host='cursor')
+        self.begin()
+        self.one(self.written(request),'stop','requested')
+        self.one(self.written(request),'stop','skipped','phase-requested')
+        recovery={**self.STOP,'stop_hook_active':True}
+        self.one(self.written(lambda:request(recovery)),'stop','failed','unsaved')
+        self.one(self.written(lambda:request(recovery)),'stop','skipped','recovery-failed')
+
+    def test_a_save_that_began_and_stopped_fails_as_incomplete(self):
+        lines=self.written(self.interrupt_save)
+        self.assertEqual([('prompt','armed',None),('stop','requested',None),('save','error','OSError'),
+                          ('stop','failed','incomplete')],
+                         [(line['stage'],line['event'],line.get('code')) for line in lines])
+
+    def test_a_finished_save_the_state_never_took_is_held_unconfirmed(self):
+        self.begin();self.stop();self.save();candidate,state=self.state()
+        state['phase']='requested';candidate.write_text(json.dumps(state))
+        self.one(self.written(lambda:self.stop(active=True)),'stop','held','unconfirmed')
+
+    def test_a_closed_task_is_not_asked_for_a_save(self):
+        self.call('start','--task-id','research','--goal','Inspect routing')
+        with self.runtime() as (_,_,brain):
+            task=brain.find_record(self.root,'research',record_type='task')[1]
+            brain.update_record(self.root,task['id'],expected_revision=task['revision'],
+                progress=None,next_steps=[],files=[],sources=[],actor='tester',
+                transition_to='completed',reason='Public fixture finished')
+        self.begin()
+        self.one(self.written(self.stop),'stop','skipped','task-completed')
+
+    def test_each_refused_save_writes_one_line_with_its_code(self):
+        self.begin();self.stop();candidate,state=self.state()
+        learning=self.payload['learnings'][0]
+        cases=[
+            ({**self.payload,'learnings':[{**learning,'sources':['missing.md']}]},
+             'memory-result-v1:source_missing','Source is missing or is not a regular file'),
+            ({**self.payload,'learnings':[{**learning,'sources':['.env']}]},
+             'memory-result-v1:source_path','source paths are refused'),
+            ({**self.payload,'learnings':[{**learning,'sources':[]}]},'memory-result-v1:no_sources','Cite sources'),
+            ({**self.payload,'verified':False},'memory-result-v1:unverified','verified=true'),
+            # The likeliest slip: verified inside the learning instead of beside it.
+            ({'progress':'Checked the retry rule.','learnings':[{**learning,'verified':True}]},
+             'memory-result-v1:learning_fields','Each learning needs type, title, consequence and sources'),
+            ({**self.payload,'learnings':[{**learning,'type':'rule'}]},'memory-result-v1:learning_type','finding or decision'),
+            ({**self.payload,'learnings':[learning,{**learning,'consequence':'The Amber dispatcher retries nothing.'}]},
+             'memory-result-v1:conflicting_learnings','Conflicting learning identities'),
+            ({**self.payload,'summary':'Inspected.'},'memory-result-v1:schema','Unknown result fields'),
+            ({**self.payload,'progress':'x'*1001},'memory-result-v1:text_limit','within 1000 characters'),
+            ({**self.payload,'progress':'stderr: the dispatcher failed'},'memory-result-v1:raw_text','pasted log'),
+            ({**self.payload,'progress':'Asked fixture.owner@example.invalid about retries.'},
+             'memory-result-v1:sensitive','personal data'),
+            ({'learnings':[]},'memory-result-v1:nothing','Nothing to record'),
+            ({'next_steps':[],'learnings':[]},'native-result:nothing-to-record','native-result:nothing-to-record'),
+        ]
+        for data,code,text in cases:
+            with self.subTest(code=code):
+                results=[]
+                self.one(self.written(lambda:results.append(self.save(data,ok=False))),'save','refused',code)
+                self.assertNotEqual(0,results[0].returncode)
+                # The agent still reads the same correctable text.
+                self.assertIn(text.encode(),results[0].stderr)
+        for token,data,code in ((state['token'],b'{"progress": "unterminated','native-result:invalid-input'),
+                                ('0'*32,json.dumps(self.payload).encode(),'native-result:request-unavailable'),
+                                ('not-a-token',json.dumps(self.payload).encode(),'native-result:invalid-token')):
+            with self.subTest(code=code):
+                results=[]
+                self.one(self.written(lambda:results.append(self.raw('native-result','--request',candidate.stem,
+                    '--token',token,'--input','-','--json',data=data))),'save','refused',code)
+                self.assertNotEqual(0,results[0].returncode)
+        self.assertEqual([],self.records('tasks'))
+        self.assertEqual('requested',self.state()[1]['phase'])
+
+    def test_saved_held_and_omitted_lines_count_learnings_and_chunks_only(self):
+        self.begin();self.stop()
+        line=self.one(self.written(self.save),'save','saved')
+        self.assertEqual((1,1),(line['learnings'],line['promoted']))
+        line=self.one(self.written(self.save),'save','saved','repeat')
+        self.assertEqual((0,0),(line['learnings'],line['promoted']))
+        self.begin();self.stop();candidate,state=self.state()
+        self.one(self.written(lambda:self.call('native-result','--request',candidate.stem,'--token',state['token'],
+                                              '--skip','--json')),'save','omitted')
+        self.begin();self.stop()
+        changed={**self.payload['learnings'][0],'consequence':'The Amber dispatcher retries no request.',
+                 'expected_revision':99}
+        line=self.one(self.written(lambda:self.save({**self.payload,'learnings':[changed]})),'save','held')
+        self.assertEqual((0,0),(line['learnings'],line['promoted']))
+
+    def test_a_save_after_a_failed_stop_is_counted_late(self):
+        self.interrupt_save()
+        self.one(self.written(self.save),'save','saved','late')
+
+    def test_journal_lines_are_metadata_only(self):
+        marker='Zircon'
+        prompt={'hook_event_name':'UserPromptSubmit','session_id':'session-'+marker,'prompt':marker+' routing question'}
+        stop={'hook_event_name':'Stop','session_id':'session-'+marker,'stop_hook_active':False,
+              'last_assistant_message':marker+' answer'}
+        self.call('native-prompt','--host','claude','--task-id','research',data=prompt)
+        self.call('native-stop','--host','claude','--task-id','research',data=stop)
+        candidate,state=self.state()
+        learning={**self.payload['learnings'][0],'title':marker+' retry boundary'}
+        save=lambda data,ok=True:self.call('native-result','--request',candidate.stem,'--token',state['token'],
+                                           '--input','-','--json',data=data,ok=ok)
+        save({**self.payload,'learnings':[{**learning,'sources':[marker+'.md']}]},ok=False)
+        save({**self.payload,'progress':marker+' progress','learnings':[learning]})
+        self.call('native-stop','--host','claude','--task-id','research',data={**stop,'stop_hook_active':True})
+        lines=self.journal()
+        self.assertEqual([('prompt','armed'),('stop','requested'),('save','refused'),('save','saved'),('stop','skipped')],
+                         [(line['stage'],line['event']) for line in lines])
+        text=(self.root/JOURNAL).read_text(encoding='utf-8')
+        for content in (marker,state['token'],candidate.stem,str(self.root),self.root.name,'rules.md','research',
+                        'tester',learning['consequence']):
+            self.assertNotIn(content,text)
+        for line in lines:
+            self.assertLessEqual(set(line),JOURNAL_FIELDS)
+            for field in ('stage','event','code'):
+                if field in line:self.assertRegex(line[field],r'^[a-z0-9][a-z0-9_.:-]{0,79}$')
+
+    def test_journal_keeps_a_bounded_window_of_the_newest_lines(self):
+        config_file=self.root/'project-brain/config/runtime.json'
+        config=json.loads(config_file.read_text());config['refresh_health_retention']=1
+        config_file.write_text(json.dumps(config))
+        with self.runtime() as (native,_,_):
+            for _ in range(60):
+                native.begin(self.root,'research','codex',{'hook_event_name':'UserPromptSubmit'},
+                             owner='tester',mode='governed')
+            native.begin(self.root,'research','codex',{'hook_event_name':'UserPromptSubmit','session_id':'session-a'},
+                         owner='tester',mode='governed')
+        lines=self.journal()
+        # Eight journal lines per refresh-health record, never fewer.
+        self.assertGreaterEqual(len(lines),8)
+        self.assertLess(len(lines),40)
+        self.assertEqual('armed',lines[-1]['event'])
+
+    @unittest.skipUnless(hasattr(os,'symlink'),'symlinks unavailable')
+    def test_a_linked_journal_is_never_written_through(self):
+        outside=self.root.parent/'outside.ndjson';outside.write_text('')
+        local=self.root/'memory-bank/local';local.mkdir(parents=True,exist_ok=True)
+        try:(local/'native-results.ndjson').symlink_to(outside)
+        except OSError:self.skipTest('symbolic links need a privilege here')
+        self.assertTrue(self.begin()['armed'])
+        self.assertEqual('',outside.read_text())
+
+    @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell hook profile')
+    def test_stop_hook_records_its_save_request_exit_for_each_host(self):
+        prompt={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Inspect the Amber routing policy.'}
+        payloads={'claude':(prompt,self.STOP),'codex':(prompt,self.STOP),
+                  'cursor':({'hook_event_name':'beforeSubmitPrompt','conversation_id':'session-a',
+                             'prompt':'Inspect the Amber routing policy.'},
+                            {'hook_event_name':'stop','conversation_id':'session-a','status':'completed','loop_count':0})}
+        for host,(asked,stopped) in payloads.items():
+            with self.subTest(host=host):
+                hooks=self.install_hooks(host)
+                self.hook(hooks,'working-memory-read.sh',asked)
+                lines=self.written(lambda:self.hook(hooks,'working-memory-write.sh',stopped))
+                self.assertEqual([('stop','requested',None),('stop-hook','exited',0)],
+                                 [(line['stage'],line['event'],line.get('status')) for line in lines])
+                self.assertEqual({host},{line['host'] for line in lines})
+                self.assertLessEqual(set(lines[-1]),JOURNAL_FIELDS)
+
+    @unittest.skipUnless(os.name=='posix' and shutil.which('bash') and shutil.which('timeout'),
+                         'POSIX shell hook profile with timeout')
+    def test_stop_hook_records_a_failed_killed_or_skipped_save_request(self):
+        hooks=self.install_hooks('claude')
+        # The runtime stand-in: the checkpoint succeeds, the save request fails or hangs.
+        (self.root/'memory-bank/scripts/context_cli.py').write_text(
+            'import os, sys, time\n'
+            'if "native-stop" in sys.argv:\n'
+            '    if os.environ.get("FIXTURE_NATIVE_STOP") == "hang":\n'
+            '        time.sleep(30)\n'
+            '    sys.exit(3)\n')
+        for mode,budget,expected in (('fail','5',('exited',3,None)),('hang','1',('exited',124,None)),
+                                     ('skip','5',('skipped',None,'capsule-delivered'))):
+            with self.subTest(mode=mode):
+                env=dict(self.env,FIXTURE_NATIVE_STOP=mode,CONTEXT_HOOK_BUDGET=budget)
+                if mode=='skip':env['CONTEXT_CAPSULE_DELIVERED']='1'
+                results=[]
+                lines=self.written(lambda:results.append(self.hook(hooks,'working-memory-write.sh',self.STOP,env=env)))
+                self.assertEqual(b'',results[0].stdout)
+                self.assertEqual([('stop-hook',*expected)],
+                                 [(line['stage'],line['event'],line.get('status'),line.get('code')) for line in lines])
+                self.assertEqual('claude',lines[0]['host'])
+
+    @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell hook profile')
+    def test_stop_hook_never_appends_through_a_linked_journal(self):
+        hooks=self.install_hooks('claude')
+        outside=self.root.parent/'outside.ndjson';outside.write_text('')
+        local=self.root/'memory-bank/local';local.mkdir(parents=True,exist_ok=True)
+        (local/'native-results.ndjson').symlink_to(outside)
+        self.hook(hooks,'working-memory-write.sh',self.STOP)
+        self.assertEqual('',outside.read_text())
 
 
 if __name__=='__main__':unittest.main()

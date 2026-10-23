@@ -678,7 +678,8 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                     r"""
                     if git ls-files -z -- '*/.cursor/hooks/working-memory-write.sh' \
                                           '*/.cursor/hooks/local-context.sh' \
-                      | xargs -0 -r grep -nE '\bdate[[:space:]]+[-+]|\$\(date|\$RANDOM|uuidgen'; then
+                      | xargs -0 -r grep -nE '\bdate[[:space:]]+[-+]|\$\(date|\$RANDOM|uuidgen' \
+                      | grep -v 'native-results\.ndjson'; then
                       echo "Per-turn invalidator in the Cursor rule render (above)." >&2
                       exit 1
                     fi

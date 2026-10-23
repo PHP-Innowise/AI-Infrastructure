@@ -317,6 +317,22 @@ hook's output (a `hook_success` `UserPromptSubmit` attachment; in Codex, a
 developer message that starts like a capsule) and ends at the next human
 prompt. `--json` prints the numbers as JSON, `--paths` adds per-path counts.
 
+`realized` also reads the project's native result journal,
+`memory-bank/local/native-results.ndjson` (`--state DIR` for an attached
+project's state directory), and prints how far the automatic native saves got,
+per host: prompt hook runs, save requests armed (and how many followed a
+request that was not saved completely), Codex continuation prompts, Stop hook
+runs with their timeouts and non-zero exits, saves requested, saved, held,
+omitted and failed, refused saves, errors, learnings written and chunks
+promoted, then every code with its count (`save refused
+memory-result-v1:unverified`, `stop skipped recovery-saved`, `stop-hook exited
+124`). An exact repeat of a finished save is not counted again. The journal's
+codes are fixed words; anything else in a code field counts as `other` and is
+never printed. The prompt hook's lines in `refresh-health.ndjson` name no host,
+so they are given once, for all hosts. A project without the journal ran a
+runtime before it, or no native step at all; `docs/MEMORY-INTEGRATION.md`
+lists what each line means.
+
 For a real historical comparison, freeze each project's reachable Git head and
 eligible working-tree memory once, preserving modification times, and point both
 versions at those copies. Match the input hashes, host, selected edition,
@@ -465,7 +481,9 @@ report them too.
   its text, by kind (skill, brain, chunk, task, spec-doc, changelog);
   `context.py retrieve` calls and Memory MCP `memory_retrieve` calls by the
   agent; and, as a baseline, documents of those kinds the agent opened that
-  the capsule did not deliver.
+  the capsule did not deliver. From the native result journal, per host: the
+  automatic save funnel from prompt hook run to promoted chunk, and the codes
+  of every skip, refusal and failure.
 
 `realized` records a tool's path references without checking whether the tool
 successfully read that file; mentions are textual matches. Neither measures

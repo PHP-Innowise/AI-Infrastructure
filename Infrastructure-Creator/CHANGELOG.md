@@ -4,6 +4,37 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Generated Stop hooks journal their save request — 2026-10-22
+
+- The seeded runtime journals every prompt, Stop and save to ignored
+  `memory-bank/local/native-results.ndjson` (memory-seed carries it since the
+  root change of the same day), but a generated Stop hook did not write the
+  one line the runtime cannot: its save request's exit status. A request
+  killed at the hook's budget, or failed before its own line, left nothing,
+  so a count of real sessions could not see those Stops. hook-forge now
+  documents the editions' Stop block as a mandatory fragment ("Native result
+  journal"), and step 6 runs `native-stop` through it: one `stop-hook` line
+  per Stop - `exited` with the request's status (124 when the budget killed
+  it), or `skipped` `capsule-delivered` when the Harness asked for no save -
+  with no payload, path, task or session, never through a linked journal file
+  or a linked attached state, its clock on one physical line.
+- bootstrap-verifier requires that fragment, line for line and with the
+  hook's own host, in a manifest-owned `working-memory-write.sh` once the
+  generator-owned `native_results.py` journals (`lacks the native result
+  journal line (hook-forge step 6)`). A project seeded before the journal
+  keeps its hooks, and the adapter contract still sees exactly two
+  `native-stop` lines.
+- The skill-body ceiling in `scripts/token_budget.json` rises by the 3,133
+  bytes the fragment added; mirrors and the policy lock regenerated.
+- Tests: `tests/test_native_journal_generator.py` runs the documented
+  fragment in a temporary project (each status, 124 at a one-second budget,
+  the Harness skip, every host, links at the journal and at an attached
+  state, an unwritable journal) and holds the verifier to it (missing,
+  rewritten, seeded before the journal, unowned files);
+  `tests/test_memory_prompt_generator.py` at the repository root checks that
+  the fragment is the block every edition ships. Each fails without the
+  change.
+
 ### Seeded retrieval finds a path written out under the project root — 2026-10-22
 
 - memory-seed's `context_retrieval.py` finds an absolute path a prompt names

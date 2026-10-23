@@ -17,7 +17,7 @@ runs, and scores what came back against human judgments.
         [--timeout SECONDS] [--keep]
     python3 scripts/memory_eval.py report RESULT [--compare OTHER] [--show-unjudged]
     python3 scripts/memory_eval.py realized --project DIR [--claude-root DIR] \\
-        [--codex-root DIR] [--since YYYY-MM-DD] [--json] [--paths]
+        [--codex-root DIR] [--state DIR] [--since YYYY-MM-DD] [--json] [--paths]
 
 `run`, per prompt, never writing into the project (all work is in the cache):
 
@@ -3297,10 +3297,107 @@ def codex_sources(root: Path, member: Membership) -> List[Path]:
     return found
 
 
+NATIVE_JOURNAL = "memory-bank/local/native-results.ndjson"
+HEALTH_SERIES = "memory-bank/local/refresh-health.ndjson"
+NATIVE_HOSTS = ("claude", "codex", "cursor")
+# A journal code is a fixed word; anything else in the field is counted as
+# "other", never printed.
+NATIVE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}")
+NATIVE_COUNTERS = (
+    "prompt_hook_runs", "armed", "armed_after_incomplete", "continuations",
+    "stop_hook_runs", "stop_hook_timeouts", "stop_hook_failures", "requested",
+    "saved", "held", "omitted", "failed", "refused", "errors",
+    "learnings_written", "chunks_promoted",
+)
+
+
+def native_step(counts: Counter, reasons: Dict[str, Counter], record: Dict[str, Any]) -> None:
+    """Count one journal line: a step of native_results, or the Stop hook's exit."""
+    stage, event = record.get("stage"), record.get("event")
+    if not isinstance(stage, str) or not isinstance(event, str):
+        return
+    code = record.get("code")
+    if stage == "stop-hook" and event == "exited":
+        status = record.get("status")
+        code = str(status) if type(status) is int else None
+    elif code is not None:
+        code = code if isinstance(code, str) and NATIVE_CODE.fullmatch(code) else "other"
+    if stage == "prompt":
+        counts["prompt_hook_runs"] += 1
+        counts["armed"] += event == "armed"
+        counts["armed_after_incomplete"] += event == "armed" and code is not None
+        counts["continuations"] += event == "continuation"
+    elif stage == "stop-hook":
+        counts["stop_hook_runs"] += 1
+        counts["stop_hook_timeouts"] += code == "124"
+        counts["stop_hook_failures"] += event == "exited" and code not in (None, "0", "124")
+    elif stage == "stop":
+        counts["requested"] += event == "requested"
+        counts["failed"] += event == "failed"
+        counts["held"] += event == "held"
+    elif stage == "save":
+        # A repeat of a finished save is that save again, not another one.
+        if event in ("saved", "held", "omitted") and code != "repeat":
+            counts[event] += 1
+        if event in ("saved", "held"):
+            for field, counter in (("learnings", "learnings_written"), ("promoted", "chunks_promoted")):
+                value = record.get(field)
+                counts[counter] += value if type(value) is int and value > 0 else 0
+        counts["refused"] += event == "refused"
+    counts["errors"] += event == "error"
+    if code is not None:
+        reasons.setdefault(stage + " " + event, Counter())[code] += 1
+
+
+def native_summary(counts: Counter, reasons: Dict[str, Counter]) -> Dict[str, Any]:
+    return {**{name: counts.get(name, 0) for name in NATIVE_COUNTERS},
+            "reasons": {step: dict(sorted(reasons[step].items())) for step in sorted(reasons)}}
+
+
+def native_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
+    """How far the automatic native saves got, per host, from disk.
+
+    Reads the journal native_results.py and the Stop hook append - one
+    metadata line per prompt, Stop, save and Stop-hook exit - and, for the
+    prompt hook runs of every host together, the hook's lines in the
+    refresh-health series, which names no host. Counts and fixed codes only.
+    """
+    hosts: Dict[str, Tuple[Counter, Dict[str, Counter]]] = {
+        host: (Counter(), {}) for host in (*NATIVE_HOSTS, "unknown")}
+
+    def within(record: Dict[str, Any]) -> bool:
+        at = parse_instant(record.get("at"))
+        return since is None or (at is not None and at >= since)
+
+    lines = 0
+    for record in read_records(state / NATIVE_JOURNAL):
+        if within(record):
+            lines += 1
+            host = record.get("host") if record.get("host") in NATIVE_HOSTS else "unknown"
+            native_step(*hosts[host], record)
+    total: Counter = Counter()
+    reasons: Dict[str, Counter] = {}
+    for counts, steps in hosts.values():
+        total.update(counts)
+        for step, codes in steps.items():
+            reasons.setdefault(step, Counter()).update(codes)
+    return {
+        "journal": (state / NATIVE_JOURNAL).is_file(),
+        "lines": lines,
+        "prompt_hook_health_lines": sum(record.get("source") == "hook" and within(record)
+                                        for record in read_records(state / HEALTH_SERIES)),
+        "hosts": {host: native_summary(*hosts[host]) for host in hosts},
+        "total": native_summary(total, reasons),
+    }
+
+
 def command_realized(arguments: argparse.Namespace) -> int:
     project = Path(arguments.project).expanduser().resolve()
     if not project.is_dir():
         raise EvalError(f"--project {arguments.project} is not a directory")
+    state = Path(arguments.state).expanduser().resolve() if arguments.state else project
+    if not state.is_dir():
+        raise EvalError(f"--state {arguments.state} is not a directory")
     since: Optional[datetime] = None
     if arguments.since:
         day = parse_day(arguments.since)
@@ -3335,6 +3432,7 @@ def command_realized(arguments: argparse.Namespace) -> int:
         },
         "codex": {"transcripts": len(codex_used), **tally(codex_all, paths)},
         "total": {"transcripts": len(claude_used) + len(codex_used), **tally(claude_all + codex_all)},
+        "native": native_funnel(state, since),
     }
     if paths is not None:
         report["paths"] = {
@@ -3383,6 +3481,7 @@ def format_realized(report: Dict[str, Any]) -> str:
         counts = report["total"]["by_kind"][kind]
         if counts["delivered"]:
             lines.append(f"  {kind:<10} {counts['delivered']:>6} {counts['touched']:>6} {counts['mentioned']:>6}")
+    lines.extend(format_native(report["native"]))
     if "paths" in report:
         lines.append("")
         lines.append("by path: delivered / touched / mentioned")
@@ -3392,6 +3491,50 @@ def format_realized(report: Dict[str, Any]) -> str:
                 f" {counts.get('mentioned', 0):>5}  {path}"
             )
     return "\n".join(lines)
+
+
+NATIVE_ROWS = (
+    ("prompt hook runs", "prompt_hook_runs"),
+    ("  armed a save request", "armed"),
+    ("    after an unsaved one", "armed_after_incomplete"),
+    ("  continuation prompts", "continuations"),
+    ("stop hook runs", "stop_hook_runs"),
+    ("  timed out", "stop_hook_timeouts"),
+    ("  exited non-zero", "stop_hook_failures"),
+    ("save requested", "requested"),
+    ("saved", "saved"),
+    ("held", "held"),
+    ("omitted", "omitted"),
+    ("failed", "failed"),
+    ("refused saves", "refused"),
+    ("errors", "errors"),
+    ("learnings written", "learnings_written"),
+    ("chunks promoted", "chunks_promoted"),
+)
+
+
+def format_native(native: Dict[str, Any]) -> List[str]:
+    lines = [""]
+    if not native["journal"]:
+        lines.append("Native result funnel: no native-results.ndjson in memory-bank/local"
+                     " (a runtime before the journal, or no native step ran)")
+    else:
+        lines.append(f"Native result funnel: {native['lines']} journal line(s)")
+        unknown = any(native["hosts"]["unknown"][key] for key in NATIVE_COUNTERS)
+        columns = [*NATIVE_HOSTS, *(("unknown",) if unknown else ()), "total"]
+        width = max(len(title) for title, _ in NATIVE_ROWS) + 2
+        lines.append(" " * width + "".join(column.rjust(9) for column in columns))
+        sources = {**native["hosts"], "total": native["total"]}
+        for title, key in NATIVE_ROWS:
+            lines.append(title.ljust(width) + "".join(str(sources[column][key]).rjust(9) for column in columns))
+        if native["total"]["reasons"]:
+            lines.append("")
+            lines.append("codes, all hosts:")
+            for step, codes in native["total"]["reasons"].items():
+                for code, count in codes.items():
+                    lines.append(f"  {step:<18} {code:<46} {count:>6}")
+    lines.append(f"prompt hook runs, all hosts (refresh-health.ndjson): {native['prompt_hook_health_lines']}")
+    return lines
 
 
 # --------------------------------------------------------------------------
@@ -3474,6 +3617,8 @@ def build_parser() -> argparse.ArgumentParser:
     realized.add_argument("--project", required=True, help="the project directory")
     realized.add_argument("--claude-root", default="~/.claude/projects")
     realized.add_argument("--codex-root", default="~/.codex/sessions")
+    realized.add_argument("--state", help="the accelerator state directory of an attached project"
+                          " (default: the project)")
     realized.add_argument("--since", help="only turns from this UTC date on (YYYY-MM-DD)")
     realized.add_argument("--json", action="store_true")
     realized.add_argument("--paths", action="store_true", help="also list delivered document paths")

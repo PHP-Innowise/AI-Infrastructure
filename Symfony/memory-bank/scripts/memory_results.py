@@ -71,22 +71,52 @@ DOMAIN_BYTE_LIMIT = 32 * 1024 * 1024
 # What a learning becomes when it is recorded: a finding is resolved, a
 # decision accepted - the states promotion carries into the Memory Bank.
 CLOSED_STATE = {"finding": "resolved", "decision": "accepted"}
+REFUSAL_CODE = re.compile(r"(?:memory-result-v1|native-result):[a-z0-9_-]{1,64}")
+
+
+class ResultRefused(BrainError):
+    """A refused result: the text the agent corrects, and a fixed code.
+
+    The message is unchanged, so an agent - and the Harness, which matches
+    it - reads what it always read; the code is what a count of refusals
+    uses, never the message's free text.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = "memory-result-v1:" + code
+
+
+def refusal_code(error: BrainError) -> str:
+    """The machine code of a refused save, whatever its message says."""
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and REFUSAL_CODE.fullmatch(code):
+        return code
+    # The fences and the native challenge already refuse in codes alone.
+    if REFUSAL_CODE.fullmatch(str(error)):
+        return str(error)
+    if isinstance(error, BrainRecordNotFound):
+        return "memory-result-v1:record_not_found"
+    return "memory-result-v1:unclassified"
 
 
 def _text(value: object, label: str, limit: int) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
-        raise BrainError(f"{label} must be nonempty text within {limit} characters")
-    guard_shared_text(label, [value])
+        raise ResultRefused("text_limit", f"{label} must be nonempty text within {limit} characters")
+    try:
+        guard_shared_text(label, [value])
+    except BrainError as error:
+        raise ResultRefused("sensitive", str(error)) from error
     # Shared memory holds summaries, never logs or transcripts: a line that
     # opens like one ("stderr:", "user:") is refused, as a query's is cut.
     if RAW_TEXT_PATTERN.search(value):
-        raise BrainError(f"{label} looks like a pasted log or transcript; summarize it instead")
+        raise ResultRefused("raw_text", f"{label} looks like a pasted log or transcript; summarize it instead")
     return value.strip()
 
 
 def _strings(values: object, label: str, count: int, limit: int) -> list[str]:
     if not isinstance(values, list) or len(values) > count:
-        raise BrainError(f"{label} must be a list of at most {count} items")
+        raise ResultRefused("schema", f"{label} must be a list of at most {count} items")
     return list(dict.fromkeys(_text(value, label, limit) for value in values))
 
 
@@ -96,7 +126,7 @@ def check_source(root: Path, value: object, *, require_file: bool = True) -> str
     head = value.split("#", 1)[0]
     problem = source_path_problem(value)
     if problem:
-        raise BrainError(problem)
+        raise ResultRefused("source_path", problem)
     if not require_file:
         return value
     relative = PurePosixPath(head)
@@ -106,23 +136,23 @@ def check_source(root: Path, value: object, *, require_file: bool = True) -> str
     for part in relative.parts:
         current = current / part
         if current.is_symlink():
-            raise BrainError("Symlink source paths are refused")
+            raise ResultRefused("source_path", "Symlink source paths are refused")
     if not current.is_file():
-        raise BrainError("Source is missing or is not a regular file")
+        raise ResultRefused("source_missing", "Source is missing or is not a regular file")
     return value
 
 
 def check_task_id(value: object) -> str:
     task_id = _text(value, "task ID", 200)
     if not TASK_ID_PATTERN.fullmatch(task_id) or ".." in task_id.split("/"):
-        raise BrainError("Invalid task ID")
+        raise ResultRefused("task_id", "Invalid task ID")
     return task_id
 
 
 def check_result_id(value: object) -> str:
     result_id = _text(value, "result ID", 64)
     if not RESULT_ID_PATTERN.fullmatch(result_id):
-        raise BrainError("Invalid result ID")
+        raise ResultRefused("result_id", "Invalid result ID")
     return result_id
 
 
@@ -133,35 +163,35 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
     them, which is how a finished plan says so.
     """
     if not isinstance(data, dict):
-        raise BrainError("A result is an object")
+        raise ResultRefused("schema", "A result is an object")
     unknown = set(data) - {"progress", "next_steps", "learnings", "verified"}
     if unknown:
-        raise BrainError("Unknown result fields: " + ", ".join(sorted(unknown)))
+        raise ResultRefused("schema", "Unknown result fields: " + ", ".join(sorted(unknown)))
     if "progress" in data and data["progress"] is not None and not isinstance(data["progress"], str):
-        raise BrainError("Progress must be text")
+        raise ResultRefused("schema", "Progress must be text")
     if "verified" in data and type(data["verified"]) is not bool:
-        raise BrainError("Verification attestation must be boolean")
+        raise ResultRefused("schema", "Verification attestation must be boolean")
     progress = _text(data["progress"], "progress", 1000) if data.get("progress") else None
     steps = (_strings(data["next_steps"], "next steps", NEXT_STEP_LIMIT, 300)
              if "next_steps" in data else None)
     learnings = data.get("learnings", [])
     if not isinstance(learnings, list) or len(learnings) > LEARNING_LIMIT:
-        raise BrainError(f"Keep at most {LEARNING_LIMIT} learnings")
+        raise ResultRefused("schema", f"Keep at most {LEARNING_LIMIT} learnings")
     checked = []
     identities = {}
     for learning in learnings:
         fields = {"type", "title", "consequence", "sources"}
         if (not isinstance(learning, dict) or not fields <= set(learning)
                 or set(learning) - fields - {"expected_revision"}):
-            raise BrainError("Each learning needs type, title, consequence and sources")
+            raise ResultRefused("learning_fields", "Each learning needs type, title, consequence and sources")
         if "expected_revision" in learning and (type(learning["expected_revision"]) is not int
                                                 or learning["expected_revision"] < 1):
-            raise BrainError("Learning expected_revision must be a positive original revision")
+            raise ResultRefused("schema", "Learning expected_revision must be a positive original revision")
         if learning["type"] not in LEARNING_TYPES:
-            raise BrainError("Use finding or decision")
+            raise ResultRefused("learning_type", "Use finding or decision")
         sources = _strings(learning["sources"], "sources", SOURCE_LIMIT, 1024)
         if not sources:
-            raise BrainError("Cite sources for each learning")
+            raise ResultRefused("no_sources", "Cite sources for each learning")
         for source in sources:
             check_source(root, source, require_file=check_files)
         checked.append({
@@ -180,12 +210,12 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
         identity = (item["type"], " ".join(item["title"].casefold().split()),
                     tuple(sorted(item["sources"])))
         if identity in identities and identities[identity] != item:
-            raise BrainError("Conflicting learning identities in one result")
+            raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result")
         identities[identity] = item
     if checked and data.get("verified") is not True:
-        raise BrainError("Attest that each learning was checked against its sources with verified=true")
+        raise ResultRefused("unverified", "Attest that each learning was checked against its sources with verified=true")
     if progress is None and steps is None and not checked:
-        raise BrainError("Nothing to record")
+        raise ResultRefused("nothing", "Nothing to record")
     return {"progress": progress, "next_steps": steps, "learnings": checked}
 
 
@@ -204,7 +234,7 @@ def prepared_scope(root: Path, owner: str, reason: str, attestation: str) -> str
     _text(owner, "owner", 200)
     _text(reason, "reason", 2000)
     if attestation not in ATTESTATIONS:
-        raise BrainError("attestation must be agent or person")
+        raise ResultRefused("schema", "attestation must be agent or person")
     scripts = Path(__file__).resolve().parent
     images = {}
     for name in ("memory_results.py", "brain_runtime.py", "automatic_query.py", "workspace_roots.py", "context.py"):
@@ -226,7 +256,7 @@ def prepare_result(root: Path, task_id: str, result_id: str, revision: int,
     """Validate a safe retained wire request without recording a result."""
     task_id, result_id = check_task_id(task_id), check_result_id(result_id)
     if type(revision) is not int or revision < 1:
-        raise BrainError("Supply the current task revision")
+        raise ResultRefused("revision", "Supply the current task revision")
     result = normalize(root, data, check_files=False)
     _text(owner, "owner", 200)
     _text(reason, "reason", 2000)
@@ -234,7 +264,7 @@ def prepare_result(root: Path, task_id: str, result_id: str, revision: int,
         scope = prepared_scope(root, owner, reason, attestation)
         task = writable_task(root, task_id, owner)
         if task["status"] in ("completed", "cancelled"):
-            raise BrainError("Use an active task to record new memory")
+            raise ResultRefused("task_closed", "Use an active task to record new memory")
         if task["revision"] != revision:
             raise BrainError("memory-result-v1:prepared_stale_no_write")
         wire = {"learnings": result["learnings"], "verified": True}
@@ -284,9 +314,9 @@ def _existing(root: Path, identifier: str) -> tuple[Optional[dict[str, Any]], bo
 def _authorized_task(root: Path, task: dict[str, Any], owner: str) -> dict[str, Any]:
     config = load_config(root)
     if task["privacy"] not in set(config["allowed_privacy"]) & {"public", "team"}:
-        raise BrainError("Task is outside the allowed memory privacy scope")
+        raise ResultRefused("task_privacy", "Task is outside the allowed memory privacy scope")
     if owner not in task["authorized_owners"]:
-        raise BrainError("The configured actor is not authorized for this task")
+        raise ResultRefused("not_authorized", "The configured actor is not authorized for this task")
     return task
 
 
@@ -733,14 +763,14 @@ def record_result(
     result_id = check_result_id(result_id)
     automatic_revision = type(revision) is str and revision == "auto"
     if not automatic_revision and (type(revision) is not int or revision < 1):
-        raise BrainError("Supply the current task revision")
+        raise ResultRefused("revision", "Supply the current task revision")
     if attestation not in ATTESTATIONS:
-        raise BrainError("attestation must be agent or person")
+        raise ResultRefused("schema", "attestation must be agent or person")
     if type(replay_only) is not bool or (replay_only and prepared is None):
-        raise BrainError("Receipt-only replay needs a prepared scope")
+        raise ResultRefused("schema", "Receipt-only replay needs a prepared scope")
     if prepared is not None and (not isinstance(prepared, str)
                                  or not re.fullmatch(r"[0-9a-f]{64}", prepared)):
-        raise BrainError("Invalid prepared scope")
+        raise ResultRefused("schema", "Invalid prepared scope")
     # Static shape, text/privacy and source-path policy apply to every
     # request. Current filesystem evidence is needed only for a new write.
     result = normalize(root, data, check_files=False)
@@ -754,7 +784,7 @@ def record_result(
         if automatic_revision:
             revision = task["revision"]
             if type(revision) is not int or revision < 1:
-                raise BrainError("Supply the current task revision")
+                raise ResultRefused("revision", "Supply the current task revision")
         # One task, one namespace: its external ID and its UUID both name it,
         # so every key below is derived from the UUID the lookup resolved.
         canonical = task["id"]
@@ -778,7 +808,7 @@ def record_result(
             if (prior is not None and set(prior) == {"task_id", "result_id", "digest", "task_revision"}
                     and prior.get("task_id") in (canonical, *aliases) and prior.get("result_id") == result_id
                     and prior.get("digest") != digest):
-                raise BrainError("Result ID was already used with different content")
+                raise ResultRefused("result_id_reused", "Result ID was already used with different content")
             raise BrainError("memory-result-v1:receipt_unavailable")
         if attempt is not None:
             if (attempt["task_id"] != canonical or attempt["result_id"] != result_id
@@ -818,7 +848,7 @@ def record_result(
         if replay_only and prior is None and not (resuming or restarted):
             raise BrainError("memory-result-v1:receipt_unavailable")
         if prior is None and (archived_task or task["status"] in ("completed", "cancelled")):
-            raise BrainError("Use an active task to record new memory")
+            raise ResultRefused("task_closed", "Use an active task to record new memory")
         # Auto admits a fresh operation at the current locked task image.
         # An existing result ID still passes the exact proof checks above;
         # this convenience never rebases an ambiguous started attempt.
@@ -846,7 +876,8 @@ def record_result(
         if prior is None and completed_task_stage is None and task["revision"] != revision and not restarted_holds:
             if prepared is not None:
                 raise BrainError("memory-result-v1:prepared_stale_no_write")
-            raise BrainError(
+            raise ResultRefused(
+                "stale_revision",
                 f"Stale task revision: expected {revision}, current {task['revision']}. "
                 "Nothing was written; replay this result ID with the current revision."
             )
@@ -862,7 +893,7 @@ def record_result(
             for learning in result["learnings"]:
                 identifier = learning_id(canonical, learning)
                 if identifier in identities and identities[identifier] != learning:
-                    raise BrainError("Conflicting learning identities in one result")
+                    raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result")
                 identities[identifier] = learning
                 for source in learning["sources"]:
                     check_source(root, source)
@@ -1015,7 +1046,7 @@ def record_result(
                 state = "differs"
             elif unfinished:
                 if owner not in current["authorized_owners"]:
-                    raise BrainError("An earlier attempt's record belongs to another owner")
+                    raise ResultRefused("not_authorized", "An earlier attempt's record belongs to another owner")
                 if (not created and attestation == "agent" and current["authority"] == "verified"
                         and record_attestation(current) != "agent"):
                     raise BrainError("memory-result-v1:learning_correction_not_authorized")

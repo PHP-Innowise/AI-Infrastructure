@@ -28,6 +28,67 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The automatic native save funnel, counted from disk — 2026-10-22
+
+- Why: why installed projects held no saved result had to be reconstructed
+  from transcripts, and once sessions run the disk still could not say how
+  far a save got. The challenge file is rewritten every turn and pruned to
+  128. A refused save's reason reached only the agent's tool output, and the
+  recovery Stop then marked it `failed` without one. `native_capture_incomplete`
+  lives one turn. The Stop hook left no trace when its save request failed
+  or was killed.
+- `native_results.py` appends one metadata line per prompt, Stop and save to
+  ignored `memory-bank/local/native-results.ndjson`: `at`, `host`, `stage`,
+  `event` and a fixed `code` - armed (with the phase the last request ended
+  in when the hook warns), continuation, requested or the reason a Stop asks
+  nothing (`not-governed`, `capsule-delivered`, `no-session-id`,
+  `not-stop-event`, `not-armed`, `task-completed`, `recovery-<phase>`, ...),
+  `failed` (`unsaved` or `incomplete`), held, saved/held with the learnings
+  written and chunks promoted, omitted, or `refused` with the refusal's code.
+  No payload, result, path, task or session. A call writes exactly one line;
+  an input refused before `save()` runs is journaled from `read_input`, so
+  `context.py` passes the request to it (two call lines).
+- `memory_results.py` refusals carry machine codes (`ResultRefused.code`,
+  `memory-result-v1:source_missing`, `:unverified`, `:learning_fields`,
+  `:schema`, `:nothing`, `:sensitive`, `:stale_revision`, ...) while the
+  message - the text the agent corrects and the Harness matches - is
+  unchanged; `refusal_code()` gives any refusal its code.
+- `working-memory-write.sh` appends the save request's exit status after it
+  runs (`stop-hook` `exited`, 124 when the budget killed it), or
+  `capsule-delivered` when a Harness turn skips it - written by the shell,
+  like the prompt hook's health line, because a killed runtime cannot.
+  Never through a linked journal file, nor through a link in an attached
+  state. The Codex and Cursor copies name their own host.
+- The journal keeps eight lines per `refresh_health_retention` record (a
+  fully exercised turn writes about six), trimmed in batches so an append
+  stays one write.
+- `scripts/memory_eval.py realized` prints the funnel per host - prompt hook
+  runs, armed, requested, saved, held, omitted, failed, refusals by code,
+  learnings written, chunks promoted - and the prompt hook's
+  `refresh-health.ndjson` lines for all hosts; `--state DIR` reads an
+  attached project's state.
+- The two Cursor guards that kept every clock out of the rule-rendering hooks
+  - `test_render_carries_no_per_turn_invalidator` and the lint job's textual
+  grep (`ci.yml`, `scripts/check.py`) - now admit the one on the journal
+  line, which stays on one physical line: it writes local metadata, and no
+  rule is made from it.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was rewritten for its asset copies.
+- Generated projects write the Stop hook's line too: Infrastructure-Creator's
+  hook-forge documents this Stop block as a mandatory fragment, and
+  bootstrap-verifier requires it in a generated `working-memory-write.sh`
+  once the seeded runtime journals (see `Infrastructure-Creator/CHANGELOG.md`).
+  The generator's skill-body ceiling in `scripts/token_budget.json` rises by
+  the 3,133 bytes that text added, to 302,433.
+- Tests (`tests/test_memory_native_capture.py`, `NativeFunnelJournalTests`,
+  and `tests/test_memory_eval.py`): every prompt, Stop and save path writes
+  exactly one line with its code and no content; the Stop hook's line on
+  success, failure, timeout and a Harness skip for Claude, Codex and Cursor;
+  the bounded window; no write through a linked journal; the realized
+  funnel and its text report. Each fails without the change, except the two
+  link guards, which hold the implementation to its refusal.
+
 ### A path written out under the project root is found — 2026-10-22
 
 - A prompt that names a file by its absolute path seeds the documents linked
