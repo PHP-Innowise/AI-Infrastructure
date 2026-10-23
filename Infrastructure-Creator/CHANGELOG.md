@@ -4,6 +4,28 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime closes Claude Code's save request with its marker — 2026-10-23
+
+- The memory runtime memory-seed copies puts the save request's marker last
+  for Claude Code, so the first line a person sees under "Ran N stop hooks"
+  is the instruction, as the editions' runtime does (root `CHANGELOG.md`,
+  same day). `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime builds no capsule for a Codex save continuation — 2026-10-23
+
+- The memory runtime memory-seed copies returns silently from `refresh` for
+  Claude Code and Codex when the query is the Stop hook's own save
+  continuation, as the editions' runtime does (root `CHANGELOG.md`, same
+  day). `context.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime leaves its own memory writes out of task work — 2026-10-23
+
+- The memory runtime memory-seed copies skips the chunks a promoted save
+  writes and the index it rewrites when it lists a turn's changed files, as
+  the editions' runtime does (root `CHANGELOG.md`, same day). `context.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The hook contract accepts an arm beside the refresh — 2026-10-23
 
 - `validate_generated.py` (`native_capture_hook_contract`) accepts a prompt

@@ -314,6 +314,14 @@ LAST_TURN_REPORT_MAX_AGE_SECONDS = 24 * 60 * 60
 LAST_TURN_SECTION_CHARACTER_LIMIT = 600
 LAST_TURN_SECTION_PATH_LIMIT = 3
 TURN_RUNTIME_DIRECTORIES = ("dynamic", "control", "indexes", "archive", "local")
+# What the runtime writes under memory-bank: the chunks automatic promotion
+# creates and supersedes, the index it rewrites with them, and its local
+# state. A team that commits its memory sees them in `git status` after every
+# promoted save; they are the runtime's writing, not the task's work.
+TURN_RUNTIME_MEMORY = re.compile(r"^memory-bank/(?:chunks/|local/|INDEX\.md$)")
+# The Stop hook's save continuation as Codex sends it back through
+# UserPromptSubmit: its marker and the challenge's token open the prompt.
+NATIVE_CONTINUATION_PROMPT = re.compile(r"\s*INTERNAL_NATIVE_MEMORY_RESULT [0-9a-f]{32}(?:\s|$)")
 BRANCH_PREFIXES = (
     "feature/", "feat/", "fix/", "bugfix/", "hotfix/", "chore/", "release/",
     "refactor/", "docs/", "test/", "merge/",
@@ -6109,7 +6117,10 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
 
     Paths the runtime writes itself are dropped rather than reported: a task
     recording its own record, handoff, and index churn as user work would grow
-    without ever describing anything the user changed.
+    without ever describing anything the user changed. That includes the
+    Memory Bank chunks a promoted save writes and the index it updates: in a
+    project that commits its memory, every save with a learning left
+    `memory-bank/chunks/` and `memory-bank/INDEX.md` changed for the next turn.
 
     So is the accelerator's own install while it is as the install record
     says it was written. A project that neither commits nor ignores it shows
@@ -6146,7 +6157,7 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
         path = os.fsdecode(entry[3:])
         if prefix and path.startswith(prefix):
             path = path[len(prefix):]
-        if path == "project-brain/" or runtime_owned.match(path):
+        if path == "project-brain/" or runtime_owned.match(path) or TURN_RUNTIME_MEMORY.match(path):
             continue
         if footprint and _installed_as_written(repository, path, footprint):
             continue
@@ -7122,10 +7133,12 @@ def flush_turn_deltas(
     files: list[str] = []
     for row in pending:
         files = merge_unique(files, json.loads(row["files"]))
+    # Turns buffered before `changed_paths` knew the install or the runtime's
+    # own memory writes still name them; the first flush after an update would
+    # make them the newest files.
+    files = [path for path in files if not TURN_RUNTIME_MEMORY.match(path)]
     footprint = installed_footprint(repository)
     if footprint:
-        # Turns buffered before `changed_paths` knew the install still name
-        # it; the first flush after an update would make it the newest files.
         files = [path for path in files if not _installed_as_written(repository, path, footprint)]
     omitted = max(0, len(files) - file_limit)
     checkpoint = (
@@ -9463,6 +9476,14 @@ def _command() -> int:
                     raise ContextError("--limit must be a positive integer")
                 if arguments.query is not None and arguments.task_id is None:
                     raise ContextError("--query requires --task-id")
+                if (arguments.host in ("claude", "codex") and arguments.query is not None
+                        and NATIVE_CONTINUATION_PROMPT.match(arguments.query)):
+                    # The save continuation is this turn's bookkeeping, not a
+                    # request: the turn's own prompt brought the capsule, and a
+                    # second one built from the instruction's words put 1.4 KB
+                    # of repeated state into the save step. Cursor's rule is
+                    # left to its own refresh.
+                    return 0
                 layers, index_result, warnings = refresh_layers(
                     connection, repository
                 )

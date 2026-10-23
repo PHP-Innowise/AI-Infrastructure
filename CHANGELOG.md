@@ -28,6 +28,64 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code shows what the save step is, not its marker — 2026-10-23
+
+- Why: Claude Code shows the first lines of a Stop hook's reason under "Ran
+  N stop hooks" after every answer (up to five lines in 2.1.278), and the
+  save request opened with `INTERNAL_NATIVE_MEMORY_RESULT <token>`: the
+  first thing a person saw after each answer was an opaque marker.
+- For Claude Code the marker now closes the request, and its first line is
+  the instruction's own "This is an internal continuation: ...". Codex and
+  Cursor send the continuation back as a prompt and recognise it by the
+  marker that opens it, so theirs is unchanged. `memory_eval.py realized`
+  finds the marker anywhere in the record, as before.
+- Test (`NativeAnswerTests`): Claude's request opens with the instruction and
+  ends with the marker; Codex's and Cursor's open with the marker.
+
+### A Codex save continuation gets no second capsule — 2026-10-23
+
+- Why: Codex sends the Stop hook's save continuation back through
+  UserPromptSubmit as a new prompt, so the prompt hook built a capsule for
+  the instruction's own words. The turn's prompt had already brought the
+  capsule: on a copy of a client the continuation's hook took 169 ms and put
+  1.4 KB of repeated working state, recent files and last-turn telemetry
+  into the save step, and where the project has documents, the instruction's
+  words ("progress", "learnings", "sources") would search them too.
+- `refresh --host codex` (and `--host claude`, whose continuation never
+  arrives as a prompt) returns at once, silently, for a query opened by the
+  continuation's marker and challenge token (`NATIVE_CONTINUATION_PROMPT`);
+  the hook then stays silent, as for any refresh with nothing to say. The
+  arm still recognises the continuation and journals it. Cursor's rule is
+  left to its own refresh.
+- Test: the Codex prompt hook prints nothing for a real continuation and
+  the journal records it, while the same runtime still answers Cursor and a
+  real prompt; it fails without the change.
+
+### A promoted save's memory files are not the task's work — 2026-10-23
+
+- Why: `changed_paths` drops what the runtime writes itself, so that a task
+  does not record its own churn as the user's work, but it knew only the
+  Project Brain's runtime directories. A save with a learning promotes it:
+  the runtime writes a chunk under `memory-bank/chunks/` and rewrites
+  `memory-bank/INDEX.md`. In a project that commits its memory - the
+  arrangement the editions' documentation recommends - every such save left
+  both changed for the next turn: on a copy of a client with its memory
+  committed, one save wrote five chunks (the learning and four findings
+  promoted with it) and the next turn counted `memory-bank/chunks/` and
+  `memory-bank/INDEX.md` as its work. A turn that only saved then counted
+  toward a checkpoint, and the chunks became the task's newest files.
+- `TURN_RUNTIME_MEMORY` names `memory-bank/chunks/`, `memory-bank/INDEX.md`
+  and `memory-bank/local/`; `changed_paths` skips them as it skips the
+  Brain's directories, and a checkpoint flush drops them from turns buffered
+  before. The recent-files line read from transcripts already left out every
+  `.md` file, so it named none of them.
+- None of the four clients is affected today: two ignore their memory and two
+  neither commit nor ignore the accelerator, whose collapsed `memory-bank/`
+  the install record already leaves out.
+- Tests (`AutomaticWorkingMemoryTest`): a promoted save's chunk and index are
+  not a turn's work while a real change beside them is; a flush drops them
+  from a turn buffered before. Both fail without the change.
+
 ### The prompt hook arms the save request beside the capsule's refresh — 2026-10-23
 
 - Why: the prompt hooks ran two Python processes one after the other:

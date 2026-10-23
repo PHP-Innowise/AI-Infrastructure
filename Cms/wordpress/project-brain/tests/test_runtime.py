@@ -7512,6 +7512,46 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
         self.assertEqual(0, capsule.returncode, capsule.stderr)
         self.assertEqual(["app.php"], json.loads(capsule.stdout)["working"]["files"])
 
+    def commit_base(self) -> None:
+        git = ["git", "-C", str(self.repository)]
+        self.repository.joinpath(".gitignore").write_text("/memory-bank/local/\n", encoding="utf-8")
+        subprocess.run([*git, "add", "."], check=True, capture_output=True)
+        subprocess.run([*git, "-c", "user.name=Test", "-c", "user.email=test@example.test",
+                        "commit", "-qm", "base"], check=True, capture_output=True)
+
+    def test_a_promoted_saves_memory_files_are_not_the_turns_work(self) -> None:
+        # A team that commits its memory: a save with a learning writes a
+        # chunk and rewrites the index, and that is the runtime's writing.
+        self.commit_base()
+        self.repository.joinpath("memory-bank/chunks/MEM-20261023-0000abcd-promoted.md").write_text(
+            "---\n{}\n---\n", encoding="utf-8")
+        index = self.repository / "memory-bank/INDEX.md"
+        index.write_text(index.read_text(encoding="utf-8") + "| MEM-20261023-0000abcd | Promoted |\n",
+                         encoding="utf-8")
+        only_memory = self.run_cli("turn", "--task-id", "feature/memory", "--flush-after", "5", "--json")
+        self.assertEqual(0, only_memory.returncode, only_memory.stderr)
+        self.assertEqual(0, json.loads(only_memory.stdout)["files"])
+        self.repository.joinpath("app.php").write_text("<?php\n", encoding="utf-8")
+        with_work = self.run_cli("turn", "--task-id", "feature/memory", "--flush-after", "5", "--json")
+        self.assertEqual(0, with_work.returncode, with_work.stderr)
+        self.assertEqual(1, json.loads(with_work.stdout)["files"])
+
+    def test_a_flush_drops_memory_writes_buffered_before_they_were_known(self) -> None:
+        self.commit_base()
+        self.repository.joinpath("app.php").write_text("<?php\n", encoding="utf-8")
+        first = self.run_cli("turn", "--task-id", "feature/memory", "--flush-after", "5", "--json")
+        self.assertEqual(0, first.returncode, first.stderr)
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        self.addCleanup(connection.close)
+        # A turn buffered by a runtime that took the promoted chunk and the
+        # index for work: the flush would have made them the newest files.
+        context_cli.append_turn_delta(connection, "feature/memory", ["memory-bank/chunks/", "memory-bank/INDEX.md"])
+        flushed = self.run_cli("turn", "--task-id", "feature/memory", "--flush", "--json")
+        self.assertEqual(0, flushed.returncode, flushed.stderr)
+        capsule = self.run_cli("hook-context", "--task-id", "feature/memory", "--json")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertEqual(["app.php"], json.loads(capsule.stdout)["working"]["files"])
+
     def test_hook_context_warms_four_turns_then_switches_to_governed(self) -> None:
         self.repository.joinpath("safe.php").write_text(
             "<?php // work\n", encoding="utf-8"

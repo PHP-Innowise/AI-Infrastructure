@@ -783,6 +783,33 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.assertIn('native memory result not saved completely',rule)
 
 
+    @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell hook profile')
+    def test_a_codex_save_continuation_gets_no_second_capsule(self):
+        """Codex sends the Stop hook's save continuation back through
+        UserPromptSubmit. The turn's own prompt brought the capsule; the
+        continuation is bookkeeping and gets none, while the arm still
+        records it as a continuation."""
+        hooks=self.install_hooks('codex')
+        ask={'hook_event_name':'UserPromptSubmit','session_id':'cont-codex','cwd':str(self.root),
+             'prompt':'Inspect the Amber retry policy.','turn_id':'t1','model':'m','permission_mode':'default'}
+        first=self.hook(hooks,'working-memory-read.sh',ask)
+        self.assertIn('working:',first.stdout.decode())
+        stop=self.hook(hooks,'working-memory-write.sh',{'hook_event_name':'Stop','session_id':'cont-codex',
+            'cwd':str(self.root),'stop_hook_active':False,'turn_id':'t1','model':'m','permission_mode':'default',
+            'last_assistant_message':'The Amber dispatcher retries only idempotent requests.'})
+        reason=json.loads(stop.stdout.decode().splitlines()[0])['reason']
+        before=len(self.journal())
+        continuation=self.hook(hooks,'working-memory-read.sh',dict(ask,prompt=reason,turn_id='t2'))
+        self.assertEqual(b'',continuation.stdout)
+        self.assertIn(('prompt','continuation'),[(line['stage'],line['event']) for line in self.journal()[before:]])
+        # The runtime decides it, for every hook that passes the prompt.
+        for host in ('claude','codex'):
+            quiet=self.call('refresh','--host',host,'--query',reason,'--task-id','research','--ephemeral')
+            self.assertEqual(b'',quiet.stdout)
+        cursor=self.call('refresh','--host','cursor','--query',reason,'--task-id','research','--ephemeral','--json')
+        self.assertIn('capsule_text',json.loads(cursor.stdout))
+
+
 class NativeRequestSwitchTests(NativeCaptureFixture):
     """`native_result_request: off` arms no prompt and asks no Stop; the
     default asks after every answer, as before. The request costs one more
@@ -901,6 +928,18 @@ class NativeAnswerTests(NativeCaptureFixture):
                 reason=self.ask(host='codex',session=f'codex-{n}',transcript=path)
                 self.assertIn(self.BRIEF if brief else self.REPEAT,reason)
                 self.assertNotIn(self.REPEAT if brief else self.BRIEF,reason)
+
+    def test_claude_shows_what_the_step_is_before_its_marker(self):
+        # Claude Code shows the first lines of a Stop hook's reason under "Ran
+        # N stop hooks" after every answer; Codex and Cursor send it back as a
+        # prompt, known by the marker that opens it.
+        lines=self.ask(session='marker-claude').splitlines()
+        self.assertTrue(lines[0].startswith('This is an internal continuation'))
+        self.assertRegex(lines[-1],r'^INTERNAL_NATIVE_MEMORY_RESULT [0-9a-f]{32}$')
+        for host in ('codex','cursor'):
+            with self.subTest(host=host):
+                self.assertRegex(self.ask(host=host,session='marker-'+host).splitlines()[0],
+                                 r'^INTERNAL_NATIVE_MEMORY_RESULT [0-9a-f]{32}$')
 
     def test_the_setting_decides_and_an_unknown_value_keeps_the_save(self):
         cfg_file=self.root/'project-brain/config/runtime.json'
