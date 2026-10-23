@@ -385,12 +385,29 @@ def _instruction(root,key,state,*,brief=False,host=None):
         interpreter=['python'] if shutil.which('python') else ['py','-3']
     # Keep the documented CLI spelling covered by the installed Bash
     # permission rules, even when the session's cwd is a subdirectory.
-    command='(cd '+shlex.quote(str(tooling))+' && '+shlex.join([
-        *interpreter,'memory-bank/scripts/context.py','--root',str(root),'native-result',
-        '--request',key,'--token',state['token'],'--input','-','--json'])+')'
+    def cli(*tail):
+        return shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),'native-result',
+            '--request',key,'--token',state['token'],*tail])
+    enter='cd '+shlex.quote(str(tooling))+' && '
+    if host=='claude':
+        # Claude Code asks before any command holding a subshell or a { }
+        # group, whatever the allow rules say, so (cd ROOT && ...) asked after
+        # every answer. It also asks before a heredoc whose body holds braces
+        # and quotes, and before a printf operand holding [ with $ or a
+        # backtick, which a JSON with code in it has. A cd into the project,
+        # echo and the allowed CLI pass; -E keeps the JSON's backslashes in
+        # zsh, whose plain echo turns them into characters, as in bash.
+        ask=('Use your shell tool to run this exact command: '+enter+"echo -E '<JSON>' | "
+             +cli('--input','-','--json')+'\n'
+             "Put one JSON object in place of <JSON>, writing each ' inside it as '\\''. ")
+        skip='run this command instead: '+enter+cli('--skip','--json')+'\n'
+    else:
+        ask='Use your shell tool to pipe one JSON object into this exact command: (' \
+            +enter+cli('--input','-','--json')+')\n'
+        skip='use the same command replacing --input - with --skip. '
     body=('This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
         'edit application files, run tests, delegate, or mark the task completed. '
-        'Use your shell tool to pipe one JSON object into this exact command: '+command+'\n'
+        +ask+
         'JSON: progress (summary, at most 1000 characters), optional next_steps '
         '(at most 3 strings of 300 characters; omit to preserve the current plan), '
         'learnings (at most 3 objects with type finding|decision, title, consequence, sources). '
@@ -404,8 +421,8 @@ def _instruction(root,key,state,*,brief=False,host=None):
         'Use only canonical project-relative source files you actually checked. Set verified=true '
         'only when you personally checked every learning against current sources; this is agent '
         'attestation, never human review. Empty learnings is valid. No raw requests, transcripts, '
-        'logs, credentials or personal data. If no project result is safe to save, use the same '
-        'command replacing --input - with --skip. Check the command result. '
+        'logs, credentials or personal data. If no project result is safe to save, '+skip+
+        'Check the command result. '
         +('The person has already read your answer above this continuation: after a successful save or skip, '
           'do not repeat it or mention routine memory operations; end with no further text or one short line. '
           'If a save is refused, briefly report the held save. ' if brief else
@@ -473,8 +490,14 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
                      checkout=_checkout(root),adapter=_adapter(),updated=time.time())
         _write(root,key,state)
         instruction=_instruction(root,key,state,brief=brief,host=host)
-    return step({'followup_message':instruction} if host=='cursor' else {'decision':'block','reason':instruction},
-                'requested',code,answer='brief' if brief else 'repeat')
+    # Claude Code labels a block a hook error, notifies one after every
+    # answer and hands the model the reason twice. Its Stop additionalContext
+    # (2.1.163 and later) continues the turn as hook feedback, once, through
+    # the same stop_hook_active and continuation cap.
+    if host=='claude': output={'hookSpecificOutput':{'hookEventName':'Stop','additionalContext':instruction}}
+    elif host=='cursor': output={'followup_message':instruction}
+    else: output={'decision':'block','reason':instruction}
+    return step(output,'requested',code,answer='brief' if brief else 'repeat')
 
 
 def save(root,key,token,data,*,owner,mode,provision,skip=False):

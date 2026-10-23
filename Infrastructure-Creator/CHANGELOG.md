@@ -4,6 +4,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime asks Claude Code for its save without a prompt or a hook error — 2026-10-23
+
+- The memory runtime memory-seed copies answers Claude Code's Stop with
+  `hookSpecificOutput.additionalContext` instead of a block. Its save command
+  holds no subshell: `cd ROOT && echo -E '<JSON>' | python3 … --json`.
+  This matches the editions' runtime (root `CHANGELOG.md`, same day): Claude
+  Code asked before the old command after every answer and showed the step as
+  a hook error. `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
 ### The seeded runtime closes Claude Code's save request with its marker — 2026-10-23
 
 - The memory runtime memory-seed copies puts the save request's marker last

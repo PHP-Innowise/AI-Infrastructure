@@ -597,6 +597,50 @@ python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
   capsule is the rule file its prompt hook renders, and its Stop request
   arrives as `followup_message`.
 
+### `claude_code_bench.py`
+
+**Purpose and status.** A maintainer-only check of the native save step on the
+installed Claude Code, without a model. The save after every answer depends on
+what Claude Code does with a Stop hook's output and on its permission check for
+the command the agent runs. Both change between Claude Code releases, and a
+unit test cannot see either.
+
+It installs an edition into a small project. Then, inside a network namespace
+with loopback only (`unshare -rn`), it runs `claude -p` against a scripted
+stand-in for the Messages API. The stand-in reads a file, answers, and follows
+the Stop hook's save step exactly as written. The JSON it saves holds
+backticks, `$`, brackets, an apostrophe, escapes and Cyrillic. Nothing leaves
+the machine and no tokens are spent.
+
+With `--target DIR` it runs in a copy of an installed project instead of a
+fresh install. The copy leaves out dependency trees as the rollout
+rehearsal's does, and `--sync` first brings it up to this clone. The saved
+learning cites one of the project's own tracked files, and the project itself
+is never written. A Git worktree or submodule is refused, as the rehearsal
+refuses it.
+
+```bash
+python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
+  [--target DIR [--sync] [--exclude NAME]] [--shell /usr/bin/zsh] [--timeout 180] [--keep]
+```
+
+- **Outputs:** a JSON report:
+  - Claude Code's version and the shell its Bash tool ran;
+  - whether the save ran (the journal's events);
+  - how many messages carried the step to the model, and their size;
+  - the hook errors the transcript recorded, and the error notifications in
+    the stream.
+
+  Exit 0 when the save ran, one message carried the step and no hook error
+  was recorded; 1 otherwise; 2 without Linux namespaces.
+- **Writes:** a temporary directory holding the project (or the copy) and an
+  empty HOME, under `/dev/shm` when writable, removed unless `--keep`.
+- **CI relationship:** none, as CI has no Claude Code. Run it when Claude Code
+  updates, and with `--target … --sync` on a copy of each project before a
+  rollout. Its first run, on 2.1.278, found two problems: the save command
+  asked for permission after every answer, and the Stop block showed as a hook
+  error.
+
 ### `memory_rerank_pilot.py`
 
 **Purpose and status.** Optional, source-only maintainer pilot. It compares the

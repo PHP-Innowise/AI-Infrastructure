@@ -22,6 +22,16 @@ GIT = ("git", "-c", "user.name=Lifecycle test", "-c", "user.email=lifecycle-test
        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null")
 
 
+def save_command(step: str, result: dict) -> tuple:
+    """The save a Stop step asks for, ready to run, and its stdin: Claude
+    Code's command takes the JSON in place of <JSON>, the others' a pipe."""
+    command = re.search(r"exact command: (\(cd .*?--json\)|cd .*?--json)\n", step).group(1)
+    data = json.dumps(result)
+    if "'<JSON>'" in command:
+        return command.replace("'<JSON>'", "'" + data.replace("'", "'\\''") + "'"), None
+    return command, data
+
+
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash") and shutil.which("git"), "POSIX shell hooks")
 class MemoryLifecycleTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -74,14 +84,19 @@ class MemoryLifecycleTest(unittest.TestCase):
         stop = self.hook(host, "working-memory-write.sh",
                          dict(base, hook_event_name="Stop", stop_hook_active=False), env)
         if result is not None:
-            reason = json.loads(stop.strip().splitlines()[0])["reason"]
+            output = json.loads(stop.strip().splitlines()[0])
             if host == "codex":
+                reason = output["reason"]
                 # The continuation comes back as a prompt; the turn's own prompt brought the capsule.
                 echoed = self.hook(host, "working-memory-read.sh",
                                    dict(base, hook_event_name="UserPromptSubmit", prompt=reason), env)
                 self.assertEqual("", echoed.strip())
-            command = re.search(r"exact command: (\(cd .*?--json\))", reason).group(1)
-            saved = subprocess.run(["bash", "-c", command], input=json.dumps(result), cwd=self.project,
+            else:
+                # Hook feedback, not a block: Claude Code would label a block a hook error.
+                self.assertNotIn("decision", output)
+                reason = output["hookSpecificOutput"]["additionalContext"]
+            command, data = save_command(reason, result)
+            saved = subprocess.run(["bash", "-c", command], input=data, cwd=self.project,
                                    env=env, capture_output=True, text=True, timeout=120)
             self.assertEqual(0, saved.returncode, saved.stdout[-400:] + saved.stderr[-400:])
         self.hook(host, "working-memory-write.sh", dict(base, hook_event_name="Stop", stop_hook_active=True), env)
@@ -153,13 +168,13 @@ class MemoryLifecycleTest(unittest.TestCase):
 
         prompt("g1", "How are invoices numbered per tenant?")
         followup = json.loads(stop("g1", 0))["followup_message"]
-        command = re.search(r"exact command: (\(cd .*?--json\))", followup).group(1)
-        saved = subprocess.run(["bash", "-c", command], input=json.dumps({
+        command, data = save_command(followup, {
             "progress": "Read billing.md; invoice numbering is per tenant.", "verified": True,
             "learnings": [{"type": "finding", "title": "Invoices are numbered per tenant",
                            "consequence": "Invoice numbering restarts per tenant and per year.",
-                           "sources": ["billing.md"]}]}), cwd=self.project, env=self.env,
-            capture_output=True, text=True, timeout=120)
+                           "sources": ["billing.md"]}]})
+        saved = subprocess.run(["bash", "-c", command], input=data, cwd=self.project, env=self.env,
+                               capture_output=True, text=True, timeout=120)
         self.assertEqual(0, saved.returncode, saved.stdout[-400:] + saved.stderr[-400:])
         stop("g1", 1)
 

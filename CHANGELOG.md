@@ -28,6 +28,59 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code saves without a prompt and without a hook error — 2026-10-23
+
+- Why: no Claude Code session had yet run the save after an answer, so the
+  real binary (2.1.278) was driven offline: a network namespace with
+  loopback only and a scripted stand-in for the Messages API, no model.
+  It found three defects:
+  - Claude Code asked before the save command after every answer, whatever
+    the allow rules say: a command holding a subshell or a `{ }` group always
+    asks, and the command was `(cd ROOT && python3 … --json)`. Under
+    `claude -p` the save was refused and the result lost.
+  - The Stop `decision: "block"` showed in the transcript as "Stop hook
+    error" and raised "Stop hook error occurred · ctrl+o to see" after every
+    answer.
+  - The model got the step twice: as "Stop hook feedback" and again as a
+    blocking-error message, about 2,600 characters a turn.
+- Claude Code's Stop now answers with `hookSpecificOutput.additionalContext`
+  (documented for Stop since 2.1.163). It continues the turn through the
+  same `stop_hook_active` and continuation cap, is labelled hook feedback,
+  and reaches the model once.
+- Its command is `cd ROOT && echo -E '<JSON>' | python3
+  memory-bank/scripts/context.py … --input - --json`, the JSON written in
+  place of `<JSON>`, and the skip has its own line. Offline the `cd`, `echo`
+  and the allowed CLI pass without a prompt. Rejected:
+  - a heredoc: Claude Code asks before one whose body holds braces and
+    quotes;
+  - `printf '%s'`: Claude Code asks before a `printf` operand holding `[`
+    with `$` or a backtick, as a JSON with code in it does;
+  - plain `echo`: Claude Code's Bash tool runs zsh unless `$SHELL` is bash,
+    and zsh's `echo` turned the JSON's `\n` into a newline, so the save was
+    refused. `-E` keeps it, in zsh as in bash.
+- Codex and Cursor get the same text, byte for byte, as before.
+- `memory_rollout_rehearsal.py` and the lifecycle test run either form.
+  `memory_eval.py` already finds the request in the new transcript shape;
+  a test now holds it.
+- Measured offline, one answered turn: the save ran and the second Stop saw
+  the recovery; the continuation fell from 5,250 to 3,141 characters in one
+  message; the stream raised no error notification.
+- Tests (`ClaudeSaveStepTests`): the Stop output per host; the command holds
+  no subshell, group, heredoc, `$`, backtick or `;` outside quotes; it keeps
+  a JSON with backticks, `$`, newlines, tabs, backslashes, quotes and
+  Cyrillic verbatim under bash and zsh from a subdirectory; the skip runs as
+  given. All four fail on the old runtime.
+- `scripts/claude_code_bench.py` repeats the offline run against the
+  installed Claude Code: one answered turn of an installed edition, the save
+  step followed as written with such a JSON, and a report of whether the
+  save ran, how many messages carried the step and whether the transcript
+  recorded a hook error. With `--target DIR --sync` it runs in a synced copy
+  of an installed project. On copies of the four client projects synced to
+  this change, all four saved without a prompt or a hook error. On `next` as
+  installed today, the save was refused. Linux only (user and network
+  namespaces). It is not a CI gate, as CI has no Claude Code; run it when
+  Claude Code updates and before a rollout.
+
 ### Cursor's next request keeps the rule its last prompt wrote — 2026-10-23
 
 - Why: Cursor reads its rule before the prompt hook runs, so the rule a

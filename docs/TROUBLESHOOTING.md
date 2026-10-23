@@ -498,6 +498,40 @@ recognise as attended, set `"native_result_answer": "brief"` (or
 final message alone: a headless caller would then get one short line instead
 of the answer. `repeat` restores the repeat everywhere.
 
+## Claude Code Asks Before the Save After Every Answer
+
+### Symptom
+
+After each answer Claude Code asks to approve a command like
+`cd <project> && echo -E '{...}' | python3 memory-bank/scripts/context.py ... native-result ...`.
+Under `claude -p` the command is refused instead and the result is not
+saved: `memory-bank/local/native-results.ndjson` records `stop` `failed` with
+the code `unsaved`.
+
+### Cause
+
+Claude Code runs that command without asking only when
+`.claude/settings.json` allows the memory CLI
+(`Bash(python3 memory-bank/scripts/context.py:*)`, with `python` and `py -3`
+for Windows) and the project is trusted. Claude Code ignores a project's allow
+rules until its trust dialog has been accepted once. A team-edited
+`settings.json` may have lost the rules.
+
+Runtimes released before 23 October 2026 gave the command as
+`(cd <project> && python3 ...)`. Claude Code asks before any command holding a
+subshell, whatever the allow rules say. They also sent the request as a Stop
+block, which the transcript shows as "Stop hook error" with an error
+notification after every answer.
+
+### Recover
+
+- Accept the trust dialog once in an interactive session.
+- Put the three allow rules back into `.claude/settings.json`. The edition's
+  own file lists them.
+- On an older runtime, update the accelerator (`--sync`). Until then, set
+  `"native_result_request": "off"` to stop the request (see the previous
+  section).
+
 ## Promotion Review or Apply Fails
 
 ### Symptom

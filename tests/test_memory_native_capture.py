@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,12 @@ JOURNAL = 'memory-bank/local/native-results.ndjson'
 # All a journal line may hold: when, which host, which step, a short code, the
 # Stop hook's exit status and two counts - never text, paths or identifiers.
 JOURNAL_FIELDS = {'at','host','stage','event','code','status','learnings','promoted','answer'}
+
+
+def requested(host,output):
+    """The save step a Stop hook's output asks for, as each host carries it."""
+    if host=='claude':return output['hookSpecificOutput']['additionalContext']
+    return output['followup_message'] if host=='cursor' else output['reason']
 
 
 class NativeCaptureFixture(unittest.TestCase):
@@ -271,7 +278,9 @@ class NativeCaptureTests(NativeCaptureFixture):
                                       'prompt':'Inspect the Amber routing policy.'})
         response=hook('working-memory-write.sh',{'hook_event_name':'Stop','session_id':'session-a',
                      'stop_hook_active':False,'last_assistant_message':'Inspected the retry contract.'})
-        self.assertEqual('block',json.loads(response.stdout)['decision'])
+        output=json.loads(response.stdout)
+        self.assertNotIn('decision',output)
+        self.assertIn('native-result --request',requested('claude',output))
         self.assertEqual([],self.records('tasks'));self.save();before=self.authority()
         hook('working-memory-write.sh',{'hook_event_name':'Stop','session_id':'session-a',
                                        'stop_hook_active':True,'last_assistant_message':'Saved.'})
@@ -881,8 +890,7 @@ class NativeAnswerTests(NativeCaptureFixture):
         environment=dict(self.env,**(env or {}))
         self.call('native-prompt','--host',host,'--task-id','research','--json',data=prompt,env=environment)
         reply=self.call('native-stop','--host',host,'--task-id','research',data=stop,env=environment)
-        reason=json.loads(reply.stdout)
-        return reason.get('followup_message') if host=='cursor' else reason['reason']
+        return requested(host,json.loads(reply.stdout))
 
     def rollout(self,name,source,pad=0):
         path=self.root.parent/name
@@ -959,6 +967,67 @@ class NativeAnswerTests(NativeCaptureFixture):
         last=[line for line in self.journal() if line['stage']=='stop'][-1]
         self.assertEqual(('requested','native-result:invalid-answer-setting','repeat'),
                          (last['event'],last.get('code'),last.get('answer')))
+
+
+class ClaudeSaveStepTests(NativeCaptureFixture):
+    """Claude Code drew the save step after every answer as a hook error,
+    with an error notification, and handed the model its text twice; and it
+    asked before the save command each time, whatever the allow rules say,
+    because the command held a subshell. Found by driving Claude Code 2.1.278
+    offline against a scripted model."""
+
+    def ask(self,host,session):
+        self.call('native-prompt','--host',host,'--task-id','research','--json',
+                  data={'hook_event_name':'UserPromptSubmit','session_id':session,'prompt':'Inspect the retry policy.'})
+        stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,
+              'last_assistant_message':'The Amber dispatcher retries only idempotent requests.'}
+        return json.loads(self.call('native-stop','--host',host,'--task-id','research',data=stop).stdout)
+
+    @staticmethod
+    def command(text,name='exact command: '):
+        return text.split(name,1)[1].split('\n',1)[0]
+
+    def test_claude_continues_with_hook_feedback_and_codex_with_a_block(self):
+        output=self.ask('claude','feedback-claude')
+        self.assertEqual({'hookSpecificOutput'},set(output))
+        self.assertEqual('Stop',output['hookSpecificOutput']['hookEventName'])
+        self.assertIn('native-result --request',output['hookSpecificOutput']['additionalContext'])
+        self.assertEqual('block',self.ask('codex','feedback-codex')['decision'])
+
+    def test_the_claude_save_command_holds_no_subshell_group_or_heredoc(self):
+        command=self.command(requested('claude',self.ask('claude','shape')))
+        self.assertTrue(command.startswith('cd '))
+        self.assertRegex(command,r" && echo -E '<JSON>' \| (python3|python|py -3) memory-bank/scripts/context\.py ")
+        bare=re.sub(r"'[^']*'","''",command)
+        for operator in ('(',')','{','}','<<','`','$',';'):
+            with self.subTest(operator=operator):self.assertNotIn(operator,bare)
+
+    @unittest.skipUnless(os.name=='posix','POSIX shells')
+    def test_the_claude_save_command_keeps_the_json_verbatim_in_each_shell(self):
+        # Claude Code's Bash tool runs bash or zsh, zsh first unless $SHELL is
+        # bash; zsh's plain echo would turn the JSON's backslashes into characters.
+        shells=[shell for shell in ('bash','zsh') if shutil.which(shell)]
+        work=self.root/'src';work.mkdir()
+        for n,shell in enumerate(shells):
+            with self.subTest(shell=shell):
+                progress=(f"Run {n}: `Invoice::next($tenant)` costs $5; line one.\nTab\there; "
+                          f"path C:\\shop\\src; it's \"quoted\"; счёт.")
+                data=dict(self.payload,progress=progress,learnings=[])
+                quoted="'"+json.dumps(data,ensure_ascii=False).replace("'","'\\''")+"'"
+                command=self.command(requested('claude',self.ask('claude',f'verbatim-{n}'))).replace("'<JSON>'",quoted)
+                done=subprocess.run([shell,'-c',command],cwd=work,env=self.env,capture_output=True)
+                self.assertEqual(0,done.returncode,done.stdout.decode()+done.stderr.decode())
+                self.assertEqual(progress,self.records('tasks')[0]['progress'])
+
+    @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell')
+    def test_the_claude_skip_command_runs_as_given(self):
+        text=requested('claude',self.ask('claude','skip'))
+        command=self.command(text,'run this command instead: ')
+        self.assertTrue(command.endswith('--skip --json'))
+        done=subprocess.run(['bash','-c',command],cwd=self.root.parent,env=self.env,capture_output=True)
+        self.assertEqual(0,done.returncode,done.stderr.decode())
+        self.assertEqual('omitted',json.loads(done.stdout)['state'])
+        self.assertEqual([],self.records('tasks'))
 
 
 if __name__=='__main__':unittest.main()
