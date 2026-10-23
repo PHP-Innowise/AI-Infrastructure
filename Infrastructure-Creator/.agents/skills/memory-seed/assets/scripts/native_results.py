@@ -144,16 +144,38 @@ def read_input(stream, root=None, request=None):
         return _parse_input(stream)
 
 
+def _invalid_input(detail):
+    """The refusal of an input that is not one JSON object: the journal counts
+    its code, the agent reads what to correct in its one retry."""
+    error = BrainError('native-result:invalid-input: ' + detail)
+    error.code = 'native-result:invalid-input'
+    return error
+
+
+JSON_KINDS = {list: 'an array', str: 'a string', int: 'a number', float: 'a number', bool: 'true or false',
+              type(None): 'null'}
+
+
 def _parse_input(stream):
     raw = stream.read(MAX_INPUT + 1)
     if len(raw) > MAX_INPUT:
         raise BrainError('native-result:input-too-large')
     try:
         value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        where = f'line {error.lineno} column {error.colno}'
+        if error.msg == 'Extra data':
+            raise _invalid_input(f'more than one JSON object (more after {where})') from error
+        # json's message for a control character already ends in "at".
+        detail = f'not one JSON object ({error.msg.removesuffix(" at")} at {where})'
+        # A shell's echo turns the \n of a JSON string into a real newline.
+        if error.msg.startswith('Invalid control character'):
+            detail += '; inside a string, write a newline as \\n and a tab as \\t'
+        raise _invalid_input(detail) from error
     except (ValueError, UnicodeError, RecursionError) as error:
-        raise BrainError('native-result:invalid-input') from error
+        raise _invalid_input('not one UTF-8 JSON object') from error
     if not isinstance(value, dict):
-        raise BrainError('native-result:invalid-input')
+        raise _invalid_input('one JSON object expected, got ' + JSON_KINDS.get(type(value), 'another value'))
     return value
 
 

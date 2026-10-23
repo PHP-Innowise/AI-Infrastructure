@@ -641,6 +641,29 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.assertEqual([],self.records('tasks'))
         self.assertEqual('requested',self.state()[1]['phase'])
 
+    def test_a_refused_input_says_what_to_correct(self):
+        # The agent gets one retry. A code alone does not say what to fix;
+        # a shell's echo turns the \\n of a JSON string into a real newline.
+        self.begin();self.stop();candidate,state=self.state()
+        cases=((b'{"progress": "Line one\nline two", "verified": true, "learnings": []}','write a newline as \\n'),
+               (b'{"progress": "a"}{"progress": "b"}','more than one JSON object'),
+               (b'[]','got an array'),
+               (b'progress: read the file','not one JSON object (Expecting value at line 1 column 1)'))
+        for data,text in cases:
+            with self.subTest(text=text):
+                results=[]
+                self.one(self.written(lambda:results.append(self.raw('native-result','--request',candidate.stem,
+                    '--token',state['token'],'--input','-','--json',data=data))),
+                    'save','refused','native-result:invalid-input')
+                self.assertIn(text.encode(),results[0].stderr)
+        learning={**self.payload['learnings'][0],'verified':True}
+        refused=self.save({**self.payload,'learnings':[learning]},ok=False)
+        self.assertIn(b'unexpected: verified (verified is a top-level boolean',refused.stderr)
+        missing={key:value for key,value in self.payload['learnings'][0].items() if key!='sources'}
+        refused=self.save({**self.payload,'learnings':[missing]},ok=False)
+        self.assertIn(b'missing: sources',refused.stderr)
+        self.assertEqual('requested',self.state()[1]['phase'])
+
     def test_saved_held_and_omitted_lines_count_learnings_and_chunks_only(self):
         self.begin();self.stop()
         line=self.one(self.written(self.save),'save','saved')

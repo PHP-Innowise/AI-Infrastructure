@@ -183,7 +183,18 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
         fields = {"type", "title", "consequence", "sources"}
         if (not isinstance(learning, dict) or not fields <= set(learning)
                 or set(learning) - fields - {"expected_revision"}):
-            raise ResultRefused("learning_fields", "Each learning needs type, title, consequence and sources")
+            # Name what to correct; `verified` inside a learning is the usual one.
+            detail = ""
+            if isinstance(learning, dict):
+                missing = sorted(fields - set(learning))
+                extra = sorted(str(key)[:40] for key in set(learning) - fields - {"expected_revision"})
+                if missing:
+                    detail += "; missing: " + ", ".join(missing)
+                if extra:
+                    detail += "; unexpected: " + ", ".join(extra[:5])
+                if "verified" in extra:
+                    detail += " (verified is a top-level boolean, never a learning field)"
+            raise ResultRefused("learning_fields", "Each learning needs type, title, consequence and sources" + detail)
         if "expected_revision" in learning and (type(learning["expected_revision"]) is not int
                                                 or learning["expected_revision"] < 1):
             raise ResultRefused("schema", "Learning expected_revision must be a positive original revision")

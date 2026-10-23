@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime says what to correct in a refused save — 2026-10-23
+
+- The memory runtime memory-seed copies names the JSON error, with its line
+  and column, of an input that is not one JSON object, and names the missing
+  and unexpected fields of a learning, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` and `memory_results.py`
+  change in the asset; the policy lock was rewritten.
+
 ### The seeded runtime asks no save of a Codex Plan-mode or read-only turn — 2026-10-23
 
 - The memory runtime memory-seed copies reads the Codex turn's

@@ -28,6 +28,30 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A refused save says what to correct — 2026-10-23
+
+- Why: the agent gets one retry after a refused save, and two common
+  refusals did not say what to fix.
+  - An input that was not one JSON object came back as the bare code
+    `native-result:invalid-input`. This is what a shell's `echo` causes when it
+    turns a JSON string's `\n` into a real newline, and what any malformed or
+    doubled object causes.
+  - A learning with `verified` inside it got "Each learning needs type, title,
+    consequence and sources", which does not name the extra key.
+- The input refusal keeps its journal code, through the error's `code`, and
+  now says why:
+  - the JSON error with its line and column;
+  - for a control character, how to write a newline or a tab inside a string;
+  - "more than one JSON object", or the kind of value sent instead of an
+    object.
+- The learning refusal keeps its sentence and adds the missing and the
+  unexpected fields (at most five, each cut to 40 characters). It calls
+  `verified` a top-level boolean. The same validation serves `record-result`
+  and the MCP tool.
+- Test (`NativeFunnelJournalTests`): four malformed inputs each journal
+  `native-result:invalid-input` and print their reason; `verified` inside a
+  learning and a missing `sources` are named. It fails on the old runtime.
+
 ### The host benches are tested without the hosts — 2026-10-23
 
 - `scripts/claude_code_bench.py` and `scripts/codex_bench.py` run only where
