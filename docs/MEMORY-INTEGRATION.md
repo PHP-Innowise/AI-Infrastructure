@@ -263,3 +263,5 @@ How the continuation ends depends on who reads the session. A headless run (`cod
 - Codex: the rollout's first line names the session's source as `vscode` (the app, the IDE extension and the terminal UI) or `cli`; `exec` and subagents repeat.
 
 Every other session repeats, Cursor's included. `repeat` always repeats and `brief` never does; `CONTEXT_NATIVE_RESULT_ANSWER` sets it for one session. An unknown value repeats, and the journal's `requested` line carries `native-result:invalid-answer-setting`: the save itself is asked for either way.
+
+The save takes two more model calls, and Claude Code counts them against `--max-turns` (`maxTurns` in the Agent SDK). A headless run whose answer comes in its last two allowed calls ends with `error_max_turns` and no `result`; the Stop hook is told neither the limit nor the count. Give such a run two more turns, or set `CONTEXT_NATIVE_RESULT_REQUEST=off` for it (`docs/TROUBLESHOOTING.md`).

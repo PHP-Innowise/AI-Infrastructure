@@ -532,6 +532,39 @@ notification after every answer.
   `"native_result_request": "off"` to stop the request (see the previous
   section).
 
+## A Headless Run Hits Its Turn Limit After a Complete Answer
+
+### Symptom
+
+`claude -p ... --max-turns N` (or an Agent SDK query with `maxTurns`) ends
+with `"subtype": "error_max_turns"`, `"is_error": true` and no `result`,
+although the agent had answered. In `memory-bank/local/native-results.ndjson`
+the run's last lines are `stop` `requested`, sometimes followed by `save`
+`saved`.
+
+### Cause
+
+The save continues the turn: one model call runs the save command and one
+more ends the turn. Claude Code counts both against `--max-turns`. An answer
+given in the last two allowed calls leaves the save no room, so the run ends
+on the limit instead of on the answer. Claude Code tells the Stop hook
+neither the limit nor the count, so the hook cannot step aside.
+
+Seen offline on Claude Code 2.1.278, with the answer on the second model call:
+
+- `--max-turns 2`: `error_max_turns`, nothing saved;
+- `--max-turns 3`: the result saved, then `error_max_turns` before the final
+  message.
+
+### Recover
+
+- Give a headless run that keeps the request two more turns than its work
+  needs.
+- Or switch the request off for that run with
+  `CONTEXT_NATIVE_RESULT_REQUEST=off` in its environment. Its results then
+  reach memory only through `context.py record-result`, the MCP
+  `memory_record_result` tool or the Harness.
+
 ## Promotion Review or Apply Fails
 
 ### Symptom
