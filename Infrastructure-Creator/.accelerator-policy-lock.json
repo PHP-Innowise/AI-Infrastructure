@@ -98,7 +98,7 @@
     ".agents/skills/memory-seed/assets/project-brain/templates/task.md": "54d713e2810c65ad5619fd322ac77869952e3ac041129263d5a13fce4f5e5fd1",
     ".agents/skills/memory-seed/assets/runtime-contract.json": "64522a0fa2fab417e806fc4be611e3f25e97a844256607f449f5d911f2684e4a",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "13e09d26050f26bf4ba15af6c034ea236c1b2ee85c0fa7937f399f27e1987933",
-    ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "582694ef9a405ca03b3fea3ad032a347af8e46b9d271fd50547b695e4d61e32c",
+    ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "1cb1812e3d43c0bfd60983e385d84ea535e5a0769847ea9858ffe6dce00c3180",
     ".agents/skills/memory-seed/assets/scripts/context.py": "e507c58bfd2fef6e02c6d818c98b42e24c1d81dfbda1e56be3c5078d975f805c",
     ".agents/skills/memory-seed/assets/scripts/context_cli.py": "ec874c9312133eafae8f16bc298fc011fb55579cb4b300453e81e3f31a4d0123",
     ".agents/skills/memory-seed/assets/scripts/context_continuity.py": "10324f7b38000615ee0ec72036a2a6fb3112e694544489e666ba388c93589ea5",
@@ -109,8 +109,8 @@
     ".agents/skills/memory-seed/assets/scripts/memory_results.py": "2138c074fa1cba28d6bbdfdbbdd79ccea615b347136abb5f479ceb4f34ea5ed5",
     ".agents/skills/memory-seed/assets/scripts/native_results.py": "ffa1ceb532b4fa5f536e851e7e55c3f136abda77b43c8300497f121c9b0ba182",
     ".agents/skills/memory-seed/assets/scripts/telemetry.py": "e67ab23577fedacd824247d6e94f2983bcb4ba668dd6c0cf05d77d454f815ab3",
-    ".agents/skills/memory-seed/assets/scripts/validate.py": "c8f89fb1486999bf6d262fe004d5e560175f4ee6590d43d1e6ad4df6e68cb038",
-    ".agents/skills/memory-seed/assets/scripts/workspace_roots.py": "c010550dd57fb37d00feb70fb813d9bd5106e8ad4fc3557b72298793a13e5d2b",
+    ".agents/skills/memory-seed/assets/scripts/validate.py": "74508dda604ec5bade09766e6d257138c873d5a3e1b0f19818a0020fc968d1cf",
+    ".agents/skills/memory-seed/assets/scripts/workspace_roots.py": "18c4144a23ba7eb69aaa2f510ce7da99b5735bef2f57b5a1530152eb5986889a",
     ".agents/skills/memory-seed/assets/templates/chunk.md": "4afd4d422f81c21a76b8585c328b2803756f883f1007e1487250a2e1b236f753",
     ".agents/skills/policy-forge/SKILL.md": "0ab947a40b3754f86fd56da508f4a3dc6a38a47f765d8102c188e3bd4a4c85e0",
     ".agents/skills/profile-synthesizer/SKILL.md": "744909e04b847a9058fbb2ee992e4ec234384895c33e1acce86d8eb32eacdd5e",
@@ -174,7 +174,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "ff802d8a3ea0247f83535976a42bb997321557778ab0ae8c0d2764c6b33024b1",
+  "policy_digest": "41ff4cbaa443b2b9f52a1b3c39f8394cf14e699bca372a30f5076c2e21e7cc54",
   "release": "2.5.0",
   "schema_version": 1
 }

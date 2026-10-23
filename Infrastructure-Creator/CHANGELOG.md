@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime checks a citation with one resolve — 2026-10-23
+
+- The memory runtime memory-seed copies resolves the roots once per pass
+  and each cited source once, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `brain_runtime.py`, `validate.py` and
+  `workspace_roots.py` change in the asset; the policy lock was rewritten.
+
 ### A generated Stop hook's journal line is lost quietly — 2026-10-23
 
 - The hook-forge journal fragment appended its line with `>> file

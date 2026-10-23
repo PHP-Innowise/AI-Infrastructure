@@ -347,11 +347,11 @@ class BrainIndexStabilityTests(unittest.TestCase):
             sys.path.pop(0)
         config = retrieval.load_config(self.root)
         asked = []
-        real_contains = retrieval.workspace_roots.contains
-        def contains(repository, path):
+        real_within = retrieval.workspace_roots.within
+        def within(path, bases):
             asked.append(Path(path).name)
-            return real_contains(repository, path)
-        with mock.patch.object(self.brain.workspace_roots, 'contains', contains):
+            return real_within(path, bases)
+        with mock.patch.object(self.brain.workspace_roots, 'within', within):
             documents = retrieval._brain_documents(self.root, config)[0]
             self.assertEqual(3, len(documents))
             self.assertEqual(['heron.md'], asked)
@@ -433,17 +433,58 @@ class MemoryBankScaleTests(unittest.TestCase):
 
     def test_a_citation_is_looked_at_once_a_pass_and_again_in_the_next(self):
         asked = []
-        real = self.validate.workspace_roots.contains
-        def contains(repository, path):
+        real = self.validate.workspace_roots.within
+        def within(path, bases):
             asked.append(Path(path).name)
-            return real(repository, path)
-        with mock.patch.object(self.validate.workspace_roots, 'contains', contains):
+            return real(path, bases)
+        with mock.patch.object(self.validate.workspace_roots, 'within', within):
             self.assertEqual(3, len(self.index()))
             self.assertEqual(1, asked.count('heron.md'))
             # A citation that goes away still takes its chunks out.
             (self.root / 'specs/heron.md').unlink()
             self.assertEqual([], self.index())
         self.assertIsNone(getattr(self.validate._SOURCE_FACTS, 'memo', None))
+
+    def test_a_pass_resolves_the_roots_once_however_many_files_are_cited(self):
+        for n in range(3):
+            (self.root / f'specs/egret-{n}.md').write_text(f'# Egret {n}\n', encoding='utf-8')
+            chunk = next(self.chunks.glob(f'MEM-*-heron-{n}.md'))
+            chunk.write_text(chunk.read_text(encoding='utf-8').replace(
+                '"specs/heron.md"', f'"specs/heron.md", "specs/egret-{n}.md"'), encoding='utf-8')
+        resolved = []
+        real = self.roots.resolved_roots
+        def resolved_roots(repository):
+            resolved.append(repository)
+            return real(repository)
+        with mock.patch.object(self.roots, 'resolved_roots', resolved_roots):
+            self.assertEqual(3, len(self.index()))
+        self.assertEqual(1, len(resolved))
+        self.assertIsNone(getattr(self.validate._SOURCE_FACTS, 'roots', None))
+
+    def test_a_citation_that_leads_out_by_a_link_still_takes_its_chunk_out(self):
+        # The neighbour shares the root's spelling up to a dash: a comparison
+        # of the strings alone would take it for a file inside.
+        neighbour = Path(str(self.root) + '-neighbour')
+        neighbour.mkdir()
+        self.addCleanup(shutil.rmtree, neighbour, True)
+        (neighbour / 'heron.md').write_text('# Heron\n\nHerons wade at dawn.\n', encoding='utf-8')
+        (self.root / 'specs/heron.md').unlink()
+        (self.root / 'specs/heron.md').symlink_to(neighbour / 'heron.md')
+        self.assertEqual([], self.index())
+        self.assertEqual((False, False), self.validate._source_facts(self.root, 'specs/heron.md'))
+
+    def test_within_answers_as_pathlib_does(self):
+        root = self.root
+        bases = (root, root / 'state')
+        cases = [root, root / 'specs/heron.md', Path(str(root) + '-neighbour/heron.md'),
+                 Path(str(root) + 'x'), root.parent, Path('/'), root / 'state/x', Path(str(root) + '/')]
+        for path in cases:
+            expected = any(path == base or base in path.parents for base in bases)
+            self.assertEqual(expected, self.roots.within(path, bases), path)
+        # The root of the path's own drive: on Windows `/` has no drive, and
+        # pathlib puts nothing on C: under it.
+        self.assertTrue(self.roots.within(root / 'a', (Path(root.anchor),)))
+        self.assertFalse(self.roots.within(root / 'a', ()))
 
 
 @unittest.skipUnless(shutil.which('git'), 'Git')

@@ -28,6 +28,35 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A citation check resolves its source once and the roots once a pass — 2026-10-23
+
+- Why: every prompt checks each Memory Bank chunk's citations again, and
+  each Brain record's, because a cited file can go away while the chunk
+  stays. Each check resolved the source, then `workspace_roots.contains`
+  resolved it a second time, resolved the project root again, and pathlib's
+  `relative_to` walked the path's parents. On a copy of a client grown to
+  1,200 chunks by 600 native saves, the prompt hook took 385 ms instead of
+  208. Profiled at 200 chunks, these checks were three quarters of the
+  eligibility pass.
+- `workspace_roots.within` answers `contains` for a path its caller has
+  already resolved, against `resolved_roots`. The bank validator's source
+  facts and the Brain's cited-file check resolve the roots once per pass,
+  in the memo they already keep for sources, and `source_fingerprints` once
+  per call. The spelling decides first, as in `key_for`; any other
+  spelling takes pathlib's answer, so a neighbour such as `<root>-old` is
+  still outside. `contains` keeps its contract for every other caller.
+- Measured on that copy (prompt hook, ABBA): at 650 chunks 373 → 326 ms,
+  paired median −41 ms [−42.9; −37.4]; at 1,200 chunks 396 → 336 ms,
+  −55 ms [−56.5; −52.0]. The capsules and the retrieved documents are
+  identical under `full` and `recall`; only the gate's diagnostic
+  `top_score` moves in its sixth digit, as it does between two runs of one
+  copy.
+- Tests (`test_memory_brain_scale.py`): a pass resolves the roots once
+  however many files its chunks cite; `within` answers as pathlib does,
+  neighbour included; a citation that leads out of the project by a link
+  still takes its chunk out. The two tests that counted citation checks
+  count `within` now.
+
 ### The accelerator's block in .gitignore and .gitattributes follows the release — 2026-10-23
 
 - Why: `--sync` kept `.gitignore` and `.gitattributes` whole as the
