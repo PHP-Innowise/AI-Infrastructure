@@ -479,6 +479,11 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
                             else 'incomplete' if state['digest'] else 'unsaved')
             return step({},'skipped','recovery-'+state['phase'])
         if state['phase'] != 'armed': return step({},'skipped','phase-'+state['phase'])
+        # The host tells a plan-mode turn to change nothing, overriding any
+        # other instruction: asked to save, the agent refuses after every
+        # answer, or writes against the person's choice. A save asked
+        # before the switch is still settled above.
+        if payload.get('permission_mode') == 'plan': return step({},'skipped','plan-mode')
         try: task=writable_task(root,task_id,owner)
         except BrainRecordNotFound as error:
             if error.identifier != task_id: raise

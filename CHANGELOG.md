@@ -28,6 +28,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A plan-mode turn is not asked to save — 2026-10-23
+
+- Why: in plan mode Claude Code tells the agent it "MUST NOT make any edits,
+  run any non-readonly tools … This supercedes any other instructions you
+  have received". The Stop hook still asked for a save after every answer,
+  so the agent either refused it, at the cost of a model call and a "not
+  saved completely" warning on the next prompt, or wrote memory against the
+  person's choice. The offline Claude Code run showed the save command
+  itself passes the permission check in plan mode, so only the agent's
+  compliance stood between plan mode and a write.
+- The Stop now skips the request when the hook input's `permission_mode` is
+  `plan`. Claude Code and Codex both send that field; Codex's hook schema
+  has the same five values. The journal records `stop` `skipped`
+  `plan-mode`. The prompt still arms, so a turn switched out of plan mode
+  before it ends is asked, and a save asked before the switch is settled as
+  before.
+- Test (`NativeRequestSwitchTests`): for both hosts, a plan-mode Stop asks
+  nothing and journals `plan-mode`, and the next default-mode answer is asked.
+
 ### Codex on the real host, offline — 2026-10-23
 
 - Why: the Codex side of the save after every answer had been checked only

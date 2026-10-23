@@ -834,6 +834,26 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
         path=self.root/JOURNAL
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def test_a_plan_mode_turn_is_not_asked_to_save(self):
+        # Claude Code and Codex both send permission_mode; in plan mode the
+        # host tells the agent to change nothing, overriding the request.
+        for host in ('claude','codex'):
+            with self.subTest(host=host):
+                session='plan-'+host
+                stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,
+                      'permission_mode':'plan','last_assistant_message':'Planned the change.'}
+                self.assertTrue(self.begin(host=host,session=session)['armed'])
+                before=len(self.journal())
+                planned=self.call('native-stop','--host',host,'--task-id','research',data=stop)
+                self.assertEqual(b'',planned.stdout.strip())
+                self.assertEqual([('stop','skipped','plan-mode')],
+                                 [(line['stage'],line['event'],line.get('code')) for line in self.journal()[before:]])
+                # Out of plan mode, the next answer is asked as before.
+                self.begin(host=host,session=session)
+                asked=self.call('native-stop','--host',host,'--task-id','research',
+                                data=dict(stop,permission_mode='default'))
+                self.assertIn('native-result --request',asked.stdout.decode())
+
     def test_switched_off_no_prompt_arms_and_no_stop_asks(self):
         self.set_request('off')
         for host in ('codex','claude','cursor'):

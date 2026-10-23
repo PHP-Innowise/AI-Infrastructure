@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime asks no save of a plan-mode turn — 2026-10-23
+
+- The memory runtime memory-seed copies skips the save request when the
+  Stop's `permission_mode` is `plan`, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
 ### The seeded runtime asks Claude Code for its save without a prompt or a hook error — 2026-10-23
 
 - The memory runtime memory-seed copies answers Claude Code's Stop with
