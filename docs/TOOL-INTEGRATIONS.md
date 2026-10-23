@@ -185,6 +185,11 @@ capsule is delivered through `.cursor/rules/working-memory.mdc`:
   nothing and remove another branch's rule instead of serving it.
 - Every render stands down when `CONTEXT_CAPSULE_DELIVERED=1`: the Harness has
   put the capsule into the prompt already.
+- The save continuation, which Cursor submits as a prompt, renders nothing: the
+  prompt hook arms and exits, so the rule stays the one the last real prompt
+  wrote for the next request. Rendered for the instruction's words, it had
+  replaced that rule's memory with whatever the instruction matched, often
+  `no-match`.
 
 The rule is replaced atomically only when a render succeeds and is ignored
 local state (each edition's `.gitignore` lists it). These are declared

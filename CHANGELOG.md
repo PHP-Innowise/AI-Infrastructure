@@ -28,6 +28,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Cursor's next request keeps the rule its last prompt wrote — 2026-10-23
+
+- Why: Cursor reads its rule before the prompt hook runs, so the rule a
+  prompt writes is what the next request carries. Its save continuation
+  comes back as a prompt, and the prompt hook rendered a capsule for the
+  instruction's words into the rule. On a project where the last real prompt
+  had retrieved the learning it asked about, the continuation replaced that
+  memory with `no-match`, and the person's next request carried that rule.
+- The prompt hook of every host now exits after arming when the prompt is
+  the save continuation, waiting for the background arm first: Cursor's rule
+  stays the last real prompt's, and Codex skips the refresh process
+  `refresh` would have spent saying nothing (the runtime's own check from
+  the previous entry stays, for a hook that still calls it). Claude Code's
+  continuation never arrives as a prompt. The block sits after the arm in the
+  canonical hook, so the Codex and Cursor mirrors carry it unchanged.
+- Test (`test_memory_lifecycle.py`): on a full PHP Core install, the rule
+  holding the learning the second prompt retrieved is unchanged, byte for
+  byte, after the continuation; it fails without the change.
+
 ### A task followed across sessions, a commit and a branch, in CI — 2026-10-23
 
 - Why: the rollout rehearsal runs one turn and the next session's recall,

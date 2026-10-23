@@ -124,6 +124,53 @@ class MemoryLifecycleTest(unittest.TestCase):
                                   cwd=self.project, env=self.env, capture_output=True, text=True, timeout=600)
         self.assertEqual(0, validate.returncode, validate.stdout[-400:] + validate.stderr[-400:])
 
+    def test_cursor_keeps_the_last_prompts_rule_through_a_save_continuation(self) -> None:
+        # Cursor reads its rule before the prompt hook runs, so the rule a
+        # prompt writes is what the next request carries. Its save
+        # continuation comes back as a prompt: a capsule rendered for the
+        # instruction's words replaced the rule the person's next request got.
+        (self.project / "billing.md").write_text(
+            "# Billing\n\nInvoices are numbered per tenant and restart each year.\n", encoding="utf-8")
+        self.git("add", "billing.md")
+        self.git("commit", "-qm", "Billing")
+
+        def cursor(name: str, payload: dict) -> str:
+            payload = dict(payload, conversation_id="lifecycle", workspace_roots=[str(self.project)],
+                           cursor_version="2.0.0")
+            done = subprocess.run(["bash", str(self.project / ".cursor/hooks" / name)],
+                                  input=json.dumps(payload).encode(), cwd=self.project, env=self.env,
+                                  capture_output=True, timeout=120)
+            self.assertEqual(0, done.returncode, done.stderr.decode(errors="replace")[-400:])
+            return done.stdout.decode()
+
+        def prompt(generation: str, text: str) -> str:
+            return cursor("working-memory-read.sh", {"generation_id": generation,
+                                                     "hook_event_name": "beforeSubmitPrompt", "prompt": text})
+
+        def stop(generation: str, loop: int) -> str:
+            return cursor("working-memory-write.sh", {"generation_id": generation, "hook_event_name": "stop",
+                                                      "status": "completed", "loop_count": loop})
+
+        prompt("g1", "How are invoices numbered per tenant?")
+        followup = json.loads(stop("g1", 0))["followup_message"]
+        command = re.search(r"exact command: (\(cd .*?--json\))", followup).group(1)
+        saved = subprocess.run(["bash", "-c", command], input=json.dumps({
+            "progress": "Read billing.md; invoice numbering is per tenant.", "verified": True,
+            "learnings": [{"type": "finding", "title": "Invoices are numbered per tenant",
+                           "consequence": "Invoice numbering restarts per tenant and per year.",
+                           "sources": ["billing.md"]}]}), cwd=self.project, env=self.env,
+            capture_output=True, text=True, timeout=120)
+        self.assertEqual(0, saved.returncode, saved.stdout[-400:] + saved.stderr[-400:])
+        stop("g1", 1)
+
+        prompt("g2", "Which tenant rules apply to invoice numbers?")
+        followup = json.loads(stop("g2", 0))["followup_message"]
+        rule = self.project / ".cursor/rules/working-memory.mdc"
+        before = rule.read_bytes()
+        self.assertIn(b"Invoices are numbered per tenant", before)
+        self.assertEqual({"continue": True}, json.loads(prompt("g3", followup)))
+        self.assertEqual(before, rule.read_bytes())
+
     def test_claude_code_follows_a_task_across_sessions_a_commit_and_a_branch(self) -> None:
         self.follow_a_task("claude")
 
