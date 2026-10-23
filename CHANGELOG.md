@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A task followed across sessions, a commit and a branch, in CI — 2026-10-23
+
+- Why: the rollout rehearsal runs one turn and the next session's recall,
+  and the hook tests each cover one piece. A task lives longer: a learning,
+  then a progress and a next step, a commit, a new session, another branch
+  with its own task, and the way back. Run on copies of the four clients
+  through the installed hooks it held, so it is now a regression test.
+- `tests/test_memory_lifecycle.py` installs PHP Core into a small shop and
+  follows that life through Claude Code's hooks (a session a person reads)
+  and Codex's (the save continuation comes back through the prompt hook):
+  the second session sees the progress, the next step and the learning; the
+  new branch starts its own task; back on the first branch its own progress
+  returns and the other's does not; three saves journaled; `validate`
+  passes. With the continuation fix reverted the Codex case fails. It runs
+  in the step that holds the native roundtrip and capture suites.
+
 ### Claude Code shows what the save step is, not its marker — 2026-10-23
 
 - Why: Claude Code shows the first lines of a Stop hook's reason under "Ran
