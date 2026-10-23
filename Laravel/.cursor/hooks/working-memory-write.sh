@@ -184,7 +184,8 @@ native_journal() {
   { [ -d "$directory" ] || mkdir -p "$directory" 2>/dev/null; } || return 0
   # One physical line: the Cursor render guards admit a clock only on the
   # line that writes the journal.
-  printf '{"at":"%s","host":"%s","stage":"stop-hook",%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${NATIVE_HOST[1]}" "$1" >> "$directory/native-results.ndjson" 2>/dev/null || true
+  # 2>/dev/null first: a journal it cannot open stays silent (see the health line).
+  printf '{"at":"%s","host":"%s","stage":"stop-hook",%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${NATIVE_HOST[1]}" "$1" 2>/dev/null >> "$directory/native-results.ndjson" || true
 }
 
 # The payload travels on stdin; only a metadata challenge is kept. A supported

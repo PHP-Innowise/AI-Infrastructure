@@ -292,14 +292,27 @@ adds no `ACCELERATOR.md`. After a sync, adding a tool with
 unchanged; before, a release that changed the README made that install
 refuse it (`accelerator-readme-exists`) until the file was moved aside.
 
+An install writes the same record (`memory-bank/local/accelerator-install.json`,
+ignored local state) for every file it leaves holding the release byte for
+byte - copied, already identical, or given only its executable bit - and
+keeps the entries of a record the project already has. A file it merged into
+the project's own (`AGENTS.md`, `.gitignore`, an MCP configuration) is not
+named: it is the project's, and a sync never replaces it whole. With the
+record from the start, the first sync tells untouched files from edited ones
+without the clone's history, and the memory runtime leaves the untracked
+install out of a task's changed files (`changed_paths`) from the first turn.
+
 A project that commits its accelerator takes a release through a commit:
 `--sync --update-tracked --target DIR` (`--dry-run` first) writes the files
 the project's Git tracks too, by the same rules - a file still holding a
 released version, the runtime (a local edit backed up under
 `memory-bank/local`), the managed blocks of `AGENTS.md` and
-`.claude/CLAUDE.md` - and leaves every edited file, the project's own
-`README.md` and `.gitignore`, its seeded state and the tools it did not
-install as they are. Add `--rewire-codex` when the project uses Codex and
+`.claude/CLAUDE.md`, and the accelerator's marked block in `.gitignore` and
+`.gitattributes` - and leaves every edited file, the project's own
+`README.md` and the rest of `.gitignore` and `.gitattributes`, its seeded
+state and the tools it did not install as they are. Without `--update-tracked`
+the marked block of an untracked `.gitignore` or `.gitattributes` follows the
+release too; a file without the block stays the project's. Add `--rewire-codex` when the project uses Codex and
 approve the hooks again in Codex `/hooks`. Then review the report and
 `git diff` and commit. Do not reinstall with `--overwrite` for this: it
 replaces the project's own `AGENTS.md`, `README.md` and `.gitignore` and its
@@ -528,6 +541,61 @@ python3 scripts/memory_outcome_ab.py recall-set --sources OUTSIDE/recall-sources
 - **CI relationship:** `tests/test_memory_outcome_ab.py` covers path and event
   parsing, stopping, hook flags, the statistics and sampling, recall sources,
   scenario checks and a save recorded through the runtime, without a model.
+
+### `memory_rollout_rehearsal.py`
+
+**Purpose and status.** A maintainer-only rehearsal of `install_accelerator.py
+--sync` on a copy of an installed project, before the project itself is
+synced.
+
+For each `--target` it does the following:
+- copies the project with its Git history, leaving out `node_modules`,
+  `vendor` and `var` at any depth and `.worktrees` and `.claude/worktrees` at
+  the root (`--exclude` adds more);
+- syncs the copy from this clone;
+- for each host (`claude`, `codex`, and `cursor` when asked) and capsule
+  profile, on a copy of its own, runs the installed hooks as the host would
+  on one turn:
+  - the session-start and prompt hooks;
+  - the Stop hook and the save its request names, carrying one learning that
+    cites a tracked project file;
+  - the closing Stop;
+  - a new session's prompt, whose capsule must recall the learning.
+
+No model runs. HOME and TMPDIR point into the work directory, the copies are
+removed unless `--keep`, and the project is never written. A symbolic link
+that leads out of the project is left out of the copy, because a hook would
+write through it. A Git worktree or submodule is refused, because its Git
+directory belongs to another checkout. The `config` profile
+is the one the project's own `runtime.json` selects; `--sync` does not change
+that file. Any other profile is forced through `CONTEXT_CAPSULE_PROFILE`.
+
+```bash
+python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
+  [--hosts claude,codex,cursor] [--profiles config,recall] [--work DIR] [--exclude NAME] \
+  [--timeout 60] [--keep] [--json]
+```
+
+- **Outputs:**
+  - what the sync changed and kept;
+  - the profile `runtime.json` selects;
+  - for each run:
+    - every hook's exit and time;
+    - whether the save was requested, made or refused (with its code);
+    - the native journal's lines;
+    - whether the next capsule recalled the save.
+
+  Exit 0 when every run saved and recalled with every hook exiting 0, 1
+  otherwise, 2 for a target it will not copy (this clone, a folder with no
+  installed runtime, a Git worktree or submodule).
+- **Writes:** copies under `--work`; the default is `/dev/shm` when writable,
+  otherwise the system temp directory.
+- **CI relationship:** `tests/test_memory_rollout_rehearsal.py` in the
+  `installation` job rehearses a fresh PHP Core install. Each of the three
+  hosts under each profile must save and recall, the project must stay byte
+  for byte as it was, and the copy must leave out dependency trees. Cursor's
+  capsule is the rule file its prompt hook renders, and its Stop request
+  arrives as `followup_message`.
 
 ### `memory_rerank_pilot.py`
 

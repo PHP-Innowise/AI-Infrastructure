@@ -4,6 +4,24 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### A generated Stop hook's journal line is lost quietly — 2026-10-23
+
+- The hook-forge journal fragment appended its line with `>> file
+  2>/dev/null`. A project whose `memory-bank/local` is read-only then
+  printed "Permission denied" on every Stop, because bash opens the file
+  before stderr reaches `/dev/null`. The fragment, and the line
+  `validate_generated.py` requires verbatim, now redirect stderr first, as
+  the editions' hooks do (root `CHANGELOG.md`, same day).
+  `test_native_journal_generator.py` finds the line by its file name.
+
+### A generated project's own files are not taken for a task's work — 2026-10-23
+
+- The seeded memory runtime (memory-seed) reads `.infra-manifest.json` where
+  no install record exists. Until the team commits or ignores what the
+  generator wrote, the generator's files and the manifest itself no longer
+  count as changes on every turn, while a file the team edits still does.
+  The root `CHANGELOG.md` entry of the same day has the details.
+
 ### Generated Stop hooks journal their save request — 2026-10-22
 
 - The seeded runtime journals every prompt, Stop and save to ignored
@@ -253,6 +271,9 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - memory-seed carries the runtime's Windows fixes: file identity under
   Python 3.12+, Memory Bank index paths, 8.3 project roots for the memory MCP
   server and its registration, and source hints through NT handles.
+- memory-seed's runtime gives the Git frame check before a query with no
+  branch to admit two seconds, as every other Git source check has: with one,
+  a Windows runner that paused for about a second cost a refresh its memory.
 
 - Seed the structured native result coordinator and require it in the runtime skeleton. Generated prompt/Stop hooks use one bounded same-agent save with guarded revisions and Cursor loop limits, retaining the existing Harness result path.
 

@@ -749,4 +749,50 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.assertEqual('',outside.read_text())
 
 
+class NativeRequestSwitchTests(NativeCaptureFixture):
+    """`native_result_request: off` arms no prompt and asks no Stop; the
+    default asks after every answer, as before. The request costs one more
+    model call per answer, which a team may not want on every turn."""
+
+    def set_request(self,value):
+        cfg_file=self.root/'project-brain/config/runtime.json'
+        cfg=json.loads(cfg_file.read_text());cfg['native_result_request']=value
+        cfg_file.write_text(json.dumps(cfg))
+
+    def journal(self):
+        path=self.root/JOURNAL
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_switched_off_no_prompt_arms_and_no_stop_asks(self):
+        self.set_request('off')
+        for host in ('codex','claude','cursor'):
+            with self.subTest(host=host):
+                self.assertFalse(self.begin(host=host,session='off-'+host)['armed'])
+                self.assertEqual(b'',self.stop(host=host,session='off-'+host).stdout.strip())
+        lines=[(line['stage'],line['event'],line.get('code')) for line in self.journal()]
+        self.assertEqual(3,lines.count(('prompt','skipped','switched-off')))
+        self.assertEqual(3,lines.count(('stop','skipped','switched-off')))
+        self.assertFalse(list((self.root/'project-brain/local/native-results').glob('*.json')))
+
+    def test_a_prompt_armed_before_the_switch_went_off_asks_nothing(self):
+        self.assertTrue(self.begin()['armed'])
+        self.set_request('off')
+        self.assertEqual(b'',self.stop().stdout.strip())
+        self.assertIn(('stop','skipped','switched-off'),
+                      [(line['stage'],line['event'],line.get('code')) for line in self.journal()])
+
+    def test_the_variable_overrides_the_setting_and_an_unknown_value_is_refused(self):
+        self.set_request('off')
+        prompt={'hook_event_name':'UserPromptSubmit','session_id':'override','prompt':'Inspect the retry policy.'}
+        armed=self.call('native-prompt','--host','codex','--task-id','research','--json',data=prompt,
+                        env=dict(self.env,CONTEXT_NATIVE_RESULT_REQUEST='every-turn'))
+        self.assertTrue(json.loads(armed.stdout)['armed'])
+        self.set_request('sometimes')
+        refused=self.call('native-prompt','--host','codex','--task-id','research','--json',data=prompt,ok=False)
+        self.assertNotEqual(0,refused.returncode)
+        self.assertIn('native-result:invalid-request-setting',refused.stderr.decode())
+        self.assertIn(('prompt','error','native-result:invalid-request-setting'),
+                      [(line['stage'],line['event'],line.get('code')) for line in self.journal()])
+
+
 if __name__=='__main__':unittest.main()

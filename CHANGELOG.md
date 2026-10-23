@@ -28,6 +28,200 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The accelerator's block in .gitignore and .gitattributes follows the release — 2026-10-23
+
+- Why: `--sync` kept `.gitignore` and `.gitattributes` whole as the
+  project's own files, including the block between the accelerator's
+  `# BEGIN/END ACCELERATOR MANAGED ENTRIES` markers. A client installed
+  before the client `.gitattributes` override therefore kept the edition's
+  own block, which marks every skill and hook `-diff linguist-generated`. An
+  edited hook - a safety control - showed as "Binary files differ" in review,
+  and no sync, `--update-tracked` included, ever replaced it. The rehearsal
+  of the rollout found it on scb.
+- The sync now rebuilds that block from the release with the merge an
+  install uses (`merge_additive_file`): the project's own lines stay, and a
+  directive they already hold is not repeated. A tracked file waits for
+  `--update-tracked` as before, and a file without the block stays the
+  project's.
+- Test (`InstallSyncTest`): an old `-diff` block is replaced by the release's
+  `*.sh text eol=lf` while the project's line stays; a tracked file changes
+  only with `--update-tracked`; a file without the block is kept. It fails
+  without the change.
+
+### A memory line the hooks cannot write is lost quietly — 2026-10-23
+
+- Why: the prompt hook appends a health line and the Stop hook a journal line
+  with `>> file 2>/dev/null`. Bash opens redirections left to right, so in a
+  project whose `memory-bank/local` was read-only, every turn printed
+  "Permission denied" before stderr reached `/dev/null`. The rehearsal on a
+  copy of a client showed it; the hooks themselves still exited 0 and served.
+- Both lines now redirect stderr first. The Claude Code, Codex and Cursor
+  copies of `working-memory-read.sh` and `working-memory-write.sh` change in
+  every edition, through `scripts/core_sync.py --write` and the mirrors. The
+  generator's hook-forge fragment and the verifier line it is held to
+  (`validate_generated.py`) take the same order, so generated Stop hooks
+  stay quiet too; the generator's policy lock was rewritten.
+- Test (`ReadOnlyStateTest` in `test_hooks.py`): with a read-only
+  `memory-bank/local`, both hooks of each host exit 0, print no "Permission
+  denied" and write nothing. It fails without the change; it is skipped
+  under root.
+
+### The cost of the save after every answer, read from the transcripts — 2026-10-23
+
+- Why: the native journal counts the Stop hook's save requests, but whether
+  to keep `native_result_request: every-turn` turns on what each request
+  costs. Only the session transcript shows that, and nothing read it.
+- `scripts/memory_eval.py realized` also prints, per host, the save requests
+  in the project's Claude Code transcripts and Codex rollouts. As medians:
+  the seconds and output tokens from each request to the next human prompt,
+  and those of the answer before it.
+  - A request is found by its `INTERNAL_NATIVE_MEMORY_RESULT <token>` marker
+    wherever the host recorded it, never in the agent's own messages.
+  - Claude Code's tokens are each response's `usage`, counted once per
+    response; Codex's are the cumulative `token_count`.
+  - `--json` carries the same under `continuations`.
+  - On the 21 Codex runs of 16-19 October that made one request each: +9.9 s
+    and +383 output tokens after a 17.5 s answer of 701 tokens.
+- Tests (`SaveContinuationCostTest` in `tests/test_memory_eval.py`): a Codex
+  request and a Claude Code request cost exactly the time and the tokens to
+  the next prompt; a response split into several records counts once; a
+  mention of the marker in a later answer is not a request.
+
+### A generated project's manifest marks its accelerator files too — 2026-10-23
+
+- Why: a checkpoint leaves out the accelerator's own untracked files by the
+  install record, which only `install_accelerator.py` writes. A project the
+  generator built has no such record, so while its team had neither
+  committed nor ignored the result, `.claude/`, `AGENTS.md` and the rest -
+  and `.infra-manifest.json` itself - still counted as the task's work on
+  every turn.
+- Where there is no install record, `installed_footprint` reads the
+  generator's `.infra-manifest.json` (sha256 of every file it owns). A file
+  is the generator's while its sha256 still matches. The manifest itself
+  never counts.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset (so generated projects get it) and the mirrors by
+  `scripts/core_sync.py --write`; the generator's policy lock was rewritten.
+- Test (`AutomaticWorkingMemoryTest`): an untracked generated install
+  changes nothing, and an edited generated file is reported. It fails
+  without the change.
+
+### The save after every answer can be switched off — 2026-10-22
+
+- Why: in governed mode every answer ends with the Stop hook asking the agent
+  to save its result, and that continuation is another model call. On 21
+  Codex runs with one native save each (16-19 October), it cost a median of
+  10 seconds, 383 output and 59k mostly cached input tokens: about half of
+  the answer's own time and tokens. No client has worked under it yet, and a
+  team that finds it too slow or costly had no way out but lightweight mode,
+  which gives up governance altogether.
+- `native_result_request` in `project-brain/config/runtime.json` (or
+  `CONTEXT_NATIVE_RESULT_REQUEST`): `every-turn`, the default and what ran
+  before, or `off`. Off, no prompt is armed and no Stop asks, including a
+  Stop whose prompt was armed before the switch. Each such prompt and Stop
+  is journaled as `skipped` with the code `switched-off`, and results still
+  reach memory through `record-result`, the MCP tool or the Harness. Any
+  other value refuses the arming with `native-result:invalid-request-setting`.
+  No edition ships the key, and `--sync` never changes `runtime.json`.
+  `docs/TROUBLESHOOTING.md` ("The Agent Saves After Every Answer") explains
+  what the step is, its cost and the switch.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was rewritten for its asset copies.
+- Tests (`NativeRequestSwitchTests` in `tests/test_memory_native_capture.py`):
+  - switched off, Codex, Claude Code and Cursor arm nothing and ask nothing,
+    with two `switched-off` lines each;
+  - a prompt armed before the switch asks nothing;
+  - the variable overrides the setting;
+  - an unknown value is refused and journaled.
+
+  Each fails without the change.
+
+### An install records what it wrote — 2026-10-22
+
+- Why: the record of the accelerator's own files
+  (`memory-bank/local/accelerator-install.json`) was written by `--sync`
+  only. Until a project's first sync, the memory runtime could not tell the
+  untracked install from the task's work. A fresh install's Cursor rule
+  opened with "warming: task checkpoint pending" on a project where nothing
+  had changed. The first sync also had to recognise untouched files from the
+  clone's history, and without that history (a source from an archive) an
+  untouched `ACCELERATOR.md` stayed behind as edited.
+- `install_accelerator.py` now writes the record after an install. It names
+  every file the install leaves holding the release byte for byte (copied,
+  already identical, or given its executable bit) and keeps the entries of a
+  record the project already has. A merge into the project's own file
+  (`AGENTS.md`, `.gitignore`, an MCP configuration) is not named. A dry run
+  writes nothing, and a record that cannot be read or written safely is left
+  to the next sync. The Harness applies only the reviewed files of its
+  staged install and leaves the record to its first sync.
+- Tests (`tests/test_installation.py`):
+  - an install records the runtime by its blob id and names neither its
+    merged `AGENTS.md` nor its merged `.mcp.json`; a dry run leaves the
+    record as it was;
+  - the first sync takes the recorded `ACCELERATOR.md` to the next release
+    without the clone's history. A copy from an install made before records
+    still stays as edited; that test now removes the record first.
+  - a dry-run sync leaves the install's record unchanged;
+  - `tests/test_harness_setup.py` compares the Harness's and the CLI's file
+    modes outside `memory-bank/local`, where only the CLI's record lies.
+
+### A client's sync rehearsed on a copy — 2026-10-22
+
+- Why: `--sync` updates an installed project in place, and whether the
+  memory hooks still saved and recalled afterwards showed only in the first
+  real session there. Rehearsing it on copies of the four client
+  installations by hand found that the sync leaves `runtime.json` - and so
+  the capsule profile - as it was, holds back Codex's new hook while
+  `.codex/hooks.json` waits for re-approval, and that a project whose
+  accelerator is untracked fed `.claude/`, `memory-bank/` and the rest into
+  its tasks' files.
+- `scripts/memory_rollout_rehearsal.py --target DIR` repeats that rehearsal.
+  It copies the project without dependency and worktree trees and syncs the
+  copy. Then, for each host (Claude Code, Codex; Cursor on request) and
+  capsule profile on a copy of its own, it runs the installed session-start,
+  prompt and Stop hooks, the save the Stop request names, the closing Stop
+  and a new session's prompt. It reports the
+  sync, the profile `runtime.json` selects, every hook's exit and time, the
+  save or its refusal code, the native journal and whether the next capsule
+  recalled the save. No model runs, HOME and TMPDIR stay in the work
+  directory, and the project is never written. A link out of the project is
+  left out of the copy, and a Git worktree or submodule is refused.
+- Tests (`tests/test_memory_rollout_rehearsal.py`, `installation` job; also
+  in `scripts/check.py`): on a fresh PHP Core install, Claude Code, Codex
+  and Cursor under `config` and `recall` each save and recall, the project is byte for
+  byte unchanged, the copy leaves out `node_modules` and a link out of the
+  project but keeps a link inside it, and this clone, a folder without an
+  install and a worktree are refused.
+
+### A checkpoint leaves out the accelerator's own untracked install — 2026-10-22
+
+- Why: a project that neither commits nor ignores the accelerator shows
+  `.claude/`, `.codex/`, `memory-bank/`, `specs/`, `AGENTS.md`, `VERSION` and
+  the rest as untracked in `git status` on every turn, and `changed_paths`
+  took them for the task's work. On copies of the four client installations
+  83 of the 223 files the tasks of one client recorded were those (8 of 60 on
+  another); its capsule offered `memory-bank/` as a recent file; and a turn
+  that changed nothing still buffered a turn delta, so read-only sessions
+  reached the five-turn checkpoint and showed a warming line.
+- `changed_paths` now drops what the install record
+  (`memory-bank/local/accelerator-install.json`, written by `--sync`) says the
+  accelerator wrote and nobody has touched since: an untracked directory it
+  installed into, and a file whose bytes still have the recorded Git blob id.
+  A file the team has edited differs from the record and stays a change;
+  without a record - attached, generated, or never synced - nothing changes.
+- A checkpoint flush applies the same test to the turns it consolidates:
+  turns buffered before the update still name the install, and the first
+  flush after it would otherwise have made them the task's newest files.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was rewritten for its asset copies.
+- Tests (`AutomaticWorkingMemoryTest`): an untouched untracked install changes
+  nothing, an edited installed file and the project's own work stay, no record
+  keeps the old report; a turn in such a project buffers no delta and the
+  branch has no context; a flush leaves the install a buffered turn named
+  out of the task's files. Each fails without the change.
+
 ### The automatic native save funnel, counted from disk — 2026-10-22
 
 - Why: why installed projects held no saved result had to be reconstructed
@@ -1002,6 +1196,21 @@ change below has a test that fails on `a47e1eb8`.
 
 - Keep routine native memory capture silent and preserve the original substantive answer, source citations and requested format after successful or skipped capture. A save acknowledgement must not replace the task result consumed as the last agent message. Refused saves retain their warning alongside the answer.
 - Reproduced against an actual Codex Stop continuation; empty reusable learnings remain valid and do not create findings merely to pass a lifecycle probe.
+
+### A pause of a second no longer costs a query its memory — 2026-10-16
+
+- `refresh`, `retrieve`, `context`, `hook-context` and `index` ask Git for the
+  project's source frame before anything else when they have no branch to
+  admit - an explicit `CONTEXT_TASK_ID`, an agent's own `retrieve`, a detached
+  HEAD - and gave that one `git rev-parse` one second, half of what every
+  other Git source check has. A windows-latest runner in a burst of slowness
+  failed a refresh with "Git source context unavailable": that check was the
+  refresh's only Git process, and the whole test took 2.17 s, too short for
+  any two-second check to have run out. On 8 runners over 30 minutes the
+  check never took more than 535 ms in about 24,500 runs, but on three of
+  the machines a 5 ms sleep in the probe woke up to 963 ms late, and one
+  second left no margin. The check now has the same two seconds; a Git that
+  does not answer within them still ends the command with that error.
 
 ### Automatic promotion apply admission — 2026-10-16
 

@@ -6042,16 +6042,82 @@ def merge_completion_candidates(
     return completion_candidates
 
 
+# What wrote the accelerator into this project, and with which bytes: the
+# record `scripts/install_accelerator.py` keeps of what an install or a sync
+# wrote (Git blob ids, in ignored local state), or for a project the
+# generator built, its `.infra-manifest.json` (sha256 of each file it owns).
+INSTALL_RECORD = "memory-bank/local/accelerator-install.json"
+GENERATOR_MANIFEST = ".infra-manifest.json"
+INSTALL_RECORD_BYTES = 4 * 1024 * 1024
+INSTALLED_FILE_BYTES = 1024 * 1024
+
+
+def installed_footprint(repository: Path) -> dict[str, str]:
+    """The accelerator's files as its last install, sync or generation wrote
+    them: their hashes by project-relative path - a 40-hex Git blob id from
+    the install record, a 64-hex sha256 from the generator's manifest. Empty
+    where there is neither: attached, or installed before either existed."""
+    for name in (INSTALL_RECORD, GENERATOR_MANIFEST):
+        record_path = repository / name
+        try:
+            if (record_path.is_symlink() or not record_path.is_file()
+                    or record_path.stat().st_size > INSTALL_RECORD_BYTES):
+                continue
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            continue
+        files = record.get("files") if isinstance(record, dict) else None
+        if not isinstance(files, dict):
+            continue
+        return {path: value for path, value in files.items()
+                if isinstance(path, str) and isinstance(value, str) and len(value) in (40, 64)}
+    return {}
+
+
+def _installed_as_written(repository: Path, path: str, footprint: dict[str, str]) -> bool:
+    """Whether a changed path is the accelerator's install, untouched since:
+    an untracked directory it installed into, or a file whose bytes are the
+    ones it recorded."""
+    if path.endswith("/"):
+        return any(name.startswith(path) for name in footprint)
+    if path == GENERATOR_MANIFEST:
+        return True  # the generator's own list of what it wrote
+    recorded = footprint.get(path)
+    if recorded is None:
+        return False
+    target = repository / path
+    try:
+        if (target.is_symlink() or not target.is_file()
+                or target.stat().st_size > INSTALLED_FILE_BYTES):
+            return False
+        data = target.read_bytes()
+    except OSError:
+        return False
+    if len(recorded) == 64:
+        return hashlib.sha256(data).hexdigest() == recorded
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest() == recorded
+
+
 def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     """Return sanitized changed paths from Git porcelain metadata alone.
 
-    Working-tree contents are never read here. A path list is everything the
-    short-term buffer needs, and reading the files would bypass the secret and
-    privacy gates that the indexer applies to sources it does read.
+    Working-tree contents are never read here, except the bytes of the
+    accelerator's own installed files, hashed to compare with the install
+    record and never kept. A path list is everything the short-term buffer
+    needs, and reading the files would bypass the secret and privacy gates
+    that the indexer applies to sources it does read.
 
     Paths the runtime writes itself are dropped rather than reported: a task
     recording its own record, handoff, and index churn as user work would grow
     without ever describing anything the user changed.
+
+    So is the accelerator's own install while it is as the install record
+    says it was written. A project that neither commits nor ignores it shows
+    `.claude/`, `memory-bank/`, `AGENTS.md` and the rest as untracked on every
+    turn: on one client 83 of the 223 files its tasks recorded were those, the
+    capsule offered `memory-bank/` as a recent file, and a turn that changed
+    nothing still counted toward a checkpoint. A file the team has edited
+    since differs from the record and stays.
     """
     prefix = os.fsdecode(
         git_output(repository, ["rev-parse", "--show-prefix"], "Git prefix probe")
@@ -6059,6 +6125,7 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     runtime_owned = re.compile(
         rf"^project-brain/({'|'.join(TURN_RUNTIME_DIRECTORIES)})/"
     )
+    footprint = installed_footprint(repository)
     fields = git_output(
         repository,
         [
@@ -6079,8 +6146,11 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
         path = os.fsdecode(entry[3:])
         if prefix and path.startswith(prefix):
             path = path[len(prefix):]
-        if path != "project-brain/" and not runtime_owned.match(path):
-            paths.append(path)
+        if path == "project-brain/" or runtime_owned.match(path):
+            continue
+        if footprint and _installed_as_written(repository, path, footprint):
+            continue
+        paths.append(path)
     excluded = sorted({item for item in paths if TURN_PATH_DENYLIST.search(item)})
     allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
     return allowed, excluded
@@ -7052,6 +7122,11 @@ def flush_turn_deltas(
     files: list[str] = []
     for row in pending:
         files = merge_unique(files, json.loads(row["files"]))
+    footprint = installed_footprint(repository)
+    if footprint:
+        # Turns buffered before `changed_paths` knew the install still name
+        # it; the first flush after an update would make it the newest files.
+        files = [path for path in files if not _installed_as_written(repository, path, footprint)]
     omitted = max(0, len(files) - file_limit)
     checkpoint = (
         f"Auto-checkpoint: {len(pending)} turn(s) since {_checkpoint_time(pending[0]['created_at'])}, "
@@ -8374,10 +8449,13 @@ def _command() -> int:
             delivery_admission = _branch_admission(repository, expected_branch)
         elif arguments.command in ("refresh", "context", "retrieve", "hook-context", "index"):
             # Even an empty candidate list must not let a foreign/unknown source
-            # context create state or return unverified working memory.
+            # context create state or return unverified working memory. Two
+            # seconds, as every other Git source check has: with one, a pause
+            # of about a second on a Windows runner - whose `git rev-parse`
+            # takes 40 ms - cost a refresh its memory.
             environment = _source_git_environment()
             _source_git_frame(workspace_roots.project_root(repository), environment,
-                              time.monotonic() + 1.0)
+                              time.monotonic() + 2.0)
         if workspace_roots.is_attached(repository) and os.name != "nt":
             # Attached state is the project's memory kept outside it, so it is
             # its owner's alone: whatever this run creates there - records, the

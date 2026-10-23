@@ -162,6 +162,25 @@ def _enabled(mode):
         ('CONTEXT_MEMORY_RECOVERY','CONTEXT_CAPSULE_DELIVERED'))
 
 
+# Whether a Stop asks the agent to save its result: `every-turn`, the default,
+# arms every real prompt; `off` arms none, and results reach memory only
+# through record-result, the MCP tool or the Harness. The request costs one
+# more model call per answer - on 21 Codex runs a median of 10 s, 383 output
+# and 59k (mostly cached) input tokens, about half the answer's own - which a
+# team may not want on every turn. CONTEXT_NATIVE_RESULT_REQUEST overrides
+# `native_result_request` in runtime.json.
+NATIVE_REQUESTS = ('every-turn', 'off')
+
+
+def configured_request(root):
+    """The native result request setting, or BrainError for an unknown one."""
+    value = (os.environ.get('CONTEXT_NATIVE_RESULT_REQUEST')
+             or load_config(root).get('native_result_request') or 'every-turn')
+    if value not in NATIVE_REQUESTS:
+        raise BrainError('native-result:invalid-request-setting')
+    return value
+
+
 def _disabled(mode):
     """Why _enabled is false, as the code a journal line carries."""
     if mode != 'governed': return 'not-governed'
@@ -251,6 +270,7 @@ def begin(root, task_id, host, payload, *, owner, mode):
 def _begin(step, root, task_id, host, payload, *, owner, mode):
     task_id=check_task_id(task_id)
     if not _enabled(mode): return step({'armed':False},'skipped',_disabled(mode))
+    if configured_request(root) == 'off': return step({'armed':False},'skipped','switched-off')
     key=_key(root,host,payload,task_id,owner)
     if key is None: return step({'armed':False},'skipped','no-session-id')
     with mutation_lock(root):
@@ -347,6 +367,8 @@ def stop(root, task_id, host, payload, *, owner, mode):
 
 def _stop(step, root, task_id, host, payload, *, owner, mode):
     if not _enabled(mode): return step({},'skipped',_disabled(mode))
+    # A prompt armed before the switch went off asks nothing either.
+    if configured_request(root) == 'off': return step({},'skipped','switched-off')
     task_id=check_task_id(task_id);key=_key(root,host,payload,task_id,owner)
     if key is None: return step({},'skipped','no-session-id')
     if host=='cursor' and payload.get('status') != 'completed': return step({},'skipped','not-completed')

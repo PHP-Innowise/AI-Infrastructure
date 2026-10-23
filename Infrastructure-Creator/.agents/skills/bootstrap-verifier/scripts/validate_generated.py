@@ -913,7 +913,7 @@ NATIVE_RUNTIME = "memory-bank/scripts/native_results.py"
 NATIVE_JOURNAL = "native-results.ndjson"
 NATIVE_JOURNAL_WRITE = ('printf \'{"at":"%s","host":"%s","stage":"stop-hook",%s}\\n\' '
                         '"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${NATIVE_HOST[1]}" "$1" '
-                        '>> "$directory/native-results.ndjson" 2>/dev/null || true')
+                        '2>/dev/null >> "$directory/native-results.ndjson" || true')
 NATIVE_JOURNAL_FUNCTION = (
     'native_journal() {',
     'local directory="$STATE_DIR/memory-bank/local" entry entries',

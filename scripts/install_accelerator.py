@@ -717,6 +717,9 @@ def install(
     # Every project file this run replaces, with what it held: a run that
     # fails part way puts them back (put_back).
     replaced: list[tuple] = []
+    # (project path, release file) for each file this run leaves in place, for
+    # its record: only one that holds the release byte for byte is recorded.
+    holding: list[tuple[str, Path]] = []
     try:
         for component, path in files:
             source_path = data["source_overrides"].get(path, path)
@@ -743,8 +746,10 @@ def install(
                             add_executable_bit(resolved_destination)
                         label = "WOULD_FIX_MODE" if dry_run else "FIX_MODE"
                         print(f"{label}\t{component}\t{path}\t{relative}")
+                        holding.append((relative, source))
                         continue
                     print(f"UNCHANGED\t{component}\t{path}")
+                    holding.append((relative, source))
                     continue
                 if resolution == "kept":
                     print(f"KEPT\t{component}\t{path}")
@@ -764,6 +769,7 @@ def install(
                         # whole beside the file and renamed over it.
                         replace_project_file(target, (component, path), relative, content, replaced)
                 print(f"{label}\t{component}\t{path}\t{relative}")
+                holding.append((relative, source))
                 continue
             current_action = "WOULD_OVERWRITE" if dry_run and path in overwrite_paths else action
             if not dry_run:
@@ -784,9 +790,12 @@ def install(
                 if path in overwrite_paths:
                     current_action = "OVERWRITE"
             print(f"{current_action}\t{component}\t{path}")
+            holding.append((path, source))
     except BaseException:
         put_back(target, replaced)
         raise
+    if not dry_run:
+        record_install(root, edition, data, target, holding)
     print(
         f"COMPLETE\t{edition}\ttools={','.join(tools)}\tfiles={len(files)}"
         f"\tdry_run={str(dry_run).lower()}"
@@ -865,6 +874,62 @@ SYNC_RELOCATED_FILES = {"README.md": ACCELERATOR_README}
 # The fewest inventory files a folder must hold to count as an install of an
 # edition: one stray AGENTS.md is not an installation.
 SYNC_MINIMUM_PRESENT = 10
+
+
+def record_install(root: Path, edition: str, data: dict, target: Path, paths: list[tuple[str, Path]]) -> None:
+    """Record what an install wrote, as `--sync` records what it writes.
+
+    The record names each file the accelerator last wrote by its Git blob id.
+    Only the sync wrote it, so until a project's first sync nothing on disk
+    told the accelerator's own files from the project's work: the memory
+    runtime took an untracked install for the task's changes on every turn
+    (`changed_paths`), and the first sync had to recognise untouched files
+    from the clone's history. Like the sync's, it names only files that hold
+    the release byte for byte: a merge into a project's own `AGENTS.md`,
+    `.gitignore` or MCP configuration is the project's file, and a sync that
+    took it for an untouched release would replace it whole. A record the
+    project already has - an install adding a tool to a synced project -
+    keeps its other entries. A record that cannot be read or written safely
+    is left alone; it is local state, and the next sync writes it.
+    """
+    try:
+        existing = read_confined(target, SYNC_MANIFEST)
+        record = json.loads(existing.decode("utf-8")) if existing is not None else {}
+    except (UnsafePathError, OSError, UnicodeError, ValueError):
+        return
+    known = record.get("files") if isinstance(record, dict) else None
+    files = dict(known) if isinstance(known, dict) else {}
+    for relative, source in paths:
+        try:
+            content = read_confined(target, relative)
+            release = source.read_bytes()
+        except (UnsafePathError, OSError):
+            continue
+        if content is not None and content == release:
+            files[relative] = git_blob_id(content)
+    try:
+        write_confined(
+            target,
+            SYNC_MANIFEST,
+            (
+                json.dumps(
+                    {
+                        "schema": SYNC_MANIFEST_SCHEMA,
+                        "edition": edition,
+                        "release": data["release"],
+                        "source_commit": source_commit(root),
+                        "synced_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        "files": files,
+                    },
+                    indent=1,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8"),
+            durable=False,
+        )
+    except (UnsafePathError, OSError):
+        return
 
 
 def git_blob_id(data: bytes) -> str:
@@ -2152,6 +2217,23 @@ def sync_installation(
                 keep(path, "the project's own file")
             continue
         if path in ADDITIVE_FILES:
+            # The project's file, but the block between the accelerator's
+            # markers is the accelerator's: it follows the release, as the
+            # AGENTS.md block does. An install made before the client
+            # `.gitattributes` override kept marking every skill and hook
+            # `-diff`, so an edited hook showed as "Binary files differ" in
+            # review, and no sync ever replaced that block. A file without
+            # the block - every directive was the project's already - stays.
+            text = current.decode("utf-8", "surrogateescape")
+            if ENTRIES_BEGIN in text and ENTRIES_END in text:
+                try:
+                    merged = merge_additive_file(text, payload.decode("utf-8")).encode("utf-8", "surrogateescape")
+                except (InventoryError, UnicodeError):
+                    keep(path, "managed block is malformed")
+                    continue
+                if merged != current:
+                    write(path, merged, "managed block updated", executable, durable=True)
+                continue
             keep(path, "the project's own file")
             continue
         if pristine:
