@@ -635,7 +635,10 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   was recorded; 1 otherwise; 2 without Linux namespaces.
 - **Writes:** a temporary directory holding the project (or the copy) and an
   empty HOME, under `/dev/shm` when writable, removed unless `--keep`.
-- **CI relationship:** none, as CI has no Claude Code. Run it when Claude Code
+- **CI relationship:** CI has no Claude Code, so it cannot run the bench.
+  `tests/test_host_benches.py`, in the `installation` job, holds what the
+  bench relies on: the save command found in the step the runtime writes for
+  every host, and the stand-in's turn. Run the bench itself when Claude Code
   updates, and with `--target … --sync` on a copy of each project before a
   rollout. Its first run, on 2.1.278, found two problems: the save command
   asked for permission after every answer, and the Stop block showed as a hook
@@ -674,7 +677,9 @@ python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox 
   Exit 0 when the save ran and one message carried the step; 1 otherwise; 2
   without Linux namespaces. `CODEX_BENCH_DUMP=DIR` keeps every request body.
 - **Writes:** as `claude_code_bench.py`.
-- **CI relationship:** none, as CI has no Codex. Its first run, on 0.163,
+- **CI relationship:** CI has no Codex. `tests/test_host_benches.py` holds the
+  stand-in's turn: the escaped `<hook_prompt>` read unescaped, and code mode.
+  Its first run, on 0.163,
   found that Codex adds the continuation to the same turn as a `<hook_prompt>`
   item, without running the prompt hook. The editions' documentation had said
   the continuation came back through the prompt hook.

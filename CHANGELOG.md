@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The host benches are tested without the hosts — 2026-10-23
+
+- `scripts/claude_code_bench.py` and `scripts/codex_bench.py` run only where
+  Claude Code and Codex are installed, and CI has neither. A change to the
+  save step's wording could break their command search unnoticed.
+- `tests/test_host_benches.py`, in the `installation` job, covers:
+  - each bench finds the save command in the step the runtime writes for
+    Claude Code, Codex and Cursor;
+  - the Claude stand-in reads, answers, saves through `echo -E` and ends;
+  - the Codex stand-in reads Codex's XML-escaped `<hook_prompt>` unescaped,
+    and runs commands through code mode's `exec` script when there is no
+    tool list;
+  - a target the rollout rehearsal refuses is refused.
+
 ### Codex's Plan mode and read-only sandbox are not asked to save — 2026-10-23
 
 - Why: Codex's hook `permission_mode` follows its approval policy only. The

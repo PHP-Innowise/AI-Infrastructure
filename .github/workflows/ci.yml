@@ -211,6 +211,10 @@ jobs:
         # next capsule's recall, run on a copy of a fresh install; the
         # project itself must be left byte for byte as it was.
         run: python3 -m unittest tests.test_memory_rollout_rehearsal
+      - name: Host benches find the save step and take a turn as each host sends it
+        # The benches drive the installed Claude Code and Codex, which CI
+        # lacks; their command search and stand-ins run here without them.
+        run: python3 -m unittest tests.test_host_benches
       - name: Optional developer tooling stays out of the editions
         # The live code2prompt checks skip themselves here (no Rust toolchain);
         # what runs is the containment contract and the argv/exclude pins.
