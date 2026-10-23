@@ -481,7 +481,9 @@ class MemoryBankScaleTests(unittest.TestCase):
         for path in cases:
             expected = any(path == base or base in path.parents for base in bases)
             self.assertEqual(expected, self.roots.within(path, bases), path)
-        self.assertTrue(self.roots.within(root / 'a', (Path('/'),)))
+        # The root of the path's own drive: on Windows `/` has no drive, and
+        # pathlib puts nothing on C: under it.
+        self.assertTrue(self.roots.within(root / 'a', (Path(root.anchor),)))
         self.assertFalse(self.roots.within(root / 'a', ()))
 
 
