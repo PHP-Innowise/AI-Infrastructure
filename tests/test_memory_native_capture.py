@@ -929,6 +929,18 @@ class NativeAnswerTests(NativeCaptureFixture):
                 self.assertIn(self.BRIEF if brief else self.REPEAT,reason)
                 self.assertNotIn(self.REPEAT if brief else self.BRIEF,reason)
 
+    def test_claude_shows_what_the_step_is_before_its_marker(self):
+        # Claude Code shows the first lines of a Stop hook's reason under "Ran
+        # N stop hooks" after every answer; Codex and Cursor send it back as a
+        # prompt, known by the marker that opens it.
+        lines=self.ask(session='marker-claude').splitlines()
+        self.assertTrue(lines[0].startswith('This is an internal continuation'))
+        self.assertRegex(lines[-1],r'^INTERNAL_NATIVE_MEMORY_RESULT [0-9a-f]{32}$')
+        for host in ('codex','cursor'):
+            with self.subTest(host=host):
+                self.assertRegex(self.ask(host=host,session='marker-'+host).splitlines()[0],
+                                 r'^INTERNAL_NATIVE_MEMORY_RESULT [0-9a-f]{32}$')
+
     def test_the_setting_decides_and_an_unknown_value_keeps_the_save(self):
         cfg_file=self.root/'project-brain/config/runtime.json'
         def set_answer(value):

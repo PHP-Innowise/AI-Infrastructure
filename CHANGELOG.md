@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code shows what the save step is, not its marker — 2026-10-23
+
+- Why: Claude Code shows the first lines of a Stop hook's reason under "Ran
+  N stop hooks" after every answer (up to five lines in 2.1.278), and the
+  save request opened with `INTERNAL_NATIVE_MEMORY_RESULT <token>`: the
+  first thing a person saw after each answer was an opaque marker.
+- For Claude Code the marker now closes the request, and its first line is
+  the instruction's own "This is an internal continuation: ...". Codex and
+  Cursor send the continuation back as a prompt and recognise it by the
+  marker that opens it, so theirs is unchanged. `memory_eval.py realized`
+  finds the marker anywhere in the record, as before.
+- Test (`NativeAnswerTests`): Claude's request opens with the instruction and
+  ends with the marker; Codex's and Cursor's open with the marker.
+
 ### A Codex save continuation gets no second capsule — 2026-10-23
 
 - Why: Codex sends the Stop hook's save continuation back through

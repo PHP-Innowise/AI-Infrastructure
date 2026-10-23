@@ -378,7 +378,7 @@ def _adapter():
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
-def _instruction(root,key,state,*,brief=False):
+def _instruction(root,key,state,*,brief=False,host=None):
     tooling=Path(__file__).resolve().parents[2]
     interpreter=['python3']
     if os.name == 'nt':
@@ -388,8 +388,7 @@ def _instruction(root,key,state,*,brief=False):
     command='(cd '+shlex.quote(str(tooling))+' && '+shlex.join([
         *interpreter,'memory-bank/scripts/context.py','--root',str(root),'native-result',
         '--request',key,'--token',state['token'],'--input','-','--json'])+')'
-    return ('INTERNAL_NATIVE_MEMORY_RESULT '+state['token']+'\n'
-        'This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
+    body=('This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
         'edit application files, run tests, delegate, or mark the task completed. '
         'Use your shell tool to pipe one JSON object into this exact command: '+command+'\n'
         'JSON: progress (summary, at most 1000 characters), optional next_steps '
@@ -417,6 +416,12 @@ def _instruction(root,key,state,*,brief=False):
         +'If JSON/schema is refused before any write, correct its format once in this continuation. '
         'On stale revision, scope or ownership refusal, stop and report the held save; never override '
         'newer work or repeat the user task.')
+    marker='INTERNAL_NATIVE_MEMORY_RESULT '+state['token']
+    # Codex and Cursor send the continuation back as a prompt, known by the
+    # marker that opens it. Claude Code shows the first lines of a Stop hook's
+    # reason under "Ran N stop hooks" after every answer: there the marker
+    # closes the text, and the line a person reads first says what this is.
+    return body+'\n'+marker if host=='claude' else marker+'\n'+body
 
 
 def _proven(root,state):
@@ -467,7 +472,7 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         state.update(phase='requested',scope=prepared_scope(root,owner,REASON,'agent'),
                      checkout=_checkout(root),adapter=_adapter(),updated=time.time())
         _write(root,key,state)
-        instruction=_instruction(root,key,state,brief=brief)
+        instruction=_instruction(root,key,state,brief=brief,host=host)
     return step({'followup_message':instruction} if host=='cursor' else {'decision':'block','reason':instruction},
                 'requested',code,answer='brief' if brief else 'repeat')
 
