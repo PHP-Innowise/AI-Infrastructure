@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime's status counts the accelerator's own files apart — 2026-10-24
+
+- `context.py status --json` in the runtime memory-seed copies reports
+  `uncommitted` and `accelerator_uncommitted`, as the editions' runtime does
+  (root `CHANGELOG.md`, same day). Generated hooks are unchanged. `context.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime says what to correct in a refused save — 2026-10-23
 
 - The memory runtime memory-seed copies names the JSON error, with its line

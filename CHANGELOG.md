@@ -28,6 +28,31 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The session banner counts the accelerator's own files apart — 2026-10-24
+
+- Why: the session-start banner printed `Branch: … (N uncommitted changes)`
+  from `git status --short`. In a project that neither commits nor ignores
+  the accelerator, that count included `.claude/`, `memory-bank/`,
+  `AGENTS.md` and the rest on every session:
+  - on `next`, 8 of 8 entries were the accelerator's;
+  - on `scb`, 14 of 19;
+  - on `bauherrenmappe`, 1 of 1.
+
+  The model was told about uncommitted work nobody had done.
+- `context.py status --json` reports `uncommitted` (the team's entries) and
+  `accelerator_uncommitted` (the accelerator's install as its install record
+  or the generator's manifest says it was written, and the memory the
+  runtime writes). Both come from one `git status`, with the filter
+  `changed_paths` already used, now shared as `accelerator_owned`. Outside
+  Git both fields are left out.
+- The four editions' `local-context.sh` print the branch line after the
+  status call: `Branch: … (0 uncommitted changes; 16 more are the
+  accelerator's own files)`. Without Python, or without the fields, it keeps
+  the plain Git count. The Codex and Cursor mirrors follow.
+- Test (`test_memory_lifecycle.py`): on a fresh install the banner reports 0
+  uncommitted changes and the accelerator's entries apart, and 1 after an
+  edit. It fails on the old hook.
+
 ### A refused save says what to correct — 2026-10-23
 
 - Why: the agent gets one retry after a refused save, and two common

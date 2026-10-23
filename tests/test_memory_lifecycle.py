@@ -187,6 +187,24 @@ class MemoryLifecycleTest(unittest.TestCase):
         self.assertEqual({"continue": True}, json.loads(prompt("g3", followup)))
         self.assertEqual(before, rule.read_bytes())
 
+    def test_the_session_banner_counts_the_accelerator_apart(self) -> None:
+        # Installed here, neither committed nor ignored: git status lists the
+        # accelerator, and the banner used to report it as uncommitted work.
+        def banner() -> str:
+            env = dict(self.env, CLAUDE_PROJECT_DIR=str(self.project))
+            started = self.hook("claude", "local-context.sh",
+                                {"session_id": "banner", "hook_event_name": "SessionStart", "source": "startup"}, env)
+            return next(line for line in started.splitlines() if line.startswith("Branch: "))
+
+        accelerator = len(self.git("status", "--short").splitlines())
+        self.assertGreater(accelerator, 0)
+        self.assertEqual(f"Branch: feature/SHOP-7-invoices (0 uncommitted changes; {accelerator} more are "
+                         "the accelerator's own files)", banner())
+        with open(self.project / "src/Ledger.php", "a", encoding="utf-8") as handle:
+            handle.write("// edited\n")
+        self.assertEqual(f"Branch: feature/SHOP-7-invoices (1 uncommitted changes; {accelerator} more are "
+                         "the accelerator's own files)", banner())
+
     def test_claude_code_follows_a_task_across_sessions_a_commit_and_a_branch(self) -> None:
         self.follow_a_task("claude")
 

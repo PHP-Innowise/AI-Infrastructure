@@ -1744,7 +1744,11 @@ chunk whose reviewed or automatic provenance is acceptable for the environment.
 
 Session-start hooks can report metadata such as:
 
-- branch and uncommitted-change count;
+- branch and uncommitted-change count. Changes that are the accelerator's own
+  files are counted apart: its install, untouched since the install record or
+  the generator's manifest, and the memory the runtime writes. Without that,
+  a project that neither commits nor ignores the accelerator reads as holding
+  uncommitted work in every session;
 - dependency/runtime markers;
 - selected context mode;
 - index existence and approximate staleness;
