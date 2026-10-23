@@ -4,7 +4,8 @@ The rollout rehearsal (scripts/memory_rollout_rehearsal.py) runs one turn and th
 recall. A task lives longer than that: a learning in one session, a progress and a next step in
 the next turn, a commit, a new session, another branch with its own task, and the way back. This
 follows that life with Claude Code, where a person reads the session, and with Codex, whose save
-continuation comes back through the prompt hook.
+continuation is also fed back through the prompt hook here: Codex 0.163 adds it to the turn as a
+<hook_prompt> item instead, and the hook's guard stays for a host that sends it as a prompt.
 """
 import json
 import os
@@ -87,7 +88,7 @@ class MemoryLifecycleTest(unittest.TestCase):
             output = json.loads(stop.strip().splitlines()[0])
             if host == "codex":
                 reason = output["reason"]
-                # The continuation comes back as a prompt; the turn's own prompt brought the capsule.
+                # Fed back as a prompt, the continuation gets no second capsule: the turn's own prompt brought one.
                 echoed = self.hook(host, "working-memory-read.sh",
                                    dict(base, hook_event_name="UserPromptSubmit", prompt=reason), env)
                 self.assertEqual("", echoed.strip())

@@ -641,6 +641,44 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   asked for permission after every answer, and the Stop block showed as a hook
   error.
 
+### `codex_bench.py`
+
+**Purpose and status.** The Codex counterpart of `claude_code_bench.py`, with
+the same work directory, `--target` and `--sync`. Codex runs a project's hooks
+only once their hashes are approved, and turns a Stop hook's block into a
+`<hook_prompt>` item of the same turn. The save after every answer depends on
+both, and on Codex's sandbox letting the save write the project.
+
+The stand-in serves the Responses API. It follows the save step as written,
+reading XML entities as a model does. It answers through `exec_command`, or
+through code mode's `exec` script when Codex sends no tool list, as it does
+for a project that pins a gpt-5.6 model.
+
+An isolated `CODEX_HOME` approves the project's hooks by their current hashes,
+as a person does once in `/hooks`. Then `codex exec` runs with the
+workspace-write sandbox.
+
+```bash
+python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] \
+  [--target DIR [--sync] [--exclude NAME]] [--timeout 240] [--keep]
+```
+
+- **Outputs:** a JSON report:
+  - Codex's version and the tools it offered;
+  - how many hooks were approved;
+  - how many messages carried the step, whether as a `<hook_prompt>` and
+    XML-escaped;
+  - whether the save ran and the second Stop saw the recovery (the journal's
+    events).
+
+  Exit 0 when the save ran and one message carried the step; 1 otherwise; 2
+  without Linux namespaces. `CODEX_BENCH_DUMP=DIR` keeps every request body.
+- **Writes:** as `claude_code_bench.py`.
+- **CI relationship:** none, as CI has no Codex. Its first run, on 0.163,
+  found that Codex adds the continuation to the same turn as a `<hook_prompt>`
+  item, without running the prompt hook. The editions' documentation had said
+  the continuation came back through the prompt hook.
+
 ### `memory_rerank_pilot.py`
 
 **Purpose and status.** Optional, source-only maintainer pilot. It compares the

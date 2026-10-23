@@ -28,6 +28,27 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Codex on the real host, offline — 2026-10-23
+
+- Why: the Codex side of the save after every answer had been checked only
+  through simulated hooks. `scripts/codex_bench.py` drives the installed
+  Codex (0.163) the way `claude_code_bench.py` drives Claude Code: a network
+  namespace with loopback only, a scripted stand-in for the Responses API,
+  and an isolated `CODEX_HOME` that approves the project's hooks by hash.
+- What it showed:
+  - Codex adds the Stop hook's continuation to the same turn as a
+    `<hook_prompt>` item, XML-escaped, and runs no prompt hook for it.
+    `docs/MEMORY-INTEGRATION.md` said Codex sends it back through the prompt
+    hook, and is corrected; the prompt-hook guard and the silent `refresh` for
+    such a query stay as defence.
+  - The command's `&&` reaches the model as `&amp;&amp;`. In every real Codex
+    save in the transcripts, the model ran it as `&&`.
+  - A project that pins a gpt-5.6 model gets no tool list. The model then
+    runs commands through code mode's `exec` script.
+- Measured: a fresh PHP Core install and synced copies of the four client
+  projects (one pins gpt-5.6) save and recover in Codex's workspace-write
+  sandbox.
+
 ### Claude Code saves without a prompt and without a hook error — 2026-10-23
 
 - Why: no Claude Code session had yet run the save after an answer, so the

@@ -794,10 +794,11 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
 
     @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell hook profile')
     def test_a_codex_save_continuation_gets_no_second_capsule(self):
-        """Codex sends the Stop hook's save continuation back through
-        UserPromptSubmit. The turn's own prompt brought the capsule; the
-        continuation is bookkeeping and gets none, while the arm still
-        records it as a continuation."""
+        """A save continuation sent back through UserPromptSubmit gets no
+        capsule: the turn's own prompt brought one, and the continuation is
+        bookkeeping, while the arm still records it as a continuation.
+        Codex 0.163 adds the continuation to the turn as a <hook_prompt>
+        item instead; the guard stays for a host that sends it as a prompt."""
         hooks=self.install_hooks('codex')
         ask={'hook_event_name':'UserPromptSubmit','session_id':'cont-codex','cwd':str(self.root),
              'prompt':'Inspect the Amber retry policy.','turn_id':'t1','model':'m','permission_mode':'default'}
