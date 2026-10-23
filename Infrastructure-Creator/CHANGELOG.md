@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime builds no capsule for a Codex save continuation — 2026-10-23
+
+- The memory runtime memory-seed copies returns silently from `refresh` for
+  Claude Code and Codex when the query is the Stop hook's own save
+  continuation, as the editions' runtime does (root `CHANGELOG.md`, same
+  day). `context.py` changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime leaves its own memory writes out of task work — 2026-10-23
 
 - The memory runtime memory-seed copies skips the chunks a promoted save

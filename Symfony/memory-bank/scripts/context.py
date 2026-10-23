@@ -319,6 +319,9 @@ TURN_RUNTIME_DIRECTORIES = ("dynamic", "control", "indexes", "archive", "local")
 # state. A team that commits its memory sees them in `git status` after every
 # promoted save; they are the runtime's writing, not the task's work.
 TURN_RUNTIME_MEMORY = re.compile(r"^memory-bank/(?:chunks/|local/|INDEX\.md$)")
+# The Stop hook's save continuation as Codex sends it back through
+# UserPromptSubmit: its marker and the challenge's token open the prompt.
+NATIVE_CONTINUATION_PROMPT = re.compile(r"\s*INTERNAL_NATIVE_MEMORY_RESULT [0-9a-f]{32}(?:\s|$)")
 BRANCH_PREFIXES = (
     "feature/", "feat/", "fix/", "bugfix/", "hotfix/", "chore/", "release/",
     "refactor/", "docs/", "test/", "merge/",
@@ -9473,6 +9476,14 @@ def _command() -> int:
                     raise ContextError("--limit must be a positive integer")
                 if arguments.query is not None and arguments.task_id is None:
                     raise ContextError("--query requires --task-id")
+                if (arguments.host in ("claude", "codex") and arguments.query is not None
+                        and NATIVE_CONTINUATION_PROMPT.match(arguments.query)):
+                    # The save continuation is this turn's bookkeeping, not a
+                    # request: the turn's own prompt brought the capsule, and a
+                    # second one built from the instruction's words put 1.4 KB
+                    # of repeated state into the save step. Cursor's rule is
+                    # left to its own refresh.
+                    return 0
                 layers, index_result, warnings = refresh_layers(
                     connection, repository
                 )

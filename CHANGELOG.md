@@ -28,6 +28,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A Codex save continuation gets no second capsule — 2026-10-23
+
+- Why: Codex sends the Stop hook's save continuation back through
+  UserPromptSubmit as a new prompt, so the prompt hook built a capsule for
+  the instruction's own words. The turn's prompt had already brought the
+  capsule: on a copy of a client the continuation's hook took 169 ms and put
+  1.4 KB of repeated working state, recent files and last-turn telemetry
+  into the save step, and where the project has documents, the instruction's
+  words ("progress", "learnings", "sources") would search them too.
+- `refresh --host codex` (and `--host claude`, whose continuation never
+  arrives as a prompt) returns at once, silently, for a query opened by the
+  continuation's marker and challenge token (`NATIVE_CONTINUATION_PROMPT`);
+  the hook then stays silent, as for any refresh with nothing to say. The
+  arm still recognises the continuation and journals it. Cursor's rule is
+  left to its own refresh.
+- Test: the Codex prompt hook prints nothing for a real continuation and
+  the journal records it, while the same runtime still answers Cursor and a
+  real prompt; it fails without the change.
+
 ### A promoted save's memory files are not the task's work — 2026-10-23
 
 - Why: `changed_paths` drops what the runtime writes itself, so that a task
