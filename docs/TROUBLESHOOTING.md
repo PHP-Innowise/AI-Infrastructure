@@ -460,8 +460,9 @@ except during a rebase, where it reads the branch being rebased.
 ### Symptom
 
 After each answer the agent runs one more shell command. The command pipes a
-JSON object into `context.py ... native-result`, and the agent then repeats
-its answer. Each turn takes noticeably longer and costs more.
+JSON object into `context.py ... native-result`, and in some sessions the
+agent then repeats its answer. Each turn takes noticeably longer and costs
+more.
 
 ### Cause
 
@@ -469,10 +470,14 @@ This is the automatic native result capture of governed mode. The Stop hook
 asks the same agent to save the result of the work it just did - progress,
 next steps and at most three source-backed learnings - so that the next
 session's capsule can recall them. The request follows every answer. The
-agent repeats its answer because a headless run (`codex exec`,
-`claude -p`) shows only the last message. On 21 Codex runs with one save
-each, the continuation cost a median of 10 seconds, 383 output and 59k
-mostly cached input tokens: about half of the answer's own.
+agent repeats its answer where a headless run (`codex exec`, `claude -p`)
+would show only the last message. A session the host marks as attended -
+Claude Code in the terminal, VS Code or the desktop app; Codex in its app,
+IDE extension or terminal UI - ends with at most one short line instead;
+every other session, Cursor's included, repeats (see
+`docs/MEMORY-INTEGRATION.md`). On 21 Codex runs with one save each, the
+continuation cost a median of 10 seconds, 383 output and 59k mostly cached
+input tokens: about half of the answer's own.
 
 ### Recover
 
@@ -486,6 +491,12 @@ for one session.
   Harness.
 - The native journal (`memory-bank/local/native-results.ndjson`) shows each
   skipped prompt and Stop as `skipped` with the code `switched-off`.
+
+To keep the request but stop the repeat in a session the hooks do not
+recognise as attended, set `"native_result_answer": "brief"` (or
+`CONTEXT_NATIVE_RESULT_ANSWER=brief`). Only do this where nobody reads the
+final message alone: a headless caller would then get one short line instead
+of the answer. `repeat` restores the repeat everywhere.
 
 ## Promotion Review or Apply Fails
 

@@ -28,6 +28,77 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The prompt hook arms the save request beside the capsule's refresh — 2026-10-23
+
+- Why: the prompt hooks ran two Python processes one after the other:
+  `native-prompt`, which arms the save request, then `refresh`, which builds
+  the capsule. The first is a few milliseconds of work behind about 50 ms of
+  interpreter start and imports: 63 ms of a 182 ms hook on a copy of scb.
+- Claude Code's and Codex's hooks now run `native-prompt` in the background
+  beside `refresh`, its output in a private temporary file; the hook waits
+  for it when the refresh returns and prints its line before anything else,
+  as before. Without a temporary file the request is still armed and only
+  that line is lost. The Stop hook keeps its order: `native-stop` pins the
+  task revision a checkpoint flush in `turn` may have just moved.
+- The two shared one thing: on an unsaved previous result the arm wrote
+  `native_capture_incomplete` into the last-turn report, which the refresh
+  reads into the capsule. `native-prompt` now writes it for Cursor only.
+  Claude Code and Codex get the notice from the hook's own first line, as
+  they did; the capsule line that repeated it is gone instead of appearing
+  when the arm happened to finish first. Cursor's hook answers in JSON only,
+  so its notice is that capsule line: its mirror rule keeps the arm before
+  the refresh (`_WM_NATIVE_ARM_CURSOR` in `context_retrieval.py`).
+- The generator's hook contract (`native_capture_hook_contract` in
+  `validate_generated.py`) accepts the arm beside the refresh too, when its
+  PID is taken at once and awaited; generated hooks keep the sequential
+  form hook-forge describes.
+- Measured on synced copies of scb (prompt hook, ABBA, 30 rounds): 209 →
+  147 ms, paired median −62 ms [−63.6; −59.9]. The worst case of the hook is
+  one 5 s budget instead of two against Claude Code's 8 s timeout. The
+  rehearsal on the four clients saved and recalled 16 of 16.
+- Tests: each host gets the unsaved-result notice by one fixed path (Claude
+  Code and Codex: the hook's first line, no report flag, no temporary file
+  left; Cursor: the rule written in the same turn), failing without the
+  flag change; the generator contract refuses an arm in the background
+  without its PID or its `wait`.
+
+### A session a person reads is not asked to repeat its answer after the save — 2026-10-23
+
+- Why: after every answer in governed mode the Stop hook asks the agent to
+  save its result, and since 2026-10-21 to return its substantive answer
+  again afterwards. A headless run (`codex exec`, `claude -p`) needs that: its
+  caller gets only the final message. In a session a person reads as it goes,
+  the answer is already on screen above the continuation, and the repeat
+  doubled it: on the nine Codex runs that had the instruction, the message
+  after the save was 93 % of the answer's length (21 % on the twelve before
+  it), and the continuation cost +408 output tokens against +360.
+- `native_result_answer` in `runtime.json` (or `CONTEXT_NATIVE_RESULT_ANSWER`):
+  `auto`, the default, ends a session its host marks as attended with no
+  further text or one short line, and repeats everywhere else; `repeat`
+  always repeats; `brief` never does. An unknown value repeats and the
+  journal names it; the save is asked for either way.
+  - Claude Code: `CLAUDE_CODE_SESSION_ATTENDED=1` (Claude Code 2.1.278 sets it
+    for the processes of an attended session) and an entrypoint of `cli`,
+    `claude-vscode` or `claude-desktop`. A `claude -p` started from such a
+    session inherits the entrypoint, but it is a child session, which Claude
+    Code never marks attended.
+  - Codex: the rollout's first line names the session's source: `vscode`
+    (the app, the IDE extension and the terminal UI) or `cli` end briefly;
+    `exec` and subagents repeat.
+  - Cursor and anything unmarked repeat, as before.
+- The journal's `requested` line carries `answer` (`brief`/`repeat`).
+  `memory_eval.py realized` counts the brief requests in the funnel and
+  splits the transcripts' continuation costs by how each request asked to
+  end (`brief`, `repeat`, `earlier`), read from the request's own words, so
+  the change reads as a before and after on real sessions.
+- Tests (`NativeAnswerTests`): an attended Claude session in each of the
+  three interfaces ends briefly; a child of a desktop session, `claude -p`,
+  a Slack session and an unmarked one repeat; a Codex session ends briefly
+  only for a `vscode` or `cli` rollout (not `exec`, a subagent, a first line
+  past the bound or a missing rollout); the setting and its variable decide,
+  and an unknown value keeps the save. The native-capture fixture drops the
+  marks a suite run from a Claude Code session would inherit.
+
 ### A citation check resolves its source once and the roots once a pass — 2026-10-23
 
 - Why: every prompt checks each Memory Bank chunk's citations again, and

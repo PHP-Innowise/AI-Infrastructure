@@ -200,7 +200,10 @@ class WorkerLifecycleTests(unittest.TestCase):
         return memory_onnx.Scorer(assets, sys.executable, worker_script=self.script, timeout_seconds=timeout)
 
     def stopped(self, pid):
-        deadline = time.monotonic() + .5
+        # The group's SIGKILL is sent before score() returns, but the process
+        # dies when the kernel next runs it: on a machine busy with a whole
+        # check.py, half a second was once not enough.
+        deadline = time.monotonic() + 5
         while running(pid) and time.monotonic() < deadline:
             time.sleep(.005)
         self.assertFalse(running(pid))

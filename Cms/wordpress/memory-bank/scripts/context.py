@@ -8952,7 +8952,12 @@ def _command() -> int:
                     if arguments.command == "native-stop":
                         if result: print(json.dumps(result, ensure_ascii=False))
                     else:
-                        if result.get("warning"):
+                        # Cursor's hook answers in JSON only, so the capsule
+                        # is where its notice goes. Claude Code's and Codex's
+                        # hooks print this command's line themselves and arm
+                        # beside the refresh, which would read the flag only
+                        # when the arm happened to finish first.
+                        if result.get("warning") and arguments.host == "cursor":
                             report = load_last_turn_report(repository) or {"schema_version": 1}
                             report.update(timestamp=datetime.now(timezone.utc).isoformat(),
                                           task_id=arguments.task_id, native_capture_incomplete=True)

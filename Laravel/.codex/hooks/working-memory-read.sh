@@ -209,14 +209,18 @@ TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev
 [ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
 
 # Arm one semantic result capture for this real prompt. The CLI recognizes
-# an internal Stop continuation and preserves its original challenge.
+# an internal Stop continuation and preserves its original challenge. It runs
+# beside the refresh below: neither reads what the other writes (the arm
+# leaves the unsaved-result notice to this hook's own line, and only Cursor's
+# arm writes it for the capsule), and the line is printed when the refresh
+# returns, before anything else. One Python start after the other was a
+# third of every prompt (209 -> 147 ms).
+NATIVE_PID=
 if [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ] && [ -n "$TASK_ID" ]; then
-  NATIVE_REPORT=$(printf '%s' "$HOOK_STDIN" | run "${PYTHON[@]}" "$CONTEXT_CLI" native-prompt \
-    --host codex --task-id "$TASK_ID" 2>/dev/null)
-  NATIVE_STATUS=$?
-  if [ "$NATIVE_STATUS" -eq 0 ] && [ "$NATIVE_REPORT" = "Previous native memory result was not saved completely." ]; then
-    printf '%s\n' "$NATIVE_REPORT"
-  fi
+  NATIVE_FILE=$(mktemp "${TMPDIR:-/tmp}/working-memory-native.XXXXXX" 2>/dev/null) || NATIVE_FILE=/dev/null
+  printf '%s' "$HOOK_STDIN" | run "${PYTHON[@]}" "$CONTEXT_CLI" native-prompt \
+    --host codex --task-id "$TASK_ID" > "$NATIVE_FILE" 2>/dev/null &
+  NATIVE_PID=$!
 fi
 
 # One process refreshes all three layers and assembles the capsule. Splitting
@@ -239,6 +243,15 @@ fi
 ERROR_FILE=$(mktemp "${TMPDIR:-/tmp}/working-memory-read.XXXXXX" 2>/dev/null) || ERROR_FILE=/dev/null
 REPORT=$(run "${PYTHON[@]}" "$CONTEXT_CLI" "${ARGUMENTS[@]}" 2>"$ERROR_FILE")
 HOOK_STATUS=$?
+if [ -n "$NATIVE_PID" ]; then
+  wait "$NATIVE_PID"
+  NATIVE_STATUS=$?
+  NATIVE_REPORT=
+  [ "$NATIVE_FILE" = /dev/null ] || { NATIVE_REPORT=$(cat "$NATIVE_FILE" 2>/dev/null); rm -f "$NATIVE_FILE" 2>/dev/null; }
+  if [ "$NATIVE_STATUS" -eq 0 ] && [ "$NATIVE_REPORT" = "Previous native memory result was not saved completely." ]; then
+    printf '%s\n' "$NATIVE_REPORT"
+  fi
+fi
 # A refresh stopped at its budget may already have printed part of a
 # capsule, and a cut capsule reads like a whole one. It is dropped, and the
 # turn is told below that memory was not consulted.

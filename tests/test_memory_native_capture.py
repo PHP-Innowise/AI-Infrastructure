@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 JOURNAL = 'memory-bank/local/native-results.ndjson'
 # All a journal line may hold: when, which host, which step, a short code, the
 # Stop hook's exit status and two counts - never text, paths or identifiers.
-JOURNAL_FIELDS = {'at','host','stage','event','code','status','learnings','promoted'}
+JOURNAL_FIELDS = {'at','host','stage','event','code','status','learnings','promoted','answer'}
 
 
 class NativeCaptureFixture(unittest.TestCase):
@@ -27,8 +27,11 @@ class NativeCaptureFixture(unittest.TestCase):
         self.root.mkdir()
         self.env = dict(os.environ, PROJECT_BRAIN_OWNER='tester', GIT_OPTIONAL_LOCKS='0',
                         PYTHONDONTWRITEBYTECODE='1')
+        # A suite run from a Claude Code session inherits that session's marks.
         for key in ('ACCELERATOR_HOME','ACCELERATOR_PROJECT_DIR','ACCELERATOR_STATE_DIR',
-                    'CONTEXT_MEMORY_RECOVERY','CONTEXT_CAPSULE_DELIVERED','PROJECT_BRAIN_MODE'):
+                    'CONTEXT_MEMORY_RECOVERY','CONTEXT_CAPSULE_DELIVERED','PROJECT_BRAIN_MODE',
+                    'CONTEXT_NATIVE_RESULT_REQUEST','CONTEXT_NATIVE_RESULT_ANSWER',
+                    'CLAUDE_CODE_SESSION_ATTENDED','CLAUDE_CODE_ENTRYPOINT'):
             self.env.pop(key, None)
         for rel in ('memory-bank/scripts','memory-bank/templates','project-brain/config',
                     'project-brain/schemas','project-brain/templates'):
@@ -673,6 +676,7 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
             self.assertLessEqual(set(line),JOURNAL_FIELDS)
             for field in ('stage','event','code'):
                 if field in line:self.assertRegex(line[field],r'^[a-z0-9][a-z0-9_.:-]{0,79}$')
+            if 'answer' in line:self.assertIn(line['answer'],{'brief','repeat'})
 
     def test_journal_keeps_a_bounded_window_of_the_newest_lines(self):
         config_file=self.root/'project-brain/config/runtime.json'
@@ -749,6 +753,36 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.assertEqual('',outside.read_text())
 
 
+    @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell hook profile')
+    def test_an_unsaved_result_notice_reaches_each_host_by_one_fixed_path(self):
+        """Claude Code's and Codex's prompt hooks arm the next request beside
+        the refresh: their notice is the hook's own first line, and nothing
+        the refresh reads waits on the arm. Cursor's hook answers in JSON
+        only, so its arm writes the notice for the capsule and runs first."""
+        notice='Previous native memory result was not saved completely.'
+        report=self.root/'memory-bank/local/last-turn-report.json'
+        for host,session in (('claude','unsaved-claude'),('codex','unsaved-codex')):
+            with self.subTest(host=host):
+                hooks=self.install_hooks(host)
+                self.begin(host,session);self.stop(host,session);self.stop(host,session,active=True)
+                if report.exists():report.unlink()
+                result=self.hook(hooks,'working-memory-read.sh',{'hook_event_name':'UserPromptSubmit',
+                    'session_id':session,'cwd':str(self.root),'prompt':'Continue the Amber routing research.'})
+                lines=result.stdout.decode().splitlines()
+                self.assertEqual(notice,lines[0])
+                self.assertEqual(1,lines.count(notice))
+                self.assertFalse(report.exists() and 'native_capture_incomplete' in report.read_text())
+                self.assertNotIn('native memory result not saved completely',result.stdout.decode())
+                self.assertFalse(list(Path(self.env.get('TMPDIR') or tempfile.gettempdir()).glob('working-memory-native.*')))
+        hooks=self.install_hooks('cursor')
+        self.begin('cursor','unsaved-cursor');self.stop('cursor','unsaved-cursor');self.stop('cursor','unsaved-cursor',active=True)
+        result=self.hook(hooks,'working-memory-read.sh',{'hook_event_name':'beforeSubmitPrompt',
+            'conversation_id':'unsaved-cursor','prompt':'Continue the Amber routing research.'})
+        self.assertEqual({'continue':True},json.loads(result.stdout))
+        rule=(self.root/'.cursor/rules/working-memory.mdc').read_text()
+        self.assertIn('native memory result not saved completely',rule)
+
+
 class NativeRequestSwitchTests(NativeCaptureFixture):
     """`native_result_request: off` arms no prompt and asks no Stop; the
     default asks after every answer, as before. The request costs one more
@@ -793,6 +827,99 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
         self.assertIn('native-result:invalid-request-setting',refused.stderr.decode())
         self.assertIn(('prompt','error','native-result:invalid-request-setting'),
                       [(line['stage'],line['event'],line.get('code')) for line in self.journal()])
+
+
+
+class NativeAnswerTests(NativeCaptureFixture):
+    """A session a person reads as it goes is not asked to return its answer
+    again after the save: the answer is on screen above the continuation, and
+    the repeat doubled it. A headless run - the final message is all its
+    caller gets - and any session the host does not mark keep the repeat."""
+
+    BRIEF='The person has already read your answer above this continuation'
+    REPEAT='return the substantive answer to the original user request'
+
+    def journal(self):
+        path=self.root/JOURNAL
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def ask(self,host='claude',session='answer',env=None,transcript=None):
+        prompt={'hook_event_name':'UserPromptSubmit','session_id':session,'prompt':'Inspect the retry policy.'}
+        stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,
+              'last_assistant_message':'The Amber dispatcher retries only idempotent requests.'}
+        if host=='cursor':
+            prompt={'hook_event_name':'beforeSubmitPrompt','conversation_id':session}
+            stop={'conversation_id':session,'hook_event_name':'stop','status':'completed','loop_count':0}
+        if transcript is not None:stop['transcript_path']=str(transcript)
+        environment=dict(self.env,**(env or {}))
+        self.call('native-prompt','--host',host,'--task-id','research','--json',data=prompt,env=environment)
+        reply=self.call('native-stop','--host',host,'--task-id','research',data=stop,env=environment)
+        reason=json.loads(reply.stdout)
+        return reason.get('followup_message') if host=='cursor' else reason['reason']
+
+    def rollout(self,name,source,pad=0):
+        path=self.root.parent/name
+        meta={'type':'session_meta','payload':{'id':'0','source':source,'base_instructions':'x'*pad}}
+        path.write_text(json.dumps(meta)+'\n'+json.dumps({'type':'turn_context'})+'\n')
+        return path
+
+    def test_an_attended_claude_session_is_not_asked_to_repeat_its_answer(self):
+        for entrypoint in ('cli','claude-desktop','claude-vscode'):
+            with self.subTest(entrypoint=entrypoint):
+                reason=self.ask(session='attended-'+entrypoint,
+                                env={'CLAUDE_CODE_SESSION_ATTENDED':'1','CLAUDE_CODE_ENTRYPOINT':entrypoint})
+                self.assertIn(self.BRIEF,reason)
+                self.assertNotIn(self.REPEAT,reason)
+                # The save itself is asked for exactly as before.
+                self.assertIn('native-result --request',reason)
+        answers=[line.get('answer') for line in self.journal() if line['stage']=='stop' and line['event']=='requested']
+        self.assertEqual(['brief']*3,answers)
+
+    def test_a_headless_child_or_unmarked_claude_run_repeats_its_answer(self):
+        cases={'child of a desktop session':{'CLAUDE_CODE_SESSION_ATTENDED':'0','CLAUDE_CODE_ENTRYPOINT':'claude-desktop'},
+               'claude -p':{'CLAUDE_CODE_SESSION_ATTENDED':'0','CLAUDE_CODE_ENTRYPOINT':'sdk-cli'},
+               'slack':{'CLAUDE_CODE_SESSION_ATTENDED':'1','CLAUDE_CODE_ENTRYPOINT':'claude-in-slack'},
+               'no marks':{}}
+        for n,(name,env) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                reason=self.ask(session=f'headless-{n}',env=env)
+                self.assertIn(self.REPEAT,reason)
+                self.assertNotIn(self.BRIEF,reason)
+        answers=[line.get('answer') for line in self.journal() if line['stage']=='stop' and line['event']=='requested']
+        self.assertEqual(['repeat']*4,answers)
+
+    def test_a_codex_session_ends_briefly_only_when_its_rollout_says_it_is_watched(self):
+        cases={'app or terminal':(self.rollout('app.jsonl','vscode'),True),
+               'older terminal':(self.rollout('cli.jsonl','cli'),True),
+               'codex exec':(self.rollout('exec.jsonl','exec'),False),
+               'subagent':(self.rollout('sub.jsonl',{'subagent':{'thread_spawn':{'depth':1}}}),False),
+               'first line past the bound':(self.rollout('long.jsonl','vscode',pad=300*1024),False),
+               'missing rollout':(self.root.parent/'gone.jsonl',False),
+               'no rollout':(None,False)}
+        for n,(name,(path,brief)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                reason=self.ask(host='codex',session=f'codex-{n}',transcript=path)
+                self.assertIn(self.BRIEF if brief else self.REPEAT,reason)
+                self.assertNotIn(self.REPEAT if brief else self.BRIEF,reason)
+
+    def test_the_setting_decides_and_an_unknown_value_keeps_the_save(self):
+        cfg_file=self.root/'project-brain/config/runtime.json'
+        def set_answer(value):
+            cfg=json.loads(cfg_file.read_text());cfg['native_result_answer']=value
+            cfg_file.write_text(json.dumps(cfg))
+        attended={'CLAUDE_CODE_SESSION_ATTENDED':'1','CLAUDE_CODE_ENTRYPOINT':'cli'}
+        set_answer('repeat')
+        self.assertIn(self.REPEAT,self.ask(session='set-repeat',env=attended))
+        set_answer('brief')
+        self.assertIn(self.BRIEF,self.ask(host='cursor',session='set-brief'))
+        self.assertIn(self.REPEAT,self.ask(session='env-repeat',env=dict(attended,CONTEXT_NATIVE_RESULT_ANSWER='repeat')))
+        set_answer('short')
+        reason=self.ask(session='set-unknown',env=attended)
+        self.assertIn(self.REPEAT,reason)
+        self.assertIn('native-result --request',reason)
+        last=[line for line in self.journal() if line['stage']=='stop'][-1]
+        self.assertEqual(('requested','native-result:invalid-answer-setting','repeat'),
+                         (last['event'],last.get('code'),last.get('answer')))
 
 
 if __name__=='__main__':unittest.main()

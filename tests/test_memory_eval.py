@@ -2538,7 +2538,7 @@ class SaveContinuationCostTest(unittest.TestCase):
             tokens(46, 1300),
         ])
         [cost] = memory_eval.continuation_costs(path, "codex")
-        self.assertEqual({"answer_seconds": 20.0, "answer_output_tokens": 600,
+        self.assertEqual({"answer_seconds": 20.0, "answer_output_tokens": 600, "ending": "earlier",
                           "save_seconds": 10.0, "save_output_tokens": 400}, cost)
 
     def test_a_claude_request_counts_each_response_once(self) -> None:
@@ -2556,7 +2556,7 @@ class SaveContinuationCostTest(unittest.TestCase):
             {"timestamp": self.at(30), "type": "user", "message": {"role": "user", "content": "Thanks"}},
         ])
         [cost] = memory_eval.continuation_costs(path, "claude")
-        self.assertEqual({"answer_seconds": 12.0, "answer_output_tokens": 500,
+        self.assertEqual({"answer_seconds": 12.0, "answer_output_tokens": 500, "ending": "earlier",
                           "save_seconds": 7.0, "save_output_tokens": 300}, cost)
         summary = memory_eval.continuation_summary([cost])
         self.assertEqual((1, 0.58), (summary["requests"], summary["time_share"]))
@@ -2564,6 +2564,39 @@ class SaveContinuationCostTest(unittest.TestCase):
         self.assertIn("1 request(s): +7.0 s and +300 output tokens",
                       "\n".join(memory_eval.format_continuations({"claude": summary,
                                                                    "codex": memory_eval.continuation_summary([])})))
+        self.assertNotIn("endings", summary)
+
+    def test_requests_are_told_apart_by_how_they_ask_to_end(self) -> None:
+        def message(seconds: int, role: str, text: str) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "response_item",
+                    "payload": {"type": "message", "role": role, "content": [{"type": "input_text", "text": text}]}}
+
+        def tokens(seconds: int, output: int) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {"total_token_usage": {"output_tokens": output}}}}
+
+        repeat = " After a successful save or skip, return the substantive answer to the original user request"
+        brief = " The person has already read your answer above this continuation: after a successful save"
+        path = self.write_lines([
+            message(0, "user", "Where is the report cache cleared?"), message(10, "assistant", "In ReportService."),
+            tokens(10, 300), message(11, "user", self.TOKEN + repeat),
+            message(20, "assistant", "In ReportService, as said."), tokens(21, 700),
+            message(30, "user", "And the import cache?"), message(40, "assistant", "In ImportService."),
+            tokens(40, 1000), message(41, "user", self.TOKEN + brief), tokens(44, 1100),
+            message(50, "user", "Thanks"),
+        ])
+        costs = memory_eval.continuation_costs(path, "codex")
+        self.assertEqual([("repeat", 400), ("brief", 100)], [(cost["ending"], cost["save_output_tokens"]) for cost in costs])
+        summary = memory_eval.continuation_summary(costs)
+        self.assertEqual({"brief": 1, "repeat": 1}, {name: part["requests"] for name, part in summary["endings"].items()})
+        text = "\n".join(memory_eval.format_continuations({"codex": summary}))
+        self.assertIn("brief:    1 request(s): +3.0 s and +100 output tokens", text)
+        self.assertIn("repeat:   1 request(s): +10.0 s and +400 output tokens", text)
+        counts = memory_eval.Counter()
+        for answer in ("brief", "repeat", None):
+            memory_eval.native_step(counts, {}, {"stage": "stop", "event": "requested",
+                                                 **({"answer": answer} if answer else {})})
+        self.assertEqual((3, 1), (counts["requested"], counts["requested_brief"]))
 
 if __name__ == "__main__":
     unittest.main()
