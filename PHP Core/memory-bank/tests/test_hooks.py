@@ -1238,6 +1238,223 @@ class ReadHookInputTest(unittest.TestCase):
                     self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
 
 
+class FirstTouchHookTest(unittest.TestCase):
+    """first-touch.sh: off unless switched on, once per file per session, and
+    only a call that names a file the session's baseline lists starts the
+    runtime; each host gets the shape that puts the text beside the result."""
+
+    HOOK = "first-touch.sh"
+    SOURCE = "src/Billing/Invoice.php"
+    # A runtime stand-in: records how it was called, answers with a delivery.
+    RECORDING = (
+        "import json, pathlib, sys\n"
+        "log = pathlib.Path(__file__).with_name('calls.jsonl')\n"
+        "with log.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read()}) + '\\n')\n"
+        "print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse',"
+        " 'additionalContext': 'memory citing x'}}))\n"
+    )
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="first-touch-hook-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def project(self, tool: str, *, switched: bool = True, runtime: str = RECORDING) -> Path:
+        project = self.root / tool
+        hooks = project / MIRRORS[tool][0]
+        hooks.mkdir(parents=True, exist_ok=True)
+        shutil.copy(hook_path(tool, self.HOOK), hooks)
+        config = project / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", "first_touch_delivery": switched}),
+                          encoding="utf-8")
+        cli = project / "memory-bank/scripts/context.py"
+        cli.parent.mkdir(parents=True, exist_ok=True)
+        cli.write_text(runtime, encoding="utf-8")
+        return project
+
+    def calls(self, project: Path) -> list:
+        log = project / "memory-bank/scripts/calls.jsonl"
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    def run_touch(self, tool: str, project: Path, payload: dict, env: dict | None = None):
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in ("CONTEXT_FIRST_TOUCH_DELIVERY", "CONTEXT_MEMORY_RECOVERY",
+                                      "CONTEXT_FIRST_TOUCH_BUDGET")}
+        environment.update(env or {})
+        return subprocess.run(
+            [BASH, str(project / MIRRORS[tool][0] / self.HOOK)], input=json.dumps(payload),
+            capture_output=True, text=True, cwd=str(project), env=environment, timeout=HOOK_TIMEOUT,
+        )
+
+    def read(self, project: Path, path: str = SOURCE, session: str = "ses-1") -> dict:
+        return {"session_id": session, "cwd": str(project), "tool_name": "Read",
+                "tool_input": {"file_path": str(project / path)}}
+
+    def baseline(self, project: Path, session: str, text: str) -> None:
+        directory = project / "memory-bank/local/first-touch" / session
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "cited").write_text(text, encoding="utf-8")
+
+    def test_switched_off_it_starts_no_interpreter(self) -> None:
+        project = self.project("claude", switched=False)
+        result = self.run_touch("claude", project, self.read(project))
+        self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
+        self.assertEqual([], self.calls(project))
+        self.assertFalse((project / "memory-bank/local").exists())
+        result = self.run_touch("claude", project, self.read(project),
+                                env={"CONTEXT_FIRST_TOUCH_DELIVERY": "1"})
+        self.assertIn("memory citing x", result.stdout)
+        self.assertEqual(1, len(self.calls(project)))
+        recovering = self.project("codex")
+        result = self.run_touch("codex", recovering, self.read(recovering),
+                                env={"CONTEXT_MEMORY_RECOVERY": "1"})
+        self.assertEqual((0, ""), (result.returncode, result.stdout))
+        self.assertEqual([], self.calls(recovering))
+
+    def test_switched_off_it_still_reads_a_large_call_to_the_end(self) -> None:
+        # A Write of a big file is a payload larger than a pipe holds. A hook
+        # that left without reading it broke the host's write, and Claude Code
+        # reports that as a hook error ("closed stdin before hook input was
+        # fully written (EPIPE)") on every such call while the switch is off.
+        content = "x" * (2 * 1024 * 1024)
+        for tool in ("claude", "codex", "cursor"):
+            for env in ({}, {"CONTEXT_FIRST_TOUCH_DELIVERY": "0"}, {"CONTEXT_MEMORY_RECOVERY": "1"}):
+                with self.subTest(tool=tool, env=env):
+                    project = self.project(tool, switched=False)
+                    payload = json.dumps({"session_id": "ses-1", "cwd": str(project), "tool_name": "Write",
+                                          "tool_input": {"file_path": str(project / self.SOURCE),
+                                                         "content": content}}).encode()
+                    environment = {key: value for key, value in os.environ.items()
+                                   if key not in ("CONTEXT_FIRST_TOUCH_DELIVERY", "CONTEXT_MEMORY_RECOVERY")}
+                    environment.update(env)
+                    process = subprocess.Popen(
+                        [BASH, str(project / MIRRORS[tool][0] / self.HOOK)], stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(project), env=environment,
+                    )
+                    try:
+                        process.stdin.write(payload)
+                        process.stdin.close()
+                    except BrokenPipeError:
+                        process.kill()
+                        process.wait()
+                        self.fail("the hook closed its input before the call was written")
+                    stdout, stderr = process.communicate(timeout=HOOK_TIMEOUT)
+                    self.assertEqual((0, b"", b""), (process.returncode, stdout, stderr))
+                    self.assertEqual([], self.calls(project))
+
+    def test_each_host_hands_its_call_and_session_to_the_runtime(self) -> None:
+        for tool, key in (("claude", "session_id"), ("codex", "session_id"), ("cursor", "conversation_id")):
+            with self.subTest(tool=tool):
+                project = self.project(tool)
+                payload = {key: "abc-123", "cwd": str(project), "tool_name": "Read",
+                           "tool_input": {"file_path": self.SOURCE}}
+                result = self.run_touch(tool, project, payload)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("memory citing x", result.stdout)
+                [call] = self.calls(project)
+                self.assertEqual(["first-touch", "--host", tool, "--session", "abc123"], call["argv"])
+                self.assertEqual(payload, json.loads(call["stdin"]))
+
+    def test_a_call_without_a_session_delivers_nothing(self) -> None:
+        project = self.project("claude")
+        payload = {"cwd": str(project), "tool_name": "Read", "tool_input": {"file_path": self.SOURCE}}
+        result = self.run_touch("claude", project, payload)
+        self.assertEqual((0, ""), (result.returncode, result.stdout))
+        self.assertEqual([], self.calls(project))
+
+    def test_the_baseline_keeps_every_other_call_in_the_shell(self) -> None:
+        project = self.project("codex")
+        self.baseline(project, "ses1", f"{self.SOURCE}\nsrc\\\\Billing\\\\Invoice.php\n")
+        quiet = {"session_id": "ses-1", "tool_name": "Bash", "tool_input": {"command": "git status"}}
+        self.assertEqual("", self.run_touch("codex", project, quiet).stdout)
+        self.assertEqual([], self.calls(project))
+        named = dict(quiet, tool_input={"command": f"sed -n '1,40p' {self.SOURCE}"})
+        self.assertIn("memory citing x", self.run_touch("codex", project, named).stdout)
+        windows = dict(quiet, tool_input={"command": "type src\\Billing\\Invoice.php"})
+        self.assertIn("memory citing x", self.run_touch("codex", project, windows).stdout)
+        self.assertEqual(2, len(self.calls(project)))
+        self.baseline(project, "ses1", "")
+        self.assertEqual("", self.run_touch("codex", project, named).stdout)
+        self.assertEqual(2, len(self.calls(project)))
+
+    def test_a_runtime_past_its_budget_turns_the_session_off(self) -> None:
+        if shutil.which("timeout") is None:
+            self.skipTest("no timeout(1): the budget is not enforced here")
+        slow = self.RECORDING.replace("print(", "import time\ntime.sleep(5)\nprint(", 1)
+        project = self.project("claude", runtime=slow)
+        result = self.run_touch("claude", project, self.read(project),
+                                env={"CONTEXT_FIRST_TOUCH_BUDGET": "1"})
+        self.assertEqual((0, ""), (result.returncode, result.stdout))
+        self.assertTrue((project / "memory-bank/local/first-touch/ses1/off").exists())
+        self.run_touch("claude", project, self.read(project, "src/Other.php"),
+                       env={"CONTEXT_FIRST_TOUCH_BUDGET": "1"})
+        self.assertEqual(1, len(self.calls(project)))
+
+    def test_linked_state_is_never_used(self) -> None:
+        project = self.project("claude")
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        (project / "memory-bank/local").mkdir(parents=True)
+        (project / "memory-bank/local/first-touch").symlink_to(elsewhere, target_is_directory=True)
+        result = self.run_touch("claude", project, self.read(project))
+        self.assertEqual((0, ""), (result.returncode, result.stdout))
+        self.assertEqual([], self.calls(project))
+        self.assertEqual([], list(elsewhere.iterdir()))
+
+    def test_the_claude_copy_stands_down_under_cursor_where_cursor_hooks_serve(self) -> None:
+        project = self.project("claude")
+        payload = dict(self.read(project), cursor_version="2.1.0")
+        self.assertIn("memory citing x", self.run_touch("claude", project, payload).stdout)
+        (project / ".cursor").mkdir()
+        (project / ".cursor/hooks.json").write_text("{}", encoding="utf-8")
+        self.assertEqual("", self.run_touch("claude", project, dict(payload, session_id="ses-2")).stdout)
+        self.assertEqual(1, len(self.calls(project)))
+
+    def test_the_runtime_delivers_once_in_each_hosts_shape(self) -> None:
+        project = install_session_fixture(self.root / "real")
+        subprocess.run(["git", "init", "--quiet", str(project)], check=True, capture_output=True)
+        for tool in MIRRORS:
+            shutil.copy(hook_path(tool, self.HOOK), project / MIRRORS[tool][0])
+        (project / "src/Billing").mkdir(parents=True)
+        (project / self.SOURCE).write_text("<?php\nfinal class Invoice {}\n", encoding="utf-8")
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        metadata = {"id": "MEM-20261001-aaaaaaaa", "title": "Invoice rounds per line", "type": "convention",
+                    "status": "active", "scope": ["application"], "tags": ["billing"], "created": today,
+                    "last_verified": today, "review_after": "2999-01-01", "sources": [self.SOURCE],
+                    "supersedes": [], "superseded_by": None}
+        (project / "memory-bank/chunks/MEM-20261001-aaaaaaaa-invoice-rounds.md").write_text(
+            "---\n" + json.dumps(metadata, indent=2) + "\n---\n\n# Invoice rounds per line\n\n"
+            "Totals are the sum of rounded lines.\n", encoding="utf-8")
+        config = project / "project-brain/config/runtime.json"
+        config.write_text(json.dumps({**json.loads(config.read_text(encoding="utf-8")),
+                                      "first_touch_delivery": True}), encoding="utf-8")
+        indexed = subprocess.run([sys.executable, str(project / "memory-bank/scripts/context.py"),
+                                  "--root", str(project), "index"], capture_output=True, text=True,
+                                 timeout=HOOK_TIMEOUT)
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        calls = {
+            "claude": self.read(project, session="cl-1"),
+            "codex": {"session_id": "cx-1", "cwd": str(project), "tool_name": "Bash",
+                      "tool_input": {"command": f"sed -n '1,40p' {self.SOURCE}"}},
+            "cursor": {"conversation_id": "cu-1", "cursor_version": "2.1.0", "cwd": str(project),
+                       "tool_name": "Read", "tool_input": {"target_file": self.SOURCE}},
+        }
+        for tool, payload in calls.items():
+            with self.subTest(tool=tool):
+                result = self.run_touch(tool, project, payload)
+                self.assertEqual(0, result.returncode, result.stderr)
+                output = json.loads(result.stdout)
+                text = (output["additional_context"] if tool == "cursor"
+                        else output["hookSpecificOutput"]["additionalContext"])
+                self.assertIn("Totals are the sum of rounded lines.", text)
+                again = self.run_touch(tool, project, payload)
+                self.assertEqual((0, ""), (again.returncode, again.stdout))
+
+
 @unittest.skipUnless(os.name == "posix", "POSIX stand-ins for Windows interpreters")
 class PythonResolutionTest(unittest.TestCase):
     """The hooks find Python 3.9+ by whichever name the shell has it.
@@ -1255,7 +1472,7 @@ class PythonResolutionTest(unittest.TestCase):
         "exit 49\n"
     )
     HOOKS = ("working-memory-read.sh", "working-memory-write.sh", "context-continuity.sh",
-             "subagent-dispatch.sh", "local-context.sh")
+             "subagent-dispatch.sh", "local-context.sh", "first-touch.sh")
 
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="python-names-")

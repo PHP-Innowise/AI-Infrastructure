@@ -51,6 +51,12 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 **Return:** `0` = normal, `1` = warning at 7 edits (shown in the hooks output; `afterFileEdit` has no channel back to the agent), `2` = block at 10 edits.
 **Tracking:** `${TMPDIR:-/tmp}/cursor-loop-detection-<uid>-<repo-key>/`, created private; `sessionStart` clears that session's counters and any left untouched for a day. A linked or foreign directory turns the count off, and a linked counter is never followed.
 
+### postToolUse: Knowledge at First Touch
+**Script:** `first-touch.sh`, matcher `Read|Write|Shell`
+**Purpose:** Off unless `first_touch_delivery` is `true` in `project-brain/config/runtime.json` (or `CONTEXT_FIRST_TOUCH_DELIVERY=1`). On, the first time a conversation (`conversation_id`) reads or writes a file, or names one in a shell read or write command, it returns `{"additional_context": "..."}` with the Memory Bank chunks, findings and decisions citing the file and the specs naming its path: at most three documents and 1,200 characters, filtered as the Task Capsule is. A file nothing cites delivers nothing. Cursor's `preToolUse` answers with a permission decision and `beforeReadFile` only allows or denies, so here the knowledge follows the tool result instead of accompanying the call.
+**Caveat:** whether Cursor shows `postToolUse` context to the model is unverified. Cursor staff confirmed in March 2026 that it was accepted and not injected, and reports through 3.7.36 say the same; check it on your Cursor version before relying on it.
+**Return:** Always `0`.
+
 ## Claude Code -> Cursor Event Mapping
 
 | Claude Code (`.claude/settings.json`) | Cursor (`.cursor/hooks.json`) |
@@ -63,11 +69,12 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 | `PostToolUse` matcher `Edit` | `afterFileEdit` |
 | `PreToolUse` matcher `Agent\|Task` | `subagentStart` |
 | `SubagentStop` | `subagentStop` |
+| `PreToolUse` matcher `Read\|Edit\|Write\|MultiEdit\|NotebookEdit\|Bash` (first touch) | `postToolUse` matcher `Read\|Write\|Shell` (after the tool result) |
 | `Notification` | No direct equivalent (closest: `permission: "ask"` on `beforeShellExecution`) |
 
 Notes:
 - Cursor `timeout` is in **seconds**, as it is in Claude Code's `settings.json`.
-- Cursor matchers use JavaScript regex, not POSIX; these hooks self-filter in-script, so no matcher is set.
+- Cursor matchers use JavaScript regex, not POSIX; these hooks self-filter in-script, so no matcher is set, except on `postToolUse`, where only `Read`, `Write` and `Shell` results reach `first-touch.sh`.
 - To fail-closed on hook crash/timeout, add `"failClosed": true` to a hook entry.
 
 ## How the Task Capsule reaches Cursor

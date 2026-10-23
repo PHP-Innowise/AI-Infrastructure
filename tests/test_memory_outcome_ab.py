@@ -1,6 +1,8 @@
 """Offline tests for scripts/memory_outcome_ab.py: no model, no network."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -143,6 +145,36 @@ class HookArgumentsTest(unittest.TestCase):
         self.assertEqual("do it", capsule[-1])
         self.assertIn("workspace-write", capsule)
 
+    def test_the_first_touch_arm_is_recall_with_its_tool_hook_switched_on(self) -> None:
+        read = "sh -c 'exec x' sh working-memory-read.sh"
+        touch = "sh -c 'exec x' sh first-touch.sh"
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory)
+            (corpus / ".codex").mkdir()
+            (corpus / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": read}]}],
+                "PreToolUse": [{"hooks": [
+                    {"type": "command", "command": "sh -c 'exec x' sh bash-validator.sh"},
+                    {"type": "command", "command": touch},
+                ]}],
+            }}), encoding="utf-8")
+            first_touch = ab.codex_command("codex", corpus, "first-touch", "do it", None)
+            recall = ab.codex_command("codex", corpus, "recall", "do it", None)
+            ab.configure_arm(corpus, "first-touch")
+            config = json.loads((corpus / "project-brain/config/runtime.json").read_text(encoding="utf-8"))
+            ab.configure_arm(corpus, "recall")
+            (corpus / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": read}]}]}}), encoding="utf-8")
+            with self.assertRaises(ab.OutcomeError):
+                ab.hook_arguments(corpus, "first-touch")
+        flag = next(value for value in first_touch if value.startswith("hooks.PreToolUse="))
+        self.assertIn("first-touch.sh", flag)
+        self.assertNotIn("bash-validator", flag)
+        self.assertTrue(any(value.startswith("hooks.UserPromptSubmit=") for value in first_touch))
+        self.assertFalse(any(value.startswith("hooks.PreToolUse=") for value in recall))
+        self.assertEqual({"capsule_profile": "recall", "first_touch_delivery": True},
+                         {key: config[key] for key in ("capsule_profile", "first_touch_delivery")})
+
 
 class ReportTest(unittest.TestCase):
     def run_pair(self, calls_to_gold, delivered: bool = False) -> dict:
@@ -240,6 +272,34 @@ class ReportTest(unittest.TestCase):
         self.assertTrue(ab.valid_arm("recall", [ran, {**ran, "capsule_delivered": True}]))
         self.assertFalse(ab.valid_arm("recall", [{**ran, "hook_ran": False}]))
 
+    def test_a_first_touch_run_needs_both_hooks_where_it_made_a_call(self) -> None:
+        ran = {"stopped": "gold", "calls": 3, "calls_to_gold": 3, "capsule_delivered": False,
+               "hook_ran": True, "touch_ran": True}
+        self.assertTrue(ab.valid_arm("first-touch", [ran]))
+        self.assertFalse(ab.valid_arm("first-touch", [{**ran, "touch_ran": False}]))
+        self.assertFalse(ab.valid_arm("first-touch", [{**ran, "hook_ran": False}]))
+        # An answer without a single call never reached the tool hook.
+        self.assertTrue(ab.valid_arm("first-touch", [{**ran, "calls": 0, "touch_ran": False}]))
+
+    def test_first_touch_is_compared_with_recall_and_its_exposure_counted(self) -> None:
+        def run(calls, exposed=False):
+            return {"stopped": "gold", "calls": calls, "calls_to_gold": calls, "capsule_delivered": False,
+                    "hook_ran": True, "touch_ran": True, "touch_before_gold": exposed}
+        items = {f"T{n}": {"status": "ok", "arms": {
+            "recall": [run(6)], "first-touch": [run(4, exposed=n < 5)],
+        }} for n in range(20)}
+        summary = ab.summarize({"meta": {"cap": 40}, "items": items}, ("recall", "first-touch"))
+        self.assertEqual(20, summary["pairs"])
+        self.assertEqual(5, summary["exposed_first-touch"])
+        self.assertEqual("first-touch-helps", summary["verdict"])
+        with tempfile.TemporaryDirectory() as directory:
+            result = Path(directory) / "result.json"
+            result.write_text(json.dumps({"meta": {"cap": 40}, "items": items}), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(0, ab.main(["report", str(result), "--compare", "recall,first-touch"]))
+        self.assertIn("first-touch: a first touch delivered before the end in 5 pairs", output.getvalue())
+
     def test_the_report_refuses_an_unknown_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = Path(directory) / "result.json"
@@ -307,6 +367,55 @@ class SampleTest(DemoProject):
     def test_bare_dates_are_utc_midnight(self) -> None:
         self.assertEqual("2026-10-07T00:00:00+00:00", ab.instant("2026-10-07").isoformat())
         self.assertIsNone(ab.instant("tomorrow"))
+
+
+class ExposureTest(DemoProject):
+    """No agent: the original session's path, replayed through the runtime
+    with first-touch on, says whether the arm can differ from recall."""
+
+    def corpus(self) -> Path:
+        corpus = Path(self.directory.name) / "corpus"
+        shutil.copytree(ROOT / "PHP Core" / "memory-bank" / "scripts", corpus / "memory-bank" / "scripts",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (corpus / "memory-bank" / "chunks").mkdir()
+        (corpus / "memory-bank" / "README.md").write_text("# Memory Bank\n", encoding="utf-8")
+        (corpus / "memory-bank" / "INDEX.md").write_text("# Memory Index\n", encoding="utf-8")
+        shutil.copytree(self.project / "src", corpus / "src")
+        metadata = {"id": "MEM-20260901-aaaaaaaa", "title": "Named formats the rounded total",
+                    "type": "convention", "status": "active", "scope": ["application"], "tags": ["billing"],
+                    "created": "2026-09-01", "last_verified": "2026-09-01", "review_after": "2999-01-01",
+                    "sources": ["src/Named.php"], "supersedes": [], "superseded_by": None}
+        (corpus / "memory-bank" / "chunks" / "MEM-20260901-aaaaaaaa-named.md").write_text(
+            "---\n" + json.dumps(metadata, indent=2) + "\n---\n\n# Named formats the rounded total\n\n"
+            "Named.php only formats; the rounding itself is elsewhere.\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q", str(corpus)], check=True)
+        indexed = subprocess.run([sys.executable, str(corpus / "memory-bank/scripts/context.py"),
+                                  "--root", str(corpus), "index"], capture_output=True, text=True)
+        self.assertEqual(0, indexed.returncode, indexed.stderr)
+        return corpus
+
+    def test_the_first_turn_is_read_in_call_order(self) -> None:
+        session = ab.session_files(self.transcripts, self.project)[0]
+        touches = ab.first_turn_touches(session, os.path.realpath(str(self.project)))
+        self.assertEqual([("src/Named.php", False), ("src/Gold.php", True)], touches[:2])
+
+    def test_a_touch_before_gold_that_memory_cites_is_exposure(self) -> None:
+        corpus = self.corpus()
+        ab.configure_arm(corpus, "first-touch")
+        replay = ab.touch_replay(corpus, ["src/Named.php", "src/Gold.php", "src/Named.php"],
+                                 ["src/Gold.php"], timeout=120)
+        self.assertEqual([], replay["errors"])
+        self.assertEqual(1, replay["before_gold"])
+        self.assertEqual(["src/Named.php"], replay["delivered_before_gold"])
+        self.assertEqual([], replay["delivered_at_gold"])
+        self.assertEqual(["memory-bank/chunks/MEM-20260901-aaaaaaaa-named.md"], replay["documents"])
+        self.assertGreater(replay["characters"], 0)
+
+    def test_a_recall_set_has_no_path_to_replay(self) -> None:
+        base = Path(self.directory.name)
+        (base / "set.json").write_text(json.dumps({"kind": "recall", "tasks": []}), encoding="utf-8")
+        self.assertEqual(2, ab.main(["exposure", "--set", str(base / "set.json"), "--out", str(base / "x.json"),
+                                     "--cache", str(base / "cache")]))
 
 
 class RecallSourcesTest(DemoProject):
@@ -595,6 +704,37 @@ class RunArmTest(unittest.TestCase):
         outcome = ab.run_arm(command, self.corpus, ["src/Missing.php"], cap=40, timeout=2)
         self.assertEqual("timeout", outcome["stopped"])
         self.assertIsNone(outcome["calls_to_gold"])
+
+    def test_a_first_touch_run_reports_what_the_hook_delivered(self) -> None:
+        # The stand-in plays the first-touch hook: it builds a session
+        # baseline and logs one delivery for a file before the gold touch.
+        session = self.corpus / "memory-bank" / "local" / "first-touch" / "s1"
+        toucher = Path(self.directory.name) / "fake-touch.py"
+        toucher.write_text(textwrap.dedent(f"""\
+            import json, os, sys
+            from pathlib import Path
+            session = Path({str(session)!r})
+            session.mkdir(parents=True)
+            (session / "cited").write_text("src/Other.php\\n")
+            (session / "deliveries.ndjson").write_text(json.dumps({{"files": [{{"path": "src/Other.php",
+                "documents": ["memory-bank/chunks/MEM-1-saved.md"], "more": 0}}], "characters": 420}}) + "\\n")
+            Path(sys.argv[1]).write_text(json.dumps(sorted(key for key in os.environ if key.startswith("CONTEXT_"))))
+            print(json.dumps({{"type": "item.started", "item": {{"id": "1", "type": "command_execution",
+                "command": "/usr/bin/bash -lc 'cat src/Gold.php'"}}}}), flush=True)
+            """), encoding="utf-8")
+        seen = Path(self.directory.name) / "environment.json"
+        with mock.patch.dict(os.environ, {"CONTEXT_FIRST_TOUCH_DELIVERY": "0", "CONTEXT_CAPSULE_PROFILE": "full"}):
+            outcome = ab.run_arm([sys.executable, str(toucher), str(seen)], self.corpus, ["src/Gold.php"],
+                                 cap=40, timeout=20, saved=["memory-bank/chunks/MEM-1-saved.md"])
+        self.assertEqual("gold", outcome["stopped"])
+        self.assertTrue(outcome["touch_ran"])
+        self.assertEqual((1, 420, ["src/Other.php"]),
+                         (outcome["touch_deliveries"], outcome["touch_characters"], outcome["touch_files"]))
+        self.assertTrue(outcome["touch_before_gold"])
+        self.assertTrue(outcome["saved_touched"])
+        environment = json.loads(seen.read_text(encoding="utf-8"))
+        self.assertNotIn("CONTEXT_FIRST_TOUCH_DELIVERY", environment)
+        self.assertNotIn("CONTEXT_CAPSULE_PROFILE", environment)
 
 
 class RunRefusesTest(unittest.TestCase):

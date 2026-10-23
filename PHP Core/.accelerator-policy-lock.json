@@ -206,12 +206,12 @@
     ".claude/commands/test-generator.md": "dcdb6542760fb1e52ac5d95ddcbee72eb5a52c5313cb49b235d5d89cd1a1375e",
     ".claude/commands/verify.md": "aac7ddc849c49eb75b8be17748add404ea552d6cb97b067a6c775d3b29066b53",
     ".claude/commands/writing-plans.md": "183238cd9fe57613f955cc23496e149b2a3624e8a13b9cd5dd4a2051e915ac53",
-    ".claude/settings.json": "628708fec4756f79f902ba5c3ba23be34636ab4e45cacc6d584da3b4da9732c1",
+    ".claude/settings.json": "5c2ccc133a1c746c82fb770ab1d9d4d97f0b3218b3ee912f2f779b0a103c6411",
     ".claude/skills/SKILL FLOW.md": "886a5eeebd80ce356d32442f137795f0bd73b564ff4e4c1c28e054846e86abf5",
     ".claude/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     ".codex/config.toml": "42c947e361a7bb6606d6455bae697d90569ce8a7b0b90cf7c39c570083f29ced",
-    ".codex/hooks.json": "84602eedb4f359016de43238f3f197c80dc2f44a1e3ac0534cb4c84f1b28795b",
-    ".cursor/hooks.json": "90a87a1326da60259a14e1f0e3642c0aacae9de2ad4869764abaa3fecfc376ea",
+    ".codex/hooks.json": "23bc8cb6ac78fbccdc24fd2b02c123af9525d70e2f93a3b1270bd1005501d00c",
+    ".cursor/hooks.json": "aac3d498f51f8deb12fe11094dd5d8b93c638a2eec9857d050a938677d5276e2",
     ".cursor/rules/accelerator-workflow.mdc": "ccd9981be92179bf32946b0110c5004d8af404e420ba868dbbf72d5586410cc4",
     ".cursor/rules/php-standards.mdc": "850700d4a40525eff2a559e30c7779f53c986312595d1804f728858e382ec436",
     ".cursor/rules/safety-and-verification.mdc": "5e8cb5bfd3d427836e521417a2a7e68bd1b3a00a25a1d174df61b29e5471344f",
@@ -219,7 +219,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "ea37087fdea5dbd59eb6d89449b632a26bbc58cfefe93e4a76b4cd502b811843"
   },
-  "policy_digest": "4fe68feaad02f461088f6b32af50a52f9c93c4b8218dfcd810ecba6ef402becd",
+  "policy_digest": "9505b55785d165eeefdca1734feb129055ee94f2be192cf09c39dbb122011819",
   "release": "2.0.0",
   "schema_version": 1
 }

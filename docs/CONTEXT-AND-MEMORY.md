@@ -1006,6 +1006,122 @@ as MCP `memory_retrieve` does: they are requests for a search, not the
 automatic capsule. A team that wants the old capsule sets `capsule_profile`
 to `full`.
 
+### Knowledge at first touch (experiment, off by default)
+
+The capsule predicts at prompt time what a turn will need. The first-touch
+hook (`first-touch.sh`) waits for the file instead. When an agent first reads
+or edits a file in a session, the hook hands it the memory that cites that
+file, beside the tool call's result:
+
+- Memory Bank chunks whose `sources` name the file;
+- findings and decisions whose sources name it, with their state
+  (`decision (accepted)`, `finding (open)`);
+- specs (`specs/**`, `docs/**`) that write its path from the project root,
+  with a directory: `src/Billing/Invoice.php`, also `./src/...` or in
+  backticks, but not a bare `Invoice.php`.
+
+It is off unless `first_touch_delivery` is `true` in `runtime.json`. The four
+editions and the generator's template ship it `false`, and the code's default
+is off. `CONTEXT_FIRST_TOUCH_DELIVERY=1` (or `0`) overrides the setting, so
+one person can try it without editing the team's tracked file. Any other
+value is refused, like a bad capsule profile.
+
+Each document is quoted by the section that speaks of the file: its path,
+name and stem are marked, and a citation-only `Sources` footer is never the
+section quoted. The bounds:
+
+- **Once per file per session.** The session is Claude Code's and Codex's
+  `session_id`, or Cursor's `conversation_id`; a call without one delivers
+  nothing. Any tool counts as the touch: a file read, then edited, is
+  delivered at the read. A document comes once a session too, with the
+  first file that brings it, as the capsule hands an item once a
+  conversation.
+- **Small.** At most three documents and 1,200 characters per call. One of
+  each kind comes before a second of any: a chunk, a decision, a finding, a
+  spec. What did not fit is counted, with `context.py links --path <file>`
+  for the citations. A session takes at most 20 deliveries.
+- **Filtered as the capsule is.** The capsule's runtime filter decides every
+  document:
+  - privacy, owner and authority;
+  - lifecycle, so terminal records are out;
+  - the secret screen, which withholds a chunk or record and masks a spec;
+  - the indexed text still being the file;
+  - review dates;
+  - every cited file being present.
+
+  A document whose cited file changed since verification is delivered marked
+  `cited file changed`. A conflicted record is held back, as the automatic
+  link channels hold it, and a Brain record yields to the chunk it was
+  promoted to.
+- **Only real project files.** The touched path passes the touch-seed screen
+  (`_file_link_problem`): no secret-shaped or private path, runtime state,
+  dependency or build output.
+- **Nothing for an uncited file.**
+
+The session's first call that needs it builds a baseline: every path a
+chunk, finding or decision cites, and every project file a spec names, read
+from the index as it stands then. The hook greps each call for those paths.
+A call naming none of them, and every later touch of a delivered file, ends
+in the shell without starting the runtime.
+
+Knowledge written later in the session is not delivered to that session.
+It is the session's own result, or arrived after the session began; the next
+session receives it. The index is only read, never refreshed, by this hook.
+The prompt hook keeps it current.
+
+| Host | Channel | Covered calls |
+| --- | --- | --- |
+| Claude Code | `PreToolUse` `hookSpecificOutput.additionalContext`, which Claude Code adds beside the tool result (up to 10,000 characters per string) | `Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, and the files a `Bash` read or write command names |
+| Codex | `PreToolUse` `hookSpecificOutput.additionalContext` (added as developer context; 2,500 tokens by default) | shell calls (the files their read and write commands name), `apply_patch` (the files the patch names); Codex reads through the shell, it has no read tool |
+| Cursor | `postToolUse` `additional_context`, which Cursor documents as added after the tool result; see the caveat below | `Read`, `Write` (Cursor reports an edit as `Write`), `Shell` |
+
+Cursor has no pre-read channel that only adds context. `beforeReadFile` can
+only allow or deny. `preToolUse` answers with a permission decision: its
+`additional_context` is supported per Cursor staff (forum, 2026-07-31), but
+the documented schema lacks it. A context-only reply could fail that schema
+and block the call, and `permission: allow` could approve a call the user's
+settings would have asked about.
+
+`postToolUse` is the documented context channel, and its delivery to the
+model is unverified. Cursor staff confirmed in March 2026 that it was
+accepted and never injected; reports through 3.7.36 (June 2026) say the same.
+A later reading of Cursor 3.21's shipped runtime has it attached to the tool
+result. No live Cursor client was available to check it here (see also
+"How the Task Capsule reaches Cursor" in [TOOL-INTEGRATIONS.md](TOOL-INTEGRATIONS.md)).
+
+Cursor rules with `globs` were considered and not used:
+- a generated rule per cited file would re-attach whenever the file is in
+  context, not once a session;
+- it would need the custody machinery `working-memory.mdc` has, once per
+  file;
+- it reaches a request that references the file, not a read in the middle of
+  a turn.
+
+Cost, measured on Linux with the switch on:
+- a call that names no cited file, or a file already delivered: 5–7 ms, in
+  the shell;
+- a first touch that delivers, and a session's first call, which builds
+  the baseline: 120–150 ms, and about 300 ms while bytecode is compiled;
+- switched off: one `grep` of `runtime.json`, about 5 ms, and no interpreter.
+
+A run past `CONTEXT_FIRST_TOUCH_BUDGET` (3 s by default) turns delivery off
+for the rest of the session, rather than hold up every call naming a cited
+file.
+
+State lives in the ignored `memory-bank/local/first-touch/<session>/`:
+- the baseline;
+- a marker per touched file (`t-…`) and per delivery (`d-…`);
+- `deliveries.ndjson`, the paths delivered: no text, no prompt.
+
+A session's directory is removed a day after it was last written. A linked
+step on the way turns the hook off.
+
+The setting is off because retrieval is frozen to fixes until a task-outcome
+measurement accepts a change ("Accepting a retrieval change" in
+[MEMORY-EVAL.md](MEMORY-EVAL.md)). `scripts/memory_outcome_ab.py` has a
+`first-touch` arm: the `recall` capsule plus this hook. Its preregistration
+against `recall` is drafted and not sealed, and no agent has run it.
+
 `retrieval-report` keeps shadow `would_skip` distinct from context actually
 `withheld` in `enforce`. It slices gate results by `mode`, `query_source`,
 `host`, and `entry_point`, and separately aggregates `no_match` layers and
@@ -1768,6 +1884,11 @@ Stop             -> working-memory-write.sh  (write: buffer + bounded flush)
 The split is deliberate. At prompt time nothing has happened yet, so there is
 no delta to record; a request is the right moment to *read*. The delta exists
 at the end of a turn, which is the right moment to *write*.
+
+A third hook, `first-touch.sh`, is wired on `PreToolUse` (Cursor:
+`postToolUse`) and does nothing unless `first_touch_delivery` is on: it
+reads the memory citing a file at the file's first touch in a session. See
+"Knowledge at first touch" above.
 
 Cursor cannot add context to a prompt from a hook, so its read half arrives
 through the `alwaysApply` rule `.cursor/rules/working-memory.mdc`: the Cursor

@@ -646,6 +646,30 @@ None says whether delivery changes what an agent does.
 - **The `recall` arm** runs it with `capsule_profile: recall`: navigation plus
   the task's own saves. It writes a manifest only on a turn one of them
   matched, so a run is valid when the hook ran.
+- **The `first-touch` arm** is `recall` with `first_touch_delivery: true` in
+  the corpus and the first-touch hook (`first-touch.sh`) passed on
+  `PreToolUse` beside the prompt hook. Against `recall` it differs by what a
+  file's first touch hands over ("Knowledge at first touch" in
+  [CONTEXT-AND-MEMORY.md](CONTEXT-AND-MEMORY.md)).
+  - A run is valid when the prompt hook ran and, where the agent made any
+    call, the first-touch hook built its session baseline.
+  - Each run records:
+    - the deliveries and their characters;
+    - the files whose first touch delivered;
+    - `touch_before_gold`: whether one of those files is not gold, so the
+      delivery came before the gold touch that ends the run;
+    - on a recall set, `saved_touched`: whether a first touch handed over the
+      save.
+  - `report` counts the exposed pairs beside the verdict.
+  - `exposure` answers, without an agent, whether the arm can differ from
+    `recall` on a cold-start set. For each task it replays the original
+    session's first-turn touches, up to its first gold file, through the
+    corpus's runtime with first-touch on, and counts what they delivered.
+    It follows the original session's path, not the agent's, so it is a
+    proxy: a task where nothing would be delivered before gold there is
+    unlikely to show a difference.
+  - The arm has not run. Its preregistration against `recall` is drafted and
+    not sealed; running agents for it waits for the maintainer.
 - **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the

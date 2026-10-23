@@ -51,6 +51,7 @@ from brain_runtime import (
     consolidate,
     CAPSULE_PROFILES,
     configured_capsule_profile,
+    configured_first_touch,
     configured_mode,
     configured_retrieval_gate,
     create_promotion,
@@ -97,6 +98,11 @@ from context_retrieval import (
     _carry_index_images,
     _with_index_images,
     TOUCH_SEED_LIMIT,
+    EXCERPT_MARK_CLOSE,
+    EXCERPT_MARK_OPEN,
+    _file_link_problem,
+    first_touch_baseline,
+    first_touch_documents,
     prompt_path_seeds,
     CAPSULE_EPISODIC_LIMIT,
     CAPSULE_EVENT_LIMIT,
@@ -6920,6 +6926,418 @@ def attach_recent_files(
         capsule["recent_files"] = shown
 
 
+# ---------------------------------------------------------------------------
+# Knowledge at first touch - off unless `first_touch_delivery` (see
+# brain_runtime.configured_first_touch). The prompt hook predicts what a turn
+# needs from its prompt; the first-touch hook hands it over when the agent
+# first reads or edits a file in a session: the chunks, findings and decisions
+# citing the file and the specs naming it (first_touch_documents).
+# ---------------------------------------------------------------------------
+# One call delivers at most three documents a file, within 1,200 characters:
+# a third of the capsule, paid on the call that opens the file.
+FIRST_TOUCH_CHARACTER_LIMIT = 1200
+FIRST_TOUCH_DOCUMENT_LIMIT = 3
+FIRST_TOUCH_EXCERPT_CHARACTERS = 300
+# A session that opens one cited file after another stops being handed them
+# after this many deliveries; its later first touches still count as touches.
+FIRST_TOUCH_SESSION_DELIVERIES = 20
+FIRST_TOUCH_PAYLOAD_BYTES = 1024 * 1024
+FIRST_TOUCH_DIRECTORY = "first-touch"
+# The session's baseline: what first_touch_baseline found in the index at the
+# session's first call that needed it, less the files touched since. The hook
+# greps a call for these paths and starts no interpreter for a call naming
+# none of them. Knowledge written later in the session is not added: it is
+# the session's own, or came after the session began.
+FIRST_TOUCH_BASELINE = "cited"
+FIRST_TOUCH_LOG = "deliveries.ndjson"
+# Written by the hook when this runtime ran past its budget: the session
+# stops delivering rather than hold up every call naming a cited file.
+FIRST_TOUCH_OFF = "off"
+FIRST_TOUCH_SESSION = re.compile(r"[A-Za-z0-9]{1,64}")
+FIRST_TOUCH_RETENTION_SECONDS = 24 * 60 * 60
+FIRST_TOUCH_PRUNE_LIMIT = 64
+FIRST_TOUCH_HOSTS = ("claude", "codex", "cursor")
+FIRST_TOUCH_FILE_TOOLS = ("Read", "Edit", "MultiEdit", "Write", "NotebookEdit")
+FIRST_TOUCH_SHELL_TOOLS = ("Bash", "Shell")
+# Claude Code names the file `file_path` (`notebook_path` for a notebook);
+# Cursor documents no key for its Read and Write tools, so the usual ones
+# are tried in turn.
+FIRST_TOUCH_PATH_KEYS = ("file_path", "notebook_path", "path", "target_file")
+FIRST_TOUCH_HEADER = (
+    "memory citing {path}, first touch this session (reference data - check "
+    "the cited file before relying on it):"
+)
+FIRST_TOUCH_LINKS = "python3 memory-bank/scripts/context.py links --path {path}"
+
+
+def first_touch_paths(payload: dict[str, object], repository: Path, host: str = "claude") -> list[str]:
+    """The project files one tool call reads or changes, project-relative.
+
+    A file tool (Claude Code's Read, Edit, Write, MultiEdit, NotebookEdit;
+    Cursor's Read and Write) names its file; a shell command (`Bash`, Cursor's
+    `Shell`) the files its read and write commands take, read as the recent
+    files are read from a transcript; a Codex `apply_patch` the files its
+    patch names. Each must be a file in the project that passes the touch-seed
+    screen (`_file_link_problem`): no secret, private or runtime-owned path,
+    no dependency or build output. Claude Code's Bash is a POSIX shell on
+    every platform (Git Bash on Windows); Codex and Cursor run PowerShell on
+    native Windows, which `_shell_script` tells from the working directory.
+    """
+    name, data = payload.get("tool_name"), payload.get("tool_input")
+    if not isinstance(name, str) or not isinstance(data, dict):
+        return []
+    root = os.path.realpath(str(workspace_roots.project_root(repository)))
+    cwd = payload.get("cwd")
+    base = cwd if isinstance(cwd, str) and os.path.isabs(cwd) else root
+    words: list[tuple[str, bool, str]] = []
+    if name in FIRST_TOUCH_FILE_TOOLS:
+        value = next((data[key] for key in FIRST_TOUCH_PATH_KEYS
+                      if isinstance(data.get(key), str) and data[key]), None)
+        if value is not None:
+            words = [(value, name != "Read", base)]
+    elif name in FIRST_TOUCH_SHELL_TOOLS:
+        directory = data.get("working_directory")
+        if isinstance(directory, str) and os.path.isabs(directory):
+            base = directory
+        command = data.get("command")
+        script = (("sh", command) if host == "claude" and isinstance(command, str)
+                  else _shell_script(command, base))
+        if script is not None:
+            words = _shell_file_words(script[1], base, dialect=script[0])
+    elif name == "apply_patch":
+        patch = next((data[key] for key in ("command", "patch", "input")
+                      if isinstance(data.get(key), str)), None)
+        if patch is not None:
+            words = _call_file_words("apply_patch", {"patch": patch}, base)
+    found: list[str] = []
+    for word, _, directory in words:
+        relative = _transcript_project_file(word, directory, root)
+        if relative is not None and _file_link_problem(relative) is None:
+            found.append(relative)
+    return list(dict.fromkeys(found))
+
+
+def _first_touch_directory(repository: Path, session: str) -> Optional[Path]:
+    """The session's directory in ignored local state, created private; None
+    when a step on the way is a link or not a directory."""
+    local = repository / "memory-bank" / "local"
+    steps = (repository / "memory-bank", local, local / FIRST_TOUCH_DIRECTORY,
+             local / FIRST_TOUCH_DIRECTORY / session)
+    for step in steps:
+        try:
+            info = os.lstat(step)
+        except FileNotFoundError:
+            try:
+                os.mkdir(step, 0o700)
+                info = os.lstat(step)
+            except OSError:
+                return None
+        except OSError:
+            return None
+        if stat_module.S_ISLNK(info.st_mode) or not stat_module.S_ISDIR(info.st_mode):
+            return None
+    return steps[-1]
+
+
+def _first_touch_marker(path: str, prefix: str = "t") -> str:
+    """`t-…` once a file is touched, `d-…` once its knowledge was delivered,
+    `k-…` once a document was handed over in the session."""
+    return prefix + "-" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:32]
+
+
+def _first_touch_create(directory: Path, name: str) -> bool:
+    """Make an empty private file; False when it exists or cannot be made."""
+    try:
+        descriptor = os.open(
+            directory / name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+    except OSError:
+        return False
+    os.close(descriptor)
+    return True
+
+
+def _first_touch_replace(directory: Path, name: str, payload: bytes) -> None:
+    temporary = directory / f".{name}.{os.getpid()}.{time.monotonic_ns()}.tmp"
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+        os.replace(temporary, directory / name)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _first_touch_read_baseline(directory: Path) -> Optional[list[str]]:
+    """The baseline's paths; None when the session has none yet."""
+    target = directory / FIRST_TOUCH_BASELINE
+    try:
+        if target.is_symlink():
+            return []
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError):
+        return []
+    # The Windows spellings beside each path are for the hook's grep only.
+    return [line for line in text.splitlines() if line and "\\\\" not in line]
+
+
+def _first_touch_write_baseline(directory: Path, paths: list[str]) -> None:
+    lines: list[str] = []
+    for path in sorted(set(paths)):
+        if not path or any(char in path for char in "\n\r\0"):
+            continue
+        lines.append(path)
+        if "/" in path:
+            # How a Windows path names the file inside the JSON a host sends.
+            lines.append(path.replace("/", "\\\\"))
+    _first_touch_replace(directory, FIRST_TOUCH_BASELINE, "".join(line + "\n" for line in lines).encode("utf-8"))
+
+
+def _first_touch_prune(parent: Path, keep: str) -> None:
+    """Remove other sessions' state left untouched for a day."""
+    now = time.time()
+    removed = 0
+    try:
+        entries = list(os.scandir(parent))
+    except OSError:
+        return
+    for entry in entries:
+        if removed >= FIRST_TOUCH_PRUNE_LIMIT:
+            break
+        if entry.name == keep or not FIRST_TOUCH_SESSION.fullmatch(entry.name):
+            continue
+        try:
+            info = entry.stat(follow_symlinks=False)
+            if not stat_module.S_ISDIR(info.st_mode) or now - info.st_mtime < FIRST_TOUCH_RETENTION_SECONDS:
+                continue
+            for item in os.scandir(entry.path):
+                os.unlink(item.path)
+            os.rmdir(entry.path)
+        except OSError:
+            continue
+        removed += 1
+
+
+def _first_touch_terms(path: str) -> list[str]:
+    """How a document names the file: its path, its name, its stem."""
+    name = path.rsplit("/", 1)[-1]
+    stem = name.split(".", 1)[0]
+    return list(dict.fromkeys([path, name, *([stem] if len(stem) >= 4 and stem != name else [])]))
+
+
+def first_touch_excerpt(
+    connection: sqlite3.Connection, item: dict[str, object], touched: str,
+    limit: int = FIRST_TOUCH_EXCERPT_CHARACTERS,
+) -> str:
+    """The section of a document that speaks of the touched file, bounded.
+
+    The file's path, name and stem are marked and the section carrying most
+    of them is quoted. A citation-only `Sources` footer is never the section:
+    it would hand the agent the path it is opening.
+    """
+    image = item.get("_indexed_policy_image")
+    content = image[2] if isinstance(image, tuple) and len(image) == 3 and isinstance(image[2], str) else ""
+    if not content:
+        return Excerpt("")
+    pattern = re.compile("|".join(
+        r"(?<![\w./-])" + re.escape(term) + r"(?![\w/-]|\.\w)"
+        for term in sorted(_first_touch_terms(touched), key=len, reverse=True)
+    ))
+    marked = pattern.sub(lambda match: EXCERPT_MARK_OPEN + match.group(0) + EXCERPT_MARK_CLOSE, content)
+    sources: Optional[set[str]] = None
+    if item.get("kind") != "spec":
+        try:
+            sources = {str(row[0]) for row in connection.execute(
+                "SELECT ref_path FROM document_links WHERE path = ? AND ref_kind = 'source' LIMIT 64",
+                (item["path"],),
+            )}
+        except sqlite3.Error:
+            sources = None
+    section = quoted_section(marked, str(item.get("title") or ""), None, citation_sources=sources or None)
+    if section is None:
+        return Excerpt("")
+    try:
+        text = sanitize_automatic_query(excerpt_window(section["units"], limit))
+        heading = sanitize_automatic_query(section["shown"]) if section["shown"] else ""
+    except ContextError:
+        return Excerpt("")
+    excerpt = Excerpt(_bounded(text, limit))
+    excerpt.heading = heading
+    return excerpt
+
+
+def _first_touch_kind(item: dict[str, object]) -> str:
+    kind = str(item.get("kind") or "")
+    if kind.startswith("brain-"):
+        return f"{kind.removeprefix('brain-')} ({item.get('lifecycle')})"
+    return kind
+
+
+def render_first_touch(blocks: list[dict[str, object]]) -> tuple[str, list[dict[str, object]]]:
+    """One call's delivery within FIRST_TOUCH_CHARACTER_LIMIT, and the blocks
+    it shows. A block is a touched file with its documents (`items`, each
+    carrying `_excerpt`) and how many more were eligible (`rest`).
+
+    Over the limit the excerpts shrink, the last first, then go; then the
+    last file's documents go from its last; a file left without one goes.
+    """
+    blocks = [dict(block, items=list(block["items"])) for block in blocks if block["items"]]
+    shrunk: dict[int, str] = {}
+
+    def excerpt(item: dict[str, object]) -> str:
+        return shrunk.get(id(item), str(item.get("_excerpt") or ""))
+
+    def assemble() -> list[str]:
+        lines: list[str] = []
+        for block in blocks:
+            path = str(block["path"])
+            lines.append(FIRST_TOUCH_HEADER.format(path=_bounded(path, 260)))
+            for item in block["items"]:
+                lines.append(_item_line(item, _first_touch_kind(item),
+                                        getattr(item.get("_excerpt"), "heading", "") or ""))
+                if excerpt(item):
+                    lines.append("  " + excerpt(item))
+            left = [*block["dropped"], *block["rest"]]
+            cited = sum(1 for item in left if item.get("kind") != "spec")
+            if cited:
+                lines.append(f"+{cited} more cite it: " + FIRST_TOUCH_LINKS.format(path=_bounded(path, 260)))
+            if len(left) > cited:
+                lines.append(f"+{len(left) - cited} more spec(s) name it")
+        return lines
+
+    for block in blocks:
+        block["dropped"] = []
+    lines = assemble()
+    while sum(len(line) + 1 for line in lines) > FIRST_TOUCH_CHARACTER_LIMIT and blocks:
+        shrinkable = [item for block in blocks for item in block["items"] if excerpt(item)]
+        if shrinkable:
+            text = excerpt(shrinkable[-1])
+            shrunk[id(shrinkable[-1])] = _bounded(text, len(text) // 2) if len(text) > 120 else ""
+        elif len(blocks[-1]["items"]) > 1:
+            blocks[-1]["dropped"].insert(0, blocks[-1]["items"].pop())
+        else:
+            blocks.pop()
+        lines = assemble()
+    return "\n".join(lines), blocks
+
+
+def first_touch_envelope(host: str, text: str) -> str:
+    """The hook output that puts `text` beside the tool result: Claude Code's
+    and Codex's PreToolUse `additionalContext`, Cursor's postToolUse
+    `additional_context` (Cursor's preToolUse adds no context)."""
+    if host == "cursor":
+        return json.dumps({"additional_context": text}, ensure_ascii=False)
+    return json.dumps(
+        {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": text}},
+        ensure_ascii=False,
+    )
+
+
+def run_first_touch(repository: Path, host: str, session: str, raw: bytes) -> Optional[str]:
+    """What one tool call's first touches deliver, as the host's hook output.
+
+    Once per file per session: the first touch of a file in the session's
+    baseline claims it (`t-…`, exclusive create) whether or not anything is
+    left to deliver, and a later touch delivers nothing. A document is
+    handed over once per session too (`k-…`), at the first file that brings
+    it. A file whose knowledge did not fit this call stays unclaimed and is
+    delivered when it is next touched. Nothing is written outside the
+    session's directory in ignored local state, and the index is only read.
+    """
+    if host not in FIRST_TOUCH_HOSTS or not FIRST_TOUCH_SESSION.fullmatch(session):
+        raise ContextError("first-touch needs a known host and a session key")
+    if not configured_first_touch(repository):
+        return None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    database = default_database(repository)
+    if not database.is_file():
+        return None
+    directory = _first_touch_directory(repository, session)
+    if directory is None or os.path.lexists(directory / FIRST_TOUCH_OFF):
+        return None
+    connection = connect_read_only(database, timeout=0.5)
+    try:
+        baseline = _first_touch_read_baseline(directory)
+        if baseline is None:
+            baseline = first_touch_baseline(connection, repository)
+            _first_touch_write_baseline(directory, baseline)
+            _first_touch_prune(directory.parent, session)
+        cited = set(baseline)
+        touched = [path for path in first_touch_paths(payload, repository, host)
+                   if path in cited and not os.path.lexists(directory / _first_touch_marker(path))]
+        if not touched:
+            return None
+        delivered = sum(1 for name in os.listdir(directory) if name.startswith("d-"))
+        config = load_config(repository)
+        blocks: list[dict[str, object]] = []
+        # A document is handed over once a session, as the capsule hands an
+        # item once a conversation: a chunk citing five files of a module
+        # comes with the first of them, and also once within this call.
+        taken: set[str] = set()
+        for path in touched:
+            items = [
+                item for item in (first_touch_documents(connection, repository, config, path)
+                                  if delivered < FIRST_TOUCH_SESSION_DELIVERIES else [])
+                if item["path"] not in taken
+                and not os.path.lexists(directory / _first_touch_marker(str(item["path"]), "k"))
+            ]
+            taken.update(str(item["path"]) for item in items[:FIRST_TOUCH_DOCUMENT_LIMIT])
+            for item in items[:FIRST_TOUCH_DOCUMENT_LIMIT]:
+                item["_excerpt"] = first_touch_excerpt(connection, item, path)
+            blocks.append({"path": path, "items": items[:FIRST_TOUCH_DOCUMENT_LIMIT],
+                           "rest": items[FIRST_TOUCH_DOCUMENT_LIMIT:]})
+            if items:
+                delivered += 1
+        _, fitted = render_first_touch(blocks)
+        fits = {str(block["path"]) for block in fitted}
+        # Claimed: what this call shows, and what had nothing to show. A call
+        # the host runs beside this one may claim a file first; it is left out.
+        claimed = [str(block["path"]) for block in blocks
+                   if (str(block["path"]) in fits or not block["items"])
+                   and _first_touch_create(directory, _first_touch_marker(str(block["path"])))]
+        text, shown = render_first_touch([block for block in blocks if block["path"] in claimed])
+        for block in shown:
+            _first_touch_create(directory, _first_touch_marker(str(block["path"]), "d"))
+            for item in block["items"]:
+                _first_touch_create(directory, _first_touch_marker(str(item["path"]), "k"))
+        remaining = cited - set(claimed)
+        if remaining != cited:
+            _first_touch_write_baseline(directory, sorted(remaining))
+        if not shown:
+            return None
+        record = {
+            "at": utc_now(), "host": host, "tool": str(payload.get("tool_name") or ""),
+            "files": [{"path": block["path"], "documents": [item["path"] for item in block["items"]],
+                       "more": len(block["dropped"]) + len(block["rest"])} for block in shown],
+            "characters": len(text),
+        }
+        try:
+            descriptor = os.open(directory / FIRST_TOUCH_LOG,
+                                 os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+        return first_touch_envelope(host, text)
+    finally:
+        connection.close()
+
+
 def head_commit(repository: Path) -> Optional[str]:
     try:
         head = os.fsdecode(
@@ -8145,6 +8563,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     links.add_argument("--json", action="store_true")
 
+    first_touch = commands.add_parser(
+        "first-touch",
+        help=(
+            "hook entry, payload on stdin: what cites a file at its first touch "
+            "in a session (off unless first_touch_delivery)"
+        ),
+    )
+    first_touch.add_argument("--host", choices=FIRST_TOUCH_HOSTS, required=True)
+    first_touch.add_argument(
+        "--session", required=True, help="the host session's key: letters and digits, at most 64"
+    )
+
     status = commands.add_parser("status", help="show local context index counts")
     status.add_argument("--json", action="store_true")
 
@@ -8477,6 +8907,17 @@ def _command() -> int:
             raise ContextError(
                 f"Repository root must be an existing directory: {repository}"
             )
+        # The first-touch hook runs on tool calls: it only reads the index,
+        # through its own read-only connection, and writes nothing but its
+        # session's ignored state - never the write lock connect() takes.
+        if arguments.command == "first-touch":
+            raw = sys.stdin.buffer.read(FIRST_TOUCH_PAYLOAD_BYTES + 1)
+            if len(raw) > FIRST_TOUCH_PAYLOAD_BYTES:
+                return 0
+            output = run_first_touch(repository, arguments.host, arguments.session, raw)
+            if output:
+                print(output)
+            return 0
         # Portable handoffs deliberately run before opening SQLite.  Loading a
         # handoff is read-only, and saving one must not create a competing
         # local task/cache or mutate governed Project Brain state. A handoff

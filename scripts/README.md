@@ -508,10 +508,12 @@ A *recall* set asks whether an agent uses what an earlier session saved:
 python3 scripts/memory_outcome_ab.py sample --projects next,scb --before 2026-10-07 \
   --n 30 --seed 1 [--exclude-set TUNING_SET] --out OUTSIDE/set.json
 python3 scripts/memory_outcome_ab.py run --set OUTSIDE/set.json --out OUTSIDE/result.json \
-  [--arms off,capsule,navigation,recall] [--repeat 2] [--cap 40] [--timeout 900] [--ids ID,...] \
+  [--arms off,capsule,navigation,recall,first-touch] [--repeat 2] [--cap 40] [--timeout 900] [--ids ID,...] \
   [--events OUTSIDE/events]
 python3 scripts/memory_outcome_ab.py report OUTSIDE/result.json [--compare off,capsule] \
   [--metric gold|recall] [--json]
+python3 scripts/memory_outcome_ab.py exposure --set OUTSIDE/set.json --out OUTSIDE/exposure.json \
+  [--ids ID,...] [--timeout 120] [--keep]
 python3 scripts/memory_outcome_ab.py recall-sources --projects next,scb --before 2026-10-07 \
   [--exclude-set SET] --out OUTSIDE/recall-sources.json
 python3 scripts/memory_outcome_ab.py recall-set --sources OUTSIDE/recall-sources.json \
@@ -528,9 +530,15 @@ python3 scripts/memory_outcome_ab.py recall-set --sources OUTSIDE/recall-sources
   - `recall-sources`: first turns with their prompts and answers;
   - `recall-set`: the checked scenarios, each with its save, and the refusals;
   - `run`: per-task counts, stop reasons, whether the hook delivered and, for
-    a recall set, whether it delivered the save;
+    a recall set, whether it delivered the save; for the `first-touch` arm
+    (`recall` plus the first-touch hook, switched on in the corpus), what that
+    hook delivered and whether it delivered before the gold touch;
   - `report`: paired differences, a bootstrap interval, a sign test and the
-    verdict rule documented in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md).
+    verdict rule documented in [MEMORY-EVAL.md](../docs/MEMORY-EVAL.md);
+  - `exposure` (no agent, cold-start sets only): for each task, the files the
+    original session's first turn touched before its first gold file, replayed
+    in order through the corpus's runtime with first-touch on, and what those
+    first touches delivered.
 - **Dependencies:** Python 3.9+ standard library, `memory_eval.py`,
   `accelerator_attach.py` and the edition runtime's transcript parsers.
 - **Writes:**
@@ -539,8 +547,9 @@ python3 scripts/memory_outcome_ab.py recall-set --sources OUTSIDE/recall-sources
 
   Sessions are `--ephemeral`, so `~/.codex/sessions` keeps nothing.
 - **CI relationship:** `tests/test_memory_outcome_ab.py` covers path and event
-  parsing, stopping, hook flags, the statistics and sampling, recall sources,
-  scenario checks and a save recorded through the runtime, without a model.
+  parsing, stopping, hook flags (the first-touch arm's tool hook among them),
+  the statistics and sampling, recall sources, scenario checks and a save
+  recorded through the runtime, without a model.
 
 ### `memory_rollout_rehearsal.py`
 

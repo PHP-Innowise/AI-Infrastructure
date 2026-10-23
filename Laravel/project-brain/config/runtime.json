@@ -17,6 +17,7 @@
   "capsule_profile": "recall",
   "codebase_map_max_drift": 25,
   "compaction_threshold": 5,
+  "first_touch_delivery": false,
   "framework": "laravel",
   "local_manifest_retention": 200,
   "mode": "governed",

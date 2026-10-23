@@ -591,6 +591,35 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     return profile
 
 
+def configured_first_touch(repository: Path) -> bool:
+    """Whether a file's first touch in a session delivers what cites it.
+
+    Environment (`CONTEXT_FIRST_TOUCH_DELIVERY`: 1/true or 0/false), then
+    `first_touch_delivery` in runtime.json, then off. The first-touch hook
+    hands an agent, as it first reads or edits a file, the Memory Bank chunks
+    and the open findings and accepted decisions citing that file, and the
+    specs naming it - instead of predicting them from the prompt. It is an
+    experiment switch and stays off until a task-outcome measurement accepts
+    it (docs/MEMORY-EVAL.md, "Accepting a retrieval change"). The variable
+    lets one person try it without editing the team's tracked runtime.json.
+    A bad value is rejected here, like a bad capsule profile. Like the
+    capsule profile it is resolved here, not among load_config's defaults: a
+    project that names no value reads exactly the configuration it read.
+    """
+    raw = os.environ.get("CONTEXT_FIRST_TOUCH_DELIVERY")
+    if raw:
+        value = raw.strip().casefold()
+        if value in ("1", "true"):
+            return True
+        if value in ("0", "false"):
+            return False
+        raise BrainError("CONTEXT_FIRST_TOUCH_DELIVERY must be 1, true, 0 or false")
+    configured = load_config(repository).get("first_touch_delivery", False)
+    if type(configured) is not bool:
+        raise BrainError("first_touch_delivery must be true or false")
+    return configured
+
+
 def configured_retrieval_gate(
     repository: Path, requested: Optional[str] = None
 ) -> str:

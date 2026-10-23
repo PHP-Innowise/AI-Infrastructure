@@ -22,6 +22,15 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   count as changes on every turn, while a file the team edits still does.
   The root `CHANGELOG.md` entry of the same day has the details.
 
+### Seeded projects carry the first-touch switch, off — 2026-10-22
+
+- memory-seed's `runtime.json.template` names `first_touch_delivery: false`,
+  as the four editions do, and the seeded runtime has the `first-touch`
+  command it reads. Off, nothing changes for a generated project; hook-forge
+  does not generate the hook yet, so turning the switch on there delivers
+  nothing. Details in the root `CHANGELOG.md`. The policy lock was
+  regenerated for the changed assets.
+
 ### Generated Stop hooks journal their save request — 2026-10-22
 
 - The seeded runtime journals every prompt, Stop and save to ignored

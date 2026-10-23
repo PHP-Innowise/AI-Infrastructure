@@ -19,7 +19,11 @@ the project's own sessions before the prompt, as the Stop hook would have
 recorded it.
 
 The `navigation` and `recall` arms run the same hook with that
-`capsule_profile` in the corpus.
+`capsule_profile` in the corpus. The `first-touch` arm is `recall` with
+`first_touch_delivery` on and the first-touch hook (`first-touch.sh`) wired
+on `PreToolUse` beside it: against `recall` it differs only by what a file's
+first touch hands over. Each run records what that hook delivered and
+whether it delivered before the run's end at a gold file.
 
 A *recall* set measures something else: whether an agent uses what an
 earlier session saved instead of investigating again. A session whose first
@@ -47,6 +51,9 @@ Codex's read-only sandbox with `--ephemeral`, so neither the corpus nor
         --scenarios ~/ab/recall-authored.json --n 30 --seed 2028 --out ~/ab/recall-set.json
     memory_outcome_ab.py run --set ~/ab/recall-set.json --arms off,capsule,navigation,recall \\
         --out ~/ab/recall-result.json
+
+    memory_outcome_ab.py exposure --set ~/ab/set.json --out ~/ab/exposure.json
+    memory_outcome_ab.py run --set ~/ab/set.json --arms recall,first-touch --out ~/ab/touch-result.json
 
 See docs/MEMORY-EVAL.md ("Measuring task outcomes").
 """
@@ -78,14 +85,27 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import memory_eval as stand  # noqa: E402
 from accelerator_attach import _toml  # noqa: E402
 
-ARMS = ("off", "capsule", "navigation", "recall")
+ARMS = ("off", "capsule", "navigation", "recall", "first-touch")
 DEFAULT_ARMS = ("off", "capsule")
 # `navigation` and `recall` run the same prompt hook with that
 # `capsule_profile` in the corpus. Navigation: working state and recent files,
 # no documents and no manifest. Recall adds the task's own saves, with a
 # manifest only on a turn one of them matched.
-HOOKED_ARMS = ("capsule", "navigation", "recall")
+HOOKED_ARMS = ("capsule", "navigation", "recall", "first-touch")
 PROFILE_ARMS = ("navigation", "recall")
+# `first-touch` is the recall capsule plus the first-touch hook, switched on:
+# against `recall` the arms differ by what a file's first touch hands over.
+TOUCH_ARMS = ("first-touch",)
+TOUCH_HOOK = "first-touch.sh"
+# What each arm writes into the corpus's runtime.json.
+ARM_SETTINGS: Dict[str, Dict[str, Any]] = {
+    "navigation": {"capsule_profile": "navigation"},
+    "recall": {"capsule_profile": "recall"},
+    "first-touch": {"capsule_profile": "recall", "first_touch_delivery": True},
+}
+# A run takes the arm's settings from the corpus, never from the operator's
+# shell: these variables would override runtime.json in every arm alike.
+ARM_ENVIRONMENT = ("CONTEXT_CAPSULE_PROFILE", "CONTEXT_FIRST_TOUCH_DELIVERY")
 # What a run counts: calls to the first gold touch, or for a recall set to the
 # first needed touch or an answer naming a needed file.
 METRICS = ("gold", "recall")
@@ -222,6 +242,25 @@ def session_turns(path: Path, root: str) -> Iterator[Dict[str, Any]]:
                 (turn["changed"] if changed else turn["read"]).append(relative)
     if turn is not None:
         yield turn
+
+
+def first_turn_touches(path: Path, root: str) -> List[Tuple[str, bool]]:
+    """The project files a session's first turn touched, in call order, each
+    with whether the call changed it."""
+    rt = runtime()
+    touches: List[Tuple[str, bool]] = []
+    started = False
+    for record in read_records(path):
+        if rt._transcript_prompt(record):
+            if started:
+                break
+            started = True
+            continue
+        if not started:
+            continue
+        for name, data, base in rt._transcript_calls(record, root):
+            touches.extend(call_paths(name, data, base, root))
+    return touches
 
 
 def transcript_directory(transcripts: Path, project: Path) -> Path:
@@ -778,21 +817,34 @@ def plant_saves(task: Dict[str, Any], corpus: Path, env: Dict[str, str], timeout
     return planted
 
 
-def hook_arguments(corpus: Path) -> List[str]:
-    """Codex session flags that run the corpus's memory prompt hook alone."""
-    hooks = json.loads((corpus / ".codex" / "hooks.json").read_text(encoding="utf-8")).get("hooks") or {}
+def _hook_groups(hooks: Dict[str, Any], event: str, script: str) -> List[Dict[str, Any]]:
+    """The corpus's `event` groups, each cut down to the handlers that run `script`."""
     groups = []
-    for group in hooks.get("UserPromptSubmit") or []:
+    for group in hooks.get(event) or []:
         handlers = [
             handler for handler in group.get("hooks") or []
-            if isinstance(handler, dict) and str(handler.get("command") or "").rstrip().endswith(PROMPT_HOOK)
+            if isinstance(handler, dict) and str(handler.get("command") or "").rstrip().endswith(script)
         ]
         if handlers:
             groups.append({**group, "hooks": handlers})
+    return groups
+
+
+def hook_arguments(corpus: Path, arm: str = "capsule") -> List[str]:
+    """Codex session flags that run the corpus's memory prompt hook alone - and
+    for a first-touch arm its first-touch tool hook beside it."""
+    hooks = json.loads((corpus / ".codex" / "hooks.json").read_text(encoding="utf-8")).get("hooks") or {}
+    groups = _hook_groups(hooks, "UserPromptSubmit", PROMPT_HOOK)
     if not groups:
         raise OutcomeError(f"{corpus}/.codex/hooks.json has no {PROMPT_HOOK} prompt hook")
-    return ["--dangerously-bypass-hook-trust", "-c", "features.hooks=true",
-            "-c", f"hooks.UserPromptSubmit={_toml(groups)}"]
+    arguments = ["--dangerously-bypass-hook-trust", "-c", "features.hooks=true",
+                 "-c", f"hooks.UserPromptSubmit={_toml(groups)}"]
+    if arm in TOUCH_ARMS:
+        touch = _hook_groups(hooks, "PreToolUse", TOUCH_HOOK)
+        if not touch:
+            raise OutcomeError(f"{corpus}/.codex/hooks.json has no {TOUCH_HOOK} tool hook")
+        arguments += ["-c", f"hooks.PreToolUse={_toml(touch)}"]
+    return arguments
 
 
 def codex_command(codex: str, corpus: Path, arm: str, prompt: str, model: Optional[str]) -> List[str]:
@@ -803,7 +855,7 @@ def codex_command(codex: str, corpus: Path, arm: str, prompt: str, model: Option
                "-s", "workspace-write", "-C", str(corpus)]
     if model:
         command += ["-m", model]
-    command += hook_arguments(corpus) if arm in HOOKED_ARMS else ["-c", "features.hooks=false"]
+    command += hook_arguments(corpus, arm) if arm in HOOKED_ARMS else ["-c", "features.hooks=false"]
     return [*command, prompt]
 
 
@@ -900,8 +952,8 @@ def health_lines(path: Path) -> int:
         return 0
 
 
-def set_capsule_profile(corpus: Path, profile: str) -> None:
-    """Write the capsule profile into a corpus's runtime.json."""
+def set_runtime_values(corpus: Path, settings: Dict[str, Any]) -> None:
+    """Write settings into a corpus's runtime.json, keeping the rest."""
     config = corpus / "project-brain" / "config" / "runtime.json"
     try:
         values = json.loads(config.read_text(encoding="utf-8"))
@@ -909,9 +961,63 @@ def set_capsule_profile(corpus: Path, profile: str) -> None:
         values = {}
     if not isinstance(values, dict):
         values = {}
-    values["capsule_profile"] = profile
+    values.update(settings)
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def set_capsule_profile(corpus: Path, profile: str) -> None:
+    """Write the capsule profile into a corpus's runtime.json."""
+    set_runtime_values(corpus, {"capsule_profile": profile})
+
+
+def configure_arm(corpus: Path, arm: str) -> None:
+    """Write the arm's settings (ARM_SETTINGS) into the corpus, if it has any."""
+    if arm in ARM_SETTINGS:
+        set_runtime_values(corpus, ARM_SETTINGS[arm])
+
+
+def touch_observation(corpus: Path, gold: Sequence[str], saved: Optional[Sequence[str]],
+                      before: Set[str]) -> Dict[str, Any]:
+    """What the first-touch hook did in one run, from its session state.
+
+    It ran when a session baseline was built - the first call that reached
+    the runtime builds it. Its log names the files whose first touch
+    delivered and the documents handed over; a delivery for a file that is
+    not gold came before the gold touch, which ends the run.
+    """
+    root = corpus / "memory-bank" / "local" / "first-touch"
+    sessions = [path for path in root.iterdir() if path.is_dir() and path.name not in before] if root.is_dir() else []
+    deliveries, characters = 0, 0
+    files: List[str] = []
+    documents: List[str] = []
+    for session in sessions:
+        log = session / "deliveries.ndjson"
+        try:
+            lines = log.read_text(encoding="utf-8").splitlines() if log.is_file() else []
+        except (OSError, UnicodeError):
+            lines = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            deliveries += 1
+            characters += int(record.get("characters") or 0)
+            for entry in record.get("files") or []:
+                if isinstance(entry, dict):
+                    files.append(str(entry.get("path")))
+                    documents.extend(str(path) for path in entry.get("documents") or [])
+    return {
+        "touch_ran": any((session / "cited").is_file() for session in sessions),
+        "touch_deliveries": deliveries,
+        "touch_characters": characters,
+        "touch_files": sorted(set(files)),
+        "touch_before_gold": any(path not in set(gold) for path in files),
+        "saved_touched": bool(saved) and any(path in set(saved or []) for path in documents),
+    }
 
 
 def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
@@ -926,10 +1032,13 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
     before = set(manifests.glob("*.json")) if manifests.is_dir() else set()
     health = corpus / "memory-bank" / "local" / "refresh-health.ndjson"
     health_before = health_lines(health)
+    touch_root = corpus / "memory-bank" / "local" / "first-touch"
+    touch_before = {path.name for path in touch_root.iterdir()} if touch_root.is_dir() else set()
     counter = Counter(corpus, gold, cap)
     started = time.monotonic()
     reason = "finished"
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("GIT_") and key not in ARM_ENVIRONMENT}
     process = subprocess.Popen(
         list(command), cwd=str(corpus), env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True,
@@ -1022,7 +1131,123 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
         "capsule_tokens": capsule_tokens,
         "manifests": dict(sorted(entry_points.items())),
         "exit": process.returncode,
+        **touch_observation(corpus, gold, saved, touch_before),
     }
+
+
+# ---------------------------------------------------------------------------
+# exposure: what first touches would hand over, without an agent
+# ---------------------------------------------------------------------------
+
+
+def touch_replay(corpus: Path, files: Sequence[str], gold: Sequence[str], timeout: float) -> Dict[str, Any]:
+    """The original session's first-turn touches, up to its first gold touch,
+    replayed through the corpus's own runtime with first-touch switched on -
+    the hook's environment, one session - and what each first touch delivered.
+
+    It answers whether the arm can differ from `recall` on a task at all:
+    with no delivery before gold, an agent taking the original's path gets
+    nothing from the hook before the run ends.
+    """
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith("GIT_") and key not in ARM_ENVIRONMENT}
+    script = corpus / "memory-bank" / "scripts" / "context.py"
+    golden = set(gold)
+    before: List[str] = []
+    for path in files:
+        if path in golden:
+            break
+        before.append(path)
+    errors: List[str] = []
+    for path in dict.fromkeys([*before, *[item for item in gold if (corpus / item).is_file()]]):
+        payload = {"session_id": "exposure", "cwd": str(corpus), "tool_name": "Read",
+                   "tool_input": {"file_path": str(corpus / path)}}
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script), "--root", str(corpus), "first-touch", "--host", "codex",
+                 "--session", "exposure"],
+                input=json.dumps(payload), capture_output=True, text=True, env=environment, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            errors.append(f"{path}: timeout")
+            continue
+        if result.returncode != 0:
+            errors.append(f"{path}: exit {result.returncode}")
+    delivered: Dict[str, List[str]] = {}
+    characters = 0
+    log = corpus / "memory-bank" / "local" / "first-touch" / "exposure" / "deliveries.ndjson"
+    for line in log.read_text(encoding="utf-8").splitlines() if log.is_file() else []:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        characters += int(record.get("characters") or 0)
+        for entry in record.get("files") or []:
+            delivered[str(entry.get("path"))] = [str(path) for path in entry.get("documents") or []]
+    return {
+        "before_gold": len(dict.fromkeys(before)),
+        "delivered_before_gold": sorted(path for path in delivered if path not in golden),
+        "delivered_at_gold": sorted(path for path in delivered if path in golden),
+        "documents": sorted({document for documents in delivered.values() for document in documents}),
+        "characters": characters,
+        "errors": errors,
+    }
+
+
+def command_exposure(arguments: argparse.Namespace) -> int:
+    out = arguments.out.expanduser()
+    if stand.inside_clone(out):
+        raise OutcomeError(f"--out {out} is inside this clone: results name client paths")
+    document = json.loads(arguments.set.expanduser().read_text(encoding="utf-8"))
+    tasks = document.get("tasks") if isinstance(document, dict) else None
+    if not isinstance(tasks, list):
+        raise OutcomeError("--set is not a sample made by this tool")
+    if document.get("kind") == "recall":
+        raise OutcomeError("exposure replays the original session's path; a recall question has none")
+    wanted = set(arguments.ids.split(",")) if arguments.ids else None
+    cache = (arguments.cache or (stand.default_cache().parent / f"{stand.default_cache().name}-outcome")).expanduser().resolve()
+    stand.prepare_cache(cache)
+    work = cache / "exposure" / f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+    work.mkdir(parents=True)
+    projects_root = arguments.projects_root.expanduser()
+    transcripts = arguments.transcripts.expanduser()
+    editions: Dict[str, Any] = {}
+    result: Dict[str, Any] = {"version": 1, "meta": {
+        "started": datetime.now(timezone.utc).isoformat(timespec="seconds"), "set": str(arguments.set),
+        "runtime": stand.read_git(ROOT, "rev-parse", "HEAD")}, "items": {}}
+    for task in tasks:
+        if not isinstance(task, dict) or (wanted is not None and task.get("id") not in wanted):
+            continue
+        item: Dict[str, Any] = {"project": task.get("project"), "gold": len(task.get("gold") or [])}
+        corpus = work / stand.safe_name(str(task.get("id")))
+        try:
+            built = build_corpus(task, corpus, cache, projects_root, editions, arguments.timeout)
+            session = transcript_directory(transcripts, built["project"]) / f"{task.get('session')}.jsonl"
+            if not session.is_file():
+                raise stand.Skip("no-session")
+            root = os.path.realpath(str(built["project"]))
+            files = [path for path, _ in first_turn_touches(session, root) if (corpus / path).is_file()]
+            configure_arm(corpus, "first-touch")
+            item.update(touch_replay(corpus, files, task.get("gold") or [], arguments.timeout))
+            item["status"] = "ok"
+        except stand.Skip as skip:
+            item["status"] = f"skipped:{skip}"
+        finally:
+            if not arguments.keep and corpus.exists():
+                stand.remove_tree(corpus)
+        result["items"][str(task.get("id"))] = item
+    ok = [item for item in result["items"].values() if item.get("status") == "ok"]
+    result["summary"] = {
+        "tasks": len(result["items"]), "replayed": len(ok),
+        "exposed": sum(1 for item in ok if item["delivered_before_gold"]),
+        "delivered_at_gold": sum(1 for item in ok if item["delivered_at_gold"]),
+    }
+    stand.write_json(out, result)
+    os.chmod(out, 0o600)
+    summary = result["summary"]
+    print(f"{summary['replayed']} of {summary['tasks']} tasks replayed; a first touch delivered before gold "
+          f"in {summary['exposed']}, at a gold file in {summary['delivered_at_gold']} -> {out}")
+    return 0
 
 
 def command_run(arguments: argparse.Namespace) -> int:
@@ -1086,8 +1311,7 @@ def command_run(arguments: argparse.Namespace) -> int:
                 for arm in order:
                     corpus = work / f"{stand.safe_name(str(task.get('id')))}-{arm}-{replicate}"
                     shutil.copytree(base, corpus, symlinks=True)
-                    if arm in PROFILE_ARMS:
-                        set_capsule_profile(corpus, arm)
+                    configure_arm(corpus, arm)
                     try:
                         outcome = run_arm(
                             codex_command(arguments.codex, corpus, arm, task["prompt"], arguments.model),
@@ -1184,6 +1408,11 @@ def valid_arm(arm: str, runs: Sequence[Dict[str, Any]]) -> bool:
     if arm == "recall":
         # A manifest only on a turn one of the task's saves matched.
         return all(value is True for value in ran)
+    if arm in TOUCH_ARMS:
+        # The recall capsule's hook, and the first-touch hook in every run
+        # that made a call: the first call builds the session's baseline.
+        return all(value is True for value in ran) and all(
+            run.get("touch_ran") is True or not run.get("calls") for run in runs)
     return not any(delivered) and not any(value is True for value in ran)
 
 
@@ -1211,6 +1440,10 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS,
             f"{treatment}_touched": all(reached(run, metric) is not None for run in arms[treatment]),
             f"{baseline}_saved": any(run.get("saved_delivered") for run in arms[baseline]),
             f"{treatment}_saved": any(run.get("saved_delivered") for run in arms[treatment]),
+            **{f"{arm}_exposed": any(run.get("touch_before_gold") for run in arms[arm])
+               for arm in compare if arm in TOUCH_ARMS},
+            **{f"{arm}_saved_touched": any(run.get("saved_touched") for run in arms[arm])
+               for arm in compare if arm in TOUCH_ARMS},
         })
     differences = [pair[treatment] - pair[baseline] for pair in pairs]
     summary: Dict[str, Any] = {
@@ -1234,6 +1467,15 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS,
         # mechanism the arms differ by. Not part of the verdict.
         summary[f"saved_delivered_{baseline}"] = sum(1 for p in pairs if p[f"{baseline}_saved"])
         summary[f"saved_delivered_{treatment}"] = sum(1 for p in pairs if p[f"{treatment}_saved"])
+    for arm in compare:
+        if arm in TOUCH_ARMS:
+            # Exposure: pairs where a first touch delivered something before
+            # the run's end at the gold file (any repeat), and - on a recall
+            # set - where a first touch handed over the save. Not part of the
+            # verdict; the preregistration decides what too little means.
+            summary[f"exposed_{arm}"] = sum(1 for p in pairs if p[f"{arm}_exposed"])
+            if metric == "recall":
+                summary[f"saved_touched_{arm}"] = sum(1 for p in pairs if p[f"{arm}_saved_touched"])
     summary["verdict"] = verdict(summary)
     return summary
 
@@ -1276,6 +1518,11 @@ def command_report(arguments: argparse.Namespace) -> int:
         if summary["metric"] == "recall":
             print(f"save delivered by the hook: {baseline} {summary[f'saved_delivered_{baseline}']}, "
                   f"{treatment} {summary[f'saved_delivered_{treatment}']}")
+        for arm in compare:
+            if arm in TOUCH_ARMS:
+                print(f"{arm}: a first touch delivered before the end in {summary[f'exposed_{arm}']} pairs"
+                      + (f", handed over the save in {summary[f'saved_touched_{arm}']}"
+                         if summary["metric"] == "recall" else ""))
     print(f"verdict: {summary['verdict']}")
     return 0
 
@@ -1330,6 +1577,16 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--keep", action="store_true", help="keep the corpora for inspection")
     run.add_argument("--events", type=Path,
                      help="pilot only: keep each run's raw Codex events (prompts and commands) in this private folder")
+    exposure = commands.add_parser(
+        "exposure", help="no agent: what the first-touch hook would deliver on each cold start's original path")
+    exposure.add_argument("--set", type=Path, required=True)
+    exposure.add_argument("--out", type=Path, required=True)
+    exposure.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
+    exposure.add_argument("--transcripts", type=Path, default=Path.home() / ".claude" / "projects")
+    exposure.add_argument("--cache", type=Path)
+    exposure.add_argument("--ids")
+    exposure.add_argument("--timeout", type=float, default=120.0, help="seconds per runtime call")
+    exposure.add_argument("--keep", action="store_true", help="keep the corpora for inspection")
     report = commands.add_parser("report", help="paired calls to the first gold file")
     report.add_argument("result", type=Path)
     report.add_argument("--json", action="store_true")
@@ -1350,6 +1607,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return command_recall_set(arguments)
         if arguments.command == "run":
             return command_run(arguments)
+        if arguments.command == "exposure":
+            return command_exposure(arguments)
         return command_report(arguments)
     except (OutcomeError, stand.EvalError) as error:
         print(f"memory_outcome_ab: {error}", file=sys.stderr)

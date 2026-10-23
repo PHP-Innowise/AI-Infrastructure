@@ -146,6 +146,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR}\"/.claude/hooks/first-touch.sh",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostToolUse": [

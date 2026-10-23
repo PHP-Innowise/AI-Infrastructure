@@ -81,6 +81,11 @@ The same safety goals are adapted to each client's event schema:
 | Edit-loop detection | `PostToolUse` for Edit | `afterFileEdit` | `PostToolUse` |
 | Task Capsule into the prompt | `UserPromptSubmit` | `beforeSubmitPrompt` renders the prompt's capsule into an `alwaysApply` rule (`sessionStart` renders the branch's, and so does `stop` unless the rule holds the prompt's) | `UserPromptSubmit` |
 | Turn checkpoint at turn end | `Stop` | `stop` | `Stop` |
+| Knowledge at a file's first touch (off unless `first_touch_delivery`) | `PreToolUse` for Read/Edit/Write/MultiEdit/NotebookEdit/Bash, `additionalContext` | `postToolUse` for Read/Write/Shell, `additional_context` after the result (delivery to the model unverified) | `PreToolUse`, `additionalContext` |
+
+The first-touch row is an experiment; see "Knowledge at first touch" in
+[CONTEXT-AND-MEMORY.md](CONTEXT-AND-MEMORY.md) for what it delivers and why
+Cursor's copy follows the tool result.
 
 ## Automatic Memory Support by Tool
 

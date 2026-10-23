@@ -15687,5 +15687,258 @@ class CapsuleProfileTest(BankFixture):
                             for warning in payload["warnings"]), payload["warnings"])
 
 
+class FirstTouchTest(BankFixture):
+    """`first_touch_delivery`: a file's first read or edit in a session hands
+    the agent what cites it, once, bounded and filtered as the capsule is."""
+
+    SOURCE = "src/Billing/Invoice.php"
+    RULE = "Invoice totals are the sum of rounded lines; rounding the sum breaks the VAT report."
+
+    def setUp(self) -> None:
+        super().setUp()
+        billing = self.repository / "src/Billing"
+        billing.mkdir(parents=True)
+        (billing / "Invoice.php").write_text("<?php\nfinal class Invoice {}\n", encoding="utf-8")
+        (billing / "Other.php").write_text("<?php\nfinal class Other {}\n", encoding="utf-8")
+        self.invoice_chunk = self.write_chunk(
+            "MEM-20261001-bbbbbbbb", "invoice-rounds",
+            self.RULE + "\n\n## Sources\n\n- " + self.SOURCE,
+            sources=[self.SOURCE],
+        )
+        self.index()
+
+    def index(self) -> None:
+        result = self.run_cli("index")
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def configure(self, **values: object) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", **values}), encoding="utf-8")
+
+    def payload(self, tool: str = "Read", path: str = SOURCE, session: str = "s1", **tool_input: object) -> dict:
+        if not tool_input:
+            tool_input = {"file_path": str(self.repository / path)}
+        return {"session_id": session, "cwd": str(self.repository), "tool_name": tool,
+                "tool_input": tool_input}
+
+    def touch(self, payload: dict, host: str = "claude", env: Optional[dict] = None,
+              session: Optional[str] = None) -> subprocess.CompletedProcess:
+        environment = {key: value for key, value in os.environ.items()
+                       if key != "CONTEXT_FIRST_TOUCH_DELIVERY"}
+        environment.update(env or {})
+        key = session or str(payload.get("session_id") or payload.get("conversation_id"))
+        return subprocess.run(
+            [sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository), "first-touch",
+             "--host", host, "--session", key.replace("-", "")],
+            input=json.dumps(payload), text=True, capture_output=True, env=environment,
+        )
+
+    def delivered(self, result: subprocess.CompletedProcess) -> str:
+        self.assertEqual(0, result.returncode, result.stderr)
+        if not result.stdout.strip():
+            return ""
+        output = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual("PreToolUse", output["hookEventName"])
+        return output["additionalContext"]
+
+    def chunk_path(self, chunk: Path) -> str:
+        return chunk.relative_to(self.repository).as_posix()
+
+    def test_it_is_off_unless_switched_on(self) -> None:
+        self.assertNotIn("first_touch_delivery", brain.load_config(self.repository))
+        self.assertFalse(brain.configured_first_touch(self.repository))
+        shipped = json.loads((EDITION / "project-brain/config/runtime.json").read_text(encoding="utf-8"))
+        self.assertIs(False, shipped["first_touch_delivery"])
+        self.assertEqual("", self.delivered(self.touch(self.payload())))
+        self.assertFalse((self.repository / "memory-bank/local/first-touch").exists())
+
+    def test_a_first_touch_delivers_what_cites_the_file_once_a_session(self) -> None:
+        self.configure(first_touch_delivery=True)
+        text = self.delivered(self.touch(self.payload()))
+        self.assertTrue(text.startswith(f"memory citing {self.SOURCE}, first touch this session"), text)
+        self.assertIn(self.chunk_path(self.invoice_chunk), text)
+        # The rule is quoted, not the Sources footer naming the file being opened.
+        self.assertIn(self.RULE, text)
+        self.assertNotIn("- " + self.SOURCE, text)
+        self.assertEqual("", self.delivered(self.touch(self.payload())))
+        self.assertEqual("", self.delivered(self.touch(self.payload(
+            "Edit", file_path=str(self.repository / self.SOURCE), old_string="a", new_string="b"))))
+        self.assertIn(self.RULE, self.delivered(self.touch(self.payload(session="s2"))))
+        log = self.repository / "memory-bank/local/first-touch/s1/deliveries.ndjson"
+        records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([[self.chunk_path(self.invoice_chunk)]],
+                         [file["documents"] for record in records for file in record["files"]])
+
+    def test_a_document_is_handed_over_once_a_session(self) -> None:
+        # A chunk citing two files comes with the first of them, as the
+        # capsule hands an item once a conversation.
+        self.configure(first_touch_delivery=True)
+        self.write_chunk("MEM-20261001-bbbbbbbb", "invoice-rounds", self.RULE,
+                         sources=[self.SOURCE, "src/Billing/Other.php"])
+        self.index()
+        self.assertIn(self.RULE, self.delivered(self.touch(self.payload())))
+        self.assertEqual("", self.delivered(self.touch(self.payload(path="src/Billing/Other.php"))))
+        self.assertIn(self.RULE, self.delivered(self.touch(self.payload(path="src/Billing/Other.php",
+                                                                        session="s2"))))
+        patch = (f"*** Begin Patch\n*** Update File: {self.SOURCE}\n@@\n-a\n+b\n"
+                 "*** Update File: src/Billing/Other.php\n@@\n-a\n+b\n*** End Patch\n")
+        text = self.delivered(self.touch(self.payload("apply_patch", session="c9", command=patch), host="codex"))
+        self.assertEqual(1, text.count(self.RULE))
+        self.assertEqual(1, text.count("memory citing"))
+
+    def test_a_file_nothing_cites_is_left_alone(self) -> None:
+        self.configure(first_touch_delivery=True)
+        self.assertEqual("", self.delivered(self.touch(self.payload(path="src/Billing/Other.php"))))
+        session = self.repository / "memory-bank/local/first-touch/s1"
+        self.assertEqual(["cited"], sorted(path.name for path in session.iterdir()))
+
+    def test_specs_that_name_the_path_follow_the_citations(self) -> None:
+        self.configure(first_touch_delivery=True)
+        (self.repository / "specs/billing.md").write_text(
+            "# Billing\n\n## Refunds\n\nRefunds are separate.\n\n## Rounding\n\n"
+            f"Lines are rounded in `{self.SOURCE}` before they are summed.\n", encoding="utf-8")
+        (self.repository / "specs/vendor-copy.md").write_text(
+            f"# Copy\n\nThe vendored lib/{self.SOURCE} and {self.SOURCE}.dist differ.\n", encoding="utf-8")
+        self.index()
+        text = self.delivered(self.touch(self.payload()))
+        self.assertIn("- spec specs/billing.md § Rounding", text)
+        self.assertIn("Lines are rounded in", text)
+        self.assertNotIn("vendor-copy", text)
+        self.assertLess(text.index(self.chunk_path(self.invoice_chunk)), text.index("specs/billing.md"))
+
+    def test_findings_and_decisions_citing_the_file_come_with_their_state(self) -> None:
+        self.configure(first_touch_delivery=True)
+        for kind, title in (("finding", "Invoice VAT rounding drifts"), ("decision", "Round each invoice line")):
+            created = self.run_cli("brain-create", kind, "--external-id", f"BILL-{kind}",
+                                   "--title", title, "--source", self.SOURCE, "--json")
+            self.assertEqual(0, created.returncode, created.stderr)
+        self.index()
+        text = self.delivered(self.touch(self.payload()))
+        self.assertIn("decision (proposed)", text)
+        self.assertIn("finding (open)", text)
+        self.assertLess(text.index(self.chunk_path(self.invoice_chunk)), text.index("decision (proposed)"))
+        self.assertLess(text.index("decision (proposed)"), text.index("finding (open)"))
+
+    def test_the_capsule_filters_still_apply(self) -> None:
+        self.configure(first_touch_delivery=True)
+        created = self.run_cli("brain-create", "finding", "--external-id", "BILL-private",
+                               "--title", "Private invoice note", "--source", self.SOURCE,
+                               "--privacy", "private", "--json")
+        self.assertEqual(0, created.returncode, created.stderr)
+        today = datetime.now(timezone.utc).date()
+        self.write_chunk("MEM-20261002-cccccccc", "overdue-rule", "An overdue invoice rule.",
+                         sources=[self.SOURCE], review_after=(today - timedelta(days=1)).isoformat())
+        self.write_chunk("MEM-20261003-dddddddd", "credential-rule",
+                         "Invoices post with\n\n```yaml\nmailer:\n  password: quokka\n```\n",
+                         sources=[self.SOURCE])
+        (self.repository / "specs/mail.md").write_text(
+            f"# Mail\n\nInvoices from `{self.SOURCE}` are mailed.\n\n```yaml\nmailer:\n  password: quokka\n```\n",
+            encoding="utf-8")
+        self.index()
+        result = self.touch(self.payload())
+        text = self.delivered(result)
+        self.assertIn(self.chunk_path(self.invoice_chunk), text)
+        self.assertIn("specs/mail.md", text)
+        for withheld in ("Private invoice note", "overdue-rule", "credential-rule"):
+            self.assertNotIn(withheld, text)
+        self.assertNotIn("quokka", result.stdout)
+
+    def test_a_changed_cited_file_is_delivered_marked(self) -> None:
+        self.configure(first_touch_delivery=True)
+        reverified = self.run_cli("bank-reverify", "--id", "MEM-20261001-bbbbbbbb")
+        self.assertEqual(0, reverified.returncode, reverified.stderr)
+        (self.repository / self.SOURCE).write_text("<?php\nfinal class Invoice { /* totals */ }\n",
+                                                   encoding="utf-8")
+        self.index()
+        text = self.delivered(self.touch(self.payload()))
+        self.assertIn(self.chunk_path(self.invoice_chunk), text)
+        self.assertIn(f"cited file changed: {self.SOURCE}; check it before relying on this", text)
+
+    def test_shell_reads_and_patches_name_their_files(self) -> None:
+        self.configure(first_touch_delivery=True)
+        self.assertEqual("", self.delivered(self.touch(
+            self.payload("Bash", session="c1", command="git status && ls src"), host="codex")))
+        self.assertIn(self.RULE, self.delivered(self.touch(
+            self.payload("Bash", session="c1", command=f"sed -n '1,40p' {self.SOURCE}"), host="codex")))
+        patch = f"*** Begin Patch\n*** Update File: {self.SOURCE}\n@@\n-a\n+b\n*** End Patch\n"
+        self.assertIn(self.RULE, self.delivered(self.touch(
+            self.payload("apply_patch", session="c2", command=patch), host="codex")))
+
+    def test_claude_bash_is_read_as_a_posix_shell_on_every_platform(self) -> None:
+        # Claude Code's Bash is Git Bash on Windows; Codex and Cursor run
+        # PowerShell there, which _shell_script tells from the directory.
+        payload = self.payload("Bash", command=f"cat {self.SOURCE}")
+        with mock.patch.object(context_cli, "_shell_script", side_effect=AssertionError("not for Claude")):
+            self.assertEqual([self.SOURCE], context_cli.first_touch_paths(payload, self.repository, "claude"))
+        with mock.patch.object(context_cli, "_shell_script",
+                               return_value=("powershell", f"Get-Content {self.SOURCE}")) as script:
+            self.assertEqual([self.SOURCE], context_cli.first_touch_paths(payload, self.repository, "codex"))
+        script.assert_called_once()
+
+    def test_cursor_gets_its_post_tool_use_shape(self) -> None:
+        self.configure(first_touch_delivery=True)
+        payload = {"conversation_id": "conv-1", "cursor_version": "2.1.0", "cwd": str(self.repository),
+                   "hook_event_name": "postToolUse", "tool_name": "Read",
+                   "tool_input": {"target_file": self.SOURCE}, "tool_output": "..."}
+        result = self.touch(payload, host="cursor")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["additional_context"], list(json.loads(result.stdout)))
+        self.assertIn(self.RULE, json.loads(result.stdout)["additional_context"])
+
+    def test_one_delivery_stays_within_its_cap(self) -> None:
+        self.configure(first_touch_delivery=True)
+        for index in range(4):
+            self.write_chunk(f"MEM-2026100{index + 4}-eeeeeee{index}", f"long-rule-{index}",
+                             " ".join(["Every invoice line keeps its own rounding."] * 30),
+                             sources=[self.SOURCE])
+        self.index()
+        text = self.delivered(self.touch(self.payload()))
+        self.assertLessEqual(len(text), context_cli.FIRST_TOUCH_CHARACTER_LIMIT)
+        self.assertEqual(3, sum(1 for line in text.splitlines() if line.startswith("- memory ")))
+        self.assertIn(f"+2 more cite it: python3 memory-bank/scripts/context.py links --path {self.SOURCE}", text)
+
+    def test_chunks_citing_a_busy_file_leave_room_for_a_decision(self) -> None:
+        self.configure(first_touch_delivery=True)
+        for index in range(4):
+            self.write_chunk(f"MEM-2026100{index + 4}-eeeeeee{index}", f"rule-{index}",
+                             f"Invoice rule number {index}.", sources=[self.SOURCE])
+        created = self.run_cli("brain-create", "decision", "--external-id", "BILL-decision",
+                               "--title", "Round each invoice line", "--source", self.SOURCE, "--json")
+        self.assertEqual(0, created.returncode, created.stderr)
+        self.index()
+        lines = self.delivered(self.touch(self.payload())).splitlines()
+        self.assertEqual(["memory", "decision", "memory"],
+                         [line.split()[1] for line in lines if line.startswith("- ")])
+        self.assertIn(f"+3 more cite it: python3 memory-bank/scripts/context.py links --path {self.SOURCE}", lines)
+
+    def test_the_baseline_is_what_the_index_held_when_the_session_began(self) -> None:
+        self.configure(first_touch_delivery=True)
+        self.assertTrue(self.delivered(self.touch(self.payload())))
+        baseline = self.repository / "memory-bank/local/first-touch/s1/cited"
+        self.assertNotIn(self.SOURCE, baseline.read_text(encoding="utf-8").splitlines())
+        # Knowledge written during the session is the session's own, or came
+        # after it began: a later session receives it.
+        self.write_chunk("MEM-20261009-ffffffff", "other-rule", "Other is a value object.",
+                         sources=["src/Billing/Other.php"])
+        self.index()
+        self.assertEqual("", self.delivered(self.touch(self.payload(path="src/Billing/Other.php"))))
+        self.assertIn("Other is a value object.",
+                      self.delivered(self.touch(self.payload(path="src/Billing/Other.php", session="s3"))))
+
+    def test_the_environment_overrides_the_setting_and_a_bad_value_is_refused(self) -> None:
+        self.assertTrue(self.delivered(self.touch(self.payload(), env={"CONTEXT_FIRST_TOUCH_DELIVERY": "1"})))
+        self.configure(first_touch_delivery=True)
+        self.assertEqual("", self.delivered(self.touch(self.payload(session="s2"),
+                                                       env={"CONTEXT_FIRST_TOUCH_DELIVERY": "0"})))
+        refused = self.touch(self.payload(session="s3"), env={"CONTEXT_FIRST_TOUCH_DELIVERY": "maybe"})
+        self.assertEqual(1, refused.returncode)
+        self.assertIn("CONTEXT_FIRST_TOUCH_DELIVERY must be", refused.stderr)
+        self.configure(first_touch_delivery="yes")
+        refused = self.touch(self.payload(session="s4"))
+        self.assertEqual(1, refused.returncode)
+        self.assertIn("first_touch_delivery must be true or false", refused.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
