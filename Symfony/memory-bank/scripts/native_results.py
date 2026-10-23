@@ -202,6 +202,9 @@ ATTENDED_ENTRYPOINTS = frozenset({'cli', 'claude-vscode', 'claude-desktop'})
 # them), `exec` for `codex exec`, an object for a subagent.
 ATTENDED_SOURCES = frozenset({'cli', 'vscode'})
 ROLLOUT_HEAD_BYTES = 256 * 1024
+# The current turn's context is near the rollout's end; one that lies
+# further back is unknown, and an unknown turn is asked as before.
+ROLLOUT_TAIL_BYTES = 512 * 1024
 
 
 def configured_answer(root):
@@ -229,6 +232,42 @@ def _rollout_source(payload):
     meta = record.get('payload') if isinstance(record, dict) and record.get('type') == 'session_meta' else None
     source = meta.get('source') if isinstance(meta, dict) else None
     return source if isinstance(source, str) else None
+
+
+def _rollout_turn(payload):
+    """The Codex turn behind this Stop: its collaboration mode and sandbox
+    type from the rollout's turn_context record with the Stop's turn_id,
+    or Nones. Codex's permission_mode follows the approval policy only."""
+    path, turn = payload.get('transcript_path'), payload.get('turn_id')
+    if not isinstance(path, str) or not path or not isinstance(turn, str) or not turn:
+        return None, None
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return None, None
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - ROLLOUT_TAIL_BYTES))
+            tail = handle.read(ROLLOUT_TAIL_BYTES)
+    except OSError:
+        return None, None
+    for line in reversed(tail.split(b'\n')):
+        if b'turn_context' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue  # the tail's first line may be cut
+        context = record.get('payload') if isinstance(record, dict) and record.get('type') == 'turn_context' else None
+        if not isinstance(context, dict):
+            continue
+        if context.get('turn_id') != turn:
+            return None, None
+        mode = context.get('collaboration_mode')
+        sandbox = context.get('sandbox_policy')
+        mode = mode.get('mode') if isinstance(mode, dict) else None
+        sandbox = sandbox.get('type') if isinstance(sandbox, dict) else None
+        return (mode if isinstance(mode, str) else None), (sandbox if isinstance(sandbox, str) else None)
+    return None, None
 
 
 def attended(root, host, payload):
@@ -466,6 +505,8 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
     # An unknown answer setting costs the turn its short ending, never its save.
     try: brief,code=attended(root,host,payload),None
     except BrainError as error: brief,code=False,refusal_code(error)
+    # Codex reports Plan mode and a read-only sandbox only in the rollout.
+    collaboration,sandbox=_rollout_turn(payload) if host=='codex' else (None,None)
     with mutation_lock(root):
         state=_read(root,key)
         if state is None: return step({},'skipped','not-armed')
@@ -483,7 +524,9 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         # other instruction: asked to save, the agent refuses after every
         # answer, or writes against the person's choice. A save asked
         # before the switch is still settled above.
-        if payload.get('permission_mode') == 'plan': return step({},'skipped','plan-mode')
+        if payload.get('permission_mode') == 'plan' or collaboration == 'plan': return step({},'skipped','plan-mode')
+        # A read-only sandbox lets no save write the project.
+        if sandbox == 'read-only': return step({},'skipped','read-only-sandbox')
         try: task=writable_task(root,task_id,owner)
         except BrainRecordNotFound as error:
             if error.identifier != task_id: raise

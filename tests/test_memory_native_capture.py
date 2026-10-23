@@ -854,6 +854,56 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
                                 data=dict(stop,permission_mode='default'))
                 self.assertIn('native-result --request',asked.stdout.decode())
 
+    def rollout(self,name,turns,pad=0):
+        """A Codex rollout: session_meta, then one turn_context per (turn, mode, sandbox)."""
+        path=self.root.parent/name
+        lines=[json.dumps({'type':'session_meta','payload':{'id':'0','source':'vscode'}})]
+        for turn,mode,sandbox in turns:
+            lines.append(json.dumps({'type':'turn_context','payload':{'turn_id':turn,
+                'collaboration_mode':{'mode':mode},'sandbox_policy':{'type':sandbox}}}))
+            lines.append(json.dumps({'type':'response_item','payload':{'type':'message','role':'user',
+                'content':[{'type':'input_text','text':'x'*pad}]}}))
+        path.write_text('\n'.join(lines)+'\n')
+        return path
+
+    def test_a_codex_plan_or_read_only_turn_is_not_asked_to_save(self):
+        # Codex's permission_mode follows the approval policy; its Plan mode
+        # and sandbox show only in the rollout's turn_context.
+        cases={'plan mode':('plan','workspace-write','plan-mode'),
+               'read-only sandbox':('default','read-only','read-only-sandbox'),
+               'default':('default','workspace-write',None)}
+        for n,(name,(mode,sandbox,skipped)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                session=f'turn-{n}'
+                path=self.rollout(f'{session}.jsonl',[('t0','default','workspace-write'),('t1',mode,sandbox)])
+                stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,'turn_id':'t1',
+                      'permission_mode':'bypassPermissions','transcript_path':str(path),
+                      'last_assistant_message':'Answered.'}
+                self.begin(host='codex',session=session)
+                before=len(self.journal())
+                out=self.call('native-stop','--host','codex','--task-id','research',data=stop).stdout
+                lines=[(line['event'],line.get('code')) for line in self.journal()[before:] if line['stage']=='stop']
+                if skipped:
+                    self.assertEqual(b'',out.strip())
+                    self.assertEqual([('skipped',skipped)],lines)
+                else:
+                    self.assertIn(b'native-result --request',out)
+
+    def test_an_unknown_codex_turn_is_asked_as_before(self):
+        # Another turn's context, or one beyond the tail the Stop reads, is unknown.
+        cases={'other turn':(self.rollout('other.jsonl',[('t1','plan','read-only')]),'t2'),
+               'beyond the tail':(self.rollout('far.jsonl',[('t1','plan','read-only')],pad=600*1024),'t1'),
+               'no rollout':(self.root.parent/'gone.jsonl','t1')}
+        for n,(name,(path,turn)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                session=f'unknown-{n}'
+                stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,'turn_id':turn,
+                      'permission_mode':'bypassPermissions','transcript_path':str(path),
+                      'last_assistant_message':'Answered.'}
+                self.begin(host='codex',session=session)
+                out=self.call('native-stop','--host','codex','--task-id','research',data=stop).stdout
+                self.assertIn(b'native-result --request',out)
+
     def test_switched_off_no_prompt_arms_and_no_stop_asks(self):
         self.set_request('off')
         for host in ('codex','claude','cursor'):

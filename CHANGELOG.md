@@ -28,6 +28,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Codex's Plan mode and read-only sandbox are not asked to save — 2026-10-23
+
+- Why: Codex's hook `permission_mode` follows its approval policy only. The
+  offline Codex run (`scripts/codex_bench.py`) reported
+  `bypassPermissions` under both the workspace-write and the read-only
+  sandbox. In the read-only sandbox the save after every answer failed
+  (`stop failed unsaved`), and with approvals on request the agent could ask
+  the person to let it write. Codex's Plan collaboration mode, like Claude
+  Code's plan mode, is for no changes. Both show in the rollout's
+  `turn_context` record, as `collaboration_mode.mode` and
+  `sandbox_policy.type`.
+- For Codex the Stop reads the last 512 KiB of the rollout and takes the
+  `turn_context` whose `turn_id` is the Stop's. Plan mode is then skipped as
+  `plan-mode`, and a read-only sandbox as `read-only-sandbox`. Another
+  turn's context, one beyond the tail, or no rollout is unknown, and such a
+  turn is asked as before.
+- Tests (`NativeRequestSwitchTests`): plan mode and a read-only sandbox ask
+  nothing and journal their code, and a default turn is asked; another
+  turn's context, one beyond the tail and a missing rollout are asked.
+
 ### A plan-mode turn is not asked to save — 2026-10-23
 
 - Why: in plan mode Claude Code tells the agent it "MUST NOT make any edits,

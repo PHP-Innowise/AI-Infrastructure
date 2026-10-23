@@ -659,7 +659,7 @@ as a person does once in `/hooks`. Then `codex exec` runs with the
 workspace-write sandbox.
 
 ```bash
-python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] \
+python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
   [--target DIR [--sync] [--exclude NAME]] [--timeout 240] [--keep]
 ```
 

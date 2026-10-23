@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime asks no save of a Codex Plan-mode or read-only turn — 2026-10-23
+
+- The memory runtime memory-seed copies reads the Codex turn's
+  `turn_context` from the rollout and skips the save request in Plan
+  collaboration mode and in a read-only sandbox, as the editions' runtime
+  does (root `CHANGELOG.md`, same day). `native_results.py` changes in the
+  asset; the policy lock was rewritten.
+
 ### The seeded runtime asks no save of a plan-mode turn — 2026-10-23
 
 - The memory runtime memory-seed copies skips the save request when the

@@ -203,7 +203,7 @@ def inside(args: argparse.Namespace) -> int:
     except Exception as error:  # the run below shows whether hooks ran without it
         trust = {"error": f"{type(error).__name__}: {error}"}
     done = subprocess.run([args.codex, "exec", "-C", str(project), "--skip-git-repo-check", "--sandbox",
-                           "workspace-write", "How are invoices numbered?"], cwd=project, env=env,
+                           args.sandbox, "How are invoices numbered?"], cwd=project, env=env,
                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=args.timeout)
     server.shutdown()
     steps = [request for request in Scripted.requests if any(MARKER in text for text in request["since"])]
@@ -258,6 +258,8 @@ def main() -> int:
     parser.add_argument("--codex", default="codex", help="the Codex command (default: codex on PATH)")
     parser.add_argument("--edition", choices=sorted(bench.EDITIONS), default="PHP Core")
     parser.add_argument("--timeout", type=float, default=240.0)
+    parser.add_argument("--sandbox", default="workspace-write", choices=("workspace-write", "read-only"),
+                        help="Codex's sandbox; read-only shows the save request skipped")
     parser.add_argument("--keep", action="store_true", help="keep the work directory and print its path")
     parser.add_argument("--target", help="run in a copy of this installed project instead of a fresh install")
     parser.add_argument("--sync", action="store_true", help="sync the copy from this clone first (with --target)")
@@ -287,7 +289,7 @@ def main() -> int:
         else:
             project = bench.prepare(work, bench.EDITIONS[args.edition])
         done = subprocess.run(["unshare", "-rn", sys.executable, str(Path(__file__).resolve()), "--inside",
-                               "--work", str(work), "--codex", args.codex,
+                               "--work", str(work), "--codex", args.codex, "--sandbox", args.sandbox,
                                "--source", bench.source_in(project), "--timeout", str(args.timeout)],
                               timeout=args.timeout + 120)
         if args.keep:
