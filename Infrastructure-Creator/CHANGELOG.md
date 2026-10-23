@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime leaves its own memory writes out of task work — 2026-10-23
+
+- The memory runtime memory-seed copies skips the chunks a promoted save
+  writes and the index it rewrites when it lists a turn's changed files, as
+  the editions' runtime does (root `CHANGELOG.md`, same day). `context.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The hook contract accepts an arm beside the refresh — 2026-10-23
 
 - `validate_generated.py` (`native_capture_hook_contract`) accepts a prompt

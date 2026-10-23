@@ -28,6 +28,31 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A promoted save's memory files are not the task's work — 2026-10-23
+
+- Why: `changed_paths` drops what the runtime writes itself, so that a task
+  does not record its own churn as the user's work, but it knew only the
+  Project Brain's runtime directories. A save with a learning promotes it:
+  the runtime writes a chunk under `memory-bank/chunks/` and rewrites
+  `memory-bank/INDEX.md`. In a project that commits its memory - the
+  arrangement the editions' documentation recommends - every such save left
+  both changed for the next turn: on a copy of a client with its memory
+  committed, one save wrote five chunks (the learning and four findings
+  promoted with it) and the next turn counted `memory-bank/chunks/` and
+  `memory-bank/INDEX.md` as its work. A turn that only saved then counted
+  toward a checkpoint, and the chunks became the task's newest files.
+- `TURN_RUNTIME_MEMORY` names `memory-bank/chunks/`, `memory-bank/INDEX.md`
+  and `memory-bank/local/`; `changed_paths` skips them as it skips the
+  Brain's directories, and a checkpoint flush drops them from turns buffered
+  before. The recent-files line read from transcripts already left out every
+  `.md` file, so it named none of them.
+- None of the four clients is affected today: two ignore their memory and two
+  neither commit nor ignore the accelerator, whose collapsed `memory-bank/`
+  the install record already leaves out.
+- Tests (`AutomaticWorkingMemoryTest`): a promoted save's chunk and index are
+  not a turn's work while a real change beside them is; a flush drops them
+  from a turn buffered before. Both fail without the change.
+
 ### The prompt hook arms the save request beside the capsule's refresh — 2026-10-23
 
 - Why: the prompt hooks ran two Python processes one after the other:
