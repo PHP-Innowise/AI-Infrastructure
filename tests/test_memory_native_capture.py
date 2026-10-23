@@ -662,6 +662,9 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         missing={key:value for key,value in self.payload['learnings'][0].items() if key!='sources'}
         refused=self.save({**self.payload,'learnings':[missing]},ok=False)
         self.assertIn(b'missing: sources',refused.stderr)
+        gone={**self.payload['learnings'][0],'sources':['src/Gone.php#L3']}
+        refused=self.save({**self.payload,'learnings':[gone]},ok=False)
+        self.assertIn(b'Source is missing or is not a regular file: src/Gone.php\n',refused.stderr)
         self.assertEqual('requested',self.state()[1]['phase'])
 
     def test_saved_held_and_omitted_lines_count_learnings_and_chunks_only(self):

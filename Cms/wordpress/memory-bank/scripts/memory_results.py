@@ -136,9 +136,10 @@ def check_source(root: Path, value: object, *, require_file: bool = True) -> str
     for part in relative.parts:
         current = current / part
         if current.is_symlink():
-            raise ResultRefused("source_path", "Symlink source paths are refused")
+            raise ResultRefused("source_path", f"Symlink source paths are refused: {head[:200]}")
+    # Named, so an agent with several learnings knows which citation to fix.
     if not current.is_file():
-        raise ResultRefused("source_missing", "Source is missing or is not a regular file")
+        raise ResultRefused("source_missing", f"Source is missing or is not a regular file: {head[:200]}")
     return value
 
 

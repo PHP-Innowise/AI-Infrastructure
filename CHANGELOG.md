@@ -48,6 +48,9 @@ edition's own files remain in that edition's changelog.
   unexpected fields (at most five, each cut to 40 characters). It calls
   `verified` a top-level boolean. The same validation serves `record-result`
   and the MCP tool.
+- A missing or linked source is named in its refusal, without its `#`
+  anchor and cut to 200 characters, so an agent citing several files knows
+  which to fix.
 - Test (`NativeFunnelJournalTests`): four malformed inputs each journal
   `native-result:invalid-input` and print their reason; `verified` inside a
   learning and a missing `sources` are named. It fails on the old runtime.
