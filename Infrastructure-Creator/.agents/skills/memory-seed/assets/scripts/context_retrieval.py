@@ -6835,7 +6835,11 @@ def linked_documents(
 _PROMPT_PATH = re.compile(
     r"(?<![\w@:/\\.-])(?:\./)?((?:[\w.-]+/)+[\w-]+(?:\.[\w-]+)*\.[A-Za-z0-9]{1,8})(?![\w/-])"
 )
-_PROMPT_ABSOLUTE = re.compile(r"(?<![\w.-])(/(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]{1,8})")
+# What follows the project's root in an absolute path written out in a prompt,
+# with slashes, or with backslashes as Windows writes it.
+_PROMPT_ROOTED_TAIL = re.compile(r"(?:[\w.-]+/)*[\w.-]+\.[A-Za-z0-9]{1,8}")
+_PROMPT_ROOTED_WINDOWS_TAIL = re.compile(r"(?:[\w.-]+\\)*[\w.-]+\.[A-Za-z0-9]{1,8}")
+_PROMPT_PATH_CHARACTER = re.compile(r"[\w.-]")
 _PROMPT_BACKSLASH = re.compile(r"(?<![\w\\])((?:[\w.-]+\\)+[\w.-]+\.[A-Za-z0-9]{1,8})")
 _PROMPT_FQCN = re.compile(r"\\?((?:[A-Z][A-Za-z0-9_]*\\+)+[A-Z][A-Za-z0-9_]*)")
 _PROMPT_BARE_FILE = re.compile(r"(?<![\w/\\.-])([\w-]+\.[A-Za-z0-9]{1,8})(?![\w/-])")
@@ -6883,10 +6887,21 @@ def prompt_path_seeds(connection: sqlite3.Connection, repository: Path, text: st
     project = workspace_roots.project_root(repository)
     found: list[str] = []
     found.extend(_PROMPT_PATH.findall(text))
-    root = project.as_posix().rstrip("/") + "/"
-    for absolute in _PROMPT_ABSOLUTE.findall(text):
-        if absolute.startswith(root):
-            found.append(absolute[len(root):])
+    # The root is known, so a path under it is found by that prefix: a pattern
+    # for the whole path stopped at a space, and a root such as
+    # "/Users/ann/My Projects/shop" lost every path written out under it.
+    # On Windows the same root is also written natively, C:\Users\...
+    roots = [(project.as_posix().rstrip("/") + "/", _PROMPT_ROOTED_TAIL)]
+    if str(project) != project.as_posix():
+        roots.append((str(project).rstrip("\\") + "\\", _PROMPT_ROOTED_WINDOWS_TAIL))
+    for root, rooted_tail in roots:
+        position = text.find(root)
+        while position != -1:
+            if position == 0 or not _PROMPT_PATH_CHARACTER.match(text[position - 1]):
+                tail = rooted_tail.match(text, position + len(root))
+                if tail:
+                    found.append(tail.group(0).replace("\\", "/"))
+            position = text.find(root, position + len(root))
     found.extend(path.replace("\\", "/") for path in _PROMPT_BACKSLASH.findall(text))
     names = [re.sub(r"\\+", "\\\\", name) for name in _PROMPT_FQCN.findall(text)]
     bare = [name for name in _PROMPT_BARE_FILE.findall(text) if "/" not in name]

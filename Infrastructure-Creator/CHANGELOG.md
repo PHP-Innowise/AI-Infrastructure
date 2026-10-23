@@ -4,6 +4,57 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded retrieval finds a path written out under the project root — 2026-10-22
+
+- memory-seed's `context_retrieval.py` finds an absolute path a prompt names
+  under the project root when the root holds a space ("My Projects") or is
+  written the Windows way (`C:\Users\...`); before, such a path seeded
+  nothing. The policy lock and mirrors were regenerated for the changed
+  asset.
+
+### Seeded memory serves a chunk written today west of UTC — 2026-10-22
+
+- memory-seed's `validate.py` takes a date as in the future only past today
+  by both the local and the UTC calendar, and `context.py bank-quarantine`
+  writes the UTC date: west of UTC every evening the chunks the runtime
+  promoted or re-verified were "in the future" and left retrieval until local
+  midnight. The policy lock and mirrors were regenerated for the changed
+  assets.
+
+### Seeded memory reads a Windows session's PowerShell commands — 2026-10-22
+
+- memory-seed's `context.py` reads Claude Code's `PowerShell` tool calls for
+  the `recent files` line of a Windows session that has that tool on. The
+  policy lock and mirrors were regenerated for the changed asset.
+
+### Seeded continuity leaves a Stop hook's continuation out — 2026-10-22
+
+- memory-seed's `context_continuity.py` leaves a Stop hook's continuation
+  (`<hook_prompt>`, Codex 0.162 and later) out of a Codex snapshot, as its
+  comment always said; the native result's own took most of every snapshot
+  taken where it ran. The policy lock and mirrors were regenerated for the
+  changed asset.
+
+### Seeded memory reads a Codex turn's files again — 2026-10-22
+
+- memory-seed's `context.py` reads the files of a Codex turn from its `exec`
+  cell (`tools.exec_command`, `tools.apply_patch`), the only form Codex 0.162
+  and later write; until now such a turn recorded none. The policy lock and
+  mirrors were regenerated for the changed asset.
+
+### Memory stands down for a session in another worktree — 2026-10-22
+
+- hook-forge: a Claude Code desktop session in its own worktree, and any
+  session after `EnterWorktree`, runs the hooks of the checkout it started from
+  and names its own checkout only in the payload's `cwd`. The generated
+  working-memory hooks read `cwd`; when it is another worktree of the
+  repository, the read hook says memory was not consulted instead of handing
+  over this branch's task, and the write hook records no turn.
+- memory-seed carries `context_continuity.py` with the same check: such a
+  session neither captures a snapshot nor claims a merge prepared for this
+  branch.
+- the policy lock and mirrors were regenerated for the changed skill and assets.
+
 ### Seeded projects ship the recall capsule — 2026-10-22
 
 - memory-seed's `runtime.json.template` sets `capsule_profile: recall`, as

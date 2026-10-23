@@ -250,6 +250,34 @@ class ContextContinuityTest(unittest.TestCase):
         self.assertIn("The pasted stack trace.", content)
         self.assertIn("Answer to rounding.", content)
 
+    def test_a_stop_hook_continuation_is_not_part_of_the_chat(self) -> None:
+        """Codex 0.162 and later write a Stop hook's continuation into the
+        conversation as a <hook_prompt> user message. The native result's own,
+        the request to save the turn, came into every Codex snapshot taken
+        where it ran."""
+        continuation = ("INTERNAL_NATIVE_MEMORY_RESULT " + "0123456789abcdef" * 2 + "\n"
+                        "Save only the result of the work already performed in this session.")
+
+        def message(role: str, text: str) -> dict[str, object]:
+            return {"type": "response_item", "payload": {"type": "message", "role": role, "content": [
+                {"type": "input_text" if role == "user" else "output_text", "text": text}]}}
+        rollout = self.root / "rollout.jsonl"
+        rollout.write_text("\n".join(json.dumps(record) for record in [
+            {"type": "session_meta", "payload": {"id": "rounding", "cwd": str(self.root)}},
+            message("user", "How should invoice totals round?"),
+            message("assistant", "Half-up, at the line level."),
+            message("user", f'<hook_prompt hook_run_id="stop:9:/work/.codex/hooks.json">{continuation}</hook_prompt>'),
+            message("assistant", "Saved the result."),
+        ]) + "\n", encoding="utf-8")
+        result = self.invoke("codex", "hook", {"hook_event_name": "Stop", "session_id": "rounding",
+                                               "transcript_path": str(rollout)})
+        self.assertEqual(0, result.returncode, result.stderr)
+        content = json.loads(runtime._snapshot_path(self.root, runtime._branch(self.root), "codex:rounding").read_text())["content"]
+        self.assertEqual("User:\nHow should invoice totals round?\n\nAssistant:\nHalf-up, at the line level."
+                         "\n\nAssistant:\nSaved the result.", content)
+        # The person's own words about the tag are still theirs.
+        self.assertFalse(runtime._codex_injected("Why does <hook_prompt>Continue.</hook_prompt> show up here?"))
+
     def test_codex_global_policy_is_filtered_but_user_markup_stays(self) -> None:
         self.assertTrue(runtime._codex_injected("# AGENTS.md instructions\n\n<INSTRUCTIONS>Global policy.</INSTRUCTIONS>"))
         self.assertTrue(runtime._codex_injected("<task-notification>Finished.</task-notification>"))
@@ -349,6 +377,48 @@ class ContextContinuityTest(unittest.TestCase):
                     self.assertIn(f"{host} answer {chat}", text)
         listing = json.loads(self.invoke("codex", "list").stdout)
         self.assertNotIn("ignored", json.dumps(listing))
+
+    def test_a_session_in_another_worktree_neither_captures_nor_claims_a_merge(self) -> None:
+        """A Claude Code desktop session in its own worktree - and a session after
+        EnterWorktree - runs the hooks of the checkout it started from and names
+        its own checkout in "cwd". Its chat is another branch's, and the merge
+        prepared for this branch's next task is not its to take."""
+        nested = self.root / ".claude" / "worktrees" / "bright fox"
+        beside = Path(self.tmp.name + " beside")
+        self.addCleanup(shutil.rmtree, beside, True)
+        environment = clean_environment()
+        for path, branch in ((nested, "feature/nested"), (beside, "feature/beside")):
+            subprocess.run(["git", "-C", str(self.root), "worktree", "add", "-q", "-b", branch, str(path)],
+                           check=True, capture_output=True, env=environment)
+        (nested / "src").mkdir()
+        self.invoke("claude", "capture", {"session_id": "one", "prompt": "First chat."})
+        self.invoke("claude", "capture", {"session_id": "two", "prompt": "Second chat."})
+        self.assertEqual(0, self.prepare("claude:one", "claude:two", host="claude").returncode)
+        pending = runtime._pending_path(self.root, runtime._branch(self.root), "claude")
+        self.assertTrue(pending.exists())
+        before = self.snapshots()
+        for cwd in (nested, nested / "src", beside):
+            with self.subTest(cwd=cwd.name):
+                for event in ("UserPromptSubmit", "Stop"):
+                    result = self.invoke("claude", "hook", {"hook_event_name": event, "session_id": "elsewhere",
+                                                            "cwd": str(cwd), "prompt": "Elsewhere.",
+                                                            "last_assistant_message": "Elsewhere."})
+                    self.assertEqual((0, b"", b""), (result.returncode, result.stdout, result.stderr))
+                started = self.invoke("claude", "hook", {"hook_event_name": "SessionStart", "session_id": "elsewhere-new",
+                                                         "cwd": str(cwd), "source": "startup"})
+                self.assertEqual((0, b""), (started.returncode, started.stdout))
+                self.assertEqual(before, self.snapshots())
+                self.assertTrue(pending.exists())
+        # This checkout, from any directory below it, still captures and receives its merge.
+        (self.root / "src").mkdir()
+        here = self.invoke("claude", "hook", {"hook_event_name": "UserPromptSubmit", "session_id": "here",
+                                              "cwd": str(self.root / "src"), "prompt": "Here."})
+        self.assertEqual(0, here.returncode)
+        self.assertEqual(len(before) + 1, len(self.snapshots()))
+        started = self.invoke("claude", "hook", {"hook_event_name": "SessionStart", "session_id": "target",
+                                                 "cwd": str(self.root), "source": "startup"})
+        self.assertIn("First chat.", json.loads(started.stdout)["hookSpecificOutput"]["additionalContext"])
+        self.assertFalse(pending.exists())
 
     def test_disabled_environment_neither_captures_nor_restores(self) -> None:
         environment = clean_environment(CONTEXT_CONTINUITY_DISABLED="1")

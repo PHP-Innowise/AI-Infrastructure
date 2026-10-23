@@ -40,7 +40,14 @@ RUNTIME_REASONS = frozenset({
     "privacy", "owner", "authority", "lifecycle", "stale", "map-unverifiable",
     "map-drift", "source-missing", "working-task", "host-loaded",
     "promoted-to-chunk", "conflict-unavailable",
+    # A durable record, finding or changelog naming only other tickets than
+    # the request's; a Brain record that failed validation; a context-handoff
+    # snapshot, which only context-load returns. Unmapped, a withheld
+    # changelog read as an unknown stage.
+    "ticket-mismatch", "invalid", "explicit-context-only",
 })
+# Path links and file links are both automatic links with a cap of their own.
+AUTOMATIC_LINK_REASONS = frozenset({"file-link-limit", "path-link-limit"})
 RANK_REASONS = frozenset({
     "layer-limit", "episodic-layer", "skill-subfile", "host-listed",
     "delivered-this-session",
@@ -390,7 +397,7 @@ def audit(
                         reason = excluded[indexed]
                         stage = (
                             "budget-loss" if reason in {"budget", "hard-budget"}
-                            else "automatic-link-limit" if reason == "file-link-limit"
+                            else "automatic-link-limit" if reason in AUTOMATIC_LINK_REASONS
                             else "capsule-loss" if reason == "capsule-limit"
                             else "rank-loss" if reason in RANK_REASONS
                             else "runtime-exclusion" if reason in RUNTIME_REASONS

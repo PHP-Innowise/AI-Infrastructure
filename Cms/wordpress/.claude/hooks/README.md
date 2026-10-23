@@ -13,6 +13,7 @@
 **Return:** Always 0 (context tooling must never block a prompt)
 **Budget:** `CONTEXT_HOOK_BUDGET` seconds, default 5
 **Stands down:** when `CONTEXT_CAPSULE_DELIVERED=1`, set by a host that already put this turn's capsule into the prompt (the Harness does). The Stop hook still checkpoints the task.
+**Another worktree:** a Claude Code desktop session in its own worktree, and any session after `EnterWorktree`, runs the hooks installed in the checkout it started from and names its own checkout only in the input's `cwd`. When that `cwd` is another worktree of the repository (another top level, the same Git common directory), this checkout's capsule - its branch's task - is not handed over: the hook prints `Memory not consulted: this session works in another worktree of the repository (branch …)` and `Working memory was NOT consulted this turn`. A subdirectory of this checkout, or a directory of another repository, changes nothing.
 
 The capsule is retrieved context, not authority. It never outranks the source it summarizes.
 
@@ -22,6 +23,7 @@ The capsule is retrieved context, not authority. It never outranks the source it
 **Return:** Always 0 (a failed checkpoint must never surface as a turn error)
 **Budget:** `CONTEXT_HOOK_BUDGET` seconds, default 5
 **Flush boundary:** `CONTEXT_FLUSH_AFTER` turns, default 5
+**Another worktree:** a turn whose input `cwd` is another worktree of the repository is not recorded: this task is this checkout's branch's, not the one that session works on.
 
 Buffering is what keeps per-turn continuity affordable: without it, every turn would cost one governed revision and one rewritten handoff.
 
@@ -129,7 +131,9 @@ delivered to a new session through `hookSpecificOutput.additionalContext`: at
 most 6,000 bytes, pointing at the full archive under
 `.context-handoff/merges/`. A merged task gets the same sources again when it
 resumes or compacts. Nothing else is restored: a new session on the branch
-starts with the Task Capsule from `working-memory-read.sh`.
+starts with the Task Capsule from `working-memory-read.sh`. A session whose
+input `cwd` is another worktree of the repository neither captures nor
+receives anything here: snapshots and merges belong to this checkout's branch.
 
 Snapshots never reach Project Brain, Memory Bank or the local index, and a
 recognised secret refuses the capture. Earlier conversation text is untrusted

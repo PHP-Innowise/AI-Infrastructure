@@ -28,6 +28,153 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A path written out under the project root is found — 2026-10-22
+
+- A prompt that names a file by its absolute path seeds the documents linked
+  to it (`prompt_path_seeds`). The path was found by one pattern for the whole
+  of it, which stopped at a space: under a root such as
+  `/Users/ann/My Projects/shop` every such path was lost, and
+  `test_prompt_paths_are_extracted_normalised_and_screened` fails whenever the
+  temporary directory holds a space. The root is known, so a path under it is
+  found by that prefix now; the character before the prefix is checked as the
+  old pattern did.
+- On Windows the root is also looked for as Windows writes it,
+  `C:\Users\...\shop\src\...`; only its slash form was. On other systems
+  the two forms are one and nothing changes.
+- `test_a_path_under_a_root_with_a_space_is_found` and
+  `test_a_windows_path_under_the_root_is_found` fail on `1b010289`.
+
+### A chunk written today is served west of UTC — 2026-10-22
+
+- The runtime writes chunk dates as UTC calendar dates - promotion,
+  re-verification and supersession do, and an ID is minted from today's UTC
+  date - but `validate.py` judged `last_verified` against the machine's local
+  date. West of UTC the UTC date is the local tomorrow every evening (in New
+  York from 20:00, in San Francisco from 17:00, summer time): every chunk
+  promoted or re-verified then was "in the future", failed validation and
+  left retrieval until local midnight. With the local calendar a day behind
+  UTC, 120 of the 722 tests in `project-brain/tests/test_runtime.py` failed;
+  now none does. A date is in the future only past today by both calendars
+  (`validate.latest_today`).
+- `bank-quarantine` dated its `valid_to` by the local calendar, unlike every
+  other date the runtime writes; east of UTC after midnight that was the UTC
+  tomorrow, and `test_quarantine_stops_serving_and_closes_validity` failed
+  there every night between local and UTC midnight (00:00-03:00 in EEST,
+  where the night check of this branch met it). It writes the UTC date
+  now, and the test runs with the local calendar a day ahead
+  (`calendar_shifted`, a 24-hour POSIX TZ offset), so it fails on a
+  regression at any hour on a POSIX runner.
+- `ChunkCalendarTest` and the quarantine test fail on `256c1c4b`.
+- Not changed: the overdue-review, past-`valid_to` and terminal-chunk
+  comparisons still read the local date. They move a boundary by hours once
+  in a chunk's life rather than hiding the day's new chunks.
+
+### A Windows session's PowerShell commands name their files — 2026-10-22
+
+- Claude Code can run shell commands through its `PowerShell` tool on
+  Windows (code.claude.com/docs/en/tools-reference): on by default without
+  Git Bash, and with Git Bash for claude.ai and Console accounts. Its input
+  has the Bash tool's `command`, but the transcript reader took only `Bash`,
+  so a session that used it recorded none of the files its commands read -
+  the main source of the `recent files` line. `PowerShell` calls are now read
+  with the PowerShell dialect the Codex Windows path already uses.
+- Where it applies: the editions' settings deny scoped `Bash(...)` rules, and
+  on Windows with Git Bash - which the hooks need - Claude Code then turns
+  the PowerShell tool off for the session unless
+  `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` or a `PowerShell(...)` rule turns it
+  on. This reaches the sessions that turn it on.
+- `test_claude_powershell_tool_calls_name_their_files` fails on `8caa2869`.
+- Not changed, needs a decision: `bash-validator.sh` is wired on `Bash` only,
+  while the documentation asks hooks that inspect shell commands to match
+  `Bash|PowerShell`, so a session with the PowerShell tool on passes around
+  it; and the memory CLI is allowed only as `Bash(...)` rules.
+
+### A Codex chat snapshot no longer carries the Stop hook's continuation — 2026-10-22
+
+- Codex 0.162 and later write a Stop hook's continuation into the
+  conversation as a `<hook_prompt hook_run_id="...">` user message.
+  `context_continuity.py` leaves the context Codex injects out of a snapshot,
+  and its comment names hook prompts among it, but the envelope list did not:
+  the native result's continuation - the request to save the turn, some 2,600
+  characters - went into every Codex snapshot taken where native capture ran.
+  On this machine's October rollouts (all in test and evaluation projects;
+  none in the Desktop projects) that was 21 of 21 snapshots, a median 69 % of
+  their text (53-80 %) and half of their user messages. `hook_prompt` is now
+  in `CODEX_INJECTED_ENVELOPES`, and `docs/CONTEXT-HANDOFF.md` names it among
+  the envelopes a projection drops.
+- `test_a_stop_hook_continuation_is_not_part_of_the_chat` fails on `7df1da52`.
+- Seen on the way, not changed: Codex 0.162.1 and 0.163.0 run no
+  `UserPromptSubmit` hook for that continuation (in those 19 projects, 22
+  user messages, 22 hook prompts and 21 read-hook health lines; a capsule
+  followed 21 of 36 real prompts and none of the 21 continuations), and 20 of
+  21 saves passed on a runtime that recognises only a bare continuation. The
+  comment in `native_results.begin` that Codex submits the Stop reason through
+  `UserPromptSubmit` describes earlier versions.
+
+### The miss audit names every exclusion the runtime writes — 2026-10-22
+
+- `scripts/memory_miss_audit.py` maps a manifest exclusion with reason
+  `ticket-mismatch`, `invalid` or `explicit-context-only` to
+  `runtime-exclusion`, and `path-link-limit` beside `file-link-limit` to
+  `automatic-link-limit`. They read as `unknown`: on the 327-prompt implicit
+  set, 43 of the 50 changelogs `main` withholds (the ticket filter: a changelog
+  naming only other tickets than the request's) showed as unexplained misses;
+  with the map they are runtime exclusions, the other 7 capsule losses.
+- `test_every_manifest_exclusion_the_runtime_writes_has_a_stage` fails on
+  `a54143b8`.
+
+### A Codex turn records its files again — 2026-10-22
+
+Codex 0.162 and later run every tool from one JavaScript cell, the custom
+tool `exec`: a shell command is `tools.exec_command({cmd: "...", workdir:
+"..."})`, a patch `tools.apply_patch("*** Begin Patch ...")`. The Stop hook's
+transcript reader knew Codex's `function_call`, `local_shell_call` and the
+`apply_patch` custom tool, none of which those versions write, so a Codex turn
+recorded none of its files and the next session's `recent files` line stayed
+empty. On this machine's 154 October rollouts (Codex Desktop and the TUI,
+0.162 and 0.163) the reader found 0 files in 650 turns.
+
+- `_transcript_calls` reads an `exec` cell's `tools.exec_command` and
+  `tools.apply_patch` calls: their string literals - double, single or
+  backtick quoted, `String.raw` included, JavaScript escapes decoded - go
+  through the same shell and patch readers as before, from the cell's
+  `workdir` when it is an absolute literal. A command built from a variable or
+  a `${}` substitution names nothing the text can show and is passed over.
+- On the same rollouts 42 turns record 90 files; most of those sessions worked
+  in other checkouts and in `~/.codex`, whose files are not the project's.
+- `test_codex_exec_cells_name_their_files` in
+  `project-brain/tests/test_runtime.py` fails on `f6876f7d`.
+
+### A session in another worktree is not served this checkout's memory — 2026-10-22
+
+A Claude Code desktop session in its own worktree - and any session after
+`EnterWorktree` - runs the hooks installed in the checkout it started from:
+`${CLAUDE_PROJECT_DIR}` stays there, and the session's own checkout arrives
+only in the input's `cwd` (code.claude.com/docs/en/worktrees, "What worktrees
+share with the main checkout"). The memory hooks took their project and branch
+from their own location, so such a session was handed the other branch's task
+as its state, its turns were recorded into that task (`turn`, `native-stop`),
+and its chats were captured as that branch's snapshots - a new worktree session
+could even claim the merge prepared for that branch's next task. In the client
+projects the accelerator is untracked, so a worktree holds no memory of its own.
+
+- `working-memory-read.sh` and `working-memory-write.sh` read `cwd` with their
+  other fields. When it is another worktree of the repository (another top
+  level, the same Git common directory), the read hook prints that memory was
+  not consulted, and the write hook records nothing; Cursor's read hook only
+  answers `{"continue": true}`. `context_continuity.py` makes the same check
+  and neither captures nor restores. A `cwd` equal to the project costs no Git
+  call; a subdirectory of the project or another repository changes nothing.
+- Tests: `OtherWorktreeTest` in `memory-bank/tests/test_hooks.py` (all three
+  hosts) and `test_a_session_in_another_worktree_neither_captures_nor_claims_a_merge`
+  fail on `a9277c8f`.
+- `hook-forge` describes the check for generated projects; the hooks README of
+  each edition names it. `scripts/token_budget.json` raises the
+  Infrastructure-Creator `body_bytes` ceiling from 299,300 to 300,000 for that
+  752-byte requirement: the skill bodies were 151 bytes under it.
+- Serving such a session with its own branch's task and files (`--checkout`
+  through the runtime's branch observations) is a separate change.
+
 ### A person's refresh asks for the full capsule on Windows too — 2026-10-22
 
 - Harness read the `CAPSULE_PROFILE_FLAG` marker through `O_NOFOLLOW`, as it

@@ -116,9 +116,9 @@ run() {
 # handed in its last few turns is not handed again, and so does the path of
 # its transcript, where a compaction since the last turn shows.
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
-# Output: the session id, the transcript path, the prompt, one per line, and
-# a final "\n." that keeps command substitution from eating the prompt's own
-# trailing newlines.
+# Output: the session id, the transcript path, the session's directory, the
+# prompt, one per line, and a final "\n." that keeps command substitution
+# from eating the prompt's own trailing newlines.
 HOOK_INPUT=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
 import json
 import os
@@ -146,14 +146,53 @@ if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", s
 transcript = data.get("transcript_path", "")
 if not isinstance(transcript, str) or len(transcript) > 4096 or "\n" in transcript or not os.path.isabs(transcript):
     transcript = ""
-sys.stdout.write(session + "\n" + transcript + "\n" + prompt + "\n.")
+cwd = data.get("cwd", "")
+if not isinstance(cwd, str) or len(cwd) > 4096 or "\n" in cwd or "\0" in cwd or not os.path.isabs(cwd):
+    cwd = ""
+sys.stdout.write(session + "\n" + transcript + "\n" + cwd + "\n" + prompt + "\n.")
 ' 2>/dev/null)
-case "$HOOK_INPUT" in *$'\n'*$'\n'*) ;; *) HOOK_INPUT=$'\n\n\n.' ;; esac
+case "$HOOK_INPUT" in *$'\n'*$'\n'*$'\n'*) ;; *) HOOK_INPUT=$'\n\n\n\n.' ;; esac
 SESSION_ID=${HOOK_INPUT%%$'\n'*}
 HOOK_REST=${HOOK_INPUT#*$'\n'}
 TRANSCRIPT=${HOOK_REST%%$'\n'*}
+HOOK_REST=${HOOK_REST#*$'\n'}
+SESSION_DIR=${HOOK_REST%%$'\n'*}
 QUERY=${HOOK_REST#*$'\n'}
 QUERY=${QUERY%$'\n.'}
+
+# A Claude Code desktop session in its own worktree - and any session after
+# EnterWorktree - runs the hooks of the checkout they are installed in and
+# names its own checkout in the input's "cwd". The memory here follows this
+# checkout's branch: handed to a session on another branch, its task would
+# read as that session's own state. Another checkout of the same repository,
+# then, gets no capsule; a subdirectory of this checkout, or a directory of
+# another repository, changes nothing.
+checkout_identity() {
+  local directory=$1 output top common
+  output=$(git -C "$directory" rev-parse --show-toplevel --git-common-dir 2>/dev/null) || return 1
+  case "$output" in *$'\n'*) ;; *) return 1 ;; esac
+  top=${output%%$'\n'*}
+  common=${output#*$'\n'}
+  case "$common" in /*|[A-Za-z]:[\\/]*) ;; *) common="$directory/$common" ;; esac
+  top=$(cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  common=$(cd -- "$common" 2>/dev/null && pwd -P) || return 1
+  printf '%s\n%s' "$top" "$common"
+}
+in_other_worktree() {
+  local session=$1 mine theirs
+  [ -n "$session" ] && [ "$session" != "$PROJECT_DIR" ] && [ -d "$session" ] || return 1
+  theirs=$(checkout_identity "$session") || return 1
+  mine=$(checkout_identity "$PROJECT_DIR") || return 1
+  [ "${theirs%%$'\n'*}" != "${mine%%$'\n'*}" ] && [ "${theirs#*$'\n'}" = "${mine#*$'\n'}" ]
+}
+if in_other_worktree "$SESSION_DIR"; then
+  # Cursor reads only JSON from this hook; its answer is printed on exit.
+  case "$HOOK_STDIN" in *'"cursor_version"'*) exit 0 ;; esac
+  SESSION_BRANCH=$(git -C "$SESSION_DIR" branch --show-current 2>/dev/null)
+  echo "Memory not consulted: this session works in another worktree of the repository${SESSION_BRANCH:+ (branch $SESSION_BRANCH)}, and this memory follows the checkout its hooks are installed in."
+  echo "Working memory was NOT consulted this turn. Read the canonical sources directly."
+  exit 0
+fi
 
 # A rebase detaches HEAD on the commits it replays, and the branch being
 # rebased is still the work in hand - often the very conflict a turn asks

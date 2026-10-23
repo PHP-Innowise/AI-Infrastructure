@@ -102,6 +102,15 @@ class DirectQueryPrivacyBoundaryTest(unittest.TestCase):
                             )
 
 
+def calendar_shifted(days: int) -> dict[str, str] | None:
+    """An environment whose local date is a day after (+1) or before (-1)
+    the UTC date, at any hour: a POSIX TZ offset runs to 24 hours. Elsewhere
+    there is no such offset, and the caller skips."""
+    if os.name != "posix":
+        return None
+    return {**os.environ, "TZ": "XXX-24" if days > 0 else "XXX+24"}
+
+
 class RuntimeHarness(unittest.TestCase):
     """Temporary governed repository shared by the runtime test classes."""
 
@@ -131,7 +140,9 @@ class RuntimeHarness(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def run_cli(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_cli(
+        self, *arguments: str, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
                 sys.executable,
@@ -142,6 +153,7 @@ class RuntimeHarness(unittest.TestCase):
             ],
             text=True,
             capture_output=True,
+            env=env,
         )
 
     def run_main(self, *arguments: str) -> tuple[int, str, str]:
@@ -5919,9 +5931,11 @@ class ProvenanceAuditTest(BankFixture):
         )
 
     def test_quarantine_stops_serving_and_closes_validity(self) -> None:
+        # East of UTC after midnight the local date runs a day ahead; the
+        # date written is the UTC one, as every other date the runtime writes.
         result = self.run_cli(
             "bank-quarantine", "--id", "MEM-20260101-aaaaaaaa",
-            "--reason", "suspected poisoning", "--json",
+            "--reason", "suspected poisoning", "--json", env=calendar_shifted(+1),
         )
         self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
@@ -6130,6 +6144,45 @@ class ChunkSourceDigestTest(BankFixture):
             [item["path"] for item in capsule["selected"]],
             capsule,
         )
+
+
+class ChunkCalendarTest(BankFixture):
+    """Chunk dates are UTC calendar dates - promotion and re-verification
+    write them so - and west of UTC the evening's UTC date is the local
+    tomorrow. Judged by the local calendar, such a chunk was "in the future":
+    it failed validation and left retrieval until local midnight."""
+
+    def test_a_chunk_dated_today_in_utc_is_served_where_it_is_still_yesterday(self) -> None:
+        behind = calendar_shifted(-1)
+        if behind is None:
+            self.skipTest("the local calendar is set through a POSIX TZ offset")
+        # The fixture's chunk was verified today by the UTC calendar.
+        self.assertEqual(0, self.run_cli("index", "--json", env=behind).returncode)
+        started = self.run_cli(
+            "start", "--task-id", "TASK-WEST", "--goal", "Apply the cobalt authority rule.",
+            "--source", "specs/authority.md", "--json", env=behind,
+        )
+        self.assertEqual(0, started.returncode, started.stderr)
+        capsule = json.loads(
+            self.run_cli(
+                "retrieve", "cerulean rollout", "--task-id", "TASK-WEST",
+                "--ephemeral", "--json", env=behind,
+            ).stdout
+        )
+        self.assertIn(
+            "memory-bank/chunks/MEM-20260101-aaaaaaaa-old-rule.md",
+            [item["path"] for item in capsule["selected"]],
+            capsule,
+        )
+        # A date ahead of both calendars is still refused.
+        later = (datetime.now(timezone.utc).date() + timedelta(days=2)).isoformat()
+        future = self.write_chunk(
+            "MEM-20260101-bbbbbbbb", "later-rule", "The cobalt rollout is later.",
+            last_verified=later, review_after=later,
+        )
+        metadata = json.loads(future.read_text(encoding="utf-8")[4:].split("\n---\n", 1)[0])
+        with self.assertRaisesRegex(brain.BankValidationError, "must not be in the future"):
+            brain.validate_bank_metadata(future, metadata, self.repository)
 
 
 class OverdueBankWriteTest(BankFixture):
@@ -6875,6 +6928,28 @@ class FileLinkSeedTest(RuntimeHarness):
             ["app/Billing/InvoiceTotal.php", "src/Http/Kernel.php", "tests/Unit/FooTest.php"],
             retrieval.prompt_path_seeds(connection, self.repository, text),
         )
+
+    def test_a_path_under_a_root_with_a_space_is_found(self) -> None:
+        # A root such as "/Users/ann/My Projects/shop": the pattern for the
+        # whole path stopped at the space and lost every path under it.
+        connection = self.link_table("src/Http/Kernel.php", "composer.json")
+        project = self.repository / "My Projects" / "shop"
+        project.mkdir(parents=True)
+        root = project.as_posix()
+        text = f"the error is in {root}/src/Http/Kernel.php:40, after {root}/composer.json changed"
+        self.assertEqual(["src/Http/Kernel.php", "composer.json"],
+                         retrieval.prompt_path_seeds(connection, project, text))
+
+    def test_a_windows_path_under_the_root_is_found(self) -> None:
+        # Windows writes the root with backslashes - C:\work\ann lee\shop -
+        # and only its slash form was looked for.
+        from pathlib import PureWindowsPath
+        connection = self.link_table("src/http/kernel.php")
+        root = PureWindowsPath("C:/work/ann lee/shop")
+        with mock.patch.object(retrieval.workspace_roots, "project_root", return_value=root):
+            seeds = retrieval.prompt_path_seeds(
+                connection, self.repository, "it fails in C:\\work\\ann lee\\shop\\src\\http\\kernel.php:40")
+        self.assertEqual(["src/http/kernel.php"], seeds)
 
     def test_fqcn_maps_through_psr4_autoload_and_autoload_dev(self) -> None:
         connection = self.link_table("app/Billing/InvoiceTotal.php", "extra/Money.php", "tests/Unit/FooTest.php")
@@ -14804,6 +14879,48 @@ class RecentProjectFilesTest(RuntimeHarness):
         transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
         self.assertEqual(3, self.turn(transcript)["recent_files"])
         self.assertEqual("recent files: src/Guard.php, src/Refund.php, src/Ledger.php", self.recent_line())
+
+    def test_codex_exec_cells_name_their_files(self) -> None:
+        # Codex 0.162 and later run every tool from one JavaScript cell, the
+        # custom tool `exec`; its shell commands and patches are string
+        # literals in that program, and none of their files was recorded.
+        def item(payload: dict) -> dict:
+            return {"type": "response_item", "payload": payload}
+
+        def cell(code: str) -> dict:
+            return item({"type": "custom_tool_call", "name": "exec", "call_id": "c", "input": code})
+
+        repository = json.dumps(str(self.repository))
+        transcript = Path(self.temporary.name) / "exec-rollout.jsonl"
+        records = [
+            item({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the refund"}]}),
+            cell("const r = await tools.exec_command({cmd: \"sed -n '1,40p' \\\"src/Refund.php\\\" && "
+                 "rg -n settle src/Ledger.php\", workdir: " + repository + ", max_output_tokens: 4000});\ntext(r);"),
+            cell("const base = " + repository + ";\n"
+                 "await tools.exec_command({max_output_tokens: 2000, cmd: 'cat src/Export.php', workdir: base});\n"
+                 "await tools.exec_command({cmd: `head -5 ${base}/src/Reader.php`});\n"
+                 "const command = 'cat src/Writer.php';\nawait tools.exec_command({cmd: command});"),
+            cell("await tools.apply_patch(\"*** Begin Patch\\n*** Update File: src/Guard.php\\n@@\\n-a\\n+b\\n"
+                 "*** End Patch\\n\");\n"
+                 "await tools.apply_patch(String.raw`*** Begin Patch\n*** Add File: src/Query.php\n+<?php\n"
+                 "*** End Patch`);"),
+        ]
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        # A command from a variable or a `${}` template names nothing knowable.
+        self.assertEqual(5, self.turn(transcript)["recent_files"])
+        self.assertEqual("recent files: src/Guard.php, src/Query.php, src/Refund.php, src/Ledger.php, src/Export.php",
+                         self.recent_line())
+
+    def test_claude_powershell_tool_calls_name_their_files(self) -> None:
+        # On Windows Claude Code runs shell commands through its PowerShell
+        # tool by default; only the Bash tool was read.
+        transcript = self.claude(
+            self.prompt("fix the refund"),
+            self.call("PowerShell", {"command": "Get-Content src/Refund.php | Select-String total; "
+                                                "Set-Content src/Guard.php '<?php'"}),
+        )
+        self.assertEqual(2, self.turn(transcript)["recent_files"])
+        self.assertEqual("recent files: src/Guard.php, src/Refund.php", self.recent_line())
 
     def test_codex_powershell_calls_name_their_files(self) -> None:
         transcript = Path(self.temporary.name) / "windows-rollout.jsonl"

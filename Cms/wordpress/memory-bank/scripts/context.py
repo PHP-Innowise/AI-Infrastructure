@@ -6433,9 +6433,179 @@ def _transcript_prompt(record: dict[str, object]) -> bool:
     return False
 
 
+# Codex 0.162 and later run their tools from one JavaScript cell, the custom
+# tool `exec`: a shell command is `tools.exec_command({cmd: "...", workdir:
+# "..."})`, a patch `tools.apply_patch("*** Begin Patch ...")`. On 99 rollouts
+# of October 2026 every shell command and patch came that way, and a turn
+# recorded none of its files. Only string literals are read: a command built
+# from a variable or a `${}` substitution names nothing the text can show.
+_CODEX_EXEC_TOOL = re.compile(r"\btools\s*\.\s*(exec_command|apply_patch)\s*\(")
+_JS_IDENTIFIER = re.compile(r"[A-Za-z_$][\w$]*")
+_JS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "0": "\0"}
+_JS_SPACE = " \t\r\n"
+
+
+def _js_string(code: str, index: int) -> tuple[Optional[str], int]:
+    """The JavaScript string literal at `index`, after any spaces, and the
+    index past it; (None, index) when there is none, when its value depends
+    on the program (a `${}` substitution) or when it never closes."""
+    length = len(code)
+    while index < length and code[index] in _JS_SPACE:
+        index += 1
+    raw = code.startswith("String.raw", index)
+    start = index + len("String.raw") if raw else index
+    if start >= length or code[start] not in ("`" if raw else "\"'`"):
+        return None, index
+    quote = code[start]
+    position = start + 1
+    out: list[str] = []
+    while position < length:
+        char = code[position]
+        if char == quote:
+            return "".join(out), position + 1
+        if char == "\\":
+            escape = code[position + 1:position + 2]
+            if not escape:
+                break
+            if raw:
+                out.append(char + escape)
+                position += 2
+            elif escape in _JS_ESCAPES:
+                out.append(_JS_ESCAPES[escape])
+                position += 2
+            elif escape == "x" and re.fullmatch(r"[0-9A-Fa-f]{2}", code[position + 2:position + 4]):
+                out.append(chr(int(code[position + 2:position + 4], 16)))
+                position += 4
+            elif escape == "u":
+                match = re.match(r"\{([0-9A-Fa-f]{1,6})\}|([0-9A-Fa-f]{4})", code[position + 2:position + 10])
+                if not match or int(match.group(1) or match.group(2), 16) > 0x10FFFF:
+                    return None, index
+                out.append(chr(int(match.group(1) or match.group(2), 16)))
+                position += 2 + match.end()
+            elif escape == "\r":
+                position += 3 if code[position + 2:position + 3] == "\n" else 2
+            elif escape in "\n\u2028\u2029":
+                position += 2
+            else:
+                out.append(escape)
+                position += 2
+            continue
+        if quote == "`" and code.startswith("${", position):
+            return None, index
+        if quote != "`" and char in "\r\n":
+            return None, index
+        out.append(char)
+        position += 1
+    return None, index
+
+
+def _js_literal_end(code: str, index: int) -> int:
+    """The index past the string literal opening at `index`, a template's
+    `${}` substitutions included."""
+    quote, position, depth = code[index], index + 1, 0
+    while position < len(code):
+        char = code[position]
+        if char == "\\":
+            position += 2
+            continue
+        if quote != "`":
+            if char == quote:
+                return position + 1
+        elif depth == 0 and char == "`":
+            return position + 1
+        elif code.startswith("${", position):
+            depth += 1
+            position += 1
+        elif depth and char == "}":
+            depth -= 1
+        position += 1
+    return len(code)
+
+
+def _js_value_end(code: str, index: int) -> int:
+    """The index of the "," or "}" that ends the object value at `index`."""
+    depth = 0
+    while index < len(code):
+        char = code[index]
+        if char in "\"'`":
+            index = _js_literal_end(code, index)
+            continue
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                return index
+            depth -= 1
+        elif char == "," and depth == 0:
+            return index
+        index += 1
+    return len(code)
+
+
+def _js_object_strings(code: str, index: int) -> dict[str, str]:
+    """The string-literal values of the object literal at `index`, by key;
+    any other value is passed over."""
+    length = len(code)
+    while index < length and code[index] in _JS_SPACE:
+        index += 1
+    if index >= length or code[index] != "{":
+        return {}
+    index += 1
+    found: dict[str, str] = {}
+    while index < length:
+        while index < length and code[index] in _JS_SPACE + ",":
+            index += 1
+        if index >= length or code[index] == "}":
+            break
+        if code[index] in "\"'":
+            key, index = _js_string(code, index)
+            if key is None:
+                break
+        else:
+            match = _JS_IDENTIFIER.match(code, index)
+            if not match:
+                break
+            key, index = match.group(0), match.end()
+        while index < length and code[index] in _JS_SPACE:
+            index += 1
+        if index < length and code[index] == ":":
+            value, end = _js_string(code, index + 1)
+            if value is not None:
+                found.setdefault(key, value)
+                index = end
+                continue
+            index = _js_value_end(code, index + 1)
+        elif index < length and code[index] not in ",}":
+            index = _js_value_end(code, index)
+    return found
+
+
+def _codex_exec_calls(code: str, root: str) -> list[tuple[str, dict[str, object], str]]:
+    """(tool, arguments, working directory) for the shell commands and patches
+    one Codex `exec` cell runs."""
+    calls: list[tuple[str, dict[str, object], str]] = []
+    for match in _CODEX_EXEC_TOOL.finditer(code):
+        if match.group(1) == "apply_patch":
+            patch, _ = _js_string(code, match.end())
+            if patch is None:
+                fields = _js_object_strings(code, match.end())
+                patch = fields.get("input") or fields.get("patch")
+            if patch:
+                calls.append(("apply_patch", {"patch": patch}, root))
+            continue
+        fields = _js_object_strings(code, match.end())
+        workdir = fields.get("workdir")
+        script = _shell_script(fields.get("cmd") or fields.get("command"), workdir)
+        if script:
+            base = workdir if workdir and os.path.isabs(workdir) else root
+            calls.append(("Bash", {"command": script[1], "dialect": script[0]}, base))
+    return calls
+
+
 def _transcript_calls(record: dict[str, object], root: str) -> list[tuple[str, dict[str, object], str]]:
     """(tool, arguments, working directory) for the calls one record makes:
-    Claude Code main-thread tool uses, Codex shell and patch calls."""
+    Claude Code main-thread tool uses, Codex shell and patch calls - also
+    those a Codex `exec` cell makes."""
     calls: list[tuple[str, dict[str, object], str]] = []
     if record.get("type") == "assistant" and not record.get("isSidechain"):
         message = record.get("message") if isinstance(record.get("message"), dict) else {}
@@ -6468,6 +6638,8 @@ def _transcript_calls(record: dict[str, object], root: str) -> list[tuple[str, d
                 calls.append(("Bash", {"command": script[1], "dialect": script[0]}, base))
         elif kind == "custom_tool_call" and payload.get("name") == "apply_patch":
             calls.append(("apply_patch", {"patch": payload.get("input")}, root))
+        elif kind == "custom_tool_call" and payload.get("name") == "exec" and isinstance(payload.get("input"), str):
+            calls.extend(_codex_exec_calls(payload["input"], root))
     return calls
 
 
@@ -6481,6 +6653,12 @@ def _call_file_words(name: str, data: dict[str, object], base: str) -> list[tupl
         return [(value, False, base)] if isinstance(value, str) else []
     if name == "Bash" and isinstance(data.get("command"), str):
         return _shell_file_words(data["command"], base, dialect=str(data.get("dialect") or "sh"))
+    if name == "PowerShell" and isinstance(data.get("command"), str):
+        # Claude Code runs shell commands through this tool on Windows while
+        # it is on - by default for claude.ai and Console accounts, unless a
+        # Bash deny rule turns it off; its input has the Bash tool's fields.
+        # Unread, such a session recorded none of the files its commands read.
+        return _shell_file_words(data["command"], base, dialect="powershell")
     if name == "apply_patch" and isinstance(data.get("patch"), str):
         return [((update or moved).strip(), True, base) for update, moved in _PATCH_FILE_LINE.findall(data["patch"])]
     return []
@@ -9767,7 +9945,8 @@ def _command() -> int:
                 result = retire_chunk(
                     repository,
                     arguments.memory_id,
-                    valid_to=date.today().isoformat(),
+                    # A UTC calendar date, like every date the runtime writes.
+                    valid_to=datetime.now(timezone.utc).date().isoformat(),
                     reason=arguments.reason or "quarantined",
                 )
                 if arguments.json:

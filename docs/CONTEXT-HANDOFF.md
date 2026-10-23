@@ -123,8 +123,10 @@ visible `user` and `assistant` text; it discards system messages, hidden
 reasoning, tool calls, envelopes, and metadata. In a Codex rollout it also
 drops the context Codex records as user messages: the project's
 `# AGENTS.md instructions` block (with or without a project path), and known
-context envelopes such as `<environment_context>`, `<skill>` and
-`<task-notification>`. User HTML/Blade examples and `<pasted_content>` stay.
+context envelopes such as `<environment_context>`, `<skill>`,
+`<task-notification>` and a Stop hook's `<hook_prompt>` continuation (the
+native result's request to save the turn). User HTML/Blade examples and
+`<pasted_content>` stay.
 So a Codex chat's `list` preview opens with its first real prompt. A projected
 JSONL snapshot is explicitly partial, never a full transcript. The runtime never searches client
 account directories, private session stores, or internal history files.

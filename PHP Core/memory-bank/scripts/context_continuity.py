@@ -67,12 +67,15 @@ CAPTURE_EVENTS = {"UserPromptSubmit", "Stop", "beforeSubmitPrompt", "afterAgentR
 # skills, hook prompts and notifications. None of it is what the person typed,
 # and the AGENTS.md text would open every Codex snapshot of a project alike.
 # Only known injected envelopes are filtered. User markup and pasted content
-# stay even when they occupy one complete tagged text part.
+# stay even when they occupy one complete tagged text part. A Stop hook's
+# continuation is a hook prompt (<hook_prompt hook_run_id="...">, Codex 0.162
+# and later): the native result's own, some 2,600 characters, came into every
+# Codex snapshot taken where it ran.
 CODEX_INSTRUCTIONS_HEADER = "# AGENTS.md instructions"
 CODEX_ENVELOPE = re.compile(r"\s*<([a-z][a-z0-9_-]*)(?:\s[^<>]*)?>.*</\1(?:\s[^<>]*)?>\s*", re.DOTALL)
 CODEX_INJECTED_ENVELOPES = {
     "environment_context", "skill", "task-notification", "system-reminder",
-    "turn_aborted", "external_codex_apps_open_page",
+    "turn_aborted", "external_codex_apps_open_page", "hook_prompt",
 }
 KINDS = {
     kind + suffix
@@ -129,6 +132,42 @@ def _git(root: Path, args: list[str]) -> str | None:
 def _branch(root: Path) -> str | None:
     branch = _git(root, ["branch", "--show-current"])
     return branch or None
+
+
+def _checkout_identity(directory: Path) -> tuple[str, str] | None:
+    """(top level, common Git directory) of the checkout holding `directory`."""
+    try:
+        result = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel", "--git-common-dir"],
+                                capture_output=True, text=True, timeout=2, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    lines = result.stdout.splitlines() if result.returncode == 0 else []
+    if len(lines) != 2 or not all(lines):
+        return None
+    return os.path.realpath(lines[0]), os.path.realpath(os.path.join(str(directory), lines[1]))
+
+
+def _in_other_worktree(root: Path, payload: dict[str, Any]) -> bool:
+    """Whether the session works in another checkout of this repository.
+
+    A Claude Code desktop session in its own worktree - and any session after
+    EnterWorktree - runs the hooks of the checkout they are installed in and
+    names its own checkout in the payload's "cwd". Snapshots here belong to
+    this checkout's branch: one captured from another branch's session would
+    join its chats, and a merge prepared for this branch would go to that
+    session. A subdirectory of this checkout, or a directory of another
+    repository, is not another worktree."""
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str) or not cwd or "\0" in cwd or not os.path.isabs(cwd):
+        return False
+    project = _project(root)
+    try:
+        if not os.path.isdir(cwd) or os.path.realpath(cwd) == os.path.realpath(str(project)):
+            return False
+    except (OSError, ValueError):
+        return False
+    theirs, mine = _checkout_identity(Path(cwd)), _checkout_identity(project)
+    return theirs is not None and mine is not None and theirs[0] != mine[0] and theirs[1] == mine[1]
 
 
 def _reject_secrets(text: str) -> None:
@@ -804,6 +843,8 @@ def main() -> int:
             # One wired script serves every lifecycle event: the client names
             # the event in its payload. An unknown event does nothing.
             payload = _read_payload()
+            if _in_other_worktree(root, payload):
+                return 0
             name = payload.get("hook_event_name")
             if name in START_EVENTS:
                 arguments.event = "restore"
