@@ -617,6 +617,9 @@ None says whether delivery changes what an agent does.
   navigation` in the corpus: working state and recent files, no documents.
   It writes no manifest, so its runs are recognised by the line every hook
   refresh appends to `refresh-health.ndjson`.
+- **The `recall` arm** runs it with `capsule_profile: recall`: navigation plus
+  the task's own saves. It writes a manifest only on a turn one of them
+  matched, so a run is valid when the hook ran.
 - **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the
@@ -633,6 +636,36 @@ None says whether delivery changes what an agent does.
 - **Validity:** a pair counts only if the hook's own manifest (`refresh` or
   `hook-context`) shows that the capsule arm received a capsule in every repeat
   and the `off` arm received none.
+
+**Recall sets.** A cold start has no earlier save to recall, so the metric
+above cannot see recall. A recall set asks whether the agent uses what an
+earlier session saved instead of investigating again.
+- **The source:** a session's first turn that read project files, changed
+  none, and answered at length naming files it read (`recall-sources`).
+- **The scenario:** what that session would have saved - one learning citing
+  files the turn read - and a question a new session asks that needs it, not
+  naming the *needed* files. Both are written outside the tool for each
+  source, and `recall-set` checks them: the learning is one `record-result`
+  accepts, every file it cites is in the corpus at the question, the needed
+  files are among its sources, and the question names none.
+- **The corpus:** the project at the moment of the question, with its recent
+  files. Before any arm runs, `run` records the save on the corpus branch's
+  task through `record-result`, with the project's own promotion settings,
+  then commits and indexes it: every arm, `off` included, starts from the
+  same tree, and the agent's own `retrieve` can find the save in any arm.
+- **The regime (`recall-set --regime`):**
+  - `next`: the question comes a minute after the source turn ended. The
+    recent files then usually show the files the turn read, so every hooked
+    arm has a pointer to the subject.
+  - `later`: the same save and question, asked at the start of the first
+    later real session whose recent files - replayed from every turn before
+    it - show none of the files the answer named. Navigation then has nothing
+    to point at, and only the save can.
+- **The metric (`report --metric recall`, a recall result's default):** calls
+  before the agent first touches a needed file, or - a turn that finished
+  without one - before an answer that names one. A run that reached neither
+  counts one past the cap. Each run also records whether the hook's capsule
+  delivered the save.
 
 **The verdict.** `report` prints the mean difference capsule − off, a
 bootstrap 95% interval and an exact sign test, then applies the rule:
@@ -706,6 +739,107 @@ deliver:
 
 This metric counts calls to a file, not recall. A smaller capsule that keeps
 recall needs its own arm and its own measurement before the default moves.
+
+**The third measurement (2026-10-22): four arms and recall.**
+
+The candidate is `capsule_profile: recall`: navigation plus the task's own
+saves. The rule was sealed before the run and asked three things:
+- **(a)** on recall sets, `recall` is not worse than `full`;
+- **(b)** on cold starts, `recall` is navigation;
+- **(c)** with `recall` shipped, every suite that saves a result and expects
+  the next automatic capsule to carry it stays green.
+
+Setup:
+- **Recall sets.** 30 scenarios, seed 2028, from 105 client first turns that
+  answered from files they read. The learning and the question were written
+  by an AI author from each turn's own answer. Real pairs - a result saved
+  through `record-result` or `native-result` and asked about later - do not
+  exist in the four clients: none was ever saved there.
+- **Two regimes:** `next` and `later`, the same 30 sources.
+- **Arms:** `off`, `capsule`, `navigation`, `recall`, two repeats each;
+  runtime `fb197740`.
+- **Cold starts:** the 14 left unused by the earlier samples.
+
+Results on the recall sets (calls to the save's subject):
+
+| regime | comparison | pairs | means | difference, 95% CI | verdict |
+|---|---|---|---|---|---|
+| next | recall against capsule | 25 | 2.70 → 2.70 | 0.00 [−0.26, +0.28] | no difference shown |
+| next | recall against navigation | 25 | 2.60 → 2.66 | +0.06 [−1.08, +2.02] | no difference shown |
+| later | recall against capsule | 24 | 4.19 → 3.98 | −0.21 [−0.42, −0.02] | recall-helps |
+| later | recall against navigation | 24 | 4.58 → 3.98 | −0.60 [−3.54, +3.21] | no difference shown |
+
+What the rows show:
+- The hook delivered the save in every pair with `recall` and with `full`,
+  and never with `navigation`.
+- Reached within the cap, `recall` against `capsule`: next 24 → 24, later
+  23 → 23.
+- **Lost results:** the `later` run lost five results to a task-ID collision,
+  now fixed. A sealed amendment reran four of them. With those 28 pairs the
+  first `later` row is no difference shown (−0.11 [−0.32, +0.11]): `recall` is
+  as good as `full` here, not better.
+- **Navigation:** against it the mean difference is not shown. By sign,
+  `recall` was faster on 19 of 23 tasks without a tie (next) and 21 of 23
+  (later), with a median of one call. That is exploratory: a few censored
+  runs set the means, and every arm reaches the subject in two to six calls.
+
+On cold starts, the `recall` capsule was byte-identical to navigation's on
+all 14 tasks: a new branch has no saves of its own. The agent runs there
+(n = 14) are insufficient by the rule. Their two identical arms differed by
++1.57 calls [+0.07, +4.32] - a reminder of why the rule wants 20 pairs.
+
+The suites, with `recall` shipped in the four editions and the generator
+template:
+
+| shipped default | passed | failed |
+|---|---|---|
+| `full` | 235 | 0 |
+| `navigation` | 212 | 23 |
+| `recall` | 214 | 21 |
+
+`recall` turns green the three runtime recall suites navigation breaks:
+- native save, then a new session's `refresh`;
+- MCP save, then CLI recall;
+- the hook outputs of a saved fact.
+
+Two blockers remain:
+- **The Harness recall suite.** It expects a corrected learning in the
+  next message, and the learning arrives as a chunk quoted by its
+  `## Sources` footer. Under `full` the chunk is quoted the same way; the
+  suite passes only because the cited source file comes along, which
+  `recall` does not deliver. `excerpt_section` skips a citation-only footer
+  for linked selections only.
+- **Harness automatic memory requires a manifest.** A capsule without
+  documents - navigation always, `recall` without a match of its own -
+  fails its `prepare`.
+
+So (a) and (b) held and (c) did not, and the default stayed `full`.
+
+**(c) run again (2026-10-22).** Both blockers are fixed:
+- `excerpt_section` skips a citation-only footer for every Memory Bank chunk,
+  whatever selected it, so the corrected learning reaches the next message as
+  its rule. The 327-prompt stand under `full` delivered the same documents at
+  the same sizes before and after the change (217 useful).
+- In Harness a capsule with no document and no source proof needs no
+  fingerprints; a proof that does arrive is checked as before. Harness's
+  explicit `refresh` and the LongMemEval bridge ask for `full`.
+
+The tests that check a layer `recall` leaves out on purpose pin `full` in
+their fixtures:
+- the shared document in the Cursor rule;
+- the document beside broken UTF-8;
+- Hindsight's source hints;
+- the Git calls and the working record re-read on the full search path;
+- the membership index's full capsule render;
+- Harness's first-message document, funnel diagnosis, ordinary receipt and
+  opened-memory report.
+
+With `recall` shipped, `check.py` passed 235 commands and failed none, the
+Harness recall suite among them. The 7 it skipped need what that machine
+lacked: ShellCheck, the Harness graph and QA venvs, and Windows. So (c)
+holds: the four editions and the generator's template ship `recall`. The
+code's default stays `full` for a project whose `runtime.json` names no
+profile.
 
 **Privacy.** Sets carry prompts and results name client paths. Both are
 written owner-only and are refused inside the clone. `--events` keeps raw

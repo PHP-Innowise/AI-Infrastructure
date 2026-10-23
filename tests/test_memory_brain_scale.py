@@ -25,6 +25,20 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'PHP Core/memory-bank/scripts'
 
 
+def full_capsule(root):
+    """Pin the full automatic capsule in a fixture project.
+
+    The editions ship the recall capsule - working state, recent files and
+    the task's own saves. A test of a layer only the full capsule carries -
+    shared documents and what is built on them - pins `full`, which a
+    project can still choose.
+    """
+    config = Path(root) / 'project-brain/config/runtime.json'
+    data = json.loads(config.read_text(encoding='utf-8'))
+    data['capsule_profile'] = 'full'
+    config.write_text(json.dumps(data), encoding='utf-8')
+
+
 class BrainScaleTests(unittest.TestCase):
     def setUp(self):
         clean = {k: v for k, v in os.environ.items() if not k.startswith(('GIT_', 'CONTEXT_', 'ACCELERATOR_'))}
@@ -456,6 +470,8 @@ class ConcurrentCheckpointTests(unittest.TestCase):
         for args in (('init', '-q', '-b', 'feature/heron-pair'), ('add', '-A'),
                      ('-c', 'user.email=h@example.invalid', '-c', 'user.name=H', 'commit', '-q', '-m', 'fixture')):
             subprocess.run(['git', '-C', str(self.root), *args], check=True, capture_output=True, timeout=60)
+        # The final re-read of the working record belongs to the full search path.
+        full_capsule(self.root)
         subprocess.run([sys.executable, str(self.root / 'memory-bank/scripts/context.py'), '--root', str(self.root),
                         'start', '--task-id', 'feature/heron-pair', '--goal', 'Heron pairing', '--source',
                         'docs/heron.md', '--json'], check=True, capture_output=True, timeout=120)

@@ -152,6 +152,20 @@ def diagnosis_example(count=1):
     return value
 
 
+def pin_capsule_profile(project, profile):
+    """Set the automatic capsule's profile in a fixture project's runtime.json.
+
+    The editions ship the recall capsule - working state, recent files and the
+    task's own saves. A test of what the full capsule carries on a first
+    message - shared documents, their fingerprints, receipts and counts built
+    from its manifest - pins `full`, which a project can still choose.
+    """
+    configuration = Path(project) / "project-brain/config/runtime.json"
+    config = json.loads(configuration.read_text())
+    config["capsule_profile"] = profile
+    configuration.write_text(json.dumps(config))
+
+
 class TaskContextTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -890,6 +904,8 @@ class TaskContextTests(unittest.TestCase):
 
     def test_automatic_launch_receives_source_linked_answers_without_settings(self):
         query, paths = source_link_fixture(self.project)
+        # Source-linked documents are a layer of the full capsule.
+        pin_capsule_profile(self.project, "full")
         store = self.manager()
         sid = store.create(self.automatic(store, prompt=query))['id']
         session = self.wait_status(store, sid, 'completed')
@@ -904,6 +920,8 @@ class TaskContextTests(unittest.TestCase):
 
     def test_unattended_memory_reaches_the_launch_without_a_step_from_a_person(self):
         from harness import memory_draft
+        # The launch's prompt quotes a shared document: the full capsule's.
+        pin_capsule_profile(self.project, "full")
         store = self.manager()
         governed = self.project / "project-brain/control/retrieval-manifests"
         before = sorted(governed.glob("*.json"))
@@ -1062,6 +1080,8 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
 
     def test_an_unattended_run_saves_its_draft_and_each_follow_up_retrieves_for_its_message(self):
         from harness import memory_draft
+        # Counts the delivered shared document: the full capsule's.
+        pin_capsule_profile(self.project, "full")
         self.fake.write_text(FAKE_DRAFT)
         store = self.manager()
         sid = store.create(self.automatic(store))["id"]
@@ -1114,6 +1134,8 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
             project, number = self.root / f"project-{provider}-{len(self.calls)}", len(self.calls)
             project.mkdir()
             install_knowledge_fixture(project)
+            # Delivered and opened counts follow a delivered shared document.
+            pin_capsule_profile(project, "full")
             self.fake.write_text(fake)
             with patch.object(sessions.providers, "discover_providers", return_value=[
                     {"id": provider, "name": "Offline fixture", "available": True, "executable": str(self.fake)}]), \
@@ -1768,6 +1790,8 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
         self.assertEqual(self.calls, [])
 
     def test_funnel_diagnosis_prepare_replaces_previous_child_with_current_metadata_only(self):
+        # The funnel and the fingerprints come from the full capsule's manifest.
+        pin_capsule_profile(self.project, "full")
         store = self.manager()
         sid = store.create(self.options(store))['id']
         waiting = self.wait_status(store, sid, 'awaiting_context')
@@ -1842,6 +1866,8 @@ print(json.dumps({"type":"result","subtype":"success","is_error":False,"result":
 
 
     def test_ordinary_receipt_prepare_get_save_restart_and_content_exclusion(self):
+        # The ordinary receipt is built from the full capsule's manifest.
+        pin_capsule_profile(self.project, "full")
         store = self.manager()
         sid = store.create(self.automatic(store))['id']
         completed = self.wait_status(store, sid, 'completed')

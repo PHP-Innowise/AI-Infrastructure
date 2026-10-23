@@ -4,6 +4,27 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Seeded projects ship the recall capsule — 2026-10-22
+
+- memory-seed's `runtime.json.template` sets `capsule_profile: recall`, as
+  the four editions do: a generated project's automatic capsule carries the
+  working state, the recent files and what the task itself saved, and
+  `retrieve` still searches everything. Details in the root `CHANGELOG.md`.
+  The policy lock was regenerated for the changed asset.
+
+### Seeded runtime names its capsule profile flag — 2026-10-22
+
+- memory-seed's `context.py` carries the `CAPSULE_PROFILE_FLAG` marker, by
+  which a helper such as Harness tells that `refresh` takes
+  `--capsule-profile`. The policy lock was regenerated for the changed asset.
+
+### Seeded excerpts quote a chunk's rule, not its Sources footer — 2026-10-22
+
+- memory-seed's `context_retrieval.py` skips a Memory Bank chunk's
+  citation-only `## Sources` footer whatever selected it, as it did for linked
+  selections: a request naming a cited file got the paths without the rule.
+  The policy lock was regenerated for the changed asset.
+
 ### Seeded memory consolidates only on request — 2026-10-21
 
 - memory-seed's `runtime.json.template` ships `automatic_consolidation` and

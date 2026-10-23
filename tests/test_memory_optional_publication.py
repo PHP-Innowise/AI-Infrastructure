@@ -219,6 +219,15 @@ class InlineSourceAdmissionTests(unittest.TestCase):
         cap=dict(self.cap,semantic=[],selected=[]);proof=dict(self.proof,selected=[],capsule_sha256=self.digest(cap));self.assertEqual({},self.accept(cap,proof))
         with self.assertRaises(SessionError):self.accept(cap,{})
 
+    def test_no_document_and_no_proof_need_no_fingerprints(self):
+        # The navigation and recall profiles send no proof for a capsule that
+        # carries no document: there is nothing to fingerprint. A capsule with
+        # a document and no proof is still refused.
+        cap=dict(self.cap,semantic=[],selected=[])
+        for allow in (True,False):
+            with self.subTest(allow=allow):self.assertEqual({},TaskContext._source_hashes(Path('/unused-avocet'),cap,provenance=None,allow_local=allow))
+        with self.assertRaises(SessionError):TaskContext._source_hashes(Path('/unused-avocet'),self.cap,provenance=None,allow_local=True)
+
     def test_wrong_profile_scope_task_revision_frame_and_permission_refused(self):
         for changed in ({'profile':'foreign'},{'scope':'governed'},{'task_uuid':'foreign'},{'task_revision':True},{'capsule_sha256':'0'*64},{'extra':0}):
             with self.subTest(changed=changed):

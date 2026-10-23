@@ -234,18 +234,21 @@ class TaskContext:
     @staticmethod
     def _source_hashes(root, capsule, home=None, *, provenance=None, allow_local=False):
         manifest = capsule.get('manifest')
-        if manifest is None and allow_local:
-            return TaskContext._inline_source_hashes(capsule, provenance, home)
-        if manifest is None and not any(
+        if manifest is None and (provenance is None or not allow_local) and not any(
             isinstance(item, dict) and isinstance(item.get('path'), str)
             for layer in ('procedural', 'semantic', 'episodic', 'selected')
-            for item in capsule.get(layer, [])
+            for item in (capsule.get(layer) if type(capsule.get(layer)) is list else ())
         ):
             # A capsule that carries no document - the navigation profile's
-            # working state and recent files, or a turn whose index could not
-            # be trusted - selected nothing to fingerprint, and the runtime
-            # records no delivery for it. There is nothing to approve.
+            # working state and recent files, recall's when nothing of the
+            # task's own matched, or a turn whose index could not be trusted -
+            # selected nothing to fingerprint, and the runtime records no
+            # delivery and sends no proof for it. There is nothing to approve.
+            # A proof that does arrive over the local transport is checked as
+            # always.
             return {}
+        if manifest is None and allow_local:
+            return TaskContext._inline_source_hashes(capsule, provenance, home)
         if not isinstance(manifest, str) or not re.fullmatch(
             r'(?:project-brain/control|memory-bank/local)/retrieval-manifests/'
             r'[0-9a-f-]{36}\.json', manifest,

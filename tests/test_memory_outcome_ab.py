@@ -10,6 +10,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -89,6 +90,20 @@ class CounterTest(unittest.TestCase):
         counter.feed({"type": "turn.completed", "usage": {"input_tokens": 5}})
         self.assertTrue(counter.finished)
         self.assertEqual({"input_tokens": 5}, counter.usage)
+
+    def test_a_finished_answer_naming_gold_is_an_answer_only_without_a_touch(self) -> None:
+        counter = ab.Counter(self.corpus, ["src/Gold.php"], cap=40)
+        counter.feed(event("item.started", self.command("1", "context.py retrieve rounding")))
+        counter.feed(event("item.completed", {"id": "m1", "type": "agent_message", "text": "Looking."}))
+        counter.feed(event("item.completed", {"id": "m2", "type": "agent_message",
+                                              "text": "The rounding lives in `Gold.php`, saved last session."}))
+        self.assertFalse(counter.answered())
+        counter.feed({"type": "turn.completed", "usage": {}})
+        self.assertTrue(counter.answered())
+        elsewhere = ab.Counter(self.corpus, ["src/Gold.php"], cap=40)
+        elsewhere.feed(event("item.completed", {"id": "m", "type": "agent_message", "text": "See src/Other.php."}))
+        elsewhere.feed({"type": "turn.completed", "usage": {}})
+        self.assertFalse(elsewhere.answered())
 
 
 class HookArgumentsTest(unittest.TestCase):
@@ -194,6 +209,37 @@ class ReportTest(unittest.TestCase):
         self.assertTrue(ab.valid_arm("capsule", [run]))
         self.assertFalse(ab.valid_arm("off", [{**run, "capsule_delivered": False}]))
 
+    def test_the_recall_metric_counts_an_answer_naming_a_needed_file(self) -> None:
+        answer = {"stopped": "finished", "calls_to_gold": None, "calls_to_answer": 2}
+        self.assertEqual(41, ab.censored(answer, 40))
+        self.assertEqual(2, ab.censored(answer, 40, "recall"))
+        self.assertEqual(41, ab.censored({"calls_to_gold": None, "calls_to_answer": None}, 40, "recall"))
+        self.assertEqual(5, ab.censored({"calls_to_gold": 5, "calls_to_answer": None}, 40, "recall"))
+
+    def test_recall_arms_are_compared_by_the_results_own_metric(self) -> None:
+        def run(gold, answer, delivered, ran, saved=False):
+            return {"stopped": "finished", "calls_to_gold": gold, "calls_to_answer": answer,
+                    "capsule_delivered": delivered, "hook_ran": ran, "saved_delivered": saved}
+        items = {f"T{n}": {"status": "ok", "arms": {
+            "navigation": [run(None, None, False, True), run(9, None, False, True)],
+            "recall": [run(None, 1, True, True, True), run(None, 3, False, True)],
+        }} for n in range(20)}
+        result = {"meta": {"cap": 40, "metric": "recall"}, "items": items}
+        summary = ab.summarize(result, ("navigation", "recall"))
+        self.assertEqual("recall", summary["metric"])
+        self.assertEqual(20, summary["pairs"])
+        self.assertEqual(25.0, summary["mean_navigation"])
+        self.assertEqual(2.0, summary["mean_recall"])
+        self.assertEqual("recall-helps", summary["verdict"])
+        self.assertEqual((0, 20), (summary["touched_navigation"], summary["touched_recall"]))
+        self.assertEqual((0, 20), (summary["saved_delivered_navigation"], summary["saved_delivered_recall"]))
+        self.assertEqual(41.0, ab.summarize(result, ("navigation", "recall"), "gold")["mean_recall"])
+
+    def test_a_recall_run_needs_the_hook_but_not_a_manifest(self) -> None:
+        ran = {"stopped": "gold", "calls_to_gold": 3, "capsule_delivered": False, "hook_ran": True}
+        self.assertTrue(ab.valid_arm("recall", [ran, {**ran, "capsule_delivered": True}]))
+        self.assertFalse(ab.valid_arm("recall", [{**ran, "hook_ran": False}]))
+
     def test_the_report_refuses_an_unknown_comparison(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = Path(directory) / "result.json"
@@ -207,8 +253,8 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(ab.bootstrap([1.0, 2.0, 3.0]), ab.bootstrap([1.0, 2.0, 3.0]))
 
 
-class SampleTest(unittest.TestCase):
-    """Cold starts from a synthetic Claude Code transcript."""
+class DemoProject(unittest.TestCase):
+    """A Git project and its synthetic Claude Code transcripts."""
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -244,6 +290,10 @@ class SampleTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.directory.cleanup()
 
+
+class SampleTest(DemoProject):
+    """Cold starts from a synthetic Claude Code transcript."""
+
     def test_a_cold_start_keeps_changed_files_the_prompt_does_not_name(self) -> None:
         before = ab.instant("2026-10-07")
         tasks = list(ab.cold_starts(self.project, self.transcripts, None, before))
@@ -257,6 +307,210 @@ class SampleTest(unittest.TestCase):
     def test_bare_dates_are_utc_midnight(self) -> None:
         self.assertEqual("2026-10-07T00:00:00+00:00", ab.instant("2026-10-07").isoformat())
         self.assertIsNone(ab.instant("tomorrow"))
+
+
+class RecallSourcesTest(DemoProject):
+    """First turns that answered from files they read, from synthetic transcripts."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        for number in range(12):
+            (self.project / "src" / f"Other{number}.php").write_text("<?php\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.project), "add", "-A"], check=True,
+                       env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        # The corpus for a question is the last commit before it.
+        dated = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+                 "GIT_AUTHOR_DATE": "2026-09-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-09-01T00:00:00Z"}
+        subprocess.run(["git", "-C", str(self.project), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-q", "-m", "dated"], check=True, env=dated)
+        root = str(self.project)
+        folder = ab.transcript_directory(self.transcripts, self.project)
+        answer = ("The rounding happens in Gold.php: amounts are rounded half-up to two places before "
+                  "the invoice total is summed, so line totals and the grand total can differ by a cent. "
+                  "Named.php only formats the result for display. ") * 2
+        reader = [
+            {"type": "user", "timestamp": "2026-09-02T09:00:00Z", "cwd": root,
+             "message": {"content": "Where does the invoice rounding happen?"}},
+            {"type": "assistant", "timestamp": "2026-09-02T09:01:00Z", "cwd": root, "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": f"{root}/src/Gold.php"}},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": f"{root}/src/Named.php"}},
+            ]}},
+            {"type": "assistant", "timestamp": "2026-09-02T09:02:00Z", "cwd": root,
+             "message": {"content": [{"type": "text", "text": answer}]}},
+            {"type": "user", "timestamp": "2026-09-02T09:10:00Z", "cwd": root, "message": {"content": "Thanks"}},
+        ]
+        (folder / "session-2.jsonl").write_text("\n".join(json.dumps(record) for record in reader) + "\n",
+                                                encoding="utf-8")
+        short = [dict(reader[0], timestamp="2026-09-03T09:00:00Z"), reader[1],
+                 {**reader[2], "message": {"content": [{"type": "text", "text": "Gold.php."}]}}]
+        (folder / "session-3.jsonl").write_text("\n".join(json.dumps(record) for record in short) + "\n",
+                                                encoding="utf-8")
+        # Later work on twelve other files pushes the two out of the ten the
+        # capsule shows; the session after it is the later question's moment.
+        busy = [
+            {"type": "user", "timestamp": "2026-09-05T09:00:00Z", "cwd": root,
+             "message": {"content": "Tidy the other services"}},
+            {"type": "assistant", "timestamp": "2026-09-05T09:01:00Z", "cwd": root, "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": f"{root}/src/Other{number}.php"}}
+                for number in range(12)]}},
+        ]
+        (folder / "session-4.jsonl").write_text("\n".join(json.dumps(record) for record in busy) + "\n",
+                                                encoding="utf-8")
+        later = {"type": "user", "timestamp": "2026-09-06T09:00:00Z", "cwd": root,
+                 "message": {"content": "Next thing"}}
+        (folder / "session-5.jsonl").write_text(json.dumps(later) + "\n", encoding="utf-8")
+
+    def sources(self) -> list:
+        return list(ab.recall_sources(self.project, self.transcripts, None, ab.instant("2026-10-07")))
+
+    def test_a_turn_that_read_and_answered_is_a_source_and_one_that_changed_is_not(self) -> None:
+        sources = self.sources()
+        # session-1 changed files, session-3 answered in two words.
+        self.assertEqual(["session-2"], [source["session"] for source in sources])
+        source = sources[0]
+        self.assertEqual(["src/Gold.php", "src/Named.php"], source["read"])
+        self.assertEqual(["src/Gold.php", "src/Named.php"], source["named"])
+        self.assertEqual("2026-09-02T09:03:00Z", source["ts"])
+        self.assertEqual(ab.task_id("demo", "2026-09-02T09:03:00Z"), source["id"])
+        # session-3 still shows the two files; after session-4 they are gone.
+        self.assertEqual("2026-09-06T09:00:00Z", source["later"])
+
+    def scenario(self, **changes) -> dict:
+        return {"id": self.sources()[0]["id"], "learning": {
+            "type": "finding", "title": "Invoice rounding happens per line",
+            "consequence": "Amounts are rounded half-up to two places per line before the total is summed.",
+            "sources": ["src/Gold.php"]},
+            "needed": ["src/Gold.php"], "prompt": "Why can the invoice total differ by a cent?", **changes}
+
+    def test_an_authored_scenario_must_fit_its_source(self) -> None:
+        source = self.sources()[0]
+        self.assertIsNone(ab.recall_problem(source, self.scenario()))
+        for changes, reason in (
+            ({"prompt": "Look at Gold.php again"}, "names a needed file"),
+            ({"needed": ["src/Named.php"]}, "among the learning's sources"),
+            ({"learning": {**self.scenario()["learning"], "sources": ["src/Other.php"]}}, "the source turn read"),
+            ({"learning": {**self.scenario()["learning"], "type": "event"}}, "finding or decision"),
+            ({"learning": {**self.scenario()["learning"], "consequence": "user: paste\nassistant: log"}},
+             "record-result refuses"),
+        ):
+            with self.subTest(reason=reason):
+                self.assertIn(reason, ab.recall_problem(source, self.scenario(**changes)) or "")
+
+    def test_recall_set_keeps_valid_scenarios_with_their_save(self) -> None:
+        base = Path(self.directory.name)
+        sources_path, authored, out = base / "sources.json", base / "authored.json", base / "set.json"
+        sources = self.sources()
+        # A file the turn read but the corpus does not hold: record-result
+        # would refuse a learning that cites it.
+        ghost = {**sources[0], "id": "T-ghost", "read": [*sources[0]["read"], "src/Ghost.php"]}
+        ab.stand.write_json(sources_path, {"sources": [*sources, ghost]})
+        cites_ghost = self.scenario(id="T-ghost", learning={**self.scenario()["learning"],
+                                                             "sources": ["src/Gold.php", "src/Ghost.php"]})
+        ab.stand.write_json(authored, [self.scenario(), {"id": "T-unknown", "skip": "no"}, cites_ghost])
+        root = ["--projects-root", str(Path(self.directory.name) / "Desktop")]
+        self.assertEqual(0, ab.main(["recall-set", "--sources", str(sources_path), "--scenarios", str(authored),
+                                     *root, "--n", "5", "--seed", "1", "--out", str(out)]))
+        document = json.loads(out.read_text(encoding="utf-8"))
+        self.assertEqual("recall", document["kind"])
+        self.assertEqual({"T-unknown": "no such source",
+                          "T-ghost": "learning sources missing from the corpus: src/Ghost.php"}, document["refused"])
+        task = document["tasks"][0]
+        self.assertEqual(["src/Gold.php"], task["gold"])
+        self.assertEqual([{"learnings": [self.scenario()["learning"]], "verified": True}], task["saves"])
+        later = base / "later.json"
+        self.assertEqual(0, ab.main(["recall-set", "--sources", str(sources_path), "--scenarios", str(authored),
+                                     *root, "--regime", "later", "--n", "5", "--seed", "1", "--out", str(later)]))
+        moved = json.loads(later.read_text(encoding="utf-8"))["tasks"][0]
+        self.assertEqual(("2026-09-06T09:00:00Z", "later", task["id"]), (moved["ts"], moved["regime"], moved["source"]))
+        self.assertEqual(ab.task_id("demo", f"2026-09-06T09:00:00Z#{task['id']}"), moved["id"])
+        self.assertEqual(task["saves"], moved["saves"])
+        excluded = base / "excluded.json"
+        self.assertEqual(0, ab.main(["recall-set", "--sources", str(sources_path), "--scenarios", str(authored),
+                                     *root, "--exclude-id", task["id"], "--n", "5", "--seed", "1", "--out", str(excluded)]))
+        self.assertEqual([], json.loads(excluded.read_text(encoding="utf-8"))["tasks"])
+
+
+class LaterMomentTest(unittest.TestCase):
+    """The later question waits until the capsule's recent files hide the subject."""
+
+    class Repository:
+        def commit_before(self, moment):
+            return "c0ffee"
+
+        def tree(self, commit):
+            return "7ree"
+
+    def later(self, present: list) -> object:
+        when = ab.instant
+        history = [(when("2026-09-01T10:00:00Z"), ["src/Gold.php"]),
+                   (when("2026-09-02T10:00:00Z"), [f"src/X{number}.php" for number in range(10)])]
+        starts = [when("2026-09-01T09:59:00Z"), when("2026-09-03T09:00:00Z")]
+        with mock.patch.object(ab.stand, "read_git", return_value="\n".join(present)):
+            return ab.later_moment(Path("/demo"), self.Repository(), history, starts,
+                                   when("2026-09-01T10:01:00Z"), ["src/Gold.php"], when("2026-10-07"))
+
+    def test_ten_newer_files_hide_the_subject(self) -> None:
+        self.assertEqual("2026-09-03T09:00:00Z",
+                         self.later(["src/Gold.php", *(f"src/X{number}.php" for number in range(10))]))
+
+    def test_files_gone_from_the_corpus_hide_nothing(self) -> None:
+        # The capsule skips recent files the corpus no longer has, so the
+        # subject is still the one it shows.
+        self.assertIsNone(self.later(["src/Gold.php"]))
+
+    def test_a_subject_gone_from_the_corpus_has_no_later_question(self) -> None:
+        self.assertIsNone(self.later([f"src/X{number}.php" for number in range(10)]))
+
+
+class PlantSavesTest(unittest.TestCase):
+    """A save recorded through the runtime's own record-result, then committed and indexed."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        base = Path(self.directory.name)
+        self.corpus = base / "corpus"
+        shutil.copytree(ROOT / "PHP Core" / "memory-bank" / "scripts", self.corpus / "memory-bank" / "scripts",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (self.corpus / "memory-bank" / "chunks").mkdir()
+        (self.corpus / "memory-bank" / "README.md").write_text("# Memory Bank\n", encoding="utf-8")
+        (self.corpus / "memory-bank" / "INDEX.md").write_text(
+            "# Memory Index\n\n| ID | Title | Type | Scope | Tags | Status | Last Verified | File |\n"
+            "| --- | --- | --- | --- | --- | --- | --- | --- |\n", encoding="utf-8")
+        (self.corpus / ".gitignore").write_text("memory-bank/local/\n", encoding="utf-8")
+        (self.corpus / "project-brain" / "config").mkdir(parents=True)
+        (self.corpus / "project-brain" / "config" / "runtime.json").write_text(
+            json.dumps({"mode": "governed", "automatic_promotion": True}), encoding="utf-8")
+        (self.corpus / "src").mkdir()
+        (self.corpus / "src" / "Gold.php").write_text("<?php\n// invoice rounding\n", encoding="utf-8")
+        self.cache = base / "cache"
+        (self.cache / "home").mkdir(parents=True)
+        self.task = {"id": "T0123456789", "ts": "2026-09-02T09:03:00Z", "saves": [{"learnings": [{
+            "type": "finding", "title": "Invoice rounding happens per line",
+            "consequence": "Amounts are rounded half-up per line before the total is summed.",
+            "sources": ["src/Gold.php"]}], "verified": True}]}
+        self.env = ab.stand.runtime_env(self.cache, ab.stand.parse_instant(self.task["ts"]), None)
+        ab.stand.commit_corpus(self.corpus, self.env, None, None, ab.corpus_branch(self.task))
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_the_save_lands_on_the_branch_task_promoted_and_committed(self) -> None:
+        planted = ab.plant_saves(self.task, self.corpus, self.env, 60, Path(self.directory.name) / "saves")
+        self.assertEqual((1, 1), (planted["records"], planted["promoted"]))
+        chunks = [path for path in planted["documents"] if path.startswith("memory-bank/chunks/")]
+        self.assertEqual(1, len(chunks), planted["documents"])
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=str(self.corpus), env=self.env,
+                                capture_output=True, text=True)
+        self.assertEqual("", status.stdout)
+        refreshed = ab.stand.run_runtime(self.corpus, ["refresh", "--query", "invoice rounding per line",
+                                                       "--task-id", ab.corpus_branch(self.task), "--ephemeral",
+                                                       "--capsule-profile", "recall"], self.env, 60)
+        self.assertEqual(0, refreshed["exit"], refreshed["stderr"])
+        self.assertIn("Invoice rounding happens per line", refreshed["stdout"].decode("utf-8"))
+
+    def test_a_set_without_saves_plants_nothing(self) -> None:
+        self.assertEqual({}, ab.plant_saves({"id": "T1", "ts": self.task["ts"]}, self.corpus, self.env, 60,
+                                            Path(self.directory.name) / "saves"))
 
 
 class RunArmTest(unittest.TestCase):
@@ -280,11 +534,17 @@ class RunArmTest(unittest.TestCase):
                     health.write(json.dumps({{"source": "refresh"}}) + "\\n")
                 if "--navigation" not in sys.argv:
                     (manifests / "hook.json").write_text(json.dumps(
-                        {{"entry_point": "refresh", "token_estimates": {{"total": 812}}}}))
+                        {{"entry_point": "refresh", "token_estimates": {{"total": 812}},
+                         "selected": [{{"path": "memory-bank/chunks/MEM-1-saved.md"}}]}}))
             (manifests / "agent.json").write_text(json.dumps({{"entry_point": "retrieve"}}))
             def emit(event):
                 print(json.dumps(event), flush=True)
             emit({{"type": "thread.started"}})
+            if "--answer" in sys.argv:
+                emit({{"type": "item.started", "item": {{"id": "1", "type": "command_execution", "command": "/usr/bin/bash -lc 'ls'"}}}})
+                emit({{"type": "item.completed", "item": {{"id": "m", "type": "agent_message", "text": "It is in src/Gold.php."}}}})
+                emit({{"type": "turn.completed", "usage": {{}}}})
+                sys.exit(0)
             emit({{"type": "item.started", "item": {{"id": "1", "type": "command_execution", "command": "/usr/bin/bash -lc 'ls'"}}}})
             emit({{"type": "item.started", "item": {{"id": "2", "type": "command_execution", "command": "/usr/bin/bash -lc 'cat src/Gold.php'"}}}})
             time.sleep(30)
@@ -318,11 +578,41 @@ class RunArmTest(unittest.TestCase):
         self.assertFalse(outcome["capsule_delivered"])
         self.assertFalse(outcome["hook_ran"])
 
+    def test_an_answer_naming_the_needed_file_is_counted_and_the_save_seen(self) -> None:
+        command = [sys.executable, str(self.fake), "--dangerously-bypass-hook-trust", "--answer", "prompt"]
+        outcome = ab.run_arm(command, self.corpus, ["src/Gold.php"], cap=40, timeout=20,
+                             saved=["memory-bank/chunks/MEM-1-saved.md"])
+        self.assertEqual("finished", outcome["stopped"])
+        self.assertIsNone(outcome["calls_to_gold"])
+        self.assertEqual(1, outcome["calls_to_answer"])
+        self.assertTrue(outcome["saved_delivered"])
+        unseen = ab.run_arm(command, self.corpus, ["src/Gold.php"], cap=40, timeout=20,
+                            saved=["memory-bank/chunks/MEM-2-other.md"])
+        self.assertFalse(unseen["saved_delivered"])
+
     def test_the_deadline_stops_a_quiet_session(self) -> None:
         command = [sys.executable, str(self.fake), "prompt"]
         outcome = ab.run_arm(command, self.corpus, ["src/Missing.php"], cap=40, timeout=2)
         self.assertEqual("timeout", outcome["stopped"])
         self.assertIsNone(outcome["calls_to_gold"])
+
+
+class RunRefusesTest(unittest.TestCase):
+    def test_a_set_with_one_id_twice_is_refused_before_any_run(self) -> None:
+        # Two sources asked at the same later session once shared an ID, and
+        # the second result overwrote the first.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            task = {"id": "T1", "project": "demo", "ts": "2026-09-06T09:00:00Z", "prompt": "q", "gold": ["a"]}
+            (base / "set.json").write_text(json.dumps({"kind": "recall", "tasks": [task, dict(task)]}),
+                                           encoding="utf-8")
+            fake = base / "codex"
+            fake.write_text("#!/bin/sh\necho codex-cli 0\n", encoding="utf-8")
+            fake.chmod(0o755)
+            code = ab.main(["run", "--set", str(base / "set.json"), "--out", str(base / "result.json"),
+                            "--codex", str(fake), "--cache", str(base / "cache")])
+            self.assertEqual(2, code)
+            self.assertFalse((base / "result.json").exists())
 
 
 class OutputsStayOutsideTheCloneTest(unittest.TestCase):

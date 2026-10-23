@@ -28,6 +28,153 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A person's refresh asks for the full capsule on Windows too — 2026-10-22
+
+- Harness read the `CAPSULE_PROFILE_FLAG` marker through `O_NOFOLLOW`, as it
+  reads the source-hint and provenance markers, and Windows has no
+  `O_NOFOLLOW`: there the marker counted as absent, and a person's knowledge
+  `refresh` ran under the shipped `recall` and searched only the task's own
+  saves. The marker only widens that refresh, so without `O_NOFOLLOW` it is
+  read from a regular file that is not a link.
+- `test_an_explicit_refresh_searches_everything_without_o_nofollow` fails on
+  `46db067e`.
+
+### The editions ship the recall capsule — 2026-10-22
+
+- The four editions' `project-brain/config/runtime.json` and the generator's
+  `runtime.json.template` set `capsule_profile: recall`: the automatic capsule
+  carries the working state, the recent files and what the task's own saves
+  recorded. The code's default stays `full`, so a project whose `runtime.json`
+  names no profile keeps the capsule it had. An explicit `retrieve`, MCP
+  `memory_retrieve`, Harness's explicit `refresh` and the LongMemEval bridge
+  still search everything.
+- The third task-outcome measurement sealed three conditions
+  (`docs/MEMORY-EVAL.md`). On recall sets `recall` was not worse than `full`;
+  on cold starts it was navigation byte for byte, and navigation had reached
+  the changed file in 2.92 fewer calls than `full` on 30 client tasks. The
+  third condition - every suite that saves a result and expects the next
+  capsule to carry it stays green with `recall` shipped - failed on the two
+  blockers the next two entries fix. Run again with `recall` shipped,
+  `check.py` passed every job it ran.
+- Tests that check a layer `recall` leaves out on purpose pin `full` in their
+  fixtures: the shared document in the Cursor rule, the document beside
+  broken UTF-8, Hindsight's source hints, the Git calls and the working
+  record re-read on the full search path, the membership index's full capsule
+  render, and Harness's first-message document, funnel diagnosis, ordinary
+  receipt and opened-memory report.
+- `AGENTS.md` in the four editions, `README_EN.md`, `README_RU.md`,
+  `harness/README.md` and `docs/CONTEXT-AND-MEMORY.md` say what the automatic
+  capsule carries.
+
+### Harness works under a capsule without documents — 2026-10-22
+
+Under the navigation and recall profiles a capsule may carry no document -
+recall's whenever none of the task's own saves matches - and Harness assumed
+one in three places.
+
+- **Automatic memory.** `3ea0b262` let a capsule with no document through
+  only off the local transport. On POSIX, where Harness asks the runtime for
+  a source proof and runs the turn ephemeral, such a capsule still went to
+  the proof check, and the runtime sends no proof when there is no document
+  to prove: every such turn failed `prepare` with "The local source
+  provenance is unavailable or invalid". A capsule with no document and no
+  proof needs no fingerprints on either path now; a proof that does arrive is
+  checked as before, and a document without one is still refused.
+- **A person's refresh.** The knowledge `refresh` action ran under the
+  project's automatic profile. It is an explicit request, like MCP
+  `memory_retrieve`, and passes `--capsule-profile full` when the runtime
+  takes it - `context.py` names that with a `CAPSULE_PROFILE_FLAG` marker, read
+  the way Harness reads the source-hint and provenance markers.
+- **The LongMemEval bridge** measures retrieval and asks `assemble_capsule`
+  for the full capsule when the runtime knows the profile.
+- `test_no_document_and_no_proof_need_no_fingerprints`,
+  `test_an_explicit_refresh_searches_whatever_the_automatic_capsule_carries`
+  and `test_the_bridge_measures_the_full_capsule_whatever_the_project_ships`
+  fail on `60be9fb8`.
+
+### A Memory Bank chunk is quoted by its rule, not its Sources footer — 2026-10-22
+
+- `excerpt_section` skipped a citation-only `## Sources` footer for linked
+  selections only. A chunk found by its own words - a request naming the
+  file it cites - was quoted by that footer: the paths without the rule.
+- The Harness recall suite showed it under the recall capsule: the corrected
+  learning reached the next message as a list of sources. Under `full` the
+  same chunk was quoted the same way, and the learning arrived only because
+  the cited file came along.
+- Every Memory Bank chunk is held to the linked selections' rule now; a
+  request about the sources still gets them, and a distinctive pointer still
+  carries no excerpt.
+- `test_a_chunk_found_by_its_own_words_quotes_its_rule_too` replaces
+  `test_lexical_selection_and_distinctive_pointer_are_unchanged`, which pinned
+  the old quote, and fails on `1d4f4af5`.
+- The 327-prompt stand under `full` does not move: the same documents, 217
+  useful, the same capsule characters on every prompt.
+
+### A recall capsule: navigation plus the task's own saves — 2026-10-22
+
+- `capsule_profile: recall` (also `CONTEXT_CAPSULE_PROFILE` and
+  `refresh --capsule-profile recall`) is the navigation capsule plus what the
+  task's own saves recorded, searched by the request among themselves. The
+  default stays `full`, and an explicit `retrieve` or MCP `memory_retrieve`
+  still searches everything.
+- What counts as the task's own:
+  - a finding or decision whose name is the one a result of this task gives
+    a learning (`record-result`, `native-result`, MCP
+    `memory_record_result`): the name is computed again from the task's UUID
+    and the record's type, title and sources;
+  - a finding or decision whose name starts with the task's external ID or a
+    ticket it names: a Harness draft (`<task>-finding-<hex>`), or findings an
+    agent filed as `CMS-739-review-4` while on `feature/CMS-739-…`;
+  - the Memory Bank chunk any of these was promoted to, found by the record
+    it cites, also after compaction archives the record. A saved finding is
+    resolved as it is written and no resolved finding is indexed, so for a
+    finding the chunk is what the capsule can deliver.
+- With none of them indexed the capsule is navigation's: no search and no
+  delivery record. Recorded history, path and file links, related knowledge
+  and source hints are left out; a conflict partner is still delivered.
+  Lightweight mode has no governed saves, so there `recall` is navigation.
+- `scripts/memory_outcome_ab.py`:
+  - a `recall` arm;
+  - recall sets: `recall-sources` lists first turns that answered from files
+    they read, `recall-set` checks the learning and the follow-up question
+    written for each against it, and `run` records the save on the corpus
+    branch's task through `record-result` before any arm;
+  - two regimes: the question a minute after the source turn (`next`), or at
+    the first later session whose recent files no longer show the files the
+    answer named (`later`);
+  - the recall metric: calls to the first touch of a file the save cites, or
+    to an answer naming one; `report --metric`;
+  - each run records whether the hook delivered the save;
+  - `--exclude-set` also takes a sample this tool made;
+  - `recall-set` refuses a learning that cites a file the corpus at the
+    question lacks - a file the source turn read before it was committed -
+    which `record-result` would refuse when the save is planted;
+  - a later question's task ID includes its source: several sources asked at
+    the same later session shared one ID, and `run`, which now refuses a set
+    with a repeated ID, kept only the last of their results.
+- The measurement, under a rule sealed before the run
+  (`docs/MEMORY-EVAL.md`, "The third measurement"):
+  - On 30 recall scenarios in two regimes, `recall` was as good as `full`:
+    - next: 0.00 calls [−0.26, +0.28];
+    - later: −0.21 [−0.42, −0.02], and −0.11 [−0.32, +0.11] with four
+      results recovered.
+  - The hook delivered the save in every pair.
+  - On 14 cold starts the `recall` capsule equals navigation's byte for byte.
+  - With `recall` shipped, the three runtime recall suites navigation breaks
+    pass. But the Harness recall suite fails: a promoted chunk is quoted by its
+    `Sources` footer, which `full` hides by delivering the cited file beside
+    it. The Harness's automatic memory also fails on a capsule without a
+    manifest. `recall` therefore stays opt-in and the default stays `full`.
+- The core change was made in `PHP Core/` and written to the other editions,
+  the generator asset and the mirrors by `scripts/core_sync.py --write`; the
+  generator's policy lock was regenerated.
+- Tests: a saved result reaches the next capsule under `recall` and the bank's
+  other matching chunk does not; another task's save does not, and without
+  its own the capsule is navigation's; records filed under the task or its
+  ticket count and a longer ticket number does not; a promoted save is still
+  found after compaction; the refresh flag selects `recall`; an explicit
+  retrieval still searches.
+
 ### A navigation-only capsule, behind an experiment switch — 2026-10-21
 
 - `capsule_profile` in `runtime.json` (or `CONTEXT_CAPSULE_PROFILE`) chooses

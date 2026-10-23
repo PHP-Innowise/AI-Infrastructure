@@ -946,30 +946,65 @@ delivery hooks leave alone: rendering a withheld capsule would satisfy their
 
 What the automatic capsule carries is a separate setting:
 `CONTEXT_CAPSULE_PROFILE`, then `capsule_profile` in `runtime.json`, defaulting
-to `full`.
+to `full`. The four editions and the generator's template ship `recall`; a
+project whose `runtime.json` names no profile keeps `full`.
 
 - **`full`:** the established capsule — working state, recent files and the
   retrieved semantic and episodic documents.
 - **`navigation`:** the working state and the recent files only. It searches
   nothing and records no delivery.
+- **`recall`:** navigation plus what the task's own saves recorded, and
+  nothing else. The request is searched only among those documents; without
+  one of them indexed, the capsule is navigation's. The task's own saves are
+  the findings and decisions:
+  - whose name is the one a result of this task gives a learning
+    (`record-result`, `native-result`, MCP `memory_record_result`);
+  - or whose name starts with the task's external ID or a ticket it names
+    (a Harness draft `<task>-finding-<hex>`, a finding an agent filed as
+    `CMS-739-review-4` on `feature/CMS-739-…`).
+
+  A saved finding is resolved as it is written and no resolved finding is
+  indexed, so what the capsule finds is the Memory Bank chunk it was promoted
+  to: a chunk counts when a record it cites is one of these, before or after
+  compaction archives the record. An open finding or an accepted decision
+  counts itself. Recorded history, path and file links, related knowledge
+  and source hints are left out; a conflict partner is still delivered.
+  Lightweight mode has no governed saves, so there `recall` is navigation.
 
 The profile applies to the automatic entry points (`refresh`, which the Codex
 and Cursor hooks run, and Claude's `hook-context`). An explicit
 `context.py retrieve` always searches. Any other value leaves the turn without
 a capsule and says why, as a broken index does.
 
-`navigation` is an opt-in profile, not the default. On 30 client tasks it
-reached the file a task changed in fewer calls than the full capsule
-(`docs/MEMORY-EVAL.md`, "Measuring task outcomes"). It also turns off
-everything the hook delivers through the document layers:
+`navigation` is an opt-in profile. On 30 client tasks it reached the file a
+task changed in fewer calls than the full capsule (`docs/MEMORY-EVAL.md`,
+"Measuring task outcomes"). It also turns off everything the hook delivers
+through the document layers:
 - a result saved in one session is no longer recalled by the next session's
   capsule;
 - source hints are not delivered;
 - the Cursor rule carries no documents.
 
 An agent can still pull all of these with `context.py retrieve` or the MCP
-`memory_retrieve` tool. The navigation measurement did not cover recall, so the
-default stays `full`.
+`memory_retrieve` tool. `recall` keeps the first of them - a session's saved
+result in the next session's capsule - and drops the other two.
+
+Measured against both (`docs/MEMORY-EVAL.md`, "Measuring task outcomes"):
+- on questions about a saved result, `recall` was as good as `full`;
+- on cold starts it is navigation, byte for byte.
+
+That is why the editions ship it. Two things held it back and are fixed:
+- the Harness's automatic memory required a manifest, which a capsule
+  without documents does not write; such a capsule now needs no source
+  fingerprints, and a proof that does arrive is checked as before;
+- a promoted chunk was quoted by its `Sources` footer, which `full` hid by
+  delivering the cited file beside it; the excerpt now skips a citation-only
+  footer whatever selected the chunk.
+
+The Harness's explicit `refresh` and the LongMemEval bridge ask for `full`,
+as MCP `memory_retrieve` does: they are requests for a search, not the
+automatic capsule. A team that wants the old capsule sets `capsule_profile`
+to `full`.
 
 `retrieval-report` keeps shadow `would_skip` distinct from context actually
 `withheld` in `enforce`. It slices gate results by `mode`, `query_source`,
