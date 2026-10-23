@@ -28,6 +28,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A compaction after a new conversation's first turn hands its memory again — 2026-10-24
+
+- Why: Claude Code writes a new conversation's transcript only after its
+  first prompt hook has run (seen on 2.1.278: the file did not exist at
+  `SessionStart` or at the first `UserPromptSubmit`). That turn kept no
+  transcript position, so a `/compact` or an automatic compaction before the
+  second turn went unseen. The second turn's capsule left out what the first
+  had handed and said `memory: 1 item(s) handed earlier in this conversation
+  still apply`, while the conversation held only the summary.
+- What changes: a transcript not written yet is a position, its start. The
+  next turn reads the file from there and sees the compaction record. Codex
+  0.163 already has its rollout at `SessionStart`, so nothing changes for it.
+- Tests: `test_a_transcript_written_after_the_first_turn_still_shows_a_compaction`
+  in `project-brain/tests/test_runtime.py`, with and without a compaction. It
+  fails without the change. Offline on Claude Code 2.1.278: after a first turn
+  that handed a learning, `/compact` and a second turn, the capsule carries
+  the learning again.
+
 ### The session banner counts the accelerator's own files apart — 2026-10-24
 
 - Why: the session-start banner printed `Branch: … (N uncommitted changes)`

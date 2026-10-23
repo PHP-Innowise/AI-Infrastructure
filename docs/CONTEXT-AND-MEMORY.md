@@ -1087,6 +1087,9 @@ thing while its id and content are. A host that compacts a conversation
 records it in the transcript the hook is given (`--transcript`): Claude Code
 writes a `compact_boundary` record, Codex a `compacted` one. After one, nothing
 counts as handed any more, because the conversation holds a summary of it.
+Claude Code writes a new conversation's transcript only after the first prompt
+hook, so a transcript not written yet counts from its start: a compaction
+before the second turn is seen too.
 Only what the capsule shows counts as handed: an item its rendered text had no
 room for is excluded from the manifest as `capsule-limit` and is handed on a
 later turn.

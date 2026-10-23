@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime sees a compaction after a conversation's first turn — 2026-10-24
+
+- The memory runtime memory-seed copies takes a transcript not written yet
+  as a position, its start. A compaction before the second turn of a new
+  Claude Code conversation then hands its memory again, as the editions'
+  runtime does (root `CHANGELOG.md`, same day). `context_retrieval.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime's status counts the accelerator's own files apart — 2026-10-24
 
 - `context.py status --json` in the runtime memory-seed copies reports
