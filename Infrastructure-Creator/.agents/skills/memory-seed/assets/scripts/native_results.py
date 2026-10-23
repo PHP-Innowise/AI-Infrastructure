@@ -607,7 +607,10 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
         normalized=normalize(root,data,check_files=not begun)
         if (state['task_uuid'] is None and normalized['progress'] is None
                 and not normalized['next_steps'] and not normalized['learnings']):
-            raise BrainError('native-result:nothing-to-record')
+            error=BrainError('native-result:nothing-to-record: no task yet and nothing to start one with; give a '
+                             'progress summary or a learning, or run the command with --skip')
+            error.code='native-result:nothing-to-record'
+            raise error
         if state['task_uuid'] is None:
             try: writable_task(root,state['task_id'],owner)
             except BrainRecordNotFound as error:

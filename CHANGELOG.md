@@ -48,6 +48,10 @@ edition's own files remain in that edition's changelog.
   unexpected fields (at most five, each cut to 40 characters). It calls
   `verified` a top-level boolean. The same validation serves `record-result`
   and the MCP tool.
+- "Nothing to record" says what a result needs (a progress summary, next
+  steps or a checked learning), and the native save's bare
+  `native-result:nothing-to-record` adds that `--skip` is the way out.
+  Conflicting learnings name the title they share.
 - A missing or linked source is named in its refusal, without its `#`
   anchor and cut to 200 characters, so an agent citing several files knows
   which to fix.

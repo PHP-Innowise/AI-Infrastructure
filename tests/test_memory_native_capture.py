@@ -665,6 +665,11 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         gone={**self.payload['learnings'][0],'sources':['src/Gone.php#L3']}
         refused=self.save({**self.payload,'learnings':[gone]},ok=False)
         self.assertIn(b'Source is missing or is not a regular file: src/Gone.php\n',refused.stderr)
+        twice=[self.payload['learnings'][0],{**self.payload['learnings'][0],'consequence':'Another rule.'}]
+        refused=self.save({**self.payload,'learnings':twice},ok=False)
+        self.assertIn(b"two findings titled 'Amber retry boundary' cite the same sources; merge them",refused.stderr)
+        refused=self.save({'verified':True,'learnings':[]},ok=False)
+        self.assertIn(b'Nothing to record: give a progress summary',refused.stderr)
         self.assertEqual('requested',self.state()[1]['phase'])
 
     def test_saved_held_and_omitted_lines_count_learnings_and_chunks_only(self):

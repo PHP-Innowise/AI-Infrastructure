@@ -222,12 +222,13 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
         identity = (item["type"], " ".join(item["title"].casefold().split()),
                     tuple(sorted(item["sources"])))
         if identity in identities and identities[identity] != item:
-            raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result")
+            raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result: two "
+                                f"{item['type']}s titled {item['title'][:80]!r} cite the same sources; merge them")
         identities[identity] = item
     if checked and data.get("verified") is not True:
         raise ResultRefused("unverified", "Attest that each learning was checked against its sources with verified=true")
     if progress is None and steps is None and not checked:
-        raise ResultRefused("nothing", "Nothing to record")
+        raise ResultRefused("nothing", "Nothing to record: give a progress summary, next steps or a checked learning")
     return {"progress": progress, "next_steps": steps, "learnings": checked}
 
 
@@ -905,7 +906,8 @@ def record_result(
             for learning in result["learnings"]:
                 identifier = learning_id(canonical, learning)
                 if identifier in identities and identities[identifier] != learning:
-                    raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result")
+                    raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result: "
+                                        f"{learning['title'][:80]!r}")
                 identities[identifier] = learning
                 for source in learning["sources"]:
                     check_source(root, source)
