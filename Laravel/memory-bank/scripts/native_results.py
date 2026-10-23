@@ -152,6 +152,16 @@ def _invalid_input(detail):
     return error
 
 
+def _overtaken(code, what):
+    """The refusal of a save another writer overtook - in practice a second
+    session on the branch saving first. The bare code left the agent to
+    guess; its instruction says to stop and report the held save."""
+    error = BrainError(f'{code}: {what} after this save was requested; nothing was written: '
+                       'report the held save, do not retry it')
+    error.code = code
+    return error
+
+
 JSON_KINDS = {list: 'an array', str: 'a string', int: 'a number', float: 'a number', bool: 'true or false',
               type(None): 'null'}
 
@@ -617,7 +627,7 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
             try: writable_task(root,state['task_id'],owner)
             except BrainRecordNotFound as error:
                 if error.identifier != state['task_id']: raise
-            else: raise BrainError('native-result:task-changed')
+            else: raise _overtaken('native-result:task-changed','the branch task was created')
             provision(state['task_id'])
             task=writable_task(root,state['task_id'],owner)
             state.update(task_uuid=task['id'],revision=task['revision'])
@@ -625,14 +635,18 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
         if not begun:
             task=writable_task(root,state['task_id'],owner)
             if task['id'] != state['task_uuid']:
-                raise BrainError('native-result:task-changed')
+                raise _overtaken('native-result:task-changed','the branch task was replaced')
         digest=request_digest(state['task_uuid'],normalized)
         if state['digest'] is not None and state['digest'] != digest:
             raise BrainError('native-result:content-changed')
         state['digest']=digest;_write(root,key,state)
-        result=record_result(root,state['task_uuid'],'native-'+token,state['revision'],data,
-                             owner=owner,reason=REASON,attestation='agent',prepared=state['scope'],
-                             replay_only=begun)
+        try:
+            result=record_result(root,state['task_uuid'],'native-'+token,state['revision'],data,
+                                 owner=owner,reason=REASON,attestation='agent',prepared=state['scope'],
+                                 replay_only=begun)
+        except BrainError as error:
+            if str(error) != 'memory-result-v1:prepared_stale_no_write': raise
+            raise _overtaken(str(error),'another session or a person saved the task') from error
         held=any(item['state'] in {'differs','archived-differs'} for item in result['records'])
         state['phase']='held' if held else 'saved';_write(root,key,state)
         return step(result,state['phase'],repeat,

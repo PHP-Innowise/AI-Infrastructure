@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime says to report a save another session overtook — 2026-10-24
+
+- The memory runtime memory-seed copies explains the stale-revision and
+  task-changed refusals of a native save, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
 ### The seeded runtime names the echo behind a raw newline — 2026-10-24
 
 - The memory runtime memory-seed copies adds to the raw-newline refusal that

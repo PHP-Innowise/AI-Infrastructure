@@ -578,6 +578,32 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.one(self.written(lambda:request(recovery)),'stop','failed','unsaved')
         self.one(self.written(lambda:request(recovery)),'stop','skipped','recovery-failed')
 
+    def test_a_save_another_session_overtook_says_to_report_it(self):
+        # Two Claude Code sessions on one branch, offline: the first to save
+        # moved the task's revision, and the second was refused with a bare
+        # code. Nothing is written either way; now the refusal says why and
+        # what to do, and the journal keeps its code.
+        self.call('start','--task-id','research','--goal','Inspect routing')
+        self.begin();self.stop()
+        self.call('update','--task-id','research','--revision','auto','--progress','Another session saved first.')
+        before=self.authority();refused=[]
+        lines=self.written(lambda:refused.append(self.save(ok=False)))
+        self.one(lines,'save','refused','memory-result-v1:prepared_stale_no_write')
+        self.assertIn(b'memory-result-v1:prepared_stale_no_write: another session or a person saved the task after '
+                      b'this save was requested; nothing was written: report the held save, do not retry it',
+                      refused[0].stderr)
+        self.assertEqual(before,self.authority())
+
+    def test_a_task_created_since_the_request_says_to_report_the_save(self):
+        # In a new project the other session's save created the branch task.
+        self.begin();self.stop()
+        self.call('start','--task-id','research','--goal','Inspect routing')
+        refused=[]
+        lines=self.written(lambda:refused.append(self.save(ok=False)))
+        self.one(lines,'save','refused','native-result:task-changed')
+        self.assertIn(b'native-result:task-changed: the branch task was created after this save was requested; '
+                      b'nothing was written',refused[0].stderr)
+
     def test_a_save_that_began_and_stopped_fails_as_incomplete(self):
         lines=self.written(self.interrupt_save)
         self.assertEqual([('prompt','armed',None),('stop','requested',None),('save','error','OSError'),

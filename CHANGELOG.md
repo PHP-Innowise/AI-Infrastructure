@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A save another session overtook says to report it — 2026-10-24
+
+- Why: two Claude Code sessions on one branch, driven offline at once with
+  different results: the first save moved the task's revision, and the
+  second was refused with the bare `memory-result-v1:prepared_stale_no_write`.
+  In a new project the second was refused with `native-result:task-changed`,
+  because the first save had created the branch task. Nothing was written
+  either way, as designed, but the agent read only a code.
+- What changes: on the `native-result` path both refusals say what happened
+  and what to do, for example "another session or a person saved the task
+  after this save was requested; nothing was written: report the held save,
+  do not retry it". The journal keeps the codes. `record-result`,
+  which the Harness reads by its exact text, is unchanged.
+- Tests: two in `tests/test_memory_native_capture.py`, one per refusal; both
+  fail without the change.
+
 ### A raw newline in a save names the echo that made it — 2026-10-24
 
 - Why: driven offline on Claude Code 2.1.278 under zsh, a save piped with a
