@@ -645,7 +645,8 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         # The agent gets one retry. A code alone does not say what to fix;
         # a shell's echo turns the \\n of a JSON string into a real newline.
         self.begin();self.stop();candidate,state=self.state()
-        cases=((b'{"progress": "Line one\nline two", "verified": true, "learnings": []}','write a newline as \\n'),
+        cases=((b'{"progress": "Line one\nline two", "verified": true, "learnings": []}',
+                'write a newline as \\n and a tab as \\t (a plain echo in zsh turns \\n into a line break: pipe with echo -E)'),
                (b'{"progress": "a"}{"progress": "b"}','more than one JSON object'),
                (b'[]','got an array'),
                (b'progress: read the file','not one JSON object (Expecting value at line 1 column 1)'))

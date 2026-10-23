@@ -168,9 +168,11 @@ def _parse_input(stream):
             raise _invalid_input(f'more than one JSON object (more after {where})') from error
         # json's message for a control character already ends in "at".
         detail = f'not one JSON object ({error.msg.removesuffix(" at")} at {where})'
-        # A shell's echo turns the \n of a JSON string into a real newline.
+        # A shell's echo turns the \n of a JSON string into a real newline:
+        # the agent did write \n, so the hint names the echo too.
         if error.msg.startswith('Invalid control character'):
-            detail += '; inside a string, write a newline as \\n and a tab as \\t'
+            detail += ('; inside a string, write a newline as \\n and a tab as \\t (a plain echo in zsh turns '
+                       '\\n into a line break: pipe with echo -E)')
         raise _invalid_input(detail) from error
     except (ValueError, UnicodeError, RecursionError) as error:
         raise _invalid_input('not one UTF-8 JSON object') from error

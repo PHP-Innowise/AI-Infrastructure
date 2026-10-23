@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime names the echo behind a raw newline — 2026-10-24
+
+- The memory runtime memory-seed copies adds to the raw-newline refusal that
+  a plain `echo` in zsh turns `\n` into a line break and that `echo -E`
+  keeps it, as the editions' runtime does (root `CHANGELOG.md`, same day).
+  `native_results.py` changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime sees a compaction after a conversation's first turn — 2026-10-24
 
 - The memory runtime memory-seed copies takes a transcript not written yet

@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A raw newline in a save names the echo that made it — 2026-10-24
+
+- Why: driven offline on Claude Code 2.1.278 under zsh, a save piped with a
+  plain `echo` instead of the command's `echo -E` was refused with "inside a
+  string, write a newline as \n". The agent had written `\n`: zsh's `echo`
+  turned it into a line break. The hint pointed at the JSON, not at the pipe.
+- What changes: the hint adds "(a plain echo in zsh turns \n into a line
+  break: pipe with echo -E)". The journal code is unchanged.
+- Tests: `test_a_refused_input_says_what_to_correct` checks the whole hint.
+  Offline, a stand-in model that pipes with a plain `echo` first and retries
+  as told after the refusal saves on the second call.
+
 ### A compaction after a new conversation's first turn hands its memory again — 2026-10-24
 
 - Why: Claude Code writes a new conversation's transcript only after its
