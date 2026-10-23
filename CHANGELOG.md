@@ -28,6 +28,40 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The prompt hook arms the save request beside the capsule's refresh — 2026-10-23
+
+- Why: the prompt hooks ran two Python processes one after the other:
+  `native-prompt`, which arms the save request, then `refresh`, which builds
+  the capsule. The first is a few milliseconds of work behind about 50 ms of
+  interpreter start and imports: 63 ms of a 182 ms hook on a copy of scb.
+- Claude Code's and Codex's hooks now run `native-prompt` in the background
+  beside `refresh`, its output in a private temporary file; the hook waits
+  for it when the refresh returns and prints its line before anything else,
+  as before. Without a temporary file the request is still armed and only
+  that line is lost. The Stop hook keeps its order: `native-stop` pins the
+  task revision a checkpoint flush in `turn` may have just moved.
+- The two shared one thing: on an unsaved previous result the arm wrote
+  `native_capture_incomplete` into the last-turn report, which the refresh
+  reads into the capsule. `native-prompt` now writes it for Cursor only.
+  Claude Code and Codex get the notice from the hook's own first line, as
+  they did; the capsule line that repeated it is gone instead of appearing
+  when the arm happened to finish first. Cursor's hook answers in JSON only,
+  so its notice is that capsule line: its mirror rule keeps the arm before
+  the refresh (`_WM_NATIVE_ARM_CURSOR` in `context_retrieval.py`).
+- The generator's hook contract (`native_capture_hook_contract` in
+  `validate_generated.py`) accepts the arm beside the refresh too, when its
+  PID is taken at once and awaited; generated hooks keep the sequential
+  form hook-forge describes.
+- Measured on synced copies of scb (prompt hook, ABBA, 30 rounds): 209 →
+  147 ms, paired median −62 ms [−63.6; −59.9]. The worst case of the hook is
+  one 5 s budget instead of two against Claude Code's 8 s timeout. The
+  rehearsal on the four clients saved and recalled 16 of 16.
+- Tests: each host gets the unsaved-result notice by one fixed path (Claude
+  Code and Codex: the hook's first line, no report flag, no temporary file
+  left; Cursor: the rule written in the same turn), failing without the
+  flag change; the generator contract refuses an arm in the background
+  without its PID or its `wait`.
+
 ### A session a person reads is not asked to repeat its answer after the save — 2026-10-23
 
 - Why: after every answer in governed mode the Stop hook asks the agent to

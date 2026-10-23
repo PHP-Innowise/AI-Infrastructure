@@ -753,6 +753,36 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.assertEqual('',outside.read_text())
 
 
+    @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell hook profile')
+    def test_an_unsaved_result_notice_reaches_each_host_by_one_fixed_path(self):
+        """Claude Code's and Codex's prompt hooks arm the next request beside
+        the refresh: their notice is the hook's own first line, and nothing
+        the refresh reads waits on the arm. Cursor's hook answers in JSON
+        only, so its arm writes the notice for the capsule and runs first."""
+        notice='Previous native memory result was not saved completely.'
+        report=self.root/'memory-bank/local/last-turn-report.json'
+        for host,session in (('claude','unsaved-claude'),('codex','unsaved-codex')):
+            with self.subTest(host=host):
+                hooks=self.install_hooks(host)
+                self.begin(host,session);self.stop(host,session);self.stop(host,session,active=True)
+                if report.exists():report.unlink()
+                result=self.hook(hooks,'working-memory-read.sh',{'hook_event_name':'UserPromptSubmit',
+                    'session_id':session,'cwd':str(self.root),'prompt':'Continue the Amber routing research.'})
+                lines=result.stdout.decode().splitlines()
+                self.assertEqual(notice,lines[0])
+                self.assertEqual(1,lines.count(notice))
+                self.assertFalse(report.exists() and 'native_capture_incomplete' in report.read_text())
+                self.assertNotIn('native memory result not saved completely',result.stdout.decode())
+                self.assertFalse(list(Path(self.env.get('TMPDIR') or tempfile.gettempdir()).glob('working-memory-native.*')))
+        hooks=self.install_hooks('cursor')
+        self.begin('cursor','unsaved-cursor');self.stop('cursor','unsaved-cursor');self.stop('cursor','unsaved-cursor',active=True)
+        result=self.hook(hooks,'working-memory-read.sh',{'hook_event_name':'beforeSubmitPrompt',
+            'conversation_id':'unsaved-cursor','prompt':'Continue the Amber routing research.'})
+        self.assertEqual({'continue':True},json.loads(result.stdout))
+        rule=(self.root/'.cursor/rules/working-memory.mdc').read_text()
+        self.assertIn('native memory result not saved completely',rule)
+
+
 class NativeRequestSwitchTests(NativeCaptureFixture):
     """`native_result_request: off` arms no prompt and asks no Stop; the
     default asks after every answer, as before. The request costs one more

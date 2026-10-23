@@ -897,7 +897,18 @@ def native_capture_hook_contract(source: str, edition: str, name: str) -> bool:
                 or line.count('--task-id') != 1):
             return False
     if prompt:
-        return ' | run ' in calls[0] and 'NATIVE_REPORT=$(' in calls[0]
+        if ' | run ' not in calls[0]:
+            return False
+        if 'NATIVE_REPORT=$(' in calls[0]:
+            return True
+        # Beside the refresh, as the editions' Claude Code and Codex hooks arm:
+        # in the background with its output in the hook's own file, its PID
+        # taken at once and awaited, so the call stays bounded by `run` and
+        # never outlives the hook.
+        index = lines.index(calls[0])
+        return (calls[0].endswith(' > "$NATIVE_FILE" 2>/dev/null &')
+                and lines[index + 1:index + 2] == ['NATIVE_PID=$!']
+                and 'wait "$NATIVE_PID"' in lines[index + 2:])
     return (sum(' | timeout "$BUDGET_SECONDS" ' in line for line in calls) == 1
             and all('NATIVE_RESPONSE=$(' in line for line in calls)
             and any('NATIVE_STATUS=$?' in line for line in lines))

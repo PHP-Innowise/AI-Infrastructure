@@ -4,6 +4,17 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The hook contract accepts an arm beside the refresh — 2026-10-23
+
+- `validate_generated.py` (`native_capture_hook_contract`) accepts a prompt
+  hook that runs `native-prompt` in the background beside the refresh, as
+  the editions' Claude Code and Codex hooks now do, when its output goes to
+  the hook's own file, its PID is taken at once and the hook waits for it.
+  The sequential form hook-forge describes is unchanged. The seeded runtime
+  writes the unsaved-result flag for Cursor only and carries the Cursor
+  mirror rule that keeps its arm first (root `CHANGELOG.md`, same day); the
+  policy lock was rewritten.
+
 ### The seeded runtime ends an attended session's save briefly — 2026-10-23
 
 - The memory runtime memory-seed copies asks a session a person reads as it

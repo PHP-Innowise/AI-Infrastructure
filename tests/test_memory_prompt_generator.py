@@ -84,6 +84,11 @@ class GeneratorPromptReadTests(unittest.TestCase):
                     '--host wrong --task-id "$TASK_ID"'),host,name))
                 self.assertFalse(contract(source.replace(command,'obsolete-native-adapter'),host,name))
                 self.assertFalse(contract(source.replace("printf '%s' \"$HOOK_STDIN\" |",'echo ignored |'),host,name))
+                if 'NATIVE_PID=$!' in source:
+                    # An arm beside the refresh is taken only with its PID at
+                    # once and awaited: it must not outlive the hook.
+                    self.assertFalse(contract(source.replace('  wait "$NATIVE_PID"\n','  :\n'),host,name))
+                    self.assertFalse(contract(source.replace('  NATIVE_PID=$!\n','  :\n'),host,name))
 
     def test_documented_stop_journal_is_the_one_the_editions_ship(self):
         # hook-forge's fragment for the Stop hook's line in the native result

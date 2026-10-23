@@ -38,7 +38,7 @@
     ".agents/skills/bootstrap-verifier/scripts/publish_staging.py": "f3d6fe428803bf9cd4987d9fe68af20d0429a509714921befb90d4daa78cff02",
     ".agents/skills/bootstrap-verifier/scripts/validate_content_review.py": "47e544546476dcf74cc97f00fffcedc82696106cfa94a95015bf7c5e15a1cd43",
     ".agents/skills/bootstrap-verifier/scripts/validate_flow_contracts.py": "aa84fdaa8461e99e12c4104108ef8316c79bf2ff25ca068c55870dcd926811b3",
-    ".agents/skills/bootstrap-verifier/scripts/validate_generated.py": "ec9bde0ea1064b5c437dd0a6d8c3de799220199adddeb3f6311d5bd52a9d5fd0",
+    ".agents/skills/bootstrap-verifier/scripts/validate_generated.py": "29ec330c0e2958c417f6aaa63c414ab53f987935e0daa3efbd3506d5c8c1cff3",
     ".agents/skills/bootstrap-verifier/scripts/validate_memory_content.py": "b2e75fdcd908494487d3f6f2f85bce813647ca4c6f90c595e05ceca583f682af",
     ".agents/skills/bootstrap-verifier/scripts/validate_plan_mutations.py": "a8c925e0b7979ba4004726834494fc6c88607d6b3e8a109f59960deb413cc354",
     ".agents/skills/bootstrap-verifier/scripts/validate_plan_review.py": "5592efabd9650913edfbbe2576599787303a62172a1182c7c5093b11a8efbb4b",
@@ -99,11 +99,11 @@
     ".agents/skills/memory-seed/assets/runtime-contract.json": "64522a0fa2fab417e806fc4be611e3f25e97a844256607f449f5d911f2684e4a",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "13e09d26050f26bf4ba15af6c034ea236c1b2ee85c0fa7937f399f27e1987933",
     ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "1cb1812e3d43c0bfd60983e385d84ea535e5a0769847ea9858ffe6dce00c3180",
-    ".agents/skills/memory-seed/assets/scripts/context.py": "e507c58bfd2fef6e02c6d818c98b42e24c1d81dfbda1e56be3c5078d975f805c",
+    ".agents/skills/memory-seed/assets/scripts/context.py": "fc5425b35f442a26f320f32c4abbedb75917d96adef016d327c92ba36d6fe1d5",
     ".agents/skills/memory-seed/assets/scripts/context_cli.py": "ec874c9312133eafae8f16bc298fc011fb55579cb4b300453e81e3f31a4d0123",
     ".agents/skills/memory-seed/assets/scripts/context_continuity.py": "10324f7b38000615ee0ec72036a2a6fb3112e694544489e666ba388c93589ea5",
     ".agents/skills/memory-seed/assets/scripts/context_handoff.py": "cbb82c4c610e2ccce46167bb2c27fff12b1516acc4a8ec7de98e0cda5ad2b9a6",
-    ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "3c49e00702b72cbcc67080ce51b4d37c4b0bfd12c37de8722a81a17f11772e16",
+    ".agents/skills/memory-seed/assets/scripts/context_retrieval.py": "aad3606330a64ad5c8e27fe8ee968f370068d2b549500a933ae1c1175a172962",
     ".agents/skills/memory-seed/assets/scripts/mcp_config.py": "d3bac7148db0afbc84d71772e76bbe20729f157e4ade571261e9b61c39bbe87c",
     ".agents/skills/memory-seed/assets/scripts/mcp_server.py": "884998f865dccdb283fa1a66f577aaea931fe18b519206875e6bf5e44b95f267",
     ".agents/skills/memory-seed/assets/scripts/memory_results.py": "2138c074fa1cba28d6bbdfdbbdd79ccea615b347136abb5f479ceb4f34ea5ed5",
@@ -174,7 +174,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "455cd5d1d1bc9cc85ed01b8d579c7dbb763c4bded493b77532e1202ea3588ebd",
+  "policy_digest": "c631b5077cd3e2c66da1c22b03e95698330b408cae774404387edbdd2c775a6e",
   "release": "2.5.0",
   "schema_version": 1
 }

@@ -394,6 +394,49 @@ _WM_PROMPT_SESSION_CURSOR = r'''# The rule is re-sent whole with every request, 
 # of it as "handed earlier": no --session-id. JSON, even without a query.
 ARGUMENTS+=(--json)
 '''
+# The prompt hook arms the next save request beside its refresh and prints
+# the arm's line once the refresh returns. Cursor's arm runs first instead:
+# its hook answers in JSON only, so the unsaved-result notice reaches the
+# agent through the capsule, built from the flag the arm writes.
+_WM_NATIVE_ARM = r'''# Arm one semantic result capture for this real prompt. The CLI recognizes
+# an internal Stop continuation and preserves its original challenge. It runs
+# beside the refresh below: neither reads what the other writes (the arm
+# leaves the unsaved-result notice to this hook's own line, and only Cursor's
+# arm writes it for the capsule), and the line is printed when the refresh
+# returns, before anything else. One Python start after the other was a
+# third of every prompt (209 -> 147 ms).
+NATIVE_PID=
+if [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ] && [ -n "$TASK_ID" ]; then
+  NATIVE_FILE=$(mktemp "${TMPDIR:-/tmp}/working-memory-native.XXXXXX" 2>/dev/null) || NATIVE_FILE=/dev/null
+  printf '%s' "$HOOK_STDIN" | run "${PYTHON[@]}" "$CONTEXT_CLI" native-prompt \
+    --host claude --task-id "$TASK_ID" > "$NATIVE_FILE" 2>/dev/null &
+  NATIVE_PID=$!
+fi
+'''
+_WM_NATIVE_ARM_CURSOR = r'''# Arm one semantic result capture for this real prompt. The CLI recognizes
+# an internal Stop continuation and preserves its original challenge. Unlike
+# the Claude Code and Codex hooks, this one arms before the refresh, not
+# beside it: a hook that answers Cursor in JSON only has the capsule to carry
+# an unsaved-result notice, and the refresh below reads the one the arm writes.
+if [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ] && [ -n "$TASK_ID" ]; then
+  NATIVE_REPORT=$(printf '%s' "$HOOK_STDIN" | run "${PYTHON[@]}" "$CONTEXT_CLI" native-prompt \
+    --host cursor --task-id "$TASK_ID" 2>/dev/null)
+  NATIVE_STATUS=$?
+  if [ "$NATIVE_STATUS" -eq 0 ] && [ "$NATIVE_REPORT" = "Previous native memory result was not saved completely." ]; then
+    printf '%s\n' "$NATIVE_REPORT"
+  fi
+fi
+'''
+_WM_NATIVE_WAIT = r'''if [ -n "$NATIVE_PID" ]; then
+  wait "$NATIVE_PID"
+  NATIVE_STATUS=$?
+  NATIVE_REPORT=
+  [ "$NATIVE_FILE" = /dev/null ] || { NATIVE_REPORT=$(cat "$NATIVE_FILE" 2>/dev/null); rm -f "$NATIVE_FILE" 2>/dev/null; }
+  if [ "$NATIVE_STATUS" -eq 0 ] && [ "$NATIVE_REPORT" = "Previous native memory result was not saved completely." ]; then
+    printf '%s\n' "$NATIVE_REPORT"
+  fi
+fi
+'''
 _WM_DELIVERY_PROMPT = r'''if [ -z "$REPORT" ]; then
   # A refresh that succeeded with nothing to say - a prompt the sanitizer
   # left nothing of - stays silent. One that failed says so, and says what
@@ -658,6 +701,8 @@ MIRROR_RULES: dict[str, Any] = {
                             "# Hook type: UserPromptSubmit",
                             "# Cursor hook event: beforeSubmitPrompt",
                         ],
+                        [_WM_NATIVE_ARM, _WM_NATIVE_ARM_CURSOR],
+                        [_WM_NATIVE_WAIT, ""],
                         ["--host claude", "--host cursor"],
                         ["ARGUMENTS=(refresh --host cursor", "ARGUMENTS=(refresh --host cursor --delivery-profile cursor-rule"],
                         [_WM_PROMPT_PREAMBLE, _WM_PROMPT_PREAMBLE_CURSOR],

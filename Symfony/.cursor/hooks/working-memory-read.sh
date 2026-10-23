@@ -257,7 +257,10 @@ TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev
 [ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
 
 # Arm one semantic result capture for this real prompt. The CLI recognizes
-# an internal Stop continuation and preserves its original challenge.
+# an internal Stop continuation and preserves its original challenge. Unlike
+# the Claude Code and Codex hooks, this one arms before the refresh, not
+# beside it: a hook that answers Cursor in JSON only has the capsule to carry
+# an unsaved-result notice, and the refresh below reads the one the arm writes.
 if [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ] && [ -n "$TASK_ID" ]; then
   NATIVE_REPORT=$(printf '%s' "$HOOK_STDIN" | run "${PYTHON[@]}" "$CONTEXT_CLI" native-prompt \
     --host cursor --task-id "$TASK_ID" 2>/dev/null)
