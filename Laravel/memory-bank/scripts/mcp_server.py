@@ -200,7 +200,7 @@ TOOLS = [
         {'task_id': S, 'query': S, 'paths': {'type': 'array', 'items': S, 'maxItems': 10}}, ('task_id', 'query'), read=True),
     tool('memory_checkpoint', 'Flush working Git metadata into the existing branch/task. Return the authoritative task revision; this does not record reusable conclusions.',
         {'task_id': S, 'goal': S}, ('task_id',)),
-    tool('memory_record_result', 'Record sanitized progress/next steps and source-backed reusable findings/decisions before finishing. Supply the current task revision and a stable result_id: exact completed replay preserves later edits, and repeating an interrupted save with the same result_id finishes it without duplicating what it already wrote. Unchanged runtime-owned agent knowledge can be revised automatically; a deliberate correction may supply the current revision of that learning as expected_revision. A protected/conflicting learning is held individually while independent progress and valid facts save. verified=true is agent attestation, not human review. Empty learnings is valid.',
+    tool('memory_record_result', 'Record sanitized progress/next steps and source-backed reusable findings/decisions before finishing, where no Stop hook asks for the native-result save; where one asks, that save is the record. Supply the current task revision and a stable result_id: exact completed replay preserves later edits, and repeating an interrupted save with the same result_id finishes it without duplicating what it already wrote. Unchanged runtime-owned agent knowledge can be revised automatically; a deliberate correction may supply the current revision of that learning as expected_revision. A protected/conflicting learning is held individually while independent progress and valid facts save. verified=true is agent attestation, not human review. Empty learnings is valid.',
         {'task_id': S, 'result_id': S, 'revision': {'type': 'integer', 'minimum': 1}, 'progress': S,
          'next_steps': A, 'verified': {'type': 'boolean'}, 'learnings': {'type': 'array', 'maxItems': 3,
           'items': {'type': 'object', 'required': ['type', 'title', 'consequence', 'sources'], 'additionalProperties': False,
@@ -240,7 +240,7 @@ def serve(memory, incoming=sys.stdin.buffer, outgoing=sys.stdout):
                 initialized = True
                 result = {'protocolVersion': VERSION, 'capabilities': {'tools': {}},
                     'serverInfo': {'name': 'harness-project-memory', 'version': '1.0.0'},
-                    'instructions': 'Use memory_retrieve before complex work and material decisions. Check cited sources. Use memory_checkpoint and memory_record_result at meaningful boundaries and before finishing authorized work. Reuse the current task ID; never store transcripts or secrets.'}
+                    'instructions': 'Use memory_retrieve before complex work and material decisions. Check cited sources. Use memory_checkpoint at meaningful boundaries, and memory_record_result before finishing authorized work only where no Stop hook asks for the native-result save. Reuse the current task ID; never store transcripts or secrets.'}
             elif method == 'ping': result = {}
             elif not ready: raise BrainError('Initialize the memory server first')
             elif method == 'tools/list':

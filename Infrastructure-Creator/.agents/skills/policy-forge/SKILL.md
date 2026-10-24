@@ -43,7 +43,17 @@ Append a generation log to `tasks/TASK-{N}/policy-forge-log.md` listing every fi
    after compaction/scope changes and before uncovered material decisions;
    source verification; progress/next-step checkpoints at meaningful boundaries;
    and source-backed reusable findings/decisions at finalization when writes are
-   authorized. Support Harness `memory-draft` and an available Harness Memory MCP
+   authorized. Where the generated Stop hook requests the `native-result` save -
+   governed Claude Code, Codex and Cursor sessions running the hooks, outside
+   Harness sessions, unless `native_result_request` is `off` - that request is
+   the save: the policy opens its save rule with the prohibition on saving the
+   answer's result another way (`record-result`, the MCP tool, a closing
+   `update`), and an answer's end is not one of the stage boundaries that ask
+   for `update`. Only where Stop requests none does the agent save explicitly.
+   Name those cases in the policy so an agent can tell which applies before it
+   finishes: a rule that opened with "MUST save" drew an explicit save on the
+   first answer of a session. For the explicit save, support Harness
+   `memory-draft` and an available Harness Memory MCP
    without requiring either for an otherwise self-contained target; the fallback
    is the installed context CLI's `record-result`. An exact completed result ID
    replays passively. An interrupted attempt repeated with the same result ID

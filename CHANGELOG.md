@@ -28,6 +28,55 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The policy asks for an explicit save only where no Stop request comes — 2026-10-24
+
+- Why: each edition's `AGENTS.md` said "MUST finish authorized work with
+  progress/next steps and source-backed reusable findings/decisions (Harness
+  `memory-draft`, `memory_record_result` MCP, or `context.py
+  record-result`)", and the Memory MCP server asked for
+  `memory_record_result` "before finishing authorized work". The Stop hook
+  asks for the `native-result` save after every answer, so an agent that
+  follows the policy saves each answer twice. On a synced copy of a client
+  project, gpt-6.1-sol on Codex 0.163 ran `context.py record-result` itself
+  in all 12 answers of a 12-answer plan (13 calls; the run's own count of 10
+  missed `Result already recorded`), and a closing `context.py update` in 7.
+  The native save then saved each answer again, with `learnings: []` every
+  time.
+- What changes: the save rule in `AGENTS.md` opens with what not to do:
+  MUST NOT save an answer's result yourself - no `record-result`,
+  `memory_record_result` or closing `update` - where Stop requests it. The
+  Stop bullet names where that is: governed Claude Code, Codex and Cursor
+  sessions running the hooks, outside the Harness, unless
+  `native_result_request` is `off`. The stage-boundary `update` rule leaves
+  out an answer's end that Stop's request saves. Where no request comes - a
+  Harness session's `memory-draft` block, lightweight mode,
+  `native_result_request: off`, a host without the hooks - the explicit save
+  is still required before finishing. Plan mode and a read-only sandbox get
+  no request and stay read-only scopes. "Report save failures; claim saves
+  only after success" stays. The Memory MCP server's instructions, the
+  `memory_record_result` description, `memory-bank/MCP.md` and the
+  generator's `policy-forge` say the same.
+- Measured live on copies of that project, same model and prompts, one
+  copy per session: under the old policy `record-result` ran in 12 of 12
+  answers and `update` in 7, and a same-day control answer saved explicitly
+  too. A first rewording that kept "MUST save" in front and made the
+  prohibition conditional did not change a session's first answer (1 of 1
+  still saved). The rule as shipped: `record-result` in 2 of 12 answers (one
+  a first answer, one beside the rule a person asked to keep), `update` in
+  0; all 12 native saves landed on the first try, and 5 of them carried
+  learnings, against 0 of 12 before.
+  Asked to keep a rule, the agent re-verified a chunk, created a finding or
+  edited `AGENTS.md`, as before. `native_result_request: off` is not visible
+  to an agent unless it reads `runtime.json`.
+- Budget: `AGENTS.md` grows 379 bytes in each edition, about 80 tokens per
+  session; the four `agents_md_bytes` ceilings rise by that much, and the
+  generator's `body_bytes` by 745 for `policy-forge`. The policy locks were
+  rewritten.
+- Tests: `NativeSaveRequestPolicyTest` in `tests/test_framework_semantics.py`
+  holds the rule in every edition whose Stop hook asks for the save, and in
+  the MCP server; `tests/fixtures/memory_native_roundtrip_public.json`
+  carries the server's new instructions.
+
 ### A save step points back to the rules the conversation holds — 2026-10-24
 
 - Why: every answer carried the whole save step, about 2,600 characters, of

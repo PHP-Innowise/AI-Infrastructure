@@ -82,6 +82,10 @@ See [Claude MCP](https://code.claude.com/docs/en/mcp),
   ledger entry carries `[attestation:agent]`, a chunk promoted from it is tagged
   `agent-attested`, and the capsule marks such knowledge where it delivers it.
   Empty learnings is valid; explicit `next_steps: []` clears finished steps.
+  Where the Stop hook asks for the `native-result` save - governed Claude Code,
+  Codex and Cursor sessions running the hooks, outside Harness sessions, unless
+  `native_result_request` is `off` - that save records the answer: do not
+  record the same result with this tool or `record-result` as well.
 
 Use `CONTEXT_TASK_ID`, otherwise the branch task. On detached HEAD, use an explicit
 existing task ID. Do not create another task for the same work. Saving runs promotion

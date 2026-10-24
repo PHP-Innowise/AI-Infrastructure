@@ -4,6 +4,24 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### policy-forge asks for an explicit save only where no Stop request comes — 2026-10-24
+
+- `policy-forge`'s working-memory rules: where the generated Stop hook
+  requests the `native-result` save (governed Claude Code, Codex and Cursor
+  sessions running the hooks, outside Harness sessions, unless
+  `native_result_request` is `off`), that request is the save. The generated
+  save rule opens with the prohibition on saving the answer's result another
+  way (`record-result`, the MCP tool, a closing `update`), and an answer's
+  end is not a stage boundary that asks for `update`; only where Stop
+  requests none does the agent save explicitly (Harness `memory-draft`, the
+  Memory MCP, or `record-result`). The policy names those cases. A policy
+  that asked for the explicit save after every answer made an agent save
+  each answer twice, and one that opened with "MUST save" still drew it on
+  a session's first answer (root `CHANGELOG.md`, same day).
+- The memory-seed asset's `mcp_server.py` (server instructions and the
+  `memory_record_result` description) and `MCP.md` say the same, as the
+  editions' do. The policy lock was rewritten.
+
 ### The seeded runtime's later save steps point back to the full one — 2026-10-24
 
 - The memory runtime memory-seed copies sends the save step's full rules only

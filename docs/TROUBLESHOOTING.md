@@ -481,6 +481,13 @@ input tokens: about half of the answer's own. Only the first step of a
 conversation, and the first after a compaction, carries the full rules; later
 ones point back to them and are about 900 characters shorter.
 
+An agent that also runs `context.py record-result` or `memory_record_result`
+during the answer saves it twice. The `AGENTS.md` of releases before 24
+October 2026 asked for that explicit save after every answer; the current
+policy asks for it only where the Stop hook requests no save.
+`install_accelerator.py --sync` rewrites the policy's managed block, with
+`--update-tracked` where the project's Git tracks `AGENTS.md`.
+
 ### Recover
 
 To keep the capsule but drop the request, set `"native_result_request": "off"`
