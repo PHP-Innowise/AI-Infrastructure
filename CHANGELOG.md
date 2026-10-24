@@ -47,7 +47,7 @@ edition's own files remain in that edition's changelog.
   output is piped into, one run beside it or in a substitution, Python that
   is not the CLI - and the rules apply as before. Generic section,
   byte-identical in the four editions and Infrastructure-Creator; mirrors
-  regenerated.
+  regenerated; the editions' `.claude/hooks/README.md` lists the exception.
 - Tests: eight corpus cases in `tests/fixtures/bash-validator-corpus.json`
   (four allowed, four still refused) and the `memory-cli` decision.
 
