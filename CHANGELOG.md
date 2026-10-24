@@ -83,14 +83,17 @@ edition's own files remain in that edition's changelog.
   had its trust accepted.
 - What changes: the recovery Stop reads the transcript's last 512 KiB for
   the save command's result. When Claude Code recorded a refusal there
-  (`toolDenialKind` `user-rejected`, `permission-rule` or `automode-*`, not
-  `interrupted` or `cancelled`), the journal says `failed` `host-refused`.
+  (`toolDenialKind` `user-rejected`, `permission-rule` or `automode-blocked`;
+  not `interrupted`, `cancelled` or auto mode's classifier failing), the
+  journal says `failed` `host-refused`.
   The next prompt prints the usual warning once, and the session is not
   asked again for a day (`prompt` `skipped` `host-refused`). A new session is
   asked again. A person who answers No in Claude Code's terminal dialog ends
   the turn before any Stop runs (seen offline: the transcript records
   `user-rejected`, no recovery Stop follows), so the next prompt reads the
-  refusal from the transcript and does the same.
+  refusal from the transcript and does the same. It also catches a refusal
+  the recovery Stop missed: Claude Code writes its transcript in batches, and
+  a denial made 10 ms before that Stop was not on disk yet.
 - Tests: three in `tests/test_memory_native_capture.py`. The two refusal
   tests fail without the change; the third holds that an interrupted or
   plain unsaved request stays `unsaved`. On the real host, a turn after the

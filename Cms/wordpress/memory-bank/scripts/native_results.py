@@ -244,8 +244,9 @@ ROLLOUT_TAIL_BYTES = 512 * 1024
 # had no one to ask, as in a project whose trust was never accepted, whose
 # allow rules Claude Code ignores - is refused again after every answer,
 # each time for two model calls. Such a session is not asked again for a day.
-CLAUDE_REFUSALS = frozenset({'user-rejected','permission-rule','automode-blocked','automode-unavailable',
-                             'automode-parsing-error'})
+# Auto mode's classifier failing (`automode-unavailable`, `-parsing-error`) is
+# "not a judgment that the action is unsafe", and the next answer may pass.
+CLAUDE_REFUSALS = frozenset({'user-rejected','permission-rule','automode-blocked'})
 REFUSED_SECONDS = 24 * 60 * 60
 CLAUDE_TAIL_BYTES = 512 * 1024
 
@@ -464,9 +465,12 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
                 and prompt.lstrip().startswith('INTERNAL_NATIVE_MEMORY_RESULT '+previous['token'])):
             return step({'armed':False,'continuation':True},'continuation')
         # A person who says no in Claude Code's dialog ends the turn before
-        # any Stop runs: the request is still pending, and the refusal is in
-        # the transcript the prompt hook is handed.
-        if (previous and previous['phase']=='requested' and host=='claude' and not previous['digest']
+        # any Stop runs, so the request is still pending. And Claude Code
+        # writes its transcript in batches: a refusal just before the
+        # recovery Stop may not be on disk yet, and that Stop calls the
+        # request failed. Either way the refusal is in the transcript the
+        # prompt hook is handed.
+        if (previous and previous['phase'] in {'requested','failed'} and host=='claude' and not previous['digest']
                 and _claude_refusal(payload,previous['token'])):
             previous.update(phase='refused',updated=time.time())
         # A session whose host refused the save is not asked again for a day;

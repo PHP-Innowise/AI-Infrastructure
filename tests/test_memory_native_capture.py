@@ -637,11 +637,27 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.one(self.written(lambda:self.call('native-stop','--host','claude','--task-id','research',
                                                data=self.STOP)),'stop','skipped','phase-declined',host='claude')
 
+    def test_a_refusal_written_after_the_stop_is_read_at_the_next_prompt(self):
+        # Offline in auto mode: the denial was created 10 ms before the
+        # recovery Stop and was not on disk when that Stop read the transcript.
+        self.begin(host='claude')
+        self.call('native-stop','--host','claude','--task-id','research',data=self.STOP)
+        token=self.state()[1]['token']
+        late=self.root.parent/'late.jsonl'
+        late.write_text('',encoding='utf-8')
+        recovery={**self.STOP,'stop_hook_active':True,'transcript_path':str(late)}
+        self.one(self.written(lambda:self.call('native-stop','--host','claude','--task-id','research',data=recovery)),
+                 'stop','failed','unsaved',host='claude')
+        payload={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Next question',
+                 'transcript_path':self.refused_transcript(token,'automode-blocked')}
+        lines=self.written(lambda:self.call('native-prompt','--host','claude','--task-id','research',data=payload))
+        self.one(lines,'prompt','skipped','host-refused',host='claude')
+
     def test_an_interrupted_save_is_not_a_refusal(self):
         self.begin(host='claude')
         self.call('native-stop','--host','claude','--task-id','research',data=self.STOP)
         token=self.state()[1]['token']
-        for kind in ('interrupted',None):
+        for kind in ('interrupted','automode-parsing-error',None):
             with self.subTest(kind=kind):
                 candidate,state=self.state();state['phase']='requested';candidate.write_text(json.dumps(state))
                 recovery={**self.STOP,'stop_hook_active':True,'transcript_path':self.refused_transcript(token,kind)}
