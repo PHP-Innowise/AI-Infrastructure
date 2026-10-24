@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A capsule request cuts each section into sentences once — 2026-10-24
+
+- Why: after the masking cache, the next cost in `refresh` on a synced copy
+  of `next` was cutting sections into the sentences an excerpt window moves
+  by: 369 `_excerpt_units` calls per request, the same sections cut again on
+  each of the three excerpt passes.
+- What changes: the units of a section are held per its lines in a bounded
+  cache (2,048 sections); each caller gets its own list. They depend on the
+  lines alone.
+- Measured on the copy, 24 interleaved first prompts of fresh sessions per
+  side, with the masking cache in both: the prompt hook's median went from
+  280.5 to 238 ms (−42.5 ms, −15 %), every output byte for byte the same.
+  With the masking cache, a first prompt went from about 311 to 238 ms.
+
 ### A capsule request masks each document image once — 2026-10-24
 
 - Why: profiling the prompt hook on a synced copy of `next` showed masking

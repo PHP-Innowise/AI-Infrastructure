@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime cuts each section into sentences once per request — 2026-10-24
+
+- The memory runtime memory-seed copies holds a section's excerpt units, as
+  the editions' runtime does (root `CHANGELOG.md`, same day).
+  `context_retrieval.py` changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime masks each document image once per request — 2026-10-24
 
 - The memory runtime memory-seed copies holds `mask_secrets` per text and
