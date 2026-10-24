@@ -999,12 +999,15 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
                 self.assertIn('native-result --request',asked.stdout.decode())
 
     def rollout(self,name,turns,pad=0):
-        """A Codex rollout: session_meta, then one turn_context per (turn, mode, sandbox)."""
+        """A Codex rollout: session_meta, then one turn_context per (turn, mode,
+        sandbox[, file-system policy, working directory])."""
         path=self.root.parent/name
         lines=[json.dumps({'type':'session_meta','payload':{'id':'0','source':'vscode'}})]
-        for turn,mode,sandbox in turns:
-            lines.append(json.dumps({'type':'turn_context','payload':{'turn_id':turn,
-                'collaboration_mode':{'mode':mode},'sandbox_policy':{'type':sandbox}}}))
+        for turn,mode,sandbox,*files in turns:
+            context={'turn_id':turn,'collaboration_mode':{'mode':mode},'sandbox_policy':{'type':sandbox}}
+            if files:context['file_system_sandbox_policy']=files[0]
+            if files[1:] and files[1] is not None:context['cwd']=files[1]
+            lines.append(json.dumps({'type':'turn_context','payload':context}))
             lines.append(json.dumps({'type':'response_item','payload':{'type':'message','role':'user',
                 'content':[{'type':'input_text','text':'x'*pad}]}}))
         path.write_text('\n'.join(lines)+'\n')
@@ -1020,6 +1023,40 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
             with self.subTest(case=name):
                 session=f'turn-{n}'
                 path=self.rollout(f'{session}.jsonl',[('t0','default','workspace-write'),('t1',mode,sandbox)])
+                stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,'turn_id':'t1',
+                      'permission_mode':'bypassPermissions','transcript_path':str(path),
+                      'last_assistant_message':'Answered.'}
+                self.begin(host='codex',session=session)
+                before=len(self.journal())
+                out=self.call('native-stop','--host','codex','--task-id','research',data=stop).stdout
+                lines=[(line['event'],line.get('code')) for line in self.journal()[before:] if line['stage']=='stop']
+                if skipped:
+                    self.assertEqual(b'',out.strip())
+                    self.assertEqual([('skipped',skipped)],lines)
+                else:
+                    self.assertIn(b'native-result --request',out)
+
+    def test_a_codex_workspace_that_cannot_write_the_brain_is_not_asked_to_save(self):
+        # Codex started in a subdirectory writes only there: offline on Codex
+        # 0.163 the save failed with a read-only file system after every answer.
+        root=os.path.realpath(self.root)
+        def files(*writable,read_only=()):
+            entries=[{'path':{'type':'special','value':{'kind':'root'}},'access':'read'}]
+            entries+=[{'path':{'type':'path','path':path},'access':'write'} for path in writable]
+            entries+=[{'path':{'type':'path','path':path},'access':'read'} for path in read_only]
+            return {'kind':'restricted','entries':entries}
+        # A policy read as not letting the turn write its own directory is in
+        # a form the reading does not know: asked as before.
+        cases={'a subdirectory':(files(root+'/src'),root+'/src','outside-sandbox'),
+               'the Brain carved out':(files(root,read_only=(root+'/project-brain',)),root,'outside-sandbox'),
+               'the project root':(files(root),root,None),
+               'an added writable root':(files(root+'/src',root),root+'/src',None),
+               'its own directory unwritable':(files(root+'/elsewhere'),root+'/src',None),
+               'no working directory':(files(root+'/src'),None,None)}
+        for n,(name,(policy,cwd,skipped)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                session=f'workspace-{n}'
+                path=self.rollout(f'{session}.jsonl',[('t1','default','workspace-write',policy,cwd)])
                 stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,'turn_id':'t1',
                       'permission_mode':'bypassPermissions','transcript_path':str(path),
                       'last_assistant_message':'Answered.'}

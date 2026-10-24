@@ -28,6 +28,29 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A Codex session that cannot write the Brain is not asked to save — 2026-10-24
+
+- Why: offline on Codex 0.163, a session started in a subdirectory of the
+  project (`codex exec -C project/src`) runs in a workspace-write sandbox
+  that writes only that subdirectory. The save after every answer failed
+  with "Read-only file system" on `project/project-brain`, journaled as
+  `failed` `unsaved`: two model calls for nothing each time.
+- What changes: the Stop reads the turn's `file_system_sandbox_policy` from
+  the rollout's `turn_context`, as it reads Plan mode and the sandbox type.
+  When the most specific entry over the Brain does not grant write, the save
+  is not asked for and the journal says `skipped` `outside-sandbox`. An
+  unrestricted policy, or none, asks as before; the attached launch's state
+  directory is an added writable root and saves. A policy that, read this
+  way, would not let the turn write its own working directory is in a form
+  the runtime does not know (a later Codex, another platform's paths), and
+  the save is asked for as before rather than dropped.
+- Tests: `test_a_codex_workspace_that_cannot_write_the_brain_is_not_asked_to_save`
+  (a subdirectory, a Brain carved out read-only, the project root, an added
+  root, a policy that denies the turn its own directory, no working
+  directory), failing without the change. On the real host, started from `src`:
+  `skipped` `outside-sandbox`; the bench's default and attached runs save,
+  and a read-only sandbox is still `read-only-sandbox`.
+
 ### Cursor keeps the full save step on every answer — 2026-10-24
 
 - Why: a later save step points back to the full one while the transcript

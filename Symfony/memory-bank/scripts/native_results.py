@@ -322,21 +322,22 @@ def _rollout_source(payload):
 
 
 def _rollout_turn(payload):
-    """The Codex turn behind this Stop: its collaboration mode and sandbox
-    type from the rollout's turn_context record with the Stop's turn_id,
-    or Nones. Codex's permission_mode follows the approval policy only."""
+    """The Codex turn behind this Stop: its collaboration mode, sandbox type
+    and restricted file-system policy from the rollout's turn_context record
+    with the Stop's turn_id, or Nones. Codex's permission_mode follows the
+    approval policy only."""
     path, turn = payload.get('transcript_path'), payload.get('turn_id')
     if not isinstance(path, str) or not path or not isinstance(turn, str) or not turn:
-        return None, None
+        return None, None, None
     try:
         if not stat.S_ISREG(os.stat(path).st_mode):
-            return None, None
+            return None, None, None
         with open(path, 'rb') as handle:
             handle.seek(0, os.SEEK_END)
             handle.seek(max(0, handle.tell() - ROLLOUT_TAIL_BYTES))
             tail = handle.read(ROLLOUT_TAIL_BYTES)
     except OSError:
-        return None, None
+        return None, None, None
     for line in reversed(tail.split(b'\n')):
         if b'turn_context' not in line:
             continue
@@ -348,13 +349,51 @@ def _rollout_turn(payload):
         if not isinstance(context, dict):
             continue
         if context.get('turn_id') != turn:
-            return None, None
+            return None, None, None
         mode = context.get('collaboration_mode')
         sandbox = context.get('sandbox_policy')
         mode = mode.get('mode') if isinstance(mode, dict) else None
         sandbox = sandbox.get('type') if isinstance(sandbox, dict) else None
-        return (mode if isinstance(mode, str) else None), (sandbox if isinstance(sandbox, str) else None)
-    return None, None
+        files = context.get('file_system_sandbox_policy')
+        files = files if isinstance(files, dict) and files.get('kind') == 'restricted' else None
+        # Read as not letting the turn write its own directory, the policy is
+        # in a form this reading does not know: the Stop asks as before.
+        where = context.get('cwd')
+        if files is not None and not (isinstance(where, str) and where
+                                      and _sandbox_writes(files, os.path.realpath(where))):
+            files = None
+        return (mode if isinstance(mode, str) else None), (sandbox if isinstance(sandbox, str) else None), files
+    return None, None, None
+
+
+def _sandbox_writes(policy, target):
+    """Whether a Codex restricted file-system policy lets a command write
+    `target`: the most specific entry over it decides, as it decides Codex's
+    own carve-outs (.git, .codex and .agents stay read-only inside a writable
+    workspace)."""
+    target = os.path.normcase(target)
+    best = None
+    for entry in policy.get('entries') or ():
+        if not isinstance(entry, dict) or entry.get('access') not in ('read', 'write', 'none'):
+            continue
+        where = entry.get('path')
+        if not isinstance(where, dict):
+            continue
+        if where.get('type') == 'path' and isinstance(where.get('path'), str):
+            base = os.path.realpath(where['path'])
+        elif where.get('type') == 'special' and isinstance(where.get('value'), dict):
+            base = {'root': os.sep, 'slash_tmp': '/tmp',
+                    'tmpdir': os.environ.get('TMPDIR')}.get(where['value'].get('kind'))
+            if not base:
+                continue
+            base = os.path.realpath(base)
+        else:
+            continue
+        base = os.path.normcase(base)
+        if target == base or target.startswith(base.rstrip(os.sep) + os.sep):
+            if best is None or len(base) > best[0]:
+                best = (len(base), entry['access'])
+    return best is not None and best[1] == 'write'
 
 
 def _claude_refusal(payload, token):
@@ -649,7 +688,7 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
     try: brief,code=attended(root,host,payload),None
     except BrainError as error: brief,code=False,refusal_code(error)
     # Codex reports Plan mode and a read-only sandbox only in the rollout.
-    collaboration,sandbox=_rollout_turn(payload) if host=='codex' else (None,None)
+    collaboration,sandbox,files=_rollout_turn(payload) if host=='codex' else (None,None,None)
     with mutation_lock(root):
         state=_read(root,key)
         if state is None: return step({},'skipped','not-armed')
@@ -675,6 +714,10 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         if payload.get('permission_mode') == 'plan' or collaboration == 'plan': return step({},'skipped','plan-mode')
         # A read-only sandbox lets no save write the project.
         if sandbox == 'read-only': return step({},'skipped','read-only-sandbox')
+        # Codex started below the project writes only there: a save to the
+        # project's Brain fails with a read-only file system, every answer.
+        if files is not None and not _sandbox_writes(files, os.path.realpath(brain_root(root))):
+            return step({},'skipped','outside-sandbox')
         try: task=writable_task(root,task_id,owner)
         except BrainRecordNotFound as error:
             if error.identifier != task_id: raise
