@@ -15,6 +15,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -149,6 +150,31 @@ class TargetTest(unittest.TestCase):
             self.assertIn("worktree or submodule", claude_code_bench.target_problem(project))
         # An edition inside this clone has the runtime, and is still not a project.
         self.assertIn("this clone", claude_code_bench.target_problem(ROOT / "PHP Core"))
+
+
+class EditionTest(unittest.TestCase):
+    def test_the_wordpress_edition_installs(self) -> None:
+        # The bench passed "Cms/wordpress" to the installer, which takes
+        # "WordPress": it could not run that edition at all.
+        with tempfile.TemporaryDirectory() as temporary:
+            project = claude_code_bench.prepare(Path(temporary), "WordPress")
+            self.assertTrue((project / "memory-bank/scripts/context.py").is_file())
+            self.assertTrue((project / ".claude/hooks/working-memory-write.sh").is_file())
+
+    def test_the_bench_hands_the_installer_the_editions_name(self) -> None:
+        seen = []
+
+        def prepare(work: Path, edition: str) -> Path:
+            seen.append(edition)
+            raise SystemExit(0)
+
+        argv = ["claude_code_bench.py", "--edition", "WordPress", "--claude", sys.executable]
+        with mock.patch.object(claude_code_bench, "prepare", prepare), mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(claude_code_bench.sys, "platform", "linux"), \
+                mock.patch.object(claude_code_bench.shutil, "which", return_value="/usr/bin/true"):
+            with self.assertRaises(SystemExit):
+                claude_code_bench.main()
+        self.assertEqual(["WordPress"], seen)
 
 
 class NamespaceTest(unittest.TestCase):

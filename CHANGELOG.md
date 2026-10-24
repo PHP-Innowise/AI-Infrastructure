@@ -28,6 +28,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The host benches run the WordPress edition — 2026-10-24
+
+- Why: `claude_code_bench.py` and `codex_bench.py` handed the installer the
+  edition's directory, `Cms/wordpress`, where it takes the name `WordPress`.
+  `--edition WordPress` failed before Claude Code or Codex started.
+- What changes: both benches hand the installer the edition's name.
+- Tests: `EditionTest` in `tests/test_host_benches.py` holds the name `main()`
+  hands on, failing on the old code, and installs WordPress through
+  `prepare()`. Offline, both benches pass on WordPress.
+
 ### The Claude Code bench runs a permission mode, as your own uid — 2026-10-24
 
 - Why: inside `unshare -rn` the bench ran Claude Code as root, and Claude

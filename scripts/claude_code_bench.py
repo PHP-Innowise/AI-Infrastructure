@@ -49,7 +49,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
-EDITIONS = {"PHP Core": "PHP Core", "Laravel": "Laravel", "Symfony": "Symfony", "WordPress": "Cms/wordpress"}
+# The installer's edition names; WordPress lives in Cms/wordpress.
+EDITIONS = ("PHP Core", "Laravel", "Symfony", "WordPress")
 GIT = ["git", "-c", "user.name=Bench", "-c", "user.email=bench@example.invalid", "-c", "commit.gpgsign=false",
        "-c", "core.hooksPath=/dev/null"]
 KEY = "offline-bench-key-not-a-real-api-key"
@@ -353,7 +354,7 @@ def main() -> int:
             project = prepare_target(work, Path(args.target).expanduser().resolve(), args.sync, args.exclude,
                                      args.timeout)
         else:
-            project = prepare(work, EDITIONS[args.edition])
+            project = prepare(work, args.edition)
         trust(work, project)
         unshare_help = subprocess.run(["unshare", "--help"], capture_output=True, text=True).stdout
         done = subprocess.run([*namespace(unshare_help), sys.executable, str(Path(__file__).resolve()),

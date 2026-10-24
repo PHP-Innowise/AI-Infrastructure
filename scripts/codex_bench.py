@@ -287,7 +287,7 @@ def main() -> int:
             project = bench.prepare_target(work, Path(args.target).expanduser().resolve(), args.sync,
                                            args.exclude, args.timeout)
         else:
-            project = bench.prepare(work, bench.EDITIONS[args.edition])
+            project = bench.prepare(work, args.edition)
         done = subprocess.run(["unshare", "-rn", sys.executable, str(Path(__file__).resolve()), "--inside",
                                "--work", str(work), "--codex", args.codex, "--sandbox", args.sandbox,
                                "--source", bench.source_in(project), "--timeout", str(args.timeout)],
