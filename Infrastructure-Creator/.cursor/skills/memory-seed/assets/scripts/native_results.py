@@ -539,7 +539,14 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
     key=_key(root,host,payload,task_id,owner)
     if key is None: return step({'armed':False},'skipped','no-session-id')
     with mutation_lock(root):
-        previous=_read(root,key)
+        # A state this runtime cannot read - written by another version of
+        # it, or damaged - refused every later prompt of the session, which
+        # then saved nothing more. Its request can no longer be settled: a
+        # new one replaces it.
+        try: previous,unreadable=_read(root,key),False
+        except BrainError as error:
+            if refusal_code(error) != 'native-result:invalid-state': raise
+            previous,unreadable=None,True
         # Codex submits the Stop reason through UserPromptSubmit too. It is
         # bookkeeping for this prompt, never a new generation of user work.
         prompt=payload.get('prompt')
@@ -572,7 +579,7 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
         _write(root,key,state);_prune(root,key)
     # The warning is counted by what the last request became.
     return step({'armed':True,'request':key,**({'warning':'Previous native memory result was not saved completely.'} if warning else {})},
-                'armed','previous-'+previous['phase'] if warning else None)
+                'armed','previous-'+previous['phase'] if warning else 'previous-unreadable' if unreadable else None)
 
 
 def recovery(host, payload):

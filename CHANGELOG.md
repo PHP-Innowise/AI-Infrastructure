@@ -28,6 +28,34 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A save request this runtime cannot read is replaced at the next prompt — 2026-10-25
+
+- Why: a session's request file that this runtime refuses as
+  `native-result:invalid-state` - one another version of the runtime wrote
+  (an older one does not know the `refused` and `declined` phases), or one
+  cut short - refused every later prompt and Stop of that session. The
+  session saved nothing more, and only the journal said so.
+- What changes: the prompt replaces such a request with a new one and
+  journals `armed` `previous-unreadable`, without the "not saved
+  completely" warning, since whether it was saved is unknown. Storage that
+  is not a plain file stays `unsafe-storage` and is never replaced.
+- Tests: `test_a_state_this_runtime_cannot_read_is_replaced_at_the_next_prompt`
+  (another version's phase, a file cut short, a directory in its place),
+  failing without the change.
+
+### Claude Code started below the project root runs none of its hooks — 2026-10-25
+
+- Documentation only (`docs/TROUBLESHOOTING.md`, `docs/MEMORY-INTEGRATION.md`
+  known limits). Offline on Claude Code 2.1.278, started in `src/` of an
+  installed project (trusted, and with `src/` trusted too): no hook ran - no
+  capsule, no save, no `bash-validator.sh` - while skills, commands and
+  agents were found above. It reads `.claude/settings.json` only from the
+  folder it starts in, and `.claude/CLAUDE.md`'s `@../AGENTS.md` became an
+  external import: a dialog in a terminal (default "No"), left out under
+  `-p`. Codex 0.163 from a subdirectory runs the project's hooks. Claude
+  Code's own Bash sandbox (bubblewrap) started in the root let the save
+  write.
+
 ### A Codex session that cannot write the Brain is not asked to save — 2026-10-24
 
 - Why: offline on Codex 0.163, a session started in a subdirectory of the

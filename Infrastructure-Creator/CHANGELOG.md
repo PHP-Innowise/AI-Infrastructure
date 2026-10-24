@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime replaces a save request it cannot read — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), the prompt
+  replaces a session's request file refused as `invalid-state` and journals
+  `previous-unreadable`, instead of refusing every later prompt of the
+  session. `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
 ### The seeded runtime asks no save of a Codex session that cannot write the Brain — 2026-10-24
 
 - As the editions' runtime does (root `CHANGELOG.md`, same day), a Codex Stop

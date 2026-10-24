@@ -555,6 +555,35 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         # The warning the prompt hook prints, counted by what the last request became.
         self.one(self.written(self.begin),'prompt','armed','previous-failed')
 
+    def test_a_state_this_runtime_cannot_read_is_replaced_at_the_next_prompt(self):
+        # Written by another version of the runtime or cut short, the state
+        # refused every later prompt of its session, which saved nothing more.
+        def prompt(session,ok=True):
+            return self.call('native-prompt','--host','codex','--task-id','research','--json',ok=ok,
+                             data={'hook_event_name':'UserPromptSubmit','session_id':session,'prompt':'Inspect it.'})
+        damages={'another version':lambda path:path.write_text(json.dumps(dict(json.loads(path.read_text()),phase='queued'))),
+                 'cut short':lambda path:path.write_bytes(path.read_bytes()[:40])}
+        for n,(name,damage) in enumerate(damages.items()):
+            with self.subTest(state=name):
+                session=f'unreadable-{n}';stop=dict(self.STOP,session_id=session)
+                key=json.loads(prompt(session).stdout)['request']
+                path=self.root/'project-brain/local/native-results'/(key+'.json')
+                damage(path)
+                self.one(self.written(lambda:self.call('native-stop','--host','codex','--task-id','research',
+                                                       data=stop,ok=False)),'stop','error','native-result:invalid-state')
+                self.one(self.written(lambda:prompt(session)),'prompt','armed','previous-unreadable')
+                self.assertIn('INTERNAL_NATIVE_MEMORY_RESULT',json.loads(
+                    self.call('native-stop','--host','codex','--task-id','research',data=stop).stdout)['reason'])
+                token=json.loads(path.read_text())['token']
+                self.one(self.written(lambda:self.call('native-result','--request',key,'--token',token,
+                                                       '--input','-','--json',data=self.payload)),'save','saved')
+        # Storage that is not a plain file is still refused, never replaced.
+        key=json.loads(prompt('unsafe').stdout)['request']
+        path=self.root/'project-brain/local/native-results'/(key+'.json')
+        path.unlink();path.mkdir()
+        self.one(self.written(lambda:prompt('unsafe',ok=False)),'prompt','error','native-result:unsafe-storage')
+        self.assertTrue(path.is_dir())
+
     def test_each_stop_path_writes_one_line_with_its_code(self):
         def request(payload=self.STOP,host='codex',**values):
             return self.call('native-stop','--host',host,'--task-id','research',data=payload,
