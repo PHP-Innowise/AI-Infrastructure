@@ -28,6 +28,29 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The memory CLI may name SQL past bash-validator — 2026-10-25
+
+- Why: every shipped `bash-validator.sh` refused the accelerator's own
+  memory CLI whenever what it was handed named destructive SQL. A save
+  whose progress or learning said "the rollback runs DROP TABLE invoices"
+  was blocked as `destructive SQL - DROP TABLE/DATABASE/SCHEMA` - that
+  answer's native save was lost, in Claude Code's `echo -E '<JSON>' |`
+  form and in the `| (cd ROOT && ...)` form Codex and Cursor are given -
+  and so were `context.py retrieve --query 'rollback DROP TABLE'` and
+  `record-result` with such text. The SQL rules leave searches and git
+  alone; the text piped into the CLI was scanned as if it fed a SQL client.
+- What changes: a command that runs nothing but the memory CLI
+  (`python3`/`python`/`py -3` `memory-bank/scripts/context.py`, any
+  directory before either) and `cd`, `cat`, `echo` or `printf`, in any
+  pipe, group or heredoc, is left alone by the SQL rules: nothing in it can
+  run the text. Any other program in the command - a client the CLI's
+  output is piped into, one run beside it or in a substitution, Python that
+  is not the CLI - and the rules apply as before. Generic section,
+  byte-identical in the four editions and Infrastructure-Creator; mirrors
+  regenerated.
+- Tests: eight corpus cases in `tests/fixtures/bash-validator-corpus.json`
+  (four allowed, four still refused) and the `memory-cli` decision.
+
 ### A prompt sent while the save is written no longer cancels it — 2026-10-25
 
 - Why: offline on Claude Code 2.1.278, in its terminal, with a scripted

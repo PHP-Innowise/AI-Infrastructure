@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### bash-validator lets the memory CLI name SQL — 2026-10-25
+
+- The generic section shared with the editions (root `CHANGELOG.md`, same
+  day): a command that runs nothing but the memory CLI and cd, cat, echo or
+  printf is left alone by the SQL rules.
+
 ### The seeded runtime keeps a save in flight when a prompt arrives — 2026-10-25
 
 - As the editions' runtime does (root `CHANGELOG.md`, same day), a prompt

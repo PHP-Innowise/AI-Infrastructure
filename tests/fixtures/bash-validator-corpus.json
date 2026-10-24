@@ -13,7 +13,8 @@
     "delete-from": "DELETE with no WHERE, and TRUNCATE without TABLE, are refused only when a simple command of the input runs SQL text (mysql, psql, sqlite3, wp db query, dbal:run-sql, artisan tinker, ...). Elsewhere 'delete from the cart' is a test name, an issue title or a translation. DROP TABLE, TRUNCATE TABLE and an always-true WHERE (1=1, true, bare 1) stay refused everywhere, as before.",
     "core.hooksPath": "Every git config write or unset of core.hooksPath is refused, also one that points the hooks at a project directory such as .githooks: the hook cannot tell enabling hooks from disabling them, so the user runs it.",
     "launchers": "A quoted command line is checked as a command only when a known launcher (BV_LAUNCHERS: ssh, ddev, lando, vagrant, docker, kubectl, tmux, ...) receives it; a quoted argument of any other program is text.",
-    "nesting": "Nesting deeper than any real command (BV_MAX_NEST call frames) is refused as 'command too complex' instead of parsed: bash would overflow its stack and the hook would fail open."
+    "nesting": "Nesting deeper than any real command (BV_MAX_NEST call frames) is refused as 'command too complex' instead of parsed: bash would overflow its stack and the hook would fail open.",
+    "memory-cli": "The accelerator's memory CLI (python3 memory-bank/scripts/context.py) is handed text that may name SQL - a query about a migration, a saved result saying the rollback runs DROP TABLE - and runs none of it. A command that runs nothing but the memory CLI and cd, cat, echo or printf, in any pipe, group or heredoc, cannot run that text, so the SQL rules leave it alone, as they leave git and searches. Any other program in the command - a SQL client the CLI's output is piped into, one run beside it, Python that is not the CLI - and the SQL rules apply as before."
   },
   "cases": [
     {
@@ -411,6 +412,30 @@
       "note": "SQL piped into a client"
     },
     {
+      "command": "echo \"DROP TABLE users;\" | python3 memory-bank/scripts/context.py retrieve --query users | mysql app",
+      "expect": "block",
+      "editions": "all",
+      "note": "the memory CLI's output read by a SQL client"
+    },
+    {
+      "command": "echo \"DROP TABLE users;\" | python3 -c 'import sqlite3,sys; sqlite3.connect(\"app.db\").executescript(sys.stdin.read())'",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL piped into Python that is not the memory CLI"
+    },
+    {
+      "command": "python3 memory-bank/scripts/context.py retrieve --query users; mysql -e \"DROP TABLE users;\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "SQL beside a memory query"
+    },
+    {
+      "command": "echo \"$(mysql -e 'DROP TABLE users;')\" | python3 memory-bank/scripts/context.py native-result --input - --json",
+      "expect": "block",
+      "editions": "all",
+      "note": "a SQL client in a substitution handed to the memory CLI"
+    },
+    {
       "command": "mysql app <<'SQL'\nDROP TABLE users;\nSQL",
       "expect": "block",
       "editions": "all",
@@ -640,6 +665,30 @@
       "expect": "pass",
       "editions": "all",
       "note": "read-only search (blocked by the old hook)"
+    },
+    {
+      "command": "cd /srv/shop && echo -E '{\"progress\":\"The down() migration runs DROP TABLE invoices.\",\"verified\":true,\"learnings\":[]}' | python3 memory-bank/scripts/context.py --root /srv/shop native-result --request 0f4c2a6b8d0e1f3a5c7e9b1d3f5a7c9e0f2b4d6a8c0e1f3a5b7d9f1a3c5e7b9d --token 6f1d3b5a7c9e0f2a4c6e8b0d2f4a6c8e --input - --json",
+      "expect": "pass",
+      "editions": "all",
+      "note": "the memory CLI's saved result names SQL it never runs (Claude Code's form)"
+    },
+    {
+      "command": "printf '%s' '{\"progress\":\"TRUNCATE TABLE invoices resets the counters.\"}' | (cd /srv/shop && python3 memory-bank/scripts/context.py --root /srv/shop native-result --input - --json)",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a saved result piped into the memory CLI's group (Codex's and Cursor's form)"
+    },
+    {
+      "command": "(cd /srv/shop && python3 memory-bank/scripts/context.py --root /srv/shop native-result --input - --json) <<'JSON'\n{\"progress\":\"The rollback runs DROP SCHEMA reports.\"}\nJSON",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a saved result in a heredoc handed to the memory CLI's group"
+    },
+    {
+      "command": "python3 memory-bank/scripts/context.py retrieve --query 'why does the rollback DROP TABLE invoices'",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a memory query names SQL"
     },
     {
       "command": "rg -i \"delete from users\" src/",

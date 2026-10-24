@@ -88,8 +88,11 @@ fi
 # command names follow Symfony Console (any unambiguous per-part prefix,
 # case-insensitive fallback; options may stand before the name); SQL keyword
 # rules ignore case and do not fire on read-only searches (grep, rg, ag,
-# ack), on git (git grep/log -S, commit messages), or on the cat/echo/printf
-# that feeds one of those. DELETE without WHERE and TRUNCATE without TABLE
+# ack), on git (git grep/log -S, commit messages), on the cat/echo/printf
+# that feeds one of those, or in a command that runs nothing but the
+# accelerator's memory CLI (python3 memory-bank/scripts/context.py, whose
+# queries and saved results may name SQL it never runs) and cd, cat, echo or
+# printf. DELETE without WHERE and TRUNCATE without TABLE
 # count only when the input runs SQL (BV_RE_SQL_RUNNER): elsewhere "delete
 # from the cart" is English.
 #
@@ -143,6 +146,9 @@ BV_RE_SQL_WHERE_ALL="[Ww][Hh][Ee][Rr][Ee]${BV_SQL_WS}(1[[:space:]]*=[[:space:]]*
 # A word of a simple command that runs SQL text: an SQL client, wp db
 # query/cli, artisan db/tinker, dbal:run-sql or doctrine:query:sql.
 BV_SQL_NAME="[^${BV_US}[:space:]]"
+# The accelerator's memory CLI started by a Python launcher, as a simple
+# command's words (see the SQL note at the top).
+BV_RE_MEMORY_CLI="^${BV_US}([^${BV_US}]*/)?(python3?(\.[0-9]+)?|py)(${BV_US}-3)?${BV_US}([^${BV_US}]*/)?memory-bank/scripts/context\.py(${BV_US}|\$)"
 BV_RE_SQL_RUNNER="${BV_US}(${BV_SQL_NAME}*/)?(mysql|mariadb|mysqlsh|mycli|psql|pgcli|sqlite3|sqlcmd|usql|tinker|artisan${BV_US}db|${BV_SQL_NAME}*:run-sql|${BV_SQL_NAME}*:query:sql)(${BV_US}|\$)|${BV_US}db${BV_US}(query|cli)(${BV_US}|\$)"
 
 BV_GENERIC_RULES=(
@@ -1276,10 +1282,27 @@ bv_program_rules() {
   esac
 }
 
-# SQL text is data in a search, and in the cat/echo/printf that feeds one.
+# BV_MEMORY_ONLY: 1 when the input runs the memory CLI and beside it only cd,
+# cat, echo and printf - nothing that could run the SQL text it carries.
+bv_memory_only() {
+  local i=0 n=${#BV_SEG_WORDS[@]} w first cli=0
+  BV_MEMORY_ONLY=0
+  while (( i < n )); do
+    w=${BV_SEG_WORDS[i]}; i=$(( i + 1 ))
+    [[ -n $w ]] || continue
+    if [[ $w =~ $BV_RE_MEMORY_CLI ]]; then cli=1; continue; fi
+    first=${w#"$BV_US"}; first=${first%%"$BV_US"*}
+    case $first in cd|cat|echo|printf) ;; *) return 0 ;; esac
+  done
+  BV_MEMORY_ONLY=$cli
+}
+
+# SQL text is data in a search, in the cat/echo/printf that feeds one, and
+# in a command of the memory CLI alone.
 bv_sql_check() {
   local parent=${BV_SEG_PARENT[BV_CUR]}
   [[ $BV_SEARCH != *",$BV_PROG,"* ]] || return 0
+  (( ! BV_MEMORY_ONLY )) || return 0
   case $BV_PROG in
     cat|echo|printf)
       (( parent < 0 )) || [[ $BV_SEARCH != *",${BV_SEG_PROG[parent]},"* ]] || return 0 ;;
@@ -1323,6 +1346,7 @@ bv_validate() {
   BV_SEG_DEPTH=(); BV_SEG_PARENT=()
   [[ -n ${BV_ARGV_PROGS-} ]] || bv_index_rules
   bv_run_parse "$1" 0 -1
+  bv_memory_only
   while (( i < ${#BV_SEG_WORDS[@]} )); do
     bv_check_seg "$i"
     [[ -z $BV_HIT ]] || return 0
