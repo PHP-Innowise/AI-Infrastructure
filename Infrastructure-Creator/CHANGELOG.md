@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime sends the full save step again after a Codex compaction — 2026-10-24
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), a full save
+  step counts only after the compaction record's own line.
+  `native_results.py` changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime cuts each section into sentences once per request — 2026-10-24
 
 - The memory runtime memory-seed copies holds a section's excerpt units, as

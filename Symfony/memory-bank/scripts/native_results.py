@@ -287,7 +287,11 @@ def _rules_in_context(payload):
     except OSError:
         return False
     start = max(tail.rfind(record) for record in COMPACTION_RECORDS)
-    return tail.find(FULL_RULES.encode(), start + 1 if start >= 0 else 0) >= 0
+    # The model holds what follows the compaction record's own line: Codex's
+    # record carries a retained context with earlier steps in it, which the
+    # model no longer sees.
+    begin = 0 if start < 0 else (tail.find(b'\n', start) + 1 or len(tail))
+    return tail.find(FULL_RULES.encode(), begin) >= 0
 
 
 def configured_answer(root):

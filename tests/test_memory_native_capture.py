@@ -1218,6 +1218,11 @@ class NativeInstructionTests(NativeCaptureFixture):
             with self.subTest(record=record['type']):
                 path=self.transcript('compacted.jsonl',{'type':'user','message':{'content':first}},record)
                 self.assertIn(self.FULL,self.ask(session='after-'+record['type'],transcript=path))
+        # Codex's compaction record keeps earlier items in a retained context
+        # that is not the model's history: the steps it holds are dropped too.
+        carried=self.transcript('carried.jsonl',{'type':'user','message':{'content':first}},
+                                {'type':'compacted','payload':{'message':'summary','retained_context':{'items':[first]}}})
+        self.assertIn(self.FULL,self.ask(host='codex',session='after-carried',transcript=carried))
         self.assertIn(self.FULL,self.ask(session='gone',transcript=self.root.parent/'gone.jsonl'))
         self.assertIn(self.FULL,self.ask(session='none'))
 

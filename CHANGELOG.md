@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### After a Codex compaction the save step is full again — 2026-10-24
+
+- Why: offline on Codex 0.163, with an automatic compaction before the third
+  turn, that turn's save step came short, pointing back to rules the model
+  no longer held. Codex's `compacted` record carries a `retained_context`
+  with the earlier steps in it, and the check found the full step's text
+  there, after the record's marker. The model's history after the
+  compaction (`replacement_history`) held no full step.
+- What changes: the full step counts only after the compaction record's own
+  line.
+- Tests: `test_the_full_step_comes_back_after_a_compaction_or_without_a_transcript`
+  carries a compaction record with the full step inside it, and fails without
+  the change. Offline, three turns around the compaction: Codex 2,522, then
+  1,619, then 2,522 characters again; Claude Code around a `/compact` 3,149,
+  2,246, 3,149. Every turn saved.
+
 ### A capsule request cuts each section into sentences once — 2026-10-24
 
 - Why: after the masking cache, the next cost in `refresh` on a synced copy
