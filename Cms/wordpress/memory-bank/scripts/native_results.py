@@ -613,9 +613,10 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
             return step({'armed':False,'warning':'Previous native memory result was not saved completely.'},
                         'skipped','host-refused')
         # A person may send the next prompt while the agent still writes the
-        # save: Claude Code queues it and runs this hook at once, mid-turn.
-        # Replaced, the request refused that save on its way and the agent
-        # was warned of a result it was saving; moved aside, the save lands.
+        # save: Claude Code and Codex take it into the running turn and run
+        # this hook at once. Replaced, the request refused that save on its
+        # way and the agent was warned of a result it was saving; moved
+        # aside, the save lands.
         moved=(previous is not None and previous['phase']=='requested'
                and 0 <= time.time()-previous['updated'] < IN_FLIGHT_SECONDS)
         if moved: _write(root,_aside(key),previous)

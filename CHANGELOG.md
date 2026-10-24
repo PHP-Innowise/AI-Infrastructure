@@ -53,11 +53,12 @@ edition's own files remain in that edition's changelog.
 
 ### A prompt sent while the save is written no longer cancels it — 2026-10-25
 
-- Why: offline on Claude Code 2.1.278, in its terminal, with a scripted
-  model that took 8 seconds to write the save, a second question sent
-  while it did was queued, and Claude Code ran the prompt hook at once,
-  mid-turn (`queue-operation` `enqueue`, then `absorbed_mid_turn`). The
-  hook re-armed the session: the save in flight was refused as
+- Why: offline in the terminals of Claude Code 2.1.278 and Codex 0.163,
+  with a scripted model that took 8 seconds to write the save, a second
+  question sent while it did went into the running turn, and the host ran
+  the prompt hook at once (Claude Code's transcript: `queue-operation`
+  `enqueue`, then `absorbed_mid_turn`; Codex's rollout: the message under
+  the same `turn_id`). The hook re-armed the session: the save in flight was refused as
   `native-result:request-unavailable`, and the agent read "Previous native
   memory result was not saved completely." in the middle of saving it. With
   a real model the save takes seconds after every visible answer, the time
