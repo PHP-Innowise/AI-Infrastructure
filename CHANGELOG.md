@@ -28,6 +28,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A capsule request masks each document image once — 2026-10-24
+
+- Why: profiling the prompt hook on a synced copy of `next` showed masking
+  secrets in about a fifth of `refresh`. One request cuts the capsule's
+  excerpts three times over (for the manifest, the text and the output), and
+  each pass screened every document image again: 127 `mask_secrets` calls
+  for about 30 distinct texts.
+- What changes: `mask_secrets` is held per text and secret policy in a
+  bounded cache (128 texts). The key carries `secret_policy_fingerprint()`,
+  so a pattern added since masks afresh, and a policy holding a scanner that
+  is no compiled pattern is not cached at all. A ValidationError is never
+  held.
+- Measured on the copy, 24 interleaved first prompts of fresh sessions per
+  side: the prompt hook's median went from 311.5 to 286.5 ms (−25 ms, −8 %),
+  every output byte for byte the same. Prompts whose items repeat do no
+  excerpt work and are unchanged.
+- Tests: `MaskSecretsTest.test_masking_is_held_per_text_and_secret_policy`;
+  the secret-policy delivery suites, which change the patterns between
+  calls, failed against a cache keyed on the text alone.
+
 ### The policy asks for an explicit save only where no Stop request comes — 2026-10-24
 
 - Why: each edition's `AGENTS.md` said "MUST finish authorized work with

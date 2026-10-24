@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime masks each document image once per request — 2026-10-24
+
+- The memory runtime memory-seed copies holds `mask_secrets` per text and
+  secret policy, as the editions' runtime does (root `CHANGELOG.md`, same
+  day). `validate.py` changes in the asset; the policy lock was rewritten.
+
 ### policy-forge asks for an explicit save only where no Stop request comes — 2026-10-24
 
 - `policy-forge`'s working-memory rules: where the generated Stop hook
