@@ -2626,5 +2626,13 @@ class SaveContinuationCostTest(unittest.TestCase):
                                                  **({"answer": answer} if answer else {})})
         self.assertEqual((3, 1), (counts["requested"], counts["requested_brief"]))
 
+    def test_an_armed_prompt_that_printed_no_warning_is_not_after_an_unsaved_one(self):
+        # A request moved aside while its save was written, or one the runtime
+        # could not read, arms the next prompt without the unsaved warning.
+        counts = memory_eval.Counter()
+        for code in (None, "previous-failed", "previous-in-flight", "previous-unreadable"):
+            memory_eval.native_step(counts, {}, {"stage": "prompt", "event": "armed", **({"code": code} if code else {})})
+        self.assertEqual((4, 1), (counts["armed"], counts["armed_after_incomplete"]))
+
 if __name__ == "__main__":
     unittest.main()

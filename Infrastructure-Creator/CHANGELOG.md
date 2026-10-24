@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime keeps a save in flight when a prompt arrives — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), a prompt
+  that finds the last request asked and unsettled moves it aside instead of
+  replacing it, so the save being written still lands. `native_results.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime replaces a save request it cannot read — 2026-10-25
 
 - As the editions' runtime does (root `CHANGELOG.md`, same day), the prompt

@@ -584,6 +584,69 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.one(self.written(lambda:prompt('unsafe',ok=False)),'prompt','error','native-result:unsafe-storage')
         self.assertTrue(path.is_dir())
 
+    def queued(self,host='claude',text='And how are credit notes numbered?',transcript=None):
+        payload={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':text}
+        if transcript: payload['transcript_path']=transcript
+        return self.call('native-prompt','--host',host,'--task-id','research','--json',data=payload)
+
+    def stopped(self,active,host='claude'):
+        return self.call('native-stop','--host',host,'--task-id','research',data=dict(self.STOP,stop_hook_active=active))
+
+    def test_a_prompt_sent_while_the_save_is_written_does_not_cancel_it(self):
+        # Claude Code queues a prompt sent while the agent writes the save and
+        # runs the prompt hook at once, mid-turn. Offline, re-arming there
+        # refused that save on its way ("request-unavailable") and warned the
+        # agent of an unsaved result in the middle of saving it.
+        self.begin(host='claude')
+        self.one(self.written(lambda:self.stopped(False)),'stop','requested',host='claude')
+        candidate,state=self.state()
+        out=[]
+        self.one(self.written(lambda:out.append(self.queued())),'prompt','armed','previous-in-flight',host='claude')
+        self.assertNotIn('warning',json.loads(out[0].stdout))
+        self.one(self.written(lambda:self.call('native-result','--request',candidate.stem,'--token',state['token'],
+                                               '--input','-','--json',data=self.payload)),'save','saved',host='claude')
+        self.one(self.written(lambda:self.stopped(True)),'stop','skipped','recovery-saved',host='claude')
+        self.one(self.written(lambda:out.append(self.queued(text='Next question'))),'prompt','armed',host='claude')
+        self.assertNotIn('warning',json.loads(out[1].stdout))
+        self.state()  # the request moved aside went with the prompt after
+        self.assertEqual(1,len(self.records('tasks')))
+
+    def test_a_request_moved_aside_is_reported_at_the_next_prompt_when_unsaved(self):
+        self.begin(host='claude');self.stopped(False)
+        self.one(self.written(self.queued),'prompt','armed','previous-in-flight',host='claude')
+        # The continuation ended without the save: its Stop settles the request moved aside.
+        self.one(self.written(lambda:self.stopped(True)),'stop','failed','unsaved',host='claude')
+        out=[]
+        self.one(self.written(lambda:out.append(self.queued(text='Next question'))),'prompt','armed','previous-failed',
+                 host='claude')
+        self.assertEqual('Previous native memory result was not saved completely.',json.loads(out[0].stdout)['warning'])
+        # A person who answered No to the save moved aside: not asked again for a day.
+        self.stopped(False)
+        token=self.state()[1]['token']
+        self.queued()
+        refused=self.refused_transcript(token,'user-rejected')
+        self.one(self.written(lambda:self.queued(text='Again',transcript=refused)),'prompt','skipped','host-refused',
+                 host='claude')
+        self.one(self.written(lambda:self.stopped(False)),'stop','skipped','phase-declined',host='claude')
+
+    def test_a_request_asked_long_ago_is_reported_at_once_and_codex_continues_one_moved_aside(self):
+        self.begin(host='claude');self.stopped(False)
+        candidate,state=self.state();state['updated']-=11*60;candidate.write_text(json.dumps(state))
+        self.one(self.written(self.queued),'prompt','armed','previous-requested',host='claude')
+        refused=self.call('native-result','--request',candidate.stem,'--token',state['token'],'--input','-','--json',
+                          data=self.payload,ok=False)
+        self.assertIn(b'native-result:request-unavailable',refused.stderr)
+        # Codex hands the save step back as a prompt: one carrying the token of
+        # the request moved aside is that continuation, not a new prompt.
+        self.begin(host='codex',session='session-c')
+        reason=json.loads(self.call('native-stop','--host','codex','--task-id','research',
+                                    data=dict(self.STOP,session_id='session-c')).stdout)['reason']
+        prompt={'hook_event_name':'UserPromptSubmit','session_id':'session-c','prompt':'Steer: also the credit notes.'}
+        self.one(self.written(lambda:self.call('native-prompt','--host','codex','--task-id','research','--json',
+                                               data=prompt)),'prompt','armed','previous-in-flight')
+        self.one(self.written(lambda:self.call('native-prompt','--host','codex','--task-id','research','--json',
+                                               data=dict(prompt,prompt=reason))),'prompt','continuation')
+
     def test_each_stop_path_writes_one_line_with_its_code(self):
         def request(payload=self.STOP,host='codex',**values):
             return self.call('native-stop','--host',host,'--task-id','research',data=payload,
@@ -943,19 +1006,23 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         only, so its arm writes the notice for the capsule and runs first."""
         notice='Previous native memory result was not saved completely.'
         report=self.root/'memory-bank/local/last-turn-report.json'
+        # A temporary directory of its own: another suite's hook running
+        # beside this one leaves its own file in a shared one for a moment.
+        private=Path(tempfile.mkdtemp(prefix='native-hook-tmp-',dir=self.root.parent))
         for host,session in (('claude','unsaved-claude'),('codex','unsaved-codex')):
             with self.subTest(host=host):
                 hooks=self.install_hooks(host)
                 self.begin(host,session);self.stop(host,session);self.stop(host,session,active=True)
                 if report.exists():report.unlink()
                 result=self.hook(hooks,'working-memory-read.sh',{'hook_event_name':'UserPromptSubmit',
-                    'session_id':session,'cwd':str(self.root),'prompt':'Continue the Amber routing research.'})
+                    'session_id':session,'cwd':str(self.root),'prompt':'Continue the Amber routing research.'},
+                    env=dict(self.env,TMPDIR=str(private)))
                 lines=result.stdout.decode().splitlines()
                 self.assertEqual(notice,lines[0])
                 self.assertEqual(1,lines.count(notice))
                 self.assertFalse(report.exists() and 'native_capture_incomplete' in report.read_text())
                 self.assertNotIn('native memory result not saved completely',result.stdout.decode())
-                self.assertFalse(list(Path(self.env.get('TMPDIR') or tempfile.gettempdir()).glob('working-memory-native.*')))
+                self.assertFalse(list(private.glob('working-memory-native.*')))
         hooks=self.install_hooks('cursor')
         self.begin('cursor','unsaved-cursor');self.stop('cursor','unsaved-cursor');self.stop('cursor','unsaved-cursor',active=True)
         result=self.hook(hooks,'working-memory-read.sh',{'hook_event_name':'beforeSubmitPrompt',

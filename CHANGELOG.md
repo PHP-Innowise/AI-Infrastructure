@@ -28,6 +28,34 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A prompt sent while the save is written no longer cancels it — 2026-10-25
+
+- Why: offline on Claude Code 2.1.278, in its terminal, with a scripted
+  model that took 8 seconds to write the save, a second question sent
+  while it did was queued, and Claude Code ran the prompt hook at once,
+  mid-turn (`queue-operation` `enqueue`, then `absorbed_mid_turn`). The
+  hook re-armed the session: the save in flight was refused as
+  `native-result:request-unavailable`, and the agent read "Previous native
+  memory result was not saved completely." in the middle of saving it. With
+  a real model the save takes seconds after every visible answer, the time
+  in which a person types the next question.
+- What changes: a prompt that finds the last request asked and unsettled,
+  less than ten minutes old, moves it aside to a second file of the same
+  session and journals `armed` `previous-in-flight` without a warning. The
+  save still lands there (`native-result` reads either file by its token),
+  the continuation's Stop settles it, and the prompt after reports it as
+  any other request: quiet when saved, the warning when not, "not asked
+  again for a day" when the person refused the save command. Codex's
+  continuation prompt is recognised by either request's token. An older
+  request is reported at once, as before. The queued prompt's own answer is
+  saved with the next answer's save. `memory_eval.py realized` does not
+  count `previous-in-flight` or `previous-unreadable` as armed after an
+  unsaved result.
+- Tests: `test_a_prompt_sent_while_the_save_is_written_does_not_cancel_it`,
+  `test_a_request_moved_aside_is_reported_at_the_next_prompt_when_unsaved`,
+  `test_a_request_asked_long_ago_is_reported_at_once_and_codex_continues_one_moved_aside`,
+  `test_an_armed_prompt_that_printed_no_warning_is_not_after_an_unsaved_one`.
+
 ### A save request this runtime cannot read is replaced at the next prompt — 2026-10-25
 
 - Why: a session's request file that this runtime refuses as
