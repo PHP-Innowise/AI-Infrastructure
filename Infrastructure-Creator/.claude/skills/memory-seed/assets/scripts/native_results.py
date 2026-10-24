@@ -336,7 +336,8 @@ def _claude_refusal(payload, token):
             record = json.loads(line)
         except (ValueError, RecursionError):
             continue  # the tail's first line may be cut
-        content = record.get('message', {}).get('content') if isinstance(record, dict) else None
+        message = record.get('message') if isinstance(record, dict) else None
+        content = message.get('content') if isinstance(message, dict) else None
         for block in content if isinstance(content, list) else ():
             if not isinstance(block, dict):
                 continue

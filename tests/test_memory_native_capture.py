@@ -586,7 +586,9 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
                                   f'--request r --token {token} --input - --json'}}
         result={'type':'tool_result','tool_use_id':'toolu_save','is_error':True,
                 'content':'This Bash command contains multiple operations. The following part requires approval'}
-        records=[{'type':'assistant','message':{'role':'assistant','content':[call]}},
+        # A line that is not a message, or whose message is not an object, is passed over.
+        records=[{'type':'summary','message':'tool_result in a string'},['tool_result'],
+                 {'type':'assistant','message':{'role':'assistant','content':[call]}},
                  {'type':'user','message':{'role':'user','content':[result]},**({'toolDenialKind':kind} if kind else {})}]
         path.write_text(''.join(json.dumps(record)+'\n' for record in records),encoding='utf-8')
         return str(path)
