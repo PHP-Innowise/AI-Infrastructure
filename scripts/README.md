@@ -630,6 +630,12 @@ trust and nothing else. It warns when the trust dialog was never accepted:
 there `claude -p` ignores the project's allow rules and refuses the save,
 which the bench's own trusted HOME would hide.
 
+`--attached` runs a fresh project with nothing installed and the edition
+lent from this clone, as the Harness launches it (`accelerator_attach.py`:
+`--add-dir`, one `--settings` with the edition's permissions and hooks, the
+state outside the project). The project is left untrusted there, because
+permissions from `--settings` count without the trust dialog.
+
 `--mode` runs one permission mode (`default`, `acceptEdits`, `auto`,
 `dontAsk`, `bypassPermissions` or `plan`). The namespace keeps your own uid
 where `unshare` can map it (util-linux 2.38 and later), because Claude Code
@@ -639,7 +645,7 @@ journal records `plan-mode`.
 
 ```bash
 python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
-  [--target DIR [--sync] [--exclude NAME]] [--shell /usr/bin/zsh] [--mode dontAsk] \
+  [--target DIR [--sync] [--exclude NAME] | --attached] [--shell /usr/bin/zsh] [--mode dontAsk] \
   [--timeout 180] [--keep]
 ```
 

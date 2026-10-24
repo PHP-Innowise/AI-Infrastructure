@@ -331,6 +331,10 @@ project's trust dialog was never accepted there. In such a project
 `claude -p` runs the hooks but ignores the project's allow rules and refuses
 the save, so open the project once in interactive Claude Code first.
 
+For a project the Harness attaches without copying, run
+`python3 scripts/claude_code_bench.py --attached`: it launches Claude Code
+the same way, with the edition lent from the clone and nothing installed.
+
 For heavily adapted or drifting installations, regenerate from current
 project evidence with Infrastructure-Creator rather than repeatedly layering
 generic files over the project.

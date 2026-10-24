@@ -28,6 +28,21 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The Claude Code bench runs attached, as the Harness launches it — 2026-10-24
+
+- Why: the Harness lends an edition from the clone without copying it
+  (`accelerator_attach.py`): `--add-dir`, one `--settings` with the edition's
+  permissions and hooks, and the accelerator's state outside the project.
+  The bench only ran installed editions, so that launch, and whether its save
+  passes Claude Code's permission check, had never run offline.
+- What changes: `claude_code_bench.py --attached` runs a fresh project with
+  nothing installed and that overlay, leaving the project untrusted, and
+  reads the journal from the state directory. Offline on Claude Code 2.1.278
+  it saves, under `default` and `dontAsk` alike: permissions from
+  `--settings` count without the trust dialog, and the `cd` into the
+  added directory passes.
+- Tests: `AttachedTest` in `tests/test_host_benches.py`.
+
 ### The rollout rehearsal says when your Claude Code does not trust a target — 2026-10-24
 
 - Why: the rehearsal is the step before a rollout, and its copies run with a

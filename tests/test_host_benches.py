@@ -7,7 +7,9 @@ stand-ins take a turn the way each host sends it (Claude Code's hook feedback,
 Codex's XML-escaped <hook_prompt> and code mode), and a target the rollout
 rehearsal refuses is refused.
 """
+import contextlib
 import html
+import io
 import importlib
 import json
 import sys
@@ -175,6 +177,30 @@ class EditionTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 claude_code_bench.main()
         self.assertEqual(["WordPress"], seen)
+
+
+class AttachedTest(unittest.TestCase):
+    def test_an_attached_run_installs_nothing_and_carries_the_harness_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            project, state = claude_code_bench.prepare_attached(work, "PHP Core")
+            self.assertFalse((project / "memory-bank").exists())
+            self.assertFalse((project / ".claude").exists())
+            self.assertFalse(state.is_relative_to(project))
+            overlay = json.loads((work / "overlay.json").read_text(encoding="utf-8"))
+            self.assertIn("--add-dir", overlay["arguments"])
+            self.assertTrue(any("memory-bank/scripts/context.py" in rule
+                                for rule in overlay["settings"]["permissions"]["allow"]))
+            self.assertIn("Stop", overlay["settings"]["hooks"])
+            self.assertEqual(str(state), overlay["environment"]["ACCELERATOR_STATE_DIR"])
+
+    def test_attached_takes_no_target(self) -> None:
+        argv = ["claude_code_bench.py", "--attached", "--target", "/p/next", "--claude", sys.executable]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(claude_code_bench.sys, "platform", "linux"), \
+                mock.patch.object(claude_code_bench.shutil, "which", return_value="/usr/bin/true"):
+            with contextlib.redirect_stderr(io.StringIO()) as said:
+                self.assertEqual(2, claude_code_bench.main())
+        self.assertIn("--attached runs a fresh project", said.getvalue())
 
 
 class PersonTrustTest(unittest.TestCase):

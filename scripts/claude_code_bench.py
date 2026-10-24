@@ -33,6 +33,7 @@ is never written.
   python3 scripts/claude_code_bench.py
   python3 scripts/claude_code_bench.py --shell /usr/bin/zsh --edition Laravel --keep
   python3 scripts/claude_code_bench.py --mode dontAsk
+  python3 scripts/claude_code_bench.py --attached
   python3 scripts/claude_code_bench.py --target ~/Desktop/next --sync
 """
 import argparse
@@ -46,7 +47,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 # The installer's edition names; WordPress lives in Cms/wordpress.
@@ -182,7 +183,8 @@ def text_of(content: Any) -> str:
     return "\n".join(parts)
 
 
-def prepare(work: Path, edition: str) -> Path:
+def shop(work: Path) -> Path:
+    """A small PHP project in its own Git repository, with nothing installed."""
     project = work / "project"
     (project / "src").mkdir(parents=True)
     (work / "home").mkdir()
@@ -191,12 +193,32 @@ def prepare(work: Path, edition: str) -> Path:
     env = clean_env()
     for args in (["init", "-q", "-b", "feature/SHOP-7-invoices"], ["add", "."], ["commit", "-qm", "Shop baseline"]):
         subprocess.run([*GIT, *args], cwd=project, env=env, check=True, capture_output=True)
+    return project
+
+
+def prepare(work: Path, edition: str) -> Path:
+    project = shop(work)
+    env = clean_env()
     done = subprocess.run([sys.executable, str(ROOT / "scripts/install_accelerator.py"), "--edition", edition,
                            "--target", str(project), "--merge-existing"], cwd=ROOT, env=env,
                           capture_output=True, text=True)
     if done.returncode:
         raise SystemExit(f"install failed: {done.stdout[-600:]}{done.stderr[-600:]}")
     return project
+
+
+def prepare_attached(work: Path, edition: str) -> Tuple[Path, Path]:
+    """A project with nothing installed and the edition lent from this clone,
+    as the Harness launches it: the overlay goes to `work/overlay.json`, the
+    accelerator's state to a directory outside the project."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import accelerator_attach as attach
+    project = shop(work)
+    state = attach.state_directory(project, work / "state-base")
+    overlay = attach.claude_overlay(edition, project, state)
+    (work / "overlay.json").write_text(json.dumps({"settings": overlay.settings, "arguments": overlay.arguments,
+                                                   "environment": overlay.environment}), encoding="utf-8")
+    return project, state
 
 
 def prepare_target(work: Path, target: Path, sync: bool, excludes: List[str], timeout: float) -> Path:
@@ -229,10 +251,11 @@ def target_problem(target: Path) -> Optional[str]:
     return None
 
 
-def trust(work: Path, project: Path) -> None:
+def trust(work: Path, project: Path, accepted: bool = True) -> None:
     # A person who opened the project once and accepted its trust dialog:
     # until then Claude Code ignores the project's allow rules.
-    config = {"hasCompletedOnboarding": True, "projects": {str(project): {"hasTrustDialogAccepted": True}},
+    config = {"hasCompletedOnboarding": True,
+              "projects": {str(project): {"hasTrustDialogAccepted": accepted}},
               "customApiKeyResponses": {"approved": [KEY[-20:]], "rejected": []}}
     (work / "home/.claude.json").write_text(json.dumps(config), encoding="utf-8")
 
@@ -264,8 +287,15 @@ def inside(args: argparse.Namespace) -> int:
                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1")
     (work / "tmp").mkdir(exist_ok=True)
     mode = ["--permission-mode", args.mode] if args.mode != "default" else []
+    lent: List[str] = []
+    if args.attached:
+        # The Harness's launch: one --settings with the edition's permissions
+        # and hooks, the edition as an added directory, its roots in the env.
+        overlay = json.loads((work / "overlay.json").read_text(encoding="utf-8"))
+        env.update(overlay["environment"])
+        lent = ["--settings", json.dumps(overlay["settings"]), *overlay["arguments"]]
     done = subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json",
-                           "--verbose", *mode], cwd=project, env=env, stdin=subprocess.DEVNULL,
+                           "--verbose", *mode, *lent], cwd=project, env=env, stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, timeout=args.timeout)
     server.shutdown()
     stream = [json.loads(line) for line in done.stdout.splitlines() if line.startswith("{")]
@@ -274,7 +304,7 @@ def inside(args: argparse.Namespace) -> int:
     save = next((request for request in Scripted.requests
                  if request["content"] and request["content"][0].get("text") == "Saved."), None)
     result = text_of(save["since"][0]) if save and save["since"] else ""
-    journal_file = project / "memory-bank/local/native-results.ndjson"
+    journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     journal = [json.loads(line) for line in journal_file.read_text().splitlines()] if journal_file.exists() else []
     events = [f"{line['stage']}:{line['event']}" + (f":{line['code']}" if line.get("code") else "")
               for line in journal if line.get("stage") in ("stop", "save")]
@@ -346,6 +376,8 @@ def main() -> int:
                         help="the shell Claude Code's Bash tool runs (bash or zsh)")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--mode", choices=MODES, default="default", help="the permission mode to run")
+    parser.add_argument("--attached", nargs="?", const="", default=None, metavar="",
+                        help="lend the edition from this clone as the Harness does; install nothing")
     parser.add_argument("--target", help="run in a copy of this installed project instead of a fresh install")
     parser.add_argument("--sync", action="store_true", help="sync the copy from this clone first (with --target)")
     parser.add_argument("--exclude", action="append", default=[], help="another directory name to leave out of the copy")
@@ -360,6 +392,9 @@ def main() -> int:
         print("claude_code_bench: needs Linux with unshare and ip (user and network namespaces)", file=sys.stderr)
         return 2
     args.claude = os.path.realpath(args.claude)
+    if args.attached is not None and args.target:
+        print("claude_code_bench: --attached runs a fresh project; it takes no --target", file=sys.stderr)
+        return 2
     if args.target:
         problem = target_problem(Path(args.target).expanduser().resolve())
         if problem:
@@ -376,13 +411,19 @@ def main() -> int:
                       "there `claude -p` ignores the project's allow rules and refuses the save. Open the "
                       "project once in interactive Claude Code and accept it.", file=sys.stderr)
             project = prepare_target(work, target, args.sync, args.exclude, args.timeout)
+        elif args.attached is not None:
+            project, state = prepare_attached(work, args.edition)
+            args.attached = str(state)
         else:
             project = prepare(work, args.edition)
-        trust(work, project)
+        # Attached, the project is left untrusted: the Harness's --settings
+        # permissions count without the trust dialog, project ones would not.
+        trust(work, project, accepted=args.attached is None)
         unshare_help = subprocess.run(["unshare", "--help"], capture_output=True, text=True).stdout
         done = subprocess.run([*namespace(unshare_help), sys.executable, str(Path(__file__).resolve()),
                                "--inside", "--work", str(work), "--claude", args.claude, "--shell", args.shell,
                                "--mode", args.mode, "--source", source_in(project),
+                               *(["--attached", args.attached] if args.attached else []),
                                "--timeout", str(args.timeout)],
                               timeout=args.timeout + 60)
         if args.keep:
