@@ -1201,7 +1201,7 @@ class NativeInstructionTests(NativeCaptureFixture):
     def test_a_later_step_points_back_to_the_full_one_the_conversation_holds(self):
         # Every answer carried the whole step, about 2,600 characters, and
         # Claude Code's terminal showed it whole each time.
-        for host in ('claude','codex','cursor'):
+        for host in ('claude','codex'):
             with self.subTest(host=host):
                 first=self.ask(host=host,session=host+'-first')
                 self.assertIn(self.FULL,first)
@@ -1211,6 +1211,13 @@ class NativeInstructionTests(NativeCaptureFixture):
                 self.assertIn(self.BACK,later)
                 self.assertIn('exact command: ',later)
                 self.assertLess(len(later),len(first)-800)
+
+    def test_cursor_gets_the_full_step_every_time(self):
+        # Its transcript format and how it records a summarized conversation
+        # are unknown here, so nothing tells a short step is safe.
+        first=self.ask(host='cursor',session='cursor-first')
+        held=self.transcript('cursor.jsonl',{'type':'user','message':{'content':first}})
+        self.assertIn(self.FULL,self.ask(host='cursor',session='cursor-later',transcript=held))
 
     def test_the_full_step_comes_back_after_a_compaction_or_without_a_transcript(self):
         first=self.ask(session='before')

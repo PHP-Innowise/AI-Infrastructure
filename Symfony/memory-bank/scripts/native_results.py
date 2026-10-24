@@ -685,7 +685,10 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         state.update(phase='requested',scope=prepared_scope(root,owner,REASON,'agent'),
                      checkout=_checkout(root),adapter=_adapter(),updated=time.time())
         _write(root,key,state)
-        full=configured_instruction(root)=='full' or not _rules_in_context(payload)
+        # Cursor's transcript, when it keeps one, and how it records a
+        # summarized conversation could not be checked here: it gets the
+        # full step every time, as before.
+        full=configured_instruction(root)=='full' or host=='cursor' or not _rules_in_context(payload)
         instruction=_instruction(root,key,state,brief=brief,host=host,full=full)
     # Claude Code labels a block a hook error, notifies one after every
     # answer and hands the model the reason twice. Its Stop additionalContext

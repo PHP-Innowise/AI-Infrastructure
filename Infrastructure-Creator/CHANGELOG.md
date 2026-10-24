@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime keeps Cursor's save step full — 2026-10-24
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), Cursor gets
+  the full save step every time. `native_results.py` changes in the asset;
+  the policy lock was rewritten.
+
 ### The seeded runtime sends the full save step again after a Codex compaction — 2026-10-24
 
 - As the editions' runtime does (root `CHANGELOG.md`, same day), a full save

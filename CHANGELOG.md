@@ -28,6 +28,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Cursor keeps the full save step on every answer — 2026-10-24
+
+- Why: a later save step points back to the full one while the transcript
+  holds it after its last compaction record. Cursor's transcript, when it
+  keeps one, and how it records a summarized conversation could not be
+  checked here, so nothing tells that a short step is safe there.
+- What changes: Cursor gets the full step every time, as before the short
+  step. Claude Code and Codex are unchanged. The known limits in
+  `docs/MEMORY-INTEGRATION.md` add that a save step after `/rewind` past
+  the conversation's first full step still points back to it.
+- Tests: `test_cursor_gets_the_full_step_every_time`, failing without the
+  change.
+
 ### After a Codex compaction the save step is full again — 2026-10-24
 
 - Why: offline on Codex 0.163, with an automatic compaction before the third
