@@ -529,7 +529,9 @@ notification after every answer.
   `python3 scripts/claude_code_bench.py --target DIR` says whether your Claude
   Code has accepted it for that project.
 - Put the three allow rules back into `.claude/settings.json`. The edition's
-  own file lists them.
+  own file lists them. The dialog's "Yes, and don't ask again for: echo *"
+  does not help: it adds `Bash(echo *)` to `.claude/settings.local.json`,
+  which leaves the memory CLI unapproved, and the next session asks again.
 - On an older runtime, update the accelerator (`--sync`). Until then, set
   `"native_result_request": "off"` to stop the request (see the previous
   section).
