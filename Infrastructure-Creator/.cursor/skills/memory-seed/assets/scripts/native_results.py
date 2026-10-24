@@ -37,7 +37,7 @@ HEX = re.compile(r'[0-9a-f]{64}')
 TOKEN = re.compile(r'[0-9a-f]{32}')
 FIELDS = {'profile','owner','host','session','project','task_id','token','phase',
           'task_uuid','revision','scope','digest','updated','checkout','adapter'}
-PHASES = {'armed','requested','saved','held','omitted','failed'}
+PHASES = {'armed','requested','saved','held','omitted','failed','refused','declined'}
 HOSTS = {'claude','codex','cursor'}
 JOURNAL = 'native-results.ndjson'
 # A fully exercised turn writes about six lines - armed; requested and the
@@ -239,6 +239,15 @@ ROLLOUT_HEAD_BYTES = 256 * 1024
 # The current turn's context is near the rollout's end; one that lies
 # further back is unknown, and an unknown turn is asked as before.
 ROLLOUT_TAIL_BYTES = 512 * 1024
+# Claude Code records on a tool call's result how it refused the call. A save
+# the host refused - a person said no, a rule or auto mode denied it, or `-p`
+# had no one to ask, as in a project whose trust was never accepted, whose
+# allow rules Claude Code ignores - is refused again after every answer,
+# each time for two model calls. Such a session is not asked again for a day.
+CLAUDE_REFUSALS = frozenset({'user-rejected','permission-rule','automode-blocked','automode-unavailable',
+                             'automode-parsing-error'})
+REFUSED_SECONDS = 24 * 60 * 60
+CLAUDE_TAIL_BYTES = 512 * 1024
 
 
 def configured_answer(root):
@@ -302,6 +311,41 @@ def _rollout_turn(payload):
         sandbox = sandbox.get('type') if isinstance(sandbox, dict) else None
         return (mode if isinstance(mode, str) else None), (sandbox if isinstance(sandbox, str) else None)
     return None, None
+
+
+def _claude_refusal(payload, token):
+    """Whether Claude Code refused this request's save command: the denial
+    kind it recorded on the command's result in the transcript tail."""
+    path = payload.get('transcript_path')
+    if not isinstance(path, str) or not path:
+        return False
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - CLAUDE_TAIL_BYTES))
+            tail = handle.read(CLAUDE_TAIL_BYTES)
+    except OSError:
+        return False
+    calls, refused = set(), False
+    for line in tail.split(b'\n'):
+        if token.encode() not in line and b'tool_result' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue  # the tail's first line may be cut
+        content = record.get('message', {}).get('content') if isinstance(record, dict) else None
+        for block in content if isinstance(content, list) else ():
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'tool_use' and token in json.dumps(block.get('input')):
+                calls.add(block.get('id'))
+            elif block.get('type') == 'tool_result' and block.get('tool_use_id') in calls:
+                # The last attempt decides: a retry the host let through began a save.
+                refused = record.get('toolDenialKind') in CLAUDE_REFUSALS
+    return refused
 
 
 def attended(root, host, payload):
@@ -418,7 +462,15 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
         if (previous and previous['phase']=='requested' and isinstance(prompt,str)
                 and prompt.lstrip().startswith('INTERNAL_NATIVE_MEMORY_RESULT '+previous['token'])):
             return step({'armed':False,'continuation':True},'continuation')
-        warning = bool(previous and previous['phase'] in {'requested','failed','held'})
+        # A session whose host refused the save is not asked again for a day;
+        # the first prompt after says so as any unsaved result does.
+        if (previous and previous['phase'] in {'refused','declined'}
+                and 0 <= time.time()-previous['updated'] < REFUSED_SECONDS):
+            if previous['phase'] == 'declined': return step({'armed':False},'skipped','host-refused')
+            previous.update(phase='declined',updated=time.time());_write(root,key,previous)
+            return step({'armed':False,'warning':'Previous native memory result was not saved completely.'},
+                        'skipped','host-refused')
+        warning = bool(previous and previous['phase'] in {'requested','failed','held','refused'})
         state={'profile':PROFILE,'owner':owner,'host':host,
                'session':hashlib.sha256(str(payload.get('conversation_id' if host=='cursor' else 'session_id')).encode()).hexdigest(),
                'project':_project(root),'task_id':task_id,'token':uuid4().hex,
@@ -546,11 +598,16 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         if state is None: return step({},'skipped','not-armed')
         if recovery(host,payload):
             if state['phase']=='requested':
-                state['phase']='held' if _proven(root,state) else 'failed'
-                _write(root,key,state)
                 # Held: a finished save the state never took. Failed: no
-                # save began, or one began and did not finish.
-                return step({},state['phase'],'unconfirmed' if state['phase']=='held'
+                # save began, or one began and did not finish. Refused:
+                # Claude Code refused the save command itself.
+                if _proven(root,state): state['phase']='held'
+                elif host=='claude' and not state['digest'] and _claude_refusal(payload,state['token']):
+                    state['phase']='refused'
+                else: state['phase']='failed'
+                _write(root,key,state)
+                return step({},'held' if state['phase']=='held' else 'failed',
+                            'unconfirmed' if state['phase']=='held' else 'host-refused' if state['phase']=='refused'
                             else 'incomplete' if state['digest'] else 'unsaved')
             return step({},'skipped','recovery-'+state['phase'])
         if state['phase'] != 'armed': return step({},'skipped','phase-'+state['phase'])

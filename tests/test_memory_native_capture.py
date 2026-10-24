@@ -578,6 +578,55 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.one(self.written(lambda:request(recovery)),'stop','failed','unsaved')
         self.one(self.written(lambda:request(recovery)),'stop','skipped','recovery-failed')
 
+    def refused_transcript(self,token,kind):
+        """A Claude Code transcript whose save command the host refused."""
+        path=self.root.parent/'transcript.jsonl'
+        call={'type':'tool_use','id':'toolu_save','name':'Bash',
+              'input':{'command':f'cd x && echo -E \'{{}}\' | python3 memory-bank/scripts/context.py native-result '
+                                  f'--request r --token {token} --input - --json'}}
+        result={'type':'tool_result','tool_use_id':'toolu_save','is_error':True,
+                'content':'This Bash command contains multiple operations. The following part requires approval'}
+        records=[{'type':'assistant','message':{'role':'assistant','content':[call]}},
+                 {'type':'user','message':{'role':'user','content':[result]},**({'toolDenialKind':kind} if kind else {})}]
+        path.write_text(''.join(json.dumps(record)+'\n' for record in records),encoding='utf-8')
+        return str(path)
+
+    def test_a_session_whose_host_refused_the_save_is_not_asked_again(self):
+        # Offline, Claude Code under -p in a project whose trust was never
+        # accepted ignored its allow rules and refused the save after every
+        # answer: two model calls each time and a warning on every prompt.
+        def request(payload,host='claude'):
+            return self.call('native-stop','--host',host,'--task-id','research',data=payload)
+        def prompt(host='claude'):
+            return self.call('native-prompt','--host',host,'--task-id','research',data={
+                'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Next question'})
+        self.begin(host='claude')
+        self.one(self.written(lambda:request(self.STOP)),'stop','requested',host='claude')
+        token=self.state()[1]['token']
+        recovery={**self.STOP,'stop_hook_active':True,'transcript_path':self.refused_transcript(token,'user-rejected')}
+        self.one(self.written(lambda:request(recovery)),'stop','failed','host-refused',host='claude')
+        warned=[]
+        self.one(self.written(lambda:warned.append(prompt())),'prompt','skipped','host-refused',host='claude')
+        self.assertEqual(b'Previous native memory result was not saved completely.\n',warned[0].stdout)
+        quiet=[]
+        self.one(self.written(lambda:quiet.append(prompt())),'prompt','skipped','host-refused',host='claude')
+        self.assertEqual(b'',quiet[0].stdout)
+        self.one(self.written(lambda:request(self.STOP)),'stop','skipped','phase-declined',host='claude')
+        # A day later the session is asked again.
+        candidate,state=self.state();state['updated']-=24*60*60+1;candidate.write_text(json.dumps(state))
+        self.one(self.written(prompt),'prompt','armed',host='claude')
+
+    def test_an_interrupted_save_is_not_a_refusal(self):
+        self.begin(host='claude')
+        self.call('native-stop','--host','claude','--task-id','research',data=self.STOP)
+        token=self.state()[1]['token']
+        for kind in ('interrupted',None):
+            with self.subTest(kind=kind):
+                candidate,state=self.state();state['phase']='requested';candidate.write_text(json.dumps(state))
+                recovery={**self.STOP,'stop_hook_active':True,'transcript_path':self.refused_transcript(token,kind)}
+                lines=self.written(lambda:self.call('native-stop','--host','claude','--task-id','research',data=recovery))
+                self.one(lines,'stop','failed','unsaved',host='claude')
+
     def test_a_save_another_session_overtook_says_to_report_it(self):
         # Two Claude Code sessions on one branch, offline: the first to save
         # moved the task's revision, and the second was refused with a bare

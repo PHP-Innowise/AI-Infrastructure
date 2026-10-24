@@ -532,6 +532,11 @@ notification after every answer.
   `"native_result_request": "off"` to stop the request (see the previous
   section).
 
+After Claude Code refuses the save once, the session is not asked again for
+a day: the journal records `stop` `failed` `host-refused`, then `prompt`
+`skipped` `host-refused`. A new session is asked again, so check the trust
+and the rules before starting one.
+
 ## A Headless Run Hits Its Turn Limit After a Complete Answer
 
 ### Symptom

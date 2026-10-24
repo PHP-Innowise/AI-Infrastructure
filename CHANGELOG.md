@@ -28,6 +28,27 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A session whose host refused the save is not asked again for a day — 2026-10-24
+
+- Why: offline on Claude Code 2.1.278, `claude -p` in a project whose trust
+  dialog was never accepted ran the hooks but ignored the project's allow
+  rules. The save command was refused after every answer ("requires
+  approval"): two wasted model calls and a "not saved completely" warning on
+  each prompt. The same happens when a person keeps saying no or a rule or
+  auto mode denies the command. Of the four client projects, `next` has never
+  had its trust accepted.
+- What changes: the recovery Stop reads the transcript's last 512 KiB for
+  the save command's result. When Claude Code recorded a refusal there
+  (`toolDenialKind` `user-rejected`, `permission-rule` or `automode-*`, not
+  `interrupted` or `cancelled`), the journal says `failed` `host-refused`.
+  The next prompt prints the usual warning once, and the session is not
+  asked again for a day (`prompt` `skipped` `host-refused`). A new session is
+  asked again.
+- Tests: two in `tests/test_memory_native_capture.py`. The refusal test
+  fails without the change; the other holds that an interrupted or plain
+  unsaved request stays `unsaved`. On the real host, a turn after the
+  refusal has no save step.
+
 ### The host benches run the WordPress edition — 2026-10-24
 
 - Why: `claude_code_bench.py` and `codex_bench.py` handed the installer the
