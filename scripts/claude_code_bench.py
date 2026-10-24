@@ -5,7 +5,7 @@ The native save after every answer depends on what Claude Code does with a Stop
 hook's output and on its permission check for the command the agent runs, and
 both change between Claude Code releases. This drives the real binary through
 one turn without a model: Claude Code runs inside a network namespace with
-loopback only (`unshare -rn`, so nothing can leave the machine and no tokens
+loopback only (`unshare -n`, so nothing can leave the machine and no tokens
 are spent) against a scripted stand-in for the Messages API. The stand-in reads
 a file, answers, and then follows the Stop hook's save step exactly as written,
 with a JSON that holds backticks, `$`, brackets, apostrophes, escapes and
