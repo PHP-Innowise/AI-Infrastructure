@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The Claude Code bench says when your Claude Code does not trust the target — 2026-10-24
+
+- Why: the bench runs in a HOME of its own that trusts the copy, so it passed
+  on `next`, whose trust dialog your own Claude Code never accepted. There
+  `claude -p` refuses the save after every answer.
+- What changes: with `--target`, `claude_code_bench.py` reads your own Claude
+  Code configuration (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR`) for that
+  project's `hasTrustDialogAccepted` and nothing else. When the dialog was
+  never accepted, it says so and how to fix it. The run's outcome is
+  unchanged.
+- Tests: `PersonTrustTest` in `tests/test_host_benches.py`.
+
 ### A session whose host refused the save is not asked again for a day — 2026-10-24
 
 - Why: offline on Claude Code 2.1.278, `claude -p` in a project whose trust

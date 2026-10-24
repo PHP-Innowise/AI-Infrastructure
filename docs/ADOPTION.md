@@ -325,6 +325,12 @@ the request to the model, and, for Claude Code, whether its transcript
 recorded a hook error. A refused save there is what a person would see as a
 permission prompt after every answer.
 
+The Claude Code bench runs in a HOME of its own that trusts the copy. With
+`--target` it also reads your own Claude Code configuration and says when the
+project's trust dialog was never accepted there. In such a project
+`claude -p` runs the hooks but ignores the project's allow rules and refuses
+the save, so open the project once in interactive Claude Code first.
+
 For heavily adapted or drifting installations, regenerate from current
 project evidence with Infrastructure-Creator rather than repeatedly layering
 generic files over the project.

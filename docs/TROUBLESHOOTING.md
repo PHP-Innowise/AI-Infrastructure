@@ -526,6 +526,8 @@ notification after every answer.
 ### Recover
 
 - Accept the trust dialog once in an interactive session.
+  `python3 scripts/claude_code_bench.py --target DIR` says whether your Claude
+  Code has accepted it for that project.
 - Put the three allow rules back into `.claude/settings.json`. The edition's
   own file lists them.
 - On an older runtime, update the accelerator (`--sync`). Until then, set

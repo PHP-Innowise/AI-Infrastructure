@@ -303,6 +303,25 @@ def inside(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def person_trust(target: Path) -> Optional[bool]:
+    """Whether your own Claude Code accepted the trust dialog for this project.
+
+    The bench runs in a HOME of its own that trusts the copy, so it cannot see
+    this. Without that trust, `claude -p` in the project runs the hooks but
+    ignores the project's allow rules and refuses the save. None when the
+    configuration cannot be read.
+    """
+    folder = os.environ.get("CLAUDE_CONFIG_DIR")
+    config = Path(folder) / ".claude.json" if folder else Path.home() / ".claude.json"
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    projects = data.get("projects") if isinstance(data, dict) else None
+    entry = projects.get(str(target)) if isinstance(projects, dict) else None
+    return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
+
+
 def namespace(unshare_help: str) -> List[str]:
     """The namespace the bench runs in: loopback only, and the person's own uid
     where `unshare` can map it, since Claude Code refuses bypassPermissions to root."""
@@ -351,8 +370,12 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="claude-code-bench-", dir=str(base) if base else None))
     try:
         if args.target:
-            project = prepare_target(work, Path(args.target).expanduser().resolve(), args.sync, args.exclude,
-                                     args.timeout)
+            target = Path(args.target).expanduser().resolve()
+            if person_trust(target) is False:
+                print(f"claude_code_bench: your Claude Code has not accepted the trust dialog for {target}; "
+                      "there `claude -p` ignores the project's allow rules and refuses the save. Open the "
+                      "project once in interactive Claude Code and accept it.", file=sys.stderr)
+            project = prepare_target(work, target, args.sync, args.exclude, args.timeout)
         else:
             project = prepare(work, args.edition)
         trust(work, project)

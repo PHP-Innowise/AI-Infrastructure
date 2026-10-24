@@ -619,6 +619,12 @@ learning cites one of the project's own tracked files, and the project itself
 is never written. A Git worktree or submodule is refused, as the rehearsal
 refuses it.
 
+With `--target` it also reads your own Claude Code configuration
+(`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`) for that project's
+trust and nothing else. It warns when the trust dialog was never accepted:
+there `claude -p` ignores the project's allow rules and refuses the save,
+which the bench's own trusted HOME would hide.
+
 `--mode` runs one permission mode (`default`, `acceptEdits`, `auto`,
 `dontAsk`, `bypassPermissions` or `plan`). The namespace keeps your own uid
 where `unshare` can map it (util-linux 2.38 and later), because Claude Code

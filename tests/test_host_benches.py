@@ -177,6 +177,21 @@ class EditionTest(unittest.TestCase):
         self.assertEqual(["WordPress"], seen)
 
 
+class PersonTrustTest(unittest.TestCase):
+    def test_the_bench_reads_whether_your_claude_code_trusts_the_target(self) -> None:
+        # next had never had its trust accepted: there `claude -p` refused
+        # the save after every answer, which the bench's own HOME hides.
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / ".claude.json"
+            with mock.patch.dict(claude_code_bench.os.environ, {"CLAUDE_CONFIG_DIR": folder}):
+                self.assertIsNone(claude_code_bench.person_trust(Path("/p/next")))
+                config.write_text(json.dumps({"projects": {"/p/next": {"hasTrustDialogAccepted": False},
+                                                           "/p/scb": {"hasTrustDialogAccepted": True}}}))
+                self.assertIs(False, claude_code_bench.person_trust(Path("/p/next")))
+                self.assertIs(True, claude_code_bench.person_trust(Path("/p/scb")))
+                self.assertIs(False, claude_code_bench.person_trust(Path("/p/never-opened")))
+
+
 class NamespaceTest(unittest.TestCase):
     def test_the_bench_keeps_the_persons_uid_where_unshare_can(self) -> None:
         # Inside `unshare -r` Claude Code runs as root and refuses
