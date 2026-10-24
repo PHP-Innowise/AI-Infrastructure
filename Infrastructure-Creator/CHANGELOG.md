@@ -7,8 +7,9 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 ### The seeded runtime stops asking a session whose host refused the save — 2026-10-24
 
 - The memory runtime memory-seed copies reads Claude Code's denial of the
-  save command from the transcript and does not ask that session again for
-  a day, as the editions' runtime does (root `CHANGELOG.md`, same day).
+  save command from the transcript, at the recovery Stop or, after No in the
+  terminal dialog, at the next prompt, and does not ask that session again
+  for a day, as the editions' runtime does (root `CHANGELOG.md`, same day).
   `native_results.py` changes in the asset; the policy lock was rewritten.
 
 ### The seeded runtime says to report a save another session overtook — 2026-10-24

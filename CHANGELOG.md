@@ -87,11 +87,15 @@ edition's own files remain in that edition's changelog.
   `interrupted` or `cancelled`), the journal says `failed` `host-refused`.
   The next prompt prints the usual warning once, and the session is not
   asked again for a day (`prompt` `skipped` `host-refused`). A new session is
-  asked again.
-- Tests: two in `tests/test_memory_native_capture.py`. The refusal test
-  fails without the change; the other holds that an interrupted or plain
-  unsaved request stays `unsaved`. On the real host, a turn after the
-  refusal has no save step.
+  asked again. A person who answers No in Claude Code's terminal dialog ends
+  the turn before any Stop runs (seen offline: the transcript records
+  `user-rejected`, no recovery Stop follows), so the next prompt reads the
+  refusal from the transcript and does the same.
+- Tests: three in `tests/test_memory_native_capture.py`. The two refusal
+  tests fail without the change; the third holds that an interrupted or
+  plain unsaved request stays `unsaved`. On the real host, a turn after the
+  refusal has no save step, after `claude -p` in an untrusted project and
+  after No in the terminal dialog alike.
 
 ### The host benches run the WordPress edition — 2026-10-24
 

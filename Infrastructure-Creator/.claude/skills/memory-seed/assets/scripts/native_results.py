@@ -463,6 +463,12 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
         if (previous and previous['phase']=='requested' and isinstance(prompt,str)
                 and prompt.lstrip().startswith('INTERNAL_NATIVE_MEMORY_RESULT '+previous['token'])):
             return step({'armed':False,'continuation':True},'continuation')
+        # A person who says no in Claude Code's dialog ends the turn before
+        # any Stop runs: the request is still pending, and the refusal is in
+        # the transcript the prompt hook is handed.
+        if (previous and previous['phase']=='requested' and host=='claude' and not previous['digest']
+                and _claude_refusal(payload,previous['token'])):
+            previous.update(phase='refused',updated=time.time())
         # A session whose host refused the save is not asked again for a day;
         # the first prompt after says so as any unsaved result does.
         if (previous and previous['phase'] in {'refused','declined'}

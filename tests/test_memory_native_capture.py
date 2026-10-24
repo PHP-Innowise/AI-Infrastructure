@@ -618,6 +618,25 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         candidate,state=self.state();state['updated']-=24*60*60+1;candidate.write_text(json.dumps(state))
         self.one(self.written(prompt),'prompt','armed',host='claude')
 
+    def test_a_save_refused_in_the_dialog_is_not_asked_again(self):
+        # Claude Code's terminal, offline: a person answered No to the save
+        # command and the turn ended without a Stop, so the request stayed
+        # pending and the next answer asked again.
+        def prompt(transcript=None):
+            payload={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Next question'}
+            if transcript: payload['transcript_path']=transcript
+            return self.call('native-prompt','--host','claude','--task-id','research',data=payload)
+        self.begin(host='claude')
+        self.call('native-stop','--host','claude','--task-id','research',data=self.STOP)
+        token=self.state()[1]['token']
+        warned=[]
+        lines=self.written(lambda:warned.append(prompt(self.refused_transcript(token,'user-rejected'))))
+        self.one(lines,'prompt','skipped','host-refused',host='claude')
+        self.assertEqual(b'Previous native memory result was not saved completely.\n',warned[0].stdout)
+        self.one(self.written(prompt),'prompt','skipped','host-refused',host='claude')
+        self.one(self.written(lambda:self.call('native-stop','--host','claude','--task-id','research',
+                                               data=self.STOP)),'stop','skipped','phase-declined',host='claude')
+
     def test_an_interrupted_save_is_not_a_refusal(self):
         self.begin(host='claude')
         self.call('native-stop','--host','claude','--task-id','research',data=self.STOP)
