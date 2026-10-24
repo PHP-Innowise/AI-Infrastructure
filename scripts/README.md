@@ -606,7 +606,7 @@ the command the agent runs. Both change between Claude Code releases, and a
 unit test cannot see either.
 
 It installs an edition into a small project. Then, inside a network namespace
-with loopback only (`unshare -rn`), it runs `claude -p` against a scripted
+with loopback only, it runs `claude -p` against a scripted
 stand-in for the Messages API. The stand-in reads a file, answers, and follows
 the Stop hook's save step exactly as written. The JSON it saves holds
 backticks, `$`, brackets, an apostrophe, escapes and Cyrillic. Nothing leaves
@@ -619,9 +619,17 @@ learning cites one of the project's own tracked files, and the project itself
 is never written. A Git worktree or submodule is refused, as the rehearsal
 refuses it.
 
+`--mode` runs one permission mode (`default`, `acceptEdits`, `auto`,
+`dontAsk`, `bypassPermissions` or `plan`). The namespace keeps your own uid
+where `unshare` can map it (util-linux 2.38 and later), because Claude Code
+refuses `bypassPermissions` to root; older `unshare` falls back to
+`unshare -rn`. In `plan` no save is asked for, and the run passes when the
+journal records `plan-mode`.
+
 ```bash
 python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
-  [--target DIR [--sync] [--exclude NAME]] [--shell /usr/bin/zsh] [--timeout 180] [--keep]
+  [--target DIR [--sync] [--exclude NAME]] [--shell /usr/bin/zsh] [--mode dontAsk] \
+  [--timeout 180] [--keep]
 ```
 
 - **Outputs:** a JSON report:

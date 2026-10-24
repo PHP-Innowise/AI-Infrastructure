@@ -151,5 +151,16 @@ class TargetTest(unittest.TestCase):
         self.assertIn("this clone", claude_code_bench.target_problem(ROOT / "PHP Core"))
 
 
+class NamespaceTest(unittest.TestCase):
+    def test_the_bench_keeps_the_persons_uid_where_unshare_can(self) -> None:
+        # Inside `unshare -r` Claude Code runs as root and refuses
+        # bypassPermissions: "cannot be used with root/sudo privileges".
+        kept = claude_code_bench.namespace("  --map-user=<uid>|<name>  map current user to uid")
+        self.assertEqual(["unshare", "-n", "--user"], kept[:3])
+        self.assertIn("--keep-caps", kept)
+        self.assertNotIn("-r", kept)
+        self.assertEqual(["unshare", "-rn"], claude_code_bench.namespace("  -r, --map-root-user"))
+
+
 if __name__ == "__main__":
     unittest.main()

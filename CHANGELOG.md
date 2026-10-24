@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The Claude Code bench runs a permission mode, as your own uid — 2026-10-24
+
+- Why: inside `unshare -rn` the bench ran Claude Code as root, and Claude
+  Code refuses `bypassPermissions` to root ("cannot be used with root/sudo
+  privileges"). The bench also ran only the default mode, while the
+  Harness fleet worker runs `dontAsk`.
+- What changes: `scripts/claude_code_bench.py --mode` takes `default`,
+  `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions` or `plan`. The
+  namespace maps your own uid where `unshare` can (util-linux 2.38 and
+  later) and falls back to `unshare -rn`. In `plan` the run passes when no
+  save was asked for and the journal records `plan-mode`.
+- Tests: `NamespaceTest` in `tests/test_host_benches.py`. Offline on Claude
+  Code 2.1.278 every mode passes.
+
 ### A save another session overtook says to report it — 2026-10-24
 
 - Why: two Claude Code sessions on one branch, driven offline at once with

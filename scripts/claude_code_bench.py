@@ -19,6 +19,10 @@ recorded and the second Stop saw the recovery.
 
 Linux only: user and network namespaces (`unshare`), and `ip` to raise the
 loopback. Claude Code is the installed one unless `--claude` names a binary.
+The namespace keeps the person's own uid where `unshare` can map it
+(util-linux 2.38 and later): Claude Code refuses `bypassPermissions` to root.
+`--mode` runs one permission mode; in `plan` the save is not asked for, and
+the run passes when the journal says so.
 
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
@@ -28,6 +32,7 @@ is never written.
 
   python3 scripts/claude_code_bench.py
   python3 scripts/claude_code_bench.py --shell /usr/bin/zsh --edition Laravel --keep
+  python3 scripts/claude_code_bench.py --mode dontAsk
   python3 scripts/claude_code_bench.py --target ~/Desktop/next --sync
 """
 import argparse
@@ -49,6 +54,7 @@ GIT = ["git", "-c", "user.name=Bench", "-c", "user.email=bench@example.invalid",
        "-c", "core.hooksPath=/dev/null"]
 KEY = "offline-bench-key-not-a-real-api-key"
 MARKER = "INTERNAL_NATIVE_MEMORY_RESULT"
+MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan")
 
 
 def result_for(source: str) -> Dict[str, Any]:
@@ -256,9 +262,10 @@ def inside(args: argparse.Namespace) -> int:
                ANTHROPIC_BASE_URL=f"http://127.0.0.1:{server.server_address[1]}", ANTHROPIC_API_KEY=KEY,
                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1", DISABLE_AUTOUPDATER="1", DISABLE_TELEMETRY="1")
     (work / "tmp").mkdir(exist_ok=True)
+    mode = ["--permission-mode", args.mode] if args.mode != "default" else []
     done = subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json",
-                           "--verbose"], cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                          text=True, timeout=args.timeout)
+                           "--verbose", *mode], cwd=project, env=env, stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=args.timeout)
     server.shutdown()
     stream = [json.loads(line) for line in done.stdout.splitlines() if line.startswith("{")]
     steps = [request for request in Scripted.requests if any(MARKER in text for text in request["since"])]
@@ -275,7 +282,8 @@ def inside(args: argparse.Namespace) -> int:
     errors = [error for record in records if record.get("subtype") == "stop_hook_summary"
               for error in record.get("hookErrors") or []]
     report = {
-        "claude": args.claude, "version": version(args.claude), "shell": args.shell, "exit": done.returncode,
+        "claude": args.claude, "version": version(args.claude), "shell": args.shell, "mode": args.mode,
+        "exit": done.returncode,
         "step_messages": carried,
         "step_chars": sum(len(text) for text in steps[0]["since"]) if steps else 0,
         "save_result": result[:200],
@@ -286,8 +294,21 @@ def inside(args: argparse.Namespace) -> int:
                                    and "error" in str(item.get("key", "")) for item in stream),
     }
     report["ok"] = (report["saved"] and carried == 1 and not errors and not report["error_notifications"])
+    if args.mode == "plan":
+        # Plan mode tells the agent to change nothing: no save is asked for.
+        report["ok"] = (not steps and "stop:skipped:plan-mode" in events and not errors
+                        and not report["error_notifications"])
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
+
+
+def namespace(unshare_help: str) -> List[str]:
+    """The namespace the bench runs in: loopback only, and the person's own uid
+    where `unshare` can map it, since Claude Code refuses bypassPermissions to root."""
+    if "--map-user" in unshare_help:
+        return ["unshare", "-n", "--user", f"--map-user={os.getuid()}", f"--map-group={os.getgid()}",
+                "--keep-caps"]
+    return ["unshare", "-rn"]
 
 
 def version(claude: str) -> str:
@@ -304,6 +325,7 @@ def main() -> int:
     parser.add_argument("--shell", default=shutil.which("bash") or "/bin/bash",
                         help="the shell Claude Code's Bash tool runs (bash or zsh)")
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument("--mode", choices=MODES, default="default", help="the permission mode to run")
     parser.add_argument("--target", help="run in a copy of this installed project instead of a fresh install")
     parser.add_argument("--sync", action="store_true", help="sync the copy from this clone first (with --target)")
     parser.add_argument("--exclude", action="append", default=[], help="another directory name to leave out of the copy")
@@ -333,9 +355,11 @@ def main() -> int:
         else:
             project = prepare(work, EDITIONS[args.edition])
         trust(work, project)
-        done = subprocess.run(["unshare", "-rn", sys.executable, str(Path(__file__).resolve()), "--inside",
-                               "--work", str(work), "--claude", args.claude, "--shell", args.shell,
-                               "--source", source_in(project), "--timeout", str(args.timeout)],
+        unshare_help = subprocess.run(["unshare", "--help"], capture_output=True, text=True).stdout
+        done = subprocess.run([*namespace(unshare_help), sys.executable, str(Path(__file__).resolve()),
+                               "--inside", "--work", str(work), "--claude", args.claude, "--shell", args.shell,
+                               "--mode", args.mode, "--source", source_in(project),
+                               "--timeout", str(args.timeout)],
                               timeout=args.timeout + 60)
         if args.keep:
             print(f"kept {work}", file=sys.stderr)
