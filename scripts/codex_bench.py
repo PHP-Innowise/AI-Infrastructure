@@ -21,10 +21,15 @@ the recovery. Exit 0 when the save ran and the recovery was seen.
 
 Linux only: user and network namespaces (`unshare`), and `ip` to raise the
 loopback. `--target DIR [--sync]` runs in a copy of an installed project, as
-`claude_code_bench.py` does.
+`claude_code_bench.py` does. `--attached` runs a fresh project with nothing
+installed and the edition lent from this clone, as the Harness launches Codex
+(`accelerator_attach.py`: `-c` hooks and instructions, the state outside the
+project as an added directory), with the hooks trusted the way
+`accelerator_attach.py trust-codex-hooks` records them.
 
   python3 scripts/codex_bench.py
   python3 scripts/codex_bench.py --target ~/Desktop/next --sync
+  python3 scripts/codex_bench.py --attached
 """
 import argparse
 import html
@@ -38,7 +43,7 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -198,17 +203,29 @@ def inside(args: argparse.Namespace) -> int:
     env.update(HOME=str(work / "home"), CODEX_HOME=str(home), TMPDIR=str(work / "tmp"), BENCH_API_KEY="offline")
     (work / "tmp").mkdir(exist_ok=True)
     os.environ.update(HOME=str(work / "home"), CODEX_HOME=str(home))
+    overlay: Dict[str, Any] = {}
+    if args.attached:
+        import accelerator_attach as attach
+        overlay = json.loads((work / "overlay.json").read_text(encoding="utf-8"))
     try:
-        trust = approve_hooks(args.codex, project)
+        if args.attached:
+            entries = attach.trust_codex_hooks(args.codex, args.edition, project)
+            trust = {"hooks": len(entries), "trusted": sum(entry["status"] == "trusted" for entry in entries)}
+        else:
+            trust = approve_hooks(args.codex, project)
     except Exception as error:  # the run below shows whether hooks ran without it
         trust = {"error": f"{type(error).__name__}: {error}"}
-    done = subprocess.run([args.codex, "exec", "-C", str(project), "--skip-git-repo-check", "--sandbox",
-                           args.sandbox, "How are invoices numbered?"], cwd=project, env=env,
-                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=args.timeout)
+    command = [args.codex, "exec", "-C", str(project), "--skip-git-repo-check", "--sandbox", args.sandbox,
+               "How are invoices numbered?"]
+    if args.attached:
+        command = attach.apply_overlay("codex", command, overlay)
+        env.update(overlay["environment"])
+    done = subprocess.run(command, cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, timeout=args.timeout)
     server.shutdown()
     steps = [request for request in Scripted.requests if any(MARKER in text for text in request["since"])]
     carried = [text for text in steps[0]["since"] if MARKER in text] if steps else []
-    journal_file = project / "memory-bank/local/native-results.ndjson"
+    journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     journal = [json.loads(line) for line in journal_file.read_text().splitlines()] if journal_file.exists() else []
     events = [f"{line['stage']}:{line['event']}" + (f":{line['code']}" if line.get("code") else "")
               for line in journal if line.get("stage") in ("prompt", "stop", "save")]
@@ -226,6 +243,18 @@ def inside(args: argparse.Namespace) -> int:
     report["ok"] = report["saved"] and len(carried) == 1
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
+
+
+def prepare_attached(work: Path, edition: str) -> Tuple[Path, Path]:
+    """A project with nothing installed and the edition lent from this clone,
+    as the Harness launches Codex: the overlay goes to `work/overlay.json`."""
+    import accelerator_attach as attach
+    project = bench.shop(work)
+    state = attach.state_directory(project, work / "state-base")
+    overlay = attach.codex_overlay(edition, project, state)
+    (work / "overlay.json").write_text(json.dumps({"arguments": overlay.arguments,
+                                                   "environment": overlay.environment}), encoding="utf-8")
+    return project, state
 
 
 def approve_hooks(codex: str, project: Path) -> Dict[str, Any]:
@@ -264,6 +293,8 @@ def main() -> int:
     parser.add_argument("--target", help="run in a copy of this installed project instead of a fresh install")
     parser.add_argument("--sync", action="store_true", help="sync the copy from this clone first (with --target)")
     parser.add_argument("--exclude", action="append", default=[], help="another directory name to leave out of the copy")
+    parser.add_argument("--attached", nargs="?", const="", default=None, metavar="",
+                        help="lend the edition from this clone as the Harness does; install nothing")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--work", help=argparse.SUPPRESS)
     parser.add_argument("--source", help=argparse.SUPPRESS)
@@ -274,6 +305,9 @@ def main() -> int:
         print("codex_bench: needs Linux with unshare and ip (user and network namespaces)", file=sys.stderr)
         return 2
     args.codex = codex_binary(args.codex)
+    if args.attached is not None and args.target:
+        print("codex_bench: --attached runs a fresh project; it takes no --target", file=sys.stderr)
+        return 2
     if args.target:
         problem = bench.target_problem(Path(args.target).expanduser().resolve())
         if problem:
@@ -286,11 +320,16 @@ def main() -> int:
         if args.target:
             project = bench.prepare_target(work, Path(args.target).expanduser().resolve(), args.sync,
                                            args.exclude, args.timeout)
+        elif args.attached is not None:
+            project, state = prepare_attached(work, args.edition)
+            args.attached = str(state)
         else:
             project = bench.prepare(work, args.edition)
         done = subprocess.run(["unshare", "-rn", sys.executable, str(Path(__file__).resolve()), "--inside",
                                "--work", str(work), "--codex", args.codex, "--sandbox", args.sandbox,
-                               "--source", bench.source_in(project), "--timeout", str(args.timeout)],
+                               "--source", bench.source_in(project), "--timeout", str(args.timeout),
+                               "--edition", args.edition,
+                               *(["--attached", args.attached] if args.attached else [])],
                               timeout=args.timeout + 120)
         if args.keep:
             print(f"kept {work}", file=sys.stderr)

@@ -203,6 +203,24 @@ class AttachedTest(unittest.TestCase):
         self.assertIn("--attached runs a fresh project", said.getvalue())
 
 
+class CodexAttachedTest(unittest.TestCase):
+    def test_codex_attached_installs_nothing_and_takes_no_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            project, state = codex_bench.prepare_attached(work, "PHP Core")
+            self.assertFalse((project / "memory-bank").exists())
+            self.assertFalse((project / ".codex").exists())
+            overlay = json.loads((work / "overlay.json").read_text(encoding="utf-8"))
+            self.assertIn(str(state), overlay["arguments"])
+            self.assertTrue(any(argument.startswith("hooks.") for argument in overlay["arguments"]))
+        argv = ["codex_bench.py", "--attached", "--target", "/p/next", "--codex", sys.executable]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(codex_bench.sys, "platform", "linux"), \
+                mock.patch.object(codex_bench.shutil, "which", return_value="/usr/bin/true"):
+            with contextlib.redirect_stderr(io.StringIO()) as said:
+                self.assertEqual(2, codex_bench.main())
+        self.assertIn("--attached runs a fresh project", said.getvalue())
+
+
 class PersonTrustTest(unittest.TestCase):
     def test_the_bench_reads_whether_your_claude_code_trusts_the_target(self) -> None:
         # next had never had its trust accepted: there `claude -p` refused

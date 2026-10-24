@@ -332,7 +332,8 @@ project's trust dialog was never accepted there. In such a project
 the save, so open the project once in interactive Claude Code first.
 
 For a project the Harness attaches without copying, run
-`python3 scripts/claude_code_bench.py --attached`: it launches Claude Code
+`python3 scripts/claude_code_bench.py --attached` and
+`python3 scripts/codex_bench.py --attached`: they launch Claude Code and Codex
 the same way, with the edition lent from the clone and nothing installed.
 
 For heavily adapted or drifting installations, regenerate from current

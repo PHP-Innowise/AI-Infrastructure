@@ -42,6 +42,10 @@ edition's own files remain in that edition's changelog.
   `--settings` count without the trust dialog, and the `cd` into the
   added directory passes.
 - Tests: `AttachedTest` in `tests/test_host_benches.py`.
+- `codex_bench.py --attached` does the same for Codex: the edition's hooks and
+  instructions as `-c` options, the state as an added directory, and the
+  hooks trusted as `accelerator_attach.py trust-codex-hooks` records them.
+  Offline on Codex 0.163 it saves. `CodexAttachedTest` holds it.
 
 ### The rollout rehearsal says when your Claude Code does not trust a target — 2026-10-24
 

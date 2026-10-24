@@ -686,6 +686,11 @@ An isolated `CODEX_HOME` approves the project's hooks by their current hashes,
 as a person does once in `/hooks`. Then `codex exec` runs with the
 workspace-write sandbox.
 
+`--attached` runs a fresh project with nothing installed and the edition lent
+from this clone, as the Harness launches Codex (`accelerator_attach.py`): the
+hooks and instructions as `-c` options, the state as an added directory, and
+the hooks trusted as `accelerator_attach.py trust-codex-hooks` records them.
+
 ```bash
 python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
   [--target DIR [--sync] [--exclude NAME]] [--timeout 240] [--keep]
