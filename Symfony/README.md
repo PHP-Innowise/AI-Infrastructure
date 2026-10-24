@@ -207,6 +207,8 @@ Do not install Symfony CLI, bundles, npm packages, or analysis tools without app
 
 ## Quick Start
 
+Start Claude Code, Codex or Cursor in the project root, the folder that holds `.claude/`, `.codex/` and `.cursor/`. Claude Code started in a subfolder reads none of this project's settings and runs none of its hooks: no memory and no guards. Codex started in one runs the hooks, but its sandbox cannot write the project's memory, so nothing is saved.
+
 | Skill / command | Purpose |
 | --- | --- |
 | `requirements-analyst` | Clarify requirements and create task-ready acceptance criteria |

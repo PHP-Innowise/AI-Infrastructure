@@ -106,7 +106,8 @@ edition's own files remain in that edition's changelog.
   external import: a dialog in a terminal (default "No"), left out under
   `-p`. Codex 0.163 from a subdirectory runs the project's hooks. Claude
   Code's own Bash sandbox (bubblewrap) started in the root let the save
-  write.
+  write. The editions' `README.md`, installed as `ACCELERATOR.md`, opens
+  Quick Start with where to start the tools.
 
 ### A Codex session that cannot write the Brain is not asked to save — 2026-10-24
 
