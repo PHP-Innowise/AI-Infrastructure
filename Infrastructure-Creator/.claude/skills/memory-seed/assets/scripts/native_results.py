@@ -251,6 +251,45 @@ REFUSED_SECONDS = 24 * 60 * 60
 CLAUDE_TAIL_BYTES = 512 * 1024
 
 
+# The rules a save step carries - the schema, what belongs in learnings - are
+# the same after every answer: about 1,150 of its 2,700 characters, which
+# Claude Code's terminal also shows whole each time. A step whose
+# conversation still holds a full one carries the command and points back to
+# it. The full step is sent again once a compaction has dropped it, or when
+# the transcript cannot say. `full` sends it every time;
+# CONTEXT_NATIVE_RESULT_INSTRUCTION overrides `native_result_instruction`.
+NATIVE_INSTRUCTIONS = ('auto', 'full')
+FULL_RULES = 'Exact schema example (replace placeholders, never save the example)'
+RULES_TAIL_BYTES = 2 * 1024 * 1024
+COMPACTION_RECORDS = (b'"subtype":"compact_boundary"', b'"type":"compacted"')
+
+
+def configured_instruction(root):
+    """Whether a save step may point back to the full one; an unknown value sends it whole."""
+    value = (os.environ.get('CONTEXT_NATIVE_RESULT_INSTRUCTION')
+             or load_config(root).get('native_result_instruction') or 'auto')
+    return value if value in NATIVE_INSTRUCTIONS else 'full'
+
+
+def _rules_in_context(payload):
+    """Whether the conversation still holds a full save step: its rules are
+    in the transcript's last 2 MiB, after the last compaction record."""
+    path = payload.get('transcript_path')
+    if not isinstance(path, str) or not path:
+        return False
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - RULES_TAIL_BYTES))
+            tail = handle.read(RULES_TAIL_BYTES)
+    except OSError:
+        return False
+    start = max(tail.rfind(record) for record in COMPACTION_RECORDS)
+    return tail.find(FULL_RULES.encode(), start + 1 if start >= 0 else 0) >= 0
+
+
 def configured_answer(root):
     """The native result answer setting, or BrainError for an unknown one."""
     value = (os.environ.get('CONTEXT_NATIVE_RESULT_ANSWER')
@@ -514,7 +553,7 @@ def _adapter():
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
-def _instruction(root,key,state,*,brief=False,host=None):
+def _instruction(root,key,state,*,brief=False,host=None,full=True):
     tooling=Path(__file__).resolve().parents[2]
     interpreter=['python3']
     if os.name == 'nt':
@@ -541,10 +580,7 @@ def _instruction(root,key,state,*,brief=False,host=None):
         ask='Use your shell tool to pipe one JSON object into this exact command: (' \
             +enter+cli('--input','-','--json')+')\n'
         skip='use the same command replacing --input - with --skip. '
-    body=('This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
-        'edit application files, run tests, delegate, or mark the task completed. '
-        +ask+
-        'JSON: progress (summary, at most 1000 characters), optional next_steps '
+    rules=('JSON: progress (summary, at most 1000 characters), optional next_steps '
         '(at most 3 strings of 300 characters; omit to preserve the current plan), '
         'learnings (at most 3 objects with type finding|decision, title, consequence, sources). '
         'Exact schema example (replace placeholders, never save the example): '
@@ -557,7 +593,13 @@ def _instruction(root,key,state,*,brief=False,host=None):
         'Use only canonical project-relative source files you actually checked. Set verified=true '
         'only when you personally checked every learning against current sources; this is agent '
         'attestation, never human review. Empty learnings is valid. No raw requests, transcripts, '
-        'logs, credentials or personal data. If no project result is safe to save, '+skip+
+        'logs, credentials or personal data. ') if full else (
+        # The conversation holds the full step from an earlier answer.
+        'The JSON follows the rules of the full save step earlier in this conversation: progress, optional '
+        'next_steps, learnings with checked sources, and verified as a top-level boolean. ')
+    body=('This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
+        'edit application files, run tests, delegate, or mark the task completed. '
+        +ask+rules+'If no project result is safe to save, '+skip+
         'Check the command result. '
         +('The person has already read your answer above this continuation: after a successful save or skip, '
           'do not repeat it or mention routine memory operations; end with no further text or one short line. '
@@ -639,7 +681,8 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         state.update(phase='requested',scope=prepared_scope(root,owner,REASON,'agent'),
                      checkout=_checkout(root),adapter=_adapter(),updated=time.time())
         _write(root,key,state)
-        instruction=_instruction(root,key,state,brief=brief,host=host)
+        full=configured_instruction(root)=='full' or not _rules_in_context(payload)
+        instruction=_instruction(root,key,state,brief=brief,host=host,full=full)
     # Claude Code labels a block a hook error, notifies one after every
     # answer and hands the model the reason twice. Its Stop additionalContext
     # (2.1.163 and later) continues the turn as hook feedback, once, through

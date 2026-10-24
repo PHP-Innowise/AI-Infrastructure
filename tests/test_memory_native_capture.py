@@ -1184,6 +1184,59 @@ class NativeAnswerTests(NativeCaptureFixture):
                          (last['event'],last.get('code'),last.get('answer')))
 
 
+class NativeInstructionTests(NativeCaptureFixture):
+    """The full save step while the conversation lacks one, a short one after."""
+
+    ask=NativeAnswerTests.ask
+    FULL='Exact schema example (replace placeholders, never save the example)'
+    BACK='the rules of the full save step earlier in this conversation'
+
+    def transcript(self,name,*records):
+        # Claude Code and Codex write their records as compact JSON lines.
+        path=self.root.parent/name
+        path.write_text(''.join(json.dumps(record,separators=(',',':'))+'\n' for record in records),
+                        encoding='utf-8')
+        return path
+
+    def test_a_later_step_points_back_to_the_full_one_the_conversation_holds(self):
+        # Every answer carried the whole step, about 2,600 characters, and
+        # Claude Code's terminal showed it whole each time.
+        for host in ('claude','codex','cursor'):
+            with self.subTest(host=host):
+                first=self.ask(host=host,session=host+'-first')
+                self.assertIn(self.FULL,first)
+                held=self.transcript(host+'.jsonl',{'type':'user','message':{'content':first}})
+                later=self.ask(host=host,session=host+'-later',transcript=held)
+                self.assertNotIn(self.FULL,later)
+                self.assertIn(self.BACK,later)
+                self.assertIn('exact command: ',later)
+                self.assertLess(len(later),len(first)-800)
+
+    def test_the_full_step_comes_back_after_a_compaction_or_without_a_transcript(self):
+        first=self.ask(session='before')
+        for record in ({'type':'system','subtype':'compact_boundary'},{'type':'compacted','payload':{}}):
+            with self.subTest(record=record['type']):
+                path=self.transcript('compacted.jsonl',{'type':'user','message':{'content':first}},record)
+                self.assertIn(self.FULL,self.ask(session='after-'+record['type'],transcript=path))
+        self.assertIn(self.FULL,self.ask(session='gone',transcript=self.root.parent/'gone.jsonl'))
+        self.assertIn(self.FULL,self.ask(session='none'))
+
+    def test_the_setting_can_send_the_full_step_every_time(self):
+        first=self.ask(session='setting-first')
+        held=self.transcript('held.jsonl',{'type':'user','message':{'content':first}})
+        cfg_file=self.root/'project-brain/config/runtime.json'
+        for value in ('full','bogus'):
+            with self.subTest(value=value):
+                cfg=json.loads(cfg_file.read_text());cfg['native_result_instruction']=value
+                cfg_file.write_text(json.dumps(cfg))
+                self.assertIn(self.FULL,self.ask(session='setting-'+value,transcript=held))
+        cfg=json.loads(cfg_file.read_text());cfg['native_result_instruction']='auto'
+        cfg_file.write_text(json.dumps(cfg))
+        self.assertNotIn(self.FULL,self.ask(session='setting-auto',transcript=held))
+        self.assertIn(self.FULL,self.ask(session='setting-env',transcript=held,
+                                         env={'CONTEXT_NATIVE_RESULT_INSTRUCTION':'full'}))
+
+
 class ClaudeSaveStepTests(NativeCaptureFixture):
     """Claude Code drew the save step after every answer as a hook error,
     with an error notification, and handed the model its text twice; and it

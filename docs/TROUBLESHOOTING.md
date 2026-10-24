@@ -477,7 +477,9 @@ IDE extension or terminal UI - ends with at most one short line instead;
 every other session, Cursor's included, repeats (see
 `docs/MEMORY-INTEGRATION.md`). On 21 Codex runs with one save each, the
 continuation cost a median of 10 seconds, 383 output and 59k mostly cached
-input tokens: about half of the answer's own.
+input tokens: about half of the answer's own. Only the first step of a
+conversation, and the first after a compaction, carries the full rules; later
+ones point back to them and are about 900 characters shorter.
 
 ### Recover
 

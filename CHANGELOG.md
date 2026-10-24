@@ -28,6 +28,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A save step points back to the rules the conversation holds — 2026-10-24
+
+- Why: every answer carried the whole save step, about 2,600 characters, of
+  which the rules (the JSON fields, the schema example, what belongs in
+  learnings) were about 1,150. The conversation already held them from the
+  first step. Claude Code's terminal showed the whole step after every
+  answer.
+- What changes: the Stop reads the transcript's last 2 MiB. When a full step
+  is there after the last compaction record, the step carries its commands,
+  its ending, its refusal rules and a pointer back to the full step, 903
+  characters shorter. After a compaction, or without a readable transcript,
+  the full step comes back. `"native_result_instruction": "full"` (or
+  `CONTEXT_NATIVE_RESULT_INSTRUCTION=full`) sends it every time. The first
+  step of a conversation is byte for byte what it was.
+- Tests: `NativeInstructionTests` in `tests/test_memory_native_capture.py`,
+  failing without the change. Offline on Claude Code 2.1.278, three turns of
+  one session: 3,117 characters, then 2,214 twice, all three saved. On Codex
+  0.163, `exec` then `exec resume`: 2,516 then 1,613, both saved.
+
 ### The Claude Code bench runs attached, as the Harness launches it — 2026-10-24
 
 - Why: the Harness lends an edition from the clone without copying it
