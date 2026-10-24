@@ -579,6 +579,11 @@ python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
 - **Outputs:**
   - what the sync changed and kept;
   - the profile `runtime.json` selects;
+  - with Claude Code among the hosts, whether your own Claude Code ever
+    accepted the project's trust dialog (`~/.claude.json`, or
+    `$CLAUDE_CONFIG_DIR`; that flag and nothing else is read). Without it,
+    `claude -p` there ignores the project's allow rules and refuses the save,
+    which the copy's own HOME would hide. It does not change the exit status;
   - for each run:
     - every hook's exit and time;
     - whether the save was requested, made or refused (with its code);

@@ -333,6 +333,11 @@ def rehearse_target(target: Path, hosts: List[str], profiles: List[str], work: P
     prepare_home(work / "home")
     (work / "tmp").mkdir(parents=True, exist_ok=True)
     report: Dict[str, Any] = {"target": str(target), "runs": []}
+    if "claude" in hosts:
+        # The copy runs with a HOME of its own; your Claude Code decides
+        # whether the project's allow rules count at all.
+        import claude_code_bench
+        report["claude_trust"] = claude_code_bench.person_trust(target)
     copy_tree(target, base, excludes)
     try:
         report["sync"] = sync(base, child_env(work / "home", work / "tmp", {}), timeout * 10)
@@ -367,6 +372,9 @@ def print_report(reports: List[Dict[str, Any]]) -> None:
         print(f"  sync: {sync_state.get('changed')} changed, {sync_state.get('kept')} kept"
               + (f"; {sync_state['partial']}" if sync_state.get("partial") else ""))
         print(f"  capsule profile in runtime.json: {report.get('profile_in_config')}")
+        if report.get("claude_trust") is False:
+            print("  claude trust: never accepted in your Claude Code; there `claude -p` ignores the project's "
+                  "allow rules and refuses the save. Open the project once in interactive Claude Code.")
         for run in report["runs"]:
             if run.get("skipped"):
                 print(f"  {run['host']:6}  skipped: {run['skipped']}")

@@ -28,6 +28,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The rollout rehearsal says when your Claude Code does not trust a target — 2026-10-24
+
+- Why: the rehearsal is the step before a rollout, and its copies run with a
+  HOME of their own. On `next` it passed while your own Claude Code had never
+  accepted the project's trust dialog, so `claude -p` there would refuse the
+  save after every answer.
+- What changes: with Claude Code among the hosts,
+  `memory_rollout_rehearsal.py` reports `claude_trust` per target, read as
+  the Claude Code bench reads it, and prints a line when the dialog was never
+  accepted. The exit status is unchanged.
+- Tests: `tests/test_memory_rollout_rehearsal.py` runs it against a Claude
+  Code configuration that never trusted the project.
+
 ### The Claude Code bench says when your Claude Code does not trust the target — 2026-10-24
 
 - Why: the bench runs in a HOME of its own that trusts the copy, so it passed
