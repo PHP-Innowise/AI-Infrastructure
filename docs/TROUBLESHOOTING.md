@@ -506,7 +506,7 @@ After each answer Claude Code asks to approve a command like
 `cd <project> && echo -E '{...}' | python3 memory-bank/scripts/context.py ... native-result ...`.
 Under `claude -p` the command is refused instead and the result is not
 saved: `memory-bank/local/native-results.ndjson` records `stop` `failed` with
-the code `unsaved`.
+the code `host-refused` (`unsaved` on runtimes before 24 October 2026).
 
 ### Cause
 
@@ -712,7 +712,9 @@ blocked, or a hook times out.
     prompt, Stop and save with a fixed code. `stop-hook` `exited` with
     `status` 124 is a save request killed at its budget; `stop-hook`
     `skipped` `capsule-delivered` a Harness turn; `stop` `failed` `unsaved`
-    a request nobody answered; `save` `refused` carries the refusal's code
+    a request nobody answered, `host-refused` one Claude Code refused (the
+    session is then not asked again for a day); `save` `refused` carries the
+    refusal's code
     (`memory-result-v1:learning_fields` is usually `verified` put inside a
     learning). From the repository, `python3 scripts/memory_eval.py realized
     --project DIR` counts the lines per host.
