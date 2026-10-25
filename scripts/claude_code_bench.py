@@ -45,6 +45,13 @@ there got the capsule and the policy, its save landed in the root's Project
 Brain under the worktree's branch, the worktree got an index of its own in
 the root, and nothing was written into the worktree.
 
+`--desktop` runs the measured session as the Claude desktop app drives
+Claude Code: questions and answers as stream-json, the project's settings
+named (`--setting-sources user,project,local`), and every permission prompt
+sent to the host over stdio, which the bench refuses and counts. The run
+passes only when the session saved without asking one - a save the app had
+to ask about would ask the person after every answer.
+
 `--permissions` (with `--subfolder`, `src` by default) has the stand-in try
 the same reads, writes, commands and fetches in both sessions - secrets the
 project denies, files it allows, commands it denies or allows, the project's
@@ -64,6 +71,7 @@ is never written.
   python3 scripts/claude_code_bench.py --queued 8
   python3 scripts/claude_code_bench.py --subfolder src
   python3 scripts/claude_code_bench.py --worktree --subfolder src
+  python3 scripts/claude_code_bench.py --desktop --worktree
   python3 scripts/claude_code_bench.py --permissions --mode bypassPermissions
   python3 scripts/claude_code_bench.py --attached
   python3 scripts/claude_code_bench.py --target ~/Desktop/next --sync
@@ -421,6 +429,67 @@ def clean_env() -> Dict[str, str]:
             if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_", "CLAUDE", "CODEX", "ANTHROPIC"))}
 
 
+def desktop(argv: List[str], cwd: Path, env: Dict[str, str], prompt: str, timeout: float
+            ) -> Tuple[subprocess.CompletedProcess, List[Dict[str, Any]]]:
+    """One question as the Claude desktop app asks it: stream-json both ways
+    and permission prompts over stdio, each refused and kept. The session
+    ends after its turn's result; its output, and the prompts."""
+    import select
+    argv = [*argv, "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
+            "--permission-prompt-tool=stdio", "--setting-sources=user,project,local", "--await-initialize"]
+    process = subprocess.Popen(argv, cwd=cwd, env=dict(env, CLAUDE_CODE_ENTRYPOINT="claude-desktop"),
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # The app's first line: the initialize control request, which makes the
+    # session send its permission prompts to the host.
+    initialize = {"type": "control_request", "request_id": "bench-initialize", "request": {"subtype": "initialize"}}
+    message = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": prompt}]},
+               "parent_tool_use_id": None, "session_id": ""}
+    process.stdin.write((json.dumps(initialize) + "\n" + json.dumps(message) + "\n").encode())
+    process.stdin.flush()
+    asked: List[Dict[str, Any]] = []
+    lines: List[str] = []
+    buffer, finished, deadline = b"", False, time.time() + timeout
+    while time.time() < deadline and not finished:
+        ready, _, _ = select.select([process.stdout], [], [], 1.0)
+        if not ready:
+            if process.poll() is not None:
+                break
+            continue
+        chunk = os.read(process.stdout.fileno(), 65536)
+        if not chunk:
+            break
+        buffer += chunk
+        while b"\n" in buffer and not finished:
+            raw, buffer = buffer.split(b"\n", 1)
+            line = raw.decode("utf-8", "replace")
+            lines.append(line)
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "control_request":
+                request = item.get("request") or {}
+                answer: Dict[str, Any] = {}
+                if request.get("subtype") == "can_use_tool":
+                    asked.append({"tool": request.get("tool_name"), "input": request.get("input")})
+                    answer = {"behavior": "deny", "message": "The bench refuses every permission prompt."}
+                reply = {"type": "control_response", "response": {
+                    "subtype": "success", "request_id": item.get("request_id"), "response": answer}}
+                process.stdin.write((json.dumps(reply) + "\n").encode())
+                process.stdin.flush()
+            elif item.get("type") == "result":
+                finished = True
+    try:
+        process.stdin.close()
+        process.wait(timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        process.kill()
+        process.wait()
+    return subprocess.CompletedProcess(argv, process.returncode or 0, "\n".join(lines), ""), asked
+
+
 def terminal(argv: List[str], project: Path, env: Dict[str, str], journal: Path, wait: float,
              begun: threading.Event, requests: List[Any], settle: float = 6.0) -> str:
     """A host in its terminal: a question, then a second one once the
@@ -561,6 +630,11 @@ def inside(args: argparse.Namespace) -> int:
                           Scripted.requests)
         (work / "screen.txt").write_text(screen, encoding="utf-8")
         done = subprocess.CompletedProcess([], 0, "", "")
+    elif args.desktop:
+        # The app names the mode the person chose, the default one too: left
+        # out, 2.1.299 under the app's flags decides an ask in auto mode.
+        done, asked = desktop([args.claude, "--permission-mode", args.mode, *lent], project_cwd, env,
+                              "How are invoices numbered?", args.timeout)
     else:
         done = subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json",
                                "--verbose", *mode, *lent], cwd=project_cwd, env=env, stdin=subprocess.DEVNULL,
@@ -597,6 +671,10 @@ def inside(args: argparse.Namespace) -> int:
         # Plan mode tells the agent to change nothing: no save is asked for.
         report["ok"] = (not steps and "stop:skipped:plan-mode" in events and not errors
                         and not report["error_notifications"])
+    if args.desktop:
+        # A prompt the app would have shown the person: the save's above all.
+        report["permission_prompts"] = [str(item["tool"]) + ": " + json.dumps(item["input"])[:120] for item in asked]
+        report["ok"] = report["ok"] and not asked
     if args.queued is not None:
         report["unsaved_on_screen"] = UNSAVED in screen
         report["ok"] = queued_ok(events, screen) and not errors
@@ -672,6 +750,9 @@ def main() -> int:
     parser.add_argument("--mode", choices=MODES, default="default", help="the permission mode to run")
     parser.add_argument("--subfolder", metavar="DIR", default=None,
                         help="after a session in the project root, run the measured one in DIR below it")
+    parser.add_argument("--desktop", action="store_true",
+                        help="drive the measured session as the Claude desktop app does: stream-json, the "
+                             "project's settings named, permission prompts over stdio (refused and counted)")
     parser.add_argument("--worktree", action="store_true",
                         help="after a session in the project root, run the measured one in a Git worktree of the "
                              "project (in DIR of it with --subfolder)")
@@ -707,6 +788,10 @@ def main() -> int:
         args.subfolder = "src"
     if args.permissions and args.target:
         print("claude_code_bench: --permissions writes probe files into the project; it takes no --target",
+              file=sys.stderr)
+        return 2
+    if args.desktop and (args.queued is not None or args.permissions):
+        print("claude_code_bench: --desktop drives one turn as the app does; it takes no --queued or --permissions",
               file=sys.stderr)
         return 2
     if args.worktree and (args.permissions or args.target):
@@ -753,6 +838,7 @@ def main() -> int:
                                *(["--queued", str(args.queued)] if args.queued is not None else []),
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
                                *(["--worktree"] if args.worktree else []),
+                               *(["--desktop"] if args.desktop else []),
                                *(["--permissions"] if args.permissions else []),
                                "--timeout", str(args.timeout)],
                               timeout=args.timeout + 60)

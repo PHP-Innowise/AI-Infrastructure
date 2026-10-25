@@ -89,6 +89,14 @@ edition's own files remain in that edition's changelog.
   installations, under both profiles, every save landed under the
   worktree's branch, was recalled, and left the worktree clean
   (`tests/test_memory_rollout_rehearsal.py` covers it).
+  `scripts/claude_code_bench.py --desktop` drives a session as the
+  desktop app drives Claude Code (stream-json, the initialize request,
+  `--setting-sources user,project,local`, permission prompts over stdio,
+  each refused and listed) and fails on any prompt: in the root, below it
+  and in a worktree, 2.1.278 and 2.1.299 asked none; with the memory CLI's
+  allow taken out it lists the save's command. Left without a mode, 2.1.299
+  under those flags decides an ask in auto mode, which needs a classifier
+  no offline run has, so the bench names the mode as the app does.
   `scripts/claude_code_bench.py --worktree` (and
   `--worktree --subfolder src`) repeats the host run and passes only when
   the save went to the worktree's branch, the worktree got its own index

@@ -682,6 +682,17 @@ save landed in the root's Project Brain under the worktree's branch, the
 worktree got an index of its own in the root, and nothing was written into
 the worktree.
 
+`--desktop` drives the measured session as the Claude desktop app drives
+Claude Code: stream-json both ways, the initialize request first
+(`--await-initialize`), `--setting-sources user,project,local`, the mode
+named, and every permission prompt sent to the host over stdio, which the
+bench refuses and lists. The run passes only when the session saved without
+one: a save the app has to ask about asks the person after every answer.
+With the dispatcher's allow for the memory CLI taken out, it fails there
+with the save's command as the prompt. Left without a mode, Claude Code
+2.1.299 under the app's flags decides an ask in auto mode, whose classifier
+no offline run has: the app names the mode, and so does the bench.
+
 `--permissions` (with `--subfolder`, `src` by default) has the stand-in try
 nineteen tool calls in both sessions - reads of secrets the project denies
 at the root and below it, of files it allows and of one outside, writes,
@@ -695,7 +706,7 @@ path matching was probed, not documented.
 ```bash
 python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   [--target DIR [--sync] [--exclude NAME] | --attached] [--shell /usr/bin/zsh] [--mode dontAsk] \
-  [--queued 8 | --subfolder src [--permissions] | --worktree [--subfolder src]] [--timeout 180] [--keep]
+  [--queued 8 | --subfolder src [--permissions] | --worktree [--subfolder src]] [--desktop] [--timeout 180] [--keep]
 ```
 
 - **Outputs:** a JSON report:
@@ -708,7 +719,8 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   - with `--subfolder`, the folder, and whether the capsule and the whole
     policy reached the session;
   - with `--worktree`, also whether the save went to the worktree's branch,
-    its own index exists and the worktree stayed clean.
+    its own index exists and the worktree stayed clean;
+  - with `--desktop`, the permission prompts the app would have shown.
 
   Exit 0 when the save ran, one message carried the step and no hook error
   was recorded; 1 otherwise; 2 without Linux namespaces.
