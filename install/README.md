@@ -195,8 +195,11 @@ Code reads a project's hooks, permission rules and `env` only from the folder
 a session starts in - and says so on stderr (`CLAUDE below-root <folder>`).
 It writes a small dispatcher into your own Claude Code configuration folder
 (`~/.claude/ai-accelerator/`, entries in `~/.claude/settings.json`) when that
-folder exists, and nothing once `~/.claude/ai-accelerator/off` exists. A scripted install leaves it to the project's first Claude Code
-session in its root. The edition's `ACCELERATOR.md` describes it.
+folder exists, and nothing once `~/.claude/ai-accelerator/off` exists. A
+scripted install leaves it to the project's first Claude Code session in its
+root. The edition's `ACCELERATOR.md` describes it, and
+[memory integration](../docs/MEMORY-INTEGRATION.md#claude-code-started-below-the-project-root)
+says what the dispatcher does and how it was checked.
 
 ## 6. Validate the Installation
 

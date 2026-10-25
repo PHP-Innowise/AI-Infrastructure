@@ -745,11 +745,13 @@ blocked, or a hook times out.
     do), and a folder of another Git checkout inside the project - a
     worktree, a vendored repository - is that checkout's. To remove the
     dispatcher, create that `off` file and delete the entries from
-    `settings.json`. Codex started in a subdirectory finds and runs the
-    project's hooks; its sandbox writes only below that folder, so the save
-    waits in a temporary folder (`ai-accelerator-native-spool-<uid>`) and the
-    next hook saves it (journal `saved` with code `spooled`: the sandbox
-    cannot write the journal either).
+    `settings.json`. What the dispatcher does and how it was checked:
+    [Claude Code started below the project root](MEMORY-INTEGRATION.md#claude-code-started-below-the-project-root).
+    Codex started in a subdirectory finds and runs the project's hooks; its
+    sandbox writes only below that folder, so the save waits in a temporary
+    folder (`ai-accelerator-native-spool-<uid>`) and the next hook saves it
+    (journal `saved` with code `spooled`: the sandbox cannot write the
+    journal either).
 
 ### Recover
 
