@@ -9,10 +9,12 @@ in the root, which such a session does not read, so it is not asked about
 the save after every answer.
 
 permissions: the decision the project's permission rules - .claude/
-settings.json and settings.local.json, which Claude Code reads only in the
-root too - make there: a deny or an ask wherever they would, and an allow
-only for a file inside the root or a single plain command, so a session
-below the root is never let further than one in the root.
+settings.json and settings.local.json - make in the root: a deny or an ask
+wherever they would, and an allow only for a file inside the root or a
+single plain command, so a session below the root is never let further than
+one in the root. Claude Code reads settings.json only in the root; it reads
+settings.local.json below it too, but resolves its paths from the session's
+folder, which is stricter there and never looser.
 
 environment: the project's `env` for the session's commands, through the
 file Claude Code names in CLAUDE_ENV_FILE at a session's start; the
