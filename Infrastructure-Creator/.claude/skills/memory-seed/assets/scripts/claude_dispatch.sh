@@ -27,6 +27,11 @@
 # _PROJECT_DIR, as memory-bank/scripts/workspace_roots.py reads them).
 hook=${1:-}
 case "$hook" in ''|*/*|.*) exit 0 ;; esac
+# A session a launcher lends an accelerator to - the Harness, or
+# scripts/accelerator_attach.py - runs that accelerator's hooks through
+# --settings in any folder, a worktree of an installed project among them,
+# and names it in ACCELERATOR_HOME: serving it too would run them twice.
+[ -n "${ACCELERATOR_HOME:-}" ] && exit 0
 # Every session of the person runs this for every hook: nothing below starts
 # another process until the session's folder is below a listed root or in a
 # worktree of one.

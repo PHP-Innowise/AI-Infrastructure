@@ -257,7 +257,7 @@ class PolicyImport(Fixture):
 class DispatcherVersion(Fixture):
     # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
     # then record the scripts' new fingerprint here.
-    FINGERPRINTS = {3: "f0a6a4c24b412c3b5fe1a0798fa2afffa2022b27ab886c424aede24ab3cfc753"}
+    FINGERPRINTS = {3: "6c1938f50928511f22cc4043a19ae52aaeff0a38708ee83237302833d155cb68"}
 
     def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
         shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")
@@ -844,6 +844,17 @@ class Worktrees(Fixture):
         where, named, home, state, served, _ = done.stdout.decode().split("|", 5)
         self.assertEqual((shown(where), shown(named), home, state, served),
                          (shown(worktree), shown(worktree), "", "", ""))
+
+    def test_a_session_a_launcher_lends_an_accelerator_to_is_left_to_it(self):
+        # The Harness's attached launch: its own hooks run through --settings.
+        root = self.committed()
+        inner = root / ".claude" / "worktrees" / "refunds"
+        git(root, "worktree", "add", "-q", str(inner), "-b", "feature/SHOP-9-refunds")
+        self.env["ACCELERATOR_HOME"] = str(self.base / "clone" / "PHP Core")
+        for start in (inner, root / "src"):
+            with self.subTest(start=start):
+                done = self.run_dispatcher("echo.sh", start)
+                self.assertEqual((done.returncode, done.stdout), (0, b""), done.stderr)
 
     def test_a_worktree_with_an_installation_of_its_own_or_of_another_repository_is_left_alone(self):
         root = self.committed()
