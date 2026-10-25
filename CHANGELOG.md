@@ -92,7 +92,9 @@ edition's own files remain in that edition's changelog.
   request is reported at once, as before. The queued prompt's own answer is
   saved with the next answer's save. `memory_eval.py realized` does not
   count `previous-in-flight` or `previous-unreadable` as armed after an
-  unsaved result.
+  unsaved result. A save that lands after its request was moved aside is
+  journaled `saved` (or `omitted`) with code `in-flight`, so `realized`
+  counts how often the case comes up and how often the save still lands.
 - Tests: `test_a_prompt_sent_while_the_save_is_written_does_not_cancel_it`,
   `test_a_request_moved_aside_is_reported_at_the_next_prompt_when_unsaved`,
   `test_a_request_asked_long_ago_is_reported_at_once_and_codex_continues_one_moved_aside`,

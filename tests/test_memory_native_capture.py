@@ -604,7 +604,8 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.one(self.written(lambda:out.append(self.queued())),'prompt','armed','previous-in-flight',host='claude')
         self.assertNotIn('warning',json.loads(out[0].stdout))
         self.one(self.written(lambda:self.call('native-result','--request',candidate.stem,'--token',state['token'],
-                                               '--input','-','--json',data=self.payload)),'save','saved',host='claude')
+                                               '--input','-','--json',data=self.payload)),'save','saved','in-flight',
+                 host='claude')
         self.one(self.written(lambda:self.stopped(True)),'stop','skipped','recovery-saved',host='claude')
         self.one(self.written(lambda:out.append(self.queued(text='Next question'))),'prompt','armed',host='claude')
         self.assertNotIn('warning',json.loads(out[1].stdout))

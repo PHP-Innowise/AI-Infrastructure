@@ -841,7 +841,7 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
         if skip:
             if state['digest'] is not None: raise BrainError('native-result:save-already-started')
             state['phase']='omitted';_write(root,slot,state)
-            return step({'state':'omitted','attestation':'agent'},'omitted')
+            return step({'state':'omitted','attestation':'agent'},'omitted','in-flight' if slot != key else None)
         # A completed replay may outlive its sources or active task alias.
         # Only the canonical result protocol can admit such a replay; local
         # challenge metadata alone must never authorize a fresh write.
@@ -878,6 +878,7 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
             raise _overtaken(str(error),'another session or a person saved the task') from error
         held=any(item['state'] in {'differs','archived-differs'} for item in result['records'])
         state['phase']='held' if held else 'saved';_write(root,slot,state)
-        return step(result,state['phase'],repeat,
+        # For the journal: a save that landed after a prompt moved its request aside.
+        return step(result,state['phase'],repeat or ('in-flight' if slot != key else None),
                     learnings=sum(item['state'] in {'created','completed','updated'} for item in result['records']),
                     promoted=len((result['promotion'] or {}).get('promoted') or ()))
