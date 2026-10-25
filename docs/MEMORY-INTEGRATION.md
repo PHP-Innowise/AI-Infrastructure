@@ -221,6 +221,19 @@ and confirm no duplicates. Inspect Harness **Knowledge → Memory use**, run
 `context.py validate --json` and `memory-bank/scripts/validate.py`. Distinguish real
 client connections from isolated protocol tests.
 
+When Claude Code or Codex updates, run the host benches before the next rollout; they
+drive the installed binary offline against a scripted model (`scripts/README.md`):
+
+```bash
+python3 scripts/claude_code_bench.py                     # each --mode too: acceptEdits, dontAsk, auto, bypassPermissions, plan
+python3 scripts/claude_code_bench.py --queued 8          # a question typed while the save is written, in the terminal
+python3 scripts/claude_code_bench.py --attached          # as the Harness launches it
+python3 scripts/codex_bench.py                           # and --attached, --sandbox read-only
+python3 scripts/codex_bench.py --queued 8
+```
+
+Then `--target DIR --sync` on a copy of each client project, and the rollout rehearsal.
+
 ## Automatic results in native sessions
 
 Governed Codex, Claude Code and Cursor sessions now use one bounded same-agent Stop continuation to record the result of the work already performed. The prompt hook arms ignored metadata only; the normal Git checkpoint runs first at Stop. The continuation calls `context.py native-result` with progress, optional next steps and at most three source-backed findings/decisions. `verified` is a top-level boolean and means agent attestation, never human review. Empty learnings and an explicit skip are valid. No prompt, final prose or transcript is parsed into authoritative knowledge.
