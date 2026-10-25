@@ -64,7 +64,11 @@ edition's own files remain in that edition's changelog.
   `subprocess` and `urllib.parse` are imported where they are used, and the
   helper runs isolated and without site (`-I -S`), so a person's
   `PYTHONPATH` cannot shadow the standard library either - 32 ms a call
-  before, 22 ms after.
+  before, 22 ms after. The guard, `bash-validator.sh`, now runs there as in
+  the root, without the helper, unless the command names `context.py`:
+  the helper only adds the allow the project's rules give the memory CLI,
+  and its Python start cost every other Bash call five times the guard's
+  own - 37 ms before, 7.5 ms after; a block is the guard's as before.
 - The runtime's shared layout (`workspace_roots.py`): the three variables
   with the state root equal to the tooling root - an installation lent
   to its own worktree. The Project Brain and Memory Bank are the root's,

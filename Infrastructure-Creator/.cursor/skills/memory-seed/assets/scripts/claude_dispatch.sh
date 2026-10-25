@@ -154,6 +154,17 @@ else
   cd -- "$root" || exit 0
   export CLAUDE_PROJECT_DIR="$native"
 fi
+if [ "$hook" = bash-validator.sh ]; then
+  payload=$(cat)
+  # The guard runs as in the root. The helper below adds the allow the
+  # project's rules give the memory CLI there - the save step's command -
+  # so it starts only for a command that names the CLI: its Python start
+  # cost every other Bash call five times the guard's own.
+  case "$payload" in
+    *context.py*) ;;
+    *) printf '%s' "$payload" | "${BASH:-bash}" "$root/.claude/hooks/$hook"; exit $? ;;
+  esac
+fi
 case "$hook" in
   bash-validator.sh|permissions|environment|policy-*)
     # The guard's verdict plus what the project's permission rules allow,
@@ -176,8 +187,16 @@ case "$hook" in
     if [ ${#python[@]} -gt 0 ]; then
       # Isolated and without site: the helper needs the standard library
       # only, and a PYTHONPATH of the person's cannot shadow it.
+      if [ "$hook" = bash-validator.sh ]; then
+        printf '%s' "$payload" | "${python[@]}" -I -S "$here/ai-accelerator-dispatch.py" "$hook" "$native" "$start" ${project:+"$worktree"}
+        exit $?
+      fi
       exec "${python[@]}" -I -S "$here/ai-accelerator-dispatch.py" "$hook" "$native" "$start" ${project:+"$worktree"}
     fi ;;
 esac
 case "$hook" in permissions|environment|policy-*) exit 0 ;; esac
+if [ "$hook" = bash-validator.sh ]; then
+  printf '%s' "$payload" | "${BASH:-bash}" "$root/.claude/hooks/$hook"
+  exit $?
+fi
 exec "${BASH:-bash}" "$root/.claude/hooks/$hook"

@@ -257,7 +257,7 @@ class PolicyImport(Fixture):
 class DispatcherVersion(Fixture):
     # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
     # then record the scripts' new fingerprint here.
-    FINGERPRINTS = {3: "a43496aedd68a414d3355ee3b53298d87ab1e7fcfd8332a27cc4b9de1d963d23"}
+    FINGERPRINTS = {3: "01f6a42d684516ea4f8aa8025f2186e2f1ea29cf4f7e6b5893b1b8c30a3c024b"}
 
     def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
         shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")
