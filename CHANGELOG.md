@@ -28,6 +28,33 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Command rules below the project root reach as far as the root's — 2026-10-25
+
+- Why: a differential run - random deny rules in the project's
+  `settings.local.json`, random reads, writes and commands, tried in a root
+  session and in one started in `src/` of the real Claude Code 2.1.278 -
+  found commands the root refused that the dispatcher let through below it:
+  `env rm -rf x`, `... | xargs rm -rf`, `if true; then rm -rf x; fi`,
+  `{ rm -rf x; }`, `for ...; do rm -rf $d; done`. It also refused two the
+  root allows: `command -v sudo` and `xargs -I{} rm -rf {}`.
+- What changes: the dispatcher takes from Claude Code's own code what it
+  looks through - `time`, `nohup`, `timeout`, `nice`, `stdbuf`, `env`,
+  `command`, `builtin`, `noglob` and a bare `xargs` for any rule, `sudo`,
+  `doas`, `exec`, `setsid`, `ionice`, `pkexec`, `runuser` and `eval` too,
+  each named without a path, with their options, leading assignments and
+  the keywords `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!`,
+  `{` - and
+  matches each rule against every form of the command along the way, so
+  `Bash(sudo:*)` still refuses `timeout 5 sudo ls`. `command -v` and an
+  `xargs` with flags, `busybox`, `coproc` and a wrapper named by its path
+  are not looked through, as in the root.
+- Tests: the cases above and twenty more in
+  `tests/test_memory_claude_subfolders.py`; the differential runs (scratch,
+  not in CI) afterwards found no command refused in the root and let
+  through below it. Claude Code also reads the root's `settings.local.json`
+  in a session below it, resolving its paths from that session's folder:
+  stricter there, never looser (`docs/MEMORY-INTEGRATION.md`).
+
 ### Below the project root on Windows too; the dispatcher keeps its newest copy — 2026-10-25
 
 - Why: Claude Code on Windows runs hook commands with Git Bash, and the

@@ -257,7 +257,7 @@ class PolicyImport(Fixture):
 class DispatcherVersion(Fixture):
     # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
     # then record the scripts' new fingerprint here.
-    FINGERPRINTS = {2: "a25d9cfb837c91c32c9266193960b483897284af098e8b9b89a43993f174eab1"}
+    FINGERPRINTS = {2: "927f56d2296c26118a33cc6bc8237a7ea695427892ff0abaccd81ef608d2c443"}
 
     def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
         shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")
@@ -420,6 +420,16 @@ class Permissions(Fixture):
             ("Bash", {"command": "rm -rf build"}, "deny"), ("Bash", {"command": "sudo -n true"}, "deny"),
             ("Bash", {"command": "chmod 777 notes.txt"}, "deny"), ("Bash", {"command": "echo hi && rm -rf build"}, "deny"),
             ("Bash", {"command": "FOO=1 timeout 5 sudo ls"}, "deny"), ("Bash", {"command": "echo $(sudo id)"}, "deny"),
+            # Forms the root refuses too, found by differential runs against the binary.
+            ("Bash", {"command": "env rm -rf build"}, "deny"), ("Bash", {"command": "env -i A=1 rm -rf build"}, "deny"),
+            ("Bash", {"command": "find . -name x | xargs rm -rf"}, "deny"),
+            # A flag after xargs keeps Claude Code from looking through it.
+            ("Bash", {"command": "find . -print0 | xargs -0 -I {} rm -rf {}"}, None),
+            ("Bash", {"command": "if true; then rm -rf build; fi"}, "deny"),
+            ("Bash", {"command": "for d in build; do rm -rf $d; done"}, "deny"),
+            ("Bash", {"command": "{ rm -rf build; }"}, "deny"), ("Bash", {"command": "! sudo -n true"}, "deny"),
+            # Text an allowed echo prints is not a command: allowed, as in the root.
+            ("Bash", {"command": "echo 'rm -rf build'"}, "allow"),
             ("Bash", {"command": "ls"}, "allow"), ("Bash", {"command": "php -v"}, "allow"),
             ("Bash", {"command": "git status --short"}, "allow"),
             ("Bash", {"command": "php -v && ls"}, None), ("Bash", {"command": "git log > out.txt"}, None),
@@ -435,6 +445,29 @@ class Permissions(Fixture):
         for tool, tool_input, expected in cases:
             with self.subTest(tool=tool, tool_input=tool_input):
                 self.assertEqual(self.decide(root, tool, tool_input), expected)
+
+    def test_a_command_rule_reaches_through_what_claude_code_reaches_through(self):
+        # Read from Claude Code 2.1.278 and checked by differential runs of
+        # the same commands in a root session and one below it.
+        root = self.project(policy="# Policy\n")
+        settings = root / ".claude" / "settings.json"
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        data["permissions"] = {"deny": ["Bash(rm -rf:*)", "Bash(sudo:*)"], "allow": []}
+        settings.write_text(json.dumps(data), encoding="utf-8")
+        refused = ["rm -rf x", "env rm -rf x", "env -u HOME A=1 rm -rf x", "find . | xargs rm -rf",
+                   "sudo -u www rm -rf x", "ionice -c3 rm -rf x", "setsid rm -rf x", "timeout -k 5 10s rm -rf x",
+                   "nice -n 5 rm -rf x", "command rm -rf x", "A=1 B=2 rm -rf x", "if true; then rm -rf x; fi",
+                   "until true; do rm -rf x; done", "{ rm -rf x; }", "! rm -rf x", "echo a && rm -rf x",
+                   "echo $(rm -rf x)", "sudo -n true", "FOO=1 timeout 5 sudo ls"]
+        let_through = ["xargs -I{} rm -rf {}", "command -v sudo", "command -V sudo", "echo 'rm -rf x'",
+                       "bash -c 'rm -rf x'", "/usr/bin/sudo -n true", "rm -Rf x", "/usr/bin/env rm -rf x",
+                       "busybox rm -rf x", "coproc rm -rf x"]
+        for command in refused:
+            with self.subTest(command=command):
+                self.assertEqual(self.decide(root, "Bash", {"command": command}), "deny")
+        for command in let_through:
+            with self.subTest(command=command):
+                self.assertIsNone(self.decide(root, "Bash", {"command": command}))
 
     def test_local_rules_count_and_the_persons_own_are_never_overridden(self):
         root = self.edition_project()

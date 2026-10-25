@@ -267,7 +267,19 @@ def policy(root: str, start: str, part: int) -> str:
 READ_TOOLS = {"Read": "file_path"}
 EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
 OPERATORS = {"&&", "||", ";", "|", "&", "|&", ";;", "(", ")", "\n"}
-WRAPPERS = {"timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "exec"}
+# What Claude Code 2.1 looks through to the command a deny rule names, read
+# from the binary and checked by differential runs against it: `env rm -rf
+# x`, `... | xargs rm -rf`, `sudo rm -rf x` and `if ...; then rm -rf x; fi`
+# are refused under Bash(rm -rf:*) in the root, while `command -v sudo`,
+# `xargs -I{} rm -rf {}`, `busybox rm -rf x`, `coproc rm -rf x` and a
+# wrapper named by its path (`/usr/bin/env rm -rf x`) are not.
+WRAPPERS = {"time", "nohup", "timeout", "nice", "stdbuf", "env", "command", "builtin", "noglob", "xargs",
+            "sudo", "doas", "exec", "setsid", "ionice", "pkexec", "runuser", "eval"}
+KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}"}
+ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*")
+# Options of a wrapper that take the next word as their value.
+VALUES = {"env": {"-u"}, "sudo": {"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t"}, "doas": {"-u", "-C"},
+          "timeout": {"-k", "-s"}, "runuser": {"-u", "-g"}}
 
 
 def project_rules(root: str) -> dict:
@@ -395,7 +407,7 @@ def segments(command: str) -> list:
     for token in tokens + [";"]:
         punctuation = bool(token) and set(token) <= set("();<>|&")
         if token in OPERATORS or punctuation and set(token) & set(";&|()"):
-            while current and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", current[0]):
+            while current and ASSIGNMENT.fullmatch(current[0]):
                 current = current[1:]
             if current:
                 found.append(current)
@@ -408,12 +420,33 @@ def segments(command: str) -> list:
     return found
 
 
-def unwrapped(segment: list) -> list:
-    while segment and segment[0] in WRAPPERS:
-        segment = segment[1:]
-        while segment and (segment[0].startswith("-") or re.fullmatch(r"[0-9.]+[smhd]?", segment[0])):
+def forms(segment: list):
+    """The segment and each command it runs as keywords, assignments and
+    wrappers with their options come off - a rule may name the wrapper
+    itself (Bash(sudo:*)) or what it runs (Bash(rm -rf:*)) - but through a
+    bare `xargs` only, and not through `command -v`."""
+    yield segment
+    while segment:
+        word = segment[0]
+        if word in KEYWORDS or ASSIGNMENT.fullmatch(word):
             segment = segment[1:]
-    return segment
+            yield segment
+            continue
+        name = word
+        if name not in WRAPPERS:
+            return
+        rest = segment[1:]
+        if name == "xargs" and (not rest or rest[0].startswith("-")):
+            return
+        if name == "command" and any("v" in option or "V" in option for option in rest[:1] if option.startswith("-")):
+            return
+        while rest and (rest[0].startswith("-") or re.fullmatch(r"[0-9.]+[smhd]?", rest[0])
+                        or name == "env" and ASSIGNMENT.fullmatch(rest[0])):
+            option, rest = rest[0], rest[1:]
+            if option in VALUES.get(name, ()) and rest:
+                rest = rest[1:]
+        segment = rest
+        yield segment
 
 
 def bash_matches(content: str, segment: list) -> bool:
@@ -460,8 +493,7 @@ def matches(rule: str, tool: str, tool_input: dict, root: str, start: str, allow
             # One plain command, as the root's rule would let through.
             parts = segments(command)
             return plain(command) and len(parts) == 1 and bash_matches(content, parts[0])
-        return any(bash_matches(content, segment) or bash_matches(content, unwrapped(segment))
-                   for segment in segments(command))
+        return any(bash_matches(content, form) for segment in segments(command) for form in forms(segment))
     if rule_tool in ("Agent", "Task") and tool in ("Agent", "Task") and not allow:
         return tool_input.get("subagent_type") == content.strip()
     if rule_tool == "WebFetch" and tool == "WebFetch":
