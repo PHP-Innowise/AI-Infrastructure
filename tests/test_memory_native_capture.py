@@ -1229,7 +1229,9 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
         # TMPDIR: there it is the user's TEMP folder, where the save waits.
         policy={'kind':'restricted','entries':[{'path':{'type':'special','value':{'kind':'tmpdir'}},'access':'write'}]}
         temporary=str(self.root.parent/'windows-temp')
-        spool=os.path.join(temporary,'ai-accelerator-native-spool-user')
+        # Resolved, as the Stop passes it: a Windows TEMP path can carry 8.3
+        # short names (RUNNER~1) that the policy's resolved entry does not.
+        spool=os.path.realpath(os.path.join(temporary,'ai-accelerator-native-spool-user'))
         with self.runtime() as (native,_,_):
             os.environ.pop('TMPDIR',None)
             with mock.patch.object(native.tempfile,'gettempdir',return_value=temporary):
