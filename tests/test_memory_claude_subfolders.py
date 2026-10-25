@@ -257,7 +257,7 @@ class PolicyImport(Fixture):
 class DispatcherVersion(Fixture):
     # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
     # then record the scripts' new fingerprint here.
-    FINGERPRINTS = {3: "b521f764a0743b4fa164b3e89cc3024e0d420b1a776e568830ae57fb4c04f2cc"}
+    FINGERPRINTS = {3: "f0a6a4c24b412c3b5fe1a0798fa2afffa2022b27ab886c424aede24ab3cfc753"}
 
     def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
         shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")
@@ -824,6 +824,26 @@ class Worktrees(Fixture):
         self.assert_served(self.run_dispatcher("echo.sh", worktree / "backend" / "src"), root, worktree / "backend")
         done = self.run_dispatcher("echo.sh", worktree)
         self.assertEqual((done.returncode, done.stdout), (0, b""), "the monorepo's root is not the project")
+
+    def test_an_installed_worktree_of_an_installed_project_is_served_as_itself(self):
+        # Its own root comes first, whatever the lengths of the two roots.
+        main = self.project("a-main-checkout-with-a-name-longer-than-its-worktree",
+                            hooks={"echo.sh": self.ECHO}, policy="# Main\n")
+        (main / "src" / "Billing" / "Invoice.php").write_text("<?php\n", encoding="utf-8")
+        git(main, "add", "src")
+        git(main, "commit", "-qm", "base")
+        self.setup_dispatcher(main)
+        worktree = self.base / "wt"
+        git(main, "worktree", "add", "-q", str(worktree), "-b", "feature/own")
+        for name in ("memory-bank", ".claude"):
+            shutil.copytree(main / name, worktree / name, dirs_exist_ok=True)
+        shutil.copy2(main / "AGENTS.md", worktree / "AGENTS.md")
+        self.setup_dispatcher(worktree)
+        done = self.run_dispatcher("echo.sh", worktree / "src" / "Billing")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        where, named, home, state, served, _ = done.stdout.decode().split("|", 5)
+        self.assertEqual((shown(where), shown(named), home, state, served),
+                         (shown(worktree), shown(worktree), "", "", ""))
 
     def test_a_worktree_with_an_installation_of_its_own_or_of_another_repository_is_left_alone(self):
         root = self.committed()

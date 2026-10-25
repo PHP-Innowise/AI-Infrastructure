@@ -52,7 +52,10 @@ edition's own files remain in that edition's changelog.
   also covering the root's own files from there; the policy comes in
   parts whatever Claude Code was told about imports. A forged `.git`
   file, a submodule, a worktree of another repository or one with an
-  installation of its own is left alone.
+  installation of its own is left alone. A root the session's folder is
+  below, in its own checkout or one around it, comes first: an installed
+  worktree of an installed project is served as itself whatever the
+  lengths of the two roots - found by a test, before it shipped.
 - The runtime's shared layout (`workspace_roots.py`): the three variables
   with the state root equal to the tooling root - an installation lent
   to its own worktree. The Project Brain and Memory Bank are the root's,

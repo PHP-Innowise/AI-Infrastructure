@@ -76,25 +76,43 @@ while :; do
   [ -n "$folder" ] || break
   folder=${folder%/*}
 done
-root=
-native=
-project=
+# Two ways to find the root: the longest listed root the session's folder
+# is below, and in a worktree the longest listed root whose folder there -
+# the worktree itself for the main checkout - holds the session's folder.
+below=
+below_native=
+borrowed=
+borrowed_native=
+borrowed_project=
 while IFS= read -r listed || [ -n "$listed" ]; do
   listed=${listed%$'\r'}
   shell_path "$listed"
-  # In a worktree, the listed root's folder there - the worktree itself for
-  # the main checkout - is that root's project.
   if [ -n "$main" ]; then
     case "$path" in
       "$main"|"$main"/*)
         candidate=$checkout${path:${#main}}
         case "$start" in
-          "$candidate"|"$candidate"/*) [ ${#path} -gt ${#root} ] && root=$path && native=$listed && project=$candidate ;;
+          "$candidate"|"$candidate"/*)
+            [ ${#path} -gt ${#borrowed} ] && borrowed=$path && borrowed_native=$listed && borrowed_project=$candidate ;;
         esac ;;
     esac
   fi
-  case "$start" in "$path"/*) [ ${#path} -gt ${#root} ] && root=$path && native=$listed && project= ;; esac
+  case "$start" in "$path"/*) [ ${#path} -gt ${#below} ] && below=$path && below_native=$listed ;; esac
 done < "$here/projects"
+# A root in the session's own checkout, or in one around it - a monorepo it
+# is installed in - comes first. A folder of another checkout inside the
+# project - a Git repository kept there, or a worktree of another
+# repository - is that checkout's, whose branch is not the project's; a
+# worktree of the project's own repository borrows the root's installation.
+root=
+native=
+project=
+if [ -n "$below" ]; then
+  case "$checkout" in "$below"/*) ;; *) root=$below native=$below_native ;; esac
+fi
+if [ -z "$root" ] && [ -n "$borrowed" ]; then
+  root=$borrowed native=$borrowed_native project=$borrowed_project
+fi
 [ -n "$root" ] || exit 0
 case "$hook" in
   policy-*) needed=AGENTS.md ;;
@@ -118,11 +136,6 @@ else
     [ -f "$folder/memory-bank/scripts/context.py" ] && exit 0
     folder=${folder%/*}
   done
-  # A folder of another checkout - a Git repository kept inside the
-  # project, or a worktree of another repository - is that checkout's, whose
-  # branch is not the project's. A checkout around the project, a monorepo
-  # it is installed in, is not.
-  case "$checkout" in "$root"/*) exit 0 ;; esac
 fi
 if [ -n "$project" ]; then
   cd -- "$project" || exit 0
