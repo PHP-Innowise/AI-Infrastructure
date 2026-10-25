@@ -28,6 +28,33 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Codex started below the project saves through its next hook — 2026-10-25
+
+- Why: Codex started in a subdirectory of the project runs a workspace-write
+  sandbox that writes only below that subdirectory. The save after every
+  answer failed with "Read-only file system" at the runtime lock, and since
+  5695f5e8 it was not asked for at all (`outside-sandbox`): such a session
+  saved nothing, and the person was not to be asked to restart anywhere.
+- What changes: the Stop asks for the save whenever the sandbox writes a
+  temporary directory, as Codex's does (`/tmp`, `$TMPDIR`). The save
+  command, finding the project read-only (EROFS, EACCES or EPERM on the
+  Brain), checks the request and the result as a save does - a malformed
+  result is refused while the agent can still correct it - and leaves it
+  in a folder of this user's there (`ai-accelerator-native-spool-<uid>`,
+  owner-only, journal `save` `spooled`), answering `{"state": "spooled"}`.
+  The session's next hook - the continuation's Stop, or else the next
+  prompt - runs outside the sandbox, takes the file (one attempt each) and
+  saves it (`saved` with code `spooled`). Only a sandbox that writes
+  neither the Brain nor a temporary directory is skipped as
+  `outside-sandbox`.
+- Tests: `test_a_save_the_sandbox_cannot_write_is_made_by_the_next_hook`
+  (the project made read-only; a malformed result refused at once, the
+  result spooled, then saved by the continuation's Stop and, in a second
+  case, by the next prompt), failing without the change, and a
+  temporary-directory case in the outside-sandbox test. On the real host,
+  Codex 0.163 started from `src`: `requested`, `saved` `spooled`,
+  `recovery-saved`.
+
 ### The host benches type a question while the save is written — 2026-10-25
 
 - `scripts/claude_code_bench.py --queued SECONDS` and `scripts/codex_bench.py

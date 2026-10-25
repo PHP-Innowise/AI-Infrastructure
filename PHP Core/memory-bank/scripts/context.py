@@ -8984,6 +8984,10 @@ def _command() -> int:
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     payload = native_results.read_input(sys.stdin.buffer)
+                    # A save the agent's sandbox could not write waits in
+                    # the spool; this hook runs outside the sandbox.
+                    native_results.drain(repository, arguments.task_id, arguments.host, payload, owner=owner, mode=mode,
+                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner))
                     operation = native_results.begin if arguments.command == "native-prompt" else native_results.stop
                     result = operation(repository, arguments.task_id, arguments.host, payload, owner=owner, mode=mode)
                     if arguments.command == "native-stop":

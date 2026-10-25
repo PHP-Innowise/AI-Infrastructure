@@ -738,8 +738,10 @@ blocked, or a hook times out.
     import in `.claude/CLAUDE.md` is an import from outside the working
     directory, which Claude Code asks about in a terminal and leaves out
     under `-p`. Start Claude Code in the project root. Codex started in a
-    subdirectory finds and runs the project's hooks; its save is skipped as
-    `outside-sandbox`, because its sandbox writes only below that folder.
+    subdirectory finds and runs the project's hooks; its sandbox writes only
+    below that folder, so the save waits in a temporary folder
+    (`ai-accelerator-native-spool-<uid>`) and the next hook saves it
+    (journal `save` `spooled`, then `saved` with code `spooled`).
 
 ### Recover
 

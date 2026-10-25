@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime saves from a sandbox that cannot write the project — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day): a save the
+  agent's sandbox cannot write waits in a temporary folder of the user's,
+  and the session's next hook saves it. `native_results.py` and
+  `context.py` change in the asset; the policy lock was rewritten.
+
 ### bash-validator lets the memory CLI name SQL — 2026-10-25
 
 - The generic section shared with the editions (root `CHANGELOG.md`, same
