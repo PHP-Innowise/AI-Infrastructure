@@ -299,10 +299,12 @@ def clean_env() -> Dict[str, str]:
 
 
 def terminal(argv: List[str], project: Path, env: Dict[str, str], journal: Path, wait: float,
-             begun: threading.Event, settle: float = 6.0) -> str:
+             begun: threading.Event, requests: List[Any], settle: float = 6.0) -> str:
     """A host in its terminal: a question, then a second one once the
     stand-in has begun writing the save (`begun`); what the screen showed,
-    as text. Also run by codex_bench.py."""
+    as text. A question the stand-in never hears of (`requests` stays as it
+    was) - the terminal was not ready, or a notice took the keys - is typed
+    again. Also run by codex_bench.py."""
     import fcntl
     import pty
     import select
@@ -342,7 +344,14 @@ def terminal(argv: List[str], project: Path, env: Dict[str, str], journal: Path,
 
     try:
         pump(settle)
-        type_line("How are invoices numbered?")
+        for _ in range(3):
+            before = len(requests)
+            type_line("How are invoices numbered?")
+            heard = time.time() + 15
+            while len(requests) == before and time.time() < heard and pump(0.5):
+                pass
+            if len(requests) > before:
+                break
         deadline = time.time() + wait
         while not begun.is_set() and time.time() < deadline and pump(0.5):
             pass
@@ -399,7 +408,9 @@ def inside(args: argparse.Namespace) -> int:
     screen = ""
     if args.queued is not None:
         Scripted.save_delay = args.queued
-        screen = terminal([args.claude, *mode, *lent], project, env, journal_file, args.timeout, Scripted.save_begun)
+        screen = terminal([args.claude, *mode, *lent], project, env, journal_file, args.timeout, Scripted.save_begun,
+                          Scripted.requests)
+        (work / "screen.txt").write_text(screen, encoding="utf-8")
         done = subprocess.CompletedProcess([], 0, "", "")
     else:
         done = subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json",

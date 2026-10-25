@@ -249,7 +249,8 @@ def inside(args: argparse.Namespace) -> int:
         Scripted.save_delay = args.queued
         # The terminal reads the sandbox from config.toml and starts in the project.
         screen = bench.terminal([args.codex], project, dict(env, TERM="xterm-256color"), journal_file,
-                                args.timeout, Scripted.save_begun, settle=8.0)
+                                args.timeout, Scripted.save_begun, Scripted.requests, settle=8.0)
+        (work / "screen.txt").write_text(screen, encoding="utf-8")
         done = subprocess.CompletedProcess([], 0, "", "")
     else:
         done = subprocess.run(command, cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True,

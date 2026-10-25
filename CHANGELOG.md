@@ -39,8 +39,12 @@ edition's own files remain in that edition's changelog.
   `request-unavailable`; on this branch both hosts pass. The Codex terminal
   runs commands through the app-server daemon under `~/.codex/packages`,
   which the isolated `CODEX_HOME` links to; `--queued` takes no `--attached`
-  there. Tests without the hosts: the stand-in waits over the first save
-  only, and what counts as passing.
+  there. A question the stand-in never received - the terminal of a large
+  project was not ready yet - is typed again, up to three times, and the
+  screen is kept in the work directory. On copies of next, scb,
+  bauherrenmappe and aea-partner (`--target ... --sync`) both hosts pass.
+  Tests without the hosts: the stand-in waits over the first save only,
+  and what counts as passing.
 
 ### The memory CLI may name SQL past bash-validator — 2026-10-25
 
