@@ -81,11 +81,14 @@ edition's own files remain in that edition's changelog.
   question sent while it did went into the running turn, and the host ran
   the prompt hook at once (Claude Code's transcript: `queue-operation`
   `enqueue`, then `absorbed_mid_turn`; Codex's rollout: the message under
-  the same `turn_id`). The hook re-armed the session: the save in flight was refused as
-  `native-result:request-unavailable`, and the agent read "Previous native
-  memory result was not saved completely." in the middle of saving it. With
-  a real model the save takes seconds after every visible answer, the time
-  in which a person types the next question.
+  the same `turn_id`). The hook re-armed the session: the save in flight
+  was refused as `native-result:request-unavailable`, and the agent read
+  "Previous native memory result was not saved completely." in the middle
+  of saving it. With a real model the save takes seconds after every
+  visible answer, the time in which a person types the next question. The
+  Claude desktop app mostly runs the prompt hook only when a queued prompt
+  starts, after the turn: in 509 local desktop sessions 26 of 2,456 human
+  prompts (1.1 %) were sent while the agent still worked.
 - What changes: a prompt that finds the last request asked and unsettled,
   less than ten minutes old, moves it aside to a second file of the same
   session and journals `armed` `previous-in-flight` without a warning. The
