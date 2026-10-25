@@ -42,11 +42,12 @@ import json
 import os
 import re
 import shlex
-import shutil
-import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
+
+# shutil, subprocess and urllib.parse are imported where they are used: the
+# permissions entry runs before every tool call below the root or in a
+# worktree, and a decision needs none of them - a third of its start.
 
 WINDOWS = os.name == "nt"
 
@@ -99,6 +100,7 @@ def same_path(first: str, second: str) -> bool:
 def hook_bash() -> str:
     """The bash Claude Code runs hooks with: Git for Windows' on Windows,
     where a bare bash is WSL's launcher, which CreateProcess finds first."""
+    import shutil
     if not WINDOWS:
         return shutil.which("bash") or "bash"
     configured = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
@@ -475,6 +477,7 @@ def bash_matches(content: str, segment: list) -> bool:
 def domain_matches(content: str, url: str) -> bool:
     if not content.startswith("domain:"):
         return False
+    from urllib.parse import urlsplit
     domain, host = content[len("domain:"):].strip().lower(), (urlsplit(url).hostname or "").lower()
     if domain.startswith("*."):
         return host.endswith(domain[1:])
@@ -611,6 +614,7 @@ def main() -> int:
         sys.stdout.buffer.write(policy(root, start, int(number) if number.isdigit() else 0, project).encode("utf-8"))
         return 0
     payload = sys.stdin.buffer.read()
+    import subprocess
     done = subprocess.run([hook_bash(), str(Path(root) / ".claude/hooks" / hook)], input=payload,
                           cwd=project or root, stdout=subprocess.PIPE)
     if hook == "bash-validator.sh":

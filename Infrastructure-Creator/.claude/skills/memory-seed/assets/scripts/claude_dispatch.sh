@@ -174,7 +174,9 @@ case "$hook" in
       done
     fi
     if [ ${#python[@]} -gt 0 ]; then
-      exec "${python[@]}" "$here/ai-accelerator-dispatch.py" "$hook" "$native" "$start" ${project:+"$worktree"}
+      # Isolated and without site: the helper needs the standard library
+      # only, and a PYTHONPATH of the person's cannot shadow it.
+      exec "${python[@]}" -I -S "$here/ai-accelerator-dispatch.py" "$hook" "$native" "$start" ${project:+"$worktree"}
     fi ;;
 esac
 case "$hook" in permissions|environment|policy-*) exit 0 ;; esac

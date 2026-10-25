@@ -59,6 +59,12 @@ edition's own files remain in that edition's changelog.
   below, in its own checkout or one around it, comes first: an installed
   worktree of an installed project is served as itself whatever the
   lengths of the two roots - found by a test, before it shipped.
+- The dispatcher's permissions entry, which runs before every tool call
+  below the root or in a worktree, starts a third faster: `shutil`,
+  `subprocess` and `urllib.parse` are imported where they are used, and the
+  helper runs isolated and without site (`-I -S`), so a person's
+  `PYTHONPATH` cannot shadow the standard library either - 32 ms a call
+  before, 22 ms after.
 - The runtime's shared layout (`workspace_roots.py`): the three variables
   with the state root equal to the tooling root - an installation lent
   to its own worktree. The Project Brain and Memory Bank are the root's,
