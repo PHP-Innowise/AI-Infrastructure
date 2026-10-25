@@ -30,6 +30,15 @@ project as an added directory), with the hooks trusted the way
   python3 scripts/codex_bench.py
   python3 scripts/codex_bench.py --target ~/Desktop/next --sync
   python3 scripts/codex_bench.py --attached
+  python3 scripts/codex_bench.py --queued 8
+
+`--queued SECONDS` runs Codex in its terminal instead, through a
+pseudo-terminal, as claude_code_bench.py does: the stand-in takes SECONDS to
+write the save, and a second question is typed while it does. Codex takes it
+into the running turn and runs the prompt hook at once; the run passes when
+the save in flight still lands. The terminal runs commands through the
+app-server daemon installed under ~/.codex/packages, which the isolated
+CODEX_HOME links to.
 """
 import argparse
 import html
@@ -41,6 +50,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -59,6 +69,8 @@ class Scripted(BaseHTTPRequestHandler):
     source = "composer.json"
     requests: List[Dict[str, Any]] = []
     lock = threading.Lock()
+    save_delay = 0.0
+    save_begun = threading.Event()
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -81,6 +93,7 @@ class Scripted(BaseHTTPRequestHandler):
         if not self.path.split("?")[0].endswith("/responses"):
             return self.reply(404, {"error": {"message": "bench", "type": "not_found"}})
         output, since = self.decide(body)
+        self.pause(output)
         if os.environ.get("CODEX_BENCH_DUMP"):
             with open(os.path.join(os.environ["CODEX_BENCH_DUMP"], f"request-{len(self.requests) + 1:02d}.json"),
                       "w", encoding="utf-8") as handle:
@@ -116,6 +129,13 @@ class Scripted(BaseHTTPRequestHandler):
         event("response.completed", {"response": response})
         self.wfile.flush()
         self.close_connection = True
+
+    def pause(self, output: List[Dict[str, Any]]) -> None:
+        """--queued: the first save takes save_delay seconds to write."""
+        if (self.save_delay and output and str(output[0].get("call_id", "")).startswith("call_save_")
+                and not self.save_begun.is_set()):
+            self.save_begun.set()
+            time.sleep(self.save_delay)
 
     def decide(self, body: Dict[str, Any]):
         items = body.get("input") or []
@@ -194,7 +214,8 @@ def inside(args: argparse.Namespace) -> int:
     server = ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     (home / "config.toml").write_text(
-        'model = "gpt-5.1-codex"\nmodel_provider = "bench"\napproval_policy = "never"\n\n'
+        'model = "gpt-5.1-codex"\nmodel_provider = "bench"\napproval_policy = "never"\n'
+        f'sandbox_mode = "{args.sandbox}"\n\n'
         '[model_providers.bench]\nname = "bench"\n'
         f'base_url = "http://127.0.0.1:{server.server_address[1]}/v1"\n'
         'wire_api = "responses"\nenv_key = "BENCH_API_KEY"\n\n'
@@ -220,12 +241,22 @@ def inside(args: argparse.Namespace) -> int:
     if args.attached:
         command = attach.apply_overlay("codex", command, overlay)
         env.update(overlay["environment"])
-    done = subprocess.run(command, cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                          text=True, timeout=args.timeout)
+    journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
+    screen = ""
+    if args.queued is not None:
+        if args.packages and not (home / "packages").exists():
+            (home / "packages").symlink_to(args.packages)
+        Scripted.save_delay = args.queued
+        # The terminal reads the sandbox from config.toml and starts in the project.
+        screen = bench.terminal([args.codex], project, dict(env, TERM="xterm-256color"), journal_file,
+                                args.timeout, Scripted.save_begun, settle=8.0)
+        done = subprocess.CompletedProcess([], 0, "", "")
+    else:
+        done = subprocess.run(command, cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                              text=True, timeout=args.timeout)
     server.shutdown()
     steps = [request for request in Scripted.requests if any(MARKER in text for text in request["since"])]
     carried = [text for text in steps[0]["since"] if MARKER in text] if steps else []
-    journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     journal = [json.loads(line) for line in journal_file.read_text().splitlines()] if journal_file.exists() else []
     events = [f"{line['stage']}:{line['event']}" + (f":{line['code']}" if line.get("code") else "")
               for line in journal if line.get("stage") in ("prompt", "stop", "save")]
@@ -241,6 +272,9 @@ def inside(args: argparse.Namespace) -> int:
         "stderr_tail": done.stderr[-300:] if done.returncode else "",
     }
     report["ok"] = report["saved"] and len(carried) == 1
+    if args.queued is not None:
+        report["unsaved_on_screen"] = bench.UNSAVED in screen
+        report["ok"] = bench.queued_ok(events, screen)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -295,9 +329,13 @@ def main() -> int:
     parser.add_argument("--exclude", action="append", default=[], help="another directory name to leave out of the copy")
     parser.add_argument("--attached", nargs="?", const="", default=None, metavar="",
                         help="lend the edition from this clone as the Harness does; install nothing")
+    parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
+                        help="in Codex's terminal, type a second question while the save, which the stand-in "
+                             "takes SECONDS to write, is in flight")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--work", help=argparse.SUPPRESS)
     parser.add_argument("--source", help=argparse.SUPPRESS)
+    parser.add_argument("--packages", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.inside:
         return inside(args)
@@ -307,6 +345,10 @@ def main() -> int:
     args.codex = codex_binary(args.codex)
     if args.attached is not None and args.target:
         print("codex_bench: --attached runs a fresh project; it takes no --target", file=sys.stderr)
+        return 2
+    if args.queued is not None and args.attached is not None:
+        print("codex_bench: --queued runs an installed edition in the terminal; it takes no --attached",
+              file=sys.stderr)
         return 2
     if args.target:
         problem = bench.target_problem(Path(args.target).expanduser().resolve())
@@ -329,7 +371,9 @@ def main() -> int:
                                "--work", str(work), "--codex", args.codex, "--sandbox", args.sandbox,
                                "--source", bench.source_in(project), "--timeout", str(args.timeout),
                                "--edition", args.edition,
-                               *(["--attached", args.attached] if args.attached else [])],
+                               *(["--attached", args.attached] if args.attached else []),
+                               *(["--queued", str(args.queued), "--packages", str(Path.home() / ".codex/packages")]
+                                 if args.queued is not None else [])],
                               timeout=args.timeout + 120)
         if args.keep:
             print(f"kept {work}", file=sys.stderr)

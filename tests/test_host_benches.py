@@ -14,6 +14,7 @@ import importlib
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,6 +98,26 @@ class ClaudeStandInTest(unittest.TestCase):
     def test_a_request_without_tools_gets_text(self) -> None:
         [reply], stop, _ = claude_code_bench.Scripted.decide(self.stand_in, {"messages": []})
         self.assertEqual(("text", "end_turn"), (reply["type"], stop))
+
+    def test_with_queued_the_stand_in_takes_its_time_over_the_first_save_only(self) -> None:
+        stand_in = SimpleNamespace(save_delay=7.0, save_begun=threading.Event())
+        with mock.patch.object(claude_code_bench.time, "sleep") as sleep:
+            for name in ("toolu_read", "toolu_save", "toolu_save"):
+                claude_code_bench.Scripted.pause(stand_in, [{"type": "tool_use", "id": name}])
+        sleep.assert_called_once_with(7.0)
+        self.assertTrue(stand_in.save_begun.is_set())
+
+    def test_a_queued_run_passes_only_when_the_save_in_flight_lands(self) -> None:
+        # The second question came while the save was written: the save must
+        # still land, and nothing may say it was not saved.
+        landed = ["prompt:armed", "stop:requested", "prompt:armed:previous-in-flight", "save:saved",
+                  "stop:skipped:recovery-saved"]
+        refused = ["prompt:armed", "stop:requested", "prompt:armed:previous-requested",
+                   "save:refused:native-result:request-unavailable", "stop:skipped:recovery-armed"]
+        warning = "Previous native memory result was not saved completely."
+        self.assertTrue(claude_code_bench.queued_ok(landed, "Saved."))
+        self.assertFalse(claude_code_bench.queued_ok(refused, warning))
+        self.assertFalse(claude_code_bench.queued_ok(landed, warning))
 
 
 class CodexStandInTest(unittest.TestCase):

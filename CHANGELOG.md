@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The host benches type a question while the save is written — 2026-10-25
+
+- `scripts/claude_code_bench.py --queued SECONDS` and `scripts/codex_bench.py
+  --queued SECONDS` run the host in its terminal through a pseudo-terminal:
+  the stand-in takes SECONDS to write the save, and once it has begun a
+  second question is typed. The run passes when the save in flight still
+  lands and nothing says it was not saved. On the runtime before the
+  in-flight fix (afb80236) Claude Code's run fails with the save refused as
+  `request-unavailable`; on this branch both hosts pass. The Codex terminal
+  runs commands through the app-server daemon under `~/.codex/packages`,
+  which the isolated `CODEX_HOME` links to; `--queued` takes no `--attached`
+  there. Tests without the hosts: the stand-in waits over the first save
+  only, and what counts as passing.
+
 ### The memory CLI may name SQL past bash-validator — 2026-10-25
 
 - Why: every shipped `bash-validator.sh` refused the accelerator's own

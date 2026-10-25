@@ -24,6 +24,12 @@ The namespace keeps the person's own uid where `unshare` can map it
 `--mode` runs one permission mode; in `plan` the save is not asked for, and
 the run passes when the journal says so.
 
+`--queued SECONDS` runs Claude Code in its terminal instead, through a
+pseudo-terminal: the stand-in takes SECONDS to write the save, and a second
+question is typed while it does. Claude Code queues it into the running turn
+and runs the prompt hook at once; the run passes when the save in flight
+still lands and the screen never says the result was not saved.
+
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
 rehearsal's does, and `--sync` first brings it up to this clone. The saved
@@ -33,6 +39,7 @@ is never written.
   python3 scripts/claude_code_bench.py
   python3 scripts/claude_code_bench.py --shell /usr/bin/zsh --edition Laravel --keep
   python3 scripts/claude_code_bench.py --mode dontAsk
+  python3 scripts/claude_code_bench.py --queued 8
   python3 scripts/claude_code_bench.py --attached
   python3 scripts/claude_code_bench.py --target ~/Desktop/next --sync
 """
@@ -45,6 +52,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,6 +65,8 @@ GIT = ["git", "-c", "user.name=Bench", "-c", "user.email=bench@example.invalid",
 KEY = "offline-bench-key-not-a-real-api-key"
 MARKER = "INTERNAL_NATIVE_MEMORY_RESULT"
 MODES = ("default", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan")
+ANSI = re.compile(rb"\x1b\[[0-9;?<>=]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>78]")
+UNSAVED = "not saved completely"
 
 
 def result_for(source: str) -> Dict[str, Any]:
@@ -82,6 +92,9 @@ class Scripted(BaseHTTPRequestHandler):
     source = "src/Invoice.php"
     requests: List[Dict[str, Any]] = []
     lock = threading.Lock()
+    # --queued: how long the save takes to write, and when it began.
+    save_delay = 0.0
+    save_begun = threading.Event()
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -105,6 +118,7 @@ class Scripted(BaseHTTPRequestHandler):
         if not path.endswith("/v1/messages"):
             return self.reply(404, {"type": "error", "error": {"type": "not_found_error", "message": "bench"}})
         content, stop, since = self.decide(body)
+        self.pause(content)
         with self.lock:
             self.requests.append({"since": since, "content": content})
             number = len(self.requests)
@@ -140,6 +154,13 @@ class Scripted(BaseHTTPRequestHandler):
         event("message_stop", {"type": "message_stop"})
         self.wfile.flush()
         self.close_connection = True
+
+    def pause(self, content: List[Dict[str, Any]]) -> None:
+        """--queued: the first save takes save_delay seconds to write, as a
+        model's JSON does; the time a person types the next question in."""
+        if self.save_delay and content and content[0].get("id") == "toolu_save" and not self.save_begun.is_set():
+            self.save_begun.set()
+            time.sleep(self.save_delay)
 
     def decide(self, body: Dict[str, Any]):
         messages = body.get("messages") or []
@@ -251,12 +272,16 @@ def target_problem(target: Path) -> Optional[str]:
     return None
 
 
-def trust(work: Path, project: Path, accepted: bool = True) -> None:
+def trust(work: Path, project: Path, accepted: bool = True, terminal: bool = False) -> None:
     # A person who opened the project once and accepted its trust dialog:
     # until then Claude Code ignores the project's allow rules.
-    config = {"hasCompletedOnboarding": True,
-              "projects": {str(project): {"hasTrustDialogAccepted": accepted}},
-              "customApiKeyResponses": {"approved": [KEY[-20:]], "rejected": []}}
+    config: Dict[str, Any] = {"hasCompletedOnboarding": True,
+                              "projects": {str(project): {"hasTrustDialogAccepted": accepted}},
+                              "customApiKeyResponses": {"approved": [KEY[-20:]], "rejected": []}}
+    if terminal:
+        # The terminal asks for a theme and a project's onboarding once.
+        config["theme"] = "dark"
+        config["projects"][str(project)]["hasCompletedProjectOnboarding"] = True
     (work / "home/.claude.json").write_text(json.dumps(config), encoding="utf-8")
 
 
@@ -271,6 +296,82 @@ def clean_env() -> Dict[str, str]:
     # A run from a Claude Code or Codex session inherits that session's marks.
     return {key: value for key, value in os.environ.items()
             if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_", "CLAUDE", "CODEX", "ANTHROPIC"))}
+
+
+def terminal(argv: List[str], project: Path, env: Dict[str, str], journal: Path, wait: float,
+             begun: threading.Event, settle: float = 6.0) -> str:
+    """A host in its terminal: a question, then a second one once the
+    stand-in has begun writing the save (`begun`); what the screen showed,
+    as text. Also run by codex_bench.py."""
+    import fcntl
+    import pty
+    import select
+    import signal
+    import struct
+    import termios
+    env = dict(env, TERM="xterm-256color", COLUMNS="160", LINES="50")
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(project)
+        os.execve(argv[0], argv, env)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
+    screen = bytearray()
+
+    def pump(seconds: float) -> bool:
+        """Read the screen for `seconds`; False once the terminal has closed."""
+        end = time.time() + seconds
+        while time.time() < end:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError:
+                return False
+            if not chunk:
+                return False
+            screen.extend(chunk)
+        return True
+
+    def type_line(text: str) -> None:
+        for character in text:
+            os.write(fd, character.encode())
+            time.sleep(0.01)
+        time.sleep(0.3)
+        os.write(fd, b"\r")
+
+    try:
+        pump(settle)
+        type_line("How are invoices numbered?")
+        deadline = time.time() + wait
+        while not begun.is_set() and time.time() < deadline and pump(0.5):
+            pass
+        pump(1)
+        type_line("And how are credit notes numbered?")
+        # The turn ends with the continuation's Stop, after the save.
+        while time.time() < deadline and pump(1):
+            lines = journal.read_text().splitlines() if journal.exists() else []
+            if any('"stage":"stop"' in line and '"recovery-' in line for line in lines):
+                break
+        if pump(2):
+            for _ in range(2):
+                os.write(fd, b"\x03")
+                if not pump(1):
+                    break
+    finally:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            os.waitpid(pid, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+    return ANSI.sub(b"", bytes(screen)).decode("utf-8", "replace")
+
+
+def queued_ok(events: List[str], screen: str) -> bool:
+    """The save in flight when the second question came still landed, and
+    nothing told the agent or the person it was not saved."""
+    return ("save:saved" in events and not any("request-unavailable" in event for event in events)
+            and UNSAVED not in screen)
 
 
 def inside(args: argparse.Namespace) -> int:
@@ -294,9 +395,16 @@ def inside(args: argparse.Namespace) -> int:
         overlay = json.loads((work / "overlay.json").read_text(encoding="utf-8"))
         env.update(overlay["environment"])
         lent = ["--settings", json.dumps(overlay["settings"]), *overlay["arguments"]]
-    done = subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json",
-                           "--verbose", *mode, *lent], cwd=project, env=env, stdin=subprocess.DEVNULL,
-                          capture_output=True, text=True, timeout=args.timeout)
+    journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
+    screen = ""
+    if args.queued is not None:
+        Scripted.save_delay = args.queued
+        screen = terminal([args.claude, *mode, *lent], project, env, journal_file, args.timeout, Scripted.save_begun)
+        done = subprocess.CompletedProcess([], 0, "", "")
+    else:
+        done = subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json",
+                               "--verbose", *mode, *lent], cwd=project, env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=args.timeout)
     server.shutdown()
     stream = [json.loads(line) for line in done.stdout.splitlines() if line.startswith("{")]
     steps = [request for request in Scripted.requests if any(MARKER in text for text in request["since"])]
@@ -304,10 +412,10 @@ def inside(args: argparse.Namespace) -> int:
     save = next((request for request in Scripted.requests
                  if request["content"] and request["content"][0].get("text") == "Saved."), None)
     result = text_of(save["since"][0]) if save and save["since"] else ""
-    journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     journal = [json.loads(line) for line in journal_file.read_text().splitlines()] if journal_file.exists() else []
     events = [f"{line['stage']}:{line['event']}" + (f":{line['code']}" if line.get("code") else "")
-              for line in journal if line.get("stage") in ("stop", "save")]
+              for line in journal if line.get("stage") in ("stop", "save")
+              or (args.queued is not None and line.get("stage") == "prompt")]
     transcript = sorted((work / "home/.claude/projects").glob("*/*.jsonl"))
     records = [json.loads(line) for path in transcript for line in path.read_text().splitlines() if line.strip()]
     errors = [error for record in records if record.get("subtype") == "stop_hook_summary"
@@ -329,6 +437,9 @@ def inside(args: argparse.Namespace) -> int:
         # Plan mode tells the agent to change nothing: no save is asked for.
         report["ok"] = (not steps and "stop:skipped:plan-mode" in events and not errors
                         and not report["error_notifications"])
+    if args.queued is not None:
+        report["unsaved_on_screen"] = UNSAVED in screen
+        report["ok"] = queued_ok(events, screen) and not errors
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -376,6 +487,9 @@ def main() -> int:
                         help="the shell Claude Code's Bash tool runs (bash or zsh)")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--mode", choices=MODES, default="default", help="the permission mode to run")
+    parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
+                        help="in Claude Code's terminal, type a second question while the save, which the "
+                             "stand-in takes SECONDS to write, is in flight")
     parser.add_argument("--attached", nargs="?", const="", default=None, metavar="",
                         help="lend the edition from this clone as the Harness does; install nothing")
     parser.add_argument("--target", help="run in a copy of this installed project instead of a fresh install")
@@ -418,12 +532,13 @@ def main() -> int:
             project = prepare(work, args.edition)
         # Attached, the project is left untrusted: the Harness's --settings
         # permissions count without the trust dialog, project ones would not.
-        trust(work, project, accepted=args.attached is None)
+        trust(work, project, accepted=args.attached is None, terminal=args.queued is not None)
         unshare_help = subprocess.run(["unshare", "--help"], capture_output=True, text=True).stdout
         done = subprocess.run([*namespace(unshare_help), sys.executable, str(Path(__file__).resolve()),
                                "--inside", "--work", str(work), "--claude", args.claude, "--shell", args.shell,
                                "--mode", args.mode, "--source", source_in(project),
                                *(["--attached", args.attached] if args.attached else []),
+                               *(["--queued", str(args.queued)] if args.queued is not None else []),
                                "--timeout", str(args.timeout)],
                               timeout=args.timeout + 60)
         if args.keep:
