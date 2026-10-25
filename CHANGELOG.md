@@ -28,6 +28,58 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code started in a worktree of the project — 2026-10-25
+
+- Git gives a linked worktree only what it tracks, and none of the four
+  real installations checked was tracked: Claude Code's own worktrees
+  (`claude --worktree`, the desktop app's `.claude/worktrees/<name>`)
+  copy `settings.local.json` and `.worktreeinclude` files, not the
+  installation. The real Claude Code 2.1.278 started in such a worktree
+  ran no project hook - no project context, no `AGENTS.md`, no capsule,
+  no save - and 12 of the person's 90 Claude Code sessions in October
+  started in one of its worktrees.
+- The dispatcher (`claude_dispatch.sh`, version 3) now serves a session
+  started in a linked worktree of a listed root's repository that has no
+  installation of its own: it finds the worktree by its `.git` file,
+  which names `<main checkout>/.git/worktrees/<name>`, a folder Git keeps
+  with a `gitdir` file, without starting a process; a project installed
+  in a folder of a monorepo is that folder of the worktree. It runs the
+  root's hooks in the worktree with `ACCELERATOR_HOME` and
+  `ACCELERATOR_STATE_DIR` naming the root and `ACCELERATOR_PROJECT_DIR`
+  the worktree; `environment` gives the session's commands the same
+  three variables, so the save step serves the worktree; `permissions`
+  decides for the worktree's files by the root's rules, a deny or ask
+  also covering the root's own files from there; the policy comes in
+  parts whatever Claude Code was told about imports. A forged `.git`
+  file, a submodule, a worktree of another repository or one with an
+  installation of its own is left alone.
+- The runtime's shared layout (`workspace_roots.py`): the three variables
+  with the state root equal to the tooling root - an installation lent
+  to its own worktree. The Project Brain and Memory Bank are the root's,
+  keyed as there (`key_for`); the worktree is the project, whose branch
+  names the task; the index is the worktree's own,
+  `memory-bank/local/worktrees/<hash>/context.db` (`default_database`);
+  the accelerator's policy, skills, `specs/` and `tasks/` are indexed
+  from the root, where the worktree has no copy (`source_scan_plan`), and
+  a citation of them by the root's key resolves there (`resolve`). The
+  installed state keeps its permissions: no owner-only `umask`, no
+  `ensure_attached_state`.
+- Offline with the real Claude Code 2.1.278, in `.claude/worktrees/<name>`
+  and in a folder of a worktree beside the project: project context,
+  policy, a capsule with the worktree's own task, and the save into the
+  root's Brain under the worktree's branch; 280 randomized permission
+  calls in seven rule sets decided in a worktree for its files as in the
+  root for the root's. `tests/test_memory_claude_subfolders.py`
+  (`Worktrees`) and the new `tests/test_memory_worktree_sessions.py`, in
+  CI's memory job, cover both halves; mutating any of the changes fails
+  them.
+- Not covered: a session that enters a worktree after starting in the
+  root (`EnterWorktree`) keeps the root's hooks, which leave the memory
+  out there, as before; Codex and Cursor started in such a worktree run
+  no hooks. Documented in `docs/MEMORY-INTEGRATION.md` ("Claude Code
+  started in a worktree"), `docs/TROUBLESHOOTING.md` item 11 and
+  `install/README.md`.
+
 ### The spool's journal line, as it lands — 2026-10-25
 
 - Documentation: below the project root Codex's sandbox cannot write the

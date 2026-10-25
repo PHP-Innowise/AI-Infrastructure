@@ -27,7 +27,16 @@ in the conversation only up to INLINE characters and puts a longer one in a
 file, of which the model sees the first 2,000 - so the policy comes in parts,
 one settings entry each, cut between sections.
 
-Usage: ai-accelerator-dispatch.py HOOK ROOT START, the hook's input on stdin.
+A session in a worktree of the project's repository, which has none of an
+installation Git does not track, is served the same way for the worktree
+(PROJECT, the root's folder there): the root's rules decide for the files of
+the worktree, its guard runs there, environment also gives the session's
+commands the three variables that make the root's memory CLI serve the
+worktree (workspace_roots.py), and the policy comes whatever Claude Code was
+told about imports, since the worktree has nothing for it to import.
+
+Usage: ai-accelerator-dispatch.py HOOK ROOT START [PROJECT], the hook's input
+on stdin.
 """
 import json
 import os
@@ -44,7 +53,7 @@ WINDOWS = os.name == "nt"
 # One copy serves every project of the person: a session in the root of a
 # project with an older release must not put an older one back. Raise it,
 # with the comment in claude_dispatch.sh, whenever either file changes.
-DISPATCH_VERSION = 2
+DISPATCH_VERSION = 3
 INTERPRETERS = (["python3"], ["python"], ["py", "-3"])
 CLI = "memory-bank/scripts/context.py"
 # How .claude/CLAUDE.md, or the project's own CLAUDE.md, pulls AGENTS.md in.
@@ -243,13 +252,15 @@ def imports_policy(root: str) -> bool:
     return False
 
 
-def policy(root: str, start: str, part: int) -> str:
+def policy(root: str, start: str, part: int, project: str = "") -> str:
     """Part `part` of the project's AGENTS.md, with a line saying what it is;
     nothing past its end, nor where the project's CLAUDE.md does not import
-    it, nor when Claude Code imports it itself."""
+    it, nor when Claude Code imports it itself - which in a worktree without
+    the installation it cannot, unless the worktree has its own AGENTS.md."""
     path = Path(root) / "AGENTS.md"
-    if not 1 <= part <= POLICY_PARTS or not path.is_file() or not imports_policy(root) \
-            or external_imports_approved(start):
+    if not 1 <= part <= POLICY_PARTS or not path.is_file() or not imports_policy(root):
+        return ""
+    if (Path(project) / "AGENTS.md").is_file() if project else external_imports_approved(start):
         return ""
     try:
         text = path.read_text(encoding="utf-8")
@@ -525,19 +536,27 @@ def own_rules() -> list:
     return found
 
 
-def permission(payload: dict, root: str, start: str):
+def permission(payload: dict, root: str, start: str, project: str = ""):
     """The project's decision for this tool call in the root - deny, then
     ask, then allow - as a PreToolUse answer, or None. An allow is never
-    given where the person's own or the managed settings deny or ask."""
+    given where the person's own or the managed settings deny or ask. In a
+    worktree the root's rules decide for the worktree's files as for the
+    root's, and a deny or an ask also covers the root's own files there."""
     tool, tool_input = payload.get("tool_name"), payload.get("tool_input")
     if not isinstance(tool, str) or not isinstance(tool_input, dict):
         return None
     rules = project_rules(root)
+    place = project or root
+    places = (project, root) if project else (root,)
     for kind in ("deny", "ask", "allow"):
         for rule in rules[kind]:
-            if matches(rule, tool, tool_input, root, start, allow=kind == "allow"):
+            if kind == "allow":
+                found = matches(rule, tool, tool_input, place, start, allow=True)
+            else:
+                found = any(matches(rule, tool, tool_input, base, start, allow=False) for base in places)
+            if found:
                 if kind == "allow" and any(matches(own, tool, tool_input, base, start, allow=False)
-                                           for own in own_rules() for base in (root, start)):
+                                           for own in own_rules() for base in (*places, start)):
                     return None
                 answer = {"hookEventName": "PreToolUse", "permissionDecision": kind}
                 if kind == "deny":
@@ -547,8 +566,10 @@ def permission(payload: dict, root: str, start: str):
     return None
 
 
-def environment(root: str) -> list:
-    """`export` lines for the project's env, shared settings then local."""
+def environment(root: str, project: str = "") -> list:
+    """`export` lines for the project's env, shared settings then local; in
+    a worktree also the variables that make the root's memory CLI - the save
+    step's - serve the worktree, as its hooks do."""
     values = {}
     for name in ("settings.json", "settings.local.json"):
         try:
@@ -560,14 +581,17 @@ def environment(root: str) -> list:
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) and not key.startswith(("CLAUDE_", "ANTHROPIC_")) \
                     and isinstance(value, (str, int, float, bool)):
                 values[key] = str(value).lower() if isinstance(value, bool) else str(value)
+    if project:
+        values.update(ACCELERATOR_HOME=root, ACCELERATOR_STATE_DIR=root, ACCELERATOR_PROJECT_DIR=project)
     return [f"export {key}={shlex.quote(value)}" for key, value in values.items()]
 
 
 def main() -> int:
     hook, root, start = sys.argv[1:4]
+    project = sys.argv[4] if len(sys.argv) > 4 else ""
     if hook == "environment":
         target = os.environ.get("CLAUDE_ENV_FILE")
-        lines = environment(root)
+        lines = environment(root, project)
         if target and lines:
             with open(target, "a", encoding="utf-8") as handle:
                 handle.write("\n".join(lines) + "\n")
@@ -577,18 +601,18 @@ def main() -> int:
             payload = json.loads(sys.stdin.buffer.read() or b"{}")
         except ValueError:
             return 0
-        answer = permission(payload, root, start) if isinstance(payload, dict) else None
+        answer = permission(payload, root, start, project) if isinstance(payload, dict) else None
         if answer:
             print(json.dumps(answer))
         return 0
     if hook.startswith("policy-"):
         number = hook[len("policy-"):]
         # UTF-8 whatever the locale: a policy's dash fails an ASCII one.
-        sys.stdout.buffer.write(policy(root, start, int(number) if number.isdigit() else 0).encode("utf-8"))
+        sys.stdout.buffer.write(policy(root, start, int(number) if number.isdigit() else 0, project).encode("utf-8"))
         return 0
     payload = sys.stdin.buffer.read()
-    done = subprocess.run([hook_bash(), str(Path(root) / ".claude/hooks" / hook)], input=payload, cwd=root,
-                          stdout=subprocess.PIPE)
+    done = subprocess.run([hook_bash(), str(Path(root) / ".claude/hooks" / hook)], input=payload,
+                          cwd=project or root, stdout=subprocess.PIPE)
     if hook == "bash-validator.sh":
         sys.stdout.buffer.write(done.stdout)
         if done.returncode != 0 or done.stdout.strip():

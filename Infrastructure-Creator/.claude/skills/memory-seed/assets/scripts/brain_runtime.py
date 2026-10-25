@@ -420,7 +420,10 @@ def ensure_attached_state(repository: Path) -> list[str]:
     own directory is made first, so the lock works in an empty state. All of
     it is owner-only (`secure_attached_state`).
     """
-    if not workspace_roots.is_attached(repository):
+    layout = workspace_roots.roots(repository)
+    # Installed state - a worktree's borrowed from its main checkout too -
+    # keeps the project's permissions and lacks nothing to seed.
+    if not layout.attached or layout.shared:
         return []
     tooling = workspace_roots.tooling_root(repository)
     secure_attached_state(repository)

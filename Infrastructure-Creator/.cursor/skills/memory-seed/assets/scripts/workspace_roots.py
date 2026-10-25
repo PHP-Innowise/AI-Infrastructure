@@ -29,6 +29,19 @@ absolute path is taken as written; tooling documents are keyed that way, so
 the accelerator's AGENTS.md cannot collide with a project's own. A key under
 project-brain/ or memory-bank/ is accelerator state. Any other key is a path
 in the project.
+
+Shared, a linked worktree of an installed project borrows its main
+checkout's installation: Git gives a worktree none of an installation it
+does not track, and Claude Code started there ran nothing of it. The
+person's dispatcher (claude_dispatch.sh) then runs the main checkout's hooks
+with the same three variables, ACCELERATOR_HOME and ACCELERATOR_STATE_DIR
+both naming the main checkout and ACCELERATOR_PROJECT_DIR the worktree. The
+state is the installed one, shared with the main checkout's sessions and
+keyed as there; the worktree is the project, whose branch names the task;
+the index is the worktree's own (context.py's `default_database`), because
+the two checkouts' documents differ; and the accelerator's own files a
+record cites - AGENTS.md, skills, specs/, tasks/ - are read from the main
+checkout when the worktree has none.
 """
 
 from __future__ import annotations
@@ -64,6 +77,9 @@ class Roots(NamedTuple):
     tooling: Path
     project: Path
     state: Path
+    # A worktree served by its main checkout's installation: the tooling
+    # and the state are that installation, the project is the worktree.
+    shared: bool = False
 
     @property
     def attached(self) -> bool:
@@ -208,7 +224,7 @@ def _roots(repository: str, home: str, state: str, project: str) -> Roots:
                 and project_path.is_dir()
                 and project_path.resolve() != root.resolve()
             ):
-                return Roots(TOOLING_ROOT, project_path, root)
+                return Roots(TOOLING_ROOT, project_path, root, TOOLING_ROOT == root.resolve())
         except OSError:
             pass
     return Roots(root, root, root)
@@ -254,15 +270,32 @@ def resolve(repository: Path, key: str) -> Path:
         return Path(relative)
     if layout.attached and is_state_key(relative):
         return layout.state / relative
+    if layout.shared and accelerator_owned_source(relative):
+        # The main checkout's records cite the accelerator's own files as
+        # its installation keys them. A worktree of an installation Git does
+        # not track has none of them, so they are read where they are.
+        candidate = layout.project / relative
+        if not os.path.lexists(candidate):
+            return layout.tooling / relative
+        return candidate
     return layout.project / relative
 
 
 def key_for(repository: Path, base: Path, path: Path) -> str:
     """The key for `path`, found under `base`: relative, or absolute for
-    attached tooling, which shares no root with the project."""
+    attached tooling, which shares no root with the project. Shared, the
+    tooling root also holds the state, whose keys stay the installed ones."""
     layout = roots(repository)
     if layout.attached and base == layout.tooling:
+        if layout.shared:
+            relative = relative_key(base, path)
+            if is_state_key(relative):
+                return relative
         return path.as_posix()
+    return relative_key(base, path)
+
+
+def relative_key(base: Path, path: Path) -> str:
     # path.relative_to(base).as_posix() by slicing the strings when `path` is
     # spelled under `base`: pathlib's version was half of a prompt's source
     # walk. Any other spelling takes pathlib's answer, or its ValueError.
@@ -332,7 +365,7 @@ def describe(repository: Path) -> dict[str, Optional[str]]:
     """The layout as status reports it: which mode, and where each root is."""
     layout = roots(repository)
     return {
-        "layout": "attached" if layout.attached else "installed",
+        "layout": "shared" if layout.shared else "attached" if layout.attached else "installed",
         "tooling": str(layout.tooling),
         "project": str(layout.project),
         "state": str(layout.state),

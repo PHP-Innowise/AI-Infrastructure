@@ -336,6 +336,14 @@ def default_root() -> Path:
 
 
 def default_database(repository: Path) -> Path:
+    layout = workspace_roots.roots(repository)
+    if layout.shared:
+        # A worktree served by its main checkout's installation shares the
+        # state, not the index: the two checkouts' documents differ. One
+        # index per worktree, kept with the state it borrows.
+        checkout = os.path.realpath(str(layout.project))
+        digest = hashlib.sha256(os.fsencode(checkout)).hexdigest()[:16]
+        return repository / "memory-bank" / "local" / "worktrees" / digest / "context.db"
     return repository / "memory-bank" / "local" / "context.db"
 
 
@@ -1000,7 +1008,12 @@ def collect_source_candidates(repository: Path, *, excluded=None) -> list[Source
     """
     candidates: list[SourceCandidate] = []
     rejected = set()
+    layout = workspace_roots.roots(repository)
+    # Shared, the worktree's own copy of an accelerator file wins over the
+    # main checkout's: the project's paths found per pattern so far.
+    found: dict[str, set[str]] = {}
     for layer, kind, pattern, base in source_scan_plan(repository):
+        borrowed = layout.shared and base == layout.tooling and kind != "memory"
         for path in sorted(base.glob(pattern)):
             try:
                 status = os.lstat(path)
@@ -1008,6 +1021,13 @@ def collect_source_candidates(repository: Path, *, excluded=None) -> list[Source
                 continue
             if not stat_module.S_ISREG(status.st_mode):
                 continue
+            if layout.shared and kind != "memory":
+                relative = workspace_roots.relative_key(base, path)
+                if borrowed:
+                    if relative in found.get(pattern, ()):
+                        continue
+                else:
+                    found.setdefault(pattern, set()).add(relative)
             key = workspace_roots.key_for(repository, base, path)
             problem = _invalid_source_key(key)
             if problem is not None:
@@ -1069,6 +1089,12 @@ def source_scan_plan(repository: Path) -> list[tuple[str, str, str, Path]]:
     for layer, kind, pattern in SOURCE_PATTERNS:
         if kind == "memory":
             bases = (layout.state,)
+        elif layout.shared:
+            # A worktree served by its main checkout's installation: its own
+            # documents, and the accelerator's - policy, skills, specs, tasks
+            # - from the main checkout, which Git gives the worktree none of.
+            bases = ((layout.project, layout.tooling) if accelerator_owned_source(pattern)
+                     else (layout.project,))
         elif layer == "procedural":
             bases = (layout.tooling, layout.project)
         else:
@@ -8493,7 +8519,8 @@ def _command() -> int:
             environment = _source_git_environment()
             _source_git_frame(workspace_roots.project_root(repository), environment,
                               time.monotonic() + 2.0)
-        if workspace_roots.is_attached(repository) and os.name != "nt":
+        layout = workspace_roots.roots(repository)
+        if layout.attached and not layout.shared and os.name != "nt":
             # Attached state is the project's memory kept outside it, so it is
             # its owner's alone: whatever this run creates there - records, the
             # index database and its journals, logs, receipts - is owner-only,
