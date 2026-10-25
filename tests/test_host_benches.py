@@ -110,12 +110,14 @@ class ClaudeStandInTest(unittest.TestCase):
     def test_a_queued_run_passes_only_when_the_save_in_flight_lands(self) -> None:
         # The second question came while the save was written: the save must
         # still land, and nothing may say it was not saved.
-        landed = ["prompt:armed", "stop:requested", "prompt:armed:previous-in-flight", "save:saved",
+        landed = ["prompt:armed", "stop:requested", "prompt:armed:previous-in-flight", "save:saved:in-flight",
                   "stop:skipped:recovery-saved"]
         refused = ["prompt:armed", "stop:requested", "prompt:armed:previous-requested",
                    "save:refused:native-result:request-unavailable", "stop:skipped:recovery-armed"]
         warning = "Previous native memory result was not saved completely."
         self.assertTrue(claude_code_bench.queued_ok(landed, "Saved."))
+        # A runtime that kept the request where it was journals a plain save.
+        self.assertTrue(claude_code_bench.queued_ok([event.replace(":in-flight", "") for event in landed], "Saved."))
         self.assertFalse(claude_code_bench.queued_ok(refused, warning))
         self.assertFalse(claude_code_bench.queued_ok(landed, warning))
 
