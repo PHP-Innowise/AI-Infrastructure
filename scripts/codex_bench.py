@@ -46,6 +46,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -198,6 +199,27 @@ def text_of(item: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def stop_helpers(home: Path) -> int:
+    """Codex starts helpers that outlive it - the terminal's app-server daemon,
+    code mode's host - and they keep writing to CODEX_HOME after the run is
+    gone. Stop every process whose CODEX_HOME is this run's; returns how many."""
+    marker = b"CODEX_HOME=" + os.fsencode(str(home))
+    stopped = 0
+    for _ in range(2):  # a supervisor may restart one between passes
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit() or int(entry.name) in (os.getpid(), os.getppid()):
+                continue
+            try:
+                if marker not in (entry / "environ").read_bytes().split(b"\0"):
+                    continue
+                os.kill(int(entry.name), signal.SIGKILL)
+                stopped += 1
+            except (OSError, ValueError):
+                continue
+        time.sleep(0.5)
+    return stopped
+
+
 def codex_binary(name: str) -> str:
     """The Codex a person runs: the command on PATH, the npm launcher included."""
     found = shutil.which(name)
@@ -256,6 +278,7 @@ def inside(args: argparse.Namespace) -> int:
         done = subprocess.run(command, cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=args.timeout)
     server.shutdown()
+    helpers = stop_helpers(home)
     steps = [request for request in Scripted.requests if any(MARKER in text for text in request["since"])]
     carried = [text for text in steps[0]["since"] if MARKER in text] if steps else []
     journal = [json.loads(line) for line in journal_file.read_text().splitlines()] if journal_file.exists() else []
@@ -271,6 +294,7 @@ def inside(args: argparse.Namespace) -> int:
         "saved": "stop:skipped:recovery-saved" in events,
         "events": events,
         "stderr_tail": done.stderr[-300:] if done.returncode else "",
+        "helpers_stopped": helpers,
     }
     report["ok"] = report["saved"] and len(carried) == 1
     if args.queued is not None:

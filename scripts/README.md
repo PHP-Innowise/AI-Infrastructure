@@ -710,6 +710,10 @@ the hooks trusted as `accelerator_attach.py trust-codex-hooks` records them.
 turn (the same `turn_id`) and runs the prompt hook at once. The terminal runs
 commands through the app-server daemon installed under `~/.codex/packages`,
 which the isolated `CODEX_HOME` links to; `--queued` takes no `--attached`.
+That daemon, and code mode's host, outlive the terminal and keep writing to
+the run's `CODEX_HOME`: at the end of every run the bench stops each process
+whose `CODEX_HOME` is the run's, and the report says how many
+(`helpers_stopped`).
 
 ```bash
 python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \

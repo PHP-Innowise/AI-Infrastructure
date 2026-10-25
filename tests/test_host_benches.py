@@ -12,6 +12,7 @@ import html
 import io
 import importlib
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -120,6 +121,27 @@ class ClaudeStandInTest(unittest.TestCase):
         self.assertTrue(claude_code_bench.queued_ok([event.replace(":in-flight", "") for event in landed], "Saved."))
         self.assertFalse(claude_code_bench.queued_ok(refused, warning))
         self.assertFalse(claude_code_bench.queued_ok(landed, warning))
+
+
+class CodexHelpersTest(unittest.TestCase):
+    """Codex's helpers outlive the bench's run unless it stops them."""
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "Linux /proc")
+    def test_only_the_runs_own_helpers_are_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            ours, theirs = Path(folder) / "codex-home", Path(folder) / "other-home"
+            sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+            mine = subprocess.Popen(sleep, env={"CODEX_HOME": str(ours)})
+            other = subprocess.Popen(sleep, env={"CODEX_HOME": str(theirs)})
+            try:
+                self.assertEqual(1, codex_bench.stop_helpers(ours))
+                self.assertEqual(-9, mine.wait(timeout=10))
+                self.assertIsNone(other.poll())
+            finally:
+                for process in (mine, other):
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
 
 
 class CodexStandInTest(unittest.TestCase):

@@ -43,6 +43,11 @@ edition's own files remain in that edition's changelog.
   project was not ready yet - is typed again, up to three times, and the
   screen is kept in the work directory. On copies of next, scb,
   bauherrenmappe and aea-partner (`--target ... --sync`) both hosts pass.
+  Codex's terminal leaves its app-server daemon (and, in code mode, its
+  host) running after the run, writing to the run's `CODEX_HOME`: the
+  Codex bench now stops every process whose `CODEX_HOME` is the run's and
+  reports how many (`helpers_stopped`); fifty-odd were left from earlier
+  runs on this machine.
   Tests without the hosts: the stand-in waits over the first save only,
   and what counts as passing.
 
