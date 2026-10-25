@@ -561,7 +561,9 @@ def _claude_settings(edition: str, state: Path, repository: Path) -> dict[str, A
     settings["permissions"] = {
         "allow": [*permissions.get("allow", []), f"Read({home_rule}/**)", f"Read({state_rule}/**)"],
         # The clone is shared by every attached project: never edited from one.
-        "deny": [*permissions.get("deny", []), f"Edit({home_rule}/**)", f"Write({home_rule}/**)"],
+        # An Edit rule covers every tool that writes files; Claude Code warns
+        # that a Write rule matches nothing.
+        "deny": [*permissions.get("deny", []), f"Edit({home_rule}/**)"],
     }
     quoted_home = shlex.quote(home.as_posix())
     hooks: dict[str, Any] = {}

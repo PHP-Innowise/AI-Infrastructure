@@ -17,12 +17,12 @@
       "Read(.env.*)",
       "Read(**/.env)",
       "Read(**/.env.*)",
-      "Write(.env)",
-      "Write(.env.*)",
-      "Write(**/.env)",
-      "Write(**/.env.*)",
+      "Edit(.env)",
+      "Edit(.env.*)",
+      "Edit(**/.env)",
+      "Edit(**/.env.*)",
       "Read(**/secrets/**)",
-      "Write(**/secrets/**)"
+      "Edit(**/secrets/**)"
     ]
   },
   "hooks": {

@@ -166,7 +166,7 @@
     ".claude/commands/infra-scan.md": "0420a7f5c4a8b957922f19552de6255d2e3b1c9913efde3d25d0f5980b59746c",
     ".claude/commands/infra-update.md": "67098a547015b638cb258b1066ef08298a3fcdaedf7147abb9d3e28d9d861cac",
     ".claude/commands/infra-validate.md": "d907c3be687ccce23946a7fa9791b552621318463b6fefcf4b2abb95e5e81d48",
-    ".claude/settings.json": "23dd76996486c82813b2d42160956968e0193f40e8cf3c25b6b42e37487b48e5",
+    ".claude/settings.json": "000d3af1d92788f9b8816211559115252154b1458ba5c53578d53c127ac4b0cc",
     ".claude/skills/SKILL FLOW.md": "b023d63a54f8cebaf2d8847d58486f8a42c2ee05c63243cb9f728bdca792918c",
     ".codex/config.toml": "bae61997c97fa15c4d4914dfc9d75a03e4c38e90479860fbc61b90787114b868",
     ".codex/hooks.json": "ca6b0fb0d41b3d2192192db62ab19fda94f8319f0c6cef85aaadf4f26ad4d851",
@@ -177,7 +177,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "caff7e560a993467e7fe7ef1eb7b27f1b0313bc833149b85a06d511348654979",
+  "policy_digest": "e5a04dec11da8cd58cedaf8dbf671e6f67a4ac635ad50fc46e8ab8ac8643d128",
   "release": "2.5.0",
   "schema_version": 1
 }

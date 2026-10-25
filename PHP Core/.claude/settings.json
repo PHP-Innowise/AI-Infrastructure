@@ -9,8 +9,6 @@
     "allow": [
       "Read(**)",
       "Edit(**)",
-      "Write(**)",
-      "Glob(**)",
       "Grep(**)",
       "Bash(php:*)",
       "Bash(composer:*)",
@@ -59,8 +57,6 @@
       "Read(.env.*)",
       "Edit(.env)",
       "Edit(.env.*)",
-      "Write(.env)",
-      "Write(.env.*)",
       "Read(./secrets/**)",
       "Bash(rm -rf:*)",
       "Bash(sudo:*)",

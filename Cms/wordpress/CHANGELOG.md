@@ -5,6 +5,12 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- `.claude/settings.json` no longer carries `Write(**)` and `Glob(**)` in `allow`, nor `Write(.env)`,
+  `Write(.env.*)` and `Write(wp-config.php)`, `Write(wp-config-*.php)` in `deny`. Claude Code 2.1 matches file permissions only by `Edit(path)` and
+  `Read(path)` rules, which already cover them, and printed a warning for each at every start of its
+  terminal. Nothing allowed or denied changes. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
 - Claude Code started in a folder below the project root runs the project's hooks and gets its
   `AGENTS.md`: in a session in the root, `.claude/hooks/local-context.sh` sets up a dispatcher in
   your own Claude Code configuration (`memory-bank/scripts/claude_subfolders.py`, with

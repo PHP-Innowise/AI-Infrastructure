@@ -4,6 +4,15 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Its Claude Code settings deny writing secrets with Edit rules — 2026-10-25
+
+- `.claude/settings.json` denies writing `.env`, `.env.*`, `**/.env`,
+  `**/.env.*` and `**/secrets/**` with `Edit(...)` rules instead of
+  `Write(...)` ones, which Claude Code 2.1 never matches and warned about at
+  every start of its terminal. The `Read(...)` denies already stopped those
+  writes (offline, 2.1.278 in `acceptEdits`: refused before and after); the
+  policy lock was rewritten.
+
 ### Claude Code started below a generated project's root runs its hooks — 2026-10-25
 
 - As the editions do (root `CHANGELOG.md`, same day): memory-seed copies

@@ -28,6 +28,29 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### No permission rule Claude Code warns about at every start — 2026-10-25
+
+- Why: Claude Code 2.1 checks file permissions with `Edit(path)` and
+  `Read(path)` rules only. The editions' `.claude/settings.json` also
+  carried `Write(**)` and `Glob(**)` in `allow` and `Write(.env)`,
+  `Write(.env.*)` (WordPress also `Write(wp-config*.php)`) in `deny`, which
+  match nothing, and its terminal printed four warnings about them at every
+  start - text the person was shown and had nothing to do about. The
+  attached launch (`scripts/accelerator_attach.py`) added a fifth,
+  `Write(<clone>/**)` beside `Edit(<clone>/**)`.
+- What changes: those rules are gone from the four editions and the
+  attached launch; Infrastructure-Creator's own settings deny the same
+  secret paths with `Edit(...)` rules (its `CHANGELOG.md`). `Edit(**)`,
+  `Read(**)`, `Edit(.env)` and the rest already covered every one, so
+  nothing allowed or denied changes. The editions' policy locks were
+  rewritten.
+- Tests: `tests/test_hook_wiring.py` refuses a `Write`, `MultiEdit`,
+  `NotebookEdit` or `Glob` rule with a path in any edition's or the
+  generator's settings, and fails on the old ones. Offline on Claude Code
+  2.1.278: the terminal of an installed project starts with no warning;
+  a `Write` to `.env` in `acceptEdits` mode is refused in an edition and in
+  the generator, before and after.
+
 ### Claude Code started below the project root runs the project's hooks — 2026-10-25
 
 - Why: Claude Code reads `.claude/settings.json` - the hooks and the
