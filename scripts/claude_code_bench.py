@@ -490,7 +490,7 @@ def terminal(argv: List[str], project: Path, env: Dict[str, str], journal: Path,
 def queued_ok(events: List[str], screen: str) -> bool:
     """The save in flight when the second question came still landed, and
     nothing told the agent or the person it was not saved."""
-    landed = any(event in ("save:saved", "save:saved:in-flight") for event in events)
+    landed = any(event in ("save:saved", "save:saved:in-flight", "save:saved:spooled") for event in events)
     return landed and not any("request-unavailable" in event for event in events) and UNSAVED not in screen
 
 

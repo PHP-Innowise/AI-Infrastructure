@@ -63,6 +63,24 @@ edition's own files remain in that edition's changelog.
   in a session below it, resolving its paths from that session's folder:
   stricter there, never looser (`docs/MEMORY-INTEGRATION.md`).
 
+### The Codex bench starts below the project root — 2026-10-25
+
+- `scripts/codex_bench.py --subfolder DIR` starts Codex in DIR below the
+  project root, in `codex exec` or, with `--queued`, in its terminal: the
+  save goes through the spool of 2a31787a and the run passes when the
+  journal says `saved` with code `spooled` and the recovery was seen. Its
+  work folder is on disk under `~/.cache/ai-infrastructure-benches/`:
+  Codex 0.163's bubblewrap sandbox mounts its own `/dev` and writes `/tmp`,
+  so a project in `/dev/shm` was invisible to a command started below its
+  root (`can't open file .../context.py`) and one in `/tmp` writable. The
+  stand-in reads its file from the folder Codex starts in.
+- Offline on Codex 0.163: from `src/` in `codex exec` and in the terminal
+  with a second question typed during the save (`previous-in-flight`), the
+  save landed through the spool; nothing said it was not saved.
+  `claude_code_bench.py`'s check of a queued save counts a spooled one as
+  landed. The sandbox below the root writes no journal either, so the
+  `save` `spooled` line is never there; the next hook's `saved` line is.
+
 ### Below the project root on Windows too; the dispatcher keeps its newest copy — 2026-10-25
 
 - Why: Claude Code on Windows runs hook commands with Git Bash, and the

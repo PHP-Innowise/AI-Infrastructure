@@ -735,9 +735,21 @@ the run's `CODEX_HOME`: at the end of every run the bench stops each process
 whose `CODEX_HOME` is the run's, and the report says how many
 (`helpers_stopped`).
 
+`--subfolder DIR` starts Codex in DIR below the project root. Its
+workspace-write sandbox writes only below DIR - not the project's Brain, nor
+its journal - so the save waits in the temporary directory and the session's
+next hook, outside the sandbox, writes it: the run passes when the journal
+says `save` `saved` with code `spooled` and the recovery was seen. Its work
+folder is on disk, under `~/.cache/ai-infrastructure-benches/`: Codex's
+bubblewrap sandbox mounts its own `/dev` and writes `/tmp`, so a project in
+`/dev/shm` was invisible to a command started below its root, and one in
+`/tmp` writable. With `--queued` it runs in Codex's terminal: the second
+question moves the request aside (`previous-in-flight`) and the save still
+lands through the spool.
+
 ```bash
 python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
-  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--timeout 240] [--keep]
+  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--subfolder src] [--timeout 240] [--keep]
 ```
 
 - **Outputs:** a JSON report:
