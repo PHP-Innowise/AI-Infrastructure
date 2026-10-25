@@ -168,6 +168,29 @@ class SharedWorktree(unittest.TestCase):
         self.assertEqual(stat.S_IMODE((self.main / "project-brain").stat().st_mode), self.brain_mode)
         self.assertEqual(git(self.worktree, "status", "--porcelain", "--ignored"), "")
 
+    def test_the_index_of_a_removed_worktree_goes_at_the_next_checkpoint(self):
+        gone = self.main / ".claude" / "worktrees" / "short-lived"
+        git(self.main, "worktree", "add", "-q", str(gone), "-b", "feature/SHOP-11-short-lived")
+        done = self.cli("status", "--json", env=dict(self.shared, ACCELERATOR_PROJECT_DIR=str(gone)))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        index = Path(json.loads(done.stdout)["database"]).parent
+        self.assertEqual((index / "worktree").read_text(encoding="utf-8"), os.path.realpath(gone))
+        kept = Path(json.loads(self.cli("status", "--json").stdout)["database"]).parent
+        git(self.main, "worktree", "remove", "--force", str(gone))
+        invoice = self.main / "src" / "Invoice.php"
+        original = invoice.read_text(encoding="utf-8")
+        invoice.write_text(original + "// numbered per tenant\n", encoding="utf-8")
+        try:
+            done = subprocess.run([sys.executable, str(self.main / "memory-bank" / "scripts" / "context.py"), "turn",
+                                   "--task-id", "feature/SHOP-7-invoices", "--flush", "--json"],
+                                  cwd=self.main, env=self.env, capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL)
+            self.assertEqual(done.returncode, 0, done.stderr)
+        finally:
+            invoice.write_text(original, encoding="utf-8")
+        self.assertFalse(index.exists(), "the removed worktree's index is gone")
+        self.assertTrue((kept / "worktree").is_file(), "a worktree that is still there keeps its index")
+
     @unittest.skipIf(BASH is None, "no bash to run hooks with")
     def test_the_prompt_hook_in_the_worktree_works_for_its_own_branch(self):
         payload = {"session_id": "worktree-session", "hook_event_name": "UserPromptSubmit",

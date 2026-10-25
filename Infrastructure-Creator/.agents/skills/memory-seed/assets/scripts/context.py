@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sqlite3
 import stat as stat_module
 import subprocess
@@ -335,6 +336,11 @@ def default_root() -> Path:
     return workspace_roots.default_state_root()
 
 
+# Beside a worktree's own index: the worktree it indexes, so that the index
+# of a worktree that was removed can be told and removed too.
+WORKTREE_INDEX_MARKER = "worktree"
+
+
 def default_database(repository: Path) -> Path:
     layout = workspace_roots.roots(repository)
     if layout.shared:
@@ -345,6 +351,50 @@ def default_database(repository: Path) -> Path:
         digest = hashlib.sha256(os.fsencode(checkout)).hexdigest()[:16]
         return repository / "memory-bank" / "local" / "worktrees" / digest / "context.db"
     return repository / "memory-bank" / "local" / "context.db"
+
+
+def remember_worktree_index(repository: Path, database: Path) -> None:
+    """Name the worktree beside its index (see WORKTREE_INDEX_MARKER)."""
+    layout = workspace_roots.roots(repository)
+    if not layout.shared or database != default_database(repository).resolve():
+        return
+    checkout = os.path.realpath(str(layout.project))
+    marker = database.parent / WORKTREE_INDEX_MARKER
+    try:
+        if marker.read_text(encoding="utf-8") == checkout:
+            return
+    except (OSError, UnicodeError):
+        pass
+    try:
+        database.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(checkout, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def prune_worktree_indexes(repository: Path) -> int:
+    """Remove the indexes of worktrees that are gone; how many went.
+
+    An index is a cache: one whose worktree no longer exists holds nothing
+    another session reads. One without its marker is left alone.
+    """
+    folder = repository / "memory-bank" / "local" / "worktrees"
+    removed = 0
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            checkout = (Path(entry.path) / WORKTREE_INDEX_MARKER).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if checkout and os.path.isabs(checkout) and not os.path.lexists(checkout):
+            shutil.rmtree(entry.path, ignore_errors=True)
+            removed += 1
+    return removed
 
 
 def connect(database: Path, *, timeout: float = 5.0, require_write: bool = False,
@@ -7330,6 +7380,7 @@ def run_turn(
         # is moved, and compaction batches so Git history is not
         # churned one terminal record at a time.
         compaction = auto_compact(repository, owner=owner)
+        prune_worktree_indexes(repository)
     elif mode != "lightweight":
         # A failed/interrupted promotion has its own local retry schedule.
         # Recover it without inventing a Git delta or changing task lifecycle.
@@ -8593,6 +8644,8 @@ def _command() -> int:
         if getattr(arguments, 'provenance_response', False) and not arguments.json:
             raise ContextError('Source provenance transport requires JSON output')
         database = (arguments.db or default_database(repository)).resolve()
+        if not getattr(arguments, "read_only", False):
+            remember_worktree_index(repository, database)
         mode = configured_mode(repository, arguments.mode)
         _COMMAND_STATE.update(database=database, mode=mode, command=arguments.command,
                               read_only=bool(getattr(arguments, "read_only", False)))

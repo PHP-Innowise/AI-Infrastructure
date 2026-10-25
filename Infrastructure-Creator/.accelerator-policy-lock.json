@@ -102,7 +102,7 @@
     ".agents/skills/memory-seed/assets/scripts/claude_dispatch.py": "3c714aba156721e447edfb41cab6f9e995e61da93717c89cff2ca9b960801399",
     ".agents/skills/memory-seed/assets/scripts/claude_dispatch.sh": "4f34ff14ec349e93794f996ba5e99f69a41135810c1e55f74fa39d1372bd917d",
     ".agents/skills/memory-seed/assets/scripts/claude_subfolders.py": "e8c25ccdd281f87aa7f18749bfa4f242b347653ab6a76327c4068b7688c6f136",
-    ".agents/skills/memory-seed/assets/scripts/context.py": "6d8be6f7a93f44d3e3de896f3773e591da24b167a2ebb971dda39a7770797d26",
+    ".agents/skills/memory-seed/assets/scripts/context.py": "3aa280821f7c8dcaf15a8df45be527f411e10793b84995675000574cbf9c4dee",
     ".agents/skills/memory-seed/assets/scripts/context_cli.py": "ec874c9312133eafae8f16bc298fc011fb55579cb4b300453e81e3f31a4d0123",
     ".agents/skills/memory-seed/assets/scripts/context_continuity.py": "10324f7b38000615ee0ec72036a2a6fb3112e694544489e666ba388c93589ea5",
     ".agents/skills/memory-seed/assets/scripts/context_handoff.py": "cbb82c4c610e2ccce46167bb2c27fff12b1516acc4a8ec7de98e0cda5ad2b9a6",
@@ -177,7 +177,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "18f603e639ff616dedb678532e08fd1bf31d31da9a17fe40dc29e873536cf7ee",
+  "policy_digest": "0c7cf1680b56b6224b5d035c3173f08f48df2f1de9e1d407f368e83320d0e315",
   "release": "2.5.0",
   "schema_version": 1
 }

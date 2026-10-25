@@ -664,6 +664,14 @@ DIR. The run passes when that session got the capsule and every line of the
 project's `AGENTS.md` in the conversation itself - not in a file Claude Code
 keeps an over-long hook output in - and its save landed.
 
+`--worktree` does the same in a Git worktree of the project made where
+Claude Code makes its own (`.claude/worktrees/bench`, on a branch of its
+own), with `--subfolder DIR` in DIR of it. The installation is not
+committed, so the worktree has none of it; the run also passes only when the
+save landed in the root's Project Brain under the worktree's branch, the
+worktree got an index of its own in the root, and nothing was written into
+the worktree.
+
 `--permissions` (with `--subfolder`, `src` by default) has the stand-in try
 nineteen tool calls in both sessions - reads of secrets the project denies
 at the root and below it, of files it allows and of one outside, writes,
@@ -677,7 +685,7 @@ path matching was probed, not documented.
 ```bash
 python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   [--target DIR [--sync] [--exclude NAME] | --attached] [--shell /usr/bin/zsh] [--mode dontAsk] \
-  [--queued 8 | --subfolder src [--permissions]] [--timeout 180] [--keep]
+  [--queued 8 | --subfolder src [--permissions] | --worktree [--subfolder src]] [--timeout 180] [--keep]
 ```
 
 - **Outputs:** a JSON report:
@@ -688,7 +696,9 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
     the stream;
   - with `--queued`, whether the screen said the result was not saved;
   - with `--subfolder`, the folder, and whether the capsule and the whole
-    policy reached the session.
+    policy reached the session;
+  - with `--worktree`, also whether the save went to the worktree's branch,
+    its own index exists and the worktree stayed clean.
 
   Exit 0 when the save ran, one message carried the step and no hook error
   was recorded; 1 otherwise; 2 without Linux namespaces.

@@ -63,20 +63,28 @@ edition's own files remain in that edition's changelog.
   from the root, where the worktree has no copy (`source_scan_plan`), and
   a citation of them by the root's key resolves there (`resolve`). The
   installed state keeps its permissions: no owner-only `umask`, no
-  `ensure_attached_state`.
+  `ensure_attached_state`. A file named `worktree` beside the index names
+  the worktree (`remember_worktree_index`), and a checkpoint removes the
+  index of a worktree that is gone (`prune_worktree_indexes`, beside the
+  consolidation and compaction it runs with).
 - Offline with the real Claude Code 2.1.278, in `.claude/worktrees/<name>`
   and in a folder of a worktree beside the project: project context,
   policy, a capsule with the worktree's own task, and the save into the
   root's Brain under the worktree's branch; 280 randomized permission
   calls in seven rule sets decided in a worktree for its files as in the
-  root for the root's. `tests/test_memory_claude_subfolders.py`
+  root for the root's. `scripts/claude_code_bench.py --worktree` (and
+  `--worktree --subfolder src`) repeats the host run and passes only when
+  the save went to the worktree's branch, the worktree got its own index
+  and stayed clean. `tests/test_memory_claude_subfolders.py`
   (`Worktrees`) and the new `tests/test_memory_worktree_sessions.py`, in
   CI's memory job, cover both halves; mutating any of the changes fails
   them.
 - Not covered: a session that enters a worktree after starting in the
   root (`EnterWorktree`) keeps the root's hooks, which leave the memory
   out there, as before; Codex and Cursor started in such a worktree run
-  no hooks. Documented in `docs/MEMORY-INTEGRATION.md` ("Claude Code
+  no hooks; the memory MCP server, found by the nearest `.mcp.json`,
+  serves a worktree inside the root as the root. Documented in
+  `docs/MEMORY-INTEGRATION.md` ("Claude Code
   started in a worktree"), `docs/TROUBLESHOOTING.md` item 11 and
   `install/README.md`.
 

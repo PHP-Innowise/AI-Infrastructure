@@ -37,6 +37,14 @@ session in DIR below it: the run passes when that session got the capsule
 and every line of the project's AGENTS.md in the conversation itself - not
 in a file Claude Code keeps an over-long hook output in - and its save lands.
 
+`--worktree` does the same in a Git worktree of the project, made where
+Claude Code makes its own (`.claude/worktrees/bench`, on a branch of its
+own), with `--subfolder DIR` in DIR of it. The installation is not
+committed, so the worktree has none of it: the run passes when the session
+there got the capsule and the policy, its save landed in the root's Project
+Brain under the worktree's branch, the worktree got an index of its own in
+the root, and nothing was written into the worktree.
+
 `--permissions` (with `--subfolder`, `src` by default) has the stand-in try
 the same reads, writes, commands and fetches in both sessions - secrets the
 project denies, files it allows, commands it denies or allows, the project's
@@ -55,6 +63,7 @@ is never written.
   python3 scripts/claude_code_bench.py --mode dontAsk
   python3 scripts/claude_code_bench.py --queued 8
   python3 scripts/claude_code_bench.py --subfolder src
+  python3 scripts/claude_code_bench.py --worktree --subfolder src
   python3 scripts/claude_code_bench.py --permissions --mode bypassPermissions
   python3 scripts/claude_code_bench.py --attached
   python3 scripts/claude_code_bench.py --target ~/Desktop/next --sync
@@ -76,6 +85,9 @@ from typing import Any, Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parents[1]
 # The installer's edition names; WordPress lives in Cms/wordpress.
 EDITIONS = ("PHP Core", "Laravel", "Symfony", "WordPress")
+# Where Claude Code makes its own worktrees, and the branch of the bench's.
+WORKTREE = ".claude/worktrees/bench"
+WORKTREE_BRANCH = "feature/SHOP-9-refunds"
 GIT = ["git", "-c", "user.name=Bench", "-c", "user.email=bench@example.invalid", "-c", "commit.gpgsign=false",
        "-c", "core.hooksPath=/dev/null"]
 KEY = "offline-bench-key-not-a-real-api-key"
@@ -520,7 +532,7 @@ def inside(args: argparse.Namespace) -> int:
     journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     screen = ""
     first_lines = 0
-    if args.subfolder:
+    if args.subfolder or args.worktree:
         # A session in the project root first: its session-start hook sets up
         # the dispatcher (in the background), which the session below needs.
         subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json", "--verbose",
@@ -532,7 +544,14 @@ def inside(args: argparse.Namespace) -> int:
             time.sleep(0.2)
         first_lines = len(journal_file.read_text().splitlines()) if journal_file.exists() else 0
         Scripted.requests.clear()
-        project_cwd = project / args.subfolder
+        place = project
+        if args.worktree:
+            place = project / WORKTREE
+            subprocess.run([*GIT, "worktree", "add", "-q", str(place), "-b", WORKTREE_BRANCH], cwd=project,
+                           check=True, capture_output=True)
+            # The stand-in reads the worktree's copy of the project's file.
+            Scripted.project = str(place)
+        project_cwd = place / (args.subfolder or "")
         project_cwd.mkdir(parents=True, exist_ok=True)
     else:
         project_cwd = project
@@ -581,7 +600,7 @@ def inside(args: argparse.Namespace) -> int:
     if args.queued is not None:
         report["unsaved_on_screen"] = UNSAVED in screen
         report["ok"] = queued_ok(events, screen) and not errors
-    if args.subfolder:
+    if args.subfolder or args.worktree:
         # The session below the root got the capsule and the policy, and saved.
         report["started_in"] = args.subfolder
         heard = "\n".join(text for request in Scripted.requests for text in request["since"])
@@ -590,6 +609,20 @@ def inside(args: argparse.Namespace) -> int:
         report["policy"] = (all(line in heard for line in policy if line.strip())
                             and "Output too large" not in heard)
         report["ok"] = report["saved"] and report["capsule"] and report["policy"] and not errors
+    if args.worktree:
+        # The root's memory, the worktree's own task and index, and nothing
+        # written into the worktree.
+        worktree = project / WORKTREE
+        report["started_in"] = (Path(WORKTREE) / (args.subfolder or "")).as_posix()
+        tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
+                 for path in (project / "project-brain/dynamic/tasks").glob("*.md")]
+        report["worktree_task"] = any(task.get("external_id") == WORKTREE_BRANCH and task.get("progress")
+                                      for task in tasks)
+        report["own_index"] = any((project / "memory-bank/local/worktrees").glob("*/context.db"))
+        report["worktree_clean"] = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=worktree,
+                                                  capture_output=True, text=True).stdout == ""
+        report["ok"] = (report["ok"] and report["worktree_task"] and report["own_index"]
+                        and report["worktree_clean"])
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -639,6 +672,9 @@ def main() -> int:
     parser.add_argument("--mode", choices=MODES, default="default", help="the permission mode to run")
     parser.add_argument("--subfolder", metavar="DIR", default=None,
                         help="after a session in the project root, run the measured one in DIR below it")
+    parser.add_argument("--worktree", action="store_true",
+                        help="after a session in the project root, run the measured one in a Git worktree of the "
+                             "project (in DIR of it with --subfolder)")
     parser.add_argument("--permissions", action="store_true",
                         help="try the same tool calls in the root and below it, and compare the decisions")
     parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
@@ -673,7 +709,12 @@ def main() -> int:
         print("claude_code_bench: --permissions writes probe files into the project; it takes no --target",
               file=sys.stderr)
         return 2
-    if args.subfolder is not None and (args.queued is not None or args.attached is not None or args.mode == "plan"):
+    if args.worktree and (args.permissions or args.target):
+        print("claude_code_bench: --worktree makes a worktree of a fresh install; it takes no --permissions or "
+              "--target", file=sys.stderr)
+        return 2
+    if (args.subfolder is not None or args.worktree) and (args.queued is not None or args.attached is not None
+                                                          or args.mode == "plan"):
         print("claude_code_bench: --subfolder runs two sessions with -p in an installed project and expects a "
               "save; it takes no --queued, --attached or --mode plan", file=sys.stderr)
         return 2
@@ -711,6 +752,7 @@ def main() -> int:
                                *(["--attached", args.attached] if args.attached else []),
                                *(["--queued", str(args.queued)] if args.queued is not None else []),
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
+                               *(["--worktree"] if args.worktree else []),
                                *(["--permissions"] if args.permissions else []),
                                "--timeout", str(args.timeout)],
                               timeout=args.timeout + 60)
