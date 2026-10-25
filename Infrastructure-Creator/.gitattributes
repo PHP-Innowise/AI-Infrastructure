@@ -83,6 +83,9 @@
 .claude/skills/memory-seed/assets/runtime-contract.json -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/automatic_query.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/brain_runtime.py -diff linguist-generated=true
+.claude/skills/memory-seed/assets/scripts/claude_dispatch.py -diff linguist-generated=true
+.claude/skills/memory-seed/assets/scripts/claude_dispatch.sh -diff linguist-generated=true
+.claude/skills/memory-seed/assets/scripts/claude_subfolders.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context_cli.py -diff linguist-generated=true
 .claude/skills/memory-seed/assets/scripts/context_continuity.py -diff linguist-generated=true
@@ -231,6 +234,9 @@
 .cursor/skills/memory-seed/assets/runtime-contract.json -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/automatic_query.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/brain_runtime.py -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/scripts/claude_dispatch.py -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/scripts/claude_dispatch.sh -diff linguist-generated=true
+.cursor/skills/memory-seed/assets/scripts/claude_subfolders.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context_cli.py -diff linguist-generated=true
 .cursor/skills/memory-seed/assets/scripts/context_continuity.py -diff linguist-generated=true

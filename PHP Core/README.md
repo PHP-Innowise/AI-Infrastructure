@@ -125,7 +125,7 @@ composer install
 
 ## Quick Start
 
-Start Claude Code, Codex or Cursor in the project root, the folder that holds `.claude/`, `.codex/` and `.cursor/`. Claude Code started in a subfolder reads none of this project's settings and runs none of its hooks: no memory and no guards. Codex started in one runs the hooks, but its sandbox cannot write the project's memory, so nothing is saved.
+Start Claude Code, Codex or Cursor in the project root, the folder that holds `.claude/`, `.codex/` and `.cursor/`, or in a folder below it. Claude Code reads a project's settings - its hooks and permission rules - only from the folder it starts in, so the first session in the root sets up a small dispatcher in your own Claude Code configuration (entries in `~/.claude/settings.json`, scripts in `~/.claude/ai-accelerator/`): for a session started below the root it runs this project's hooks and brings its `AGENTS.md`, and anywhere else it does nothing. Before that first session in the root, and on Windows, Claude Code started in a subfolder runs none of the project's hooks; the project's permission rules apply only in the root. A file named `off` in `~/.claude/ai-accelerator/` turns the dispatcher off for good. Codex started in a subfolder runs the hooks, and its save waits in a temporary folder for the next hook.
 
 Use slash commands (Claude Code / Cursor) to move through the workflow:
 

@@ -656,10 +656,18 @@ directory as `screen.txt`. Its first run, on 2.1.278, found the prompt hook
 re-arming the session: the save in flight was refused as
 `request-unavailable`.
 
+`--subfolder DIR` runs a first session in the project root, whose
+session-start hook sets up the dispatcher for sessions started below the
+root in the bench's own Claude Code configuration
+(`memory-bank/scripts/claude_subfolders.py`), then the measured session in
+DIR. The run passes when that session got the capsule and every line of the
+project's `AGENTS.md` in the conversation itself - not in a file Claude Code
+keeps an over-long hook output in - and its save landed.
+
 ```bash
 python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   [--target DIR [--sync] [--exclude NAME] | --attached] [--shell /usr/bin/zsh] [--mode dontAsk] \
-  [--queued 8] [--timeout 180] [--keep]
+  [--queued 8 | --subfolder src] [--timeout 180] [--keep]
 ```
 
 - **Outputs:** a JSON report:
@@ -668,7 +676,9 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   - how many messages carried the step to the model, and their size;
   - the hook errors the transcript recorded, and the error notifications in
     the stream;
-  - with `--queued`, whether the screen said the result was not saved.
+  - with `--queued`, whether the screen said the result was not saved;
+  - with `--subfolder`, the folder, and whether the capsule and the whole
+    policy reached the session.
 
   Exit 0 when the save ran, one message carried the step and no hook error
   was recorded; 1 otherwise; 2 without Linux namespaces.

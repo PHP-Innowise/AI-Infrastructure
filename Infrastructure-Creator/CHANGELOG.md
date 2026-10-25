@@ -4,6 +4,19 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Claude Code started below a generated project's root runs its hooks — 2026-10-25
+
+- As the editions do (root `CHANGELOG.md`, same day): memory-seed copies
+  `claude_subfolders.py`, `claude_dispatch.py` and now `claude_dispatch.sh`
+  (`scripts/asset_parity.py` requires `memory-bank/scripts/*.sh` in the
+  asset), and hook-forge ends `local-context.sh` with the fragment that, in
+  a session in the root, sets up the dispatcher in the person's own Claude
+  Code configuration. `context_retrieval.py` changes in the asset (the
+  shared-core manifest names `memory-bank/scripts/*.sh`); the policy lock
+  was rewritten. The two instructions add about 800 bytes to the skill
+  bodies, which stood 8 bytes under their ceiling: `body_bytes` in
+  `scripts/token_budget.json` goes from 303,878 to 306,200.
+
 ### The seeded runtime saves from a sandbox that cannot write the project — 2026-10-25
 
 - As the editions' runtime does (root `CHANGELOG.md`, same day): a save the

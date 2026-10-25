@@ -24,6 +24,7 @@
 # byte-identical, so a pull request shows the canonical change once.
 # PHP Core/ itself and the two framework-shaped hooks stay reviewed.
 Laravel/memory-bank/scripts/*.py linguist-generated=true
+Laravel/memory-bank/scripts/*.sh linguist-generated=true
 Laravel/memory-bank/MCP.md linguist-generated=true
 Laravel/memory-bank/tests/*.py linguist-generated=true
 Laravel/memory-bank/templates/* linguist-generated=true
@@ -36,6 +37,7 @@ Laravel/.claude/hooks/*.sh linguist-generated=true
 Laravel/.claude/hooks/bash-validator.sh -linguist-generated
 Laravel/.claude/hooks/local-context.sh -linguist-generated
 Symfony/memory-bank/scripts/*.py linguist-generated=true
+Symfony/memory-bank/scripts/*.sh linguist-generated=true
 Symfony/memory-bank/MCP.md linguist-generated=true
 Symfony/memory-bank/tests/*.py linguist-generated=true
 Symfony/memory-bank/templates/* linguist-generated=true
@@ -48,6 +50,7 @@ Symfony/.claude/hooks/*.sh linguist-generated=true
 Symfony/.claude/hooks/bash-validator.sh -linguist-generated
 Symfony/.claude/hooks/local-context.sh -linguist-generated
 Cms/wordpress/memory-bank/scripts/*.py linguist-generated=true
+Cms/wordpress/memory-bank/scripts/*.sh linguist-generated=true
 Cms/wordpress/memory-bank/MCP.md linguist-generated=true
 Cms/wordpress/memory-bank/tests/*.py linguist-generated=true
 Cms/wordpress/memory-bank/templates/* linguist-generated=true

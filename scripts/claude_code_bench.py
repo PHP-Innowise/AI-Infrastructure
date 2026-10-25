@@ -30,6 +30,13 @@ question is typed while it does. Claude Code queues it into the running turn
 and runs the prompt hook at once; the run passes when the save in flight
 still lands and the screen never says the result was not saved.
 
+`--subfolder DIR` runs a first session in the project root, whose
+session-start hook sets up the dispatcher in the bench's own Claude Code
+settings (memory-bank/scripts/claude_subfolders.py), then the measured
+session in DIR below it: the run passes when that session got the capsule
+and every line of the project's AGENTS.md in the conversation itself - not
+in a file Claude Code keeps an over-long hook output in - and its save lands.
+
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
 rehearsal's does, and `--sync` first brings it up to this clone. The saved
@@ -40,6 +47,7 @@ is never written.
   python3 scripts/claude_code_bench.py --shell /usr/bin/zsh --edition Laravel --keep
   python3 scripts/claude_code_bench.py --mode dontAsk
   python3 scripts/claude_code_bench.py --queued 8
+  python3 scripts/claude_code_bench.py --subfolder src
   python3 scripts/claude_code_bench.py --attached
   python3 scripts/claude_code_bench.py --target ~/Desktop/next --sync
 """
@@ -406,6 +414,23 @@ def inside(args: argparse.Namespace) -> int:
         lent = ["--settings", json.dumps(overlay["settings"]), *overlay["arguments"]]
     journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     screen = ""
+    first_lines = 0
+    if args.subfolder:
+        # A session in the project root first: its session-start hook sets up
+        # the dispatcher (in the background), which the session below needs.
+        subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json", "--verbose",
+                        *mode, *lent], cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                       timeout=args.timeout)
+        listed = work / "home/.claude/ai-accelerator/projects"
+        deadline = time.time() + 15
+        while time.time() < deadline and str(project) not in (listed.read_text().splitlines() if listed.exists() else []):
+            time.sleep(0.2)
+        first_lines = len(journal_file.read_text().splitlines()) if journal_file.exists() else 0
+        Scripted.requests.clear()
+        project_cwd = project / args.subfolder
+        project_cwd.mkdir(parents=True, exist_ok=True)
+    else:
+        project_cwd = project
     if args.queued is not None:
         Scripted.save_delay = args.queued
         screen = terminal([args.claude, *mode, *lent], project, env, journal_file, args.timeout, Scripted.save_begun,
@@ -414,7 +439,7 @@ def inside(args: argparse.Namespace) -> int:
         done = subprocess.CompletedProcess([], 0, "", "")
     else:
         done = subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json",
-                               "--verbose", *mode, *lent], cwd=project, env=env, stdin=subprocess.DEVNULL,
+                               "--verbose", *mode, *lent], cwd=project_cwd, env=env, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=args.timeout)
     server.shutdown()
     stream = [json.loads(line) for line in done.stdout.splitlines() if line.startswith("{")]
@@ -423,7 +448,7 @@ def inside(args: argparse.Namespace) -> int:
     save = next((request for request in Scripted.requests
                  if request["content"] and request["content"][0].get("text") == "Saved."), None)
     result = text_of(save["since"][0]) if save and save["since"] else ""
-    journal = [json.loads(line) for line in journal_file.read_text().splitlines()] if journal_file.exists() else []
+    journal = [json.loads(line) for line in journal_file.read_text().splitlines()[first_lines:]] if journal_file.exists() else []
     events = [f"{line['stage']}:{line['event']}" + (f":{line['code']}" if line.get("code") else "")
               for line in journal if line.get("stage") in ("stop", "save")
               or (args.queued is not None and line.get("stage") == "prompt")]
@@ -451,6 +476,15 @@ def inside(args: argparse.Namespace) -> int:
     if args.queued is not None:
         report["unsaved_on_screen"] = UNSAVED in screen
         report["ok"] = queued_ok(events, screen) and not errors
+    if args.subfolder:
+        # The session below the root got the capsule and the policy, and saved.
+        report["started_in"] = args.subfolder
+        heard = "\n".join(text for request in Scripted.requests for text in request["since"])
+        report["capsule"] = "working:" in heard
+        policy = (project / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+        report["policy"] = (all(line in heard for line in policy if line.strip())
+                            and "Output too large" not in heard)
+        report["ok"] = report["saved"] and report["capsule"] and report["policy"] and not errors
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -498,6 +532,8 @@ def main() -> int:
                         help="the shell Claude Code's Bash tool runs (bash or zsh)")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--mode", choices=MODES, default="default", help="the permission mode to run")
+    parser.add_argument("--subfolder", metavar="DIR", default=None,
+                        help="after a session in the project root, run the measured one in DIR below it")
     parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
                         help="in Claude Code's terminal, type a second question while the save, which the "
                              "stand-in takes SECONDS to write, is in flight")
@@ -523,6 +559,13 @@ def main() -> int:
     if args.queued is not None and args.mode == "plan":
         print("claude_code_bench: plan mode asks for no save, so there is none to type a question during; "
               "--queued takes no --mode plan", file=sys.stderr)
+        return 2
+    if args.subfolder is not None and (args.queued is not None or args.attached is not None or args.mode == "plan"):
+        print("claude_code_bench: --subfolder runs two sessions with -p in an installed project and expects a "
+              "save; it takes no --queued, --attached or --mode plan", file=sys.stderr)
+        return 2
+    if args.subfolder is not None and (Path(args.subfolder).is_absolute() or ".." in Path(args.subfolder).parts):
+        print("claude_code_bench: --subfolder names a folder inside the project", file=sys.stderr)
         return 2
     if args.target:
         problem = target_problem(Path(args.target).expanduser().resolve())
@@ -554,6 +597,7 @@ def main() -> int:
                                "--mode", args.mode, "--source", source_in(project),
                                *(["--attached", args.attached] if args.attached else []),
                                *(["--queued", str(args.queued)] if args.queued is not None else []),
+                               *(["--subfolder", args.subfolder] if args.subfolder else []),
                                "--timeout", str(args.timeout)],
                               timeout=args.timeout + 60)
         if args.keep:

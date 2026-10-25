@@ -5,6 +5,14 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- Claude Code started in a folder below the project root runs the project's hooks and gets its
+  `AGENTS.md`: in a session in the root, `.claude/hooks/local-context.sh` sets up a dispatcher in
+  your own Claude Code configuration (`memory-bank/scripts/claude_subfolders.py`, with
+  `claude_dispatch.py` and `claude_dispatch.sh`); a file named `off` in `~/.claude/ai-accelerator/`
+  turns it off. Codex started in a subfolder saves through a temporary folder. Quick Start in
+  `README.md` (`ACCELERATOR.md`) and `.claude/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../../CHANGELOG.md).
+
 - `README.md`, installed as `ACCELERATOR.md`, opens Quick Start with where to start the tools: in the
   project root. Claude Code started in a subfolder reads none of the project's settings and runs none
   of its hooks; Codex started in one cannot save memory there. Details in the root

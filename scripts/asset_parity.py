@@ -72,6 +72,7 @@ ASSET_TO_EDITION_PREFIX = {
 REQUIRED_FROM_EDITION = (
     "memory-bank/MCP.md",
     "memory-bank/scripts/*.py",
+    "memory-bank/scripts/*.sh",
     "memory-bank/templates/*",
     "project-brain/PROTOCOL.md",
     "project-brain/README.md",

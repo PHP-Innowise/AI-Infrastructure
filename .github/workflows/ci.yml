@@ -296,6 +296,8 @@ jobs:
         run: python3 -m unittest tests.test_memory_cursor_report
       - name: Native CLI MCP promoted-memory roundtrips
         run: python3 -m unittest tests.test_memory_native_roundtrip tests.test_memory_native_capture tests.test_memory_lifecycle
+      - name: Claude Code started below the project root
+        run: python3 -m unittest tests.test_memory_claude_subfolders
       - name: Typed health source-notice summaries
         run: python3 -m unittest tests.test_memory_health_notices
       - name: Closed-unit memory cost booking replay (offline)

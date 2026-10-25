@@ -28,6 +28,57 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code started below the project root runs the project's hooks — 2026-10-25
+
+- Why: Claude Code reads `.claude/settings.json` - the hooks and the
+  permission rules - only from the folder a session starts in. Started in
+  `src/` of an installed project, it ran no capsule, no save and no guard,
+  and `.claude/CLAUDE.md`'s `@../AGENTS.md` became an import from outside
+  the working directory, which it asks about in a terminal (No by default)
+  and leaves out under `-p`. Nothing was to be asked of the person.
+- What changes: `local-context.sh`, in a session in the root, runs
+  `memory-bank/scripts/claude_subfolders.py` in the background. It copies
+  `claude_dispatch.sh` and `claude_dispatch.py` into the person's Claude
+  Code configuration folder (`~/.claude/ai-accelerator/`, or under
+  `$CLAUDE_CONFIG_DIR`), lists the project root there, and adds to their
+  `settings.json` one entry per project hook (same matcher and timeout) and
+  four session-start entries `policy-1` to `policy-4`, keeping everything
+  else. It writes only for the Claude Code whose transcript folder holds the
+  session, nothing when all is in place, never on Windows, and never once a
+  file named `off` is in that folder. The dispatcher runs a listed root's
+  hook for a session started below it in the same checkout, with
+  `CLAUDE_PROJECT_DIR` set to the root, and exits at once anywhere else.
+  For `bash-validator.sh` it adds the allow the project's rules give the
+  memory CLI in the root. The `policy-N` entries bring `AGENTS.md` in pieces
+  cut between sections, each under the 10,000 characters Claude Code 2.1
+  keeps in the conversation (a longer hook output goes to a file of which
+  the model sees 2,000), and nothing when Claude Code imports the file
+  itself - the dialog's Yes, filed under the repository's root. The
+  shared-core manifest now names `memory-bank/scripts/*.sh`, and the
+  generator's asset carries the shell dispatcher; its skill-body ceiling
+  in `scripts/token_budget.json` rises to 306,200 bytes for the two
+  instructions that seed it (Infrastructure-Creator `CHANGELOG.md`).
+- Tests: `tests/test_memory_claude_subfolders.py`, 27 cases: pieces of
+  every edition's policy and the parts' limit; the import approval under the
+  repository's key and under a linked worktree's main checkout; the memory
+  CLI recognised in five forms and 16 commands that are not; the setup once,
+  beside the person's own settings, through a linked `settings.json`, for six
+  projects starting together, dropping a removed project, and not for a
+  settings file it cannot read, a linked folder, another program's hook or
+  the `off` file; the dispatcher in the root, below an unlisted project, in a
+  nested repository, in a project installed inside a larger checkout,
+  outside Git and under an ASCII locale; the edition's real
+  `bash-validator.sh` (a save naming DROP TABLE allowed, `rm -rf /` blocked)
+  and the real `local-context.sh` setting it up. Mutations of the dispatcher
+  and of the list's lock fail them. In a folder of no listed project the
+  dispatcher costs 1.1 ms a hook, against 0.9 ms for `bash` doing nothing.
+  Offline, Claude Code 2.1.278 started in `src/` got the capsule, every line
+  of `AGENTS.md` and saved, in the four editions and in default,
+  `acceptEdits`, `dontAsk`, `bypassPermissions` and `auto` modes, after
+  `--resume` too; in its terminal, with No and with Yes to the import
+  dialog, the policy came once. `scripts/claude_code_bench.py --subfolder
+  src` runs it.
+
 ### Codex started below the project saves through its next hook — 2026-10-25
 
 - Why: Codex started in a subdirectory of the project runs a workspace-write
