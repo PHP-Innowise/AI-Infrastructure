@@ -748,8 +748,8 @@ blocked, or a hook times out.
     `settings.json`. Codex started in a subdirectory finds and runs the
     project's hooks; its sandbox writes only below that folder, so the save
     waits in a temporary folder (`ai-accelerator-native-spool-<uid>`) and the
-    next hook saves it (journal `save` `spooled`, then `saved` with code
-    `spooled`).
+    next hook saves it (journal `saved` with code `spooled`: the sandbox
+    cannot write the journal either).
 
 ### Recover
 

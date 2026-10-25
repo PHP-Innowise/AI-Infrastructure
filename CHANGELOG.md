@@ -28,6 +28,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The spool's journal line, as it lands — 2026-10-25
+
+- Documentation: below the project root Codex's sandbox cannot write the
+  project's journal either, so the `save` `spooled` line of 2a31787a is
+  lost there and the record is the next hook's `saved` with code
+  `spooled` (`docs/MEMORY-INTEGRATION.md`, `docs/TROUBLESHOOTING.md`).
+  Found by the Codex bench started below the root.
+
 ### Command rules below the project root reach as far as the root's — 2026-10-25
 
 - Why: a differential run - random deny rules in the project's
