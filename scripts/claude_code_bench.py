@@ -520,6 +520,10 @@ def main() -> int:
     if args.attached is not None and args.target:
         print("claude_code_bench: --attached runs a fresh project; it takes no --target", file=sys.stderr)
         return 2
+    if args.queued is not None and args.mode == "plan":
+        print("claude_code_bench: plan mode asks for no save, so there is none to type a question during; "
+              "--queued takes no --mode plan", file=sys.stderr)
+        return 2
     if args.target:
         problem = target_problem(Path(args.target).expanduser().resolve())
         if problem:

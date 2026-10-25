@@ -678,8 +678,8 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   `tests/test_host_benches.py`, in the `installation` job, holds what the
   bench relies on: the save command found in the step the runtime writes for
   every host, and the stand-in's turn. Run the bench itself when Claude Code
-  updates, and with `--target … --sync` on a copy of each project before a
-  rollout. Its first run, on 2.1.278, found two problems: the save command
+  updates - with `--queued 8` too - and with `--target … --sync` on a copy of
+  each project before a rollout. Its first run, on 2.1.278, found two problems: the save command
   asked for permission after every answer, and the Stop block showed as a hook
   error.
 
