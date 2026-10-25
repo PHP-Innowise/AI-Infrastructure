@@ -469,7 +469,7 @@ def print_report(reports: List[Dict[str, Any]]) -> None:
                 continue
             outcome = "saved" if run["saved"] else (f"refused ({run['refusal']})" if run["requested"] else "no request")
             label = run["profile"] + ("@worktree" if run.get("place") == "worktree" else "")
-            print(f"  {run['host']:6} {label:16} prompt {run['ms']['prompt']:5} ms  stop {run['ms']['stop']:5} ms"
+            print(f"  {run['host']:6} {label:19} prompt {run['ms']['prompt']:5} ms  stop {run['ms']['stop']:5} ms"
                   f"  {outcome:28} recalled {'yes' if run['recalled'] else 'NO'}"
                   + (f"  hook failures: {', '.join(run['hook_failures'])}" if run["hook_failures"] else "")
                   + ("" if run.get("place") != "worktree" else
