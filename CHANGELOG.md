@@ -76,7 +76,9 @@ edition's own files remain in that edition's changelog.
   their full path, and `working-memory-read.sh` (with its mirrors' rule in
   `context_retrieval.py`) gives the advice to build the index by hand only
   in the root, where the command it names works.
-- Offline with the real Claude Code 2.1.278, in `.claude/worktrees/<name>`
+- Offline with the real Claude Code 2.1.278 and 2.1.299 (the version the
+  desktop app bundles; without the dispatcher a worktree session there got
+  nothing either), in `.claude/worktrees/<name>`
   and in a folder of a worktree beside the project: project context,
   policy, a capsule with the worktree's own task, and the save into the
   root's Brain under the worktree's branch; 280 randomized permission
