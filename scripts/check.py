@@ -382,6 +382,7 @@ WINDOWS_MEMORY_TESTS = (
     "tests.test_cursor_review_recovery",
     "tests.test_cursor_generator_contract",
     "tests.test_memory_claude_subfolders",
+    "tests.test_memory_worktree_sessions",
 )
 WINDOWS_CREATOR_TESTS = ("tests.test_windows_creator", "tests.test_windows_discovery")
 

@@ -204,6 +204,22 @@ class SharedWorktree(unittest.TestCase):
         self.assertRegex(done.stdout, re.compile(r"^working: (feature/SHOP-9-refunds|not recorded yet)", re.M))
         self.assertNotIn("SHOP-7", done.stdout)
 
+    @unittest.skipIf(BASH is None, "no bash to run hooks with")
+    def test_the_session_start_names_the_worktrees_branch_and_where_its_memory_is(self):
+        payload = {"session_id": "worktree-start", "hook_event_name": "SessionStart", "source": "startup",
+                   "cwd": str(self.worktree)}
+        done = subprocess.run([BASH, (self.main / ".claude" / "hooks" / "local-context.sh").as_posix()],
+                              input=json.dumps(payload), cwd=self.worktree, env=self.shared,
+                              capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Branch: feature/SHOP-9-refunds", done.stdout)
+        # The root as the hook's shell spells it: /c/Users/... in Git Bash.
+        self.assertRegex(done.stdout, r"Accelerator: the installation in \S*/shop, whose memory this worktree shares")
+        self.assertNotIn("attached from", done.stdout)
+        # The worktree has no memory-bank/ of its own: the files are named
+        # where they are.
+        self.assertNotIn(" Read memory-bank/README.md", done.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

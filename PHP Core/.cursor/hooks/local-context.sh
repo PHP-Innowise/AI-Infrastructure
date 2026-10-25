@@ -27,8 +27,9 @@ if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${
   PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
   STATE_DIR=$ACCELERATOR_STATE_DIR
 fi
-if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
-  # Attached: describe the project the session works in, whatever the cwd.
+if [ "$PROJECT_DIR" != "$ROOT_DIR" ]; then
+  # Attached, or a worktree its main checkout's installation serves:
+  # describe the project the session works in, whatever the cwd.
   cd "$PROJECT_DIR" 2>/dev/null || exit 0
 fi
 if [ -f "$EDITION_DIR/VERSION" ]; then
@@ -59,6 +60,8 @@ fi
 if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
   echo "Accelerator: attached from $ROOT_DIR (nothing is installed in this project)."
   echo "Accelerator state (Project Brain, Memory Bank, index): $STATE_DIR"
+elif [ "$PROJECT_DIR" != "$ROOT_DIR" ]; then
+  echo "Accelerator: the installation in $ROOT_DIR, whose memory this worktree shares (Git gives the worktree none of it)."
 fi
 
 # Edit and repetition counts are session-scoped (loop-detection.sh and the
@@ -273,7 +276,7 @@ if [ -f "$ROOT_DIR/memory-bank/README.md" ] && [ -f "$STATE_DIR/memory-bank/INDE
       MEMORY_SUMMARY=$("${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/validate.py" --summary "$STATE_DIR/memory-bank" 2>/dev/null)
       [ -n "$MEMORY_SUMMARY" ] && cache_write memory-summary "$MEMORY_SUMMARY"
     fi
-    if [ "$STATE_DIR" = "$ROOT_DIR" ]; then
+    if [ "$PROJECT_DIR" = "$ROOT_DIR" ]; then
       echo "$MEMORY_SUMMARY Read memory-bank/README.md and INDEX.md before relevant durable-memory work."
     else
       echo "$MEMORY_SUMMARY Read $ROOT_DIR/memory-bank/README.md and $STATE_DIR/memory-bank/INDEX.md before relevant durable-memory work."

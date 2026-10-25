@@ -444,6 +444,7 @@ jobs:
           tests.test_cursor_review_recovery
           tests.test_cursor_generator_contract
           tests.test_memory_claude_subfolders
+          tests.test_memory_worktree_sessions
 
   harness-fleet:
     name: Offline Fleet runtime

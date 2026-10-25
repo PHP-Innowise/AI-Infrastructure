@@ -67,6 +67,12 @@ edition's own files remain in that edition's changelog.
   the worktree (`remember_worktree_index`), and a checkpoint removes the
   index of a worktree that is gone (`prune_worktree_indexes`, beside the
   consolidation and compaction it runs with).
+- The hooks tell a worktree from the root by `PROJECT_DIR`, not
+  `STATE_DIR`: `local-context.sh` describes the worktree, names the
+  installation whose memory it shares and the Memory Bank's files by
+  their full path, and `working-memory-read.sh` (with its mirrors' rule in
+  `context_retrieval.py`) gives the advice to build the index by hand only
+  in the root, where the command it names works.
 - Offline with the real Claude Code 2.1.278, in `.claude/worktrees/<name>`
   and in a folder of a worktree beside the project: project context,
   policy, a capsule with the worktree's own task, and the save into the

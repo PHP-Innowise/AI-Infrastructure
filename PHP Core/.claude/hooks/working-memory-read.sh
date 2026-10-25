@@ -309,7 +309,9 @@ if [ -z "$REPORT" ]; then
     echo "Memory refresh unavailable: it exceeded its ${BUDGET_SECONDS}s budget."
     # The first index of a large project can take longer than a prompt's
     # budget, and an index stopped there starts over on the next prompt.
-    if [ "$STATE_DIR" = "$ROOT_DIR" ]; then
+    # Installed, in the project root: run elsewhere - attached, or for a
+    # worktree its main checkout serves - the command needs the roots' variables.
+    if [ "$PROJECT_DIR" = "$ROOT_DIR" ]; then
       echo "If this repeats on every prompt, build the index once outside the hook: ${PYTHON[*]} memory-bank/scripts/context.py index"
     fi
   else
