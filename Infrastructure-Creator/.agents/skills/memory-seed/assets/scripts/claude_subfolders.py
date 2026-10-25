@@ -31,6 +31,7 @@ Usage: claude_subfolders.py < SESSION-START-INPUT
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -38,6 +39,7 @@ import shlex
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from claude_dispatch import DISPATCH_VERSION, POLICY_PARTS
@@ -145,20 +147,40 @@ def installed_version(helper: Path) -> int:
     return int(found.group(1)) if found else 0
 
 
-def exclusive(handle) -> None:
-    """Hold `handle`'s file for this process until it is closed."""
-    if os.name == "nt":
+@contextlib.contextmanager
+def exclusive(path: Path):
+    """Hold the lock file at `path` for this process inside the block."""
+    with open(path, "a+b") as handle:
+        if os.name != "nt":
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+            return
         import msvcrt
-        handle.seek(0)
-        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # retries for ten seconds, then raises
-    else:
-        import fcntl
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        # Windows: the first byte, polled briefly - LK_LOCK waits a second a
+        # try - and given back before the file is closed.
+        deadline = time.monotonic() + 30
+        while True:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def write_if_changed(path: Path, content: bytes, mode: int) -> bool:
+    """Write `content` at `path` unless it is already there (and, where file
+    modes exist, with `mode`), through a file put in place at once."""
     try:
-        if path.read_bytes() == content and stat.S_IMODE(path.stat().st_mode) == mode:
+        if path.read_bytes() == content and (os.name == "nt" or stat.S_IMODE(path.stat().st_mode) == mode):
             return False
     except OSError:
         pass
@@ -167,7 +189,16 @@ def write_if_changed(path: Path, content: bytes, mode: int) -> bool:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(content)
         os.chmod(name, mode)
-        os.replace(name, path)
+        for attempt in range(50):
+            try:
+                os.replace(name, path)
+                break
+            except PermissionError:
+                # Windows refuses to replace a file another process has
+                # open - a dispatcher reading the list - for a moment.
+                if os.name != "nt" or attempt == 49:
+                    raise
+                time.sleep(0.02)
     finally:
         if os.path.exists(name):
             os.unlink(name)
@@ -195,10 +226,6 @@ def main(argv: list) -> int:
             or hasattr(os, "getuid") and info.st_uid != os.getuid():
         return 0
     dispatcher = folder / DISPATCHER
-    # Another project's newer release put a newer dispatcher here: it stays.
-    if installed_version(folder / HELPER) <= DISPATCH_VERSION:
-        write_if_changed(dispatcher, (HERE / "claude_dispatch.sh").read_bytes(), 0o755)
-        write_if_changed(folder / HELPER, (HERE / "claude_dispatch.py").read_bytes(), 0o644)
     try:
         wanted = wanted_entries(settings, dispatcher)
     except (OSError, ValueError, AttributeError):
@@ -206,11 +233,14 @@ def main(argv: list) -> int:
     # A settings.json linked from elsewhere - a dotfiles checkout - is
     # written where it lives, and stays linked.
     user_settings = Path(os.path.realpath(config / "settings.json"))
-    with open(folder / ".lock", "a") as lock:
+    with exclusive(folder / ".lock"):
         # Sessions of two projects starting together each add their root and
-        # write the same entries: the lock keeps one from reading what the
+        # write the same files: the lock keeps one from reading what the
         # other has half written, or dropping its root.
-        exclusive(lock)
+        # Another project's newer release put a newer dispatcher here: it stays.
+        if installed_version(folder / HELPER) <= DISPATCH_VERSION:
+            write_if_changed(dispatcher, (HERE / "claude_dispatch.sh").read_bytes(), 0o755)
+            write_if_changed(folder / HELPER, (HERE / "claude_dispatch.py").read_bytes(), 0o644)
         projects = folder / "projects"
         try:
             listed = projects.read_text(encoding="utf-8").splitlines()

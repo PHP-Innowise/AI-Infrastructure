@@ -101,7 +101,7 @@
     ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "1cb1812e3d43c0bfd60983e385d84ea535e5a0769847ea9858ffe6dce00c3180",
     ".agents/skills/memory-seed/assets/scripts/claude_dispatch.py": "751cf9e8ef8448e8f76d05f280c83c8734bbbeebc84ef4db478134cafa3999b5",
     ".agents/skills/memory-seed/assets/scripts/claude_dispatch.sh": "b8342ef3017c2c6bfb5619bb5cc32a6c62422766d8b1c138f48d800daba2b659",
-    ".agents/skills/memory-seed/assets/scripts/claude_subfolders.py": "afac6986a289eaca42c35cb2a72a525b32f54a78d3c5b95c7b903110c4632e3e",
+    ".agents/skills/memory-seed/assets/scripts/claude_subfolders.py": "e8c25ccdd281f87aa7f18749bfa4f242b347653ab6a76327c4068b7688c6f136",
     ".agents/skills/memory-seed/assets/scripts/context.py": "fe023849c8602f5ff54664171c66f1270a9363320b1713a1c27e27b2b771549b",
     ".agents/skills/memory-seed/assets/scripts/context_cli.py": "ec874c9312133eafae8f16bc298fc011fb55579cb4b300453e81e3f31a4d0123",
     ".agents/skills/memory-seed/assets/scripts/context_continuity.py": "10324f7b38000615ee0ec72036a2a6fb3112e694544489e666ba388c93589ea5",
@@ -177,7 +177,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "d0648cf8690b8a6901c59369627a6d4733ad88e63703aeaf3d3f36a572e3d1d3",
+  "policy_digest": "0e2ad3f1ea7539b752569d6a189e931ecaebd32b0522ed8791c4eb0e45ecffa4",
   "release": "2.5.0",
   "schema_version": 1
 }

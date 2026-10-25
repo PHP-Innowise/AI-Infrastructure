@@ -740,8 +740,9 @@ blocked, or a hook times out.
     the same under `$CLAUDE_CONFIG_DIR`) lists the project root and
     `~/.claude/settings.json` holds `ai-accelerator-dispatch.sh` entries,
     `permissions` among them. If they are missing, start one session in the
-    root. Nothing is set up on Windows or while `~/.claude/ai-accelerator/off`
-    exists, and a folder of another Git checkout inside the project - a
+    root. Nothing is set up while `~/.claude/ai-accelerator/off` exists
+    (on Windows the dispatcher runs under Git Bash, as Claude Code's hooks
+    do), and a folder of another Git checkout inside the project - a
     worktree, a vendored repository - is that checkout's. To remove the
     dispatcher, create that `off` file and delete the entries from
     `settings.json`. Codex started in a subdirectory finds and runs the

@@ -28,6 +28,39 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Below the project root on Windows too; the dispatcher keeps its newest copy — 2026-10-25
+
+- Why: Claude Code on Windows runs hook commands with Git Bash, and the
+  dispatcher for sessions started below a project's root stayed off there:
+  its list holds roots as Python writes them (`C:\Users\me\shop`) while
+  Git Bash shows the session's folder as `/c/Users/me/shop`, a bare `bash`
+  started from Python is WSL's launcher, `python3` is often missing or the
+  Store's stand-in, and Windows names ignore case. And one dispatcher
+  serves every project of the person: a session in the root of a project
+  with an older release put an older dispatcher back.
+- What changes: the dispatcher compares roots in Git Bash's form without
+  regard to case, walks up by length so that a difference in case cannot
+  keep the walk from ending, runs the project's hooks with the bash it runs
+  in, and finds Python as the hooks do (`python`, `py -3`, `python3`). Its
+  helper runs a hook with Git for Windows' bash, compares paths and rule
+  paths without regard to case and across drives, and looks the import
+  approval up under the key Claude Code uses there (forward slashes). The
+  setup names the dispatcher with forward slashes, locks with `msvcrt` and
+  skips the owner check Windows lacks; the installer sets it up there too.
+  `DISPATCH_VERSION` keeps a newer dispatcher in place, and a fingerprint
+  test makes any change to its scripts raise it. The policy parts come only
+  where the project's `CLAUDE.md` imports `AGENTS.md`.
+- Tests: `tests/test_memory_claude_subfolders.py` runs in the Windows CI
+  job too, with Git Bash, skipping there only what needs symbolic links,
+  file modes, a pseudo-terminal or a JSON reader for `bash-validator.sh`.
+  Its first run there found the setup rewriting its files at every start
+  (Windows has no file modes to match) and dropping a root when six
+  projects started together (the dispatcher's files were written outside
+  the lock, and Windows refuses to replace a file another process reads):
+  every write is now under the lock, compared by content alone there, and
+  tried again for a moment when Windows refuses it. Claude Code itself was
+  not run on Windows.
+
 ### Below the project root Claude Code gets the project's permission rules and env — 2026-10-25
 
 - Why: the dispatcher of 9f854412 ran the project's hooks for a Claude Code

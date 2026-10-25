@@ -11,6 +11,10 @@ it at the top of every session.
 
 ## Unreleased
 
+- Claude Code started in a folder below the project root gets the project's hooks, rules, `env` and
+  policy on Windows too, under the Git Bash it runs hooks with. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
 - Claude Code started in a folder below the project root also gets the project's permission rules
   and `env` there, and the installer run in a terminal sets that up at once. Quick Start in
   `README.md` (`ACCELERATOR.md`) and `.claude/hooks/README.md` say so. Details in the root

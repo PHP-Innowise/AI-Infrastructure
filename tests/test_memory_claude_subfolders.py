@@ -719,8 +719,11 @@ class Dispatcher(Fixture):
                        "tool_input": {"command": command}, "cwd": str(start)}
             return self.run_dispatcher("bash-validator.sh", start, json.dumps(payload).encode())
 
-        save = (f"cd {root} && echo -E '{{\"progress\": \"The rollback runs DROP TABLE invoices.\"}}' | "
-                f"python3 memory-bank/scripts/context.py --root {root} native-result --request r --token t "
+        # As the runtime writes the step: the root through shlex.quote, so a
+        # Windows path keeps its backslashes.
+        quoted = shlex.quote(str(root))
+        save = (f"cd {quoted} && echo -E '{{\"progress\": \"The rollback runs DROP TABLE invoices.\"}}' | "
+                f"python3 memory-bank/scripts/context.py --root {quoted} native-result --request r --token t "
                 "--input - --json")
         done = call(save)
         self.assertEqual(done.returncode, 0, done.stderr)

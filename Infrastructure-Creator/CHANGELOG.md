@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded dispatcher runs on Windows and keeps its newest copy — 2026-10-25
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,
+  `claude_dispatch.sh` and `claude_subfolders.py` change in the asset; the
+  policy lock was rewritten.
+
 ### The seeded dispatcher carries the project's permission rules and env — 2026-10-25
 
 - As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,
