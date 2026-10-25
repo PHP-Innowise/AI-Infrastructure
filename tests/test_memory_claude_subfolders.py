@@ -845,6 +845,20 @@ class Worktrees(Fixture):
         self.assertEqual((shown(where), shown(named), home, state, served),
                          (shown(worktree), shown(worktree), "", "", ""))
 
+    def test_a_worktree_git_records_by_a_relative_path(self):
+        # Git 2.48 and later write both links relative under
+        # worktree.useRelativePaths.
+        root = self.committed()
+        inner = root / ".claude" / "worktrees" / "relative"
+        beside = self.base / "project-relative"
+        for path, branch in ((inner, "feature/relative"), (beside, "feature/beside")):
+            git(root, "-c", "worktree.useRelativePaths=true", "worktree", "add", "-q", str(path), "-b", branch)
+        if os.path.isabs((inner / ".git").read_text(encoding="utf-8").strip()[len("gitdir: "):]):
+            self.skipTest("this Git writes worktree links absolute")
+        for project in (inner, beside):
+            with self.subTest(project=project):
+                self.assert_served(self.run_dispatcher("echo.sh", project / "src" / "Billing"), root, project)
+
     def test_a_session_a_launcher_lends_an_accelerator_to_is_left_to_it(self):
         # The Harness's attached launch: its own hooks run through --settings.
         root = self.committed()
