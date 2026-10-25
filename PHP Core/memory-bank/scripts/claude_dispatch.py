@@ -8,6 +8,16 @@ command among them - gets the allow the project's permission rules give it
 in the root, which such a session does not read, so it is not asked about
 the save after every answer.
 
+permissions: the decision the project's permission rules - .claude/
+settings.json and settings.local.json, which Claude Code reads only in the
+root too - make there: a deny or an ask wherever they would, and an allow
+only for a file inside the root or a single plain command, so a session
+below the root is never let further than one in the root.
+
+environment: the project's `env` for the session's commands, through the
+file Claude Code names in CLAUDE_ENV_FILE at a session's start; the
+CLAUDE_ and ANTHROPIC_ ones set Claude Code itself, which no hook can.
+
 policy-N: part N of the project's AGENTS.md. Claude Code reaches it from
 .claude/CLAUDE.md through an import from outside the session's folder, which
 it asks about in a terminal and leaves out under -p. It keeps a hook's output
@@ -19,10 +29,12 @@ Usage: ai-accelerator-dispatch.py HOOK ROOT START, the hook's input on stdin.
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 INTERPRETERS = (["python3"], ["python"], ["py", "-3"])
 CLI = "memory-bank/scripts/context.py"
@@ -190,8 +202,283 @@ def policy(root: str, start: str, part: int) -> str:
     return header.format(path, part, count) + body
 
 
+# The tools a Read or an Edit rule covers, with the input naming the file.
+# Claude Code 2.1 refuses to write a file a Read rule denies, too.
+READ_TOOLS = {"Read": "file_path"}
+EDIT_TOOLS = {"Edit": "file_path", "Write": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
+OPERATORS = {"&&", "||", ";", "|", "&", "|&", ";;", "(", ")", "\n"}
+WRAPPERS = {"timeout", "time", "nice", "nohup", "stdbuf", "command", "builtin", "exec"}
+
+
+def project_rules(root: str) -> dict:
+    """The allow, ask and deny rules of the project's shared and local
+    settings, as Claude Code merges them for a session in the root."""
+    rules = {"allow": [], "ask": [], "deny": []}
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            data = json.loads((Path(root) / ".claude" / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        permissions = data.get("permissions") if isinstance(data, dict) else None
+        for kind in rules:
+            values = permissions.get(kind) if isinstance(permissions, dict) else None
+            rules[kind] += [value for value in values if isinstance(value, str)] if isinstance(values, list) else []
+    return rules
+
+
+def split_rule(rule: str):
+    """(tool, content) of `Tool(content)`; content None for a bare `Tool`."""
+    found = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_-]*)(?:\((.*)\))?\s*", rule, re.S)
+    return (found.group(1), found.group(2)) if found else (None, None)
+
+
+def glob_regex(glob: str) -> str:
+    parts, index = [], 0
+    while index < len(glob):
+        if glob.startswith("**/", index):
+            parts.append("(?:.*/)?")
+            index += 3
+        elif glob.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        else:
+            parts.append({"*": "[^/]*", "?": "[^/]"}.get(glob[index], re.escape(glob[index])))
+            index += 1
+    return "".join(parts)
+
+
+def path_rule(content: str, root: str):
+    """(base, regex, anchored, folder) of a Read or Edit rule's path, as
+    Claude Code 2.1 reads one in the project root: gitignore patterns from
+    the root, `/x` from the root, `//x` absolute, `~/x` from home. A pattern
+    with a / before its end is anchored to its base; a trailing `/` or
+    `/**` names a folder and is not one, so `secrets/**` matches a secrets
+    folder at any depth while `a/b/**` matches only the root's a/b."""
+    text = content.strip()
+    if text.startswith("//"):
+        base, text, anchored = os.sep, text[2:], True
+    elif text.startswith("~/"):
+        base, text, anchored = str(Path.home()), text[2:], True
+    elif text.startswith("/"):
+        base, text, anchored = root, text[1:], True
+    else:
+        base, anchored = root, None
+        if text.startswith("./"):
+            text = text[2:]
+    folder = False
+    if text.endswith("/**"):
+        text, folder = text[:-3], True
+    elif text.endswith("/"):
+        text, folder = text.rstrip("/"), True
+    if not text:
+        text, folder = "**", False
+    if anchored is None:
+        anchored = "/" in text
+    return base, re.compile(glob_regex(text)), anchored, folder
+
+
+def path_matches(content: str, path: str, root: str) -> bool:
+    """Whether the rule's path names `path` (absolute) or a folder holding it."""
+    base, regex, anchored, folder = path_rule(content, root)
+    relative = os.path.relpath(path, base) if base != os.sep else path.lstrip(os.sep)
+    if relative == "." or relative.startswith(".." + os.sep) or relative == ".." or os.path.isabs(relative):
+        return False
+    names = relative.replace(os.sep, "/").split("/")
+    for depth in range(1, len(names) + 1):
+        candidate = "/".join(names[:depth])
+        is_folder = depth < len(names) or os.path.isdir(path)
+        if folder and not is_folder:
+            continue
+        if regex.fullmatch(candidate if anchored else names[depth - 1]):
+            return True
+    return False
+
+
+def file_paths(tool_input: dict, key: str, start: str) -> list:
+    """The file a tool names, as written and with links resolved."""
+    value = tool_input.get(key)
+    if not isinstance(value, str) or not value or "\0" in value:
+        return []
+    path = os.path.normpath(value if os.path.isabs(value) else os.path.join(start, value))
+    return list(dict.fromkeys([path, os.path.realpath(path)]))
+
+
+def inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def words(command: str):
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def segments(command: str) -> list:
+    """The simple commands of `command`, each a list of words without its
+    leading variable assignments; those inside $(...) and backticks too."""
+    found = []
+    tokens = words(command.replace("\n", " ; "))
+    if tokens is None:
+        tokens = re.split(r"\s+|([;&|()])", command)
+        tokens = [token for token in tokens if token]
+    current = []
+    for token in tokens + [";"]:
+        punctuation = bool(token) and set(token) <= set("();<>|&")
+        if token in OPERATORS or punctuation and set(token) & set(";&|()"):
+            while current and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", current[0]):
+                current = current[1:]
+            if current:
+                found.append(current)
+            current = []
+        elif not punctuation:
+            # A redirection's < or > is left out; its target stays a word.
+            current.append(token)
+    for inner in re.findall(r"\$\(([^()]*)\)|`([^`]*)`", command):
+        found += segments(inner[0] or inner[1])
+    return found
+
+
+def unwrapped(segment: list) -> list:
+    while segment and segment[0] in WRAPPERS:
+        segment = segment[1:]
+        while segment and (segment[0].startswith("-") or re.fullmatch(r"[0-9.]+[smhd]?", segment[0])):
+            segment = segment[1:]
+    return segment
+
+
+def bash_matches(content: str, segment: list) -> bool:
+    if content.endswith(":*"):
+        prefix = words(content[:-2].strip())
+        return bool(prefix) and segment[:len(prefix)] == prefix
+    if "*" in content:
+        pattern = "".join(".*" if character == "*" else re.escape(character) for character in content.strip())
+        return re.fullmatch(pattern, " ".join(segment)) is not None
+    return " ".join(segment) == " ".join(content.split())
+
+
+def domain_matches(content: str, url: str) -> bool:
+    if not content.startswith("domain:"):
+        return False
+    domain, host = content[len("domain:"):].strip().lower(), (urlsplit(url).hostname or "").lower()
+    if domain.startswith("*."):
+        return host.endswith(domain[1:])
+    return bool(host) and host == domain
+
+
+def matches(rule: str, tool: str, tool_input: dict, root: str, start: str, allow: bool) -> bool:
+    """Whether `rule` covers this call; for an allow, only where nothing it
+    does could reach further than the same call in the root."""
+    rule_tool, content = split_rule(rule)
+    if rule_tool is None:
+        return False
+    if content is None:
+        return rule_tool == tool or (rule_tool.startswith("mcp__") and tool.startswith(rule_tool + "__"))
+    if rule_tool in ("Read", "Edit") and (tool in READ_TOOLS or tool in EDIT_TOOLS):
+        if rule_tool == "Edit" and tool not in EDIT_TOOLS:
+            return False
+        if rule_tool == "Read" and tool in EDIT_TOOLS and allow:
+            return False
+        paths = file_paths(tool_input, READ_TOOLS.get(tool) or EDIT_TOOLS[tool], start)
+        if allow:
+            return bool(paths) and all(inside(path, root) and path_matches(content, path, root) for path in paths)
+        return any(path_matches(content, path, root) for path in paths)
+    if rule_tool == "Bash" and tool == "Bash":
+        command = tool_input.get("command")
+        if not isinstance(command, str):
+            return False
+        if allow:
+            # One plain command, as the root's rule would let through.
+            parts = segments(command)
+            return plain(command) and len(parts) == 1 and bash_matches(content, parts[0])
+        return any(bash_matches(content, segment) or bash_matches(content, unwrapped(segment))
+                   for segment in segments(command))
+    if rule_tool in ("Agent", "Task") and tool in ("Agent", "Task") and not allow:
+        return tool_input.get("subagent_type") == content.strip()
+    if rule_tool == "WebFetch" and tool == "WebFetch":
+        url = tool_input.get("url")
+        return isinstance(url, str) and domain_matches(content, url)
+    return False
+
+
+def own_rules() -> list:
+    """The deny and ask rules of the person's own and the managed settings,
+    which Claude Code applies below the root by itself."""
+    folder = os.environ.get("CLAUDE_CONFIG_DIR")
+    sources = [Path(folder) / "settings.json" if folder else Path.home() / ".claude" / "settings.json",
+               Path("/etc/claude-code/managed-settings.json"),
+               Path("/Library/Application Support/ClaudeCode/managed-settings.json")]
+    found = []
+    for source in sources:
+        try:
+            data = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        permissions = data.get("permissions") if isinstance(data, dict) else None
+        for kind in ("deny", "ask"):
+            values = permissions.get(kind) if isinstance(permissions, dict) else None
+            found += [value for value in values if isinstance(value, str)] if isinstance(values, list) else []
+    return found
+
+
+def permission(payload: dict, root: str, start: str):
+    """The project's decision for this tool call in the root - deny, then
+    ask, then allow - as a PreToolUse answer, or None. An allow is never
+    given where the person's own or the managed settings deny or ask."""
+    tool, tool_input = payload.get("tool_name"), payload.get("tool_input")
+    if not isinstance(tool, str) or not isinstance(tool_input, dict):
+        return None
+    rules = project_rules(root)
+    for kind in ("deny", "ask", "allow"):
+        for rule in rules[kind]:
+            if matches(rule, tool, tool_input, root, start, allow=kind == "allow"):
+                if kind == "allow" and any(matches(own, tool, tool_input, base, start, allow=False)
+                                           for own in own_rules() for base in (root, start)):
+                    return None
+                answer = {"hookEventName": "PreToolUse", "permissionDecision": kind}
+                if kind == "deny":
+                    answer["permissionDecisionReason"] = (
+                        f"The project's settings deny this ({rule}), as they would in the project root.")
+                return {"hookSpecificOutput": answer}
+    return None
+
+
+def environment(root: str) -> list:
+    """`export` lines for the project's env, shared settings then local."""
+    values = {}
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            data = json.loads((Path(root) / ".claude" / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeError):
+            continue
+        env = data.get("env") if isinstance(data, dict) else None
+        for key, value in (env.items() if isinstance(env, dict) else ()):
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) and not key.startswith(("CLAUDE_", "ANTHROPIC_")) \
+                    and isinstance(value, (str, int, float, bool)):
+                values[key] = str(value).lower() if isinstance(value, bool) else str(value)
+    return [f"export {key}={shlex.quote(value)}" for key, value in values.items()]
+
+
 def main() -> int:
     hook, root, start = sys.argv[1:4]
+    if hook == "environment":
+        target = os.environ.get("CLAUDE_ENV_FILE")
+        lines = environment(root)
+        if target and lines:
+            with open(target, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        return 0
+    if hook == "permissions":
+        try:
+            payload = json.loads(sys.stdin.buffer.read() or b"{}")
+        except ValueError:
+            return 0
+        answer = permission(payload, root, start) if isinstance(payload, dict) else None
+        if answer:
+            print(json.dumps(answer))
+        return 0
     if hook.startswith("policy-"):
         number = hook[len("policy-"):]
         # UTF-8 whatever the locale: a policy's dash fails an ASCII one.

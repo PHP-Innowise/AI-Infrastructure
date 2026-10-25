@@ -876,6 +876,34 @@ SYNC_RELOCATED_FILES = {"README.md": ACCELERATOR_README}
 SYNC_MINIMUM_PRESENT = 10
 
 
+def claude_below_root(target: Path) -> None:
+    """Claude Code reads a project's settings only in the folder a session
+    starts in, and the project's first session in its root sets up what
+    serves the folders below it (memory-bank/scripts/claude_subfolders.py).
+    An install a person runs from the command line in a terminal - its
+    output through `tee` or not - does that at once, in the Claude Code
+    configuration folder this machine already has, so a first session started
+    below the root has the project's hooks too. Anything else - a test, a
+    bench, the Harness, an agent, a call into this module - leaves it to that
+    session, and never writes outside the project."""
+    script = target / "memory-bank" / "scripts" / "claude_subfolders.py"
+    if os.name == "nt" or not script.is_file() or not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return
+    try:
+        subprocess.run([sys.executable, str(script), "--install"], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    configured = os.environ.get("CLAUDE_CONFIG_DIR")
+    folder = (Path(configured) if configured else Path.home() / ".claude") / "ai-accelerator"
+    try:
+        listed = (folder / "projects").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return
+    if str(target.resolve()) in listed:
+        print(f"CLAUDE\tbelow-root\t{folder}", file=sys.stderr)
+
+
 def record_install(root: Path, edition: str, data: dict, target: Path, paths: list[tuple[str, Path]]) -> None:
     """Record what an install wrote, as `--sync` records what it writes.
 
@@ -2430,15 +2458,19 @@ def main() -> int:
             print(json.dumps(report, indent=1, ensure_ascii=False))
             return 1 if report["error"] else 0
         tools = list(dict.fromkeys(args.tool or TOOLS))
-        return install(
+        target = resolve_write_target(args.target)
+        code = install(
             root,
             args.edition,
-            resolve_write_target(args.target),
+            target,
             tools,
             args.dry_run,
             args.overwrite,
             args.merge_existing,
         )
+        if code == 0 and not args.dry_run and "claude" in tools:
+            claude_below_root(target)
+        return code
     except (InventoryError, OSError, subprocess.CalledProcessError) as error:
         print(f"install-accelerator: {error}", file=sys.stderr)
         return 1

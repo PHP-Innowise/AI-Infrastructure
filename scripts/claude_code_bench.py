@@ -37,6 +37,13 @@ session in DIR below it: the run passes when that session got the capsule
 and every line of the project's AGENTS.md in the conversation itself - not
 in a file Claude Code keeps an over-long hook output in - and its save lands.
 
+`--permissions` (with `--subfolder`, `src` by default) has the stand-in try
+the same reads, writes, commands and fetches in both sessions - secrets the
+project denies, files it allows, commands it denies or allows, the project's
+env, a domain it allows and one it does not - and passes when the session
+below the root got the decision the root got for every one (deny, ask or
+ran) and printed the same env.
+
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
 rehearsal's does, and `--sync` first brings it up to this clone. The saved
@@ -48,6 +55,7 @@ is never written.
   python3 scripts/claude_code_bench.py --mode dontAsk
   python3 scripts/claude_code_bench.py --queued 8
   python3 scripts/claude_code_bench.py --subfolder src
+  python3 scripts/claude_code_bench.py --permissions --mode bypassPermissions
   python3 scripts/claude_code_bench.py --attached
   python3 scripts/claude_code_bench.py --target ~/Desktop/next --sync
 """
@@ -103,6 +111,8 @@ class Scripted(BaseHTTPRequestHandler):
     # --queued: how long the save takes to write, and when it began.
     save_delay = 0.0
     save_begun = threading.Event()
+    # --permissions: the tool calls to try, one a turn, before answering.
+    probes: List[Dict[str, Any]] = []
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -178,6 +188,15 @@ class Scripted(BaseHTTPRequestHandler):
         since = messages[start + 1:]
         texts = [text_of(item.get("content")) for item in since]
         blocks = [block for item in since if isinstance(item.get("content"), list) for block in item["content"]]
+        probes = getattr(self, "probes", None)
+        if probes and MARKER not in "\n".join(texts):
+            issued = sum(1 for item in messages if item.get("role") == "assistant"
+                         and isinstance(item.get("content"), list) for block in item["content"]
+                         if isinstance(block, dict) and str(block.get("id", "")).startswith("toolu_probe_"))
+            if issued < len(probes):
+                probe = probes[issued]
+                return [{"type": "tool_use", "id": f"toolu_probe_{issued}", "name": probe["name"],
+                         "input": probe["input"]}], "tool_use", texts
         if start >= 0 and any(block.get("type") == "tool_result" for block in blocks):
             used = [block for block in messages[start].get("content", [])
                     if isinstance(block, dict) and block.get("type") == "tool_use"]
@@ -197,6 +216,90 @@ class Scripted(BaseHTTPRequestHandler):
                      "input": {"command": command, "description": "Save the turn's memory result"}}], "tool_use", texts
         return [{"type": "tool_use", "id": "toolu_read", "name": "Read",
                  "input": {"file_path": os.path.join(self.project, self.source)}}], "tool_use", texts
+
+
+def probe_calls(project: Path) -> List[Dict[str, Any]]:
+    """--permissions: what the stand-in tries, against the editions' rules."""
+    root = str(project)
+
+    def read(relative: str) -> Dict[str, Any]:
+        return {"name": "Read", "input": {"file_path": f"{root}/{relative}"}}
+
+    def bash(command: str) -> Dict[str, Any]:
+        return {"name": "Bash", "input": {"command": command, "description": "Probe"}}
+
+    return [read(".env"), read("src/.env"), read(".env.local"), read("secrets/key.txt"),
+            read("src/secrets/key.txt"), read("composer.json"), read("src/Invoice.php"),
+            {"name": "Read", "input": {"file_path": "/etc/hostname"}},
+            {"name": "Write", "input": {"file_path": f"{root}/notes.txt", "content": "Notes.\n"}},
+            # A new file: Claude Code asks to read an existing one before
+            # writing it, in some sessions before the permission check.
+            {"name": "Write", "input": {"file_path": f"{root}/.env.probe", "content": "PROBE=1\n"}},
+            bash("rm -rf build"), bash("sudo -n true"), bash("chmod 777 notes.txt"), bash("ls"),
+            bash("git status --short"), bash("echo probe && rm -rf build"),
+            # The project's env: where both sessions run it, both print the same.
+            dict(bash("printenv APP_ENV FORCE_COLOR"), same_output=True),
+            {"name": "WebFetch", "input": {"url": "https://github.com/", "prompt": "Title?"}},
+            {"name": "WebFetch", "input": {"url": "https://example.com/", "prompt": "Title?"}}]
+
+
+def verdict(text: str) -> str:
+    """deny, ask or ran, from what Claude Code answered a probe with."""
+    if re.search(r"denied by your permission|has been denied|project's settings deny|covered by a Read deny", text):
+        return "deny"
+    if re.search(r"haven't granted|requires approval", text):
+        return "ask"
+    return "ran"
+
+
+def probe_session(args: argparse.Namespace, cwd: Path, env: Dict[str, str], mode: List[str]) -> List[str]:
+    """Each probe's verdict; a probe marked same_output carries its output."""
+    Scripted.requests.clear()  # each session has the stand-in's loop guard to itself
+    done = subprocess.run([args.claude, "-p", "Try the probes.", "--output-format", "stream-json", "--verbose", *mode],
+                          cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                          timeout=args.timeout)
+    found: Dict[int, str] = {}
+    for line in done.stdout.splitlines():
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        message = item.get("message") if isinstance(item, dict) else None
+        for block in message.get("content") if isinstance(message, dict) and isinstance(message.get("content"), list) else []:
+            if isinstance(block, dict) and block.get("type") == "tool_result" \
+                    and str(block.get("tool_use_id", "")).startswith("toolu_probe_"):
+                index = int(block["tool_use_id"].rsplit("_", 1)[1])
+                found[index] = verdict(text_of([block]))
+                if found[index] == "ran" and index < len(Scripted.probes) and Scripted.probes[index].get("same_output"):
+                    found[index] += ": " + " ".join(text_of([block]).split())
+    return [found.get(index, "missing") for index in range(len(Scripted.probes))]
+
+
+def permission_run(args: argparse.Namespace, work: Path, project: Path, env: Dict[str, str], mode: List[str]) -> int:
+    """--permissions: the same probes in the root and below it."""
+    for relative, text in ((".env", "A=1\n"), ("src/.env", "B=2\n"), (".env.local", "C=3\n"),
+                           ("secrets/key.txt", "key\n"), ("src/secrets/key.txt", "key\n")):
+        (project / relative).parent.mkdir(parents=True, exist_ok=True)
+        (project / relative).write_text(text, encoding="utf-8")
+    Scripted.probes = probe_calls(project)
+    in_root = probe_session(args, project, env, mode)
+    listed = work / "home/.claude/ai-accelerator/projects"
+    deadline = time.time() + 15
+    while time.time() < deadline and str(project) not in (listed.read_text().splitlines() if listed.exists() else []):
+        time.sleep(0.2)
+    (project / "notes.txt").unlink(missing_ok=True)
+    below_cwd = project / args.subfolder
+    below_cwd.mkdir(parents=True, exist_ok=True)
+    below = probe_session(args, below_cwd, env, mode)
+    labels = [f"{probe['name']} {probe['input'].get('file_path') or probe['input'].get('command') or probe['input'].get('url')}"
+              .replace(str(project), "<root>") for probe in Scripted.probes]
+    differ = [f"{label}: root {first}, {args.subfolder} {second}"
+              for label, first, second in zip(labels, in_root, below) if first != second]
+    report = {"claude": args.claude, "version": version(args.claude), "mode": args.mode, "started_in": args.subfolder,
+              "probes": dict(zip(labels, in_root)), "differ": differ,
+              "ok": not differ and "missing" not in in_root + below}
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["ok"] else 1
 
 
 def text_of(content: Any) -> str:
@@ -412,6 +515,8 @@ def inside(args: argparse.Namespace) -> int:
         overlay = json.loads((work / "overlay.json").read_text(encoding="utf-8"))
         env.update(overlay["environment"])
         lent = ["--settings", json.dumps(overlay["settings"]), *overlay["arguments"]]
+    if args.permissions:
+        return permission_run(args, work, project, env, mode)
     journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     screen = ""
     first_lines = 0
@@ -534,6 +639,8 @@ def main() -> int:
     parser.add_argument("--mode", choices=MODES, default="default", help="the permission mode to run")
     parser.add_argument("--subfolder", metavar="DIR", default=None,
                         help="after a session in the project root, run the measured one in DIR below it")
+    parser.add_argument("--permissions", action="store_true",
+                        help="try the same tool calls in the root and below it, and compare the decisions")
     parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
                         help="in Claude Code's terminal, type a second question while the save, which the "
                              "stand-in takes SECONDS to write, is in flight")
@@ -559,6 +666,12 @@ def main() -> int:
     if args.queued is not None and args.mode == "plan":
         print("claude_code_bench: plan mode asks for no save, so there is none to type a question during; "
               "--queued takes no --mode plan", file=sys.stderr)
+        return 2
+    if args.permissions and args.subfolder is None:
+        args.subfolder = "src"
+    if args.permissions and args.target:
+        print("claude_code_bench: --permissions writes probe files into the project; it takes no --target",
+              file=sys.stderr)
         return 2
     if args.subfolder is not None and (args.queued is not None or args.attached is not None or args.mode == "plan"):
         print("claude_code_bench: --subfolder runs two sessions with -p in an installed project and expects a "
@@ -598,6 +711,7 @@ def main() -> int:
                                *(["--attached", args.attached] if args.attached else []),
                                *(["--queued", str(args.queued)] if args.queued is not None else []),
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
+                               *(["--permissions"] if args.permissions else []),
                                "--timeout", str(args.timeout)],
                               timeout=args.timeout + 60)
         if args.keep:

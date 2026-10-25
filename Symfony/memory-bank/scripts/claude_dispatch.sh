@@ -11,9 +11,11 @@
 # in the project), and lists the root in the `projects` file beside it.
 # A session started in the root runs the project's own hooks and this exits
 # at once, as it does for a folder below no listed root and for a folder of
-# another Git checkout inside one. The entries named policy-1, policy-2, ...
-# bring the project's AGENTS.md in parts. A file named `off` beside this
-# script turns it off for good.
+# another Git checkout inside one. The entry named permissions makes the
+# decisions the project's permission rules make in the root, environment
+# gives the session's commands the project's env, and those named policy-1,
+# policy-2, ... bring the project's AGENTS.md in parts. A file named `off`
+# beside this script turns it off for good.
 hook=${1:-}
 case "$hook" in ''|*/*|.*) exit 0 ;; esac
 # Every session of the person runs this for every hook: nothing below starts
@@ -29,6 +31,7 @@ done < "$here/projects"
 [ -n "$root" ] || exit 0
 case "$hook" in
   policy-*) needed=AGENTS.md ;;
+  permissions|environment) needed=.claude/settings.json ;;
   *) needed=.claude/hooks/$hook ;;
 esac
 [ -f "$root/memory-bank/scripts/context.py" ] && [ -f "$root/$needed" ] || exit 0
@@ -46,13 +49,13 @@ top=$(git -C "$start" rev-parse --show-toplevel 2>/dev/null) && case "$top" in "
 cd -- "$root" || exit 0
 export CLAUDE_PROJECT_DIR="$root"
 case "$hook" in
-  bash-validator.sh|policy-*)
+  bash-validator.sh|permissions|environment|policy-*)
     # The guard's verdict plus what the project's permission rules allow,
-    # and the policy its .claude/CLAUDE.md imports: what a session started
-    # in the root has.
+    # the decisions those rules make, and the policy its .claude/CLAUDE.md
+    # imports: what a session started in the root has.
     if command -v python3 > /dev/null 2>&1; then
       exec python3 "$here/ai-accelerator-dispatch.py" "$hook" "$root" "$start"
     fi ;;
 esac
-case "$hook" in policy-*) exit 0 ;; esac
+case "$hook" in permissions|environment|policy-*) exit 0 ;; esac
 exec bash "$root/.claude/hooks/$hook"

@@ -730,23 +730,25 @@ blocked, or a hook times out.
     learning). From the repository, `python3 scripts/memory_eval.py realized
     --project DIR` counts the lines per host.
 11. Hooks that run in one Claude Code session and not in another - no
-    capsule, no save, no `bash-validator.sh` - while no hook reports an
-    error: check the folder the session started in. Claude Code reads
-    `.claude/settings.json`, with the hooks and the permission rules, only
-    from the folder it starts in. For a folder below the root a dispatcher
-    in your own Claude Code configuration runs the project's hooks, and a
-    session in the root sets it up: `~/.claude/ai-accelerator/projects` (or
+    capsule, no save, no `bash-validator.sh` - or files the project denies
+    read in one, while no hook reports an error: check the folder the session
+    started in. Claude Code reads `.claude/settings.json`, with the hooks,
+    the permission rules and `env`, only from the folder it starts in. For a
+    folder below the root a dispatcher in your own Claude Code configuration
+    gives the session all of them; the installer run in a terminal and a
+    session in the root set it up: `~/.claude/ai-accelerator/projects` (or
     the same under `$CLAUDE_CONFIG_DIR`) lists the project root and
-    `~/.claude/settings.json` holds `ai-accelerator-dispatch.sh` entries.
-    If they are missing, start one session in the root. Nothing is set up on
-    Windows or while `~/.claude/ai-accelerator/off` exists, and a folder of
-    another Git checkout inside the project - a worktree, a vendored
-    repository - is that checkout's. To remove the dispatcher, create that
-    `off` file and delete the entries from `settings.json`. Codex started
-    in a subdirectory finds and runs the project's hooks; its sandbox writes
-    only below that folder, so the save waits in a temporary folder
-    (`ai-accelerator-native-spool-<uid>`) and the next hook saves it
-    (journal `save` `spooled`, then `saved` with code `spooled`).
+    `~/.claude/settings.json` holds `ai-accelerator-dispatch.sh` entries,
+    `permissions` among them. If they are missing, start one session in the
+    root. Nothing is set up on Windows or while `~/.claude/ai-accelerator/off`
+    exists, and a folder of another Git checkout inside the project - a
+    worktree, a vendored repository - is that checkout's. To remove the
+    dispatcher, create that `off` file and delete the entries from
+    `settings.json`. Codex started in a subdirectory finds and runs the
+    project's hooks; its sandbox writes only below that folder, so the save
+    waits in a temporary folder (`ai-accelerator-native-spool-<uid>`) and the
+    next hook saves it (journal `save` `spooled`, then `saved` with code
+    `spooled`).
 
 ### Recover
 

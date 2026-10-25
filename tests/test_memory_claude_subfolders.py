@@ -263,6 +263,150 @@ class MemoryCommand(unittest.TestCase):
         self.assertFalse(dispatch.memory_command(None, self.ROOT))
 
 
+class Permissions(Fixture):
+    """The project's permission rules below the root, as Claude Code 2.1.278
+    applies them in the root (probed offline with the real binary)."""
+
+    def test_path_patterns_match_as_claude_code_matches_them_in_the_root(self):
+        root = self.base / "shop"
+        home = Path.home()
+        cases = {
+            # rule: (paths it denies, paths it does not), relative to the root
+            "./alpha/**": (["alpha/a.txt", "sub/alpha/a.txt"], ["alpha.txt"]),
+            "zeta/**": (["zeta/z.txt", "sub/zeta/z.txt"], []),
+            "h1*/**": (["h1z/x.txt", "s/h1z/x.txt"], []),
+            "c2/": (["c2/x.txt", "s/c2/x.txt"], []),
+            "beta/x.txt": (["beta/x.txt"], ["sub/beta/x.txt"]),
+            "/gamma/**": (["gamma/g.txt"], ["sub/gamma/g.txt"]),
+            "a1/b1/**": (["a1/b1/x.txt"], ["s/a1/b1/x.txt"]),
+            "c1/*": (["c1/x.txt", "c1/n/x.txt"], ["s/c1/x.txt"]),
+            "./d1/e1.txt": (["d1/e1.txt"], ["s/d1/e1.txt"]),
+            "f1/**/g1.txt": (["f1/q/g1.txt"], ["s/f1/q/g1.txt"]),
+            "delta": (["delta/d.txt", "sub/delta/d.txt"], []),
+            "**/eps.txt": (["eps.txt", "sub/eps.txt"], []),
+            "*.key": (["a.key", "sub/b.key"], ["a.keys"]),
+            ".env": ([".env", "src/.env"], [".envrc"]),
+            ".env.*": ([".env.local"], [".env"]),
+            "./secrets/**": (["secrets/key.txt", "src/secrets/key.txt"], ["secrets.txt"]),
+            "**": (["composer.json", "src/Invoice.php"], []),
+        }
+        for rule, (denied, kept) in cases.items():
+            for relative in denied:
+                with self.subTest(rule=rule, path=relative):
+                    self.assertTrue(dispatch.path_matches(rule, str(root / relative), str(root)))
+            for relative in kept:
+                with self.subTest(rule=rule, path=relative):
+                    self.assertFalse(dispatch.path_matches(rule, str(root / relative), str(root)))
+        # A relative rule never reaches outside the root; // and ~/ do.
+        self.assertFalse(dispatch.path_matches(".env", str(self.base / "outside" / ".env"), str(root)))
+        self.assertTrue(dispatch.path_matches("//" + str(self.base / "outside" / "abs.txt").lstrip("/"),
+                                              str(self.base / "outside" / "abs.txt"), str(root)))
+        self.assertTrue(dispatch.path_matches("~/homefile.txt", str(home / "homefile.txt"), str(root)))
+
+    def decide(self, root, tool, tool_input, start=None):
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config)}):
+            answer = dispatch.permission({"tool_name": tool, "tool_input": tool_input}, str(root),
+                                         str(start or root / "src"))
+        return answer["hookSpecificOutput"]["permissionDecision"] if answer else None
+
+    def edition_project(self):
+        root = self.project(policy="# Policy\n")
+        for relative in (".env", "src/.env", "secrets/key.txt", "composer.json", "src/Invoice.php"):
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text("x\n", encoding="utf-8")
+        return root
+
+    def test_the_editions_rules_decide_below_the_root_as_in_it(self):
+        root = self.edition_project()
+        read, write = (lambda path: {"file_path": str(path)}), (lambda path: {"file_path": str(path), "content": "x"})
+        cases = [
+            ("Read", read(root / ".env"), "deny"), ("Read", read(root / "src/.env"), "deny"),
+            ("Read", read(root / ".env.local"), "deny"), ("Read", read(root / "secrets/key.txt"), "deny"),
+            ("Read", read(root / "src/secrets/key.txt"), "deny"), ("Read", read(root / "composer.json"), "allow"),
+            ("Read", read(root / "src/Invoice.php"), "allow"), ("Read", read("/etc/hostname"), None),
+            ("Write", write(root / "notes.txt"), "allow"), ("Write", write(root / ".env"), "deny"),
+            ("Edit", {"file_path": str(root / ".env"), "old_string": "x", "new_string": "y"}, "deny"),
+            ("NotebookEdit", {"notebook_path": str(root / "src/.env"), "new_source": "x"}, "deny"),
+            ("Write", write(self.base / "elsewhere.txt"), None),
+            ("Read", {"file_path": "../composer.json"}, "allow"),
+            ("Bash", {"command": "rm -rf build"}, "deny"), ("Bash", {"command": "sudo -n true"}, "deny"),
+            ("Bash", {"command": "chmod 777 notes.txt"}, "deny"), ("Bash", {"command": "echo hi && rm -rf build"}, "deny"),
+            ("Bash", {"command": "FOO=1 timeout 5 sudo ls"}, "deny"), ("Bash", {"command": "echo $(sudo id)"}, "deny"),
+            ("Bash", {"command": "ls"}, "allow"), ("Bash", {"command": "php -v"}, "allow"),
+            ("Bash", {"command": "git status --short"}, "allow"),
+            ("Bash", {"command": "php -v && ls"}, None), ("Bash", {"command": "git log > out.txt"}, None),
+            ("Bash", {"command": "php $(id)"}, None), ("Bash", {"command": "phpunit"}, None),
+            ("WebFetch", {"url": "https://github.com/x", "prompt": "p"}, "allow"),
+            ("WebFetch", {"url": "https://api.github.com/x", "prompt": "p"}, "allow"),
+            ("WebFetch", {"url": "https://example.com/", "prompt": "p"}, None),
+            ("WebFetch", {"url": "https://github.com.example.com/", "prompt": "p"}, None),
+            ("Agent", {"subagent_type": "Explore", "prompt": "p"}, "deny"),
+            ("Agent", {"subagent_type": "php-reviewer", "prompt": "p"}, None),
+            ("TodoWrite", {"todos": []}, None),
+        ]
+        for tool, tool_input, expected in cases:
+            with self.subTest(tool=tool, tool_input=tool_input):
+                self.assertEqual(self.decide(root, tool, tool_input), expected)
+
+    def test_local_rules_count_and_the_persons_own_are_never_overridden(self):
+        root = self.edition_project()
+        (root / ".claude" / "settings.local.json").write_text(json.dumps({"permissions": {
+            "deny": ["Read(notes/**)"], "ask": ["Bash(git push:*)"]}}), encoding="utf-8")
+        (root / "notes").mkdir()
+        self.assertEqual(self.decide(root, "Read", {"file_path": str(root / "notes/a.md")}), "deny")
+        self.assertEqual(self.decide(root, "Bash", {"command": "git push origin main"}), "ask")
+        (self.config / "settings.json").write_text(json.dumps({"permissions": {
+            "deny": ["Read(composer.json)"], "ask": ["Bash(php:*)"]}}), encoding="utf-8")
+        self.assertIsNone(self.decide(root, "Read", {"file_path": str(root / "composer.json")}))
+        self.assertIsNone(self.decide(root, "Bash", {"command": "php -v"}))
+        self.assertEqual(self.decide(root, "Read", {"file_path": str(root / "src/Invoice.php")}), "allow")
+
+    def test_a_link_counts_by_where_it_leads(self):
+        root = self.edition_project()
+        (root / "src" / "out").symlink_to(self.base / "home")
+        (root / "src" / "env-link").symlink_to(root / ".env")
+        self.assertIsNone(self.decide(root, "Read", {"file_path": str(root / "src/out/x.txt")}))
+        self.assertEqual(self.decide(root, "Read", {"file_path": str(root / "src/env-link")}), "deny")
+
+    def test_the_dispatcher_answers_for_the_project_below_the_root(self):
+        root = self.edition_project()
+        self.setup_dispatcher(root)
+        payload = {"tool_name": "Read", "tool_input": {"file_path": str(root / ".env")}}
+        done = self.run_dispatcher("permissions", root / "src", json.dumps(payload).encode())
+        self.assertEqual(done.returncode, 0, done.stderr)
+        answer = json.loads(done.stdout)["hookSpecificOutput"]
+        self.assertEqual(answer["permissionDecision"], "deny")
+        self.assertIn("Read(.env)", answer["permissionDecisionReason"])
+        self.assertEqual(self.run_dispatcher("permissions", root, json.dumps(payload).encode()).stdout, b"",
+                         "in the root Claude Code applies the rules itself")
+        self.assertEqual(self.run_dispatcher("permissions", root / "src", b"not json").stdout, b"")
+
+
+class Environment(Fixture):
+    def test_the_projects_env_reaches_the_commands_below_the_root(self):
+        root = self.project(policy="# Policy\n")
+        settings = json.loads((root / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        settings["env"] = {"APP_ENV": "local", "FORCE_COLOR": "1", "QUOTED": "it's $HOME", "FLAG": True,
+                           "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1", "ANTHROPIC_MODEL": "x", "bad-key": "x"}
+        (root / ".claude" / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+        (root / ".claude" / "settings.local.json").write_text(json.dumps({"env": {"APP_ENV": "testing"}}),
+                                                               encoding="utf-8")
+        self.assertEqual(dispatch.environment(str(root)), [
+            "export APP_ENV=testing", "export FORCE_COLOR=1", "export QUOTED='it'\"'\"'s $HOME'",
+            "export FLAG=true"])
+        self.setup_dispatcher(root)
+        target = self.base / "session.env"
+        self.env["CLAUDE_ENV_FILE"] = str(target)
+        done = self.run_dispatcher("environment", root / "src")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        shown = subprocess.run(["bash", "-c", f"source {shlex.quote(str(target))}; printf '%s|%s' \"$APP_ENV\" \"$QUOTED\""],
+                               capture_output=True, text=True, env=self.env)
+        self.assertEqual(shown.stdout, "testing|it's $HOME")
+        target.unlink()
+        self.run_dispatcher("environment", root)
+        self.assertFalse(target.exists(), "in the root Claude Code sets the env itself")
+
+
 class Setup(Fixture):
     def test_a_root_session_installs_the_dispatcher_once(self):
         root = self.project(policy="# Policy\n")
@@ -282,6 +426,8 @@ class Setup(Fixture):
                     if hook["command"].startswith('"${CLAUDE_PROJECT_DIR}"/.claude/hooks/'):
                         expected.append((event, group.get("matcher", ""), hook["command"].rsplit("/", 1)[1],
                                          hook.get("timeout")))
+        expected.append(("PreToolUse", "", "permissions", 10))
+        expected.append(("SessionStart", "", "environment", 10))
         expected += [("SessionStart", "", f"policy-{part}", 10) for part in range(1, dispatch.POLICY_PARTS + 1)]
         self.assertEqual(sorted(self.dispatched()), sorted(expected))
         before = (self.config / "settings.json").stat().st_mtime_ns, (self.config / "settings.json").read_bytes()
@@ -493,6 +639,90 @@ class Dispatcher(Fixture):
         self.assertNotIn(b"allow", done.stdout)
 
 
+class InstallTime(Fixture):
+    """A person installing in a terminal gets the dispatcher at once; a
+    scripted install leaves it to the project's first session in its root."""
+
+    def install(self, target, terminal):
+        command = [sys.executable, str(ROOT / "scripts" / "install_accelerator.py"), "--edition", "PHP Core",
+                   "--target", str(target)]
+        if not terminal:
+            done = subprocess.run(command, env=self.env, cwd=ROOT, capture_output=True, text=True,
+                                  stdin=subprocess.DEVNULL, timeout=300)
+            return done.returncode, done.stdout + done.stderr
+        import pty
+        leader, follower = pty.openpty()
+        # "stderr-and-stdin": stdout goes elsewhere, as `| tee` sends it.
+        piped = open(self.base / "stdout.txt", "wb") if terminal == "stderr-and-stdin" else None
+        process = subprocess.Popen(command, stdin=follower, stdout=piped or follower, stderr=follower, env=self.env,
+                                   cwd=ROOT)
+        os.close(follower)
+        output = b""
+        while True:
+            try:
+                chunk = os.read(leader, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+        os.close(leader)
+        code = process.wait(timeout=300)
+        if piped:
+            piped.close()
+            output += (self.base / "stdout.txt").read_bytes()
+        return code, output.decode("utf-8", "replace")
+
+    def target(self):
+        target = self.base / "shop"
+        target.mkdir()
+        git(target, "init", "-q")
+        return target
+
+    def test_a_person_installing_in_a_terminal_gets_the_dispatcher_at_once(self):
+        target = self.target()
+        code, output = self.install(target, terminal=True)
+        self.assertEqual(code, 0, output[-2000:])
+        self.assertIn("CLAUDE\tbelow-root\t" + str(self.config / "ai-accelerator"), output)
+        listed = (self.config / "ai-accelerator" / "projects").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(listed, [str(target.resolve())])
+        self.assertIn(("PreToolUse", "", "permissions", 10), self.dispatched())
+
+    def test_a_scripted_install_leaves_it_to_the_first_session_in_the_root(self):
+        target = self.target()
+        code, output = self.install(target, terminal=False)
+        self.assertEqual(code, 0, output[-2000:])
+        self.assertNotIn("below-root", output)
+        self.assertFalse((self.config / "ai-accelerator").exists())
+        self.assertFalse((self.config / "settings.json").exists())
+
+    def test_a_call_into_the_module_never_writes_outside_the_project(self):
+        spec = importlib.util.spec_from_file_location("installer_under_test", ROOT / "scripts" / "install_accelerator.py")
+        installer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(installer)
+        target = self.target()
+        with open(os.devnull, "w") as quiet, mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config)}), \
+                mock.patch.object(sys.stdin, "isatty", return_value=True), \
+                mock.patch.object(sys.stderr, "isatty", return_value=True), mock.patch("sys.stdout", new=quiet):
+            self.assertEqual(installer.install(ROOT, "PHP Core", target, ["claude"], False, False, False), 0)
+        self.assertFalse((self.config / "ai-accelerator").exists())
+
+    def test_output_through_tee_still_counts_as_a_terminal(self):
+        target = self.target()
+        code, output = self.install(target, terminal="stderr-and-stdin")
+        self.assertEqual(code, 0, output[-2000:])
+        self.assertIn("CLAUDE\tbelow-root", output)
+        self.assertTrue((self.config / "ai-accelerator" / "projects").is_file())
+
+    def test_nothing_without_a_claude_code_configuration_folder(self):
+        shutil.rmtree(self.config)
+        target = self.target()
+        code, output = self.install(target, terminal=True)
+        self.assertEqual(code, 0, output[-2000:])
+        self.assertNotIn("below-root", output)
+        self.assertFalse(self.config.exists())
+
+
 @unittest.skipIf(os.name == "nt", "the dispatcher is not set up on Windows")
 class RootSession(Fixture):
     def test_the_root_sessions_start_hook_sets_it_up_and_a_folder_below_gets_the_banner(self):
@@ -516,7 +746,9 @@ class RootSession(Fixture):
         while time.time() < deadline and not (settings.exists() and self.dispatched()):
             time.sleep(0.2)
         self.assertIn(("SessionStart", "", "local-context.sh", 10), self.dispatched())
-        done = self.run_dispatcher("local-context.sh", root / "src", payload)
+        # Without a transcript the hook's own setup, in the background again,
+        # writes nothing while the test's folder is removed.
+        done = self.run_dispatcher("local-context.sh", root / "src", b'{"hook_event_name": "SessionStart"}')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn(b"Project Context", done.stdout)
         policy = self.run_dispatcher("policy-1", root / "src").stdout.decode("utf-8")

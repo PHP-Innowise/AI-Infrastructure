@@ -99,9 +99,9 @@
     ".agents/skills/memory-seed/assets/runtime-contract.json": "64522a0fa2fab417e806fc4be611e3f25e97a844256607f449f5d911f2684e4a",
     ".agents/skills/memory-seed/assets/scripts/automatic_query.py": "13e09d26050f26bf4ba15af6c034ea236c1b2ee85c0fa7937f399f27e1987933",
     ".agents/skills/memory-seed/assets/scripts/brain_runtime.py": "1cb1812e3d43c0bfd60983e385d84ea535e5a0769847ea9858ffe6dce00c3180",
-    ".agents/skills/memory-seed/assets/scripts/claude_dispatch.py": "15dd4eb373d66bad4b5a2bfd6f97f11b68014faed9ffdc0ac6b490a94cbe547b",
-    ".agents/skills/memory-seed/assets/scripts/claude_dispatch.sh": "7514e9a9d821030afcb733082a1bd71dd2c2c3fa675cae4e1120212bcb2c71bd",
-    ".agents/skills/memory-seed/assets/scripts/claude_subfolders.py": "11f0222cb8b231a2c7499524d66a66cbe26400c5e16dba18e0a59b717c0b04a4",
+    ".agents/skills/memory-seed/assets/scripts/claude_dispatch.py": "fbf7996327c677d2f8390dd92a91a199a99f31cbe2f869da3b00d68ac919afd2",
+    ".agents/skills/memory-seed/assets/scripts/claude_dispatch.sh": "efc080edace262819aaa081e8590ccd0618972d9299a841795e4050e7bc19c2b",
+    ".agents/skills/memory-seed/assets/scripts/claude_subfolders.py": "3c2c4778a1fe9641a41e4a83689a949382ff15a51054bd9aaa32a82b92640007",
     ".agents/skills/memory-seed/assets/scripts/context.py": "fe023849c8602f5ff54664171c66f1270a9363320b1713a1c27e27b2b771549b",
     ".agents/skills/memory-seed/assets/scripts/context_cli.py": "ec874c9312133eafae8f16bc298fc011fb55579cb4b300453e81e3f31a4d0123",
     ".agents/skills/memory-seed/assets/scripts/context_continuity.py": "10324f7b38000615ee0ec72036a2a6fb3112e694544489e666ba388c93589ea5",
@@ -177,7 +177,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "e5a04dec11da8cd58cedaf8dbf671e6f67a4ac635ad50fc46e8ab8ac8643d128",
+  "policy_digest": "34cd6eff9b7e2c9f5f55e1c76fd134f9c594efe99b3b9cfde2dd44ec567a0624",
   "release": "2.5.0",
   "schema_version": 1
 }

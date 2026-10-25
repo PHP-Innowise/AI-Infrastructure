@@ -28,6 +28,44 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Below the project root Claude Code gets the project's permission rules and env — 2026-10-25
+
+- Why: the dispatcher of 9f854412 ran the project's hooks for a Claude Code
+  session started below the root, but Claude Code applies the project's
+  permission rules and `env` only to a session started in it. Offline on
+  2.1.278, a session in `src/` in `bypassPermissions` read and edited
+  `.env`, read `secrets/` and ran `rm -rf`, `sudo` and `chmod 777`, all of
+  which the root denies; in `default` it was asked about reads, writes, `php`
+  and a fetch the project allows; and its commands lacked `APP_ENV`. The
+  dispatcher was set up only by a first session in the root.
+- What changes: a `permissions` entry answers every tool call below a listed
+  root with the decision the project's `settings.json` and
+  `settings.local.json` make in the root - a deny or an ask wherever they
+  would, an allow only for a file inside the root or a single plain command,
+  and none against a deny or ask of the person's own or the managed
+  settings. Read and Edit paths match as Claude Code 2.1.278 matches them in
+  the root, probed with the real binary: gitignore patterns from the root,
+  where a trailing `/` or `/**` names a folder at any depth and a pattern
+  with another `/` is anchored. Bash rules count for every command of a
+  compound one, Agent rules by subagent type, WebFetch ones by domain. An
+  `environment` entry writes the project's `env`, but the `CLAUDE_` and
+  `ANTHROPIC_` variables, into the file Claude Code names in
+  `CLAUDE_ENV_FILE`. The installer, run from the command line in a terminal
+  (stdin and stderr a terminal, `| tee` included), sets the dispatcher up at
+  once and says so on stderr; a test, a bench, the Harness or a call into the
+  module never writes outside the project. Windows stays without it: its
+  hooks run through Git Bash, with paths, Python and `bash` this could not
+  be checked against here.
+- Tests: `tests/test_memory_claude_subfolders.py`, now 38 cases: the path
+  patterns as probed, the editions' rules decided below the root as in it,
+  local rules, the person's own rules, links, the dispatcher's answer, the
+  env export, and the install from a terminal, through `tee`, from a script,
+  as a module call and without a configuration folder. Mutations of the
+  matching fail them. `scripts/claude_code_bench.py --permissions` tries
+  nineteen tool calls in the root and in `src/`: the same decisions in
+  `default`, `acceptEdits` and `bypassPermissions` and in all four editions,
+  the same `printenv`; without the `permissions` entry ten differ.
+
 ### No permission rule Claude Code warns about at every start — 2026-10-25
 
 - Why: Claude Code 2.1 checks file permissions with `Edit(path)` and

@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded dispatcher carries the project's permission rules and env — 2026-10-25
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,
+  `claude_dispatch.sh` and `claude_subfolders.py` change in the asset, with a
+  `permissions` and an `environment` entry for a Claude Code session started
+  below the root and a `--install` mode; the policy lock was rewritten.
+
 ### Its Claude Code settings deny writing secrets with Edit rules — 2026-10-25
 
 - `.claude/settings.json` denies writing `.env`, `.env.*`, `**/.env`,

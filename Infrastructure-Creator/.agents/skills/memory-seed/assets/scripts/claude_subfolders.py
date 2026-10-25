@@ -8,9 +8,10 @@ dispatcher in the person's own Claude Code configuration folder - the
 claude_dispatch.sh and claude_dispatch.py beside this file - with one entry
 per project hook in their settings.json, and lists this project for it. The
 dispatcher then runs this project's hooks for a session started below it,
-and does nothing anywhere else. Further session-start entries bring such a
-session the project's AGENTS.md, which its .claude/CLAUDE.md imports from
-outside the session's folder.
+and does nothing anywhere else. More entries make the decisions the
+project's permission rules make in the root, give the session's commands
+the project's env, and bring the session the project's AGENTS.md, which its
+.claude/CLAUDE.md imports from outside the session's folder.
 
 It writes only into the configuration folder of the Claude Code that started
 this hook - the session's transcript must live there - and nothing when all
@@ -19,7 +20,13 @@ as it is. Never on Windows, whose Git Bash paths the dispatcher does not map,
 and never again once the person has put a file named `off` into the
 dispatcher's folder (ai-accelerator/ in the configuration folder).
 
+The installer runs it with --install when a person installs in a terminal,
+so a first session started below the root has the project's hooks too; it
+then writes into the configuration folder Claude Code would use here, if
+there is one, and reads no session input.
+
 Usage: claude_subfolders.py < SESSION-START-INPUT
+       claude_subfolders.py --install
 """
 from __future__ import annotations
 
@@ -78,6 +85,12 @@ def wanted_entries(settings: Path, dispatcher: Path) -> list[tuple[str, dict]]:
                 if isinstance(group.get("matcher"), str) and group["matcher"]:
                     one = {"matcher": group["matcher"], **one}
                 entries.append((event, one))
+    # The project's permission rules, for every tool, and its env for the
+    # session's commands.
+    entries.append(("PreToolUse", {"hooks": [{"type": "command", "command": f"{shlex.quote(str(dispatcher))} permissions",
+                                              "timeout": 10}]}))
+    entries.append(("SessionStart", {"hooks": [{"type": "command",
+                                                "command": f"{shlex.quote(str(dispatcher))} environment", "timeout": 10}]}))
     if (ROOT / "AGENTS.md").is_file():
         for part in range(1, POLICY_PARTS + 1):
             command = f"{shlex.quote(str(dispatcher))} policy-{part}"
@@ -133,16 +146,19 @@ def write_if_changed(path: Path, content: bytes, mode: int) -> bool:
     return True
 
 
-def main() -> int:
+def main(argv: list) -> int:
     if os.name == "nt":
         return 0
-    try:
-        payload = json.loads(sys.stdin.buffer.read(1024 * 1024) or b"{}")
-    except ValueError:
-        return 0
     config = config_folder()
+    if argv[1:] != ["--install"]:
+        try:
+            payload = json.loads(sys.stdin.buffer.read(1024 * 1024) or b"{}")
+        except ValueError:
+            return 0
+        if not own_session(payload, config):
+            return 0
     settings = ROOT / ".claude" / "settings.json"
-    if not own_session(payload, config) or not settings.is_file() or not config.is_dir():
+    if not settings.is_file() or not config.is_dir():
         return 0
     folder = config / FOLDER
     if os.path.lexists(folder / "off"):
@@ -193,6 +209,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        sys.exit(main(sys.argv))
     except Exception:  # a session's start is never failed by this
         sys.exit(0)

@@ -11,6 +11,11 @@ it at the top of every session.
 
 ## Unreleased
 
+- Claude Code started in a folder below the project root also gets the project's permission rules
+  and `env` there, and the installer run in a terminal sets that up at once. Quick Start in
+  `README.md` (`ACCELERATOR.md`) and `.claude/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
 - `.claude/settings.json` no longer carries `Write(**)` and `Glob(**)` in `allow`, nor `Write(.env)`,
   `Write(.env.*)` in `deny`. Claude Code 2.1 matches file permissions only by `Edit(path)` and
   `Read(path)` rules, which already cover them, and printed a warning for each at every start of its
