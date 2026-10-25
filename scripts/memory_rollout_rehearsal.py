@@ -243,13 +243,18 @@ def journal(copy: Path) -> List[str]:
 def dispatched_environment(dispatcher: Path, place: Path, env: Dict[str, str], timeout: float) -> Dict[str, str]:
     """The variables the dispatcher's `environment` entry gives a session's
     commands, as Claude Code sources them from CLAUDE_ENV_FILE."""
-    target = dispatcher.parent / "session.env"
+    # A file of the call's own, as Claude Code gives each session its own:
+    # the dispatcher appends to it.
+    handle, name = tempfile.mkstemp(prefix="session-", suffix=".env", dir=str(dispatcher.parent))
+    os.close(handle)
+    target = Path(name)
     subprocess.run(["bash", str(dispatcher), "environment"], cwd=place, env={**env, "CLAUDE_ENV_FILE": str(target)},
                    input=b"{}", capture_output=True, timeout=timeout)
     shell = ('set -a; . "$1" >/dev/null 2>&1; set +a; '
              'for name in $(compgen -e); do printf "%s=%s\\0" "$name" "${!name}"; done')
     done = subprocess.run(["bash", "-c", shell, "bash", str(target)], env={"PATH": env.get("PATH", "")},
                           capture_output=True, timeout=timeout)
+    target.unlink()
     exported = dict(item.split("=", 1) for item in done.stdout.decode("utf-8", "replace").split("\0") if "=" in item)
     return {key: value for key, value in exported.items() if key not in ("PATH", "PWD", "SHLVL", "OLDPWD", "_")}
 
