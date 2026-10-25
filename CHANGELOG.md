@@ -81,7 +81,13 @@ edition's own files remain in that edition's changelog.
   policy, a capsule with the worktree's own task, and the save into the
   root's Brain under the worktree's branch; 280 randomized permission
   calls in seven rule sets decided in a worktree for its files as in the
-  root for the root's. `scripts/claude_code_bench.py --worktree` (and
+  root for the root's. `scripts/memory_rollout_rehearsal.py --worktree`
+  runs the hooks through the copy's dispatcher in a worktree of each copy,
+  the save with the `environment` entry's variables: on the four client
+  installations, under both profiles, every save landed under the
+  worktree's branch, was recalled, and left the worktree clean
+  (`tests/test_memory_rollout_rehearsal.py` covers it).
+  `scripts/claude_code_bench.py --worktree` (and
   `--worktree --subfolder src`) repeats the host run and passes only when
   the save went to the worktree's branch, the worktree got its own index
   and stayed clean. `tests/test_memory_claude_subfolders.py`

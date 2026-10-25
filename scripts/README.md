@@ -562,6 +562,14 @@ For each `--target` it does the following:
   - the closing Stop;
   - a new session's prompt, whose capsule must recall the learning.
 
+With `--worktree`, Claude Code is also rehearsed, under each profile, in a
+Git worktree of a copy (`.claude/worktrees/rehearsal`, on a branch of its
+own), which has none of an installation Git does not track: the hooks run
+through the dispatcher the copy carries, as your Claude Code configuration
+runs them, and the save takes the variables its `environment` entry gives a
+session's commands. Such a run also has to save under the worktree's branch
+and leave the worktree clean.
+
 No model runs. HOME and TMPDIR point into the work directory, the copies are
 removed unless `--keep`, and the project is never written. A symbolic link
 that leads out of the project is left out of the copy, because a hook would
@@ -573,7 +581,7 @@ that file. Any other profile is forced through `CONTEXT_CAPSULE_PROFILE`.
 ```bash
 python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
   [--hosts claude,codex,cursor] [--profiles config,recall] [--work DIR] [--exclude NAME] \
-  [--timeout 60] [--keep] [--json]
+  [--worktree] [--timeout 60] [--keep] [--json]
 ```
 
 - **Outputs:**
@@ -588,7 +596,9 @@ python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
     - every hook's exit and time;
     - whether the save was requested, made or refused (with its code);
     - the native journal's lines;
-    - whether the next capsule recalled the save.
+    - whether the next capsule recalled the save;
+    - in a worktree, whether the save went to its branch and the worktree
+      stayed clean.
 
   Exit 0 when every run saved and recalled with every hook exiting 0, 1
   otherwise, 2 for a target it will not copy (this clone, a folder with no

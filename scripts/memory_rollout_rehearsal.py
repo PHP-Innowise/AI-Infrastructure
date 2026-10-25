@@ -27,11 +27,21 @@ selects, each hook's exit and time, whether the save was requested, saved or
 refused (with its code), the native journal's lines and whether the next
 capsule recalled the save.
 
+With --worktree, Claude Code is also rehearsed in a Git worktree of each
+copy (`.claude/worktrees/rehearsal`, on a branch of its own), which has none
+of an installation Git does not track. Its hooks run through the dispatcher
+the copy carries (`memory-bank/scripts/claude_dispatch.sh`), as your Claude
+Code configuration would run them, and the save takes the variables the
+dispatcher's `environment` entry gives the session's commands. Such a run
+passes only when, besides the save and the recall, the save went to the
+worktree's branch and nothing was written into the worktree.
+
 Maintainer-only and standard library only; never installed into a project.
 The report names the project's paths; write it outside this clone.
 
     memory_rollout_rehearsal.py --target ~/Desktop/next --target ~/Desktop/scb
     memory_rollout_rehearsal.py --target ~/Desktop/next --hosts claude --profiles config,recall --json
+    memory_rollout_rehearsal.py --target ~/Desktop/next --hosts claude --worktree
 
 Exit status: 0 when every rehearsal saved and recalled with every hook
 exiting 0, 1 otherwise, 2 for a target this tool will not copy.
@@ -81,6 +91,8 @@ ACCELERATOR_PREFIXES = (".agents/", ".claude/", ".codex/", ".cursor/", "memory-b
 SOURCE_SUFFIXES = (".php", ".json", ".ts", ".js", ".py", ".yaml", ".yml", ".xml", ".twig", ".vue", ".go")
 PREFERRED_SOURCES = ("composer.json", "package.json")
 PROMPT = "Rehearsal: where does this project keep its main configuration?"
+# Where Claude Code makes its own worktrees.
+WORKTREE = ".claude/worktrees/rehearsal"
 
 
 def inside(path: Path, parent: Path) -> bool:
@@ -182,12 +194,18 @@ def hooks(copy: Path, host: str, event: str) -> List[str]:
 
 
 def run_event(copy: Path, host: str, event: str, payload: Dict[str, Any], env: Dict[str, str],
-              timeout: float) -> List[Dict[str, Any]]:
+              timeout: float, dispatcher: Optional[Path] = None, place: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Run the project's hooks for `event`; through `dispatcher`, from `place`,
+    as the dispatcher in a person's configuration runs them in a worktree."""
     results = []
     for command in hooks(copy, host, event):
         started = time.monotonic()
+        argv = ["bash", "-c", command]
+        if dispatcher is not None:
+            name = re.findall(r"([\w.-]+\.sh)", command)
+            argv = ["bash", str(dispatcher), name[-1] if name else ""]
         try:
-            done = subprocess.run(["bash", "-c", command], input=json.dumps(payload).encode("utf-8"), cwd=copy,
+            done = subprocess.run(argv, input=json.dumps(payload).encode("utf-8"), cwd=place or copy,
                                   env=env, capture_output=True, timeout=timeout)
             code, stdout, stderr = done.returncode, done.stdout.decode("utf-8", "replace"), \
                 done.stderr.decode("utf-8", "replace")
@@ -222,9 +240,25 @@ def journal(copy: Path) -> List[str]:
         return []
 
 
-def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) -> Dict[str, Any]:
+def dispatched_environment(dispatcher: Path, place: Path, env: Dict[str, str], timeout: float) -> Dict[str, str]:
+    """The variables the dispatcher's `environment` entry gives a session's
+    commands, as Claude Code sources them from CLAUDE_ENV_FILE."""
+    target = dispatcher.parent / "session.env"
+    subprocess.run(["bash", str(dispatcher), "environment"], cwd=place, env={**env, "CLAUDE_ENV_FILE": str(target)},
+                   input=b"{}", capture_output=True, timeout=timeout)
+    shell = ('set -a; . "$1" >/dev/null 2>&1; set +a; '
+             'for name in $(compgen -e); do printf "%s=%s\\0" "$name" "${!name}"; done')
+    done = subprocess.run(["bash", "-c", shell, "bash", str(target)], env={"PATH": env.get("PATH", "")},
+                          capture_output=True, timeout=timeout)
+    exported = dict(item.split("=", 1) for item in done.stdout.decode("utf-8", "replace").split("\0") if "=" in item)
+    return {key: value for key, value in exported.items() if key not in ("PATH", "PWD", "SHLVL", "OLDPWD", "_")}
+
+
+def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float,
+             worktree: Optional[Path] = None) -> Dict[str, Any]:
     home, temporary = work / "home", work / "tmp"
-    extra = {"CLAUDE_PROJECT_DIR": str(copy)} if host == "claude" else {}
+    place = worktree or copy
+    extra = {"CLAUDE_PROJECT_DIR": str(place)} if host == "claude" else {}
     if profile != "config":
         extra["CONTEXT_CAPSULE_PROFILE"] = profile
     env = child_env(home, temporary, extra)
@@ -232,6 +266,19 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) ->
     source = cited_source(copy, env)
     before = len(journal(copy))
     steps: Dict[str, List[Dict[str, Any]]] = {}
+    dispatcher: Optional[Path] = None
+    session_env = env
+    if worktree is not None:
+        # The dispatcher as the copy's root session would set it up: its two
+        # scripts and the root it serves, in a folder of their own.
+        folder = copy.parent / (copy.name + "-dispatcher")
+        folder.mkdir(parents=True, exist_ok=True)
+        for script, name in (("claude_dispatch.sh", "ai-accelerator-dispatch.sh"),
+                             ("claude_dispatch.py", "ai-accelerator-dispatch.py")):
+            shutil.copy2(copy / "memory-bank/scripts" / script, folder / name)
+        (folder / "projects").write_text(str(copy) + "\n", encoding="utf-8")
+        dispatcher = folder / "ai-accelerator-dispatch.sh"
+        session_env = {**env, **dispatched_environment(dispatcher, place, env, timeout)}
 
     started_event, prompt_event, stop_event = EVENTS[host]
 
@@ -240,7 +287,7 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) ->
             payload: Dict[str, Any] = {"conversation_id": session, "generation_id": str(uuid.uuid4()),
                                        "workspace_roots": [str(copy)], "cursor_version": CURSOR_VERSION}
         else:
-            payload = {"session_id": session, "cwd": str(copy)}
+            payload = {"session_id": session, "cwd": str(place)}
             if host == "codex":
                 payload["turn_id"] = str(uuid.uuid4())
         return {**payload, "hook_event_name": event, **fields}
@@ -255,11 +302,14 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) ->
         extra = {"attachments": []} if host == "cursor" else {}
         return call(session, prompt_event, prompt=text, **extra)
 
+    def event(name: str, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return run_event(copy, host, name, payload, env, timeout, dispatcher, place)
+
     first = str(uuid.uuid4())
-    steps["start"] = run_event(copy, host, started_event, call(first, started_event, source="startup"), env, timeout)
-    steps["prompt"] = run_event(copy, host, prompt_event, asking(first, PROMPT), env, timeout)
+    steps["start"] = event(started_event, call(first, started_event, source="startup"))
+    steps["prompt"] = event(prompt_event, asking(first, PROMPT))
     capsule = capsule_text(copy, host, steps["prompt"])
-    steps["stop"] = run_event(copy, host, stop_event, stopping(first, False), env, timeout)
+    steps["stop"] = event(stop_event, stopping(first, False))
     request = None
     for item in steps["stop"]:
         try:
@@ -294,17 +344,16 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) ->
                 command, stdin = command.replace("'<JSON>'", "'" + data.replace("'", "'\\''") + "'"), None
             started = time.monotonic()
             done = subprocess.run(["bash", "-c", command], input=stdin,
-                                  cwd=copy, env=env, capture_output=True, timeout=timeout)
+                                  cwd=place, env=session_env, capture_output=True, timeout=timeout)
             save["save_ms"] = round((time.monotonic() - started) * 1000)
             output = done.stdout.decode("utf-8", "replace") + done.stderr.decode("utf-8", "replace")
             save["saved"] = done.returncode == 0
             if not save["saved"]:
                 found = REFUSAL.search(output)
                 save["refusal"] = found.group(1) if found else output.strip()[-300:] or f"exit {done.returncode}"
-    steps["closing stop"] = run_event(copy, host, stop_event, stopping(first, True), env, timeout)
+    steps["closing stop"] = event(stop_event, stopping(first, True))
     second = str(uuid.uuid4())
-    steps["next prompt"] = run_event(copy, host, prompt_event,
-                                     asking(second, f"What did the last session find about {marker}?"), env, timeout)
+    steps["next prompt"] = event(prompt_event, asking(second, f"What did the last session find about {marker}?"))
     recalled = marker in capsule_text(copy, host, steps["next prompt"])
     failures = [f"{step}: {item['hook']} exit {item['exit']}" for step, items in steps.items() for item in items
                 if item["exit"] != 0]
@@ -315,7 +364,7 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) ->
         except ValueError:
             continue
         lines.append(":".join(str(item.get(key)) for key in ("stage", "event", "code") if item.get(key) is not None))
-    return {
+    report = {
         "host": host, "profile": profile, "source": source,
         "capsule_chars": len(capsule),
         "ms": {step: sum(item["ms"] for item in items) for step, items in steps.items()},
@@ -324,10 +373,24 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) ->
         "journal": lines,
         "ok": save["saved"] and recalled and not failures,
     }
+    if worktree is not None:
+        branch = subprocess.run(["git", "-C", str(worktree), "branch", "--show-current"], capture_output=True,
+                                text=True).stdout.strip()
+        tasks = []
+        for path in (copy / "project-brain/dynamic/tasks").glob("*.md"):
+            try:
+                tasks.append(json.loads(path.read_text(encoding="utf-8").split("---\n")[1]))
+            except (OSError, ValueError, IndexError):
+                continue
+        report["worktree_task"] = any(task.get("external_id") == branch for task in tasks)
+        report["worktree_clean"] = subprocess.run(["git", "-C", str(worktree), "status", "--porcelain", "--ignored"],
+                                                  capture_output=True, text=True).stdout == ""
+        report["ok"] = report["ok"] and report["worktree_task"] and report["worktree_clean"]
+    return report
 
 
 def rehearse_target(target: Path, hosts: List[str], profiles: List[str], work: Path, excludes: List[str],
-                    timeout: float, keep: bool) -> Dict[str, Any]:
+                    timeout: float, keep: bool, worktree: bool = False) -> Dict[str, Any]:
     name = re.sub(r"[^A-Za-z0-9._-]+", "-", target.name) or "project"
     base = work / name / "synced"
     prepare_home(work / "home")
@@ -356,6 +419,26 @@ def rehearse_target(target: Path, hosts: List[str], profiles: List[str], work: P
                 finally:
                     if not keep:
                         shutil.rmtree(run, ignore_errors=True)
+            if host != "claude" or not worktree:
+                continue
+            for profile in profiles:
+                run = work / name / f"{host}-{profile}-worktree"
+                shutil.copytree(base, run, symlinks=True)
+                try:
+                    place = run / WORKTREE
+                    added = subprocess.run(["git", "-C", str(run), "-c", "core.hooksPath=/dev/null", "worktree", "add",
+                                            "-q", str(place), "-b", "rehearsal/worktree-" + secrets.token_hex(4)],
+                                           capture_output=True, text=True)
+                    if added.returncode:
+                        report["runs"].append({"host": host, "ok": False, "place": "worktree",
+                                               "skipped": "git worktree add failed: " + added.stderr.strip()[-200:]})
+                        continue
+                    result = rehearse(run, host, profile, work, timeout, worktree=place)
+                    report["runs"].append({**result, "place": "worktree"})
+                finally:
+                    if not keep:
+                        shutil.rmtree(run, ignore_errors=True)
+                        shutil.rmtree(run.parent / (run.name + "-dispatcher"), ignore_errors=True)
     finally:
         if not keep:
             shutil.rmtree(work / name, ignore_errors=True)
@@ -380,9 +463,13 @@ def print_report(reports: List[Dict[str, Any]]) -> None:
                 print(f"  {run['host']:6}  skipped: {run['skipped']}")
                 continue
             outcome = "saved" if run["saved"] else (f"refused ({run['refusal']})" if run["requested"] else "no request")
-            print(f"  {run['host']:6} {run['profile']:10} prompt {run['ms']['prompt']:5} ms  stop {run['ms']['stop']:5} ms"
+            label = run["profile"] + ("@worktree" if run.get("place") == "worktree" else "")
+            print(f"  {run['host']:6} {label:16} prompt {run['ms']['prompt']:5} ms  stop {run['ms']['stop']:5} ms"
                   f"  {outcome:28} recalled {'yes' if run['recalled'] else 'NO'}"
-                  + (f"  hook failures: {', '.join(run['hook_failures'])}" if run["hook_failures"] else ""))
+                  + (f"  hook failures: {', '.join(run['hook_failures'])}" if run["hook_failures"] else "")
+                  + ("" if run.get("place") != "worktree" else
+                     f"  branch's task {'yes' if run.get('worktree_task') else 'NO'}"
+                     f"  worktree {'clean' if run.get('worktree_clean') else 'WRITTEN'}"))
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -395,6 +482,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--exclude", action="append", default=[],
                         help="another tree to leave out of the copy: a name at any depth, or a root-relative path")
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds per hook call")
+    parser.add_argument("--worktree", action="store_true",
+                        help="also rehearse Claude Code in a Git worktree of each copy, as the dispatcher serves it")
     parser.add_argument("--keep", action="store_true", help="keep the copies for inspection")
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     arguments = parser.parse_args(argv)
@@ -404,6 +493,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--hosts must name some of claude, codex, cursor")
     if not profiles or any(profile not in PROFILES for profile in profiles):
         parser.error(f"--profiles must name some of {', '.join(PROFILES)}")
+    if arguments.worktree and "claude" not in hosts:
+        parser.error("--worktree rehearses Claude Code: --hosts must name claude")
     base = arguments.work
     if base is None:
         shm = Path("/dev/shm")
@@ -429,7 +520,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             reports.append(rehearse_target(target, hosts, profiles, work,
                                            [*DEFAULT_EXCLUDES, *arguments.exclude], arguments.timeout,
-                                           arguments.keep))
+                                           arguments.keep, arguments.worktree))
         finally:
             if not arguments.keep:
                 shutil.rmtree(work, ignore_errors=True)
