@@ -555,6 +555,99 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         # The warning the prompt hook prints, counted by what the last request became.
         self.one(self.written(self.begin),'prompt','armed','previous-failed')
 
+    def test_a_state_this_runtime_cannot_read_is_replaced_at_the_next_prompt(self):
+        # Written by another version of the runtime or cut short, the state
+        # refused every later prompt of its session, which saved nothing more.
+        def prompt(session,ok=True):
+            return self.call('native-prompt','--host','codex','--task-id','research','--json',ok=ok,
+                             data={'hook_event_name':'UserPromptSubmit','session_id':session,'prompt':'Inspect it.'})
+        damages={'another version':lambda path:path.write_text(json.dumps(dict(json.loads(path.read_text()),phase='queued'))),
+                 'cut short':lambda path:path.write_bytes(path.read_bytes()[:40])}
+        for n,(name,damage) in enumerate(damages.items()):
+            with self.subTest(state=name):
+                session=f'unreadable-{n}';stop=dict(self.STOP,session_id=session)
+                key=json.loads(prompt(session).stdout)['request']
+                path=self.root/'project-brain/local/native-results'/(key+'.json')
+                damage(path)
+                self.one(self.written(lambda:self.call('native-stop','--host','codex','--task-id','research',
+                                                       data=stop,ok=False)),'stop','error','native-result:invalid-state')
+                self.one(self.written(lambda:prompt(session)),'prompt','armed','previous-unreadable')
+                self.assertIn('INTERNAL_NATIVE_MEMORY_RESULT',json.loads(
+                    self.call('native-stop','--host','codex','--task-id','research',data=stop).stdout)['reason'])
+                token=json.loads(path.read_text())['token']
+                self.one(self.written(lambda:self.call('native-result','--request',key,'--token',token,
+                                                       '--input','-','--json',data=self.payload)),'save','saved')
+        # Storage that is not a plain file is still refused, never replaced.
+        key=json.loads(prompt('unsafe').stdout)['request']
+        path=self.root/'project-brain/local/native-results'/(key+'.json')
+        path.unlink();path.mkdir()
+        self.one(self.written(lambda:prompt('unsafe',ok=False)),'prompt','error','native-result:unsafe-storage')
+        self.assertTrue(path.is_dir())
+
+    def queued(self,host='claude',text='And how are credit notes numbered?',transcript=None):
+        payload={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':text}
+        if transcript: payload['transcript_path']=transcript
+        return self.call('native-prompt','--host',host,'--task-id','research','--json',data=payload)
+
+    def stopped(self,active,host='claude'):
+        return self.call('native-stop','--host',host,'--task-id','research',data=dict(self.STOP,stop_hook_active=active))
+
+    def test_a_prompt_sent_while_the_save_is_written_does_not_cancel_it(self):
+        # Claude Code queues a prompt sent while the agent writes the save and
+        # runs the prompt hook at once, mid-turn. Offline, re-arming there
+        # refused that save on its way ("request-unavailable") and warned the
+        # agent of an unsaved result in the middle of saving it.
+        self.begin(host='claude')
+        self.one(self.written(lambda:self.stopped(False)),'stop','requested',host='claude')
+        candidate,state=self.state()
+        out=[]
+        self.one(self.written(lambda:out.append(self.queued())),'prompt','armed','previous-in-flight',host='claude')
+        self.assertNotIn('warning',json.loads(out[0].stdout))
+        self.one(self.written(lambda:self.call('native-result','--request',candidate.stem,'--token',state['token'],
+                                               '--input','-','--json',data=self.payload)),'save','saved','in-flight',
+                 host='claude')
+        self.one(self.written(lambda:self.stopped(True)),'stop','skipped','recovery-saved',host='claude')
+        self.one(self.written(lambda:out.append(self.queued(text='Next question'))),'prompt','armed',host='claude')
+        self.assertNotIn('warning',json.loads(out[1].stdout))
+        self.state()  # the request moved aside went with the prompt after
+        self.assertEqual(1,len(self.records('tasks')))
+
+    def test_a_request_moved_aside_is_reported_at_the_next_prompt_when_unsaved(self):
+        self.begin(host='claude');self.stopped(False)
+        self.one(self.written(self.queued),'prompt','armed','previous-in-flight',host='claude')
+        # The continuation ended without the save: its Stop settles the request moved aside.
+        self.one(self.written(lambda:self.stopped(True)),'stop','failed','unsaved',host='claude')
+        out=[]
+        self.one(self.written(lambda:out.append(self.queued(text='Next question'))),'prompt','armed','previous-failed',
+                 host='claude')
+        self.assertEqual('Previous native memory result was not saved completely.',json.loads(out[0].stdout)['warning'])
+        # A person who answered No to the save moved aside: not asked again for a day.
+        self.stopped(False)
+        token=self.state()[1]['token']
+        self.queued()
+        refused=self.refused_transcript(token,'user-rejected')
+        self.one(self.written(lambda:self.queued(text='Again',transcript=refused)),'prompt','skipped','host-refused',
+                 host='claude')
+        self.one(self.written(lambda:self.stopped(False)),'stop','skipped','phase-declined',host='claude')
+
+    def test_a_request_asked_long_ago_is_reported_at_once_and_codex_continues_one_moved_aside(self):
+        self.begin(host='claude');self.stopped(False)
+        candidate,state=self.state();state['updated']-=11*60;candidate.write_text(json.dumps(state))
+        self.one(self.written(self.queued),'prompt','armed','previous-requested',host='claude')
+        refused=self.call('native-result','--request',candidate.stem,'--token',state['token'],'--input','-','--json',
+                          data=self.payload,ok=False)
+        self.assertIn(b'native-result:request-unavailable',refused.stderr)
+        # Codex hands the save step back as a prompt: one carrying the token of
+        # the request moved aside is that continuation, not a new prompt.
+        self.begin(host='codex',session='session-c')
+        reason=json.loads(self.call('native-stop','--host','codex','--task-id','research',
+                                    data=dict(self.STOP,session_id='session-c')).stdout)['reason']
+        prompt={'hook_event_name':'UserPromptSubmit','session_id':'session-c','prompt':'Steer: also the credit notes.'}
+        self.one(self.written(lambda:self.call('native-prompt','--host','codex','--task-id','research','--json',
+                                               data=prompt)),'prompt','armed','previous-in-flight')
+        self.one(self.written(lambda:self.call('native-prompt','--host','codex','--task-id','research','--json',
+                                               data=dict(prompt,prompt=reason))),'prompt','continuation')
+
     def test_each_stop_path_writes_one_line_with_its_code(self):
         def request(payload=self.STOP,host='codex',**values):
             return self.call('native-stop','--host',host,'--task-id','research',data=payload,
@@ -914,19 +1007,23 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         only, so its arm writes the notice for the capsule and runs first."""
         notice='Previous native memory result was not saved completely.'
         report=self.root/'memory-bank/local/last-turn-report.json'
+        # A temporary directory of its own: another suite's hook running
+        # beside this one leaves its own file in a shared one for a moment.
+        private=Path(tempfile.mkdtemp(prefix='native-hook-tmp-',dir=self.root.parent))
         for host,session in (('claude','unsaved-claude'),('codex','unsaved-codex')):
             with self.subTest(host=host):
                 hooks=self.install_hooks(host)
                 self.begin(host,session);self.stop(host,session);self.stop(host,session,active=True)
                 if report.exists():report.unlink()
                 result=self.hook(hooks,'working-memory-read.sh',{'hook_event_name':'UserPromptSubmit',
-                    'session_id':session,'cwd':str(self.root),'prompt':'Continue the Amber routing research.'})
+                    'session_id':session,'cwd':str(self.root),'prompt':'Continue the Amber routing research.'},
+                    env=dict(self.env,TMPDIR=str(private)))
                 lines=result.stdout.decode().splitlines()
                 self.assertEqual(notice,lines[0])
                 self.assertEqual(1,lines.count(notice))
                 self.assertFalse(report.exists() and 'native_capture_incomplete' in report.read_text())
                 self.assertNotIn('native memory result not saved completely',result.stdout.decode())
-                self.assertFalse(list(Path(self.env.get('TMPDIR') or tempfile.gettempdir()).glob('working-memory-native.*')))
+                self.assertFalse(list(private.glob('working-memory-native.*')))
         hooks=self.install_hooks('cursor')
         self.begin('cursor','unsaved-cursor');self.stop('cursor','unsaved-cursor');self.stop('cursor','unsaved-cursor',active=True)
         result=self.hook(hooks,'working-memory-read.sh',{'hook_event_name':'beforeSubmitPrompt',
@@ -999,12 +1096,15 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
                 self.assertIn('native-result --request',asked.stdout.decode())
 
     def rollout(self,name,turns,pad=0):
-        """A Codex rollout: session_meta, then one turn_context per (turn, mode, sandbox)."""
+        """A Codex rollout: session_meta, then one turn_context per (turn, mode,
+        sandbox[, file-system policy, working directory])."""
         path=self.root.parent/name
         lines=[json.dumps({'type':'session_meta','payload':{'id':'0','source':'vscode'}})]
-        for turn,mode,sandbox in turns:
-            lines.append(json.dumps({'type':'turn_context','payload':{'turn_id':turn,
-                'collaboration_mode':{'mode':mode},'sandbox_policy':{'type':sandbox}}}))
+        for turn,mode,sandbox,*files in turns:
+            context={'turn_id':turn,'collaboration_mode':{'mode':mode},'sandbox_policy':{'type':sandbox}}
+            if files:context['file_system_sandbox_policy']=files[0]
+            if files[1:] and files[1] is not None:context['cwd']=files[1]
+            lines.append(json.dumps({'type':'turn_context','payload':context}))
             lines.append(json.dumps({'type':'response_item','payload':{'type':'message','role':'user',
                 'content':[{'type':'input_text','text':'x'*pad}]}}))
         path.write_text('\n'.join(lines)+'\n')
@@ -1020,6 +1120,48 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
             with self.subTest(case=name):
                 session=f'turn-{n}'
                 path=self.rollout(f'{session}.jsonl',[('t0','default','workspace-write'),('t1',mode,sandbox)])
+                stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,'turn_id':'t1',
+                      'permission_mode':'bypassPermissions','transcript_path':str(path),
+                      'last_assistant_message':'Answered.'}
+                self.begin(host='codex',session=session)
+                before=len(self.journal())
+                out=self.call('native-stop','--host','codex','--task-id','research',data=stop).stdout
+                lines=[(line['event'],line.get('code')) for line in self.journal()[before:] if line['stage']=='stop']
+                if skipped:
+                    self.assertEqual(b'',out.strip())
+                    self.assertEqual([('skipped',skipped)],lines)
+                else:
+                    self.assertIn(b'native-result --request',out)
+
+    def test_a_codex_workspace_that_cannot_write_the_brain_is_not_asked_to_save(self):
+        # Codex started in a subdirectory writes only there: offline on Codex
+        # 0.163 the save failed with a read-only file system after every answer.
+        root=os.path.realpath(self.root)
+        link=str(self.root.parent/'linked project')
+        try: os.symlink(root,link,target_is_directory=True)
+        except (OSError,NotImplementedError): link=None  # Windows without the symlink privilege
+        def files(*writable,read_only=()):
+            entries=[{'path':{'type':'special','value':{'kind':'root'}},'access':'read'}]
+            entries+=[{'path':{'type':'path','path':path},'access':'write'} for path in writable]
+            entries+=[{'path':{'type':'path','path':path},'access':'read'} for path in read_only]
+            return {'kind':'restricted','entries':entries}
+        # A policy read as not letting the turn write its own directory is in
+        # a form the reading does not know: asked as before.
+        cases={'a subdirectory':(files(root+'/src'),root+'/src','outside-sandbox'),
+               'the Brain carved out':(files(root,read_only=(root+'/project-brain',)),root,'outside-sandbox'),
+               'the project root':(files(root),root,None),
+               'an added writable root':(files(root+'/src',root),root+'/src',None),
+               'its own directory unwritable':(files(root+'/elsewhere'),root+'/src',None),
+               'no working directory':(files(root+'/src'),None,None),
+               # Codex names the workspace as it was opened; a link to the
+               # project (macOS's /tmp is one) is the project itself.
+               **({'the project through a link':(files(link),link,None),
+                   'a subdirectory through a link':(files(link+'/src'),link+'/src','outside-sandbox')}
+                  if link else {})}
+        for n,(name,(policy,cwd,skipped)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                session=f'workspace-{n}'
+                path=self.rollout(f'{session}.jsonl',[('t1','default','workspace-write',policy,cwd)])
                 stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,'turn_id':'t1',
                       'permission_mode':'bypassPermissions','transcript_path':str(path),
                       'last_assistant_message':'Answered.'}
@@ -1201,7 +1343,7 @@ class NativeInstructionTests(NativeCaptureFixture):
     def test_a_later_step_points_back_to_the_full_one_the_conversation_holds(self):
         # Every answer carried the whole step, about 2,600 characters, and
         # Claude Code's terminal showed it whole each time.
-        for host in ('claude','codex','cursor'):
+        for host in ('claude','codex'):
             with self.subTest(host=host):
                 first=self.ask(host=host,session=host+'-first')
                 self.assertIn(self.FULL,first)
@@ -1212,12 +1354,24 @@ class NativeInstructionTests(NativeCaptureFixture):
                 self.assertIn('exact command: ',later)
                 self.assertLess(len(later),len(first)-800)
 
+    def test_cursor_gets_the_full_step_every_time(self):
+        # Its transcript format and how it records a summarized conversation
+        # are unknown here, so nothing tells a short step is safe.
+        first=self.ask(host='cursor',session='cursor-first')
+        held=self.transcript('cursor.jsonl',{'type':'user','message':{'content':first}})
+        self.assertIn(self.FULL,self.ask(host='cursor',session='cursor-later',transcript=held))
+
     def test_the_full_step_comes_back_after_a_compaction_or_without_a_transcript(self):
         first=self.ask(session='before')
         for record in ({'type':'system','subtype':'compact_boundary'},{'type':'compacted','payload':{}}):
             with self.subTest(record=record['type']):
                 path=self.transcript('compacted.jsonl',{'type':'user','message':{'content':first}},record)
                 self.assertIn(self.FULL,self.ask(session='after-'+record['type'],transcript=path))
+        # Codex's compaction record keeps earlier items in a retained context
+        # that is not the model's history: the steps it holds are dropped too.
+        carried=self.transcript('carried.jsonl',{'type':'user','message':{'content':first}},
+                                {'type':'compacted','payload':{'message':'summary','retained_context':{'items':[first]}}})
+        self.assertIn(self.FULL,self.ask(host='codex',session='after-carried',transcript=carried))
         self.assertIn(self.FULL,self.ask(session='gone',transcript=self.root.parent/'gone.jsonl'))
         self.assertIn(self.FULL,self.ask(session='none'))
 

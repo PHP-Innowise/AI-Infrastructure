@@ -28,6 +28,202 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The host benches type a question while the save is written — 2026-10-25
+
+- `scripts/claude_code_bench.py --queued SECONDS` and `scripts/codex_bench.py
+  --queued SECONDS` run the host in its terminal through a pseudo-terminal:
+  the stand-in takes SECONDS to write the save, and once it has begun a
+  second question is typed. The run passes when the save in flight still
+  lands and nothing says it was not saved. On the runtime before the
+  in-flight fix (afb80236) Claude Code's run fails with the save refused as
+  `request-unavailable`; on this branch both hosts pass. The Codex terminal
+  runs commands through the app-server daemon under `~/.codex/packages`,
+  which the isolated `CODEX_HOME` links to; `--queued` takes no `--attached`
+  there. A question the stand-in never received - the terminal of a large
+  project was not ready yet - is typed again, up to three times, and the
+  screen is kept in the work directory. On copies of next, scb,
+  bauherrenmappe and aea-partner (`--target ... --sync`) both hosts pass.
+  Codex's terminal leaves its app-server daemon (and, in code mode, its
+  host) running after the run, writing to the run's `CODEX_HOME`: the
+  Codex bench now stops every process whose `CODEX_HOME` is the run's and
+  reports how many (`helpers_stopped`); fifty-odd were left from earlier
+  runs on this machine.
+  Tests without the hosts: the stand-in waits over the first save only,
+  and what counts as passing.
+
+### The memory CLI may name SQL past bash-validator — 2026-10-25
+
+- Why: every shipped `bash-validator.sh` refused the accelerator's own
+  memory CLI whenever what it was handed named destructive SQL. A save
+  whose progress or learning said "the rollback runs DROP TABLE invoices"
+  was blocked as `destructive SQL - DROP TABLE/DATABASE/SCHEMA` - that
+  answer's native save was lost, in Claude Code's `echo -E '<JSON>' |`
+  form and in the `| (cd ROOT && ...)` form Codex and Cursor are given -
+  and so were `context.py retrieve --query 'rollback DROP TABLE'` and
+  `record-result` with such text. The SQL rules leave searches and git
+  alone; the text piped into the CLI was scanned as if it fed a SQL client.
+- What changes: a command that runs nothing but the memory CLI
+  (`python3`/`python`/`py -3` `memory-bank/scripts/context.py`, any
+  directory before either) and `cd`, `cat`, `echo` or `printf`, in any
+  pipe, group or heredoc, is left alone by the SQL rules: nothing in it can
+  run the text. Any other program in the command - a client the CLI's
+  output is piped into, one run beside it or in a substitution, Python that
+  is not the CLI - and the rules apply as before. Generic section,
+  byte-identical in the four editions and Infrastructure-Creator; mirrors
+  regenerated; the editions' `.claude/hooks/README.md` lists the exception.
+- Tests: eight corpus cases in `tests/fixtures/bash-validator-corpus.json`
+  (four allowed, four still refused) and the `memory-cli` decision.
+
+### A prompt sent while the save is written no longer cancels it — 2026-10-25
+
+- Why: offline in the terminals of Claude Code 2.1.278 and Codex 0.163,
+  with a scripted model that took 8 seconds to write the save, a second
+  question sent while it did went into the running turn, and the host ran
+  the prompt hook at once (Claude Code's transcript: `queue-operation`
+  `enqueue`, then `absorbed_mid_turn`; Codex's rollout: the message under
+  the same `turn_id`). The hook re-armed the session: the save in flight
+  was refused as `native-result:request-unavailable`, and the agent read
+  "Previous native memory result was not saved completely." in the middle
+  of saving it. With a real model the save takes seconds after every
+  visible answer, the time in which a person types the next question. The
+  Claude desktop app mostly runs the prompt hook only when a queued prompt
+  starts, after the turn: in 509 local desktop sessions 26 of 2,456 human
+  prompts (1.1 %) were sent while the agent still worked.
+- What changes: a prompt that finds the last request asked and unsettled,
+  less than ten minutes old, moves it aside to a second file of the same
+  session and journals `armed` `previous-in-flight` without a warning. The
+  save still lands there (`native-result` reads either file by its token),
+  the continuation's Stop settles it, and the prompt after reports it as
+  any other request: quiet when saved, the warning when not, "not asked
+  again for a day" when the person refused the save command. Codex's
+  continuation prompt is recognised by either request's token. An older
+  request is reported at once, as before. The queued prompt's own answer is
+  saved with the next answer's save. `memory_eval.py realized` does not
+  count `previous-in-flight` or `previous-unreadable` as armed after an
+  unsaved result. A save that lands after its request was moved aside is
+  journaled `saved` (or `omitted`) with code `in-flight`, so `realized`
+  counts how often the case comes up and how often the save still lands.
+- Tests: `test_a_prompt_sent_while_the_save_is_written_does_not_cancel_it`,
+  `test_a_request_moved_aside_is_reported_at_the_next_prompt_when_unsaved`,
+  `test_a_request_asked_long_ago_is_reported_at_once_and_codex_continues_one_moved_aside`,
+  `test_an_armed_prompt_that_printed_no_warning_is_not_after_an_unsaved_one`.
+
+### A save request this runtime cannot read is replaced at the next prompt — 2026-10-25
+
+- Why: a session's request file that this runtime refuses as
+  `native-result:invalid-state` - one another version of the runtime wrote
+  (an older one does not know the `refused` and `declined` phases), or one
+  cut short - refused every later prompt and Stop of that session. The
+  session saved nothing more, and only the journal said so.
+- What changes: the prompt replaces such a request with a new one and
+  journals `armed` `previous-unreadable`, without the "not saved
+  completely" warning, since whether it was saved is unknown. Storage that
+  is not a plain file stays `unsafe-storage` and is never replaced.
+- Tests: `test_a_state_this_runtime_cannot_read_is_replaced_at_the_next_prompt`
+  (another version's phase, a file cut short, a directory in its place),
+  failing without the change.
+
+### Claude Code started below the project root runs none of its hooks — 2026-10-25
+
+- Documentation only (`docs/TROUBLESHOOTING.md`, `docs/MEMORY-INTEGRATION.md`
+  known limits). Offline on Claude Code 2.1.278, started in `src/` of an
+  installed project (trusted, and with `src/` trusted too): no hook ran - no
+  capsule, no save, no `bash-validator.sh` - while skills, commands and
+  agents were found above. It reads `.claude/settings.json` only from the
+  folder it starts in, and `.claude/CLAUDE.md`'s `@../AGENTS.md` became an
+  external import: a dialog in a terminal (default "No"), left out under
+  `-p`. Codex 0.163 from a subdirectory runs the project's hooks. Claude
+  Code's own Bash sandbox (bubblewrap) started in the root let the save
+  write. The editions' `README.md`, installed as `ACCELERATOR.md`, opens
+  Quick Start with where to start the tools.
+
+### A Codex session that cannot write the Brain is not asked to save — 2026-10-24
+
+- Why: offline on Codex 0.163, a session started in a subdirectory of the
+  project (`codex exec -C project/src`) runs in a workspace-write sandbox
+  that writes only that subdirectory. The save after every answer failed
+  with "Read-only file system" on `project/project-brain`, journaled as
+  `failed` `unsaved`: two model calls for nothing each time.
+- What changes: the Stop reads the turn's `file_system_sandbox_policy` from
+  the rollout's `turn_context`, as it reads Plan mode and the sandbox type.
+  When the most specific entry over the Brain does not grant write, the save
+  is not asked for and the journal says `skipped` `outside-sandbox`. An
+  unrestricted policy, or none, asks as before; the attached launch's state
+  directory is an added writable root and saves. A policy that, read this
+  way, would not let the turn write its own working directory is in a form
+  the runtime does not know (a later Codex, another platform's paths), and
+  the save is asked for as before rather than dropped.
+- Tests: `test_a_codex_workspace_that_cannot_write_the_brain_is_not_asked_to_save`
+  (a subdirectory, a Brain carved out read-only, the project root, an added
+  root, a policy that denies the turn its own directory, no working
+  directory, the project and a subdirectory reached through a link),
+  failing without the change. On the real host, started from `src`:
+  `skipped` `outside-sandbox`; the bench's default and attached runs save,
+  and a read-only sandbox is still `read-only-sandbox`.
+
+### Cursor keeps the full save step on every answer — 2026-10-24
+
+- Why: a later save step points back to the full one while the transcript
+  holds it after its last compaction record. Cursor's transcript, when it
+  keeps one, and how it records a summarized conversation could not be
+  checked here, so nothing tells that a short step is safe there.
+- What changes: Cursor gets the full step every time, as before the short
+  step. Claude Code and Codex are unchanged. The known limits in
+  `docs/MEMORY-INTEGRATION.md` add that a save step after `/rewind` past
+  the conversation's first full step still points back to it.
+- Tests: `test_cursor_gets_the_full_step_every_time`, failing without the
+  change.
+
+### After a Codex compaction the save step is full again — 2026-10-24
+
+- Why: offline on Codex 0.163, with an automatic compaction before the third
+  turn, that turn's save step came short, pointing back to rules the model
+  no longer held. Codex's `compacted` record carries a `retained_context`
+  with the earlier steps in it, and the check found the full step's text
+  there, after the record's marker. The model's history after the
+  compaction (`replacement_history`) held no full step.
+- What changes: the full step counts only after the compaction record's own
+  line.
+- Tests: `test_the_full_step_comes_back_after_a_compaction_or_without_a_transcript`
+  carries a compaction record with the full step inside it, and fails without
+  the change. Offline, three turns around the compaction: Codex 2,522, then
+  1,619, then 2,522 characters again; Claude Code around a `/compact` 3,149,
+  2,246, 3,149. Every turn saved.
+
+### A capsule request cuts each section into sentences once — 2026-10-24
+
+- Why: after the masking cache, the next cost in `refresh` on a synced copy
+  of `next` was cutting sections into the sentences an excerpt window moves
+  by: 369 `_excerpt_units` calls per request, the same sections cut again on
+  each of the three excerpt passes.
+- What changes: the units of a section are held per its lines in a bounded
+  cache (2,048 sections); each caller gets its own list. They depend on the
+  lines alone.
+- Measured on the copy, 24 interleaved first prompts of fresh sessions per
+  side, with the masking cache in both: the prompt hook's median went from
+  280.5 to 238 ms (−42.5 ms, −15 %), every output byte for byte the same.
+  With the masking cache, a first prompt went from about 311 to 238 ms.
+
+### A capsule request masks each document image once — 2026-10-24
+
+- Why: profiling the prompt hook on a synced copy of `next` showed masking
+  secrets in about a fifth of `refresh`. One request cuts the capsule's
+  excerpts three times over (for the manifest, the text and the output), and
+  each pass screened every document image again: 127 `mask_secrets` calls
+  for about 30 distinct texts.
+- What changes: `mask_secrets` is held per text and secret policy in a
+  bounded cache (128 texts). The key carries `secret_policy_fingerprint()`,
+  so a pattern added since masks afresh, and a policy holding a scanner that
+  is no compiled pattern is not cached at all. A ValidationError is never
+  held.
+- Measured on the copy, 24 interleaved first prompts of fresh sessions per
+  side: the prompt hook's median went from 311.5 to 286.5 ms (−25 ms, −8 %),
+  every output byte for byte the same. Prompts whose items repeat do no
+  excerpt work and are unchanged.
+- Tests: `MaskSecretsTest.test_masking_is_held_per_text_and_secret_policy`;
+  the secret-policy delivery suites, which change the patterns between
+  calls, failed against a cache keyed on the text alone.
+
 ### The policy asks for an explicit save only where no Stop request comes — 2026-10-24
 
 - Why: each edition's `AGENTS.md` said "MUST finish authorized work with

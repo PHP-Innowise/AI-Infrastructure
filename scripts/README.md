@@ -643,10 +643,23 @@ refuses `bypassPermissions` to root; older `unshare` falls back to
 `unshare -rn`. In `plan` no save is asked for, and the run passes when the
 journal records `plan-mode`.
 
+`--queued SECONDS` runs Claude Code in its terminal, through a
+pseudo-terminal, instead of `claude -p`. The stand-in takes SECONDS to write
+the save, and once it has begun a second question is typed: the terminal
+takes it into the running turn and runs the prompt hook at once. The run
+passes when the save in flight still lands (`save:saved`, with code
+`in-flight` when the prompt moved its request aside) and the screen never
+says the result was not saved. A question the stand-in has not received
+within fifteen seconds - the terminal of a large project was not ready yet -
+is typed again, up to three times, and the screen is kept in the work
+directory as `screen.txt`. Its first run, on 2.1.278, found the prompt hook
+re-arming the session: the save in flight was refused as
+`request-unavailable`.
+
 ```bash
 python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   [--target DIR [--sync] [--exclude NAME] | --attached] [--shell /usr/bin/zsh] [--mode dontAsk] \
-  [--timeout 180] [--keep]
+  [--queued 8] [--timeout 180] [--keep]
 ```
 
 - **Outputs:** a JSON report:
@@ -654,7 +667,8 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   - whether the save ran (the journal's events);
   - how many messages carried the step to the model, and their size;
   - the hook errors the transcript recorded, and the error notifications in
-    the stream.
+    the stream;
+  - with `--queued`, whether the screen said the result was not saved.
 
   Exit 0 when the save ran, one message carried the step and no hook error
   was recorded; 1 otherwise; 2 without Linux namespaces.
@@ -664,8 +678,8 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   `tests/test_host_benches.py`, in the `installation` job, holds what the
   bench relies on: the save command found in the step the runtime writes for
   every host, and the stand-in's turn. Run the bench itself when Claude Code
-  updates, and with `--target … --sync` on a copy of each project before a
-  rollout. Its first run, on 2.1.278, found two problems: the save command
+  updates - with `--queued 8` too - and with `--target … --sync` on a copy of
+  each project before a rollout. Its first run, on 2.1.278, found two problems: the save command
   asked for permission after every answer, and the Stop block showed as a hook
   error.
 
@@ -691,9 +705,19 @@ from this clone, as the Harness launches Codex (`accelerator_attach.py`): the
 hooks and instructions as `-c` options, the state as an added directory, and
 the hooks trusted as `accelerator_attach.py trust-codex-hooks` records them.
 
+`--queued SECONDS` types a second question while the save is written, as in
+`claude_code_bench.py`, in Codex's terminal: Codex takes it into the running
+turn (the same `turn_id`) and runs the prompt hook at once. The terminal runs
+commands through the app-server daemon installed under `~/.codex/packages`,
+which the isolated `CODEX_HOME` links to; `--queued` takes no `--attached`.
+That daemon, and code mode's host, outlive the terminal and keep writing to
+the run's `CODEX_HOME`: at the end of every run the bench stops each process
+whose `CODEX_HOME` is the run's, and the report says how many
+(`helpers_stopped`).
+
 ```bash
 python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
-  [--target DIR [--sync] [--exclude NAME]] [--timeout 240] [--keep]
+  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--timeout 240] [--keep]
 ```
 
 - **Outputs:** a JSON report:

@@ -3304,6 +3304,10 @@ NATIVE_HOSTS = ("claude", "codex", "cursor")
 # A journal code is a fixed word; anything else in the field is counted as
 # "other", never printed.
 NATIVE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}")
+# Codes of an armed prompt that printed no unsaved-result warning: the last
+# request moved aside while its save was being written, or one the runtime
+# could not read.
+ARMED_WITHOUT_WARNING = frozenset({"previous-in-flight", "previous-unreadable"})
 NATIVE_COUNTERS = (
     "prompt_hook_runs", "armed", "armed_after_incomplete", "continuations",
     "stop_hook_runs", "stop_hook_timeouts", "stop_hook_failures", "requested",
@@ -3326,7 +3330,7 @@ def native_step(counts: Counter, reasons: Dict[str, Counter], record: Dict[str, 
     if stage == "prompt":
         counts["prompt_hook_runs"] += 1
         counts["armed"] += event == "armed"
-        counts["armed_after_incomplete"] += event == "armed" and code is not None
+        counts["armed_after_incomplete"] += event == "armed" and code is not None and code not in ARMED_WITHOUT_WARNING
         counts["continuations"] += event == "continuation"
     elif stage == "stop-hook":
         counts["stop_hook_runs"] += 1

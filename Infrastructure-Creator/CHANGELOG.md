@@ -4,6 +4,58 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### bash-validator lets the memory CLI name SQL — 2026-10-25
+
+- The generic section shared with the editions (root `CHANGELOG.md`, same
+  day): a command that runs nothing but the memory CLI and cd, cat, echo or
+  printf is left alone by the SQL rules.
+
+### The seeded runtime keeps a save in flight when a prompt arrives — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), a prompt
+  that finds the last request asked and unsettled moves it aside instead of
+  replacing it, so the save being written still lands. `native_results.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime replaces a save request it cannot read — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), the prompt
+  replaces a session's request file refused as `invalid-state` and journals
+  `previous-unreadable`, instead of refusing every later prompt of the
+  session. `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime asks no save of a Codex session that cannot write the Brain — 2026-10-24
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), a Codex Stop
+  whose turn's file-system policy does not let a command write the Brain is
+  skipped as `outside-sandbox`. `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
+### The seeded runtime keeps Cursor's save step full — 2026-10-24
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), Cursor gets
+  the full save step every time. `native_results.py` changes in the asset;
+  the policy lock was rewritten.
+
+### The seeded runtime sends the full save step again after a Codex compaction — 2026-10-24
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day), a full save
+  step counts only after the compaction record's own line.
+  `native_results.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime cuts each section into sentences once per request — 2026-10-24
+
+- The memory runtime memory-seed copies holds a section's excerpt units, as
+  the editions' runtime does (root `CHANGELOG.md`, same day).
+  `context_retrieval.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime masks each document image once per request — 2026-10-24
+
+- The memory runtime memory-seed copies holds `mask_secrets` per text and
+  secret policy, as the editions' runtime does (root `CHANGELOG.md`, same
+  day). `validate.py` changes in the asset; the policy lock was rewritten.
+
 ### policy-forge asks for an explicit save only where no Stop request comes — 2026-10-24
 
 - `policy-forge`'s working-memory rules: where the generated Stop hook

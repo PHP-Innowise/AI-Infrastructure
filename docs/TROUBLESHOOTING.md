@@ -729,6 +729,17 @@ blocked, or a hook times out.
     (`memory-result-v1:learning_fields` is usually `verified` put inside a
     learning). From the repository, `python3 scripts/memory_eval.py realized
     --project DIR` counts the lines per host.
+11. Hooks that run in one Claude Code session and not in another - no
+    capsule, no save, no `bash-validator.sh` - while no hook reports an
+    error: check the folder the session started in. Claude Code reads
+    `.claude/settings.json`, with the hooks and the permission rules, only
+    from the folder it starts in; it finds skills, commands and agents above
+    it. Started in `src/`, it runs no project hook, and the `@../AGENTS.md`
+    import in `.claude/CLAUDE.md` is an import from outside the working
+    directory, which Claude Code asks about in a terminal and leaves out
+    under `-p`. Start Claude Code in the project root. Codex started in a
+    subdirectory finds and runs the project's hooks; its save is skipped as
+    `outside-sandbox`, because its sandbox writes only below that folder.
 
 ### Recover
 

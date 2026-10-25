@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import contextlib
+import functools
 import threading
 import hashlib
 from bisect import bisect_left, bisect_right
@@ -4992,6 +4993,14 @@ def _excerpt_units(lines: list[str]) -> list[str]:
     """Sentences in order - of paragraphs, list items and table rows: what a
     window moves by. A changelog entry is one list item a kilobyte and more
     long, so a window that moved by items could only cut one."""
+    return list(_excerpt_units_held(tuple(lines)))
+
+
+# A capsule request cuts the same sections on each of its three excerpt
+# passes; the units depend on the lines alone. Bounded for a long-lived
+# importer.
+@functools.lru_cache(maxsize=2048)
+def _excerpt_units_held(lines: tuple[str, ...]) -> tuple[str, ...]:
     units: list[str] = []
     block: list[str] = []
 
@@ -5013,7 +5022,7 @@ def _excerpt_units(lines: list[str]) -> list[str]:
         else:
             block.append(stripped)
     flush()
-    return units
+    return tuple(units)
 
 
 def excerpt_weights(connection: sqlite3.Connection, query: str) -> dict[str, float]:

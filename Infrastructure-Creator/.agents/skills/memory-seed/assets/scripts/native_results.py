@@ -249,6 +249,10 @@ ROLLOUT_TAIL_BYTES = 512 * 1024
 CLAUDE_REFUSALS = frozenset({'user-rejected','permission-rule','automode-blocked'})
 REFUSED_SECONDS = 24 * 60 * 60
 CLAUDE_TAIL_BYTES = 512 * 1024
+# A prompt sent while the agent still writes the save moves the pending
+# request aside when it was asked this recently (see _begin); an older one
+# is reported unsaved at once.
+IN_FLIGHT_SECONDS = 10 * 60
 
 
 # The rules a save step carries - the schema, what belongs in learnings - are
@@ -287,7 +291,11 @@ def _rules_in_context(payload):
     except OSError:
         return False
     start = max(tail.rfind(record) for record in COMPACTION_RECORDS)
-    return tail.find(FULL_RULES.encode(), start + 1 if start >= 0 else 0) >= 0
+    # The model holds what follows the compaction record's own line: Codex's
+    # record carries a retained context with earlier steps in it, which the
+    # model no longer sees.
+    begin = 0 if start < 0 else (tail.find(b'\n', start) + 1 or len(tail))
+    return tail.find(FULL_RULES.encode(), begin) >= 0
 
 
 def configured_answer(root):
@@ -318,21 +326,22 @@ def _rollout_source(payload):
 
 
 def _rollout_turn(payload):
-    """The Codex turn behind this Stop: its collaboration mode and sandbox
-    type from the rollout's turn_context record with the Stop's turn_id,
-    or Nones. Codex's permission_mode follows the approval policy only."""
+    """The Codex turn behind this Stop: its collaboration mode, sandbox type
+    and restricted file-system policy from the rollout's turn_context record
+    with the Stop's turn_id, or Nones. Codex's permission_mode follows the
+    approval policy only."""
     path, turn = payload.get('transcript_path'), payload.get('turn_id')
     if not isinstance(path, str) or not path or not isinstance(turn, str) or not turn:
-        return None, None
+        return None, None, None
     try:
         if not stat.S_ISREG(os.stat(path).st_mode):
-            return None, None
+            return None, None, None
         with open(path, 'rb') as handle:
             handle.seek(0, os.SEEK_END)
             handle.seek(max(0, handle.tell() - ROLLOUT_TAIL_BYTES))
             tail = handle.read(ROLLOUT_TAIL_BYTES)
     except OSError:
-        return None, None
+        return None, None, None
     for line in reversed(tail.split(b'\n')):
         if b'turn_context' not in line:
             continue
@@ -344,13 +353,51 @@ def _rollout_turn(payload):
         if not isinstance(context, dict):
             continue
         if context.get('turn_id') != turn:
-            return None, None
+            return None, None, None
         mode = context.get('collaboration_mode')
         sandbox = context.get('sandbox_policy')
         mode = mode.get('mode') if isinstance(mode, dict) else None
         sandbox = sandbox.get('type') if isinstance(sandbox, dict) else None
-        return (mode if isinstance(mode, str) else None), (sandbox if isinstance(sandbox, str) else None)
-    return None, None
+        files = context.get('file_system_sandbox_policy')
+        files = files if isinstance(files, dict) and files.get('kind') == 'restricted' else None
+        # Read as not letting the turn write its own directory, the policy is
+        # in a form this reading does not know: the Stop asks as before.
+        where = context.get('cwd')
+        if files is not None and not (isinstance(where, str) and where
+                                      and _sandbox_writes(files, os.path.realpath(where))):
+            files = None
+        return (mode if isinstance(mode, str) else None), (sandbox if isinstance(sandbox, str) else None), files
+    return None, None, None
+
+
+def _sandbox_writes(policy, target):
+    """Whether a Codex restricted file-system policy lets a command write
+    `target`: the most specific entry over it decides, as it decides Codex's
+    own carve-outs (.git, .codex and .agents stay read-only inside a writable
+    workspace)."""
+    target = os.path.normcase(target)
+    best = None
+    for entry in policy.get('entries') or ():
+        if not isinstance(entry, dict) or entry.get('access') not in ('read', 'write', 'none'):
+            continue
+        where = entry.get('path')
+        if not isinstance(where, dict):
+            continue
+        if where.get('type') == 'path' and isinstance(where.get('path'), str):
+            base = os.path.realpath(where['path'])
+        elif where.get('type') == 'special' and isinstance(where.get('value'), dict):
+            base = {'root': os.sep, 'slash_tmp': '/tmp',
+                    'tmpdir': os.environ.get('TMPDIR')}.get(where['value'].get('kind'))
+            if not base:
+                continue
+            base = os.path.realpath(base)
+        else:
+            continue
+        base = os.path.normcase(base)
+        if target == base or target.startswith(base.rstrip(os.sep) + os.sep):
+            if best is None or len(base) > best[0]:
+                best = (len(base), entry['access'])
+    return best is not None and best[1] == 'write'
 
 
 def _claude_refusal(payload, token):
@@ -441,10 +488,13 @@ def _file(root, key):
     return destination
 
 
-def _read(root, key):
-    value = _read_receipt(_file(root, key))
+def _read(root, key, slot=None):
+    """The session's request state, from its own file or from `slot`, where
+    _begin moves a request aside; its identity is the session's either way."""
+    path = _file(root, slot or key)
+    value = _read_receipt(path)
     if value is None:
-        if os.path.lexists(_file(root,key)):
+        if os.path.lexists(path):
             raise BrainError('native-result:invalid-state')
         return None
     if (set(value) != FIELDS or value['profile'] != PROFILE
@@ -472,11 +522,32 @@ def _write(root, key, value):
     atomic_json(_file(root,key), value)
 
 
+def _aside(key):
+    """The file a session's pending request moves to when a prompt arrives
+    while its save is written (see _begin)."""
+    return hashlib.sha256(('aside:'+key).encode()).hexdigest()
+
+
+def _read_aside(root, key):
+    try:
+        return _read(root, key, _aside(key))
+    except BrainError:
+        return None
+
+
+def _drop_aside(root, key):
+    try:
+        path = _file(root, _aside(key))
+        if os.path.lexists(path): path.unlink()
+    except (BrainError, OSError):
+        pass
+
+
 def _prune(root, key):
     directory = _file(root,key).parent
     candidates=[]
     for item in directory.glob('*.json'):
-        if HEX.fullmatch(item.stem) and item.stem != key:
+        if HEX.fullmatch(item.stem) and item.stem not in (key, _aside(key)):
             info=item.lstat()
             if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not linked_reparse(info):
                 candidates.append((info.st_mtime_ns,item))
@@ -496,13 +567,34 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
     key=_key(root,host,payload,task_id,owner)
     if key is None: return step({'armed':False},'skipped','no-session-id')
     with mutation_lock(root):
-        previous=_read(root,key)
+        # A state this runtime cannot read - written by another version of
+        # it, or damaged - refused every later prompt of the session, which
+        # then saved nothing more. Its request can no longer be settled: a
+        # new one replaces it.
+        try: previous,unreadable=_read(root,key),False
+        except BrainError as error:
+            if refusal_code(error) != 'native-result:invalid-state': raise
+            previous,unreadable=None,True
+        aside=_read_aside(root,key)
         # Codex submits the Stop reason through UserPromptSubmit too. It is
         # bookkeeping for this prompt, never a new generation of user work.
         prompt=payload.get('prompt')
-        if (previous and previous['phase']=='requested' and isinstance(prompt,str)
-                and prompt.lstrip().startswith('INTERNAL_NATIVE_MEMORY_RESULT '+previous['token'])):
-            return step({'armed':False,'continuation':True},'continuation')
+        for pending in (previous,aside):
+            if (pending and pending['phase']=='requested' and isinstance(prompt,str)
+                    and prompt.lstrip().startswith('INTERNAL_NATIVE_MEMORY_RESULT '+pending['token'])):
+                return step({'armed':False,'continuation':True},'continuation')
+        # A request moved aside at the last prompt had the rest of its turn to
+        # save; what it became is reported now, as for any other request.
+        unsettled=None
+        if aside is not None:
+            _drop_aside(root,key)
+            if (aside['phase'] in {'requested','failed'} and host=='claude' and not aside['digest']
+                    and _claude_refusal(payload,aside['token'])):
+                aside.update(phase='refused',updated=time.time())
+            if aside['phase'] == 'refused' and (previous is None or previous['phase'] == 'armed'):
+                previous=aside
+            elif aside['phase'] in {'requested','failed','held','refused'}:
+                unsettled=aside['phase']
         # A person who says no in Claude Code's dialog ends the turn before
         # any Stop runs, so the request is still pending. And Claude Code
         # writes its transcript in batches: a refusal just before the
@@ -520,7 +612,15 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
             previous.update(phase='declined',updated=time.time());_write(root,key,previous)
             return step({'armed':False,'warning':'Previous native memory result was not saved completely.'},
                         'skipped','host-refused')
-        warning = bool(previous and previous['phase'] in {'requested','failed','held','refused'})
+        # A person may send the next prompt while the agent still writes the
+        # save: Claude Code and Codex take it into the running turn and run
+        # this hook at once. Replaced, the request refused that save on its
+        # way and the agent was warned of a result it was saving; moved
+        # aside, the save lands.
+        moved=(previous is not None and previous['phase']=='requested'
+               and 0 <= time.time()-previous['updated'] < IN_FLIGHT_SECONDS)
+        if moved: _write(root,_aside(key),previous)
+        warning = bool(unsettled) or not moved and bool(previous and previous['phase'] in {'requested','failed','held','refused'})
         state={'profile':PROFILE,'owner':owner,'host':host,
                'session':hashlib.sha256(str(payload.get('conversation_id' if host=='cursor' else 'session_id')).encode()).hexdigest(),
                'project':_project(root),'task_id':task_id,'token':uuid4().hex,
@@ -529,7 +629,8 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
         _write(root,key,state);_prune(root,key)
     # The warning is counted by what the last request became.
     return step({'armed':True,'request':key,**({'warning':'Previous native memory result was not saved completely.'} if warning else {})},
-                'armed','previous-'+previous['phase'] if warning else None)
+                'armed','previous-'+(unsettled or previous['phase']) if warning
+                else 'previous-in-flight' if moved else 'previous-unreadable' if unreadable else None)
 
 
 def recovery(host, payload):
@@ -645,11 +746,17 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
     try: brief,code=attended(root,host,payload),None
     except BrainError as error: brief,code=False,refusal_code(error)
     # Codex reports Plan mode and a read-only sandbox only in the rollout.
-    collaboration,sandbox=_rollout_turn(payload) if host=='codex' else (None,None)
+    collaboration,sandbox,files=_rollout_turn(payload) if host=='codex' else (None,None,None)
     with mutation_lock(root):
         state=_read(root,key)
         if state is None: return step({},'skipped','not-armed')
         if recovery(host,payload):
+            # The continuation answered the request a prompt sent during its
+            # save moved aside.
+            slot=key
+            if state['phase'] != 'requested':
+                aside=_read_aside(root,key)
+                if aside is not None: state,slot=aside,_aside(key)
             if state['phase']=='requested':
                 # Held: a finished save the state never took. Failed: no
                 # save began, or one began and did not finish. Refused:
@@ -658,7 +765,7 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
                 elif host=='claude' and not state['digest'] and _claude_refusal(payload,state['token']):
                     state['phase']='refused'
                 else: state['phase']='failed'
-                _write(root,key,state)
+                _write(root,slot,state)
                 return step({},'held' if state['phase']=='held' else 'failed',
                             'unconfirmed' if state['phase']=='held' else 'host-refused' if state['phase']=='refused'
                             else 'incomplete' if state['digest'] else 'unsaved')
@@ -671,6 +778,10 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         if payload.get('permission_mode') == 'plan' or collaboration == 'plan': return step({},'skipped','plan-mode')
         # A read-only sandbox lets no save write the project.
         if sandbox == 'read-only': return step({},'skipped','read-only-sandbox')
+        # Codex started below the project writes only there: a save to the
+        # project's Brain fails with a read-only file system, every answer.
+        if files is not None and not _sandbox_writes(files, os.path.realpath(brain_root(root))):
+            return step({},'skipped','outside-sandbox')
         try: task=writable_task(root,task_id,owner)
         except BrainRecordNotFound as error:
             if error.identifier != task_id: raise
@@ -681,7 +792,10 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         state.update(phase='requested',scope=prepared_scope(root,owner,REASON,'agent'),
                      checkout=_checkout(root),adapter=_adapter(),updated=time.time())
         _write(root,key,state)
-        full=configured_instruction(root)=='full' or not _rules_in_context(payload)
+        # Cursor's transcript, when it keeps one, and how it records a
+        # summarized conversation could not be checked here: it gets the
+        # full step every time, as before.
+        full=configured_instruction(root)=='full' or host=='cursor' or not _rules_in_context(payload)
         instruction=_instruction(root,key,state,brief=brief,host=host,full=full)
     # Claude Code labels a block a hook error, notifies one after every
     # answer and hands the model the reason twice. Its Stop additionalContext
@@ -702,7 +816,11 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
     if not _enabled(mode): raise BrainError('native-result:governed-session-required')
     if not isinstance(token,str) or not TOKEN.fullmatch(token): raise BrainError('native-result:invalid-token')
     with mutation_lock(root):
-        state=_read(root,key)
+        state,slot=_read(root,key),key
+        # A prompt sent while this save was written moved its request aside.
+        if state is None or state['token'] != token:
+            aside=_read_aside(root,key)
+            if aside is not None and aside['token'] == token: state,slot=aside,_aside(key)
         if state is not None: step.host=state['host']
         if (state is None or state['token'] != token or state['owner'] != owner
                 or state['project'] != _project(root)
@@ -722,8 +840,8 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
             raise BrainError('native-result:scope-changed')
         if skip:
             if state['digest'] is not None: raise BrainError('native-result:save-already-started')
-            state['phase']='omitted';_write(root,key,state)
-            return step({'state':'omitted','attestation':'agent'},'omitted')
+            state['phase']='omitted';_write(root,slot,state)
+            return step({'state':'omitted','attestation':'agent'},'omitted','in-flight' if slot != key else None)
         # A completed replay may outlive its sources or active task alias.
         # Only the canonical result protocol can admit such a replay; local
         # challenge metadata alone must never authorize a fresh write.
@@ -742,7 +860,7 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
             provision(state['task_id'])
             task=writable_task(root,state['task_id'],owner)
             state.update(task_uuid=task['id'],revision=task['revision'])
-            _write(root,key,state)
+            _write(root,slot,state)
         if not begun:
             task=writable_task(root,state['task_id'],owner)
             if task['id'] != state['task_uuid']:
@@ -750,7 +868,7 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
         digest=request_digest(state['task_uuid'],normalized)
         if state['digest'] is not None and state['digest'] != digest:
             raise BrainError('native-result:content-changed')
-        state['digest']=digest;_write(root,key,state)
+        state['digest']=digest;_write(root,slot,state)
         try:
             result=record_result(root,state['task_uuid'],'native-'+token,state['revision'],data,
                                  owner=owner,reason=REASON,attestation='agent',prepared=state['scope'],
@@ -759,7 +877,8 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
             if str(error) != 'memory-result-v1:prepared_stale_no_write': raise
             raise _overtaken(str(error),'another session or a person saved the task') from error
         held=any(item['state'] in {'differs','archived-differs'} for item in result['records'])
-        state['phase']='held' if held else 'saved';_write(root,key,state)
-        return step(result,state['phase'],repeat,
+        state['phase']='held' if held else 'saved';_write(root,slot,state)
+        # For the journal: a save that landed after a prompt moved its request aside.
+        return step(result,state['phase'],repeat or ('in-flight' if slot != key else None),
                     learnings=sum(item['state'] in {'created','completed','updated'} for item in result['records']),
                     promoted=len((result['promotion'] or {}).get('promoted') or ()))

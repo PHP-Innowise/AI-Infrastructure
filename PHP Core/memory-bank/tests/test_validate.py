@@ -601,6 +601,35 @@ class SecretPatternTableTest(unittest.TestCase):
 class MaskSecretsTest(unittest.TestCase):
     """The index masks a detected value instead of dropping the document."""
 
+    def test_masking_is_held_per_text_and_secret_policy(self) -> None:
+        # One capsule request screens the same document images several
+        # times, so masking is held per text. A pattern added since must mask
+        # afresh, and a scanner that is no compiled pattern is never held.
+        text = "deploy with SANDPIPER_KEY_ABCDEF"
+        before = VALIDATOR.mask_secrets(text)
+        self.assertEqual((text, 0), before)
+        with mock.patch.dict(VALIDATOR.SECRET_PATTERNS, {"sandpiper key": re.compile(r"SANDPIPER_KEY_[A-Z]+")}):
+            self.assertEqual(("deploy with [redacted: sandpiper key]", 1), VALIDATOR.mask_secrets(text))
+
+        class Scanner:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def finditer(self, value: str):
+                self.calls += 1
+                return re.finditer(r"SANDPIPER_KEY_[A-Z]+", value)
+
+            def search(self, value: str):
+                return re.search(r"SANDPIPER_KEY_[A-Z]+", value)
+
+        scanner = Scanner()
+        with mock.patch.dict(VALIDATOR.SECRET_PATTERNS, {"sandpiper scanner": scanner}):
+            VALIDATOR.mask_secrets(text)
+            VALIDATOR.mask_secrets(text)
+        self.assertGreaterEqual(scanner.calls, 2)
+        self.assertEqual(before, VALIDATOR.mask_secrets(text))
+
+
     VALUE_EXTENT = (
         ("MAILER_PASSWORD=mailpit", "MAILER_PASSWORD=[redacted: assigned credential]"),
         ("```yaml\nmailer:\n  password: quokka\n```",

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import hashlib
 import json
 import os
@@ -708,6 +709,30 @@ def mask_secrets(text: str) -> tuple[str, int]:
         raise ValidationError("possible secret survives masking; value intentionally not printed")
     return text, masked
 
+
+
+# Masking depends on the text and on the secret policy only, and one capsule
+# request screens the same document images several times: its excerpts are
+# cut three times over, each screening every image again. A first prompt on a
+# synced copy of a client project took 308 ms without this and 283 ms with
+# it, its output byte for byte the same. The policy's fingerprint is part of
+# the key, so a pattern added in the meantime masks afresh, and a policy
+# holding a scanner that is no compiled pattern is not cached at all. The
+# cache is bounded, so a long-lived importer keeps no corpus.
+_mask_secrets_once = mask_secrets
+
+
+@functools.lru_cache(maxsize=128)
+def _mask_secrets_cached(text: str, policy: str) -> tuple[str, int]:
+    return _mask_secrets_once(text)
+
+
+def mask_secrets(text: str) -> tuple[str, int]:  # noqa: F811 - the cached face of the one above
+    """`text` masked as the uncached mask_secrets above masks it, once per text and policy."""
+    # A scanner that is not a compiled pattern has no fingerprint to key on.
+    if not isinstance(text, str) or any(type(pattern) is not re.Pattern for pattern in SECRET_PATTERNS.values()):
+        return _mask_secrets_once(text)
+    return _mask_secrets_cached(text, secret_policy_fingerprint())
 
 def moved_to(project_root: Path, source: str) -> Optional[str]:
     """Where Git moved a cited file that is gone - the end of its rename

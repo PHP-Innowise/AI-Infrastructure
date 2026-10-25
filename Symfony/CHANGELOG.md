@@ -11,6 +11,11 @@ it at the top of every session.
 
 ## Unreleased
 
+- `README.md`, installed as `ACCELERATOR.md`, opens Quick Start with where to start the tools: in the
+  project root. Claude Code started in a subfolder reads none of the project's settings and runs none
+  of its hooks; Codex started in one cannot save memory there. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
 - `AGENTS.md` asks for an explicit memory save (`context.py record-result`,
   `memory_record_result`, Harness `memory-draft`) only where the Stop hook
   requests no `native-result` save; where it does, the save rule opens with

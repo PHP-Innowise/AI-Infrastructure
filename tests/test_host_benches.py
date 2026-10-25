@@ -12,8 +12,10 @@ import html
 import io
 import importlib
 import json
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -97,6 +99,49 @@ class ClaudeStandInTest(unittest.TestCase):
     def test_a_request_without_tools_gets_text(self) -> None:
         [reply], stop, _ = claude_code_bench.Scripted.decide(self.stand_in, {"messages": []})
         self.assertEqual(("text", "end_turn"), (reply["type"], stop))
+
+    def test_with_queued_the_stand_in_takes_its_time_over_the_first_save_only(self) -> None:
+        stand_in = SimpleNamespace(save_delay=7.0, save_begun=threading.Event())
+        with mock.patch.object(claude_code_bench.time, "sleep") as sleep:
+            for name in ("toolu_read", "toolu_save", "toolu_save"):
+                claude_code_bench.Scripted.pause(stand_in, [{"type": "tool_use", "id": name}])
+        sleep.assert_called_once_with(7.0)
+        self.assertTrue(stand_in.save_begun.is_set())
+
+    def test_a_queued_run_passes_only_when_the_save_in_flight_lands(self) -> None:
+        # The second question came while the save was written: the save must
+        # still land, and nothing may say it was not saved.
+        landed = ["prompt:armed", "stop:requested", "prompt:armed:previous-in-flight", "save:saved:in-flight",
+                  "stop:skipped:recovery-saved"]
+        refused = ["prompt:armed", "stop:requested", "prompt:armed:previous-requested",
+                   "save:refused:native-result:request-unavailable", "stop:skipped:recovery-armed"]
+        warning = "Previous native memory result was not saved completely."
+        self.assertTrue(claude_code_bench.queued_ok(landed, "Saved."))
+        # A runtime that kept the request where it was journals a plain save.
+        self.assertTrue(claude_code_bench.queued_ok([event.replace(":in-flight", "") for event in landed], "Saved."))
+        self.assertFalse(claude_code_bench.queued_ok(refused, warning))
+        self.assertFalse(claude_code_bench.queued_ok(landed, warning))
+
+
+class CodexHelpersTest(unittest.TestCase):
+    """Codex's helpers outlive the bench's run unless it stops them."""
+
+    @unittest.skipUnless(Path("/proc/self/environ").exists(), "Linux /proc")
+    def test_only_the_runs_own_helpers_are_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            ours, theirs = Path(folder) / "codex-home", Path(folder) / "other-home"
+            sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+            mine = subprocess.Popen(sleep, env={"CODEX_HOME": str(ours)})
+            other = subprocess.Popen(sleep, env={"CODEX_HOME": str(theirs)})
+            try:
+                self.assertEqual(1, codex_bench.stop_helpers(ours))
+                self.assertEqual(-9, mine.wait(timeout=10))
+                self.assertIsNone(other.poll())
+            finally:
+                for process in (mine, other):
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
 
 
 class CodexStandInTest(unittest.TestCase):
