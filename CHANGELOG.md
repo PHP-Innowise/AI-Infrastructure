@@ -158,7 +158,9 @@ edition's own files remain in that edition's changelog.
   prompt - runs outside the sandbox, takes the file (one attempt each) and
   saves it (`saved` with code `spooled`). Only a sandbox that writes
   neither the Brain nor a temporary directory is skipped as
-  `outside-sandbox`.
+  `outside-sandbox`. Codex's `tmpdir` entry is `$TMPDIR`, or on Windows,
+  where that is rarely set, the user's temporary folder (`TEMP`, `TMP`):
+  the Windows CI found the save not asked for there.
 - Tests: `test_a_save_the_sandbox_cannot_write_is_made_by_the_next_hook`
   (the project made read-only; a malformed result refused at once, the
   result spooled, then saved by the continuation's Stop and, in a second

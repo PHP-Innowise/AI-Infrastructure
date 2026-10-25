@@ -1224,6 +1224,23 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
                 else:
                     self.assertIn(b'native-result --request',out)
 
+    def test_the_codex_temporary_directory_on_windows_is_the_users_own(self):
+        # Codex names the temporary directory `tmpdir`. Windows rarely sets
+        # TMPDIR: there it is the user's TEMP folder, where the save waits.
+        policy={'kind':'restricted','entries':[{'path':{'type':'special','value':{'kind':'tmpdir'}},'access':'write'}]}
+        temporary=str(self.root.parent/'windows-temp')
+        spool=os.path.join(temporary,'ai-accelerator-native-spool-user')
+        with self.runtime() as (native,_,_):
+            os.environ.pop('TMPDIR',None)
+            with mock.patch.object(native.tempfile,'gettempdir',return_value=temporary):
+                with mock.patch.object(native.os,'name','nt'):
+                    self.assertTrue(native._sandbox_writes(policy,spool))
+                with mock.patch.object(native.os,'name','posix'):
+                    self.assertFalse(native._sandbox_writes(policy,spool))
+            os.environ['TMPDIR']=temporary
+            with mock.patch.object(native.os,'name','posix'):
+                self.assertTrue(native._sandbox_writes(policy,spool))
+
     def test_an_unknown_codex_turn_is_asked_as_before(self):
         # Another turn's context, or one beyond the tail the Stop reads, is unknown.
         cases={'other turn':(self.rollout('other.jsonl',[('t1','plan','read-only')]),'t2'),

@@ -395,8 +395,11 @@ def _sandbox_writes(policy, target):
         if where.get('type') == 'path' and isinstance(where.get('path'), str):
             base = os.path.realpath(where['path'])
         elif where.get('type') == 'special' and isinstance(where.get('value'), dict):
+            # The temporary directory: $TMPDIR, or on Windows, where it is
+            # rarely set, the user's own (TEMP, TMP) - where _spool_dirs waits.
+            temporary = os.environ.get('TMPDIR') or (tempfile.gettempdir() if os.name == 'nt' else None)
             base = {'root': os.sep, 'slash_tmp': '/tmp',
-                    'tmpdir': os.environ.get('TMPDIR')}.get(where['value'].get('kind'))
+                    'tmpdir': temporary}.get(where['value'].get('kind'))
             if not base:
                 continue
             base = os.path.realpath(base)
