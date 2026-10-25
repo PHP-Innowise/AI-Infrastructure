@@ -31,13 +31,22 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
+WINDOWS = os.name == "nt"
+
+# One copy serves every project of the person: a session in the root of a
+# project with an older release must not put an older one back. Raise it,
+# with the comment in claude_dispatch.sh, whenever either file changes.
+DISPATCH_VERSION = 2
 INTERPRETERS = (["python3"], ["python"], ["py", "-3"])
 CLI = "memory-bank/scripts/context.py"
+# How .claude/CLAUDE.md, or the project's own CLAUDE.md, pulls AGENTS.md in.
+POLICY_IMPORT = re.compile(r"(?:^|\s)@(?:\./|\.\./)?AGENTS\.md(?:\s|$)", re.M)
 # Settings entries that carry AGENTS.md; a policy longer than they hold ends
 # in the last one, which Claude Code then keeps in a file.
 POLICY_PARTS = 4
@@ -63,6 +72,34 @@ def plain(command: str) -> bool:
     return not quoted
 
 
+def native_path(path: str) -> str:
+    """Git Bash's /c/Users/me as Windows writes it, C:/Users/me."""
+    if WINDOWS and re.match(r"/[A-Za-z](/|$)", path):
+        return path[1] + ":" + (path[2:] or "/")
+    return path
+
+
+def same_path(first: str, second: str) -> bool:
+    def key(path):
+        return os.path.normcase(os.path.normpath(native_path(path)))
+    return key(first) == key(second)
+
+
+def hook_bash() -> str:
+    """The bash Claude Code runs hooks with: Git for Windows' on Windows,
+    where a bare bash is WSL's launcher, which CreateProcess finds first."""
+    if not WINDOWS:
+        return shutil.which("bash") or "bash"
+    configured = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if configured and Path(configured).is_file():
+        return configured
+    git = shutil.which("git")
+    for folder in Path(git).resolve().parents if git else ():
+        if (folder / "bin" / "bash.exe").is_file():
+            return str(folder / "bin" / "bash.exe")
+    return shutil.which("bash") or "bash"
+
+
 def memory_command(command: str, root: str) -> bool:
     """Whether `command` runs nothing but this project's memory CLI, after an
     optional `cd ROOT &&` and an echo or printf piped into it."""
@@ -76,7 +113,7 @@ def memory_command(command: str, root: str) -> bool:
         return False
     relative = False
     if words[:1] == ["cd"]:
-        if len(words) < 3 or words[1] != root or words[2] != "&&":
+        if len(words) < 3 or not same_path(words[1], root) or words[2] != "&&":
             return False
         words, relative = words[3:], True
     if words[:1] in (["echo"], ["printf"]):
@@ -91,7 +128,7 @@ def memory_command(command: str, root: str) -> bool:
     else:
         return False
     script = words[0] if words else ""
-    if script != os.path.join(root, CLI) and not (relative and script == CLI):
+    if not script or not (same_path(script, os.path.join(root, CLI)) or relative and script == CLI):
         return False
     # The rest is the CLI's own arguments: nothing that starts another command.
     return not any(set(word) <= set("();<>|&") for word in words[1:])
@@ -120,16 +157,20 @@ def project_key(start: str) -> str:
     its .claude.json - the dialog's answer about imports from outside the
     session's folder among them: the Git checkout's (the main one's, for a
     linked working tree), or the folder the session started in outside Git."""
-    folder = Path(start)
+    folder = Path(native_path(start))
+    found = str(folder)
     for candidate in (folder, *folder.parents):
         git = candidate / ".git"
         if git.is_symlink():
             break
         if git.is_dir():
-            return str(candidate)
+            found = str(candidate)
+            break
         if git.is_file():
-            return str(main_checkout(candidate))
-    return start
+            found = str(main_checkout(candidate))
+            break
+    # Claude Code on Windows files it with forward slashes.
+    return found.replace("\\", "/") if WINDOWS else found
 
 
 def external_imports_approved(start: str) -> bool:
@@ -139,7 +180,12 @@ def external_imports_approved(start: str) -> bool:
         projects = json.loads(config.read_text(encoding="utf-8")).get("projects") or {}
     except (OSError, ValueError, AttributeError):
         return False
-    entry = projects.get(project_key(start)) if isinstance(projects, dict) else None
+    if not isinstance(projects, dict):
+        return False
+    key = project_key(start)
+    entry = projects.get(key)
+    if entry is None and WINDOWS:
+        entry = next((value for name, value in projects.items() if name.lower() == key.lower()), None)
     return isinstance(entry, dict) and entry.get("hasClaudeMdExternalIncludesApproved") is True
 
 
@@ -183,11 +229,25 @@ def pieces(text: str, budget: int) -> list:
     return result
 
 
+def imports_policy(root: str) -> bool:
+    """Whether the project's CLAUDE.md pulls AGENTS.md into a session in the
+    root: below it the dispatcher stands in for that, and for nothing else."""
+    for name in (".claude/CLAUDE.md", "CLAUDE.md"):
+        try:
+            if POLICY_IMPORT.search((Path(root) / name).read_text(encoding="utf-8")):
+                return True
+        except (OSError, UnicodeError):
+            continue
+    return False
+
+
 def policy(root: str, start: str, part: int) -> str:
     """Part `part` of the project's AGENTS.md, with a line saying what it is;
-    nothing past its end, nor when Claude Code imports the file itself."""
+    nothing past its end, nor where the project's CLAUDE.md does not import
+    it, nor when Claude Code imports it itself."""
     path = Path(root) / "AGENTS.md"
-    if not 1 <= part <= POLICY_PARTS or not path.is_file() or external_imports_approved(start):
+    if not 1 <= part <= POLICY_PARTS or not path.is_file() or not imports_policy(root) \
+            or external_imports_approved(start):
         return ""
     try:
         text = path.read_text(encoding="utf-8")
@@ -255,7 +315,9 @@ def path_rule(content: str, root: str):
     `/**` names a folder and is not one, so `secrets/**` matches a secrets
     folder at any depth while `a/b/**` matches only the root's a/b."""
     text = content.strip()
-    if text.startswith("//"):
+    if text.startswith("//") and WINDOWS and re.match(r"//[A-Za-z](/|$)", text):
+        base, text, anchored = text[2] + ":" + os.sep, text[4:], True
+    elif text.startswith("//"):
         base, text, anchored = os.sep, text[2:], True
     elif text.startswith("~/"):
         base, text, anchored = str(Path.home()), text[2:], True
@@ -274,13 +336,16 @@ def path_rule(content: str, root: str):
         text, folder = "**", False
     if anchored is None:
         anchored = "/" in text
-    return base, re.compile(glob_regex(text)), anchored, folder
+    return base, re.compile(glob_regex(text), re.IGNORECASE if WINDOWS else 0), anchored, folder
 
 
 def path_matches(content: str, path: str, root: str) -> bool:
     """Whether the rule's path names `path` (absolute) or a folder holding it."""
     base, regex, anchored, folder = path_rule(content, root)
-    relative = os.path.relpath(path, base) if base != os.sep else path.lstrip(os.sep)
+    try:
+        relative = os.path.relpath(path, base) if base != os.sep else path.lstrip(os.sep)
+    except ValueError:  # another drive
+        return False
     if relative == "." or relative.startswith(".." + os.sep) or relative == ".." or os.path.isabs(relative):
         return False
     names = relative.replace(os.sep, "/").split("/")
@@ -299,11 +364,13 @@ def file_paths(tool_input: dict, key: str, start: str) -> list:
     value = tool_input.get(key)
     if not isinstance(value, str) or not value or "\0" in value:
         return []
-    path = os.path.normpath(value if os.path.isabs(value) else os.path.join(start, value))
+    value = native_path(value)
+    path = os.path.normpath(value if os.path.isabs(value) else os.path.join(native_path(start), value))
     return list(dict.fromkeys([path, os.path.realpath(path)]))
 
 
 def inside(path: str, root: str) -> bool:
+    path, root = os.path.normcase(path), os.path.normcase(os.path.normpath(native_path(root)))
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
@@ -409,7 +476,8 @@ def own_rules() -> list:
     folder = os.environ.get("CLAUDE_CONFIG_DIR")
     sources = [Path(folder) / "settings.json" if folder else Path.home() / ".claude" / "settings.json",
                Path("/etc/claude-code/managed-settings.json"),
-               Path("/Library/Application Support/ClaudeCode/managed-settings.json")]
+               Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
+               Path(os.environ.get("ProgramFiles") or "C:\\Program Files") / "ClaudeCode" / "managed-settings.json"]
     found = []
     for source in sources:
         try:
@@ -485,7 +553,7 @@ def main() -> int:
         sys.stdout.buffer.write(policy(root, start, int(number) if number.isdigit() else 0).encode("utf-8"))
         return 0
     payload = sys.stdin.buffer.read()
-    done = subprocess.run(["bash", str(Path(root) / ".claude/hooks" / hook)], input=payload, cwd=root,
+    done = subprocess.run([hook_bash(), str(Path(root) / ".claude/hooks" / hook)], input=payload, cwd=root,
                           stdout=subprocess.PIPE)
     if hook == "bash-validator.sh":
         sys.stdout.buffer.write(done.stdout)

@@ -10,6 +10,7 @@ dispatcher runs the project's hooks for a session started below the root,
 brings the policy in parts Claude Code keeps in the conversation, and lets
 the memory CLI through as the project's own permission rules do.
 """
+import hashlib
 import importlib.util
 import json
 import os
@@ -24,7 +25,10 @@ import time
 import unittest
 from unittest import mock
 
+from tests.hook_shell import BASH
+
 ROOT = Path(__file__).resolve().parents[1]
+WINDOWS = os.name == "nt"
 EDITIONS = ("PHP Core", "Laravel", "Symfony", "Cms/wordpress")
 SCRIPTS = ROOT / "PHP Core" / "memory-bank" / "scripts"
 
@@ -39,6 +43,34 @@ def load_dispatch():
 dispatch = load_dispatch()
 
 
+def shown(path):
+    """`path` as Git Bash shows it, for comparison: C:\\Users reads /c/Users
+    there, and Windows names ignore case."""
+    text = str(path)
+    if WINDOWS:
+        text = text.replace("\\", "/")
+        if len(text) > 1 and text[1] == ":":
+            text = "/" + text[0] + text[2:]
+        text = text.lower()
+    return text
+
+
+def key_of(path):
+    """The key Claude Code files a project under in its .claude.json."""
+    return str(path).replace("\\", "/") if WINDOWS else str(path)
+
+
+def can_link(folder):
+    """Whether this machine lets a test make a symbolic link (Windows needs a privilege)."""
+    probe = Path(folder) / "link-probe"
+    try:
+        probe.symlink_to(folder, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        return False
+    probe.unlink()
+    return True
+
+
 def inside_git(folder):
     """Whether a folder above `folder` holds a .git (a machine's /tmp can)."""
     return any((parent / ".git").exists() for parent in Path(folder).parents)
@@ -50,7 +82,7 @@ def git(folder, *args):
                    cwd=folder, check=True, capture_output=True)
 
 
-@unittest.skipIf(os.name == "nt", "the dispatcher is not set up on Windows")
+@unittest.skipIf(BASH is None, "no bash to run hooks with")
 class Fixture(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="claude-subfolders-")
@@ -82,6 +114,7 @@ class Fixture(unittest.TestCase):
             path.chmod(0o755)
         if policy is not None:
             (root / "AGENTS.md").write_text(policy, encoding="utf-8")
+            shutil.copy2(ROOT / "PHP Core" / ".claude" / "CLAUDE.md", root / ".claude" / "CLAUDE.md")
         git(root, "init", "-q")
         return root
 
@@ -99,7 +132,7 @@ class Fixture(unittest.TestCase):
 
     def dispatched(self, settings=None):
         """(event, matcher, hook name, timeout) of every dispatcher entry."""
-        marker = shlex.quote(str(self.config / "ai-accelerator" / "ai-accelerator-dispatch.sh")) + " "
+        marker = shlex.quote((self.config / "ai-accelerator" / "ai-accelerator-dispatch.sh").as_posix()) + " "
         found = []
         for event, groups in (settings or self.settings()).get("hooks", {}).items():
             for group in groups:
@@ -111,8 +144,17 @@ class Fixture(unittest.TestCase):
 
     def run_dispatcher(self, hook, start, payload=b"{}"):
         env = dict(self.env, CLAUDE_PROJECT_DIR=str(start))
-        return subprocess.run(["bash", str(self.config / "ai-accelerator" / "ai-accelerator-dispatch.sh"), hook],
+        # As the settings entry names it: forward slashes, which Git Bash
+        # on Windows runs as written.
+        return subprocess.run([BASH, (self.config / "ai-accelerator" / "ai-accelerator-dispatch.sh").as_posix(), hook],
                               input=payload, env=env, cwd=start, capture_output=True)
+
+    def assert_ran(self, done, root, payload="{}"):
+        """The echo hook ran in `root`, with CLAUDE_PROJECT_DIR naming it."""
+        self.assertEqual(done.returncode, 0, done.stderr)
+        where, _, rest = done.stdout.decode().partition(" for ")
+        named, _, given = rest.partition(": ")
+        self.assertEqual((shown(where[len("ran in "):]), named, given), (shown(root), str(root), payload), done.stdout)
 
 
 class PolicyPieces(unittest.TestCase):
@@ -176,7 +218,7 @@ class PolicyParts(Fixture):
         self.assertEqual("".join(output.split(":\n\n", 1)[1] for output in outputs), text)
 
     def approve(self, folder):
-        (self.config / ".claude.json").write_text(json.dumps({"projects": {str(folder): {
+        (self.config / ".claude.json").write_text(json.dumps({"projects": {key_of(folder): {
             "hasClaudeMdExternalIncludesApproved": True, "hasClaudeMdExternalIncludesWarningShown": True}}}),
             encoding="utf-8")
 
@@ -198,28 +240,73 @@ class PolicyParts(Fixture):
             self.assertEqual(dispatch.policy(str(root), str(start), 0), "")
 
 
+class PolicyImport(Fixture):
+    def test_the_policy_comes_only_where_the_projects_claude_md_imports_it(self):
+        root = self.project(policy="# Policy\nRule.\n")
+        start = str(root / "src")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config)}):
+            self.assertTrue(dispatch.policy(str(root), start, 1))
+            (root / ".claude" / "CLAUDE.md").write_text("The project keeps its policy to itself.\n", encoding="utf-8")
+            self.assertEqual(dispatch.policy(str(root), start, 1), "")
+            (root / "CLAUDE.md").write_text("# Team notes\n\n@AGENTS.md\n", encoding="utf-8")
+            self.assertTrue(dispatch.policy(str(root), start, 1))
+            (root / "CLAUDE.md").write_text("Mail me@AGENTS.md.example\n", encoding="utf-8")
+            self.assertEqual(dispatch.policy(str(root), start, 1), "")
+
+
+class DispatcherVersion(Fixture):
+    # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
+    # then record the scripts' new fingerprint here.
+    FINGERPRINTS = {2: "a25d9cfb837c91c32c9266193960b483897284af098e8b9b89a43993f174eab1"}
+
+    def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
+        shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")
+        self.assertIn(f"# dispatch-version: {dispatch.DISPATCH_VERSION} ", shell)
+        digest = hashlib.sha256((SCRIPTS / "claude_dispatch.sh").read_bytes()
+                                + (SCRIPTS / "claude_dispatch.py").read_bytes()).hexdigest()
+        self.assertEqual(self.FINGERPRINTS.get(dispatch.DISPATCH_VERSION), digest,
+                         "claude_dispatch changed: raise DISPATCH_VERSION and record this fingerprint")
+
+    def test_a_newer_dispatcher_in_place_is_not_put_back(self):
+        root = self.project(policy="# Policy\n")
+        folder = self.config / "ai-accelerator"
+        folder.mkdir(mode=0o700)
+        newer = f"DISPATCH_VERSION = {dispatch.DISPATCH_VERSION + 1}\n"
+        (folder / "ai-accelerator-dispatch.py").write_text(newer, encoding="utf-8")
+        (folder / "ai-accelerator-dispatch.sh").write_text("# newer\n", encoding="utf-8")
+        self.setup_dispatcher(root)
+        self.assertEqual((folder / "ai-accelerator-dispatch.py").read_text(encoding="utf-8"), newer)
+        self.assertEqual((folder / "ai-accelerator-dispatch.sh").read_text(encoding="utf-8"), "# newer\n")
+        self.assertEqual((folder / "projects").read_text(encoding="utf-8").splitlines(), [str(root)])
+        self.assertTrue(self.dispatched(), "the entries are added all the same")
+        (folder / "ai-accelerator-dispatch.py").write_text("DISPATCH_VERSION = 1\n", encoding="utf-8")
+        self.setup_dispatcher(root)
+        self.assertEqual((folder / "ai-accelerator-dispatch.py").read_bytes(),
+                         (SCRIPTS / "claude_dispatch.py").read_bytes(), "an older one is replaced")
+
+
 class ProjectKey(Fixture):
     """Where Claude Code 2.1 files a session's project settings."""
 
     def test_the_checkout_outside_git_the_start_folder_and_a_linked_tree_its_main_checkout(self):
         root = self.project(policy="# Policy\n")
-        self.assertEqual(dispatch.project_key(str(root / "src" / "Billing")), str(root))
-        self.assertEqual(dispatch.project_key(str(root)), str(root))
+        self.assertEqual(dispatch.project_key(str(root / "src" / "Billing")), key_of(root))
+        self.assertEqual(dispatch.project_key(str(root)), key_of(root))
         plain = self.base / "plain" / "src"
         plain.mkdir(parents=True)
         if not inside_git(self.base):
-            self.assertEqual(dispatch.project_key(str(plain)), str(plain))
+            self.assertEqual(dispatch.project_key(str(plain)), key_of(plain))
         git(root, "add", ".")
         git(root, "commit", "-qm", "base")
         linked = self.base / "linked"
         git(root, "worktree", "add", "-q", str(linked))
         (linked / "src").mkdir(exist_ok=True)
-        self.assertEqual(dispatch.project_key(str(linked / "src")), str(root))
+        self.assertEqual(dispatch.project_key(str(linked / "src")), key_of(root))
         # A .git file that names no linked tree of a repository counts as is.
         forged = self.base / "forged"
         (forged / "src").mkdir(parents=True)
         (forged / ".git").write_text(f"gitdir: {root / '.git'}\n", encoding="utf-8")
-        self.assertEqual(dispatch.project_key(str(forged / "src")), str(forged))
+        self.assertEqual(dispatch.project_key(str(forged / "src")), key_of(forged))
 
 
 class MemoryCommand(unittest.TestCase):
@@ -299,8 +386,9 @@ class Permissions(Fixture):
                     self.assertFalse(dispatch.path_matches(rule, str(root / relative), str(root)))
         # A relative rule never reaches outside the root; // and ~/ do.
         self.assertFalse(dispatch.path_matches(".env", str(self.base / "outside" / ".env"), str(root)))
-        self.assertTrue(dispatch.path_matches("//" + str(self.base / "outside" / "abs.txt").lstrip("/"),
-                                              str(self.base / "outside" / "abs.txt"), str(root)))
+        absolute = str(self.base / "outside" / "abs.txt")
+        rule = ("//" + absolute[0] + absolute[2:].replace("\\", "/")) if WINDOWS else "//" + absolute.lstrip("/")
+        self.assertTrue(dispatch.path_matches(rule, absolute, str(root)))
         self.assertTrue(dispatch.path_matches("~/homefile.txt", str(home / "homefile.txt"), str(root)))
 
     def decide(self, root, tool, tool_input, start=None):
@@ -362,6 +450,8 @@ class Permissions(Fixture):
         self.assertEqual(self.decide(root, "Read", {"file_path": str(root / "src/Invoice.php")}), "allow")
 
     def test_a_link_counts_by_where_it_leads(self):
+        if not can_link(self.base):
+            self.skipTest("this machine makes no symbolic links")
         root = self.edition_project()
         (root / "src" / "out").symlink_to(self.base / "home")
         (root / "src" / "env-link").symlink_to(root / ".env")
@@ -399,9 +489,9 @@ class Environment(Fixture):
         self.env["CLAUDE_ENV_FILE"] = str(target)
         done = self.run_dispatcher("environment", root / "src")
         self.assertEqual(done.returncode, 0, done.stderr)
-        shown = subprocess.run(["bash", "-c", f"source {shlex.quote(str(target))}; printf '%s|%s' \"$APP_ENV\" \"$QUOTED\""],
-                               capture_output=True, text=True, env=self.env)
-        self.assertEqual(shown.stdout, "testing|it's $HOME")
+        sourced = subprocess.run([BASH, "-c", f"source {shlex.quote(target.as_posix())}; printf '%s|%s' \"$APP_ENV\" \"$QUOTED\""],
+                                 capture_output=True, text=True, env=self.env)
+        self.assertEqual(sourced.stdout, "testing|it's $HOME")
         target.unlink()
         self.run_dispatcher("environment", root)
         self.assertFalse(target.exists(), "in the root Claude Code sets the env itself")
@@ -414,7 +504,8 @@ class Setup(Fixture):
         folder = self.config / "ai-accelerator"
         dispatcher = folder / "ai-accelerator-dispatch.sh"
         self.assertEqual(dispatcher.read_bytes(), (SCRIPTS / "claude_dispatch.sh").read_bytes())
-        self.assertEqual(stat.S_IMODE(dispatcher.stat().st_mode), 0o755)
+        if not WINDOWS:
+            self.assertEqual(stat.S_IMODE(dispatcher.stat().st_mode), 0o755)
         self.assertEqual((folder / "ai-accelerator-dispatch.py").read_bytes(),
                          (SCRIPTS / "claude_dispatch.py").read_bytes())
         self.assertEqual((folder / "projects").read_text(encoding="utf-8").splitlines(), [str(root)])
@@ -450,7 +541,8 @@ class Setup(Fixture):
         self.assertEqual(settings["model"], "opus")
         self.assertEqual(settings["permissions"], own["permissions"])
         self.assertIn({"hooks": [{"type": "command", "command": "notify-send done"}]}, settings["hooks"]["Stop"])
-        self.assertEqual(stat.S_IMODE((self.config / "settings.json").stat().st_mode), 0o600)
+        if not WINDOWS:
+            self.assertEqual(stat.S_IMODE((self.config / "settings.json").stat().st_mode), 0o600)
         projects = self.config / "ai-accelerator" / "projects"
         self.assertEqual(projects.read_text(encoding="utf-8").splitlines(), [str(first), str(second)])
         before = projects.stat().st_mtime_ns
@@ -513,6 +605,8 @@ class Setup(Fixture):
         self.assertEqual(self.settings(), {})
 
     def test_a_linked_settings_file_is_written_where_it_lives(self):
+        if not can_link(self.base):
+            self.skipTest("this machine makes no symbolic links")
         dotfiles = self.base / "dotfiles"
         dotfiles.mkdir()
         (dotfiles / "settings.json").write_text('{"model": "opus"}', encoding="utf-8")
@@ -525,6 +619,8 @@ class Setup(Fixture):
         self.assertTrue(self.dispatched(written))
 
     def test_a_folder_that_is_a_link_gets_nothing(self):
+        if not can_link(self.base):
+            self.skipTest("this machine makes no symbolic links")
         root = self.project(policy="# Policy\n")
         elsewhere = self.base / "elsewhere"
         elsewhere.mkdir()
@@ -541,8 +637,7 @@ class Dispatcher(Fixture):
         root = self.project(hooks={"echo.sh": self.ECHO}, policy="# Policy\nRule.\n")
         self.setup_dispatcher(root)
         done = self.run_dispatcher("echo.sh", root / "src" / "Billing", b'{"hook": 1}')
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.decode(), f'ran in {root} for {root}: {{"hook": 1}}')
+        self.assert_ran(done, root, '{"hook": 1}')
 
     def test_nothing_runs_in_the_root_an_unregistered_project_or_another_checkout(self):
         root = self.project(hooks={"echo.sh": self.ECHO}, policy="# Policy\n")
@@ -565,8 +660,7 @@ class Dispatcher(Fixture):
         root = self.project("monorepo/backend", hooks={"echo.sh": self.ECHO}, policy="# Policy\n")
         shutil.rmtree(root / ".git")
         self.setup_dispatcher(root)
-        done = self.run_dispatcher("echo.sh", root / "src")
-        self.assertTrue(done.stdout.decode().startswith(f"ran in {root} for {root}"), done.stdout)
+        self.assert_ran(self.run_dispatcher("echo.sh", root / "src"), root)
 
     def test_the_nearest_installed_project_is_the_sessions(self):
         outer = self.project("outer", hooks={"echo.sh": self.ECHO}, policy="# Outer\n")
@@ -580,8 +674,7 @@ class Dispatcher(Fixture):
         listed = self.project("outer/src/listed", hooks={"echo.sh": self.ECHO}, policy="# Listed\n")
         shutil.rmtree(listed / ".git")
         self.setup_dispatcher(listed)
-        done = self.run_dispatcher("echo.sh", listed / "src")
-        self.assertTrue(done.stdout.decode().startswith(f"ran in {listed} for {listed}"), done.stdout)
+        self.assert_ran(self.run_dispatcher("echo.sh", listed / "src"), listed)
 
     def test_a_folder_outside_git_follows_the_registered_root(self):
         if inside_git(self.base):
@@ -589,8 +682,7 @@ class Dispatcher(Fixture):
         root = self.project(hooks={"echo.sh": self.ECHO}, policy="# Policy\n")
         shutil.rmtree(root / ".git")
         self.setup_dispatcher(root)
-        done = self.run_dispatcher("echo.sh", root / "src")
-        self.assertTrue(done.stdout.decode().startswith(f"ran in {root} for {root}"), done.stdout)
+        self.assert_ran(self.run_dispatcher("echo.sh", root / "src"), root)
 
     def test_the_policy_comes_in_parts(self):
         text = "# Policy\n" + "".join(f"## Rule {number}\n" + "Keep it.\n" * 400 for number in range(3))
@@ -613,6 +705,8 @@ class Dispatcher(Fixture):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertTrue(done.stdout.decode("utf-8").endswith("# Policy \u2014 rules\nKeep \u00e9 and \u2192.\n"))
 
+    @unittest.skipIf(WINDOWS and not any(shutil.which(name) for name in ("python3", "jq", "php")),
+                     "bash-validator.sh reads its input with python3, jq or php")
     def test_the_guard_still_blocks_and_the_memory_cli_is_let_through(self):
         root = self.project(policy="# Policy\n")
         shutil.copy2(ROOT / "PHP Core" / ".claude" / "hooks" / "bash-validator.sh",
@@ -679,6 +773,7 @@ class InstallTime(Fixture):
         git(target, "init", "-q")
         return target
 
+    @unittest.skipIf(WINDOWS, "a pseudo-terminal is POSIX's")
     def test_a_person_installing_in_a_terminal_gets_the_dispatcher_at_once(self):
         target = self.target()
         code, output = self.install(target, terminal=True)
@@ -707,6 +802,7 @@ class InstallTime(Fixture):
             self.assertEqual(installer.install(ROOT, "PHP Core", target, ["claude"], False, False, False), 0)
         self.assertFalse((self.config / "ai-accelerator").exists())
 
+    @unittest.skipIf(WINDOWS, "a pseudo-terminal is POSIX's")
     def test_output_through_tee_still_counts_as_a_terminal(self):
         target = self.target()
         code, output = self.install(target, terminal="stderr-and-stdin")
@@ -714,6 +810,7 @@ class InstallTime(Fixture):
         self.assertIn("CLAUDE\tbelow-root", output)
         self.assertTrue((self.config / "ai-accelerator" / "projects").is_file())
 
+    @unittest.skipIf(WINDOWS, "a pseudo-terminal is POSIX's")
     def test_nothing_without_a_claude_code_configuration_folder(self):
         shutil.rmtree(self.config)
         target = self.target()
@@ -723,7 +820,6 @@ class InstallTime(Fixture):
         self.assertFalse(self.config.exists())
 
 
-@unittest.skipIf(os.name == "nt", "the dispatcher is not set up on Windows")
 class RootSession(Fixture):
     def test_the_root_sessions_start_hook_sets_it_up_and_a_folder_below_gets_the_banner(self):
         root = self.base / "shop"
@@ -738,7 +834,7 @@ class RootSession(Fixture):
         payload = json.dumps({"session_id": "root", "transcript_path": str(self.transcript),
                               "hook_event_name": "SessionStart", "source": "startup"}).encode()
         env = dict(self.env, CLAUDE_PROJECT_DIR=str(root))
-        done = subprocess.run(["bash", str(root / ".claude" / "hooks" / "local-context.sh")], input=payload,
+        done = subprocess.run([BASH, (root / ".claude" / "hooks" / "local-context.sh").as_posix()], input=payload,
                               env=env, cwd=root, capture_output=True, timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr)
         settings = self.config / "settings.json"

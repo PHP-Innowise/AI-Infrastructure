@@ -16,9 +16,10 @@ the project's env, and bring the session the project's AGENTS.md, which its
 It writes only into the configuration folder of the Claude Code that started
 this hook - the session's transcript must live there - and nothing when all
 is already in place. A settings.json it cannot read as a JSON object is left
-as it is. Never on Windows, whose Git Bash paths the dispatcher does not map,
-and never again once the person has put a file named `off` into the
-dispatcher's folder (ai-accelerator/ in the configuration folder).
+as it is, and nothing again once the person has put a file named `off` into
+the dispatcher's folder (ai-accelerator/ in the configuration folder). On
+Windows the entries name the dispatcher with forward slashes, which the Git
+Bash Claude Code runs hooks with takes as written.
 
 The installer runs it with --install when a person installs in a terminal,
 so a first session started below the root has the project's hooks too; it
@@ -32,13 +33,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import stat
 import sys
 import tempfile
 from pathlib import Path
 
-from claude_dispatch import POLICY_PARTS
+from claude_dispatch import DISPATCH_VERSION, POLICY_PARTS
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -53,14 +55,20 @@ def config_folder() -> Path:
     return Path(folder) if folder else Path.home() / ".claude"
 
 
+def command_of(dispatcher: Path) -> str:
+    """The dispatcher as a settings entry names it: Claude Code runs hook
+    commands with Git Bash on Windows, which takes C:/Users/... as written."""
+    return shlex.quote(dispatcher.as_posix())
+
+
 def own_session(payload: object, config: Path) -> bool:
     """The hook was started by a Claude Code that keeps its transcripts in
     `config`: a test or a script feeding the hook gets nothing written."""
     transcript = payload.get("transcript_path") if isinstance(payload, dict) else None
     if not isinstance(transcript, str) or not os.path.isabs(transcript):
         return False
-    projects = os.path.realpath(config / "projects")
-    return os.path.realpath(transcript).startswith(projects + os.sep)
+    projects = os.path.normcase(os.path.realpath(config / "projects"))
+    return os.path.normcase(os.path.realpath(transcript)).startswith(projects + os.sep)
 
 
 def wanted_entries(settings: Path, dispatcher: Path) -> list[tuple[str, dict]]:
@@ -78,7 +86,7 @@ def wanted_entries(settings: Path, dispatcher: Path) -> list[tuple[str, dict]]:
                 name = command[len(HOOK_PREFIX):]
                 if "/" in name or not name.endswith(".sh") or not name.replace("-", "").replace(".", "").isalnum():
                     continue
-                entry: dict = {"type": "command", "command": f"{shlex.quote(str(dispatcher))} {name}"}
+                entry: dict = {"type": "command", "command": f"{command_of(dispatcher)} {name}"}
                 if isinstance(hook.get("timeout"), int):
                     entry["timeout"] = hook["timeout"]
                 one: dict = {"hooks": [entry]}
@@ -87,13 +95,13 @@ def wanted_entries(settings: Path, dispatcher: Path) -> list[tuple[str, dict]]:
                 entries.append((event, one))
     # The project's permission rules, for every tool, and its env for the
     # session's commands.
-    entries.append(("PreToolUse", {"hooks": [{"type": "command", "command": f"{shlex.quote(str(dispatcher))} permissions",
+    entries.append(("PreToolUse", {"hooks": [{"type": "command", "command": f"{command_of(dispatcher)} permissions",
                                               "timeout": 10}]}))
     entries.append(("SessionStart", {"hooks": [{"type": "command",
-                                                "command": f"{shlex.quote(str(dispatcher))} environment", "timeout": 10}]}))
+                                                "command": f"{command_of(dispatcher)} environment", "timeout": 10}]}))
     if (ROOT / "AGENTS.md").is_file():
         for part in range(1, POLICY_PARTS + 1):
-            command = f"{shlex.quote(str(dispatcher))} policy-{part}"
+            command = f"{command_of(dispatcher)} policy-{part}"
             entries.append(("SessionStart", {"hooks": [{"type": "command", "command": command, "timeout": 10}]}))
     return entries
 
@@ -101,7 +109,7 @@ def wanted_entries(settings: Path, dispatcher: Path) -> list[tuple[str, dict]]:
 def key(event: str, group: object, dispatcher: Path):
     """(event, matcher, script) of a dispatcher entry, or None for any other."""
     hooks = group.get("hooks") if isinstance(group, dict) else None
-    marker = shlex.quote(str(dispatcher)) + " "
+    marker = command_of(dispatcher) + " "
     if not isinstance(hooks, list) or len(hooks) != 1 or not isinstance(hooks[0], dict):
         return None
     command = hooks[0].get("command")
@@ -128,6 +136,26 @@ def merged(user: dict, wanted: list[tuple[str, dict]], dispatcher: Path) -> dict
     return result
 
 
+def installed_version(helper: Path) -> int:
+    """DISPATCH_VERSION of the dispatcher already in place; 0 for none."""
+    try:
+        found = re.search(r"^DISPATCH_VERSION = ([0-9]+)$", helper.read_text(encoding="utf-8"), re.M)
+    except (OSError, UnicodeError):
+        return 0
+    return int(found.group(1)) if found else 0
+
+
+def exclusive(handle) -> None:
+    """Hold `handle`'s file for this process until it is closed."""
+    if os.name == "nt":
+        import msvcrt
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # retries for ten seconds, then raises
+    else:
+        import fcntl
+        fcntl.flock(handle, fcntl.LOCK_EX)
+
+
 def write_if_changed(path: Path, content: bytes, mode: int) -> bool:
     try:
         if path.read_bytes() == content and stat.S_IMODE(path.stat().st_mode) == mode:
@@ -147,8 +175,6 @@ def write_if_changed(path: Path, content: bytes, mode: int) -> bool:
 
 
 def main(argv: list) -> int:
-    if os.name == "nt":
-        return 0
     config = config_folder()
     if argv[1:] != ["--install"]:
         try:
@@ -165,11 +191,14 @@ def main(argv: list) -> int:
         return 0
     folder.mkdir(mode=0o700, exist_ok=True)
     info = folder.lstat()
-    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) \
+            or hasattr(os, "getuid") and info.st_uid != os.getuid():
         return 0
     dispatcher = folder / DISPATCHER
-    write_if_changed(dispatcher, (HERE / "claude_dispatch.sh").read_bytes(), 0o755)
-    write_if_changed(folder / HELPER, (HERE / "claude_dispatch.py").read_bytes(), 0o644)
+    # Another project's newer release put a newer dispatcher here: it stays.
+    if installed_version(folder / HELPER) <= DISPATCH_VERSION:
+        write_if_changed(dispatcher, (HERE / "claude_dispatch.sh").read_bytes(), 0o755)
+        write_if_changed(folder / HELPER, (HERE / "claude_dispatch.py").read_bytes(), 0o644)
     try:
         wanted = wanted_entries(settings, dispatcher)
     except (OSError, ValueError, AttributeError):
@@ -177,12 +206,11 @@ def main(argv: list) -> int:
     # A settings.json linked from elsewhere - a dotfiles checkout - is
     # written where it lives, and stays linked.
     user_settings = Path(os.path.realpath(config / "settings.json"))
-    import fcntl
     with open(folder / ".lock", "a") as lock:
         # Sessions of two projects starting together each add their root and
         # write the same entries: the lock keeps one from reading what the
         # other has half written, or dropping its root.
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        exclusive(lock)
         projects = folder / "projects"
         try:
             listed = projects.read_text(encoding="utf-8").splitlines()

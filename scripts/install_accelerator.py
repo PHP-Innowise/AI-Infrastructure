@@ -887,7 +887,7 @@ def claude_below_root(target: Path) -> None:
     bench, the Harness, an agent, a call into this module - leaves it to that
     session, and never writes outside the project."""
     script = target / "memory-bank" / "scripts" / "claude_subfolders.py"
-    if os.name == "nt" or not script.is_file() or not (sys.stdin.isatty() and sys.stderr.isatty()):
+    if not script.is_file() or not (sys.stdin.isatty() and sys.stderr.isatty()):
         return
     try:
         subprocess.run([sys.executable, str(script), "--install"], stdin=subprocess.DEVNULL,
