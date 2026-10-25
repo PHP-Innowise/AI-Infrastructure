@@ -1137,6 +1137,9 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
         # Codex started in a subdirectory writes only there: offline on Codex
         # 0.163 the save failed with a read-only file system after every answer.
         root=os.path.realpath(self.root)
+        link=str(self.root.parent/'linked project')
+        try: os.symlink(root,link,target_is_directory=True)
+        except (OSError,NotImplementedError): link=None  # Windows without the symlink privilege
         def files(*writable,read_only=()):
             entries=[{'path':{'type':'special','value':{'kind':'root'}},'access':'read'}]
             entries+=[{'path':{'type':'path','path':path},'access':'write'} for path in writable]
@@ -1149,7 +1152,12 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
                'the project root':(files(root),root,None),
                'an added writable root':(files(root+'/src',root),root+'/src',None),
                'its own directory unwritable':(files(root+'/elsewhere'),root+'/src',None),
-               'no working directory':(files(root+'/src'),None,None)}
+               'no working directory':(files(root+'/src'),None,None),
+               # Codex names the workspace as it was opened; a link to the
+               # project (macOS's /tmp is one) is the project itself.
+               **({'the project through a link':(files(link),link,None),
+                   'a subdirectory through a link':(files(link+'/src'),link+'/src','outside-sandbox')}
+                  if link else {})}
         for n,(name,(policy,cwd,skipped)) in enumerate(cases.items()):
             with self.subTest(case=name):
                 session=f'workspace-{n}'

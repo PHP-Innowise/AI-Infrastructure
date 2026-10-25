@@ -153,7 +153,8 @@ edition's own files remain in that edition's changelog.
 - Tests: `test_a_codex_workspace_that_cannot_write_the_brain_is_not_asked_to_save`
   (a subdirectory, a Brain carved out read-only, the project root, an added
   root, a policy that denies the turn its own directory, no working
-  directory), failing without the change. On the real host, started from `src`:
+  directory, the project and a subdirectory reached through a link),
+  failing without the change. On the real host, started from `src`:
   `skipped` `outside-sandbox`; the bench's default and attached runs save,
   and a read-only sandbox is still `read-only-sandbox`.
 
