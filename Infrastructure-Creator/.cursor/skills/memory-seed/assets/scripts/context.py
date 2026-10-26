@@ -7686,6 +7686,7 @@ def run_turn(
     )
     buffered = len(pending_turn_deltas(connection, task_id))
     flushed = None
+    ensured = None
     if buffered and (arguments.flush or buffered >= arguments.flush_after):
         flushed = flush_turn_deltas(
             connection,
@@ -7695,6 +7696,14 @@ def run_turn(
             owner,
             file_limit=arguments.max_files,
         )
+    elif arguments.flush and (mode == "lightweight" or closed_task_record(connection, repository, task_id) is None):
+        # A checkpoint asked for before anything was buffered - a new branch,
+        # a worktree's first answer - made no task, so the `update` the
+        # checkpoint skill writes next was refused: "Working task not
+        # found". An explicit flush makes the task, as the memory MCP
+        # server's checkpoint does; the Stop hook never flushes explicitly,
+        # so visiting a branch still mints nothing.
+        ensured = ensure_working_task(connection, repository, task_id, mode, owner)
     # Full maintenance remains a flush boundary. A scheduled promotion retry
     # is the only exception: ordinary turns use Git probes and local state,
     # while a due retry shares the Stop hook's timeout and mutation lock.
@@ -7769,10 +7778,10 @@ def run_turn(
         "flushed": flushed is not None and not flushed.get("closed_task"),
         "revision": flushed.get("revision") if flushed else None,
         "files_omitted": flushed.get("files_omitted") if flushed else 0,
-        "provisioned": bool(flushed and flushed.get("provisioned")),
+        "provisioned": bool((flushed or ensured or {}).get("provisioned")),
         # The UUID of the pre-existing record the flush restored the local
         # binding to — the second-machine signal. None on an ordinary flush.
-        "rebound": flushed.get("rebound") if flushed else None,
+        "rebound": (flushed or ensured or {}).get("rebound"),
         # The completed task the buffered turns were meant for, when the
         # branch went on after completion; those turns were dropped.
         "closed_task": flushed.get("closed_task") if flushed else None,

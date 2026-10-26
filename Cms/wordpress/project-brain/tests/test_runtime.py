@@ -8424,6 +8424,37 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             self.run_cli("get", "--task-id", task_id, "--json").stdout
         )["auto_checkpoint"]
 
+    def test_an_explicit_flush_with_nothing_buffered_makes_the_task(self) -> None:
+        # The checkpoint skill flushes, then updates: on a new branch with
+        # nothing buffered the flush made no task and the update was
+        # refused ("Working task not found").
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/discussed")
+        visit = json.loads(self.run_cli("turn", "--task-id", "feature/discussed", "--json").stdout)
+        self.assertFalse(visit["provisioned"])
+        self.assertNotEqual(0, self.run_cli("get", "--task-id", "feature/discussed", "--json").returncode)
+        flushed = self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json")
+        self.assertEqual(0, flushed.returncode, flushed.stderr)
+        self.assertEqual((True, False), (json.loads(flushed.stdout)["provisioned"], json.loads(flushed.stdout)["flushed"]))
+        updated = self.run_cli("update", "--task-id", "feature/discussed", "--revision", "auto",
+                               "--progress", "Agreed to date refunds by their invoice", "--json")
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        task = json.loads(self.run_cli("get", "--task-id", "feature/discussed", "--json").stdout)
+        self.assertEqual("Agreed to date refunds by their invoice", task["progress"])
+        again = json.loads(self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json").stdout)
+        self.assertFalse(again["provisioned"])
+        # A completed task is not made again.
+        revision = json.loads(self.run_cli("get", "--task-id", "feature/discussed", "--json").stdout)["revision"]
+        done = self.run_cli("complete", "--task-id", "feature/discussed", "--revision", str(revision),
+                            "--summary", "Refunds dated", "--outcome", "done", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        closed = self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json")
+        self.assertEqual(0, closed.returncode, closed.stderr)
+        self.assertFalse(json.loads(closed.stdout)["provisioned"])
+        tasks = [path for path in (self.repository / "project-brain/dynamic/tasks").glob("*.md")
+                 if "feature/discussed" in path.read_text(encoding="utf-8")]
+        self.assertEqual(1, len(tasks))
+
     def test_a_checkpoint_names_the_branch_commits(self) -> None:
         # Paths said where the work happened; nothing said what it was, though
         # every commit already carried a person's one-line summary of it.
