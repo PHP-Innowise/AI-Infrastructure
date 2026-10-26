@@ -28,6 +28,49 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The memory CLI in a worktree finds the worktree by itself — 2026-10-26
+
+- The policy and the skills name the memory CLI as `python3
+  memory-bank/scripts/context.py`, which a worktree of an installation Git
+  does not track has none of. A worktree session's banner now names it by
+  its path in the root - bare, or in single quotes where the path needs
+  them, the form the dispatcher's allow for the memory CLI takes (a
+  double-quoted path was asked about, since bash expands inside it).
+- Run in the worktree without the dispatcher's variables - a Codex
+  command, the memory MCP server, a terminal - the root's runtime took the
+  installed layout: the main checkout's branch and index, and a citation of
+  a file only the worktree's branch has was refused ("Source is missing").
+  `workspace_roots.worktree_project` now finds the shared layout from where
+  the run is (`CLAUDE_PROJECT_DIR`, which Claude Code gives its hooks and
+  MCP servers, else the working directory), with the rules the dispatcher
+  applies: a `.git` file naming `<main>/.git/worktrees/<name>` that keeps
+  Git's back-reference, this installation inside `<main>`, and no runtime
+  of the worktree's own. A session in the main checkout keeps the root
+  after its shell moved into a worktree inside it.
+- The memory MCP server of a worktree inside the root started for the root
+  (and refused to start once the worktree was its project: it checked the
+  installation's own files there). It checks them under the installation
+  and gives the runtime it starts the worktree's layout, through Claude
+  Code's bootstrap and Codex's.
+- In a worktree, a learning citing the installation's own files - `specs/`,
+  `AGENTS.md`, skills - was refused, though retrieval reads them from the
+  main checkout; a citation is checked where `resolve` reads it
+  (`workspace_roots.citation_base`).
+- Under a sandbox that lets a command write only its own folder - Codex's
+  workspace-write in a worktree or below the root, Claude Code's - every
+  CLI command failed on the index, a lookup too: Codex 0.164 in a worktree
+  got `[Errno 30] Read-only file system`. A lookup (`status`, `retrieve`,
+  `context`, `search`) that cannot write the index where the hooks keep it
+  builds one of its own in the user's temporary folder
+  (`ai-accelerator-index-<uid>`); a write is still refused there.
+- `tests/test_memory_worktree_sessions.py` covers each piece (ten reverted
+  pieces each fail a test), a root whose path has a space included.
+  `scripts/claude_code_bench.py --worktree --cli` has the stand-in run the
+  CLI as the banner names it: 2.1.278, and 2.1.299 in the desktop app's
+  mode in the worktree and in `src/` of it, ran it without a permission
+  prompt for the worktree's task. The bench's desktop verdict no longer
+  drops a permission prompt in `--subfolder` and `--worktree` runs.
+
 ### A worktree's state spelled another way is still its installation — 2026-10-26
 
 - The Windows memory job on #66 failed twice in

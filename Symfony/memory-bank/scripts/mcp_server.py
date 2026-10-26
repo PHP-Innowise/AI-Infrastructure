@@ -75,8 +75,17 @@ class Memory:
         self.check()
 
     def check(self):
+        # The installation's own runtime and configuration, under its root:
+        # in a worktree it serves, the project - where a citation is
+        # checked - is the worktree, which has neither.
         for relative in ('memory-bank/scripts/context.py', 'project-brain/config/runtime.json'):
-            self.path(relative)
+            current = self.root
+            for part in relative.split('/'):
+                current = current / part
+                if current.is_symlink():
+                    raise BrainError('Memory storage contains a symlink')
+            if not current.is_file():
+                raise BrainError('The memory runtime is incomplete')
         config = load_config(self.root)
         owners = set(config.get('owners', ['*']))
         if '*' not in owners and self.owner not in owners:
@@ -95,9 +104,18 @@ class Memory:
         return check_source(self.root, value)
 
     def cli(self, *arguments):
+        environment = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+        layout = workspace_roots.roots(self.root)
+        if layout.shared:
+            # A worktree this installation serves, found where the server
+            # started: the runtime, started in the root, hears it as the
+            # dispatcher tells a session's hooks.
+            environment.update({workspace_roots.HOME_VARIABLE: str(layout.tooling),
+                workspace_roots.STATE_VARIABLE: str(layout.state),
+                workspace_roots.PROJECT_VARIABLE: str(layout.project)})
         result = subprocess.run([sys.executable, str(self.root / 'memory-bank/scripts/context.py'),
             '--root', str(self.root), arguments[0], '--json', *arguments[1:]], cwd=self.root,
-            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, capture_output=True, timeout=30)
+            env=environment, capture_output=True, timeout=30)
         if result.returncode or len(result.stdout) > 4 * 1024 * 1024:
             raise BrainError('Context runtime rejected the operation; inspect its status before retrying')
         try:

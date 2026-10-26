@@ -131,8 +131,9 @@ def check_source(root: Path, value: object, *, require_file: bool = True) -> str
         return value
     relative = PurePosixPath(head)
     # The project's root: the runtime's own when installed, the project the
-    # launcher named when the edition is attached and its state lives apart.
-    current = workspace_roots.project_root(root)
+    # launcher named when the edition is attached and its state lives apart,
+    # and in a worktree the main checkout's for the accelerator's own files.
+    current = workspace_roots.citation_base(root, head)
     for part in relative.parts:
         current = current / part
         if current.is_symlink():

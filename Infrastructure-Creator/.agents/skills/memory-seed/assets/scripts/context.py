@@ -353,6 +353,46 @@ def default_database(repository: Path) -> Path:
     return repository / "memory-bank" / "local" / "context.db"
 
 
+# Commands that only look things up: in a sandbox that keeps them from the
+# index where the hooks keep it, they build one of their own (sandbox_index).
+SANDBOX_LOOKUPS = frozenset({"status", "retrieve", "context", "search"})
+
+
+def index_writable(database: Path) -> bool:
+    """Whether this run may write the index where the hooks keep it.
+
+    A sandbox that lets a command write only its own folder - Codex's in a
+    worktree or below the project root, Claude Code's - refuses it there:
+    every command then failed on the index, even a lookup."""
+    try:
+        database.parent.mkdir(parents=True, exist_ok=True)
+        if database.exists() and not os.access(database, os.W_OK):
+            return False
+        probe = database.parent / f".write-probe-{os.getpid()}"
+        os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
+def sandbox_index(repository: Path) -> Path:
+    """The index a lookup the sandbox keeps from the hooks' one builds: in
+    this user's own folder in the temporary directory, which sandboxes let a
+    command write, one per state and project. It is a cache like the other."""
+    import tempfile
+    layout = workspace_roots.roots(repository)
+    owner = str(os.getuid()) if hasattr(os, "getuid") else "user"
+    folder = Path(tempfile.gettempdir()) / f"ai-accelerator-index-{owner}"
+    folder.mkdir(mode=0o700, exist_ok=True)
+    image = folder.lstat()
+    if (not stat_module.S_ISDIR(image.st_mode)
+            or (hasattr(os, "getuid") and image.st_uid != os.getuid())):
+        raise ContextError(f"{folder} is not this user's own folder")
+    places = os.path.realpath(str(layout.state)) + "\0" + os.path.realpath(str(layout.project))
+    return folder / hashlib.sha256(os.fsencode(places)).hexdigest()[:16] / "context.db"
+
+
 def remember_worktree_index(repository: Path, database: Path) -> None:
     """Name the worktree beside its index (see WORKTREE_INDEX_MARKER)."""
     layout = workspace_roots.roots(repository)
@@ -8644,6 +8684,8 @@ def _command() -> int:
         if getattr(arguments, 'provenance_response', False) and not arguments.json:
             raise ContextError('Source provenance transport requires JSON output')
         database = (arguments.db or default_database(repository)).resolve()
+        if arguments.db is None and arguments.command in SANDBOX_LOOKUPS and not index_writable(database):
+            database = sandbox_index(repository).resolve()
         if not getattr(arguments, "read_only", False):
             remember_worktree_index(repository, database)
         mode = configured_mode(repository, arguments.mode)

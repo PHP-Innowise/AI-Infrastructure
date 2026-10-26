@@ -245,6 +245,19 @@ resolve_python
 if [ -n "${PYTHON[0]:-}" ] && [ "${PYTHON[*]}" != python3 ] && [ -f "$CONTEXT_CLI" ]; then
   echo "Python here is \`${PYTHON[*]}\`, not python3: run the memory CLI commands the policy names with \`${PYTHON[*]}\` in place of \`python3\`."
 fi
+# A worktree this installation serves has no memory-bank/scripts/ of its
+# own: the session hears where the CLI is. Run from the worktree, it finds
+# the shared memory and the worktree's branch by itself.
+if [ "$PROJECT_DIR" != "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] && [ -f "$CONTEXT_CLI" ] \
+  && [ ! -f "$PROJECT_DIR/memory-bank/scripts/context.py" ]; then
+  # Bare, or in single quotes: a double-quoted path is one the dispatcher's
+  # allow for the memory CLI does not take, since bash expands inside it.
+  CLI_NAME=$CONTEXT_CLI
+  case "$CLI_NAME" in
+    *[!A-Za-z0-9_./-]*) CLI_NAME="'$(printf '%s' "$CLI_NAME" | sed "s/'/'\\\\''/g")'" ;;
+  esac
+  echo "Memory CLI: this worktree has none - run the commands the policy and skills name with \`${PYTHON[*]:-python3} $CLI_NAME\` in place of \`python3 memory-bank/scripts/context.py\`, from the worktree."
+fi
 
 if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ]; then
   CONTEXT_STATUS=$("${PYTHON[@]}" "$CONTEXT_CLI" status --json 2>/dev/null || true)
