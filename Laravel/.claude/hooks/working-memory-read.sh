@@ -196,7 +196,14 @@ if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$PROJECT_DIR" ] && [ -d "$SESSI
       "$SERVED"/*)
         if [ -d "$SERVED" ] && [ ! -f "$SERVED/memory-bank/scripts/context.py" ]; then
           PROJECT_DIR=$SERVED
-          export ACCELERATOR_HOME="$ROOT_DIR" ACCELERATOR_STATE_DIR="$ROOT_DIR" ACCELERATOR_PROJECT_DIR="$SERVED"
+          # The runtime reads these as Windows writes them: Git Bash spells C:\ as /c/,
+          # which Python on Windows takes for a folder on the current drive.
+          NATIVE_ROOT=$ROOT_DIR NATIVE_SERVED=$SERVED
+          if [ "${OS:-}" = "Windows_NT" ]; then
+            case "$NATIVE_ROOT" in /[A-Za-z]|/[A-Za-z]/*) NATIVE_ROOT="${NATIVE_ROOT:1:1}:${NATIVE_ROOT:2}" ;; esac
+            case "$NATIVE_SERVED" in /[A-Za-z]|/[A-Za-z]/*) NATIVE_SERVED="${NATIVE_SERVED:1:1}:${NATIVE_SERVED:2}" ;; esac
+          fi
+          export ACCELERATOR_HOME="$NATIVE_ROOT" ACCELERATOR_STATE_DIR="$NATIVE_ROOT" ACCELERATOR_PROJECT_DIR="$NATIVE_SERVED"
           OTHER_CHECKOUT=
         fi ;;
     esac

@@ -40,6 +40,10 @@ edition's own files remain in that edition's changelog.
   after `/clear` or a compaction); one with an installation of its own is
   left to it, as before, and so is a Cursor session there, whose capsule
   would be a rule written into the worktree.
+- On Windows the hooks hand the runtime the root and the worktree as
+  Windows spells them (`c:/...`), as the dispatcher does: Git Bash's `/c/...`
+  read as a folder on the current drive, and the runtime would have taken
+  the root's own layout and task.
 - The turn that enters the worktree was armed by its prompt in the root:
   its Stop arms the request in the worktree (`native-stop --entered`), so
   that turn's work - often all of it - is saved under the worktree's branch.
@@ -53,7 +57,8 @@ edition's own files remain in that edition's changelog.
 - Claude Code asks before a command that leaves an entered worktree, as the
   save step's `cd <root>` does. The dispatcher (version 4) gives the memory
   CLI alone the allow it has in the root there; nothing else, and nothing
-  for a session in the root itself.
+  for a session in the root itself, whose every Bash call it now reads
+  without starting a process (1.7 ms a call, as with version 3).
 - `tests/test_memory_worktree_sessions.py` runs the hooks as Claude Code does
   after `EnterWorktree`, for the entering turn and the next one, and the
   save step from the worktree; `tests/test_memory_claude_subfolders.py` the

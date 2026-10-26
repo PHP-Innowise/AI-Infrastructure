@@ -258,7 +258,7 @@ class DispatcherVersion(Fixture):
     # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
     # then record the scripts' new fingerprint here.
     FINGERPRINTS = {3: "01f6a42d684516ea4f8aa8025f2186e2f1ea29cf4f7e6b5893b1b8c30a3c024b",
-                    4: "9eca07259e4c3f15cf264683cf51e8f59608b60c2660b5603a0ee30b39ffbceb"}
+                    4: "7e467644136142202cda4daa8c402b2d430ae34b335fcd8dd789e9d8ebc56d7f"}
 
     def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
         shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")

@@ -146,7 +146,9 @@ if [ -z "$root" ]; then
   # Claude Code asks about there. The memory CLI alone gets the allow it has
   # in the root; the guard that ran is the root's own.
   [ -n "$exact" ] && [ "$hook" = bash-validator.sh ] || exit 0
-  payload=$(cat)
+  # Every Bash call of a session in the root passes here: read without a process.
+  payload=
+  IFS= read -r -d '' payload || :
   case "$payload" in *context.py*) ;; *) exit 0 ;; esac
   [[ $payload =~ \"cwd\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] || exit 0
   [ "${BASH_REMATCH[1]}" != "$start" ] && [ -f "$exact/memory-bank/scripts/context.py" ] && pick_python || exit 0
