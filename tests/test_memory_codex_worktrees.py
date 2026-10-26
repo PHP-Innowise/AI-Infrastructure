@@ -606,17 +606,21 @@ class SaveInWorktree(unittest.TestCase):
 
     def test_the_root_and_claude_code_keep_the_step_as_it_was(self):
         # Claude Code's commands get the roots from the dispatcher's
-        # environment entry; the root's own sessions need none.
+        # environment entry; the root's own sessions need none. Run in the
+        # worktree without them, the runtime finds the worktree by itself
+        # (workspace_roots.worktree_project), and Codex's step names the roots.
         program = ("import sys\nfrom pathlib import Path\nsys.path.insert(0, sys.argv[1])\nimport native_results\n"
                    "print(native_results._instruction(Path(sys.argv[2]), 'a' * 64, {'token': '0' * 32}, "
                    "host=sys.argv[3]))\n")
         shared = {"ACCELERATOR_HOME": str(self.main), "ACCELERATOR_STATE_DIR": str(self.main),
                   "ACCELERATOR_PROJECT_DIR": str(self.worktree)}
-        for host, layout, named in (("codex", shared, True), ("claude", shared, False), ("codex", {}, False),
-                                    ("cursor", shared, False)):
-            with self.subTest(host=host, shared=bool(layout)):
+        for host, layout, where, named in (("codex", shared, self.worktree, True),
+                                           ("claude", shared, self.worktree, False),
+                                           ("codex", {}, self.main, False), ("codex", {}, self.worktree, True),
+                                           ("cursor", shared, self.worktree, False)):
+            with self.subTest(host=host, shared=bool(layout), where=where.name):
                 done = subprocess.run([sys.executable, "-c", program, str(self.main / "memory-bank" / "scripts"),
-                                       str(self.main), host], env=dict(self.env, **layout), cwd=self.worktree,
+                                       str(self.main), host], env=dict(self.env, **layout), cwd=where,
                                       capture_output=True, text=True, timeout=60)
                 self.assertEqual(done.returncode, 0, done.stderr)
                 self.assertIn("native-result", done.stdout)
