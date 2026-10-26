@@ -106,26 +106,29 @@ class RolloutRehearsalTest(unittest.TestCase):
         self.assertEqual(before, snapshot(self.project))
         self.assertEqual([], list(work.iterdir()))
 
-    def test_claude_in_a_worktree_of_the_copy_saves_under_its_branch(self) -> None:
+    def test_claude_and_codex_in_a_worktree_of_the_copy_save_under_its_branch(self) -> None:
         # The worktree has none of the installation, which Git does not
-        # track: the dispatcher the copy carries serves it.
+        # track: the dispatchers the copy carries serve it.
         before = snapshot(self.project)
         work = self.work("worktree")
-        result = self.rehearse("--target", str(self.project), "--work", str(work), "--hosts", "claude",
+        result = self.rehearse("--target", str(self.project), "--work", str(work), "--hosts", "claude,codex",
                                "--profiles", "config", "--worktree", "--json")
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         [report] = json.loads(result.stdout)
-        runs = {run.get("place", "root"): run for run in report["runs"]}
-        self.assertEqual({"root", "worktree"}, set(runs))
-        run = runs["worktree"]
-        self.assertTrue(run["saved"], run.get("refusal"))
-        self.assertTrue(run["recalled"])
-        self.assertEqual([], run["hook_failures"])
-        self.assertTrue(run["worktree_task"], "the save went to the worktree's branch")
-        self.assertTrue(run["worktree_clean"], "nothing was written into the worktree")
+        runs = {(run["host"], run.get("place", "root")): run for run in report["runs"]}
+        self.assertEqual({(host, place) for host in ("claude", "codex") for place in ("root", "worktree")},
+                         set(runs))
+        for host in ("claude", "codex"):
+            with self.subTest(host=host):
+                run = runs[(host, "worktree")]
+                self.assertTrue(run["saved"], run.get("refusal"))
+                self.assertTrue(run["recalled"])
+                self.assertEqual([], run["hook_failures"])
+                self.assertTrue(run["worktree_task"], "the save went to the worktree's branch")
+                self.assertTrue(run["worktree_clean"], "nothing was written into the worktree")
         self.assertEqual(before, snapshot(self.project))
         self.assertEqual([], list(work.iterdir()))
-        refused = self.rehearse("--target", str(self.project), "--hosts", "codex", "--worktree")
+        refused = self.rehearse("--target", str(self.project), "--hosts", "cursor", "--worktree")
         self.assertEqual(2, refused.returncode)
 
     def test_the_copy_leaves_out_dependency_trees_and_keeps_the_project(self) -> None:

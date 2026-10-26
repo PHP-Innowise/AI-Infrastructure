@@ -390,9 +390,16 @@ edition's own files remain in that edition's changelog.
   `$CODEX_HOME/worktrees/<id>/project` and in `src/` of one got the capsule
   and every line of `AGENTS.md`, and its save went through the spool into the
   root's Project Brain under the worktree's branch, with an index of its own
-  and the worktree left clean - through `codex exec`, `codex app-server` as
-  the desktop app drives it (no approval asked) and the terminal with a
-  question typed during the save, in all four editions.
+  and the worktree left clean - through `codex exec` in all four editions,
+  and in PHP Core also through `codex app-server` as the desktop app drives
+  it (no approval asked) and the terminal with a question typed during the
+  save.
+  On synced copies of the four client installations the rollout rehearsal
+  (`--hosts codex --worktree`, which now rehearses Codex in a worktree too)
+  saved under the worktree's branch, recalled it and left the worktree clean
+  under both profiles, 8 of 8, and the real Codex passed the bench in a
+  worktree of two of them (inside and beside). Where the dispatcher does not
+  serve, an entry costs 2.3 ms, 1.2 ms more than an empty hook.
   `scripts/codex_bench.py --worktree [inside|beside]` and `--app-server`
   repeat it; `tests/test_memory_codex_worktrees.py` (28 cases, CI's memory
   job) covers the setup, the dispatcher, the policy and the save step, and
