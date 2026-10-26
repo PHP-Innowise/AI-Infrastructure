@@ -45,11 +45,11 @@ there got the capsule and the policy, its save landed in the root's Project
 Brain under the worktree's branch, the worktree got an index of its own in
 the root, and nothing was written into the worktree.
 
-`--cli` (with `--worktree`) has the stand-in first run the memory CLI as the
-worktree session's banner names it - the worktree has no
-memory-bank/scripts/ of its own - with a `retrieve` for the worktree's
-branch: the run passes when the banner named it, the command ran and its
-answer was for that task.
+`--cli` (with `--worktree` or `--subfolder`) has the stand-in first run the
+memory CLI as the session's banner names it - a worktree has no
+memory-bank/scripts/ of its own, and a session below the root runs its
+commands there - with a `retrieve` for the session's branch: the run passes
+when the banner named it, the command ran and its answer was for that task.
 
 `--desktop` runs the measured session as the Claude desktop app drives
 Claude Code: questions and answers as stream-json, the project's settings
@@ -133,8 +133,9 @@ def result_for(source: str) -> Dict[str, Any]:
 
 
 SAVE = re.compile(r"exact command: (cd .*?--json|\(cd .*?--json\))\n")
-CLI_HINT = re.compile(r"Memory CLI: this worktree has none - run the commands the policy and skills name with "
-                      r"`([^`]+)` in place of")
+CLI_HINT = re.compile(r"Memory CLI: [^`\n]* - run the commands the policy and skills name with `([^`]+)` in place of")
+# The branch the fixture's root is on.
+ROOT_BRANCH = "feature/SHOP-7-invoices"
 
 
 class Scripted(BaseHTTPRequestHandler):
@@ -380,7 +381,7 @@ def shop(work: Path) -> Path:
     (project / "composer.json").write_text('{"name": "acme/shop"}\n', encoding="utf-8")
     (project / "src/Invoice.php").write_text("<?php\nfinal class Invoice {}\n", encoding="utf-8")
     env = clean_env()
-    for args in (["init", "-q", "-b", "feature/SHOP-7-invoices"], ["add", "."], ["commit", "-qm", "Shop baseline"]):
+    for args in (["init", "-q", "-b", ROOT_BRANCH], ["add", "."], ["commit", "-qm", "Shop baseline"]):
         subprocess.run([*GIT, *args], cwd=project, env=env, check=True, capture_output=True)
     return project
 
@@ -657,8 +658,8 @@ def inside(args: argparse.Namespace) -> int:
                            check=True, capture_output=True)
             # The stand-in reads the worktree's copy of the project's file.
             Scripted.project = str(place)
-            if args.cli:
-                Scripted.cli_task = WORKTREE_BRANCH
+        if args.cli:
+            Scripted.cli_task = WORKTREE_BRANCH if args.worktree else ROOT_BRANCH
         project_cwd = place / (args.subfolder or "")
         project_cwd.mkdir(parents=True, exist_ok=True)
     else:
@@ -751,7 +752,7 @@ def inside(args: argparse.Namespace) -> int:
         answer = Scripted.cli_answers[0] if Scripted.cli_answers else {"error": True, "text": ""}
         report["cli_answer"] = answer["text"][:200]
         report["cli_ran"] = (not answer["error"]
-                             and re.search(r'"task_id":\s*"' + re.escape(WORKTREE_BRANCH) + '"', answer["text"]) is not None)
+                             and re.search(r'"task_id":\s*"' + re.escape(Scripted.cli_task) + '"', answer["text"]) is not None)
         report["ok"] = report["ok"] and bool(Scripted.cli_named) and report["cli_ran"]
     if args.desktop:
         # Checked last: the subfolder and worktree verdicts above are made anew.
@@ -822,7 +823,8 @@ def main() -> int:
                         help="after a session in the project root, run the measured one in a Git worktree of the "
                              "project (in DIR of it with --subfolder)")
     parser.add_argument("--cli", action="store_true",
-                        help="with --worktree: the stand-in first runs the memory CLI as the session's banner names it")
+                        help="with --worktree or --subfolder: the stand-in first runs the memory CLI as the session's "
+                             "banner names it")
     parser.add_argument("--permissions", action="store_true",
                         help="try the same tool calls in the root and below it, and compare the decisions")
     parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
@@ -864,9 +866,9 @@ def main() -> int:
         print("claude_code_bench: --desktop drives one turn as the app does; it takes no --queued or --permissions",
               file=sys.stderr)
         return 2
-    if args.cli and not args.worktree:
-        print("claude_code_bench: --cli runs the memory CLI the banner of a worktree session names; it needs "
-              "--worktree", file=sys.stderr)
+    if args.cli and not (args.worktree or args.subfolder):
+        print("claude_code_bench: --cli runs the memory CLI the banner of a session in a worktree or below the "
+              "root names; it needs --worktree or --subfolder", file=sys.stderr)
         return 2
     if args.worktree and (args.permissions or args.target):
         print("claude_code_bench: --worktree makes a worktree of a fresh install; it takes no --permissions or "

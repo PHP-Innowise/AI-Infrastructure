@@ -223,11 +223,40 @@ class SharedWorktree(unittest.TestCase):
                 self.assertRegex(done.stdout,
                                  r"Accelerator: the installation in \S*/shop, whose memory this worktree shares")
                 self.assertNotIn("attached from", done.stdout)
+                self.assertIn("the memory-bank/ and project-brain/ paths the policy and skills name are there",
+                              done.stdout)
                 # The worktree has no memory-bank/ of its own: the files are
                 # named where they are, the memory CLI too.
                 self.assertNotIn(" Read memory-bank/README.md", done.stdout)
                 self.assertRegex(done.stdout, r"Memory CLI: this worktree has none - run the commands the policy "
                                               r"and skills name with `\S+ \S*/shop/memory-bank/scripts/context\.py`")
+
+    @unittest.skipIf(BASH is None, "no bash to run hooks with")
+    def test_a_session_started_below_the_root_hears_where_the_cli_is(self):
+        # Codex runs a hook in the session's folder; the dispatcher runs
+        # Claude Code's in the root. Either way the payload names the folder.
+        hook = (self.main / ".claude" / "hooks" / "local-context.sh").as_posix()
+        for where, cwd in (("src", self.main / "src"), ("the root through the dispatcher", self.main)):
+            with self.subTest(hook_in=where):
+                payload = {"session_id": "below", "hook_event_name": "SessionStart", "source": "startup",
+                           "cwd": str(self.main / "src")}
+                done = subprocess.run([BASH, hook], input=json.dumps(payload), cwd=cwd,
+                                      env=dict(self.env, CLAUDE_PROJECT_DIR=str(cwd)), capture_output=True,
+                                      text=True, timeout=120)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                named = re.search(r"Memory CLI: this session started below the project root - run the commands "
+                                  r"the policy and skills name with `([^`]+)`", done.stdout)
+                self.assertIsNotNone(named, done.stdout)
+                ran = subprocess.run([BASH, "-c", named.group(1) + " status --json"], cwd=self.main / "src",
+                                     env=self.env, capture_output=True, text=True, timeout=120)
+                self.assertEqual(self.layout(ran), ("installed", self.main))
+        payload = {"session_id": "root", "hook_event_name": "SessionStart", "source": "startup",
+                   "cwd": str(self.main)}
+        done = subprocess.run([BASH, hook], input=json.dumps(payload), cwd=self.main,
+                              env=dict(self.env, CLAUDE_PROJECT_DIR=str(self.main)), capture_output=True,
+                              text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn("Memory CLI:", done.stdout)
 
     def plain(self, *arguments, cwd, **extra):
         """The installation's CLI run in `cwd` with none of the dispatcher's

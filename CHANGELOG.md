@@ -28,6 +28,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A session below the root hears where the memory CLI is — 2026-10-26
+
+- A session started below the project root runs its commands in its own
+  folder, where the policy's `python3 memory-bank/scripts/context.py` names
+  nothing. `local-context.sh` now names the CLI by its path in the root
+  there too, as it does in a worktree. It reads the session's folder from
+  its input's `cwd`, since the dispatcher runs it in the root and Codex in
+  the session's folder. A session in the root hears nothing new.
+- A worktree's banner also says that the `memory-bank/` and
+  `project-brain/` paths the policy and skills name are in the root: the
+  `checkpoint` skill, for one, reads `project-brain/config/runtime.json`
+  from the checkout it is in.
+- `tests/test_memory_worktree_sessions.py` runs the hook both ways - in the
+  session's folder, as Codex does, and in the root, as the dispatcher
+  does - and runs the command it names from `src/`. `claude_code_bench.py
+  --cli` now takes `--subfolder` alone: 2.1.278, and 2.1.299 in the desktop
+  app's mode, ran it from `src/` without a permission prompt for the
+  root's branch.
+
 ### The memory CLI in a worktree finds the worktree by itself — 2026-10-26
 
 - The policy and the skills name the memory CLI as `python3

@@ -65,7 +65,7 @@ if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
   echo "Accelerator: attached from $ROOT_DIR (nothing is installed in this project)."
   echo "Accelerator state (Project Brain, Memory Bank, index): $STATE_DIR"
 elif [ "$PROJECT_DIR" != "$ROOT_DIR" ]; then
-  echo "Accelerator: the installation in $ROOT_DIR, whose memory this worktree shares (Git gives the worktree none of it)."
+  echo "Accelerator: the installation in $ROOT_DIR, whose memory this worktree shares (Git gives the worktree none of it): the memory-bank/ and project-brain/ paths the policy and skills name are there."
 fi
 
 # Edit and repetition counts are session-scoped (loop-detection.sh and the
@@ -245,18 +245,30 @@ resolve_python
 if [ -n "${PYTHON[0]:-}" ] && [ "${PYTHON[*]}" != python3 ] && [ -f "$CONTEXT_CLI" ]; then
   echo "Python here is \`${PYTHON[*]}\`, not python3: run the memory CLI commands the policy names with \`${PYTHON[*]}\` in place of \`python3\`."
 fi
-# A worktree this installation serves has no memory-bank/scripts/ of its
-# own: the session hears where the CLI is. Run from the worktree, it finds
-# the shared memory and the worktree's branch by itself.
-if [ "$PROJECT_DIR" != "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] && [ -f "$CONTEXT_CLI" ] \
+# The policy and skills name the CLI by its path from the root, which a
+# worktree this installation serves has none of, and which a session started
+# below the root - its commands run there, though the dispatcher runs this
+# hook in the root - does not reach: the session hears where it is. Run from
+# where the session is, it finds the memory and the task by itself.
+CLI_WHERE=
+SESSION_CWD=
+[[ $LOOP_INPUT =~ \"cwd\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] && SESSION_CWD=${BASH_REMATCH[1]//\\\\/\\}
+if [ "$PROJECT_DIR" != "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] \
   && [ ! -f "$PROJECT_DIR/memory-bank/scripts/context.py" ]; then
+  CLI_WHERE="this worktree has none"
+elif [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ -n "$SESSION_CWD" ] \
+  && SESSION_REAL=$(cd "$SESSION_CWD" 2>/dev/null && pwd -P) && ROOT_REAL=$(cd "$ROOT_DIR" && pwd -P) \
+  && [ "${SESSION_REAL#"$ROOT_REAL"/}" != "$SESSION_REAL" ]; then
+  CLI_WHERE="this session started below the project root"
+fi
+if [ -n "$CLI_WHERE" ] && [ -f "$CONTEXT_CLI" ]; then
   # Bare, or in single quotes: a double-quoted path is one the dispatcher's
   # allow for the memory CLI does not take, since bash expands inside it.
   CLI_NAME=$CONTEXT_CLI
   case "$CLI_NAME" in
     *[!A-Za-z0-9_./-]*) CLI_NAME="'$(printf '%s' "$CLI_NAME" | sed "s/'/'\\\\''/g")'" ;;
   esac
-  echo "Memory CLI: this worktree has none - run the commands the policy and skills name with \`${PYTHON[*]:-python3} $CLI_NAME\` in place of \`python3 memory-bank/scripts/context.py\`, from the worktree."
+  echo "Memory CLI: $CLI_WHERE - run the commands the policy and skills name with \`${PYTHON[*]:-python3} $CLI_NAME\` in place of \`python3 memory-bank/scripts/context.py\`."
 fi
 
 if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ]; then
