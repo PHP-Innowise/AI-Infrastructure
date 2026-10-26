@@ -41,7 +41,10 @@ arguments and never completes work.
    file bodies, prompts, responses, logs, or secrets; the runtime refuses
    likely secrets and personal data.
 4. Report the task ID, whether it was created, the flushed turn and file
-   counts, and the new revision.
+   counts, and the new revision. A command that answers `queued` ran in a
+   sandbox that cannot write the project's memory - Codex's in a worktree
+   or below the project root: it is made when this turn ends, so report
+   that instead of its counts.
 
 ## Lightweight Workflow
 

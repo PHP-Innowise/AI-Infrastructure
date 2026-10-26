@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10456,6 +10457,170 @@ class CodexThreadTaskTest(RuntimeHarness):
         (worktree / "src").mkdir()
         self.assertEqual(other, context_cli._owner_thread(worktree / "src"))
         self.assertEqual(self.OWNER, context_cli._owner_thread(self.repository))
+
+
+@unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                 "a read-only folder of the owner's own needs POSIX permissions and a user they bind")
+class SandboxQueueTest(RuntimeHarness):
+    """A sandbox that lets a command write only its own folder - Codex's in a
+    worktree or below the root, Claude Code's - refused the memory writes the
+    policy and the checkpoint skill have an agent run: `update` at the Brain's
+    lock, `turn --flush` at the index. Read-only folders stand in for it here;
+    the commands wait in a temporary folder of the user's, and the next turn
+    a hook records, outside the sandbox, makes them."""
+
+    TASK = "feature/refunds"
+
+    def setUp(self) -> None:
+        super().setUp()
+        spool = tempfile.TemporaryDirectory(prefix="queue tmp ")
+        self.addCleanup(spool.cleanup)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_", "CLAUDE"))}
+        self.env.update(TMPDIR=spool.name, PROJECT_BRAIN_OWNER="local")
+        self.spool = Path(spool.name)
+        started = self.cli("start", "--task-id", self.TASK, "--goal", "Date refunds", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+
+    def cli(self, *arguments: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        return self.run_cli(*arguments, env=dict(self.env, **extra))
+
+    def tearDown(self) -> None:
+        self.unsandboxed()
+        super().tearDown()
+
+    def sandboxed(self) -> None:
+        """The project's memory read-only to this user's commands, as a
+        sandbox mounts it; undone before the hook's turn."""
+        for folder in (self.repository / "project-brain/local", self.repository / "memory-bank/local"):
+            folder.chmod(0o555)
+
+    def unsandboxed(self) -> None:
+        for folder in (self.repository / "project-brain/local", self.repository / "memory-bank/local"):
+            if folder.is_dir():
+                folder.chmod(0o755)
+
+    def waiting(self) -> list:
+        return sorted(self.spool.glob("ai-accelerator-memory-queue-*/command-*.json"))
+
+    def task(self) -> dict:
+        found = self.cli("get", "--task-id", self.TASK, "--json")
+        self.assertEqual(0, found.returncode, found.stderr)
+        return json.loads(found.stdout)
+
+    def hook_turn(self) -> None:
+        """The Stop hook's turn, outside the sandbox."""
+        self.unsandboxed()
+        done = self.cli("turn", "--task-id", self.TASK, "--flush-after", "5", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+
+    def journal(self) -> list:
+        path = self.repository / "memory-bank/local/native-results.ndjson"
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        return [(line["event"], line.get("code")) for line in map(json.loads, lines) if line["stage"] == "queue"]
+
+    def test_the_checkpoints_writes_wait_and_the_next_hook_makes_them_in_order(self) -> None:
+        before = self.task()["revision"]
+        self.repository.joinpath("refund.txt").write_text("refunds keep their invoice date\n", encoding="utf-8")
+        self.sandboxed()
+        for arguments in (("turn", "--task-id", self.TASK, "--flush", "--json"),
+                          ("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "First",
+                           "--next-step", "Write the refund test", "--json"),
+                          # A value that reads like an option is still the value.
+                          ("update", "--task-id", self.TASK, "--revision", "auto",
+                           "--progress", "--dated refunds: last", "--json")):
+            with self.subTest(command=arguments[0]):
+                done = self.cli(*arguments)
+                self.assertEqual(0, done.returncode, done.stderr)
+                answer = json.loads(done.stdout)
+                self.assertEqual((self.TASK, True), (answer["task_id"], answer["queued"]))
+                self.assertIn("when this turn ends", answer["detail"])
+        self.assertEqual(3, len(self.waiting()))
+        self.assertEqual(before, self.task()["revision"])
+        for record in self.waiting():
+            self.assertEqual(0o600, record.stat().st_mode & 0o777)
+        self.hook_turn()
+        task = self.task()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)] * 3, self.journal())
+        # Oldest first: the flush recorded the file, each update a revision,
+        # and the last one's progress stands.
+        self.assertIn("refund.txt", task["files"])
+        self.assertEqual(before + 3, task["revision"])
+        self.assertEqual("--dated refunds: last", task["progress"])
+        self.assertEqual(["Write the refund test"], task["next_steps"])
+
+    def test_what_a_command_refuses_it_still_refuses_at_once(self) -> None:
+        self.sandboxed()
+        for arguments, refusal in (
+                (("update", "--task-id", self.TASK, "--revision", "auto",
+                  "--progress", "token sk-live-1234567890abcdef1234567890abcdef"), "token"),
+                (("update", "--task-id", self.TASK, "--revision", "auto"), "requires a changed field"),
+                (("update", "--task-id", "bad task!", "--progress", "x"), "Task ID")):
+            with self.subTest(refusal=refusal):
+                done = self.cli(*arguments)
+                self.assertEqual(1, done.returncode, done.stdout)
+                self.assertIn(refusal, done.stderr)
+        self.assertEqual([], self.waiting())
+
+    def test_a_command_refused_when_made_reaches_the_next_capsule(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", "feature/never-started", "--revision", "auto",
+                        "--progress", "Lost refunds", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.hook_turn()
+        self.assertEqual([("refused", "refused")], self.journal())
+        capsule = self.cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK, "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn("queued memory command not made: update - context: Working task not found: "
+                      "feature/never-started", capsule.stdout)
+
+    def test_only_a_waiting_update_or_flush_of_this_project_is_made(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Kept", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        [kept] = self.waiting()
+        record = json.loads(kept.read_text(encoding="utf-8"))
+        folder, key = kept.parent, record["key"]
+
+        def plant(name: str, **changes: object) -> Path:
+            path = folder / f"command-{key}-{name}.json"
+            path.write_text(json.dumps(dict(record, **changes)), encoding="utf-8")
+            path.chmod(0o600)
+            return path
+
+        # What a file could name besides: another command, the index, another root.
+        plant("00000000000000000001-1-a", argv=["complete", "--task-id", self.TASK, "--json"])
+        plant("00000000000000000002-1-b", argv=["--db=/tmp/elsewhere.db", *record["argv"]])
+        plant("00000000000000000003-1-c", argv=["--root=/tmp", *record["argv"]])
+        plant("00000000000000000004-1-d", argv=["turn", "--task-id", self.TASK, "--json"])
+        plant("00000000000000000005-1-e", created=time.time() - 2 * 24 * 60 * 60)
+        linked = folder / f"command-{key}-00000000000000000006-1-f.json"
+        linked.symlink_to(kept)
+        other = folder / f"command-{'0' * 16}-00000000000000000007-1-g.json"
+        other.write_text(kept.read_text(encoding="utf-8"), encoding="utf-8")
+        other.chmod(0o600)
+        self.hook_turn()
+        task = self.task()
+        self.assertEqual(("active", "Kept"), (task["status"], task["progress"]))
+        self.assertEqual([("refused", "unreadable")] * 4 + [("refused", "expired")] + [("refused", "unreadable")]
+                         + [("made", None)], self.journal())
+        # Another project's queue is left to it.
+        self.assertEqual([other], self.waiting())
+
+    def test_a_command_a_drain_runs_fails_instead_of_waiting_again(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Again",
+                        CONTEXT_QUEUE_DRAIN="1")
+        self.assertNotEqual(0, done.returncode)
+        self.assertEqual([], self.waiting())
+
+    def test_a_writable_project_writes_as_before(self) -> None:
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Direct", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertNotIn("queued", json.loads(done.stdout))
+        self.assertEqual([], self.waiting())
+        self.assertEqual("Direct", self.task()["progress"])
 
 
 class AutoCheckpointFieldTest(RuntimeHarness):

@@ -912,3 +912,29 @@ def ignored_source_keys(repository: Path, names, *, strict: bool = False,
             mapped[name] = key
     ignored = _source_git_ignored(project_root(repository), sorted(set(mapped.values())), timeout)
     return {name for name, key in mapped.items() if os.fsencode(key) in ignored}
+
+
+def spool_directories(name: str) -> list[Path]:
+    """`name`-<uid> in each temporary directory a sandbox lets a command
+    write: where what a command cannot write into the project's memory waits
+    for a hook, which runs outside the sandbox, to write it.
+
+    Claude Code's sandbox gives its commands claude-<uid> under its own
+    temporary directory (CLAUDE_CODE_TMPDIR, else the system's) as TMPDIR,
+    so a session below the root or in a worktree, which may not write the
+    project, leaves it there - and the hook looks there too. Codex's
+    sandbox writes TMPDIR and /tmp. A command takes the first folder it can
+    write; a hook reads them all.
+    """
+    import tempfile
+    owner = str(os.getuid()) if hasattr(os, "getuid") else "user"
+    bases: list[str] = []
+    for base in (os.environ.get("TMPDIR"), tempfile.gettempdir(), "/tmp" if os.name == "posix" else None):
+        if base and os.path.isabs(base) and base not in bases:
+            bases.append(base)
+    claude = f"claude-{os.getuid() if hasattr(os, 'getuid') else 0}"
+    for base in (os.environ.get("CLAUDE_CODE_TMPDIR"), *list(bases)):
+        child = os.path.join(base, claude) if base and os.path.isabs(base) else None
+        if child and child not in bases:
+            bases.append(child)
+    return [Path(base) / f"{name}-{owner}" for base in bases]

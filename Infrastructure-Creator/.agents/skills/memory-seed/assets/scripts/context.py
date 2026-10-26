@@ -10,6 +10,8 @@ SOURCE_PROVENANCE_PROFILE = "local-source-provenance-v1"
 CAPSULE_PROFILE_FLAG = "capsule-profile-v1"
 
 import argparse
+import contextlib
+import errno
 import hashlib
 import io
 from contextlib import nullcontext
@@ -3278,6 +3280,9 @@ def summarize_last_turn(report: dict[str, object], *, routine: bool = True) -> O
         parts.append(f"turn failed: {error}")
     if report.get("native_capture_incomplete") is True:
         parts.append("native memory result not saved completely; inspect the prior save before relying on it")
+    # A command a sandbox left waiting was refused when the hook made it;
+    # the agent was told only that it waits.
+    parts.extend(f"queued memory command not made: {item}" for item in strings("queued_refused"))
     if report.get("promotion_retry_unavailable") is True:
         parts.append("promotion retry unavailable: local scheduling state could not be saved")
     if count("discarded_turns"):
@@ -7463,6 +7468,201 @@ def flush_turn_deltas(
     return {**result, "files_omitted": omitted, **ensured}
 
 
+# A sandbox that lets a command write only its own folder - Codex's in a
+# worktree of the project or below its root, Claude Code's there - refused the
+# memory commands the policy and the checkpoint skill have an agent run: an
+# `update` failed at the Brain's lock, a `turn --flush` at the index. The save
+# after an answer waits in a spool for the session's next hook, which runs
+# outside the sandbox (native_results); these two wait the same way, checked
+# as far as nothing has to be written, and the next turn a hook records - this
+# turn's Stop - makes them, oldest first. Nothing else is queued.
+QUEUE_NAME = "ai-accelerator-memory-queue"
+QUEUE_PROFILE = "memory-command-queue-v1"
+QUEUE_MAX_AGE_SECONDS = 24 * 60 * 60
+QUEUE_MAX_BYTES = 64 * 1024
+QUEUE_UNWRITABLE = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
+# Set for the commands a drain runs: one that still cannot write fails
+# instead of waiting again.
+QUEUE_DRAIN_VARIABLE = "CONTEXT_QUEUE_DRAIN"
+
+
+def queues_from_sandbox(arguments: argparse.Namespace) -> bool:
+    return (arguments.command == "update" or (arguments.command == "turn" and arguments.flush)) \
+        and os.environ.get(QUEUE_DRAIN_VARIABLE) != "1"
+
+
+def memory_writable(repository: Path, database: Path, mode: str) -> bool:
+    """Whether this run may write the project's memory - the Brain's lock,
+    governed, and the index - or a sandbox keeps it from them."""
+    for folder in ((brain_root(repository) / "local",) if mode == "governed" else ()) + (database.parent,):
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            probe = folder / f".write-probe-{os.getpid()}-{os.urandom(4).hex()}"
+            os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            os.unlink(probe)
+        except OSError as error:
+            if error.errno in QUEUE_UNWRITABLE:
+                return False
+    return True
+
+
+def _queue_key(repository: Path) -> str:
+    """One project's queue: the state it writes and the checkout it reads."""
+    layout = workspace_roots.roots(repository)
+    places = os.path.realpath(str(layout.state)) + "\0" + os.path.realpath(str(layout.project))
+    return hashlib.sha256(os.fsencode(places)).hexdigest()[:16]
+
+
+def _own_folder(image: os.stat_result) -> bool:
+    return (stat_module.S_ISDIR(image.st_mode) and not brain_runtime.linked_reparse(image)
+            and (not hasattr(os, "getuid") or image.st_uid == os.getuid()))
+
+
+def queue_write(repository: Path, arguments: argparse.Namespace, owner: str) -> int:
+    """Check the command as far as nothing has to be written, and leave it
+    for the next hook (drain_queued_commands)."""
+    task_id = validate_task_id(arguments.task_id)
+    argv = ["--owner=" + owner, *(["--mode=" + arguments.mode] if arguments.mode else [])]
+    if arguments.command == "update":
+        progress = arguments.progress
+        if progress is None and not (arguments.next_step or arguments.file or arguments.source
+                                     or arguments.phase or arguments.replace_next_steps):
+            raise ContextError("Working task update requires a changed field")
+        if progress is not None and not progress.strip():
+            raise ContextError("Working task progress must not be empty")
+        next_steps = normalize_values("Working task next step", arguments.next_step)
+        files = validate_paths("Working task file", arguments.file)
+        sources = normalize_values("Working task source", arguments.source)
+        reject_secrets("working task", ([progress] if progress else []) + next_steps + files + sources)
+        if arguments.actor:
+            validate_actor(arguments.actor)
+        argv += ["update", "--task-id=" + task_id,
+                 *(["--progress=" + progress] if progress is not None else []),
+                 *("--next-step=" + value for value in arguments.next_step),
+                 *("--file=" + value for value in arguments.file),
+                 *("--source=" + value for value in arguments.source),
+                 *(["--phase=" + arguments.phase] if arguments.phase else []),
+                 *(["--revision=" + str(arguments.revision)] if arguments.revision is not None else []),
+                 *(["--actor=" + arguments.actor] if arguments.actor else []),
+                 *(["--replace-next-steps"] if arguments.replace_next_steps else []),
+                 *(["--allow-phase-regression"] if arguments.allow_phase_regression else [])]
+    else:
+        argv += ["turn", "--task-id=" + task_id, "--flush", f"--max-files={arguments.max_files}"]
+    key = _queue_key(repository)
+    record = {"profile": QUEUE_PROFILE, "key": key, "created": time.time(), "argv": [*argv, "--json"]}
+    name = f"command-{key}-{time.time_ns():020d}-{os.getpid()}-{os.urandom(3).hex()}.json"
+    for folder in workspace_roots.spool_directories(QUEUE_NAME):
+        try:
+            folder.mkdir(mode=0o700, exist_ok=True)
+            if not _own_folder(folder.lstat()):
+                continue
+            atomic_json(folder / name, record)
+        except OSError:
+            continue
+        break
+    else:
+        raise ContextError("This sandbox cannot write the project's memory, nor a temporary folder of "
+                           "yours for the command to wait in")
+    what = "update" if arguments.command == "update" else "flush"
+    detail = (f"This sandbox cannot write the project's memory: the {what} waits in a temporary folder of yours, "
+              "and the session's next hook - when this turn ends - makes it.")
+    if arguments.json:
+        print(json.dumps({"task_id": task_id, "queued": True, "detail": detail}, ensure_ascii=False))
+    else:
+        print(f"Working task {what} queued: {task_id}. {detail}")
+    return 0
+
+
+def _queued_record(path: Path) -> Optional[dict]:
+    try:
+        image = path.lstat()
+        if (not stat_module.S_ISREG(image.st_mode) or image.st_nlink != 1 or brain_runtime.linked_reparse(image)
+                or (hasattr(os, "getuid") and image.st_uid != os.getuid()) or image.st_size > QUEUE_MAX_BYTES):
+            return None
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError, RecursionError):
+        return None
+    if (not isinstance(value, dict) or value.get("profile") != QUEUE_PROFILE
+            or not isinstance(value.get("argv"), list) or not 2 <= len(value["argv"]) <= 512
+            or not all(isinstance(item, str) and "\0" not in item for item in value["argv"])
+            or type(value.get("created")) not in (int, float)):
+        return None
+    return value
+
+
+def _queued_arguments(repository: Path, argv: list) -> Optional[argparse.Namespace]:
+    """The command a record names, when it is one that may wait - anything
+    else a file in the folder could name is refused."""
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            parsed = build_parser().parse_args(["--root", str(repository), *argv])
+    except SystemExit:
+        return None
+    if (parsed.command not in ("update", "turn") or (parsed.command == "turn" and not parsed.flush)
+            or parsed.db is not None or not parsed.json or Path(parsed.root) != repository
+            or sum(item.startswith("--root") for item in argv)):
+        return None
+    return parsed
+
+
+def drain_queued_commands(repository: Path) -> list:
+    """Make what a sandbox left waiting for this project (queue_write),
+    oldest first, from a run that writes its memory: a hook's turn, outside
+    the sandbox. Each file goes before its command runs, whatever it then
+    says; a command refused is journaled and named in the next capsule."""
+    if os.environ.get(QUEUE_DRAIN_VARIABLE) == "1":
+        return []
+    prefix = f"command-{_queue_key(repository)}-"
+    waiting = []
+    for folder in workspace_roots.spool_directories(QUEUE_NAME):
+        try:
+            if not _own_folder(folder.lstat()):
+                continue
+            names = [name for name in os.listdir(folder) if name.startswith(prefix) and name.endswith(".json")]
+        except OSError:
+            continue
+        waiting.extend((name[len(prefix):], folder / name) for name in names)
+    outcomes = []
+    for _, path in sorted(waiting):
+        record = _queued_record(path)
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        parsed = _queued_arguments(repository, record["argv"]) if record else None
+        command = parsed.command if parsed else None
+        if parsed is None or not 0 <= time.time() - record["created"] <= QUEUE_MAX_AGE_SECONDS:
+            outcomes.append({"command": command, "made": False, "code": "unreadable" if parsed is None else "expired",
+                             "detail": "the waiting command could not be read" if parsed is None
+                             else "it waited more than a day"})
+            continue
+        try:
+            done = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--root", str(repository),
+                                   *record["argv"]], cwd=str(workspace_roots.project_root(repository)),
+                                  env={**os.environ, QUEUE_DRAIN_VARIABLE: "1", "PYTHONIOENCODING": "utf-8"},
+                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            outcomes.append({"command": command, "made": False, "code": "unfinished",
+                             "detail": "it did not finish"})
+            continue
+        lines = [line.strip() for line in done.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
+        outcomes.append({"command": command, "made": done.returncode == 0,
+                         **({} if done.returncode == 0 else {"code": "refused",
+                                                             "detail": (lines[-1] if lines else "")[:200]})})
+    if outcomes:
+        import native_results
+        for outcome in outcomes:
+            native_results._journal(repository, None, "queue", "made" if outcome["made"] else "refused",
+                                    outcome.get("code"))
+        refused = [f"{outcome['command'] or 'command'} - {outcome['detail']}" for outcome in outcomes
+                   if not outcome["made"]]
+        if refused:
+            report = load_last_turn_report(repository) or {"schema_version": 1}
+            report.update(timestamp=datetime.now(timezone.utc).isoformat(), queued_refused=refused[-3:])
+            write_last_turn_report(repository, report)
+    return outcomes
+
+
 def run_turn(
     connection: sqlite3.Connection,
     repository: Path,
@@ -8867,6 +9067,8 @@ def _command() -> int:
                     if connection is not None:
                         connection.close()
         else:
+            if queues_from_sandbox(arguments) and not memory_writable(repository, database, mode):
+                return queue_write(repository, arguments, owner)
             connection = connect(database)
         try:
             if arguments.command == "index":
@@ -10092,7 +10294,7 @@ def _command() -> int:
                 # report — validation may have rejected it as secret-bearing,
                 # and the report must not preserve what the run refused.
                 try:
-                    return run_turn(connection, repository, arguments, mode, owner)
+                    code = run_turn(connection, repository, arguments, mode, owner)
                 except (ContextError, BrainError, OSError, sqlite3.Error) as error:
                     write_last_turn_report(
                         repository,
@@ -10104,6 +10306,10 @@ def _command() -> int:
                         },
                     )
                     raise
+                # After the turn it records, before the Stop's save request:
+                # what a sandbox left waiting is made in the order it came.
+                drain_queued_commands(repository)
+                return code
 
             if arguments.command == "rebind":
                 if mode == "lightweight":

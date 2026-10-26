@@ -479,10 +479,13 @@ class SharedWorktree(unittest.TestCase):
                           cwd=folder, TMPDIR=str(temporary))
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("README.md", done.stdout)
-        # A write needs the state itself: refused, not made somewhere else.
+        # A write needs the state itself: not made somewhere else, it waits
+        # for the session's next hook, which writes the state.
         done = self.plain("update", "--task-id", "feature/SHOP-15-sandbox", "--revision", "auto",
                           "--progress", "Nothing.", "--json", cwd=folder, TMPDIR=str(temporary))
-        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(json.loads(done.stdout)["queued"])
+        self.assertEqual(1, len(list(temporary.glob("ai-accelerator-memory-queue-*/command-*.json"))))
         self.assertFalse(list(temporary.rglob("*.md")))
 
     def test_a_worktree_with_an_installation_of_its_own_is_not_borrowed(self):

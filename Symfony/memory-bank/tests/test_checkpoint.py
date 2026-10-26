@@ -173,6 +173,11 @@ class CheckpointTaskTest(unittest.TestCase):
         lightweight = skill[skill.index("## Lightweight Workflow"):skill.index("## Safety")]
         self.assertIn("as step 1 of the Governed Workflow does", " ".join(lightweight.split()))
         self.assertNotIn("detached-HEAD error", skill)
+        # A command a sandbox kept from the memory answers `queued`: the
+        # report says it is made when the turn ends, not counts it lacks.
+        report = " ".join(governed[governed.index("4. "):].split())
+        self.assertIn("answers `queued`", report)
+        self.assertIn("made when this turn ends", report)
 
     def test_the_skill_names_the_task_the_hooks_name(self) -> None:
         thread = "codex-thread/" + self.OWNER
