@@ -78,6 +78,13 @@ unapproved session and the measured one each get a worktree of their own.
 It passes as above, with the save under the task the owning thread names,
 codex-thread/<thread>, the measured session's own.
 
+`--cli checkpoint` has the stand-in make a checkpoint first, as the project's
+`checkpoint` skill says (scripts/bench_checkpoint.py): the task, `turn
+--flush` and `update`, with the memory CLI the session was told to run, else
+the policy's. With `--worktree` the run passes only when that checkpoint
+landed in the root's Project Brain under the worktree's task - from Codex's
+sandbox it waits for the session's next hook (journal stage `queue`).
+
 `--app-server` runs the measured turn through `codex app-server`, as the
 Codex desktop app drives it: a thread started in the session's folder with
 the workspace-write sandbox and on-request approvals, a turn, and every
@@ -92,6 +99,7 @@ started, its owner record one key a line.
   python3 scripts/codex_bench.py --worktree --app-server
   python3 scripts/codex_bench.py --worktree codex
   python3 scripts/codex_bench.py --worktree codex --app-server
+  python3 scripts/codex_bench.py --worktree codex --cli checkpoint
 """
 import argparse
 import html
@@ -112,6 +120,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+import bench_checkpoint  # noqa: E402
 import claude_code_bench as bench  # noqa: E402
 
 MARKER = bench.MARKER
@@ -135,6 +144,8 @@ class Scripted(BaseHTTPRequestHandler):
     save_delay = 0.0
     save_begun = threading.Event()
     read = ""
+    # --cli checkpoint: the checkpoint the stand-in makes before it reads.
+    checkpoint: Optional[bench_checkpoint.Checkpoint] = None
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -212,6 +223,10 @@ class Scripted(BaseHTTPRequestHandler):
                     or item.get("role") == "assistant"), default=-1)
         since = [text_of(item) for item in items[last + 1:]]
         number = len(self.requests) + 1
+        if getattr(self, "checkpoint", None) is not None and MARKER not in html.unescape("\n".join(since)):
+            planned = self.checkpoint_step(items, tools, last, number)
+            if planned is not None:
+                return [planned], since
         if any(item.get("type") in ("function_call_output", "custom_tool_call_output") for item in items[last + 1:]):
             asked = (items[last].get("arguments") or items[last].get("input") or "") if last >= 0 else ""
             text = "Saved." if "native-result" in asked else f"Invoices are numbered per tenant ({self.source})."
@@ -229,6 +244,47 @@ class Scripted(BaseHTTPRequestHandler):
                        else f"printf '%s' {quoted} | {command}")
             return [shell_call(tools, command, f"call_save_{number}")], since
         return [shell_call(tools, f"cat {getattr(self, 'read', '') or self.source}", f"call_read_{number}")], since
+
+
+    def checkpoint_step(self, items: List[Dict[str, Any]], tools: List[Any], last: int,
+                        number: int) -> Optional[Dict[str, Any]]:
+        """--cli checkpoint: its next command, the read once it is over, or
+        None after that."""
+        issued = [item for item in items if item.get("type") in ("function_call", "custom_tool_call")
+                  and str(item.get("call_id", "")).startswith("call_ckpt_")]
+        outputs = {item.get("call_id"): item for item in items
+                   if item.get("type") in ("function_call_output", "custom_tool_call_output")}
+        done = [(item["call_id"].split("_", 3)[3], *command_result(text_of(outputs.get(item["call_id"], {}))))
+                for item in issued]
+        for step in done[len(self.checkpoint.steps):]:
+            self.checkpoint.record(*step)
+        planned = self.checkpoint.next(html.unescape("\n".join(text_of(item) for item in items)), done)
+        if planned is not None:
+            name, command = planned
+            return shell_call(tools, command, f"call_ckpt_{len(done)}_{name}")
+        if last >= 0 and str(items[last].get("call_id", "")).startswith("call_ckpt_"):
+            return shell_call(tools, f"cat {getattr(self, 'read', '') or self.source}", f"call_read_{number}")
+        return None
+
+
+def command_result(text: str) -> Tuple[str, bool]:
+    """A shell call's own output and whether it failed, from what Codex hands
+    the model: exec_command's "Process exited with code N ... Output:" text,
+    or the shell tool's JSON with metadata.exit_code."""
+    code: Optional[int] = None
+    found = re.search(r"exited with code (-?\d+)", text)
+    if found:
+        code = int(found.group(1))
+    body = text.split("Output:\n", 1)[1] if "Output:\n" in text else text
+    try:
+        value = json.loads(text)
+    except ValueError:
+        value = None
+    if isinstance(value, dict) and isinstance(value.get("output"), str):
+        body = value["output"]
+        metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+        code = metadata.get("exit_code", code)
+    return body, code not in (None, 0)
 
 
 def message(number: int, text: str) -> Dict[str, Any]:
@@ -338,6 +394,10 @@ def inside(args: argparse.Namespace) -> int:
         first_lines = len(journal_file.read_text().splitlines()) if journal_file.exists() else 0
         Scripted.requests.clear()
     start.mkdir(parents=True, exist_ok=True)
+    if args.cli == "checkpoint":
+        # The measured session's checkpoint, as the project's skill says.
+        Scripted.checkpoint = bench_checkpoint.Checkpoint(
+            (project / ".agents/skills/checkpoint/SKILL.md").read_text(encoding="utf-8"))
     made = managed_worktrees(home)
     # `--worktree codex` in a terminal: Codex makes the worktree and works there.
     managed = ["--worktree"] if args.worktree == "codex" and not args.app_server else []
@@ -447,6 +507,15 @@ def inside(args: argparse.Namespace) -> int:
                         and setup.get("approvals_before") == [] and (setup.get("approval") or {}).get("approved", 0) > 0
                         and unapproved.get("hook_lines") == 0 and not unapproved.get("capsule")
                         and not unapproved.get("save_asked"))
+    if args.cli == "checkpoint":
+        # The checkpoint landed in the root's Project Brain, under the task
+        # of the checkout the session worked in.
+        task = report.get("task") or subprocess.run(["git", "-C", str(project), "branch", "--show-current"],
+                                                    capture_output=True, text=True).stdout.strip()
+        report["checkpoint"] = Scripted.checkpoint.report(project, task)
+        report["checkpoint"]["queue"] = [f"{line['event']}" + (f":{line['code']}" if line.get("code") else "")
+                                         for line in journal if line.get("stage") == "queue"]
+        report["ok"] = report["ok"] and report["checkpoint"]["ok"]
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -741,6 +810,9 @@ def main() -> int:
                              "project, inside it (the default) or beside it, or in one Codex makes (codex)")
     parser.add_argument("--app-server", action="store_true",
                         help="run the measured turn through codex app-server, as the Codex desktop app does")
+    parser.add_argument("--cli", choices=("checkpoint",), default=None,
+                        help="the stand-in first runs the memory CLI as the session was told to: checkpoint makes "
+                             "a checkpoint as the project's checkpoint skill says")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--work", help=argparse.SUPPRESS)
     parser.add_argument("--source", help=argparse.SUPPRESS)
@@ -773,6 +845,10 @@ def main() -> int:
     if args.worktree == "codex" and args.queued is not None:
         print("codex_bench: --worktree codex lets `codex exec --worktree` or, with --app-server, the bench as the "
               "app make the worktree; it takes no --queued", file=sys.stderr)
+        return 2
+    if args.cli and (args.queued is not None or args.attached is not None or args.sandbox != "workspace-write"):
+        print("codex_bench: --cli checkpoint makes a checkpoint before one answered turn of an installed edition; it "
+              "takes no --queued, --attached or --sandbox read-only", file=sys.stderr)
         return 2
     if args.app_server and (args.queued is not None or args.attached is not None):
         print("codex_bench: --app-server runs one turn of an installed edition; it takes no --queued or "
@@ -811,6 +887,7 @@ def main() -> int:
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
                                *(["--worktree", args.worktree] if args.worktree else []),
                                *(["--app-server"] if args.app_server else []),
+                               *(["--cli", args.cli] if args.cli else []),
                                *(["--queued", str(args.queued), "--packages", str(Path.home() / ".codex/packages")]
                                  if args.queued is not None else [])],
                               timeout=args.timeout + 120)
