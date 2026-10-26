@@ -41,6 +41,18 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
   `workspace_roots.py` change in the asset; the policy lock was rewritten.
 
+### Memory writes a sandbox refuses wait; the checkpoint names the hooks' task — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): the memory-seed asset's
+  `context.py` lets an `update` or a `turn --flush` that a sandbox keeps from
+  the project's memory wait in a temporary folder of the user's, made by the
+  next turn a hook records; its `status` names a rebase's branch as the task;
+  and an explicit `turn --flush` makes a task with nothing buffered yet.
+  `workspace_roots.py` and `native_results.py` change with it. skill-forge's
+  `checkpoint` guidance takes the task the hooks name - `CONTEXT_TASK_ID`,
+  else the branch, else on a detached HEAD the one `context.py status --json`
+  reports - where it said the branch task. The policy lock was rewritten.
+
 ### The seeded runtime's sandboxed lookup publishes locally — 2026-10-26
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes

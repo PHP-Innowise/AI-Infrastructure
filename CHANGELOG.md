@@ -247,6 +247,88 @@ edition's own files remain in that edition's changelog.
   dispatcher does. `tests/test_memory_worktree_sessions.py` (`AttachedWorktree`)
   fails without the change.
 
+### Explicit memory commands in a worktree: writes a sandbox refuses wait, the checkpoint names the hooks' task — 2026-10-26
+
+- The memory commands an agent runs itself - the policy's stage-boundary
+  `update`, the `checkpoint` skill's `turn --flush` and `update` - failed in
+  a worktree the installation serves. With the CLI named by its path in the
+  root (entries below), three things still stood in the way. Codex's
+  workspace-write sandbox writes only the worktree, `/tmp` and `$TMPDIR`:
+  under Codex 0.164's own sandbox (`codex sandbox -P :workspace`) `update`
+  failed at the Brain's lock (`Read-only file system:
+  project-brain/local/runtime.lock`) and `turn --flush` at the index
+  (`attempt to write a readonly database`), and Claude Code's sandbox does
+  the same there. The skill stopped on a detached HEAD, where the hooks name
+  `codex-thread/<thread>` or a rebase's branch. And on a task with nothing
+  buffered yet - a new branch, a worktree's first answer, in the root too -
+  `turn --flush` made no task, so the `update` after it was refused
+  ("Working task not found").
+- **A write a sandbox refuses waits.** An `update` or a `turn --flush` that
+  cannot write the Brain's lock folder (governed) and the index's is checked
+  as far as nothing has to be written - the task ID, a changed field, the
+  secret and personal-data refusals - and waits, owner-only, in
+  `ai-accelerator-memory-queue-<uid>` in the first temporary folder the
+  sandbox writes (`$TMPDIR`, `/tmp`, Claude Code's `claude-<uid>`: the
+  save's spool folders, now `workspace_roots.spool_directories`). It answers
+  `queued` and exits 0. The next turn a hook records - this turn's Stop,
+  outside the sandbox - makes what waits for its project (the state it
+  writes and the checkout it reads), oldest first, after the turn and
+  before the Stop's save request. Each is journaled (`native-results.ndjson`,
+  stage `queue`); one refused is named in the next capsule's last-turn line.
+  Only these two commands, rebuilt from their own options, for this project,
+  younger than a day; a file naming anything else, or a link, is refused
+  unread, and a command a drain runs fails rather than waiting again. A
+  drain with nothing waiting costs 0.07 ms a turn.
+- **The checkpoint names the hooks' task.** Its step 1 takes
+  `CONTEXT_TASK_ID`, otherwise the branch, and on a detached HEAD the
+  `automatic_memory.task_identity.task_id` of `context.py status --json`,
+  which now names a rebase's branch too (source `git-rebase`) where it told
+  the person to set `CONTEXT_TASK_ID`. The lightweight checkpoint and the
+  generator's (`skill-forge/references/php-process-skills.md`) resolve it
+  the same way; the skill reports a `queued` command as made when the turn
+  ends. It and the `memory` skill took the mode from
+  `project-brain/config/runtime.json` under `git rev-parse --show-toplevel`,
+  which a worktree the installation serves, or a project an accelerator is
+  lent to, does not hold; both take the `mode` `status --json` reports now.
+- **An explicit flush makes the task**, as the memory MCP server's
+  checkpoint already did; the Stop hook never flushes explicitly, so
+  visiting a branch still mints nothing, and a completed task is not made
+  again.
+- Offline, scripted model, the same stand-in before and after
+  (`--cli checkpoint` in `scripts/claude_code_bench.py` and
+  `scripts/codex_bench.py`, `scripts/bench_checkpoint.py`): it makes a
+  checkpoint as the installed skill says - step 1, `turn --flush`,
+  `update` - with the memory CLI the session was told of, else the
+  policy's. Before (912a0bbf): in `.claude/worktrees/<name>` under Claude
+  Code 2.1.299 and in a worktree inside and beside the root under Codex
+  0.164, the flush failed (`can't open file
+  '<worktree>/memory-bank/scripts/context.py'`); in a worktree Codex made,
+  the skill stopped on the detached HEAD. The save after the answer worked
+  in all four. After: every checkpoint landed in the root's Project
+  Brain under the task of the checkout it ran in - the worktree's branch,
+  or `codex-thread/<thread>` - in those four, in Claude Code's desktop
+  mode (no permission prompt), with its sandbox on, under the Codex
+  app-server (no approval asked) and in the project root of a fresh
+  install of either host, where the `update` had been refused ("Working
+  task not found"). Under either sandbox both writes answered `queued`
+  and the Stop made both (journal `queue made` twice); the save after
+  the answer, the capsule, the policy and a clean worktree held in every
+  run.
+- `project-brain/tests/test_runtime.py` (`SandboxQueueTest`, read-only
+  folders standing in for the sandbox; an explicit flush on a new branch)
+  and `memory-bank/tests/test_checkpoint.py` (the prompt hook's `--task-id`
+  against the skill's step 1 for a branch, `CONTEXT_TASK_ID`, both rebase
+  backends, both owner records and a worktree Codex made);
+  `tests/test_host_benches.py` holds the stand-in. Each of twelve
+  pieces taken out fails a test: the rebase in `status`, the skill's step 1
+  and its `queued` line, the queue, the drain, the command allow-list, the
+  capsule line, the drain's no-wait guard, the queue-time refusals, the
+  explicit flush, and each skill's mode from `status`.
+- Not covered: the Codex app was not driven (the bench makes its worktree
+  as the app does); Cursor in a worktree still runs no hooks; `refresh`,
+  which the `memory` skill runs, reports its layers failed in such a sandbox
+  - the hooks refresh the index on every prompt.
+
 ### A sandboxed lookup of a task publishes its manifest locally — 2026-10-26
 
 - A lookup that the sandbox keeps from the index (see the entry below) still

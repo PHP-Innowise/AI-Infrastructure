@@ -5,6 +5,20 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- The `checkpoint` skill records into the task the hooks name. It took the branch alone and stopped
+  on a detached HEAD, where the hooks name the branch a rebase in progress rewrites, or
+  `codex-thread/<thread>` in a worktree Codex made; there it now takes the task
+  `context.py status --json` reports, which names a rebase's branch too. On a task with nothing
+  buffered yet its `turn --flush` made no task, so its `update` was refused; the flush makes the task
+  now. From a sandbox that cannot write the project's memory - Codex's in a worktree or below the
+  project root - its `turn --flush` and `update`, and the policy's stage-boundary `update`, failed on
+  a read-only file system; they now wait for the session's next hook, which makes them when the turn
+  ends, and answer `queued`, which the skill reports. It and the `memory` skill now take the mode
+  from `context.py status --json`, where they read `project-brain/config/runtime.json` under the Git
+  top, which a worktree the installation serves does not hold. The policy lock was rewritten.
+  Details in the
+  root [`CHANGELOG.md`](../../CHANGELOG.md).
+
 - Codex in a worktree it made itself - `codex --worktree`, a new worktree in the Codex app - works
   on a detached HEAD, which named no task: the hooks ran there and brought neither capsule nor save.
   The thread that owns the worktree, which Codex records in `codex-thread.json` of its Git
