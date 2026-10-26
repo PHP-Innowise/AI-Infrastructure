@@ -35,7 +35,9 @@ edition's own files remain in that edition's changelog.
   nothing. `local-context.sh` now names the CLI by its path in the root
   there too, as it does in a worktree. It reads the session's folder from
   its input's `cwd`, since the dispatcher runs it in the root and Codex in
-  the session's folder. A session in the root hears nothing new.
+  the session's folder. A session in the root hears nothing new, and where
+  its input names the root as the hook spells it, the hook starts no
+  process to compare them.
 - A worktree's banner also says that the `memory-bank/` and
   `project-brain/` paths the policy and skills name are in the root: the
   `checkpoint` skill, for one, reads `project-brain/config/runtime.json`

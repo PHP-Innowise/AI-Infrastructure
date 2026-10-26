@@ -236,7 +236,7 @@ SESSION_CWD=
 if [ "$PROJECT_DIR" != "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] \
   && [ ! -f "$PROJECT_DIR/memory-bank/scripts/context.py" ]; then
   CLI_WHERE="this worktree has none"
-elif [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ -n "$SESSION_CWD" ] \
+elif [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ -n "$SESSION_CWD" ] && [ "$SESSION_CWD" != "$ROOT_DIR" ] \
   && SESSION_REAL=$(cd "$SESSION_CWD" 2>/dev/null && pwd -P) && ROOT_REAL=$(cd "$ROOT_DIR" && pwd -P) \
   && [ "${SESSION_REAL#"$ROOT_REAL"/}" != "$SESSION_REAL" ]; then
   CLI_WHERE="this session started below the project root"
