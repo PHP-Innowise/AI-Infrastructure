@@ -683,6 +683,16 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True,entered=False,
     interpreter=['python3']
     if os.name == 'nt':
         interpreter=['python'] if shutil.which('python') else ['py','-3']
+    # A worktree its main checkout's installation serves: Claude Code gets the
+    # roots' variables for its commands from the dispatcher's environment
+    # entry, Codex has no file a hook can give its commands variables through
+    # - the command names them, so the save serves the worktree as the hooks do.
+    layout=workspace_roots.roots(root)
+    assign=''
+    if layout.shared and host=='codex':
+        assign=' '.join(name+'='+shlex.quote(str(value)) for name,value in (
+            (workspace_roots.HOME_VARIABLE,layout.tooling),(workspace_roots.STATE_VARIABLE,layout.state),
+            (workspace_roots.PROJECT_VARIABLE,layout.project)))+' '
     # Keep the documented CLI spelling covered by the installed Bash
     # permission rules, even when the session's cwd is a subdirectory. In a
     # worktree this installation serves, the command names the worktree: run
@@ -693,7 +703,7 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True,entered=False,
     named=layout.shared or entered
     place=['--project',str(layout.project)] if named else []
     def cli(*tail):
-        return shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),*place,'native-result',
+        return assign+shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),*place,'native-result',
             '--request',key,'--token',state['token'],*tail])
     enter='cd '+shlex.quote(str(tooling))+' && '
     if host=='claude':

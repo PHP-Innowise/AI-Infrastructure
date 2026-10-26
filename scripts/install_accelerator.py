@@ -904,6 +904,35 @@ def claude_below_root(target: Path) -> None:
         print(f"CLAUDE\tbelow-root\t{folder}", file=sys.stderr)
 
 
+def codex_worktrees(target: Path) -> None:
+    """Codex reads a project's .codex/ only up to the nearest .git, so a
+    session in a worktree of the project, which has none of an installation
+    Git does not track, runs none of its hooks; the project's first Codex
+    session in its root sets up what serves a worktree
+    (memory-bank/scripts/codex_worktrees.py). An install a person runs in a
+    terminal does that at once, in the Codex folder this machine already
+    has. The entries run once the person has trusted them in Codex's own hook
+    review, which this never does for them. Anything else - a test, a bench,
+    the Harness, an agent, a call into this module - leaves it to that
+    session, and never writes outside the project."""
+    script = target / "memory-bank" / "scripts" / "codex_worktrees.py"
+    if not script.is_file() or not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return
+    try:
+        subprocess.run([sys.executable, str(script), "--install"], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    configured = os.environ.get("CODEX_HOME")
+    folder = (Path(configured) if configured else Path.home() / ".codex") / "ai-accelerator"
+    try:
+        listed = (folder / "projects").read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return
+    if str(target.resolve()) in listed:
+        print(f"CODEX\tworktrees\t{folder}\ttrust its hooks once in Codex (/hooks)", file=sys.stderr)
+
+
 def record_install(root: Path, edition: str, data: dict, target: Path, paths: list[tuple[str, Path]]) -> None:
     """Record what an install wrote, as `--sync` records what it writes.
 
@@ -2470,6 +2499,8 @@ def main() -> int:
         )
         if code == 0 and not args.dry_run and "claude" in tools:
             claude_below_root(target)
+        if code == 0 and not args.dry_run and "codex" in tools:
+            codex_worktrees(target)
         return code
     except (InventoryError, OSError, subprocess.CalledProcessError) as error:
         print(f"install-accelerator: {error}", file=sys.stderr)

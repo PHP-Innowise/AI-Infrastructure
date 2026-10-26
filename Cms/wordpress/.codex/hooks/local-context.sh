@@ -360,14 +360,16 @@ fi
 # Capsule delivery: this client receives the Task Capsule at prompt time
 # through working-memory-read.sh; session start reports metadata only.
 
-# Claude Code started in a folder below this project reads none of its
-# settings - only the starting folder's - so such a session ran none of these
-# hooks. This keeps a small dispatcher in your own Claude Code settings that
-# runs this project's hooks for it (memory-bank/scripts/claude_subfolders.py):
-# installed projects only, written only for the Claude Code that started this
-# hook, and in the background, so the session's start never waits for it.
-if [ "$STATE_DIR" = "$ROOT_DIR" ] && [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/claude_subfolders.py" ]; then
-  printf '%s' "$LOOP_INPUT" | "${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/claude_subfolders.py" > /dev/null 2>&1 &
+# Codex started in a worktree of this project reads none of its .codex/ -
+# only the worktree's own, which has none of an installation Git does not
+# track - so such a session ran none of these hooks. This keeps a small
+# dispatcher in your own Codex hooks that runs this project's hooks for it,
+# once you have trusted them in Codex's hook review
+# (memory-bank/scripts/codex_worktrees.py): installed projects only, written
+# only for the Codex that started this hook, and in the background, so the
+# session's start never waits for it.
+if [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/codex_worktrees.py" ]; then
+  printf '%s' "$LOOP_INPUT" | "${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/codex_worktrees.py" > /dev/null 2>&1 &
 fi
 
 exit 0
