@@ -15,7 +15,10 @@ arguments and never completes work.
 
 1. Resolve the repository root with `git rev-parse --show-toplevel`; stop safely
    if it fails.
-2. Read `project-brain/config/runtime.json` when present. If its mode is
+2. Take the mode `python3 memory-bank/scripts/context.py status --json`
+   reports (`mode`): it reads the installation's
+   `project-brain/config/runtime.json`, which a worktree the installation
+   serves, or a project an accelerator is lent to, does not hold. If its mode is
    `governed`, Project Brain is authoritative and the hooks already keep the
    task; follow the Governed Workflow below, then stop.
 3. Continue with the Lightweight Workflow only when lightweight mode was

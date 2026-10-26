@@ -217,6 +217,31 @@ class CheckpointTaskTest(unittest.TestCase):
                         for state in ("rebase-merge", "rebase-apply"):
                             shutil.rmtree(directory / state, ignore_errors=True)
 
+    def test_the_mode_is_the_installations_wherever_the_session_is(self) -> None:
+        # Read from project-brain/config/runtime.json under the Git top, the
+        # mode was missing in a worktree the installation serves and in a
+        # project an accelerator is lent to: neither holds the file.
+        for name in ("checkpoint", "memory"):
+            skill = REPOSITORY_ROOT.joinpath(f".agents/skills/{name}/SKILL.md").read_text(encoding="utf-8")
+            step = " ".join(skill[skill.index("2. "):skill.index("3. ")].split())
+            with self.subTest(skill=name):
+                self.assertIn("`python3 memory-bank/scripts/context.py status --json` reports (`mode`)", step)
+                self.assertNotIn("Read `project-brain/config/runtime.json`", skill)
+        state = self.base / "state"
+        config = state / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True)
+        roots = {"ACCELERATOR_HOME": str(REPOSITORY_ROOT), "ACCELERATOR_STATE_DIR": str(state),
+                 "ACCELERATOR_PROJECT_DIR": str(self.project)}
+        for mode in ("lightweight", "governed"):
+            with self.subTest(mode=mode):
+                config.write_text(json.dumps({"mode": mode}), encoding="utf-8")
+                status = subprocess.run([sys.executable, str(REPOSITORY_ROOT / "memory-bank/scripts/context.py"),
+                                         "status", "--json"], capture_output=True, text=True, cwd=str(self.project),
+                                        env=dict(self.env, **roots), timeout=120)
+                self.assertEqual(0, status.returncode, status.stderr)
+                self.assertFalse((self.project / "project-brain/config/runtime.json").exists())
+                self.assertEqual(mode, json.loads(status.stdout)["mode"])
+
     def test_any_other_detached_head_stops_with_the_remediation(self) -> None:
         self.git("checkout", "-q", "--detach")
         self.assertIsNone(self.hooks_task(self.project, None))
