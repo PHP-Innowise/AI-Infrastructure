@@ -842,12 +842,23 @@ def _under(path, base):
 
 def _spool_dirs():
     """The folders a save the project cannot take waits in: one of this
-    user's in each temporary directory a sandbox lets a command write."""
+    user's in each temporary directory a sandbox lets a command write.
+
+    Claude Code's sandbox gives its commands claude-<uid> under its own
+    temporary directory (CLAUDE_CODE_TMPDIR, else the system's) as TMPDIR,
+    so a save from a session below the root or in a worktree, which may not
+    write the project, waits there - and the hook, outside the sandbox,
+    looks there too. A command takes the first folder it can write."""
     owner = str(os.getuid()) if hasattr(os, 'getuid') else 'user'
     bases = []
     for base in (os.environ.get('TMPDIR'), tempfile.gettempdir(), '/tmp' if os.name == 'posix' else None):
         if base and os.path.isabs(base) and base not in bases:
             bases.append(base)
+    claude = f"claude-{os.getuid() if hasattr(os, 'getuid') else 0}"
+    for base in (os.environ.get('CLAUDE_CODE_TMPDIR'), *list(bases)):
+        child = os.path.join(base, claude) if base and os.path.isabs(base) else None
+        if child and child not in bases:
+            bases.append(child)
     return [Path(base) / f'{SPOOL_NAME}-{owner}' for base in bases]
 
 

@@ -28,6 +28,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code's sandbox below the root or in a worktree saves through the spool — 2026-10-26
+
+- Claude Code's Bash sandbox lets a command write only the folder its
+  session started in and claude-<uid> under its own temporary directory
+  (CLAUDE_CODE_TMPDIR, else the system's), which it gives the command as
+  TMPDIR. A save from a session below the project root or in a worktree
+  cannot write the project there, so it was spooled into that folder - and
+  the next hook, which runs outside the sandbox with the temporary
+  directory itself, never looked in it: the turn ended `stop` `failed`
+  `unsaved` (Claude Code 2.1.299, offline, with the sandbox on and the
+  project on disk). `native_results._spool_dirs` now looks in claude-<uid>
+  under each temporary directory too; the command still takes the first
+  folder it can write, its own TMPDIR. With it, both sessions saved
+  (`saved` `spooled`, then `recovery-saved`). A session in the root, which
+  the sandbox lets write the project, saves as before.
+  `tests/test_memory_native_capture.py` repeats it with the two TMPDIRs;
+  dropping the new folders fails it.
+
 ### Claude Code started in a worktree of the project — 2026-10-25
 
 - Git gives a linked worktree only what it tracks, and none of the four
