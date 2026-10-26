@@ -17,16 +17,20 @@ arguments and never completes work.
    if it fails.
 2. Read `project-brain/config/runtime.json` when present. If its mode is
    `governed`, Project Brain is authoritative and the hooks already keep the
-   branch task; follow the Governed Workflow below, then stop.
+   task; follow the Governed Workflow below, then stop.
 3. Continue with the Lightweight Workflow only when lightweight mode was
    explicitly configured. Every context command there must include global
    `--mode lightweight`.
 
 ## Governed Workflow
 
-1. The task ID is `CONTEXT_TASK_ID`, otherwise
-   `git symbolic-ref --quiet --short HEAD`. Stop with an actionable
-   detached-HEAD error rather than inventing an ID.
+1. The task ID is the one the hooks name: `CONTEXT_TASK_ID`, otherwise
+   `git symbolic-ref --quiet --short HEAD`. On a detached HEAD it is the
+   `automatic_memory.task_identity.task_id` that
+   `python3 memory-bank/scripts/context.py status --json` reports - the
+   branch a rebase in progress rewrites, or `codex-thread/<thread>` in a
+   worktree Codex made for a thread. When that is null, stop with its
+   `remediation` rather than inventing an ID.
 2. Run `python3 memory-bank/scripts/context.py turn --task-id <task> --flush --json`.
    It flushes the turns the Stop hook buffered into the governed task and
    creates the task when this is its first checkpoint.
@@ -41,8 +45,8 @@ arguments and never completes work.
 
 ## Lightweight Workflow
 
-1. Resolve the task ID with `git symbolic-ref --quiet --short HEAD`. Stop with
-   an actionable detached-HEAD error rather than inventing an ID.
+1. Resolve the task ID as step 1 of the Governed Workflow does, with global
+   `--mode lightweight` on its `status` command.
 2. Read `git status --porcelain=v1 -z --untracked-files=all` from the repository
    root and parse every staged, unstaged, untracked, renamed, copied, and deleted
    path. If there are no changes, report a no-op.
@@ -57,8 +61,8 @@ arguments and never completes work.
 5. Create a concise sanitized progress summary. Never store raw diffs, file
    bodies, prompts, responses, logs, or secrets.
 6. Run `python3 memory-bank/scripts/context.py --mode lightweight get --task-id
-   <branch> --json`. If absent, run `start` with goal `Checkpoint work on branch
-   <branch>` and one `--file` argv value per exact changed path. Then run
+   <task> --json`. If absent, run `start` with goal `Checkpoint work on
+   <task>` and one `--file` argv value per exact changed path. Then run
    `update` with the summary and the same exact paths, preserving leading and
    trailing whitespace.
 7. Report task ID, changed-file count, exclusions, and whether the local task
@@ -71,4 +75,4 @@ arguments and never completes work.
 - MUST NOT run unscoped `git diff`, `--stat`, or `--numstat`.
 - MUST NOT run `complete`, `record`, or `clear`, create an episode, stage,
   commit, discard, or modify repository files.
-- MUST NOT create a second task authority in governed mode: the branch task the hooks keep is the one task.
+- MUST NOT create a second task authority in governed mode: the task the hooks keep is the one task.

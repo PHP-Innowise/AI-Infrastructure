@@ -5422,12 +5422,13 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 # HEAD does not resolve to a commit: the branch is unborn
                 # (fresh init, zero commits) or HEAD itself is broken.
                 git_state = "unborn-head"
-    # A worktree Codex made for a thread: that thread names the task while
-    # HEAD stays detached (_owner_thread) and no rebase runs, as the hooks
-    # name it.
+    # A detached HEAD names the task where the hooks name one: the branch a
+    # rebase in progress rewrites (_rebased_branch), else, in a worktree Codex
+    # made for a thread, that thread (_owner_thread). The checkpoint skill
+    # takes its task from here on a detached HEAD.
     project = workspace_roots.project_root(repository)
-    owner = (_owner_thread(project) if git_state == "detached-head" and _rebased_branch(project) is None
-             else None)
+    rebased = _rebased_branch(project) if git_state == "detached-head" else None
+    owner = _owner_thread(project) if git_state == "detached-head" and rebased is None else None
 
     if git_error is not None:
         git_metadata = {
@@ -5469,6 +5470,9 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             "reason": {
                 "worktree": "Git changed-path metadata is available.",
                 "detached-head": (
+                    "Git changed-path metadata is available; HEAD is detached by a "
+                    "rebase, and the branch it rewrites supplies task identity."
+                    if rebased else
                     "Git changed-path metadata is available; HEAD is detached, and "
                     "the Codex thread that owns this worktree supplies task identity."
                     if owner else
@@ -5482,7 +5486,7 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             }[git_state],
             "remediation": (
                 "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
-                if git_state == "detached-head" and not owner
+                if git_state == "detached-head" and not owner and not rebased
                 else None
             ),
         }
@@ -5524,6 +5528,25 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 "source": "git-branch",
                 "task_id": identity,
                 "reason": "The current Git branch supplies task identity.",
+                "remediation": None,
+            }
+    elif rebased:
+        try:
+            identity = validate_task_id(branch_task_id(rebased))
+        except ContextError:
+            task_identity = {
+                "status": "degraded",
+                "source": "git-rebase",
+                "task_id": None,
+                "reason": "The branch a rebase in progress rewrites is not a valid task identifier.",
+                "remediation": "Set CONTEXT_TASK_ID to a valid task identifier.",
+            }
+        else:
+            task_identity = {
+                "status": "active",
+                "source": "git-rebase",
+                "task_id": identity,
+                "reason": "The branch a rebase in progress rewrites supplies task identity until the rebase ends.",
                 "remediation": None,
             }
     elif owner:
