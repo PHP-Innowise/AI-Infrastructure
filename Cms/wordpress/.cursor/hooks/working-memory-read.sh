@@ -285,8 +285,25 @@ rebased_branch() {
   done
   return 1
 }
+# A worktree Codex makes for a thread - `codex --worktree`, a new worktree in
+# the Codex app - starts on a detached HEAD and keeps it until someone makes a
+# branch there. Codex writes the thread that owns it into codex-thread.json of
+# the worktree's Git directory, {"version": 1, "ownerThreadId": "<UUID>"}.
+# Until a branch names the work, that thread does - codex-thread/<UUID>, which
+# the runtime admits only while HEAD stays detached and the record names it.
+# Any other detached HEAD names no task.
+codex_thread_task() {
+  local directory record= version=$'"version"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*1[ \t\n\v\f\r]*[,}]'
+  local owner=$'"ownerThreadId"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*"([0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})"'
+  directory=$(git -C "$PROJECT_DIR" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  [ -f "$directory/codex-thread.json" ] && [ ! -L "$directory/codex-thread.json" ] || return 1
+  IFS= read -r -d '' -n 4097 record < "$directory/codex-thread.json"
+  [ "${#record}" -le 4096 ] && [[ $record =~ $version ]] && [[ $record =~ $owner ]] || return 1
+  printf 'codex-thread/%s' "${BASH_REMATCH[1]}"
+}
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
 [ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
+[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)
 
 # Arm one semantic result capture for this real prompt. The CLI recognizes
 # an internal Stop continuation and preserves its original challenge. Unlike

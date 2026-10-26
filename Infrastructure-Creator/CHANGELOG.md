@@ -52,6 +52,18 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   `memory_results.py`, `mcp_server.py` and `context.py` change in the asset;
   the policy lock was rewritten.
 
+### A worktree Codex made names its task by its owning thread — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): the memory-seed asset's
+  `context.py` admits `codex-thread/<thread>` as an inferred task while the
+  worktree Codex made stays detached, `status` reports it, and the first
+  capsule names it; its `MCP.md` says so. hook-forge's identity contract lets
+  the memory hooks follow the rebase line with
+  `[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)`, the resolver the
+  editions ship, and bootstrap-verifier's contract admits that line there
+  only, right after the rebase one. Its skill-body total is 305,962 bytes,
+  under the 306,200 ceiling. The policy lock was rewritten.
+
 ### Codex in a worktree of a generated project runs its hooks — 2026-10-26
 
 - As the editions do (root `CHANGELOG.md`, same day): memory-seed copies

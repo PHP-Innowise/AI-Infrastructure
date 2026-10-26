@@ -11,6 +11,13 @@ it at the top of every session.
 
 ## Unreleased
 
+- Codex in a worktree it made itself - `codex --worktree`, a new worktree in the Codex app - works
+  on a detached HEAD, which named no task: the hooks ran there and brought neither capsule nor save.
+  The thread that owns the worktree, which Codex records in `codex-thread.json` of its Git
+  directory, now names its task, `codex-thread/<thread>`, until a branch is made there; any other
+  detached HEAD still names none. `memory-bank/MCP.md` says so. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
 - Codex started in a Git worktree of the project that has none of the installation runs the
   project's hooks and gets its `AGENTS.md` there too, for the worktree - the root's memory, the
   worktree's own task - once you trust the entries a session in the root puts into your own

@@ -980,27 +980,84 @@ def _source_git_ignored(project, paths, timeout):
         _environment=_source_git_environment, _frame=_source_git_frame, _run=_source_git_run)
 
 
+def _checkout_git_directory(project: Path) -> Optional[Path]:
+    """The Git directory of the checkout holding ``project``, found as Git
+    finds it - ``.git`` itself, or the ``gitdir:`` a linked worktree's or
+    submodule's ``.git`` file names - without starting Git again."""
+    checkout = _source_git_checkout(project)
+    if checkout is None:
+        return None
+    directory = checkout / ".git"
+    if not directory.is_dir():
+        with directory.open("rb") as handle:
+            pointer = handle.read(4097)
+        line = pointer.decode("utf-8", "strict").splitlines()[0] if pointer else ""
+        if len(pointer) > 4096 or not line.startswith("gitdir: "):
+            return None
+        directory = checkout / line[len("gitdir: "):].strip()
+    return directory
+
+
+# A worktree Codex makes for a thread names its task by that thread. The
+# record is read as the hooks' codex_thread_task() reads it, by the same two
+# patterns, so the runtime admits the task the hooks name, and `status`
+# reports it.
+CODEX_THREAD_TASK_PREFIX = "codex-thread/"
+_CODEX_THREAD_TASK = re.compile(r"codex-thread/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+_CODEX_THREAD_VERSION = re.compile(r'"version"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*1[ \t\n\v\f\r]*[,}]')
+_CODEX_THREAD_OWNER = re.compile(
+    r'"ownerThreadId"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})"')
+
+
+def _owner_thread(project: Path) -> Optional[str]:
+    """The thread owning a worktree Codex made, while it names the task.
+
+    `codex --worktree` and a new worktree in the Codex app check the project
+    out on a detached HEAD, which stays detached until someone makes a branch
+    there, and write the thread that owns the checkout into
+    ``codex-thread.json`` of its Git directory: ``{"version": 1,
+    "ownerThreadId": "<UUID>"}``, on one line (the CLI) or one key a line (the
+    app). Until a branch names the work, that thread does - the hooks
+    (working-memory-read.sh) name the task ``codex-thread/<UUID>``, admitted
+    while HEAD stays detached (_admit_inferred_task_branch). Any other
+    detached HEAD names none.
+    """
+    try:
+        directory = _checkout_git_directory(project)
+        if directory is None:
+            return None
+        record_path = directory / "codex-thread.json"
+        if record_path.is_symlink() or not record_path.is_file():
+            return None
+        with record_path.open("rb") as handle:
+            raw = handle.read(4097)
+        text = raw.decode("utf-8", "strict")
+    except (SourceGitError, OSError, UnicodeError, ValueError):
+        return None
+    owner = _CODEX_THREAD_OWNER.search(text)
+    if len(raw) > 4096 or _CODEX_THREAD_VERSION.search(text) is None or owner is None:
+        return None
+    return owner.group(1)
+
+
+def _owner_thread_task(project: Path) -> Optional[str]:
+    """``codex-thread/<UUID>`` for a worktree Codex made, as the hooks'
+    codex_thread_task() names it, or None."""
+    owner = _owner_thread(project)
+    return CODEX_THREAD_TASK_PREFIX + owner if owner else None
+
+
 def _rebased_branch(project: Path) -> Optional[str]:
     """The branch a rebase in progress replays onto a detached HEAD.
 
     Git keeps its full name in ``rebase-merge/head-name`` (``rebase-apply/``
     for the apply backend) of the worktree's own Git directory, and removes
-    the directory when the rebase ends or is aborted. The directory is found
-    as Git finds it - ``.git`` itself, or the ``gitdir:`` a linked worktree's
-    or submodule's ``.git`` file names - without starting Git again.
+    the directory when the rebase ends or is aborted.
     """
     try:
-        checkout = _source_git_checkout(project)
-        if checkout is None:
+        directory = _checkout_git_directory(project)
+        if directory is None:
             return None
-        directory = checkout / ".git"
-        if not directory.is_dir():
-            with directory.open("rb") as handle:
-                pointer = handle.read(4097)
-            line = pointer.decode("utf-8", "strict").splitlines()[0] if pointer else ""
-            if len(pointer) > 4096 or not line.startswith("gitdir: "):
-                return None
-            directory = checkout / line[len("gitdir: "):].strip()
         for state in ("rebase-merge", "rebase-apply"):
             try:
                 with (directory / state / "head-name").open("rb") as handle:
@@ -1036,8 +1093,11 @@ def _admit_inferred_task_branch(repository: Path, expected: Optional[str]) -> No
         # Git was slow.
         observed = _source_git_run(project, ["symbolic-ref", "--quiet", "HEAD"],
                                    _source_git_environment(), time.monotonic() + 2.0)
-        # A rebase detaches HEAD; the branch it rewrites stays the task.
-        if observed.returncode == 1 and _rebased_branch(project) == expected:
+        # A rebase detaches HEAD; the branch it rewrites stays the task. A
+        # worktree Codex made is detached until a branch is made there; the
+        # thread that owns it names the task meanwhile.
+        if observed.returncode == 1 and (_rebased_branch(project) == expected
+                                         or _owner_thread_task(project) == expected):
             return
         if (observed.returncode != 0
                 or not isinstance(observed.stdout, bytes) or len(observed.stdout) > 4096
@@ -4484,10 +4544,13 @@ def _render_capsule(
                     "new one starts: " + _closed_task_remedy(str(capsule.get("task_id") or "")) + ")")
     elif working is None and capsule.get("kind") == "warming":
         # A branch whose task the first checkpoint has not created yet: the
-        # layers below are still this turn's retrieval.
+        # layers below are still this turn's retrieval. A worktree Codex made
+        # has no branch to tell the agent the task's ID, so the line does.
+        task = str(capsule.get("task_id") or "")
         head.append(
-            "working: not recorded yet (the task starts at the "
-            f"{DEFAULT_TURN_FLUSH_AFTER}-turn checkpoint)"
+            "working: not recorded yet ("
+            + (f"task {task}; " if _CODEX_THREAD_TASK.fullmatch(task) else "")
+            + f"the task starts at the {DEFAULT_TURN_FLUSH_AFTER}-turn checkpoint)"
         )
     elif working is None:
         head.append("working: unavailable")
@@ -5359,6 +5422,12 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 # HEAD does not resolve to a commit: the branch is unborn
                 # (fresh init, zero commits) or HEAD itself is broken.
                 git_state = "unborn-head"
+    # A worktree Codex made for a thread: that thread names the task while
+    # HEAD stays detached (_owner_thread) and no rebase runs, as the hooks
+    # name it.
+    project = workspace_roots.project_root(repository)
+    owner = (_owner_thread(project) if git_state == "detached-head" and _rebased_branch(project) is None
+             else None)
 
     if git_error is not None:
         git_metadata = {
@@ -5400,6 +5469,9 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             "reason": {
                 "worktree": "Git changed-path metadata is available.",
                 "detached-head": (
+                    "Git changed-path metadata is available; HEAD is detached, and "
+                    "the Codex thread that owns this worktree supplies task identity."
+                    if owner else
                     "Git changed-path metadata is available, but HEAD is "
                     "detached and cannot supply task identity."
                 ),
@@ -5410,7 +5482,7 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             }[git_state],
             "remediation": (
                 "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
-                if git_state == "detached-head"
+                if git_state == "detached-head" and not owner
                 else None
             ),
         }
@@ -5454,6 +5526,14 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 "reason": "The current Git branch supplies task identity.",
                 "remediation": None,
             }
+    elif owner:
+        task_identity = {
+            "status": "active",
+            "source": "codex-thread",
+            "task_id": CODEX_THREAD_TASK_PREFIX + owner,
+            "reason": "The Codex thread that owns this worktree supplies task identity until a branch does.",
+            "remediation": None,
+        }
     else:
         task_identity = {
             "status": "degraded",
@@ -5504,6 +5584,10 @@ def derive_goal(task_id: str) -> str:
     A task goal cannot be edited after creation, so an automatically created
     one states its own provenance instead of pretending someone wrote it.
     """
+    if _CODEX_THREAD_TASK.fullmatch(task_id):
+        # No branch to read words from, and a thread ID read as one comes
+        # apart at its hyphens; the ID stays whole in the provenance.
+        return f"Work of the Codex thread that owns its worktree (auto-provisioned from {task_id})"
     label = task_id
     for prefix in BRANCH_PREFIXES:
         if label.lower().startswith(prefix):

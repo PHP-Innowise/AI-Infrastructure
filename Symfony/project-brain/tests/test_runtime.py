@@ -10344,6 +10344,120 @@ class RenamedBranchTaskTest(RuntimeHarness):
         self.assertEqual("feature/ledger-sync-v2", json.loads(started.stdout)["task_id"])
 
 
+class CodexThreadTaskTest(RuntimeHarness):
+    """A worktree Codex makes for a thread - `codex --worktree`, a new worktree
+    in the Codex app - is checked out on a detached HEAD, with the thread that
+    owns it in codex-thread.json of its Git directory. The hooks name its task
+    codex-thread/<thread>; `status` said HEAD could not supply one and told
+    the person to set CONTEXT_TASK_ID."""
+
+    OWNER = "01a1776d-b888-7ac2-8a1b-9557bdbd1dad"
+    TASK = "codex-thread/" + OWNER
+
+    def git(self, *arguments: str, where: Path | None = None) -> str:
+        return subprocess.run(["git", "-C", str(where or self.repository), "-c", "user.email=h@example.invalid",
+                               "-c", "user.name=H", *arguments], check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+        self.git("checkout", "-q", "--detach")
+        self.record = self.repository / ".git" / "codex-thread.json"
+        self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode("utf-8"))
+
+    def identity(self) -> dict:
+        status = self.run_cli("status", "--json")
+        self.assertEqual(0, status.returncode, status.stderr)
+        return json.loads(status.stdout)["automatic_memory"]
+
+    def test_status_names_the_owning_thread_while_head_is_detached(self) -> None:
+        readiness = self.identity()
+        self.assertEqual("active", readiness["status"])
+        self.assertEqual(("active", "codex-thread", self.TASK),
+                         tuple(readiness["task_identity"][key] for key in ("status", "source", "task_id")))
+        self.assertEqual("detached-head", readiness["git_metadata"]["state"])
+        self.assertIsNone(readiness["git_metadata"]["remediation"])
+        # Any other detached HEAD names none, as before.
+        self.record.unlink()
+        readiness = self.identity()
+        self.assertEqual(("degraded", None), (readiness["task_identity"]["status"],
+                                              readiness["task_identity"]["task_id"]))
+        self.assertIn("CONTEXT_TASK_ID", readiness["git_metadata"]["remediation"])
+        # A branch made in the worktree names the task from then on.
+        self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode("utf-8"))
+        self.git("switch", "-q", "-c", "codex/refunds")
+        self.assertEqual(("git-branch", "codex/refunds"),
+                         tuple(self.identity()["task_identity"][key] for key in ("source", "task_id")))
+
+    def prompt_as_the_hooks_do(self) -> subprocess.CompletedProcess[str]:
+        return self.run_cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK,
+                            "--expected-branch", self.TASK, "--ephemeral", "--sanitize")
+
+    def test_the_thread_task_is_read_and_recorded(self) -> None:
+        def prompt() -> str:
+            read = self.prompt_as_the_hooks_do()
+            self.assertEqual(0, read.returncode, read.stderr)
+            return read.stdout
+
+        # No branch tells the agent the task's ID before it is recorded.
+        self.assertIn(f"working: not recorded yet (task {self.TASK}; the task starts at the", prompt())
+        self.repository.joinpath("app.txt").write_text("refunds\n", encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", self.TASK, "--flush", "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        self.assertTrue(json.loads(turn.stdout)["provisioned"])
+        # The goal keeps the thread's ID whole instead of reading it as words.
+        self.assertIn(f"working: {self.TASK} — Work of the Codex thread that owns its worktree "
+                      f"(auto-provisioned from {self.TASK})", prompt())
+        record = json.loads(self.run_cli("get", "--task-id", self.TASK, "--json").stdout)
+        self.assertIn("app.txt", record["files"])
+
+    def test_the_thread_task_is_admitted_only_while_the_thread_owns_the_detached_checkout(self) -> None:
+        # The hooks inferred it; before anything is delivered the runtime
+        # checks it still holds, as it checks a branch.
+        self.assertEqual(0, self.prompt_as_the_hooks_do().returncode)
+        for change, undo in (
+                (lambda: self.record.write_bytes(
+                    b'{"version":1,"ownerThreadId":"01a1776e-0000-7000-8000-000000000001"}'),
+                 lambda: self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode())),
+                (lambda: self.record.unlink(),
+                 lambda: self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode())),
+                (lambda: self.git("switch", "-q", "-c", "codex/refunds"),
+                 lambda: self.git("checkout", "-q", "--detach"))):
+            change()
+            refused = self.prompt_as_the_hooks_do()
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("Inferred task branch changed or unavailable", refused.stderr)
+            undo()
+            self.assertEqual(0, self.prompt_as_the_hooks_do().returncode)
+
+    def test_a_rebase_there_or_a_branch_shaped_like_the_task_is_not_the_thread(self) -> None:
+        # During a rebase the hooks name the branch being rebased, not the thread.
+        rebase = self.repository / ".git" / "rebase-merge"
+        rebase.mkdir()
+        (rebase / "head-name").write_text("refs/heads/feature/refunds\n", encoding="utf-8")
+        self.assertNotEqual("codex-thread", self.identity()["task_identity"]["source"])
+        shutil.rmtree(rebase)
+        self.assertEqual("codex-thread", self.identity()["task_identity"]["source"])
+        self.assertFalse(context_cli.derive_goal("codex-thread/notes").startswith("Work of the Codex thread"))
+
+    def test_a_linked_worktree_keeps_its_owner_in_its_own_git_directory(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="codex-made worktree ")
+        self.addCleanup(temporary.cleanup)
+        worktree = Path(temporary.name) / "worktrees" / "b3c4" / "project"
+        self.git("worktree", "add", "-q", "--detach", str(worktree))
+        git_dir = Path(self.git("rev-parse", "--absolute-git-dir", where=worktree))
+        self.assertIsNone(context_cli._owner_thread(worktree))
+        other = "01a1776e-0000-7000-8000-000000000001"
+        # The app writes it one key a line.
+        (git_dir / "codex-thread.json").write_bytes(
+            ('{\n  "version": 1,\n  "ownerThreadId": "%s"\n}\n' % other).encode("utf-8"))
+        self.assertEqual(other, context_cli._owner_thread(worktree))
+        (worktree / "src").mkdir()
+        self.assertEqual(other, context_cli._owner_thread(worktree / "src"))
+        self.assertEqual(self.OWNER, context_cli._owner_thread(self.repository))
+
+
 class AutoCheckpointFieldTest(RuntimeHarness):
     """The automatic flush reports in its own field, never over the operator's.
 

@@ -87,7 +87,9 @@ See [Claude MCP](https://code.claude.com/docs/en/mcp),
   `native_result_request` is `off` - that save records the answer: do not
   record the same result with this tool or `record-result` as well.
 
-Use `CONTEXT_TASK_ID`, otherwise the branch task. On detached HEAD, use an explicit
+Use `CONTEXT_TASK_ID`, otherwise the branch task; in a worktree Codex made, on a
+detached HEAD, `codex-thread/<thread ID>`, which the capsule names. On any other
+detached HEAD, use an explicit
 existing task ID. Do not create another task for the same work. Saving runs promotion
 under the existing setting. A learning's record is named by its content, so a retry,
 or a later result restating it, finds that record instead of writing a second one.

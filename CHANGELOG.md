@@ -341,6 +341,67 @@ edition's own files remain in that edition's changelog.
   ends a transaction, not the connection, and on Windows an open database
   cannot be deleted. They are closed with `contextlib.closing` now.
 
+### A worktree Codex made names its task by its owning thread — 2026-10-26
+
+- `codex --worktree` and `codex exec --worktree` (0.164) check the session's
+  `HEAD` out - committed work only - in `$CODEX_HOME/worktrees/<4 hex>/<repo>`
+  on a detached HEAD and write the thread that owns the checkout into
+  `codex-thread.json` of its Git directory (`{"version":1,"ownerThreadId":
+  "<UUID>"}`, the session's own ID). The Codex app makes its worktrees the
+  same way - `git worktree add --detach`, the record one key a line - and a
+  branch comes there only by an act: its "Create branch" (`codex/` and the
+  title's first words), the agent, told to name its branches `codex/...`, or
+  "Move to worktree"; "Hand off to local" moves the work to a branch in the
+  main checkout and detaches the worktree. A detached HEAD named no task, so
+  a session there, the root's hooks run for it by the dispatcher, got neither
+  capsule nor save (offline, real Codex 0.164: hooks ran, no journal line).
+- The hooks now name such a checkout's task `codex-thread/<UUID>`, after
+  `CONTEXT_TASK_ID`, the branch and a rebase's branch:
+  `[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)` follows the rebase
+  line in every copy of `working-memory-read.sh` and
+  `working-memory-write.sh`. Any other detached HEAD still names none. The
+  thread, not the folder: it is Codex's own link between thread and
+  checkout, unique, and the same for the checkout's life; the folder's four
+  hex digits, a name the person gives it and Git's name for the worktree
+  come back for other work once a worktree is removed. A branch made there
+  names the task from the next hook on; the thread's task is not carried
+  over, since the branch travels - to the main checkout at "Hand off to
+  local", to a pull request - and the record does not. The hooks pass the
+  thread's task as the inferred identity (`--expected-branch`), and the
+  runtime delivers its capsule only while `HEAD` stays detached and the
+  record still names that thread (`_admit_inferred_task_branch`), as it
+  admits a rebase's branch only while the rebase runs. `context.py status`
+  reports it (`automatic_memory.task_identity.source` `codex-thread`) where
+  it told the person to set `CONTEXT_TASK_ID`; the first capsule, before the
+  task is recorded, names it, since no branch does; its goal reads "Work of
+  the Codex thread that owns its worktree", where the thread's ID read as
+  words came apart at its hyphens. The runtime reads the record by the hooks'
+  two patterns, so the two never name different tasks.
+- Offline, real Codex 0.164, scripted model, isolated `CODEX_HOME`:
+  `scripts/codex_bench.py --worktree codex` (new: `codex exec --worktree`
+  makes the worktree) passed - capsule, every line of `AGENTS.md`, a save
+  through the spool under the measured session's own `codex-thread/<UUID>`,
+  of a learning citing a file only that worktree had, the worktree still
+  detached and clean - and so did `--subfolder src` and `--app-server`, where
+  the bench makes the worktree as the app does (no approval asked); with the
+  hook line taken out the same run got no capsule and no save.
+  `--worktree beside` still saves under its branch.
+  `memory-bank/tests/test_hooks.py` (`CodexWorktreeOwnerTest`: the CLI's and
+  the app's record for each host, the order, twelve refused records, the
+  hooks and the runtime reading the same records) and
+  `project-brain/tests/test_runtime.py` (`CodexThreadTaskTest`: admission,
+  refusal once a branch, another owner or no record, `status`, the capsule
+  and the goal) fail on each of eight reverted pieces. The generator's
+  memory hook contract (`validate_generated.py`), which the shipped hooks
+  must pass, admits the line right after the rebase one only, and hook-forge
+  documents the resolver (`tests/test_memory_prompt_generator.py`).
+- Not covered: the Codex app was not driven - its worktrees were read from
+  its code. When the app hands the record to another thread (it archives the
+  owner while another thread still works there), that thread's task starts
+  empty. The `checkpoint` skill still stops on a detached HEAD, and the
+  explicit `context.py` commands find no runtime in a worktree without the
+  installation, branch or not.
+
 ### Codex started in a worktree of the project — 2026-10-26
 
 - Codex reads a project's `.codex/` - `hooks.json` and `config.toml` - and
@@ -407,8 +468,8 @@ edition's own files remain in that edition's changelog.
   stream before it writes: Codex 0.164's terminal, after an earlier session
   in the same `CODEX_HOME`, cut a response silent for 8 seconds.
 - Not covered: Codex's own `--worktree` starts on a detached HEAD, which
-  names no task; the desktop app's worktrees were not run; Cursor in a
-  worktree without the installation still runs no hooks.
+  named no task (see the entry above); the desktop app's worktrees were not
+  run; Cursor in a worktree without the installation still runs no hooks.
 
 ### Claude Code's sandbox below the root or in a worktree saves through the spool — 2026-10-26
 
