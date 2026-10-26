@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A sandboxed lookup of a task publishes its manifest locally — 2026-10-26
+
+- A lookup that the sandbox keeps from the index (see the entry below) still
+  failed for a task that exists: `retrieve` publishes what it delivered to
+  `project-brain/control/retrieval-manifests` under the Project Brain's
+  lock, which the sandbox does not let it take. Claude Code 2.1.299 in the
+  desktop app's mode, with the sandbox on and started in `src/`, got
+  `[Errno 30] Read-only file system` on `project-brain/local/runtime.lock`.
+  Such a lookup is now `--ephemeral`: its manifest is the local one,
+  written when it can be. `tests/test_memory_worktree_sessions.py` repeats
+  it with a task and the state read-only, and fails without the change;
+  `claude_code_bench.py --subfolder src --cli --sandbox` passes on 2.1.278
+  and on 2.1.299 in the desktop app's mode.
+
 ### A session below the root hears where the memory CLI is — 2026-10-26
 
 - A session started below the project root runs its commands in its own

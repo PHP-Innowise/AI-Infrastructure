@@ -356,12 +356,17 @@ class SharedWorktree(unittest.TestCase):
         # As a sandbox that lets a command write only the worktree - Codex's
         # workspace-write there - leaves the main checkout's state alone.
         folder = self.scratch_worktree("15-sandbox")
-        local = self.main / "memory-bank" / "local"
-        (local / "worktrees").mkdir(parents=True, exist_ok=True)
-        for place in (local, local / "worktrees"):
-            mode = stat.S_IMODE(place.stat().st_mode)
-            place.chmod(mode & ~0o222)
-            self.addCleanup(place.chmod, mode)
+        # The task exists, so a lookup publishes what it delivered.
+        done = self.plain("start", "--task-id", "feature/SHOP-15-sandbox", "--goal", "Look refunds up", "--json",
+                          cwd=folder)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        (self.main / "memory-bank" / "local" / "worktrees").mkdir(parents=True, exist_ok=True)
+        for top in (self.main / "memory-bank", self.main / "project-brain"):
+            for directory, _, files in os.walk(top):
+                for place in (Path(directory), *(Path(directory) / name for name in files)):
+                    mode = stat.S_IMODE(place.stat().st_mode)
+                    place.chmod(mode & ~0o222)
+                    self.addCleanup(place.chmod, mode)
         temporary = Path(self.temporary.name) / "sandbox-tmp"
         temporary.mkdir()
         done = self.plain("status", "--json", cwd=folder, TMPDIR=str(temporary))

@@ -8686,6 +8686,11 @@ def _command() -> int:
         database = (arguments.db or default_database(repository)).resolve()
         if arguments.db is None and arguments.command in SANDBOX_LOOKUPS and not index_writable(database):
             database = sandbox_index(repository).resolve()
+            # Nor can it write the shared record of what it delivered, which
+            # a task's lookup publishes under the Project Brain's lock: its
+            # manifest is the local one, written when it can be (--ephemeral).
+            if hasattr(arguments, "ephemeral"):
+                arguments.ephemeral = True
         if not getattr(arguments, "read_only", False):
             remember_worktree_index(repository, database)
         mode = configured_mode(repository, arguments.mode)
