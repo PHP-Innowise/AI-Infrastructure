@@ -42,7 +42,10 @@ edition's own files remain in that edition's changelog.
   under each temporary directory too; the command still takes the first
   folder it can write, its own TMPDIR. With it, both sessions saved
   (`saved` `spooled`, then `recovery-saved`). A session in the root, which
-  the sandbox lets write the project, saves as before.
+  the sandbox lets write the project, saves as before. The attached layout
+  - the Harness lending an edition, its state kept outside the project -
+  had the same loss under the sandbox, every answer, and saves through the
+  spool now too (`--sandbox --attached` fails without the change).
   `tests/test_memory_native_capture.py` repeats it with the two TMPDIRs;
   dropping the new folders fails it. `scripts/claude_code_bench.py
   --sandbox` turns the sandbox on in the bench (the project on disk under
