@@ -4,6 +4,48 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded dispatcher runs on Windows and keeps its newest copy — 2026-10-25
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,
+  `claude_dispatch.sh` and `claude_subfolders.py` change in the asset; the
+  policy lock was rewritten.
+
+### The seeded dispatcher carries the project's permission rules and env — 2026-10-25
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,
+  `claude_dispatch.sh` and `claude_subfolders.py` change in the asset, with a
+  `permissions` and an `environment` entry for a Claude Code session started
+  below the root and a `--install` mode; the policy lock was rewritten.
+
+### Its Claude Code settings deny writing secrets with Edit rules — 2026-10-25
+
+- `.claude/settings.json` denies writing `.env`, `.env.*`, `**/.env`,
+  `**/.env.*` and `**/secrets/**` with `Edit(...)` rules instead of
+  `Write(...)` ones, which Claude Code 2.1 never matches and warned about at
+  every start of its terminal. The `Read(...)` denies already stopped those
+  writes (offline, 2.1.278 in `acceptEdits`: refused before and after); the
+  policy lock was rewritten.
+
+### Claude Code started below a generated project's root runs its hooks — 2026-10-25
+
+- As the editions do (root `CHANGELOG.md`, same day): memory-seed copies
+  `claude_subfolders.py`, `claude_dispatch.py` and now `claude_dispatch.sh`
+  (`scripts/asset_parity.py` requires `memory-bank/scripts/*.sh` in the
+  asset), and hook-forge ends `local-context.sh` with the fragment that, in
+  a session in the root, sets up the dispatcher in the person's own Claude
+  Code configuration. `context_retrieval.py` changes in the asset (the
+  shared-core manifest names `memory-bank/scripts/*.sh`); the policy lock
+  was rewritten. The two instructions add about 800 bytes to the skill
+  bodies, which stood 8 bytes under their ceiling: `body_bytes` in
+  `scripts/token_budget.json` goes from 303,878 to 306,200.
+
+### The seeded runtime saves from a sandbox that cannot write the project — 2026-10-25
+
+- As the editions' runtime does (root `CHANGELOG.md`, same day): a save the
+  agent's sandbox cannot write waits in a temporary folder of the user's,
+  and the session's next hook saves it. `native_results.py` and
+  `context.py` change in the asset; the policy lock was rewritten.
+
 ### bash-validator lets the memory CLI name SQL — 2026-10-25
 
 - The generic section shared with the editions (root `CHANGELOG.md`, same

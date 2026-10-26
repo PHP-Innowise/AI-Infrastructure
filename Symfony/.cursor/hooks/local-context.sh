@@ -368,4 +368,14 @@ else
   cursor_rule_run cursor-rule --action keep --task-id "$CAPSULE_TASK_ID" >/dev/null || true
 fi
 
+# Claude Code started in a folder below this project reads none of its
+# settings - only the starting folder's - so such a session ran none of these
+# hooks. This keeps a small dispatcher in your own Claude Code settings that
+# runs this project's hooks for it (memory-bank/scripts/claude_subfolders.py):
+# installed projects only, written only for the Claude Code that started this
+# hook, and in the background, so the session's start never waits for it.
+if [ "$STATE_DIR" = "$ROOT_DIR" ] && [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/claude_subfolders.py" ]; then
+  printf '%s' "$LOOP_INPUT" | "${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/claude_subfolders.py" > /dev/null 2>&1 &
+fi
+
 exit 0

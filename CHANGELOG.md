@@ -28,6 +28,215 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The spool's journal line, as it lands — 2026-10-25
+
+- Documentation: below the project root Codex's sandbox cannot write the
+  project's journal either, so the `save` `spooled` line of 2a31787a is
+  lost there and the record is the next hook's `saved` with code
+  `spooled` (`docs/MEMORY-INTEGRATION.md`, `docs/TROUBLESHOOTING.md`).
+  Found by the Codex bench started below the root.
+
+### Command rules below the project root reach as far as the root's — 2026-10-25
+
+- Why: a differential run - random deny rules in the project's
+  `settings.local.json`, random reads, writes and commands, tried in a root
+  session and in one started in `src/` of the real Claude Code 2.1.278 -
+  found commands the root refused that the dispatcher let through below it:
+  `env rm -rf x`, `... | xargs rm -rf`, `if true; then rm -rf x; fi`,
+  `{ rm -rf x; }`, `for ...; do rm -rf $d; done`. It also refused two the
+  root allows: `command -v sudo` and `xargs -I{} rm -rf {}`.
+- What changes: the dispatcher takes from Claude Code's own code what it
+  looks through - `time`, `nohup`, `timeout`, `nice`, `stdbuf`, `env`,
+  `command`, `builtin`, `noglob` and a bare `xargs` for any rule, `sudo`,
+  `doas`, `exec`, `setsid`, `ionice`, `pkexec`, `runuser` and `eval` too,
+  each named without a path, with their options, leading assignments and
+  the keywords `if`, `then`, `else`, `elif`, `do`, `while`, `until`, `!`,
+  `{` - and
+  matches each rule against every form of the command along the way, so
+  `Bash(sudo:*)` still refuses `timeout 5 sudo ls`. `command -v` and an
+  `xargs` with flags, `busybox`, `coproc` and a wrapper named by its path
+  are not looked through, as in the root.
+- Tests: the cases above and twenty more in
+  `tests/test_memory_claude_subfolders.py`; the differential runs (scratch,
+  not in CI) afterwards found no command refused in the root and let
+  through below it. Claude Code also reads the root's `settings.local.json`
+  in a session below it, resolving its paths from that session's folder:
+  stricter there, never looser (`docs/MEMORY-INTEGRATION.md`).
+
+### Below the project root on Windows too; the dispatcher keeps its newest copy — 2026-10-25
+
+- Why: Claude Code on Windows runs hook commands with Git Bash, and the
+  dispatcher for sessions started below a project's root stayed off there:
+  its list holds roots as Python writes them (`C:\Users\me\shop`) while
+  Git Bash shows the session's folder as `/c/Users/me/shop`, a bare `bash`
+  started from Python is WSL's launcher, `python3` is often missing or the
+  Store's stand-in, and Windows names ignore case. And one dispatcher
+  serves every project of the person: a session in the root of a project
+  with an older release put an older dispatcher back.
+- What changes: the dispatcher compares roots in Git Bash's form without
+  regard to case, walks up by length so that a difference in case cannot
+  keep the walk from ending, runs the project's hooks with the bash it runs
+  in, and finds Python as the hooks do (`python`, `py -3`, `python3`). Its
+  helper runs a hook with Git for Windows' bash, compares paths and rule
+  paths without regard to case and across drives, and looks the import
+  approval up under the key Claude Code uses there (forward slashes). The
+  setup names the dispatcher with forward slashes, locks with `msvcrt` and
+  skips the owner check Windows lacks; the installer sets it up there too.
+  `DISPATCH_VERSION` keeps a newer dispatcher in place, and a fingerprint
+  test makes any change to its scripts raise it. The policy parts come only
+  where the project's `CLAUDE.md` imports `AGENTS.md`.
+- Tests: `tests/test_memory_claude_subfolders.py` runs in the Windows CI
+  job too, with Git Bash, skipping there only what needs symbolic links,
+  file modes, a pseudo-terminal or a JSON reader for `bash-validator.sh`.
+  Its first run there found the setup rewriting its files at every start
+  (Windows has no file modes to match) and dropping a root when six
+  projects started together (the dispatcher's files were written outside
+  the lock, and Windows refuses to replace a file another process reads):
+  every write is now under the lock, compared by content alone there, and
+  tried again for a moment when Windows refuses it. Claude Code itself was
+  not run on Windows.
+
+### Below the project root Claude Code gets the project's permission rules and env — 2026-10-25
+
+- Why: the dispatcher of 9f854412 ran the project's hooks for a Claude Code
+  session started below the root, but Claude Code applies the project's
+  permission rules and `env` only to a session started in it. Offline on
+  2.1.278, a session in `src/` in `bypassPermissions` read and edited
+  `.env`, read `secrets/` and ran `rm -rf`, `sudo` and `chmod 777`, all of
+  which the root denies; in `default` it was asked about reads, writes, `php`
+  and a fetch the project allows; and its commands lacked `APP_ENV`. The
+  dispatcher was set up only by a first session in the root.
+- What changes: a `permissions` entry answers every tool call below a listed
+  root with the decision the project's `settings.json` and
+  `settings.local.json` make in the root - a deny or an ask wherever they
+  would, an allow only for a file inside the root or a single plain command,
+  and none against a deny or ask of the person's own or the managed
+  settings. Read and Edit paths match as Claude Code 2.1.278 matches them in
+  the root, probed with the real binary: gitignore patterns from the root,
+  where a trailing `/` or `/**` names a folder at any depth and a pattern
+  with another `/` is anchored. Bash rules count for every command of a
+  compound one, Agent rules by subagent type, WebFetch ones by domain. An
+  `environment` entry writes the project's `env`, but the `CLAUDE_` and
+  `ANTHROPIC_` variables, into the file Claude Code names in
+  `CLAUDE_ENV_FILE`. The installer, run from the command line in a terminal
+  (stdin and stderr a terminal, `| tee` included), sets the dispatcher up at
+  once and says so on stderr; a test, a bench, the Harness or a call into the
+  module never writes outside the project. Windows stays without it: its
+  hooks run through Git Bash, with paths, Python and `bash` this could not
+  be checked against here.
+- Tests: `tests/test_memory_claude_subfolders.py`, now 38 cases: the path
+  patterns as probed, the editions' rules decided below the root as in it,
+  local rules, the person's own rules, links, the dispatcher's answer, the
+  env export, and the install from a terminal, through `tee`, from a script,
+  as a module call and without a configuration folder. Mutations of the
+  matching fail them. `scripts/claude_code_bench.py --permissions` tries
+  nineteen tool calls in the root and in `src/`: the same decisions in
+  `default`, `acceptEdits` and `bypassPermissions` and in all four editions,
+  the same `printenv`; without the `permissions` entry ten differ.
+
+### No permission rule Claude Code warns about at every start — 2026-10-25
+
+- Why: Claude Code 2.1 checks file permissions with `Edit(path)` and
+  `Read(path)` rules only. The editions' `.claude/settings.json` also
+  carried `Write(**)` and `Glob(**)` in `allow` and `Write(.env)`,
+  `Write(.env.*)` (WordPress also `Write(wp-config*.php)`) in `deny`, which
+  match nothing, and its terminal printed four warnings about them at every
+  start - text the person was shown and had nothing to do about. The
+  attached launch (`scripts/accelerator_attach.py`) added a fifth,
+  `Write(<clone>/**)` beside `Edit(<clone>/**)`.
+- What changes: those rules are gone from the four editions and the
+  attached launch; Infrastructure-Creator's own settings deny the same
+  secret paths with `Edit(...)` rules (its `CHANGELOG.md`). `Edit(**)`,
+  `Read(**)`, `Edit(.env)` and the rest already covered every one, so
+  nothing allowed or denied changes. The editions' policy locks were
+  rewritten.
+- Tests: `tests/test_hook_wiring.py` refuses a `Write`, `MultiEdit`,
+  `NotebookEdit` or `Glob` rule with a path in any edition's or the
+  generator's settings, and fails on the old ones. Offline on Claude Code
+  2.1.278: the terminal of an installed project starts with no warning;
+  a `Write` to `.env` in `acceptEdits` mode is refused in an edition and in
+  the generator, before and after.
+
+### Claude Code started below the project root runs the project's hooks — 2026-10-25
+
+- Why: Claude Code reads `.claude/settings.json` - the hooks and the
+  permission rules - only from the folder a session starts in. Started in
+  `src/` of an installed project, it ran no capsule, no save and no guard,
+  and `.claude/CLAUDE.md`'s `@../AGENTS.md` became an import from outside
+  the working directory, which it asks about in a terminal (No by default)
+  and leaves out under `-p`. Nothing was to be asked of the person.
+- What changes: `local-context.sh`, in a session in the root, runs
+  `memory-bank/scripts/claude_subfolders.py` in the background. It copies
+  `claude_dispatch.sh` and `claude_dispatch.py` into the person's Claude
+  Code configuration folder (`~/.claude/ai-accelerator/`, or under
+  `$CLAUDE_CONFIG_DIR`), lists the project root there, and adds to their
+  `settings.json` one entry per project hook (same matcher and timeout) and
+  four session-start entries `policy-1` to `policy-4`, keeping everything
+  else. It writes only for the Claude Code whose transcript folder holds the
+  session, nothing when all is in place, never on Windows, and never once a
+  file named `off` is in that folder. The dispatcher runs a listed root's
+  hook for a session started below it in the same checkout, with
+  `CLAUDE_PROJECT_DIR` set to the root, and exits at once anywhere else.
+  For `bash-validator.sh` it adds the allow the project's rules give the
+  memory CLI in the root. The `policy-N` entries bring `AGENTS.md` in pieces
+  cut between sections, each under the 10,000 characters Claude Code 2.1
+  keeps in the conversation (a longer hook output goes to a file of which
+  the model sees 2,000), and nothing when Claude Code imports the file
+  itself - the dialog's Yes, filed under the repository's root. The
+  shared-core manifest now names `memory-bank/scripts/*.sh`, and the
+  generator's asset carries the shell dispatcher; its skill-body ceiling
+  in `scripts/token_budget.json` rises to 306,200 bytes for the two
+  instructions that seed it (Infrastructure-Creator `CHANGELOG.md`).
+- Tests: `tests/test_memory_claude_subfolders.py`, 27 cases: pieces of
+  every edition's policy and the parts' limit; the import approval under the
+  repository's key and under a linked worktree's main checkout; the memory
+  CLI recognised in five forms and 16 commands that are not; the setup once,
+  beside the person's own settings, through a linked `settings.json`, for six
+  projects starting together, dropping a removed project, and not for a
+  settings file it cannot read, a linked folder, another program's hook or
+  the `off` file; the dispatcher in the root, below an unlisted project, in a
+  nested repository, in a project installed inside a larger checkout,
+  outside Git and under an ASCII locale; the edition's real
+  `bash-validator.sh` (a save naming DROP TABLE allowed, `rm -rf /` blocked)
+  and the real `local-context.sh` setting it up. Mutations of the dispatcher
+  and of the list's lock fail them. In a folder of no listed project the
+  dispatcher costs 1.1 ms a hook, against 0.9 ms for `bash` doing nothing.
+  Offline, Claude Code 2.1.278 started in `src/` got the capsule, every line
+  of `AGENTS.md` and saved, in the four editions and in default,
+  `acceptEdits`, `dontAsk`, `bypassPermissions` and `auto` modes, after
+  `--resume` too; in its terminal, with No and with Yes to the import
+  dialog, the policy came once. `scripts/claude_code_bench.py --subfolder
+  src` runs it.
+
+### Codex started below the project saves through its next hook — 2026-10-25
+
+- Why: Codex started in a subdirectory of the project runs a workspace-write
+  sandbox that writes only below that subdirectory. The save after every
+  answer failed with "Read-only file system" at the runtime lock, and since
+  5695f5e8 it was not asked for at all (`outside-sandbox`): such a session
+  saved nothing, and the person was not to be asked to restart anywhere.
+- What changes: the Stop asks for the save whenever the sandbox writes a
+  temporary directory, as Codex's does (`/tmp`, `$TMPDIR`). The save
+  command, finding the project read-only (EROFS, EACCES or EPERM on the
+  Brain), checks the request and the result as a save does - a malformed
+  result is refused while the agent can still correct it - and leaves it
+  in a folder of this user's there (`ai-accelerator-native-spool-<uid>`,
+  owner-only, journal `save` `spooled`), answering `{"state": "spooled"}`.
+  The session's next hook - the continuation's Stop, or else the next
+  prompt - runs outside the sandbox, takes the file (one attempt each) and
+  saves it (`saved` with code `spooled`). Only a sandbox that writes
+  neither the Brain nor a temporary directory is skipped as
+  `outside-sandbox`. Codex's `tmpdir` entry is `$TMPDIR`, or on Windows,
+  where that is rarely set, the user's temporary folder (`TEMP`, `TMP`):
+  the Windows CI found the save not asked for there.
+- Tests: `test_a_save_the_sandbox_cannot_write_is_made_by_the_next_hook`
+  (the project made read-only; a malformed result refused at once, the
+  result spooled, then saved by the continuation's Stop and, in a second
+  case, by the next prompt), failing without the change, and a
+  temporary-directory case in the outside-sandbox test. On the real host,
+  Codex 0.163 started from `src`: `requested`, `saved` `spooled`,
+  `recovery-saved`.
+
 ### The host benches type a question while the save is written — 2026-10-25
 
 - `scripts/claude_code_bench.py --queued SECONDS` and `scripts/codex_bench.py

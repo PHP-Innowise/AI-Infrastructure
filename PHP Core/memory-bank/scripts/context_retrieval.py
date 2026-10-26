@@ -862,6 +862,9 @@ CROSS_EDITION_PATHS = {
 # md5 comparison of the editions before the manifest was frozen.
 CROSS_EDITION_CORE_MANIFEST = (
     "memory-bank/scripts/*.py",
+    # The dispatcher claude_subfolders.py keeps in the person's own Claude
+    # Code settings, for a session started below the project root.
+    "memory-bank/scripts/*.sh",
     "memory-bank/MCP.md",
     "memory-bank/tests/*.py",
     # The chunk template is the shape every durable memory is written to, and

@@ -6,6 +6,7 @@
 **Script:** `local-context.sh`
 **Purpose:** Outputs project metadata at session start: git branch, Composer/PHP/Laravel/tooling markers, Livewire/Inertia detection, structure, governed or lightweight mode, index health/staleness, active binding count, Project Brain validation status, and Memory Bank validation summary. It never runs indexing or retrieval and never prints/injects record contents.
 **Return:** Always 0 (informational only)
+**Below the root:** in a session started in the project root it also runs `memory-bank/scripts/claude_subfolders.py` in the background, which keeps a dispatcher in your own Claude Code configuration (`~/.claude`, or `$CLAUDE_CONFIG_DIR`): Claude Code reads these hooks, the permission rules and `env` only from the folder a session starts in, and the dispatcher gives a session started below the root all of them, and `AGENTS.md`. The installer does the same when run in a terminal. It writes nothing for Codex or Cursor, nothing when all is in place, and nothing once `ai-accelerator/off` exists there (`docs/MEMORY-INTEGRATION.md` in the accelerator's repository).
 
 ### UserPromptSubmit: Working-Memory Read
 **Script:** `working-memory-read.sh`

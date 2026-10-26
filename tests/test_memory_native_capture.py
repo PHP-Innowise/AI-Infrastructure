@@ -52,8 +52,11 @@ class NativeCaptureFixture(unittest.TestCase):
         cfg_file.write_text(json.dumps(cfg))
         (self.root/'.gitignore').write_text('/memory-bank/local/\n/project-brain/local/\n__pycache__/\n')
         (self.root/'rules.md').write_text('# Routing\nThe Amber dispatcher retries only idempotent requests.\n')
+        # A commit starts `git maintenance run --auto --detach`, whose objects/maintenance.lock
+        # can appear while the cleanup removes the folder (CI: "Directory not empty: 'objects'").
         for args in (['init','-q','-b','research'],['config','user.name','Public Fixture'],
-                     ['config','user.email','fixture@example.invalid'],['add','.'],['commit','-qm','Public baseline']):
+                     ['config','user.email','fixture@example.invalid'],['config','maintenance.auto','false'],
+                     ['add','.'],['commit','-qm','Public baseline']):
             self.git(*args)
         self.payload={'progress':'Inspected the Amber retry contract.',
             'next_steps':['Check callers before changing the dispatcher.'], 'verified':True,
@@ -648,6 +651,50 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.one(self.written(lambda:self.call('native-prompt','--host','codex','--task-id','research','--json',
                                                data=dict(prompt,prompt=reason))),'prompt','continuation')
 
+    def readonly(self):
+        """The project as a sandbox that writes only below a subdirectory
+        sees it: the Brain and the runtime's local state cannot be written."""
+        modes={}
+        for top in (self.root/'project-brain',self.root/'memory-bank/local'):
+            for path in [top,*top.rglob('*')]:
+                modes[path]=path.stat().st_mode;path.chmod(modes[path]&~0o222)
+        return modes
+
+    @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,'permission bits do not stop root')
+    def test_a_save_the_sandbox_cannot_write_is_made_by_the_next_hook(self):
+        # Codex started in a subdirectory mounts the project read-only: the
+        # save failed with a read-only file system after every answer.
+        spool=Path(tempfile.mkdtemp(prefix='native-spool-',dir=self.root.parent))
+        env=dict(self.env,TMPDIR=str(spool))
+        def prompt():
+            return self.call('native-prompt','--host','codex','--task-id','research','--json',env=env,
+                             data={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Inspect it.'})
+        def stopped(active):
+            return self.call('native-stop','--host','codex','--task-id','research',env=env,
+                             data=dict(self.STOP,stop_hook_active=active))
+        for case,settle in (("the continuation's Stop",lambda:stopped(True)),('the next prompt',prompt)):
+            with self.subTest(case=case):
+                prompt();stopped(False)
+                candidate,state=self.state()
+                def save(data):
+                    return self.call('native-result','--request',candidate.stem,'--token',state['token'],
+                                     '--input','-','--json',data=data,env=env,ok=False)
+                modes=self.readonly()
+                try:
+                    # A malformed result is refused while the agent can still correct it.
+                    refused=save({'progress':'Inspected.','learnings':[{'type':'finding'}]})
+                    self.assertEqual(1,refused.returncode);self.assertIn(b'learning',refused.stderr)
+                    spooled=save(self.payload)
+                    self.assertEqual(0,spooled.returncode,spooled.stderr.decode())
+                    self.assertEqual('spooled',json.loads(spooled.stdout)['state'])
+                finally:
+                    for path,mode in modes.items():path.chmod(mode)
+                self.assertEqual(1,len(list(spool.rglob('*.json'))))
+                lines=[(line['stage'],line['event'],line.get('code')) for line in self.written(settle)]
+                self.assertEqual(('save','saved','spooled'),lines[0])
+                self.assertEqual([],list(spool.rglob('*.json')))
+                self.assertEqual(1,len(self.records('tasks')))
+
     def test_each_stop_path_writes_one_line_with_its_code(self):
         def request(payload=self.STOP,host='codex',**values):
             return self.call('native-stop','--host',host,'--task-id','research',data=payload,
@@ -1140,10 +1187,12 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
         link=str(self.root.parent/'linked project')
         try: os.symlink(root,link,target_is_directory=True)
         except (OSError,NotImplementedError): link=None  # Windows without the symlink privilege
-        def files(*writable,read_only=()):
+        def files(*writable,read_only=(),temporary=False):
             entries=[{'path':{'type':'special','value':{'kind':'root'}},'access':'read'}]
             entries+=[{'path':{'type':'path','path':path},'access':'write'} for path in writable]
             entries+=[{'path':{'type':'path','path':path},'access':'read'} for path in read_only]
+            if temporary:
+                entries+=[{'path':{'type':'special','value':{'kind':kind}},'access':'write'} for kind in ('slash_tmp','tmpdir')]
             return {'kind':'restricted','entries':entries}
         # A policy read as not letting the turn write its own directory is in
         # a form the reading does not know: asked as before.
@@ -1153,6 +1202,9 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
                'an added writable root':(files(root+'/src',root),root+'/src',None),
                'its own directory unwritable':(files(root+'/elsewhere'),root+'/src',None),
                'no working directory':(files(root+'/src'),None,None),
+               # Codex's workspace-write sandbox writes the temporary
+               # directories too: the save waits there for the next hook.
+               'a subdirectory with temporary directories':(files(root+'/src',temporary=True),root+'/src',None),
                # Codex names the workspace as it was opened; a link to the
                # project (macOS's /tmp is one) is the project itself.
                **({'the project through a link':(files(link),link,None),
@@ -1174,6 +1226,25 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
                     self.assertEqual([('skipped',skipped)],lines)
                 else:
                     self.assertIn(b'native-result --request',out)
+
+    def test_the_codex_temporary_directory_on_windows_is_the_users_own(self):
+        # Codex names the temporary directory `tmpdir`. Windows rarely sets
+        # TMPDIR: there it is the user's TEMP folder, where the save waits.
+        policy={'kind':'restricted','entries':[{'path':{'type':'special','value':{'kind':'tmpdir'}},'access':'write'}]}
+        temporary=str(self.root.parent/'windows-temp')
+        # Resolved, as the Stop passes it: a Windows TEMP path can carry 8.3
+        # short names (RUNNER~1) that the policy's resolved entry does not.
+        spool=os.path.realpath(os.path.join(temporary,'ai-accelerator-native-spool-user'))
+        with self.runtime() as (native,_,_):
+            os.environ.pop('TMPDIR',None)
+            with mock.patch.object(native.tempfile,'gettempdir',return_value=temporary):
+                with mock.patch.object(native.os,'name','nt'):
+                    self.assertTrue(native._sandbox_writes(policy,spool))
+                with mock.patch.object(native.os,'name','posix'):
+                    self.assertFalse(native._sandbox_writes(policy,spool))
+            os.environ['TMPDIR']=temporary
+            with mock.patch.object(native.os,'name','posix'):
+                self.assertTrue(native._sandbox_writes(policy,spool))
 
     def test_an_unknown_codex_turn_is_asked_as_before(self):
         # Another turn's context, or one beyond the tail the Stop reads, is unknown.

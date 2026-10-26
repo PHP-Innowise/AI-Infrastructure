@@ -8,6 +8,7 @@ so how far the saves get can be counted from disk (see _journal).
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import math
@@ -19,6 +20,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from uuid import uuid4
 
@@ -40,6 +42,13 @@ FIELDS = {'profile','owner','host','session','project','task_id','token','phase'
 PHASES = {'armed','requested','saved','held','omitted','failed','refused','declined'}
 HOSTS = {'claude','codex','cursor'}
 JOURNAL = 'native-results.ndjson'
+# A save the agent's sandbox cannot write to the project - Codex started in a
+# subdirectory writes only below it - waits in a folder of this user's in a
+# temporary directory such a sandbox lets a command write, until the
+# session's next hook, which runs outside the sandbox, saves it.
+SPOOL_PROFILE = 'native-result-spool-v1'
+SPOOL_NAME = 'ai-accelerator-native-spool'
+UNWRITABLE = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
 # A fully exercised turn writes about six lines - armed; requested and the
 # Stop hook's exit; the save; the closing Stop and its exit - and Codex one
 # more for its continuation prompt. Eight per refresh-health record keeps at
@@ -386,8 +395,11 @@ def _sandbox_writes(policy, target):
         if where.get('type') == 'path' and isinstance(where.get('path'), str):
             base = os.path.realpath(where['path'])
         elif where.get('type') == 'special' and isinstance(where.get('value'), dict):
+            # The temporary directory: $TMPDIR, or on Windows, where it is
+            # rarely set, the user's own (TEMP, TMP) - where _spool_dirs waits.
+            temporary = os.environ.get('TMPDIR') or (tempfile.gettempdir() if os.name == 'nt' else None)
             base = {'root': os.sep, 'slash_tmp': '/tmp',
-                    'tmpdir': os.environ.get('TMPDIR')}.get(where['value'].get('kind'))
+                    'tmpdir': temporary}.get(where['value'].get('kind'))
             if not base:
                 continue
             base = os.path.realpath(base)
@@ -779,8 +791,11 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         # A read-only sandbox lets no save write the project.
         if sandbox == 'read-only': return step({},'skipped','read-only-sandbox')
         # Codex started below the project writes only there: a save to the
-        # project's Brain fails with a read-only file system, every answer.
-        if files is not None and not _sandbox_writes(files, os.path.realpath(brain_root(root))):
+        # project's Brain failed with a read-only file system, every answer.
+        # Where the sandbox writes a temporary directory, the save waits
+        # there for this session's next hook (_spool); elsewhere none is asked.
+        if (files is not None and not _sandbox_writes(files, os.path.realpath(brain_root(root)))
+                and not any(_sandbox_writes(files, os.path.realpath(str(folder.parent))) for folder in _spool_dirs())):
             return step({},'skipped','outside-sandbox')
         try: task=writable_task(root,task_id,owner)
         except BrainRecordNotFound as error:
@@ -807,12 +822,107 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
     return step(output,'requested',code,answer='brief' if brief else 'repeat')
 
 
-def save(root,key,token,data,*,owner,mode,provision,skip=False):
+def save(root,key,token,data,*,owner,mode,provision,skip=False,spooled=False):
     with _Step(root,'save',key=key) as step:
-        return _save(step,root,key,token,data,owner=owner,mode=mode,provision=provision,skip=skip)
+        try:
+            return _save(step,root,key,token,data,owner=owner,mode=mode,provision=provision,skip=skip,spooled=spooled)
+        except OSError as error:
+            # A sandbox that writes only below a subdirectory mounts the
+            # project read-only: the save's first write, the runtime lock,
+            # fails before anything is written.
+            if spooled or error.errno not in UNWRITABLE or not _under(error.filename, brain_root(root)): raise
+            return _spool(step,root,key,token,data,skip=skip)
 
 
-def _save(step,root,key,token,data,*,owner,mode,provision,skip):
+def _under(path, base):
+    if not isinstance(path, (str, bytes, os.PathLike)): return False
+    path, base = os.path.realpath(os.fsdecode(path)), os.path.realpath(str(base))
+    return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def _spool_dirs():
+    """The folders a save the project cannot take waits in: one of this
+    user's in each temporary directory a sandbox lets a command write."""
+    owner = str(os.getuid()) if hasattr(os, 'getuid') else 'user'
+    bases = []
+    for base in (os.environ.get('TMPDIR'), tempfile.gettempdir(), '/tmp' if os.name == 'posix' else None):
+        if base and os.path.isabs(base) and base not in bases:
+            bases.append(base)
+    return [Path(base) / f'{SPOOL_NAME}-{owner}' for base in bases]
+
+
+def _own(image):
+    """A spool entry this user owns, not a link."""
+    return not linked_reparse(image) and (not hasattr(os, 'getuid') or image.st_uid == os.getuid())
+
+
+def _spool(step, root, key, token, data, *, skip):
+    """The project cannot be written from here. The request and the result
+    are checked as a save checks them, so the agent can still correct a
+    refused one, and the result waits in the spool for the session's next
+    hook (drain)."""
+    state = _read(root, key)
+    if state is None or state['token'] != token:
+        aside = _read_aside(root, key)
+        if aside is not None and aside['token'] == token: state = aside
+    if state is None or state['token'] != token or state['phase'] != 'requested':
+        raise BrainError('native-result:request-unavailable')
+    step.host = state['host']
+    if not skip: normalize(root, data, check_files=True)
+    record = {'profile': SPOOL_PROFILE, 'token': token, 'skip': bool(skip), 'data': None if skip else data,
+              'created': time.time()}
+    for directory in _spool_dirs():
+        try:
+            directory.mkdir(mode=0o700, exist_ok=True)
+            image = directory.lstat()
+            if not stat.S_ISDIR(image.st_mode) or not _own(image): continue
+            atomic_json(directory / (key + '.json'), record)
+        except OSError:
+            continue
+        return step({'state': 'spooled', 'attestation': 'agent',
+                     'detail': 'This sandbox cannot write the project; the save is made when this turn ends.'},
+                    'spooled')
+    raise BrainError('native-result:project-read-only')
+
+
+def _read_spool(path):
+    try:
+        image, folder = path.lstat(), path.parent.lstat()
+        if (not stat.S_ISREG(image.st_mode) or image.st_nlink != 1 or not _own(image)
+                or image.st_size > MAX_INPUT + 4096 or not stat.S_ISDIR(folder.st_mode) or not _own(folder)):
+            return None
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError, RecursionError):
+        return None
+    if (not isinstance(value, dict) or value.get('profile') != SPOOL_PROFILE or type(value.get('skip')) is not bool
+            or not isinstance(value.get('token'), str) or not TOKEN.fullmatch(value['token'])):
+        return None
+    return value
+
+
+def drain(root, task_id, host, payload, *, owner, mode, provision):
+    """Save what the agent's sandbox left in the spool (_spool), from a hook,
+    which runs outside the sandbox. One attempt each: the file goes before
+    the save, whatever the save then says."""
+    try: task_id=check_task_id(task_id)
+    except BrainError: return None
+    key=_key(root,host,payload,task_id,owner) if isinstance(payload,dict) else None
+    if key is None: return None
+    for directory in _spool_dirs():
+        path=directory/(key+'.json')
+        record=_read_spool(path)
+        if record is None: continue
+        try: path.unlink()
+        except OSError: return None
+        try:
+            return save(root,key,record['token'],record['data'],owner=owner,mode=mode,provision=provision,
+                        skip=record['skip'],spooled=True)
+        except BrainError:
+            return None  # journaled as the save's refusal; the Stop settles the request
+    return None
+
+
+def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False):
     if not _enabled(mode): raise BrainError('native-result:governed-session-required')
     if not isinstance(token,str) or not TOKEN.fullmatch(token): raise BrainError('native-result:invalid-token')
     with mutation_lock(root):
@@ -841,7 +951,8 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
         if skip:
             if state['digest'] is not None: raise BrainError('native-result:save-already-started')
             state['phase']='omitted';_write(root,slot,state)
-            return step({'state':'omitted','attestation':'agent'},'omitted','in-flight' if slot != key else None)
+            return step({'state':'omitted','attestation':'agent'},'omitted',
+                        'spooled' if spooled else 'in-flight' if slot != key else None)
         # A completed replay may outlive its sources or active task alias.
         # Only the canonical result protocol can admit such a replay; local
         # challenge metadata alone must never authorize a fresh write.
@@ -878,7 +989,8 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
             raise _overtaken(str(error),'another session or a person saved the task') from error
         held=any(item['state'] in {'differs','archived-differs'} for item in result['records'])
         state['phase']='held' if held else 'saved';_write(root,slot,state)
-        # For the journal: a save that landed after a prompt moved its request aside.
-        return step(result,state['phase'],repeat or ('in-flight' if slot != key else None),
+        # For the journal: a save the agent's sandbox spooled, or one that
+        # landed after a prompt moved its request aside.
+        return step(result,state['phase'],repeat or ('spooled' if spooled else 'in-flight' if slot != key else None),
                     learnings=sum(item['state'] in {'created','completed','updated'} for item in result['records']),
                     promoted=len((result['promotion'] or {}).get('promoted') or ()))

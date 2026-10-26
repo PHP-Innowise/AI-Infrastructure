@@ -1,0 +1,272 @@
+"""Claude Code in a folder below an installed project: keep it working.
+
+Claude Code reads a project's settings - its hooks and permission rules -
+only from the folder a session starts in, so a session started in src/ of an
+installed project ran none of the project's hooks: no memory, no guards. Run
+by the session-start hook of a session in the project root, this keeps a small
+dispatcher in the person's own Claude Code configuration folder - the
+claude_dispatch.sh and claude_dispatch.py beside this file - with one entry
+per project hook in their settings.json, and lists this project for it. The
+dispatcher then runs this project's hooks for a session started below it,
+and does nothing anywhere else. More entries make the decisions the
+project's permission rules make in the root, give the session's commands
+the project's env, and bring the session the project's AGENTS.md, which its
+.claude/CLAUDE.md imports from outside the session's folder.
+
+It writes only into the configuration folder of the Claude Code that started
+this hook - the session's transcript must live there - and nothing when all
+is already in place. A settings.json it cannot read as a JSON object is left
+as it is, and nothing again once the person has put a file named `off` into
+the dispatcher's folder (ai-accelerator/ in the configuration folder). On
+Windows the entries name the dispatcher with forward slashes, which the Git
+Bash Claude Code runs hooks with takes as written.
+
+The installer runs it with --install when a person installs in a terminal,
+so a first session started below the root has the project's hooks too; it
+then writes into the configuration folder Claude Code would use here, if
+there is one, and reads no session input.
+
+Usage: claude_subfolders.py < SESSION-START-INPUT
+       claude_subfolders.py --install
+"""
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import re
+import shlex
+import stat
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+from claude_dispatch import DISPATCH_VERSION, POLICY_PARTS
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+FOLDER = "ai-accelerator"
+DISPATCHER = "ai-accelerator-dispatch.sh"
+HELPER = "ai-accelerator-dispatch.py"
+HOOK_PREFIX = '"${CLAUDE_PROJECT_DIR}"/.claude/hooks/'
+
+
+def config_folder() -> Path:
+    folder = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(folder) if folder else Path.home() / ".claude"
+
+
+def command_of(dispatcher: Path) -> str:
+    """The dispatcher as a settings entry names it: Claude Code runs hook
+    commands with Git Bash on Windows, which takes C:/Users/... as written."""
+    return shlex.quote(dispatcher.as_posix())
+
+
+def own_session(payload: object, config: Path) -> bool:
+    """The hook was started by a Claude Code that keeps its transcripts in
+    `config`: a test or a script feeding the hook gets nothing written."""
+    transcript = payload.get("transcript_path") if isinstance(payload, dict) else None
+    if not isinstance(transcript, str) or not os.path.isabs(transcript):
+        return False
+    projects = os.path.normcase(os.path.realpath(config / "projects"))
+    return os.path.normcase(os.path.realpath(transcript)).startswith(projects + os.sep)
+
+
+def wanted_entries(settings: Path, dispatcher: Path) -> list[tuple[str, dict]]:
+    """The dispatcher's entry, one group each, for every hook script in the
+    project's settings, with the script's matcher and timeout, then those
+    for the parts of AGENTS.md."""
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    entries: list[tuple[str, dict]] = []
+    for event, groups in (data.get("hooks") or {}).items():
+        for group in groups if isinstance(groups, list) else []:
+            for hook in group.get("hooks") or [] if isinstance(group, dict) else []:
+                command = hook.get("command") if isinstance(hook, dict) else None
+                if not isinstance(command, str) or not command.startswith(HOOK_PREFIX):
+                    continue
+                name = command[len(HOOK_PREFIX):]
+                if "/" in name or not name.endswith(".sh") or not name.replace("-", "").replace(".", "").isalnum():
+                    continue
+                entry: dict = {"type": "command", "command": f"{command_of(dispatcher)} {name}"}
+                if isinstance(hook.get("timeout"), int):
+                    entry["timeout"] = hook["timeout"]
+                one: dict = {"hooks": [entry]}
+                if isinstance(group.get("matcher"), str) and group["matcher"]:
+                    one = {"matcher": group["matcher"], **one}
+                entries.append((event, one))
+    # The project's permission rules, for every tool, and its env for the
+    # session's commands.
+    entries.append(("PreToolUse", {"hooks": [{"type": "command", "command": f"{command_of(dispatcher)} permissions",
+                                              "timeout": 10}]}))
+    entries.append(("SessionStart", {"hooks": [{"type": "command",
+                                                "command": f"{command_of(dispatcher)} environment", "timeout": 10}]}))
+    if (ROOT / "AGENTS.md").is_file():
+        for part in range(1, POLICY_PARTS + 1):
+            command = f"{command_of(dispatcher)} policy-{part}"
+            entries.append(("SessionStart", {"hooks": [{"type": "command", "command": command, "timeout": 10}]}))
+    return entries
+
+
+def key(event: str, group: object, dispatcher: Path):
+    """(event, matcher, script) of a dispatcher entry, or None for any other."""
+    hooks = group.get("hooks") if isinstance(group, dict) else None
+    marker = command_of(dispatcher) + " "
+    if not isinstance(hooks, list) or len(hooks) != 1 or not isinstance(hooks[0], dict):
+        return None
+    command = hooks[0].get("command")
+    if not isinstance(command, str) or not command.startswith(marker):
+        return None
+    return event, group.get("matcher", ""), command[len(marker):]
+
+
+def merged(user: dict, wanted: list[tuple[str, dict]], dispatcher: Path) -> dict:
+    """The user's settings with this project's dispatcher entries: one for the
+    same hook and matcher replaced, those other projects added kept, nothing
+    else touched."""
+    result = json.loads(json.dumps(user))
+    hooks = result.setdefault("hooks", {})
+    for event, group in wanted:
+        present = hooks.setdefault(event, [])
+        same = key(event, group, dispatcher)
+        for index, existing in enumerate(present):
+            if key(event, existing, dispatcher) == same:
+                present[index] = group
+                break
+        else:
+            present.append(group)
+    return result
+
+
+def installed_version(helper: Path) -> int:
+    """DISPATCH_VERSION of the dispatcher already in place; 0 for none."""
+    try:
+        found = re.search(r"^DISPATCH_VERSION = ([0-9]+)$", helper.read_text(encoding="utf-8"), re.M)
+    except (OSError, UnicodeError):
+        return 0
+    return int(found.group(1)) if found else 0
+
+
+@contextlib.contextmanager
+def exclusive(path: Path):
+    """Hold the lock file at `path` for this process inside the block."""
+    with open(path, "a+b") as handle:
+        if os.name != "nt":
+            import fcntl
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+            return
+        import msvcrt
+        # Windows: the first byte, polled briefly - LK_LOCK waits a second a
+        # try - and given back before the file is closed.
+        deadline = time.monotonic() + 30
+        while True:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.02)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def write_if_changed(path: Path, content: bytes, mode: int) -> bool:
+    """Write `content` at `path` unless it is already there (and, where file
+    modes exist, with `mode`), through a file put in place at once."""
+    try:
+        if path.read_bytes() == content and (os.name == "nt" or stat.S_IMODE(path.stat().st_mode) == mode):
+            return False
+    except OSError:
+        pass
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+        os.chmod(name, mode)
+        for attempt in range(50):
+            try:
+                os.replace(name, path)
+                break
+            except PermissionError:
+                # Windows refuses to replace a file another process has
+                # open - a dispatcher reading the list - for a moment.
+                if os.name != "nt" or attempt == 49:
+                    raise
+                time.sleep(0.02)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+    return True
+
+
+def main(argv: list) -> int:
+    config = config_folder()
+    if argv[1:] != ["--install"]:
+        try:
+            payload = json.loads(sys.stdin.buffer.read(1024 * 1024) or b"{}")
+        except ValueError:
+            return 0
+        if not own_session(payload, config):
+            return 0
+    settings = ROOT / ".claude" / "settings.json"
+    if not settings.is_file() or not config.is_dir():
+        return 0
+    folder = config / FOLDER
+    if os.path.lexists(folder / "off"):
+        return 0
+    folder.mkdir(mode=0o700, exist_ok=True)
+    info = folder.lstat()
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) \
+            or hasattr(os, "getuid") and info.st_uid != os.getuid():
+        return 0
+    dispatcher = folder / DISPATCHER
+    try:
+        wanted = wanted_entries(settings, dispatcher)
+    except (OSError, ValueError, AttributeError):
+        return 0
+    # A settings.json linked from elsewhere - a dotfiles checkout - is
+    # written where it lives, and stays linked.
+    user_settings = Path(os.path.realpath(config / "settings.json"))
+    with exclusive(folder / ".lock"):
+        # Sessions of two projects starting together each add their root and
+        # write the same files: the lock keeps one from reading what the
+        # other has half written, or dropping its root.
+        # Another project's newer release put a newer dispatcher here: it stays.
+        if installed_version(folder / HELPER) <= DISPATCH_VERSION:
+            write_if_changed(dispatcher, (HERE / "claude_dispatch.sh").read_bytes(), 0o755)
+            write_if_changed(folder / HELPER, (HERE / "claude_dispatch.py").read_bytes(), 0o644)
+        projects = folder / "projects"
+        try:
+            listed = projects.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            listed = []
+        # A project removed since is dropped; this one is listed once.
+        kept = [line for line in dict.fromkeys(listed)
+                if os.path.isfile(os.path.join(line, "memory-bank", "scripts", "context.py"))]
+        if str(ROOT) not in kept:
+            kept.append(str(ROOT))
+        write_if_changed(projects, ("\n".join(kept) + "\n").encode(), 0o644)
+        try:
+            user = json.loads(user_settings.read_text(encoding="utf-8")) if user_settings.exists() else {}
+        except (OSError, ValueError):
+            return 0
+        if not isinstance(user, dict) or not isinstance(user.get("hooks", {}), dict):
+            return 0
+        updated = merged(user, wanted, dispatcher)
+        if updated != user:
+            mode = stat.S_IMODE(user_settings.stat().st_mode) if user_settings.exists() else 0o644
+            write_if_changed(user_settings, (json.dumps(updated, indent=2, ensure_ascii=False) + "\n").encode(), mode)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except Exception:  # a session's start is never failed by this
+        sys.exit(0)

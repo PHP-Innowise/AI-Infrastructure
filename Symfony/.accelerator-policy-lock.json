@@ -257,7 +257,7 @@
     ".claude/commands/twig-ux-reviewer.md": "08266292fa486e0dff4749a3b644c65ce1a04b7c326be6740d46e2bc094a512a",
     ".claude/commands/verify.md": "aac7ddc849c49eb75b8be17748add404ea552d6cb97b067a6c775d3b29066b53",
     ".claude/commands/writing-plans.md": "183238cd9fe57613f955cc23496e149b2a3624e8a13b9cd5dd4a2051e915ac53",
-    ".claude/settings.json": "9354a1b1808f28f1ab1519723f18256dc0bdef573adcfb13a62a29064dfa1256",
+    ".claude/settings.json": "af5092c65fd54eec0e8e45257510cb2e7dcf1821377205312395340cccd2a21a",
     ".claude/skills/SKILL FLOW.md": "866fd4a6a0ebeafb7033ac06ff2209bcfc328621458d4c00c935605a9d268813",
     ".claude/skills/skill-creator/SKILL.md": "af64157158595234d0e4c8dbc6508c7a03afea0bacf28a2073b951a45d7e3197",
     ".codex/config.toml": "d3f51049432266d80304bda387120c7e84f93226358b959de7a4a73d883e9639",
@@ -270,7 +270,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "85238e56099797fdd695cbc2cc65e6958e9ad7806a7e32121bd5a37ccd7e3323",
     "AGENTS.md": "38ca7d8e8ba4e6e3f481c45b7e59521449c4ffc5d3467560dfa9ad338448938e"
   },
-  "policy_digest": "93c3a1663e245719aee4fe67ae985e3466cae07072383f5125f8bf0ba0a32a9c",
+  "policy_digest": "515272747b22f58311bef999d760369bada33d291c4ea22c4576ed574dfda911",
   "release": "2.0.0",
   "schema_version": 1
 }

@@ -11,6 +11,29 @@ it at the top of every session.
 
 ## Unreleased
 
+- Claude Code started in a folder below the project root gets the project's hooks, rules, `env` and
+  policy on Windows too, under the Git Bash it runs hooks with. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
+- Claude Code started in a folder below the project root also gets the project's permission rules
+  and `env` there, and the installer run in a terminal sets that up at once. Quick Start in
+  `README.md` (`ACCELERATOR.md`) and `.claude/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
+- `.claude/settings.json` no longer carries `Write(**)` and `Glob(**)` in `allow`, nor `Write(.env)`,
+  `Write(.env.*)` in `deny`. Claude Code 2.1 matches file permissions only by `Edit(path)` and
+  `Read(path)` rules, which already cover them, and printed a warning for each at every start of its
+  terminal. Nothing allowed or denied changes. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
+- Claude Code started in a folder below the project root runs the project's hooks and gets its
+  `AGENTS.md`: in a session in the root, `.claude/hooks/local-context.sh` sets up a dispatcher in
+  your own Claude Code configuration (`memory-bank/scripts/claude_subfolders.py`, with
+  `claude_dispatch.py` and `claude_dispatch.sh`); a file named `off` in `~/.claude/ai-accelerator/`
+  turns it off. Codex started in a subfolder saves through a temporary folder. Quick Start in
+  `README.md` (`ACCELERATOR.md`) and `.claude/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
 - `README.md`, installed as `ACCELERATOR.md`, opens Quick Start with where to start the tools: in the
   project root. Claude Code started in a subfolder reads none of the project's settings and runs none
   of its hooks; Codex started in one cannot save memory there. Details in the root
