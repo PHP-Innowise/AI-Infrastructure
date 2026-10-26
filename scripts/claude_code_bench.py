@@ -52,6 +52,13 @@ sent to the host over stdio, which the bench refuses and counts. The run
 passes only when the session saved without asking one - a save the app had
 to ask about would ask the person after every answer.
 
+`--sandbox` turns Claude Code's Bash sandbox (bubblewrap) on in the bench's
+own settings. The sandbox mounts a /dev of its own, so the project goes on
+disk, and Claude Code starts without the namespace's capabilities, which
+bubblewrap refuses. Started below the root or in a worktree, a command may
+not write the project: the save waits in claude-<uid> under the sandbox's
+temporary directory and the next hook makes it (`save:saved:spooled`).
+
 `--permissions` (with `--subfolder`, `src` by default) has the stand-in try
 the same reads, writes, commands and fetches in both sessions - secrets the
 project denies, files it allows, commands it denies or allows, the project's
@@ -72,6 +79,7 @@ is never written.
   python3 scripts/claude_code_bench.py --subfolder src
   python3 scripts/claude_code_bench.py --worktree --subfolder src
   python3 scripts/claude_code_bench.py --desktop --worktree
+  python3 scripts/claude_code_bench.py --sandbox --worktree
   python3 scripts/claude_code_bench.py --permissions --mode bypassPermissions
   python3 scripts/claude_code_bench.py --attached
   python3 scripts/claude_code_bench.py --target ~/Desktop/next --sync
@@ -604,7 +612,7 @@ def inside(args: argparse.Namespace) -> int:
     if args.subfolder or args.worktree:
         # A session in the project root first: its session-start hook sets up
         # the dispatcher (in the background), which the session below needs.
-        subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json", "--verbose",
+        subprocess.run([*started(args), "-p", "How are invoices numbered?", "--output-format", "stream-json", "--verbose",
                         *mode, *lent], cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                        timeout=args.timeout)
         listed = work / "home/.claude/ai-accelerator/projects"
@@ -633,10 +641,10 @@ def inside(args: argparse.Namespace) -> int:
     elif args.desktop:
         # The app names the mode the person chose, the default one too: left
         # out, 2.1.299 under the app's flags decides an ask in auto mode.
-        done, asked = desktop([args.claude, "--permission-mode", args.mode, *lent], project_cwd, env,
+        done, asked = desktop([*started(args), "--permission-mode", args.mode, *lent], project_cwd, env,
                               "How are invoices numbered?", args.timeout)
     else:
-        done = subprocess.run([args.claude, "-p", "How are invoices numbered?", "--output-format", "stream-json",
+        done = subprocess.run([*started(args), "-p", "How are invoices numbered?", "--output-format", "stream-json",
                                "--verbose", *mode, *lent], cwd=project_cwd, env=env, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=args.timeout)
     server.shutdown()
@@ -671,6 +679,11 @@ def inside(args: argparse.Namespace) -> int:
         # Plan mode tells the agent to change nothing: no save is asked for.
         report["ok"] = (not steps and "stop:skipped:plan-mode" in events and not errors
                         and not report["error_notifications"])
+    if args.sandbox:
+        # Below the root or in a worktree the sandbox may not write the
+        # project: the save waits in the spool, and the next hook makes it.
+        report["sandbox"] = True
+        report["spooled"] = "save:saved:spooled" in events
     if args.desktop:
         # A prompt the app would have shown the person: the save's above all.
         report["permission_prompts"] = [str(item["tool"]) + ": " + json.dumps(item["input"])[:120] for item in asked]
@@ -724,6 +737,14 @@ def person_trust(target: Path) -> Optional[bool]:
     return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
 
 
+def started(args: argparse.Namespace) -> List[str]:
+    """Claude Code, as the run starts it: with the sandbox on, without the
+    namespace's capabilities, which bubblewrap refuses."""
+    if getattr(args, "sandbox", False):
+        return ["setpriv", "--inh-caps=-all", "--ambient-caps=-all", args.claude]
+    return [args.claude]
+
+
 def namespace(unshare_help: str) -> List[str]:
     """The namespace the bench runs in: loopback only, and the person's own uid
     where `unshare` can map it, since Claude Code refuses bypassPermissions to root."""
@@ -750,6 +771,8 @@ def main() -> int:
     parser.add_argument("--mode", choices=MODES, default="default", help="the permission mode to run")
     parser.add_argument("--subfolder", metavar="DIR", default=None,
                         help="after a session in the project root, run the measured one in DIR below it")
+    parser.add_argument("--sandbox", action="store_true",
+                        help="turn Claude Code's Bash sandbox on; the project goes on disk")
     parser.add_argument("--desktop", action="store_true",
                         help="drive the measured session as the Claude desktop app does: stream-json, the "
                              "project's settings named, permission prompts over stdio (refused and counted)")
@@ -790,6 +813,9 @@ def main() -> int:
         print("claude_code_bench: --permissions writes probe files into the project; it takes no --target",
               file=sys.stderr)
         return 2
+    if args.sandbox and (args.queued is not None or not shutil.which("bwrap") or not shutil.which("setpriv")):
+        print("claude_code_bench: --sandbox needs bwrap and setpriv, and takes no --queued", file=sys.stderr)
+        return 2
     if args.desktop and (args.queued is not None or args.permissions):
         print("claude_code_bench: --desktop drives one turn as the app does; it takes no --queued or --permissions",
               file=sys.stderr)
@@ -813,6 +839,12 @@ def main() -> int:
             return 2
     shm = Path("/dev/shm")
     base = shm if shm.is_dir() and os.access(shm, os.W_OK) else None
+    if args.sandbox:
+        # The sandbox mounts a /dev of its own: below /dev/shm a command
+        # would see none of the project. A short path on disk, since the
+        # sandbox's bridge sockets under the run's temporary directory must
+        # fit a socket path (108 bytes): below ~/.cache they did not.
+        base = Path("/var/tmp")
     work = Path(tempfile.mkdtemp(prefix="claude-code-bench-", dir=str(base) if base else None))
     try:
         if args.target:
@@ -830,6 +862,11 @@ def main() -> int:
         # Attached, the project is left untrusted: the Harness's --settings
         # permissions count without the trust dialog, project ones would not.
         trust(work, project, accepted=args.attached is None, terminal=args.queued is not None)
+        if args.sandbox:
+            settings = work / "home/.claude/settings.json"
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_text(json.dumps({"sandbox": {"enabled": True, "autoAllowBashIfSandboxed": True}}),
+                                encoding="utf-8")
         unshare_help = subprocess.run(["unshare", "--help"], capture_output=True, text=True).stdout
         done = subprocess.run([*namespace(unshare_help), sys.executable, str(Path(__file__).resolve()),
                                "--inside", "--work", str(work), "--claude", args.claude, "--shell", args.shell,
@@ -839,6 +876,7 @@ def main() -> int:
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
                                *(["--worktree"] if args.worktree else []),
                                *(["--desktop"] if args.desktop else []),
+                               *(["--sandbox"] if args.sandbox else []),
                                *(["--permissions"] if args.permissions else []),
                                "--timeout", str(args.timeout)],
                               timeout=args.timeout + 60)

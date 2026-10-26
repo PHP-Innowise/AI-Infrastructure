@@ -693,6 +693,15 @@ with the save's command as the prompt. Left without a mode, Claude Code
 2.1.299 under the app's flags decides an ask in auto mode, whose classifier
 no offline run has: the app names the mode, and so does the bench.
 
+`--sandbox` turns Claude Code's Bash sandbox (bubblewrap) on in the bench's
+own settings, with the project on disk under `/var/tmp`: the sandbox mounts
+a /dev of its own, and its bridge sockets under the run's temporary
+directory must fit a socket path, which a run below `~/.cache` did not in
+the desktop app's mode. Claude Code then starts without the namespace's
+capabilities, which bubblewrap refuses. In the root the save writes the
+project; below it and in a worktree it waits in the spool and the next
+hook makes it (`spooled`).
+
 `--permissions` (with `--subfolder`, `src` by default) has the stand-in try
 nineteen tool calls in both sessions - reads of secrets the project denies
 at the root and below it, of files it allows and of one outside, writes,
@@ -706,7 +715,7 @@ path matching was probed, not documented.
 ```bash
 python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   [--target DIR [--sync] [--exclude NAME] | --attached] [--shell /usr/bin/zsh] [--mode dontAsk] \
-  [--queued 8 | --subfolder src [--permissions] | --worktree [--subfolder src]] [--desktop] [--timeout 180] [--keep]
+  [--queued 8 | --subfolder src [--permissions] | --worktree [--subfolder src]] [--desktop] [--sandbox] [--timeout 180] [--keep]
 ```
 
 - **Outputs:** a JSON report:

@@ -44,7 +44,11 @@ edition's own files remain in that edition's changelog.
   (`saved` `spooled`, then `recovery-saved`). A session in the root, which
   the sandbox lets write the project, saves as before.
   `tests/test_memory_native_capture.py` repeats it with the two TMPDIRs;
-  dropping the new folders fails it.
+  dropping the new folders fails it. `scripts/claude_code_bench.py
+  --sandbox` turns the sandbox on in the bench (the project on disk under
+  `/var/tmp`, Claude Code started without the namespace's capabilities):
+  on 2.1.278 and 2.1.299 the root saved as before, and below it, in a
+  worktree and in the desktop app's mode the save went through the spool.
 
 ### Claude Code started in a worktree of the project — 2026-10-25
 
