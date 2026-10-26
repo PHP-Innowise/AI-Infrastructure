@@ -50,12 +50,40 @@ into the running turn and runs the prompt hook at once; the run passes when
 the save in flight still lands. The terminal runs commands through the
 app-server daemon installed under ~/.codex/packages, which the isolated
 CODEX_HOME links to.
+
+`--worktree [inside|beside]` runs the measured session in a Git worktree of
+the project, on a branch of its own: inside the project where Claude Code
+makes its worktrees (`.claude/worktrees/bench`), or beside it where Codex
+makes its own (`CODEX_HOME/worktrees/<id>/project`), with `--subfolder DIR`
+in DIR of it. The installation is not committed, so the worktree has none of
+it. A first session in the project root sets up the dispatcher in the
+isolated CODEX_HOME (memory-bank/scripts/codex_worktrees.py); a session in
+the worktree then runs none of its entries, which the setup leaves for the
+person's review; they are approved by their hashes, as Codex's own "Trust
+all" records them, and the measured session follows. It passes when the
+setup wrote no approval, the unapproved session ran no hook, and the
+approved one got the capsule and every line of the project's AGENTS.md, its
+save waited in the spool - Codex's sandbox writes only the worktree - and
+landed in the root's Project Brain under the worktree's branch, the
+worktree got an index of its own in the root, and nothing was written into
+the worktree.
+
+`--app-server` runs the measured turn through `codex app-server`, as the
+Codex desktop app drives it: a thread started in the session's folder with
+the workspace-write sandbox and on-request approvals, a turn, and every
+approval Codex asks the client for refused and counted. It passes only when
+none was asked.
+
+  python3 scripts/codex_bench.py --worktree
+  python3 scripts/codex_bench.py --worktree beside --subfolder src
+  python3 scripts/codex_bench.py --worktree --app-server
 """
 import argparse
 import html
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -73,6 +101,11 @@ import claude_code_bench as bench  # noqa: E402
 
 MARKER = bench.MARKER
 SAVE = bench.SAVE
+# Where the bench's worktree goes: where Claude Code makes its own, inside the
+# project, or where Codex makes its own, in CODEX_HOME beside it.
+WORKTREES = {"inside": bench.WORKTREE, "beside": "codex-home/worktrees/b3c4/project"}
+# A file of the worktree's branch alone, which the save's learning cites.
+WORKTREE_SOURCE = "src/Refund.php"
 
 
 class Scripted(BaseHTTPRequestHandler):
@@ -106,7 +139,6 @@ class Scripted(BaseHTTPRequestHandler):
         if not self.path.split("?")[0].endswith("/responses"):
             return self.reply(404, {"error": {"message": "bench", "type": "not_found"}})
         output, since = self.decide(body)
-        self.pause(output)
         if os.environ.get("CODEX_BENCH_DUMP"):
             with open(os.path.join(os.environ["CODEX_BENCH_DUMP"], f"request-{len(self.requests) + 1:02d}.json"),
                       "w", encoding="utf-8") as handle:
@@ -133,6 +165,11 @@ class Scripted(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {kind}\ndata: {json.dumps(dict(payload, type=kind))}\n\n".encode())
 
         event("response.created", {"response": dict(response, status="in_progress", output=[])})
+        # A model's stream opens before it writes: Codex 0.164's terminal,
+        # after an earlier session in the same CODEX_HOME, cut a response that
+        # stayed silent for 8 seconds and never ran the save it carried.
+        self.wfile.flush()
+        self.pause(output)
         for index, item in enumerate(output):
             event("response.output_item.added", {"output_index": index, "item": item})
             if item["type"] == "message":
@@ -273,14 +310,23 @@ def inside(args: argparse.Namespace) -> int:
     except Exception as error:  # the run below shows whether hooks ran without it
         trust = {"error": f"{type(error).__name__}: {error}"}
     start = project / args.subfolder if args.subfolder else project
+    journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
+    first_lines = 0
+    setup: Dict[str, Any] = {}
+    place = project
+    if args.worktree:
+        place, setup = worktree_setup(args, work, project, home, env, journal_file)
+        start = place / args.subfolder if args.subfolder else place
+        first_lines = len(journal_file.read_text().splitlines()) if journal_file.exists() else 0
+        Scripted.requests.clear()
     start.mkdir(parents=True, exist_ok=True)
     command = [args.codex, "exec", "-C", str(start), "--skip-git-repo-check", "--sandbox", args.sandbox,
                "How are invoices numbered?"]
     if args.attached:
         command = attach.apply_overlay("codex", command, overlay)
         env.update(overlay["environment"])
-    journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     screen = ""
+    asked: List[Dict[str, Any]] = []
     if args.queued is not None:
         if args.packages and not (home / "packages").exists():
             (home / "packages").symlink_to(args.packages)
@@ -290,6 +336,9 @@ def inside(args: argparse.Namespace) -> int:
                                 args.timeout, Scripted.save_begun, Scripted.requests, settle=8.0)
         (work / "screen.txt").write_text(screen, encoding="utf-8")
         done = subprocess.CompletedProcess([], 0, "", "")
+    elif args.app_server:
+        done, asked = app_server_turn(args.codex, start, env, "How are invoices numbered?", args.sandbox,
+                                      args.timeout, journal_file)
     else:
         done = subprocess.run(command, cwd=start, env=env, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=args.timeout)
@@ -297,7 +346,8 @@ def inside(args: argparse.Namespace) -> int:
     helpers = stop_helpers(home)
     steps = [request for request in Scripted.requests if any(MARKER in text for text in request["since"])]
     carried = [text for text in steps[0]["since"] if MARKER in text] if steps else []
-    journal = [json.loads(line) for line in journal_file.read_text().splitlines()] if journal_file.exists() else []
+    lines = journal_file.read_text().splitlines()[first_lines:] if journal_file.exists() else []
+    journal = [json.loads(line) for line in lines]
     events = [f"{line['stage']}:{line['event']}" + (f":{line['code']}" if line.get("code") else "")
               for line in journal if line.get("stage") in ("prompt", "stop", "save")]
     report = {
@@ -316,14 +366,218 @@ def inside(args: argparse.Namespace) -> int:
     if args.queued is not None:
         report["unsaved_on_screen"] = bench.UNSAVED in screen
         report["ok"] = bench.queued_ok(events, screen)
-    if args.subfolder:
+    if args.app_server:
+        # An approval the app would have asked the person for: the save's above all.
+        report["app_server"] = True
+        report["approval_requests"] = asked
+        report["ok"] = report["ok"] and not asked
+    if args.subfolder or args.worktree:
         # The sandbox writes only below the folder - not the journal either -
         # so the line is the next hook's: saved, through the spool.
-        report["started_in"] = args.subfolder
+        report["started_in"] = (start.relative_to(work)).as_posix()
         report["spooled"] = "save:saved:spooled" in events
         report["ok"] = report["ok"] and report["spooled"]
+    if args.worktree:
+        # The root's memory, the worktree's own task and index, and nothing
+        # written into the worktree - once the person approved the entries,
+        # which the setup did not do for them.
+        heard = "\n".join(text for request in Scripted.requests for text in request["since"])
+        report["setup"] = setup
+        report["capsule"] = "working:" in heard
+        policy = (project / "AGENTS.md").read_text(encoding="utf-8").splitlines()
+        report["policy"] = (all(line in heard for line in policy if line.strip())
+                            and "Warning: truncated output" not in heard)
+        tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
+                 for path in (project / "project-brain/dynamic/tasks").glob("*.md")]
+        report["worktree_task"] = any(task.get("external_id") == bench.WORKTREE_BRANCH and task.get("progress")
+                                      for task in tasks)
+        # The learning cites the branch's own file, which only the worktree has.
+        findings = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
+                    for path in (project / "project-brain/dynamic/findings").glob("*.md")]
+        report["learning_from_worktree"] = any(source.get("path") == WORKTREE_SOURCE for finding in findings
+                                               for source in finding.get("source_fingerprints") or [])
+        report["own_index"] = any((project / "memory-bank/local/worktrees").glob("*/context.db"))
+        report["worktree_clean"] = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=place,
+                                                  capture_output=True, text=True).stdout == ""
+        unapproved = setup.get("unapproved") or {}
+        report["ok"] = (report["ok"] and report["capsule"] and report["policy"] and report["worktree_task"]
+                        and report["learning_from_worktree"] and report["own_index"] and report["worktree_clean"] and setup.get("listed") is True
+                        and setup.get("approvals_before") == [] and (setup.get("approval") or {}).get("approved", 0) > 0
+                        and unapproved.get("hook_lines") == 0 and not unapproved.get("capsule")
+                        and not unapproved.get("save_asked"))
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
+
+
+def worktree_setup(args: argparse.Namespace, work: Path, project: Path, home: Path, env: Dict[str, str],
+                   journal_file: Path) -> Tuple[Path, Dict[str, Any]]:
+    """--worktree: a session in the project root, whose session-start hook sets
+    up the dispatcher (in the background); the worktree; a session there
+    before the person approved the entries; then their approval. Returns the
+    worktree and what each step left."""
+    subprocess.run([args.codex, "exec", "-C", str(project), "--skip-git-repo-check", "--sandbox", args.sandbox,
+                    "How are invoices numbered?"], cwd=project, env=env, stdin=subprocess.DEVNULL,
+                   capture_output=True, text=True, timeout=args.timeout)
+    listed = home / "ai-accelerator" / "projects"
+    deadline = time.time() + 15
+    while time.time() < deadline and str(project) not in (listed.read_text().splitlines() if listed.exists() else []):
+        time.sleep(0.2)
+    place = (project if args.worktree == "inside" else work) / WORKTREES[args.worktree]
+    place.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run([*bench.GIT, "worktree", "add", "-q", str(place), "-b", bench.WORKTREE_BRANCH], cwd=project,
+                   check=True, capture_output=True)
+    # The branch's own work: a file the main checkout does not have, which
+    # the stand-in reads and its learning cites - checked where the session
+    # works, or the save is refused.
+    (place / WORKTREE_SOURCE).parent.mkdir(parents=True, exist_ok=True)
+    (place / WORKTREE_SOURCE).write_text("<?php\nfinal class Refund {}\n", encoding="utf-8")
+    for step in (["add", WORKTREE_SOURCE], ["commit", "-qm", "Refunds"]):
+        subprocess.run([*bench.GIT, *step], cwd=place, check=True, capture_output=True)
+    start = place / args.subfolder if args.subfolder else place
+    start.mkdir(parents=True, exist_ok=True)
+    Scripted.source = WORKTREE_SOURCE
+    Scripted.read = os.path.relpath(place / WORKTREE_SOURCE, start)
+    setup: Dict[str, Any] = {
+        "listed": listed.exists() and str(project) in listed.read_text().splitlines(),
+        "entries": dispatcher_entries(home),
+        # The setup leaves the approval to the person: no record of its own.
+        "approvals_before": user_approvals(home),
+    }
+    # Before the person approved them, the entries run nowhere.
+    before = len(journal_file.read_text().splitlines()) if journal_file.exists() else 0
+    Scripted.requests.clear()
+    subprocess.run([args.codex, "exec", "-C", str(start), "--skip-git-repo-check", "--sandbox", args.sandbox,
+                    "How are invoices numbered?"], cwd=start, env=env, stdin=subprocess.DEVNULL,
+                   capture_output=True, text=True, timeout=args.timeout)
+    heard = "\n".join(text for request in Scripted.requests for text in request["since"])
+    setup["unapproved"] = {
+        "hook_lines": len(journal_file.read_text().splitlines()) - before if journal_file.exists() else 0,
+        "capsule": "working:" in heard,
+        "save_asked": MARKER in heard,
+    }
+    try:
+        setup["approval"] = approve_user_hooks(args.codex, start, home)
+    except Exception as error:  # the run shows the entries did not run
+        setup["approval"] = {"error": f"{type(error).__name__}: {error}"}
+    return place, setup
+
+
+def dispatcher_entries(home: Path) -> int:
+    """How many of the person's hooks run the dispatcher."""
+    marker = shlex.quote(str(home / "ai-accelerator" / "ai-accelerator-dispatch.sh")) + " "
+    try:
+        hooks = json.loads((home / "hooks.json").read_text(encoding="utf-8")).get("hooks") or {}
+    except (OSError, ValueError):
+        return 0
+    return sum(str(hook.get("command", "")).startswith(marker)
+               for groups in hooks.values() for group in groups for hook in group.get("hooks") or [])
+
+
+def user_approvals(home: Path) -> List[str]:
+    """The approvals config.toml holds for hooks of the person's hooks.json."""
+    text = (home / "config.toml").read_text(encoding="utf-8")
+    prefix = str(home / "hooks.json") + ":"
+    try:
+        import tomllib
+    except ImportError:
+        return sorted(set(re.findall(r'\[hooks\.state\."(' + re.escape(prefix) + r'[^"]*)"\]', text)))
+    state = (tomllib.loads(text).get("hooks") or {}).get("state") or {}
+    return sorted(key for key in state if key.startswith(prefix))
+
+
+def approve_user_hooks(codex: str, cwd: Path, home: Path) -> Dict[str, Any]:
+    """Approve the dispatcher's entries by their current hashes, as a person
+    does once with Codex's own "Trust all" - the same records through the
+    same request; nothing else of the person's."""
+    import accelerator_attach
+    marker = shlex.quote(str(home / "ai-accelerator" / "ai-accelerator-dispatch.sh")) + " "
+    [listing] = accelerator_attach._app_server(codex, [], cwd, [
+        {"method": "hooks/list", "params": {"cwds": [str(cwd)]}}])
+    hooks = [hook for scope in (listing.get("result") or {}).get("data") or []
+             for hook in scope.get("hooks") or []
+             if hook.get("source") == "user" and str(hook.get("command", "")).startswith(marker)]
+    pending = {hook["key"]: {"trusted_hash": hook["currentHash"]} for hook in hooks
+               if hook.get("trustStatus") != "trusted"}
+    if pending:
+        [written] = accelerator_attach._app_server(codex, [], cwd, [{"method": "config/batchWrite", "params": {
+            "edits": [{"keyPath": "hooks.state", "mergeStrategy": "upsert", "value": pending}]}}])
+        if "error" in written:
+            return {"error": str(written["error"])[:200], "entries": len(hooks)}
+    return {"entries": len(hooks), "approved": len(pending),
+            "statuses": sorted({hook.get("trustStatus") for hook in hooks})}
+
+
+def app_server_turn(codex: str, cwd: Path, env: Dict[str, str], prompt: str, sandbox: str, timeout: float,
+                    journal_file: Path) -> Tuple[subprocess.CompletedProcess, List[Dict[str, Any]]]:
+    """One turn through `codex app-server`, as the Codex desktop app drives one:
+    a thread in `cwd` with the sandbox and on-request approvals, a turn, and
+    every approval Codex asks for refused. Returns how it ended and what Codex
+    asked the client."""
+    import queue
+    process = subprocess.Popen([codex, "app-server"], cwd=env["HOME"], env=env, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    incoming: "queue.Queue[str]" = queue.Queue()
+    threading.Thread(target=lambda: [incoming.put(line) for line in process.stdout], daemon=True).start()
+    asked: List[Dict[str, Any]] = []
+    seen: List[str] = []
+    deadline = time.monotonic() + timeout
+
+    def send(message: Dict[str, Any]) -> None:
+        process.stdin.write(json.dumps(message) + "\n")
+        process.stdin.flush()
+
+    def until(done: Any) -> Dict[str, Any]:
+        while time.monotonic() < deadline:
+            try:
+                line = incoming.get(timeout=0.5)
+            except queue.Empty:
+                if process.poll() is not None:
+                    break
+                continue
+            seen.append(line)
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if "method" in message and "id" in message:
+                # A request to the client: an approval the app would show.
+                asked.append({"method": message["method"], "params": json.dumps(message.get("params"))[:200]})
+                send({"jsonrpc": "2.0", "id": message["id"], "result": {"decision": "decline"}})
+                continue
+            if done(message):
+                return message
+        return {}
+
+    status = "incomplete"
+    try:
+        send({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+              "params": {"clientInfo": {"name": "codex-bench-desktop", "version": "1"}}})
+        until(lambda message: message.get("id") == 0)
+        send({"jsonrpc": "2.0", "method": "initialized"})
+        send({"jsonrpc": "2.0", "id": 1, "method": "thread/start",
+              "params": {"cwd": str(cwd), "approvalPolicy": "on-request", "sandbox": sandbox}})
+        started = until(lambda message: message.get("id") == 1)
+        thread = ((started.get("result") or {}).get("thread") or {}).get("id")
+        if thread:
+            send({"jsonrpc": "2.0", "id": 2, "method": "turn/start",
+                  "params": {"threadId": thread, "input": [{"type": "text", "text": prompt}]}})
+            finished = until(lambda message: message.get("method") == "turn/completed")
+            status = ((finished.get("params") or {}).get("turn") or {}).get("status") or status
+            # The recovery Stop's line lands as the turn ends.
+            settle = time.monotonic() + 10
+            while time.monotonic() < settle and not any(
+                    '"stage":"stop"' in line and '"recovery-' in line
+                    for line in (journal_file.read_text().splitlines() if journal_file.exists() else [])):
+                time.sleep(0.2)
+    finally:
+        try:
+            process.stdin.close()
+            process.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            process.kill()
+    error = process.stderr.read() if process.stderr else ""
+    return subprocess.CompletedProcess([codex, "app-server"], 0 if status == "completed" else 1,
+                                       "".join(seen), f"turn {status}\n{error[-400:]}"), asked
 
 
 def prepare_attached(work: Path, edition: str) -> Tuple[Path, Path]:
@@ -381,6 +635,11 @@ def main() -> int:
                              "takes SECONDS to write, is in flight")
     parser.add_argument("--subfolder", metavar="DIR", default=None,
                         help="start Codex in DIR below the project root; the save goes through the spool")
+    parser.add_argument("--worktree", nargs="?", const="inside", choices=sorted(WORKTREES), default=None,
+                        help="after a session in the project root, run the measured one in a Git worktree of the "
+                             "project, inside it (the default) or beside it")
+    parser.add_argument("--app-server", action="store_true",
+                        help="run the measured turn through codex app-server, as the Codex desktop app does")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--work", help=argparse.SUPPRESS)
     parser.add_argument("--source", help=argparse.SUPPRESS)
@@ -406,6 +665,14 @@ def main() -> int:
     if args.subfolder is not None and (Path(args.subfolder).is_absolute() or ".." in Path(args.subfolder).parts):
         print("codex_bench: --subfolder names a folder inside the project", file=sys.stderr)
         return 2
+    if args.worktree and (args.attached is not None or args.sandbox != "workspace-write"):
+        print("codex_bench: --worktree runs Codex with the workspace-write sandbox in a worktree of an installed "
+              "project; it takes no --attached or --sandbox read-only", file=sys.stderr)
+        return 2
+    if args.app_server and (args.queued is not None or args.attached is not None):
+        print("codex_bench: --app-server runs one turn of an installed edition; it takes no --queued or "
+              "--attached", file=sys.stderr)
+        return 2
     if args.target:
         problem = bench.target_problem(Path(args.target).expanduser().resolve())
         if problem:
@@ -413,12 +680,12 @@ def main() -> int:
             return 2
     shm = Path("/dev/shm")
     base = shm if shm.is_dir() and os.access(shm, os.W_OK) else None
-    if args.subfolder:
+    if args.subfolder or args.worktree:
         # Codex's bubblewrap sandbox mounts its own /dev, and /tmp and $TMPDIR
         # are among its writable roots: below a project kept in /dev/shm or
         # /tmp a command would see none of it or could write all of it. On
-        # disk, the project is read-only to a command started below its root,
-        # as in a person's checkout.
+        # disk, the project is read-only to a command started below its root
+        # or in a worktree, as in a person's checkout.
         base = Path.home() / ".cache" / "ai-infrastructure-benches"
         base.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="codex-bench-", dir=str(base) if base else None))
@@ -437,6 +704,8 @@ def main() -> int:
                                "--edition", args.edition,
                                *(["--attached", args.attached] if args.attached else []),
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
+                               *(["--worktree", args.worktree] if args.worktree else []),
+                               *(["--app-server"] if args.app_server else []),
                                *(["--queued", str(args.queued), "--packages", str(Path.home() / ".codex/packages")]
                                  if args.queued is not None else [])],
                               timeout=args.timeout + 120)
