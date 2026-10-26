@@ -52,8 +52,11 @@ class NativeCaptureFixture(unittest.TestCase):
         cfg_file.write_text(json.dumps(cfg))
         (self.root/'.gitignore').write_text('/memory-bank/local/\n/project-brain/local/\n__pycache__/\n')
         (self.root/'rules.md').write_text('# Routing\nThe Amber dispatcher retries only idempotent requests.\n')
+        # A commit starts `git maintenance run --auto --detach`, whose objects/maintenance.lock
+        # can appear while the cleanup removes the folder (CI: "Directory not empty: 'objects'").
         for args in (['init','-q','-b','research'],['config','user.name','Public Fixture'],
-                     ['config','user.email','fixture@example.invalid'],['add','.'],['commit','-qm','Public baseline']):
+                     ['config','user.email','fixture@example.invalid'],['config','maintenance.auto','false'],
+                     ['add','.'],['commit','-qm','Public baseline']):
             self.git(*args)
         self.payload={'progress':'Inspected the Amber retry contract.',
             'next_steps':['Check callers before changing the dispatcher.'], 'verified':True,
