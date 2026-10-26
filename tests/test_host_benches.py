@@ -279,6 +279,29 @@ class CodexWorktreeTest(unittest.TestCase):
         self.assertIn("--worktree runs Codex", self.refused("--worktree", "--attached"))
         self.assertIn("--worktree runs Codex", self.refused("--worktree", "beside", "--sandbox", "read-only"))
         self.assertIn("--app-server runs one turn", self.refused("--app-server", "--queued", "8"))
+        self.assertIn("--worktree codex lets", self.refused("--worktree", "codex", "--queued", "8"))
+
+    def test_the_app_worktree_is_detached_marked_and_owned_as_the_app_writes_it(self) -> None:
+        # The app-server has no request for a worktree: the bench makes it the
+        # way the Codex app's own code does, and the owner record as it writes it.
+        with tempfile.TemporaryDirectory() as temporary:
+            project, home = Path(temporary) / "shop", Path(temporary) / "codex-home"
+            project.mkdir()
+            for step in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "base"]):
+                subprocess.run([*claude_code_bench.GIT, *step], cwd=project, check=True, capture_output=True)
+            place = codex_bench.app_worktree(home, project)
+            self.assertEqual([place], codex_bench.managed_worktrees(home))
+            self.assertEqual(home / "worktrees", place.parent.parent)
+            self.assertEqual("shop", place.name)
+            self.assertTrue((place.parent / ".codex-worktree-name").is_file())
+            self.assertEqual(1, subprocess.run(["git", "-C", str(place), "symbolic-ref", "-q", "HEAD"],
+                                               capture_output=True).returncode)
+            self.assertEqual("", codex_bench.owner_of(place))
+            thread = "01a1776d-b888-7ac2-8a1b-9557bdbd1dad"
+            codex_bench.own(place, thread)
+            self.assertEqual('{\n  "version": 1,\n  "ownerThreadId": "%s"\n}\n' % thread,
+                             (codex_bench.git_directory(place) / "codex-thread.json").read_text(encoding="utf-8"))
+            self.assertEqual(thread, codex_bench.owner_of(place))
 
     def test_only_the_approvals_of_the_persons_hooks_file_count_as_the_setups(self) -> None:
         # The setup must leave the approval to the person: an approval of a

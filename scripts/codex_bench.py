@@ -68,15 +68,30 @@ landed in the root's Project Brain under the worktree's branch, the
 worktree got an index of its own in the root, and nothing was written into
 the worktree.
 
+`--worktree codex` lets Codex make the worktree, as `codex --worktree` and
+a new worktree in the Codex app do: `codex exec --worktree` checks HEAD out
+in CODEX_HOME/worktrees/<id>/project on a detached HEAD - no branch to name
+the task - and records the session's thread as its owner in
+codex-thread.json of the worktree's Git directory. HEAD has a file the main
+checkout's working tree has deleted, which the save's learning cites. The
+unapproved session and the measured one each get a worktree of their own.
+It passes as above, with the save under the task the owning thread names,
+codex-thread/<thread>, the measured session's own.
+
 `--app-server` runs the measured turn through `codex app-server`, as the
 Codex desktop app drives it: a thread started in the session's folder with
 the workspace-write sandbox and on-request approvals, a turn, and every
 approval Codex asks the client for refused and counted. It passes only when
-none was asked.
+none was asked. With `--worktree codex` the bench makes the worktree the
+way the app does, the app-server having no request for one: `git worktree
+add --detach` in CODEX_HOME/worktrees/<id>/project, and, once the thread has
+started, its owner record one key a line.
 
   python3 scripts/codex_bench.py --worktree
   python3 scripts/codex_bench.py --worktree beside --subfolder src
   python3 scripts/codex_bench.py --worktree --app-server
+  python3 scripts/codex_bench.py --worktree codex
+  python3 scripts/codex_bench.py --worktree codex --app-server
 """
 import argparse
 import html
@@ -93,7 +108,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -102,10 +117,13 @@ import claude_code_bench as bench  # noqa: E402
 MARKER = bench.MARKER
 SAVE = bench.SAVE
 # Where the bench's worktree goes: where Claude Code makes its own, inside the
-# project, or where Codex makes its own, in CODEX_HOME beside it.
-WORKTREES = {"inside": bench.WORKTREE, "beside": "codex-home/worktrees/b3c4/project"}
-# A file of the worktree's branch alone, which the save's learning cites.
+# project, or where Codex makes its own, in CODEX_HOME beside it - by the
+# bench, on a branch, or by Codex itself, detached (`codex`).
+WORKTREES = {"inside": bench.WORKTREE, "beside": "codex-home/worktrees/b3c4/project", "codex": None}
+# A file of the worktree's alone, which the save's learning cites.
 WORKTREE_SOURCE = "src/Refund.php"
+# The task a worktree Codex made gets: the thread that owns it names it.
+THREAD_TASK = "codex-thread/"
 
 
 class Scripted(BaseHTTPRequestHandler):
@@ -320,8 +338,12 @@ def inside(args: argparse.Namespace) -> int:
         first_lines = len(journal_file.read_text().splitlines()) if journal_file.exists() else 0
         Scripted.requests.clear()
     start.mkdir(parents=True, exist_ok=True)
-    command = [args.codex, "exec", "-C", str(start), "--skip-git-repo-check", "--sandbox", args.sandbox,
+    made = managed_worktrees(home)
+    # `--worktree codex` in a terminal: Codex makes the worktree and works there.
+    managed = ["--worktree"] if args.worktree == "codex" and not args.app_server else []
+    command = [args.codex, "exec", "-C", str(start), *managed, "--skip-git-repo-check", "--sandbox", args.sandbox,
                "How are invoices numbered?"]
+    threads: List[str] = []
     if args.attached:
         command = attach.apply_overlay("codex", command, overlay)
         env.update(overlay["environment"])
@@ -337,13 +359,23 @@ def inside(args: argparse.Namespace) -> int:
         (work / "screen.txt").write_text(screen, encoding="utf-8")
         done = subprocess.CompletedProcess([], 0, "", "")
     elif args.app_server:
+        def started(thread: str) -> None:
+            threads.append(thread)
+            if args.worktree == "codex":
+                own(place, thread)
+
         done, asked = app_server_turn(args.codex, start, env, "How are invoices numbered?", args.sandbox,
-                                      args.timeout, journal_file)
+                                      args.timeout, journal_file, on_thread=started)
     else:
         done = subprocess.run(command, cwd=start, env=env, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=args.timeout)
+        threads.extend(re.findall(r"^session id: (\S+)$", done.stderr, re.M))
     server.shutdown()
     helpers = stop_helpers(home)
+    if managed:
+        # The worktree Codex made for this session.
+        place = next((path for path in managed_worktrees(home) if path not in made), place)
+        start = place / args.subfolder if args.subfolder else place
     steps = [request for request in Scripted.requests if any(MARKER in text for text in request["since"])]
     carried = [text for text in steps[0]["since"] if MARKER in text] if steps else []
     lines = journal_file.read_text().splitlines()[first_lines:] if journal_file.exists() else []
@@ -389,9 +421,19 @@ def inside(args: argparse.Namespace) -> int:
                             and "Warning: truncated output" not in heard)
         tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
                  for path in (project / "project-brain/dynamic/tasks").glob("*.md")]
-        report["worktree_task"] = any(task.get("external_id") == bench.WORKTREE_BRANCH and task.get("progress")
+        # A worktree on a branch: the branch names the task. One Codex made
+        # is detached, and the thread that owns it - this session's - does.
+        owner = owner_of(place) if args.worktree == "codex" else ""
+        report["task"] = THREAD_TASK + owner if args.worktree == "codex" else bench.WORKTREE_BRANCH
+        report["worktree_task"] = any(task.get("external_id") == report["task"] and task.get("progress")
                                       for task in tasks)
-        # The learning cites the branch's own file, which only the worktree has.
+        if args.worktree == "codex":
+            report["worktree"] = place.relative_to(work).as_posix()
+            report["detached"] = subprocess.run(["git", "-C", str(place), "symbolic-ref", "-q", "HEAD"],
+                                                capture_output=True).returncode == 1
+            report["owner_is_session"] = bool(owner) and threads == [owner]
+            report["ok"] = report["ok"] and report["detached"] and report["owner_is_session"]
+        # The learning cites the worktree's own file, which the main checkout lacks.
         findings = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
                     for path in (project / "project-brain/dynamic/findings").glob("*.md")]
         report["learning_from_worktree"] = any(source.get("path") == WORKTREE_SOURCE for finding in findings
@@ -422,21 +464,38 @@ def worktree_setup(args: argparse.Namespace, work: Path, project: Path, home: Pa
     deadline = time.time() + 15
     while time.time() < deadline and str(project) not in (listed.read_text().splitlines() if listed.exists() else []):
         time.sleep(0.2)
-    place = (project if args.worktree == "inside" else work) / WORKTREES[args.worktree]
-    place.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run([*bench.GIT, "worktree", "add", "-q", str(place), "-b", bench.WORKTREE_BRANCH], cwd=project,
-                   check=True, capture_output=True)
-    # The branch's own work: a file the main checkout does not have, which
-    # the stand-in reads and its learning cites - checked where the session
-    # works, or the save is refused.
-    (place / WORKTREE_SOURCE).parent.mkdir(parents=True, exist_ok=True)
-    (place / WORKTREE_SOURCE).write_text("<?php\nfinal class Refund {}\n", encoding="utf-8")
-    for step in (["add", WORKTREE_SOURCE], ["commit", "-qm", "Refunds"]):
-        subprocess.run([*bench.GIT, *step], cwd=place, check=True, capture_output=True)
+    if args.worktree == "codex":
+        # Codex checks out HEAD and leaves the working tree's changes behind:
+        # a file committed, then deleted in the main checkout, is the
+        # worktree's alone. The stand-in reads it and the learning cites it -
+        # checked where the session works, or the save is refused.
+        (project / WORKTREE_SOURCE).parent.mkdir(parents=True, exist_ok=True)
+        (project / WORKTREE_SOURCE).write_text("<?php\nfinal class Refund {}\n", encoding="utf-8")
+        for step in (["add", WORKTREE_SOURCE], ["commit", "-qm", "Refunds"]):
+            subprocess.run([*bench.GIT, *step], cwd=project, check=True, capture_output=True)
+        (project / WORKTREE_SOURCE).unlink()
+        # A terminal session starts in the project and Codex makes the
+        # worktree; the app makes it before it starts the thread.
+        place = app_worktree(home, project) if args.app_server else project
+    else:
+        place = (project if args.worktree == "inside" else work) / WORKTREES[args.worktree]
+        place.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([*bench.GIT, "worktree", "add", "-q", str(place), "-b", bench.WORKTREE_BRANCH], cwd=project,
+                       check=True, capture_output=True)
+        # The branch's own work: a file the main checkout does not have, which
+        # the stand-in reads and its learning cites - checked where the session
+        # works, or the save is refused.
+        (place / WORKTREE_SOURCE).parent.mkdir(parents=True, exist_ok=True)
+        (place / WORKTREE_SOURCE).write_text("<?php\nfinal class Refund {}\n", encoding="utf-8")
+        for step in (["add", WORKTREE_SOURCE], ["commit", "-qm", "Refunds"]):
+            subprocess.run([*bench.GIT, *step], cwd=place, check=True, capture_output=True)
     start = place / args.subfolder if args.subfolder else place
     start.mkdir(parents=True, exist_ok=True)
     Scripted.source = WORKTREE_SOURCE
     Scripted.read = os.path.relpath(place / WORKTREE_SOURCE, start)
+    # Codex makes the unapproved session a worktree of its own, from the project.
+    unapproved = ([args.codex, "exec", "-C", str(project / args.subfolder if args.subfolder else project),
+                   "--worktree"] if args.worktree == "codex" else [args.codex, "exec", "-C", str(start)])
     setup: Dict[str, Any] = {
         "listed": listed.exists() and str(project) in listed.read_text().splitlines(),
         "entries": dispatcher_entries(home),
@@ -446,9 +505,8 @@ def worktree_setup(args: argparse.Namespace, work: Path, project: Path, home: Pa
     # Before the person approved them, the entries run nowhere.
     before = len(journal_file.read_text().splitlines()) if journal_file.exists() else 0
     Scripted.requests.clear()
-    subprocess.run([args.codex, "exec", "-C", str(start), "--skip-git-repo-check", "--sandbox", args.sandbox,
-                    "How are invoices numbered?"], cwd=start, env=env, stdin=subprocess.DEVNULL,
-                   capture_output=True, text=True, timeout=args.timeout)
+    subprocess.run([*unapproved, "--skip-git-repo-check", "--sandbox", args.sandbox, "How are invoices numbered?"],
+                   cwd=start, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=args.timeout)
     heard = "\n".join(text for request in Scripted.requests for text in request["since"])
     setup["unapproved"] = {
         "hook_lines": len(journal_file.read_text().splitlines()) - before if journal_file.exists() else 0,
@@ -460,6 +518,45 @@ def worktree_setup(args: argparse.Namespace, work: Path, project: Path, home: Pa
     except Exception as error:  # the run shows the entries did not run
         setup["approval"] = {"error": f"{type(error).__name__}: {error}"}
     return place, setup
+
+
+def managed_worktrees(home: Path) -> List[Path]:
+    """The checkouts in CODEX_HOME/worktrees/<id>/, where Codex makes them."""
+    return sorted(path for path in (home / "worktrees").glob("*/*") if (path / ".git").is_file())
+
+
+def git_directory(checkout: Path) -> Path:
+    return Path(subprocess.run(["git", "-C", str(checkout), "rev-parse", "--absolute-git-dir"], check=True,
+                               capture_output=True, text=True).stdout.strip())
+
+
+def owner_of(checkout: Path) -> str:
+    """The thread codex-thread.json of the checkout's Git directory names."""
+    try:
+        record = json.loads((git_directory(checkout) / "codex-thread.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return ""
+    owner = record.get("ownerThreadId") if isinstance(record, dict) else None
+    return owner if isinstance(owner, str) else ""
+
+
+def app_worktree(home: Path, project: Path) -> Path:
+    """A worktree as the Codex app makes one before it starts the thread:
+    `git worktree add --detach` in CODEX_HOME/worktrees/<4 hex>/<the
+    project's folder name>, that folder marked with .codex-worktree-name."""
+    place = home / "worktrees" / "a7e1" / project.name
+    place.parent.mkdir(parents=True)
+    (place.parent / ".codex-worktree-name").write_text("", encoding="utf-8")
+    subprocess.run([*bench.GIT, "worktree", "add", "-q", "--detach", str(place), "HEAD"], cwd=project,
+                   check=True, capture_output=True)
+    return place
+
+
+def own(checkout: Path, thread: str) -> None:
+    """The owner record the app writes once the thread has started, as
+    JSON.stringify(record, null, 2) writes it."""
+    (git_directory(checkout) / "codex-thread.json").write_text(
+        json.dumps({"version": 1, "ownerThreadId": thread}, indent=2) + "\n", encoding="utf-8")
 
 
 def dispatcher_entries(home: Path) -> int:
@@ -508,11 +605,13 @@ def approve_user_hooks(codex: str, cwd: Path, home: Path) -> Dict[str, Any]:
 
 
 def app_server_turn(codex: str, cwd: Path, env: Dict[str, str], prompt: str, sandbox: str, timeout: float,
-                    journal_file: Path) -> Tuple[subprocess.CompletedProcess, List[Dict[str, Any]]]:
+                    journal_file: Path, on_thread: Optional[Callable[[str], None]] = None
+                    ) -> Tuple[subprocess.CompletedProcess, List[Dict[str, Any]]]:
     """One turn through `codex app-server`, as the Codex desktop app drives one:
     a thread in `cwd` with the sandbox and on-request approvals, a turn, and
-    every approval Codex asks for refused. Returns how it ended and what Codex
-    asked the client."""
+    every approval Codex asks for refused. `on_thread` gets the thread's ID
+    before its turn starts. Returns how it ended and what Codex asked the
+    client."""
     import queue
     process = subprocess.Popen([codex, "app-server"], cwd=env["HOME"], env=env, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -558,6 +657,8 @@ def app_server_turn(codex: str, cwd: Path, env: Dict[str, str], prompt: str, san
               "params": {"cwd": str(cwd), "approvalPolicy": "on-request", "sandbox": sandbox}})
         started = until(lambda message: message.get("id") == 1)
         thread = ((started.get("result") or {}).get("thread") or {}).get("id")
+        if thread and on_thread is not None:
+            on_thread(thread)
         if thread:
             send({"jsonrpc": "2.0", "id": 2, "method": "turn/start",
                   "params": {"threadId": thread, "input": [{"type": "text", "text": prompt}]}})
@@ -637,7 +738,7 @@ def main() -> int:
                         help="start Codex in DIR below the project root; the save goes through the spool")
     parser.add_argument("--worktree", nargs="?", const="inside", choices=sorted(WORKTREES), default=None,
                         help="after a session in the project root, run the measured one in a Git worktree of the "
-                             "project, inside it (the default) or beside it")
+                             "project, inside it (the default) or beside it, or in one Codex makes (codex)")
     parser.add_argument("--app-server", action="store_true",
                         help="run the measured turn through codex app-server, as the Codex desktop app does")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
@@ -668,6 +769,10 @@ def main() -> int:
     if args.worktree and (args.attached is not None or args.sandbox != "workspace-write"):
         print("codex_bench: --worktree runs Codex with the workspace-write sandbox in a worktree of an installed "
               "project; it takes no --attached or --sandbox read-only", file=sys.stderr)
+        return 2
+    if args.worktree == "codex" and args.queued is not None:
+        print("codex_bench: --worktree codex lets `codex exec --worktree` or, with --app-server, the bench as the "
+              "app make the worktree; it takes no --queued", file=sys.stderr)
         return 2
     if args.app_server and (args.queued is not None or args.attached is not None):
         print("codex_bench: --app-server runs one turn of an installed edition; it takes no --queued or "

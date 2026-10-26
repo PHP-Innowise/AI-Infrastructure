@@ -881,6 +881,19 @@ worktree got its own index in the root, and nothing was written into the
 worktree. It combines with `--subfolder`, `--queued` and `--app-server`; its
 work folder is on disk, as for `--subfolder`.
 
+`--worktree codex` lets Codex make the worktree, as `codex --worktree` and a
+new worktree in the Codex app do: `codex exec --worktree` checks `HEAD` out in
+`CODEX_HOME/worktrees/<id>/project` on a detached HEAD and writes the session's
+thread into `codex-thread.json` of the worktree's Git directory. `HEAD` has a
+file the main checkout's working tree has deleted, which the save's learning
+cites; the unapproved session and the measured one each get a worktree of
+their own. It passes as above, the save landing under the task the owning
+thread names, `codex-thread/<thread>`, the measured session's own, with the
+worktree still detached. With `--app-server` the bench makes the worktree the
+way the app does - the app-server has no request for one - and writes the
+owner record, one key a line, once the thread has started. It takes no
+`--queued`.
+
 `--app-server` runs the measured turn through `codex app-server`, as the Codex
 desktop app drives one: a thread started in the session's folder with the
 workspace-write sandbox and on-request approvals, a turn, and every approval
@@ -894,7 +907,7 @@ response that stayed silent for 8 seconds and never ran the save it carried.
 ```bash
 python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
   [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--subfolder src] \
-  [--worktree [inside|beside]] [--app-server] [--timeout 240] [--keep]
+  [--worktree [inside|beside|codex]] [--app-server] [--timeout 240] [--keep]
 ```
 
 - **Outputs:** a JSON report:
@@ -907,6 +920,8 @@ python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox 
   - with `--worktree`, what the setup wrote and the unapproved session did,
     and whether the measured one got the capsule and the policy, saved under
     the worktree's branch, got its own index and left the worktree clean;
+    with `--worktree codex`, the task the owning thread names, whether the
+    worktree stayed detached and its owner is the measured session's thread;
     with `--app-server`, the approvals Codex asked for.
 
   Exit 0 when the save ran and one message carried the step; 1 otherwise; 2
