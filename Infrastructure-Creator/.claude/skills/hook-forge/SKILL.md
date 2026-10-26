@@ -173,6 +173,8 @@ only the host. It expects `ROOT_DIR`, `PYTHON`, `CONTEXT_CLI`,
 `BUDGET_SECONDS`, `TASK_ID`, the Stop payload in `HOOK_STDIN` and `STATE_DIR`
 assigned as in `context-continuity.sh` (`STATE_DIR=$ROOT_DIR`, then
 `ACCELERATOR_STATE_DIR` when attached), so the line lands beside the runtime's.
+`ENTERED` stays unset here: the editions set it to `--entered` when their
+write hook serves a worktree the session entered.
 
 ```bash
 NATIVE_HOST=(--host claude)
@@ -189,10 +191,10 @@ native_journal() {
 if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] && [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
   if command -v timeout > /dev/null 2>&1; then
     NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
-      --host claude --task-id "$TASK_ID" 2>/dev/null)
+      --host claude --task-id "$TASK_ID" ${ENTERED:+"$ENTERED"} 2>/dev/null)
   else
     NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
-      --host claude --task-id "$TASK_ID" 2>/dev/null)
+      --host claude --task-id "$TASK_ID" ${ENTERED:+"$ENTERED"} 2>/dev/null)
   fi
   NATIVE_STATUS=$?
   [ "$NATIVE_STATUS" -eq 0 ] && [ -n "$NATIVE_RESPONSE" ] && printf '%s\n' "$NATIVE_RESPONSE"

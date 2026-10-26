@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dispatch-version: 3 (DISPATCH_VERSION in claude_dispatch.py)
+# dispatch-version: 4 (DISPATCH_VERSION in claude_dispatch.py)
 # AI accelerator, Claude Code: an installed project's hook for a session
 # started in a folder below the project root, or in a worktree of it.
 #
@@ -89,6 +89,8 @@ below_native=
 borrowed=
 borrowed_native=
 borrowed_project=
+exact=
+exact_native=
 while IFS= read -r listed || [ -n "$listed" ]; do
   listed=${listed%$'\r'}
   shell_path "$listed"
@@ -103,6 +105,7 @@ while IFS= read -r listed || [ -n "$listed" ]; do
     esac
   fi
   case "$start" in "$path"/*) [ ${#path} -gt ${#below} ] && below=$path && below_native=$listed ;; esac
+  [ "$start" = "$path" ] && exact=$path && exact_native=$listed
 done < "$here/projects"
 # A root in the session's own checkout, or in one around it - a monorepo it
 # is installed in - comes first. A folder of another checkout inside the
@@ -118,7 +121,38 @@ fi
 if [ -z "$root" ] && [ -n "$borrowed" ]; then
   root=$borrowed native=$borrowed_native project=$borrowed_project
 fi
-[ -n "$root" ] || exit 0
+# On Windows python3 is often missing, or the Store's stand-in: the first
+# that runs counts.
+pick_python() {
+  python=()
+  if [ -z "$windows" ] && command -v python3 > /dev/null 2>&1; then
+    python=(python3)
+    return 0
+  fi
+  for name in python py python3; do
+    candidate=("$name")
+    [ "$name" = py ] && candidate+=(-3)
+    if "${candidate[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      python=("${candidate[@]}")
+      return 0
+    fi
+  done
+  return 1
+}
+if [ -z "$root" ]; then
+  # A session started in a listed root runs the root's own hooks, also once
+  # it has entered a worktree of the root (Claude Code's EnterWorktree): they
+  # serve that worktree, and the save step they ask for leaves it, which
+  # Claude Code asks about there. The memory CLI alone gets the allow it has
+  # in the root; the guard that ran is the root's own.
+  [ -n "$exact" ] && [ "$hook" = bash-validator.sh ] || exit 0
+  payload=$(cat)
+  case "$payload" in *context.py*) ;; *) exit 0 ;; esac
+  [[ $payload =~ \"cwd\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] || exit 0
+  [ "${BASH_REMATCH[1]}" != "$start" ] && [ -f "$exact/memory-bank/scripts/context.py" ] && pick_python || exit 0
+  printf '%s' "$payload" | "${python[@]}" -I -S "$here/ai-accelerator-dispatch.py" entered "$exact_native" "$start"
+  exit $?
+fi
 case "$hook" in
   policy-*) needed=AGENTS.md ;;
   permissions|environment) needed=.claude/settings.json ;;
@@ -169,22 +203,8 @@ case "$hook" in
   bash-validator.sh|permissions|environment|policy-*)
     # The guard's verdict plus what the project's permission rules allow,
     # the decisions those rules make, and the policy its .claude/CLAUDE.md
-    # imports: what a session started in the root has. On Windows python3
-    # is often missing, or the Store's stand-in: the first that runs counts.
-    python=()
-    if [ -z "$windows" ] && command -v python3 > /dev/null 2>&1; then
-      python=(python3)
-    else
-      for name in python py python3; do
-        candidate=("$name")
-        [ "$name" = py ] && candidate+=(-3)
-        if "${candidate[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
-          python=("${candidate[@]}")
-          break
-        fi
-      done
-    fi
-    if [ ${#python[@]} -gt 0 ]; then
+    # imports: what a session started in the root has.
+    if pick_python; then
       # Isolated and without site: the helper needs the standard library
       # only, and a PYTHONPATH of the person's cannot shadow it.
       if [ "$hook" = bash-validator.sh ]; then

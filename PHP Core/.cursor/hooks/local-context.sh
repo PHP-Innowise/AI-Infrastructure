@@ -31,6 +31,44 @@ if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${
   # Git Bash says /c/..., a trailing separator), is a worktree's, not attached.
   [ "$(cd "$STATE_DIR" 2>/dev/null && pwd -P)" = "$ROOT_REAL" ] && STATE_DIR=$ROOT_DIR
 fi
+# The hook's input, read before the banner: a session that entered a worktree
+# of this repository - Claude Code's EnterWorktree - starts again there after
+# /clear or a compaction, still with these hooks, and names the worktree as its
+# "cwd". A worktree that has none of this installation is described and served
+# as the dispatcher serves a session started in it; the other hooks do the same.
+LOOP_INPUT=
+[ -t 0 ] || IFS= read -r -d '' LOOP_INPUT || :
+SESSION_CWD=
+[[ $LOOP_INPUT =~ \"cwd\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] && SESSION_CWD=${BASH_REMATCH[1]//\\\\/\\}
+checkout_identity() {
+  local directory=$1 output top common
+  output=$(git -C "$directory" rev-parse --show-toplevel --git-common-dir 2>/dev/null) || return 1
+  case "$output" in *$'\n'*) ;; *) return 1 ;; esac
+  top=${output%%$'\n'*}
+  common=${output#*$'\n'}
+  case "$common" in /*|[A-Za-z]:[\\/]*) ;; *) common="$directory/$common" ;; esac
+  top=$(cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  common=$(cd -- "$common" 2>/dev/null && pwd -P) || return 1
+  printf '%s\n%s' "$top" "$common"
+}
+# Cursor delivers the capsule through a rule file in the project, which in a
+# worktree would be written into it: a Cursor session there is not served.
+if [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] && [ -n "$SESSION_CWD" ] \
+  && [ "$SESSION_CWD" != "$ROOT_DIR" ] && [ -d "$SESSION_CWD" ] \
+  && case "$LOOP_INPUT" in *'"cursor_version"'*) false ;; *) true ;; esac \
+  && THEIRS=$(checkout_identity "$SESSION_CWD") && MINE=$(checkout_identity "$ROOT_DIR") \
+  && [ "${THEIRS%%$'\n'*}" != "${MINE%%$'\n'*}" ] && [ "${THEIRS#*$'\n'}" = "${MINE#*$'\n'}" ] \
+  && ROOT_REAL=$(cd "$ROOT_DIR" && pwd -P) && SESSION_REAL=$(cd "$SESSION_CWD" && pwd -P); then
+  MINE_TOP=${MINE%%$'\n'*}
+  SERVED=${THEIRS%%$'\n'*}${ROOT_REAL:${#MINE_TOP}}
+  case "$SESSION_REAL/" in
+    "$SERVED"/*)
+      if [ -d "$SERVED" ] && [ ! -f "$SERVED/memory-bank/scripts/context.py" ]; then
+        PROJECT_DIR=$SERVED
+        export ACCELERATOR_HOME="$ROOT_DIR" ACCELERATOR_STATE_DIR="$ROOT_DIR" ACCELERATOR_PROJECT_DIR="$SERVED"
+      fi ;;
+  esac
+fi
 if [ "$PROJECT_DIR" != "$ROOT_DIR" ]; then
   # Attached, or a worktree its main checkout's installation serves:
   # describe the project the session works in, whatever the cwd.
@@ -74,8 +112,6 @@ fi
 # any session's left untouched for a day are pruned, and another session still
 # running in this checkout keeps its own. A directory this user does not own,
 # or a symbolic link in its place, is left alone.
-LOOP_INPUT=
-[ -t 0 ] || IFS= read -r -d '' LOOP_INPUT || :
 SESSION_KEY=$(printf '%s' "$LOOP_INPUT" \
   | sed -n -E 's/.*"(session_id|conversation_id)"[[:space:]]*:[[:space:]]*"([^"]*)".*/\2/p' | head -1)
 SESSION_KEY=${SESSION_KEY//[^A-Za-z0-9]/}
@@ -233,8 +269,6 @@ fi
 # hook in the root - does not reach: the session hears where it is. Run from
 # where the session is, it finds the memory and the task by itself.
 CLI_WHERE=
-SESSION_CWD=
-[[ $LOOP_INPUT =~ \"cwd\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] && SESSION_CWD=${BASH_REMATCH[1]//\\\\/\\}
 if [ "$PROJECT_DIR" != "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] \
   && [ ! -f "$PROJECT_DIR/memory-bank/scripts/context.py" ]; then
   CLI_WHERE="this worktree has none"

@@ -28,6 +28,42 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A session that entered a worktree keeps its memory there — 2026-10-26
+
+- Claude Code's `EnterWorktree` moves a session that started in the project
+  root into `.claude/worktrees/<name>`, on a branch of its own. The root's
+  own hooks keep running there - `CLAUDE_PROJECT_DIR` the root, the input's
+  `cwd` the worktree - and saw another checkout of the repository: from
+  that turn on the session got no capsule and saved nothing. They now serve
+  a worktree that has none of the installation as the dispatcher serves a
+  session started in it (shared layout, the worktree's branch, its banner
+  after `/clear` or a compaction); one with an installation of its own is
+  left to it, as before, and so is a Cursor session there, whose capsule
+  would be a rule written into the worktree.
+- The turn that enters the worktree was armed by its prompt in the root:
+  its Stop arms the request in the worktree (`native-stop --entered`), so
+  that turn's work - often all of it - is saved under the worktree's branch.
+- The save step names the worktree (`context.py --project <worktree>`, a
+  global option taken only for a worktree the installation serves), since
+  run from the root it shows none of it, and in a worktree pipes the
+  result without naming the descriptor: once a session has entered a
+  worktree, Claude Code refuses "a program fed a descriptor it names"
+  (`--input -`) in every permission mode. `native-result` reads stdin when
+  given neither `--input` nor `--skip`.
+- Claude Code asks before a command that leaves an entered worktree, as the
+  save step's `cd <root>` does. The dispatcher (version 4) gives the memory
+  CLI alone the allow it has in the root there; nothing else, and nothing
+  for a session in the root itself.
+- `tests/test_memory_worktree_sessions.py` runs the hooks as Claude Code does
+  after `EnterWorktree`, for the entering turn and the next one, and the
+  save step from the worktree; `tests/test_memory_claude_subfolders.py` the
+  dispatcher's allow and what it refuses. `scripts/claude_code_bench.py
+  --enter-worktree` has the stand-in enter a worktree first: 2.1.278, and
+  2.1.299 in the desktop app's mode, saved under the worktree's branch with
+  no permission prompt and the worktree left clean. A first session's own
+  setting up of the dispatcher made 2.1.278 reread its settings in the
+  worktree, which has no hooks; the bench now enters after a first session.
+
 ### An attached project's worktree keeps an index of its own — 2026-10-26
 
 - The Harness keeps one state for a project and all its checkouts, and the

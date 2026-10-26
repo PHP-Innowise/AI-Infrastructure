@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sqlite3
 import stat
 import subprocess
@@ -257,6 +258,104 @@ class SharedWorktree(unittest.TestCase):
                               text=True, timeout=120)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn("Memory CLI:", done.stdout)
+
+    def hook(self, name, payload, cwd, **extra):
+        """One of the root's own hooks, as Claude Code runs it for a session
+        that started in the root: CLAUDE_PROJECT_DIR names the root, the
+        process and the input's cwd are where the session works now."""
+        return subprocess.run([BASH, (self.main / ".claude" / "hooks" / name).as_posix()],
+                              input=json.dumps(payload), cwd=cwd,
+                              env=dict(self.env, CLAUDE_PROJECT_DIR=str(self.main), **extra),
+                              capture_output=True, text=True, timeout=120)
+
+    def save_as_asked(self, stop, cwd, title):
+        """Run the save step a Stop hook asked for, as the agent's shell does:
+        in the session's folder, with none of the hooks' variables."""
+        decision = json.loads(stop.stdout)
+        request = decision.get("reason") or decision.get("hookSpecificOutput", {}).get("additionalContext", "")
+        command = re.search(r"exact command: (cd .*?--json)\n", request)
+        self.assertIsNotNone(command, request[:400])
+        result = json.dumps({"progress": f"{title}.", "verified": True,
+                             "learnings": [{"type": "finding", "title": title,
+                                            "consequence": "A session that entered a worktree saves under its branch.",
+                                            "sources": ["src/Invoice.php"]}]})
+        done = subprocess.run([BASH, "-c", command.group(1).replace("'<JSON>'", shlex.quote(result))], cwd=cwd,
+                              env=self.env, capture_output=True, text=True, timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
+        return command.group(1)
+
+    @unittest.skipIf(BASH is None, "no bash to run hooks with")
+    def test_a_session_that_entered_a_worktree_keeps_its_memory_there(self):
+        # Claude Code's EnterWorktree makes .claude/worktrees/<name> on a
+        # branch of its own and moves the session in; the root's hooks keep
+        # running, with the input's cwd the worktree.
+        entered = self.main / ".claude" / "worktrees" / "entered"
+        git(self.main, "worktree", "add", "-q", str(entered), "-b", "worktree-entered")
+        self.addCleanup(git, self.main, "worktree", "remove", "--force", str(entered))
+        for turn, (asked_in, title) in enumerate(((self.main, "Entering keeps the turn"),
+                                                  (entered, "Entered worktrees keep their memory"))):
+            with self.subTest(turn=turn):
+                # The first turn is asked in the root and enters the worktree;
+                # the next one is asked and ends there.
+                session = {"session_id": "entered-session"}
+                done = self.hook("working-memory-read.sh", dict(session, cwd=str(asked_in),
+                                 hook_event_name="UserPromptSubmit", prompt="How are invoices numbered?"), asked_in)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertNotIn("Memory not consulted", done.stdout)
+                if asked_in == entered:
+                    self.assertRegex(done.stdout, re.compile(r"^working: (worktree-entered|not recorded yet)", re.M))
+                    self.assertNotIn("SHOP-7", done.stdout)
+                stop = self.hook("working-memory-write.sh", dict(session, cwd=str(entered), hook_event_name="Stop",
+                                 stop_hook_active=False, last_assistant_message="Checked."), entered)
+                self.assertEqual(stop.returncode, 0, stop.stderr)
+                command = self.save_as_asked(stop, entered, title)
+                self.assertIn("--project " + shlex.quote(str(entered)), command)
+                done = self.hook("working-memory-write.sh", dict(session, cwd=str(entered), hook_event_name="Stop",
+                                 stop_hook_active=True, last_assistant_message="Saved."), entered)
+                self.assertEqual(done.returncode, 0, done.stderr)
+        tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
+                 for path in (self.main / "project-brain" / "dynamic" / "tasks").glob("*.md")]
+        self.assertTrue(any(task["external_id"] == "worktree-entered" and task.get("progress") for task in tasks))
+        findings = [path.read_text(encoding="utf-8")
+                    for path in (self.main / "project-brain" / "dynamic" / "findings").glob("*.md")]
+        for title in ("Entering keeps the turn", "Entered worktrees keep their memory"):
+            self.assertTrue(any(title in finding for finding in findings), title)
+        # After a compaction the session starts again there: the banner is the worktree's.
+        done = self.hook("local-context.sh", {"session_id": "entered-session", "cwd": str(entered),
+                                              "hook_event_name": "SessionStart", "source": "compact"}, entered)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Branch: worktree-entered", done.stdout)
+        self.assertRegex(done.stdout, r"Accelerator: the installation in \S*/shop, whose memory this worktree shares")
+        self.assertEqual(git(entered, "status", "--porcelain", "--ignored"), "")
+
+    @unittest.skipIf(BASH is None, "no bash to run hooks with")
+    def test_a_worktree_with_its_own_installation_is_still_left_to_it(self):
+        own = self.main / ".claude" / "worktrees" / "installed"
+        git(self.main, "worktree", "add", "-q", str(own), "-b", "worktree-installed")
+        self.addCleanup(git, self.main, "worktree", "remove", "--force", str(own))
+        runtime = own / "memory-bank" / "scripts" / "context.py"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("# Its own runtime\n", encoding="utf-8")
+        done = self.hook("working-memory-read.sh", {"session_id": "own", "cwd": str(own),
+                                                    "hook_event_name": "UserPromptSubmit",
+                                                    "prompt": "How are invoices numbered?"}, own)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("Memory not consulted", done.stdout)
+
+    def test_the_cli_takes_a_served_worktree_and_refuses_any_other_folder(self):
+        cli = [sys.executable, str(self.main / "memory-bank" / "scripts" / "context.py")]
+        done = subprocess.run([*cli, "--project", str(self.worktree), "status", "--json"], cwd=self.main,
+                              env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(self.layout(done), ("shared", self.worktree))
+        done = subprocess.run([*cli, "--project", str(self.main), "status", "--json"], cwd=self.main,
+                              env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(self.layout(done), ("installed", self.main))
+        outside = Path(self.temporary.name).resolve() / "elsewhere"
+        outside.mkdir(exist_ok=True)
+        done = subprocess.run([*cli, "--project", str(outside), "status", "--json"], cwd=self.main,
+                              env=self.env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("--project names neither", done.stderr)
 
     def plain(self, *arguments, cwd, **extra):
         """The installation's CLI run in `cwd` with none of the dispatcher's

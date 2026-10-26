@@ -88,21 +88,6 @@ case "$HOOK_STDIN" in
   *'"cursor_version"'*) [ -f "$ROOT_DIR/.cursor/hooks.json" ] && exit 0 ;;
 esac
 
-rebased_branch() {
-  local directory state name
-  directory=$(git -C "$PROJECT_DIR" rev-parse --absolute-git-dir 2>/dev/null) || return 1
-  for state in rebase-merge rebase-apply; do
-    [ -f "$directory/$state/head-name" ] || continue
-    name=
-    IFS= read -r name < "$directory/$state/head-name" || [ -n "$name" ] || continue
-    case "$name" in refs/heads/?*) printf '%s' "${name#refs/heads/}"; return 0 ;; esac
-  done
-  return 1
-}
-TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
-[ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
-[ -n "$TASK_ID" ] || exit 0
-
 # A bookkeeping continuation must not checkpoint the same turn again. The
 # transcript the host names gives the files this turn read or changed, for the
 # next session's "recent files"; the runtime keeps their paths only.
@@ -134,13 +119,15 @@ case "$HOOK_FIELDS" in
     TRANSCRIPT=${TRANSCRIPT%%$'\n'*} ;;
 esac
 
-# A Claude Code desktop session in its own worktree - and any session after
-# EnterWorktree - runs the hooks of the checkout they are installed in and
-# names its own checkout in the input's "cwd". This checkout's task is its
-# own branch's: a turn recorded from another checkout of the same repository
-# would land in a task that session never worked on, so none is recorded. A
-# subdirectory of this checkout, or a directory of another repository,
-# changes nothing.
+# A session that entered a worktree of this repository - Claude Code's
+# EnterWorktree - still runs these hooks, and names its own checkout in the
+# input's "cwd". It works there, on that worktree's branch. A worktree that has
+# none of this installation is served as the dispatcher serves a session
+# started in it (memory-bank/scripts/claude_dispatch.sh): this installation's
+# state, the worktree's folder as the project, and the save step names the
+# worktree. Any other checkout of the repository records no turn: it would land
+# in a task that session never worked on. A subdirectory of this checkout, or
+# a directory of another repository, changes nothing.
 checkout_identity() {
   local directory=$1 output top common
   output=$(git -C "$directory" rev-parse --show-toplevel --git-common-dir 2>/dev/null) || return 1
@@ -152,14 +139,46 @@ checkout_identity() {
   common=$(cd -- "$common" 2>/dev/null && pwd -P) || return 1
   printf '%s\n%s' "$top" "$common"
 }
-in_other_worktree() {
-  local session=$1 mine theirs
-  [ -n "$session" ] && [ "$session" != "$PROJECT_DIR" ] && [ -d "$session" ] || return 1
-  theirs=$(checkout_identity "$session") || return 1
-  mine=$(checkout_identity "$PROJECT_DIR") || return 1
-  [ "${theirs%%$'\n'*}" != "${mine%%$'\n'*}" ] && [ "${theirs#*$'\n'}" = "${mine#*$'\n'}" ]
+OTHER_CHECKOUT=
+ENTERED=
+if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$PROJECT_DIR" ] && [ -d "$SESSION_DIR" ] \
+  && THEIRS=$(checkout_identity "$SESSION_DIR") && MINE=$(checkout_identity "$PROJECT_DIR") \
+  && [ "${THEIRS%%$'\n'*}" != "${MINE%%$'\n'*}" ] && [ "${THEIRS#*$'\n'}" = "${MINE#*$'\n'}" ]; then
+  OTHER_CHECKOUT=${THEIRS%%$'\n'*}
+  # Cursor delivers the capsule through a rule file in the project, which in
+  # a worktree would be written into it: a Cursor session there is not served.
+  if [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] \
+    && case "$HOOK_STDIN" in *'"cursor_version"'*) false ;; *) true ;; esac \
+    && ROOT_REAL=$(cd "$ROOT_DIR" && pwd -P) && SESSION_REAL=$(cd "$SESSION_DIR" && pwd -P); then
+    MINE_TOP=${MINE%%$'\n'*}
+    SERVED=$OTHER_CHECKOUT${ROOT_REAL:${#MINE_TOP}}
+    case "$SESSION_REAL/" in
+      "$SERVED"/*)
+        if [ -d "$SERVED" ] && [ ! -f "$SERVED/memory-bank/scripts/context.py" ]; then
+          PROJECT_DIR=$SERVED
+          export ACCELERATOR_HOME="$ROOT_DIR" ACCELERATOR_STATE_DIR="$ROOT_DIR" ACCELERATOR_PROJECT_DIR="$SERVED"
+          ENTERED=--entered
+          OTHER_CHECKOUT=
+        fi ;;
+    esac
+  fi
+fi
+[ -z "$OTHER_CHECKOUT" ] || exit 0
+
+rebased_branch() {
+  local directory state name
+  directory=$(git -C "$PROJECT_DIR" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  for state in rebase-merge rebase-apply; do
+    [ -f "$directory/$state/head-name" ] || continue
+    name=
+    IFS= read -r name < "$directory/$state/head-name" || [ -n "$name" ] || continue
+    case "$name" in refs/heads/?*) printf '%s' "${name#refs/heads/}"; return 0 ;; esac
+  done
+  return 1
 }
-in_other_worktree "$SESSION_DIR" && exit 0
+TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
+[ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
+[ -n "$TASK_ID" ] || exit 0
 
 TURN_ARGUMENTS=(turn --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER")
 [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] && TURN_ARGUMENTS+=(--transcript "$TRANSCRIPT")
@@ -198,10 +217,10 @@ native_journal() {
 if [ "${CONTEXT_CAPSULE_DELIVERED:-}" != "1" ] && [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ]; then
   if command -v timeout > /dev/null 2>&1; then
     NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | timeout "$BUDGET_SECONDS" "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
-      --host claude --task-id "$TASK_ID" 2>/dev/null)
+      --host claude --task-id "$TASK_ID" ${ENTERED:+"$ENTERED"} 2>/dev/null)
   else
     NATIVE_RESPONSE=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" "$CONTEXT_CLI" native-stop \
-      --host claude --task-id "$TASK_ID" 2>/dev/null)
+      --host claude --task-id "$TASK_ID" ${ENTERED:+"$ENTERED"} 2>/dev/null)
   fi
   NATIVE_STATUS=$?
   [ "$NATIVE_STATUS" -eq 0 ] && [ -n "$NATIVE_RESPONSE" ] && printf '%s\n' "$NATIVE_RESPONSE"

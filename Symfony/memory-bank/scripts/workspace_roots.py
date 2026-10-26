@@ -219,12 +219,23 @@ def default_state_root() -> Path:
 
 
 _WORKING_DIRECTORY: Optional[str] = None
+_NAMED_START: Optional[str] = None
+
+
+def serve_from(folder: str) -> None:
+    """Take `folder` as where this run is (context.py --project): a save
+    made from this installation's root for a session that works in a
+    worktree, which the root alone does not show."""
+    global _NAMED_START
+    _NAMED_START = folder
 
 
 def start_directory() -> str:
-    """Where this run is: CLAUDE_PROJECT_DIR, which Claude Code gives its
-    hooks and MCP servers, else the directory the process started in (the
-    runtime never changes it)."""
+    """Where this run is: the folder --project names, else CLAUDE_PROJECT_DIR,
+    which Claude Code gives its hooks and MCP servers, else the directory the
+    process started in (the runtime never changes it)."""
+    if _NAMED_START:
+        return _NAMED_START
     named = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
     if named and os.path.isabs(named):
         return named
