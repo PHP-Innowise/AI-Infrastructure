@@ -341,6 +341,68 @@ edition's own files remain in that edition's changelog.
   ends a transaction, not the connection, and on Windows an open database
   cannot be deleted. They are closed with `contextlib.closing` now.
 
+### Codex started in a worktree of the project — 2026-10-26
+
+- Codex reads a project's `.codex/` - `hooks.json` and `config.toml` - and
+  `AGENTS.md` only in the folders between the session's folder and the
+  nearest `.git`, which in a linked worktree is the worktree's own, inside
+  the project too. A worktree of an installation Git does not track has none
+  of them: Codex 0.164 started in a worktree of an installed project, the
+  main checkout's hooks approved, ran none of them - no capsule, no save, no
+  guard. A Codex session in the root now sets up, in the background from the
+  Codex copy of `local-context.sh`, a dispatcher in the person's own Codex
+  folder (`memory-bank/scripts/codex_worktrees.py`, the scripts
+  `codex_dispatch.sh` and `.py` copied to `$CODEX_HOME/ai-accelerator/`):
+  one entry per hook of the project's `.codex/hooks.json` in
+  `$CODEX_HOME/hooks.json`, with its matcher, timeout and context limit, and
+  one named `policy`. The installer run in a terminal does it at once
+  (`CODEX worktrees <folder>`). The person's own entries keep their place -
+  Codex keys an approval by the file and the entry's position - and the
+  dispatcher's are written the same way every time, since Codex asks again
+  for a changed definition but not for an edited script. Nothing goes into
+  `config.toml`: Codex runs the entries only once the person trusts them in
+  its own review (the terminal's "Trust all and continue" at start, `/hooks`,
+  Settings > Hooks in the app; `codex exec` skips them silently). Nothing is
+  written either for hooks kept in `config.toml`, where Codex would warn at
+  every start that the layer has two forms, for a `hooks.json` that is not an
+  object, once `ai-accelerator/off` exists, for a hook another program
+  started, or on Windows.
+- The dispatcher serves only a session in a linked worktree of a listed
+  root, in the root's folder of it, without an installation of its own: it
+  runs the root's `.codex/hooks/<script>` there with `ACCELERATOR_HOME` and
+  `ACCELERATOR_STATE_DIR` naming the root and `ACCELERATOR_PROJECT_DIR` the
+  worktree, the shared layout Claude Code's dispatcher uses. In the root and
+  below it Codex runs the project's own hooks, so there - and in every other
+  project and in a launcher's attached session - it exits after a string
+  match. `policy` prints the root's `AGENTS.md` whole
+  (`additionalContextLimit` 32,768 tokens; Codex's default keeps 2,500) at a
+  new, cleared or compacted start, not on resume, whose history replays it,
+  and not where the worktree has an `AGENTS.md` of its own.
+- `native_results`: Codex has no file a hook can give the session's
+  commands variables through, so in the shared layout its save step names
+  the three roots in the command. Without them the save checked the main
+  checkout's files and refused a learning citing the branch's own file
+  (`stop:failed:unsaved`).
+- Offline with the real Codex 0.164 and a scripted model, an isolated
+  `CODEX_HOME`: the root session set up eleven entries and wrote no
+  approval; a worktree session before they were approved ran no hook; after
+  "Trust all" a session in `.claude/worktrees/<name>`, in
+  `$CODEX_HOME/worktrees/<id>/project` and in `src/` of one got the capsule
+  and every line of `AGENTS.md`, and its save went through the spool into the
+  root's Project Brain under the worktree's branch, with an index of its own
+  and the worktree left clean - through `codex exec`, `codex app-server` as
+  the desktop app drives it (no approval asked) and the terminal with a
+  question typed during the save, in all four editions.
+  `scripts/codex_bench.py --worktree [inside|beside]` and `--app-server`
+  repeat it; `tests/test_memory_codex_worktrees.py` (28 cases, CI's memory
+  job) covers the setup, the dispatcher, the policy and the save step, and
+  each of nine reverted pieces fails it. The bench's stand-in now opens its
+  stream before it writes: Codex 0.164's terminal, after an earlier session
+  in the same `CODEX_HOME`, cut a response silent for 8 seconds.
+- Not covered: Codex's own `--worktree` starts on a detached HEAD, which
+  names no task; the desktop app's worktrees were not run; Cursor in a
+  worktree without the installation still runs no hooks.
+
 ### Claude Code's sandbox below the root or in a worktree saves through the spool — 2026-10-26
 
 - Claude Code's Bash sandbox lets a command write only the folder its

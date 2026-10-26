@@ -11,6 +11,13 @@ it at the top of every session.
 
 ## Unreleased
 
+- Codex started in a Git worktree of the project that has none of the installation runs the
+  project's hooks and gets its `AGENTS.md` there too, for the worktree - the root's memory, the
+  worktree's own task - once you trust the entries a session in the root puts into your own
+  `~/.codex/hooks.json`. The Codex copy of `.codex/hooks/local-context.sh` sets them up; Quick
+  Start in `README.md` (`ACCELERATOR.md`) and `.codex/hooks/README.md` say so. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md).
+
 - Claude Code started in a Git worktree of the project that has none of the installation - the
   desktop app's `.claude/worktrees/<name>` among them - gets the project's hooks, rules, `env` and
   policy there too, for the worktree: the root's memory, the worktree's own task. Quick Start in

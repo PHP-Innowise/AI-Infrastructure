@@ -203,6 +203,18 @@ edition's `ACCELERATOR.md` describes it, and
 [memory integration](../docs/MEMORY-INTEGRATION.md#claude-code-started-below-the-project-root)
 says what the dispatcher does and how it was checked.
 
+With the `codex` tool selected, an install run in a terminal also sets up
+Codex for sessions started in a Git worktree of the project - Codex reads a
+project's `.codex/` only up to the nearest `.git`, and a worktree has none of
+an installation Git does not track - and says so on stderr
+(`CODEX worktrees <folder>`). It writes a dispatcher into your own Codex
+folder (`~/.codex/ai-accelerator/`, entries in `~/.codex/hooks.json`) when
+that folder exists, never `config.toml`, and nothing for hooks kept in
+`config.toml` or once `~/.codex/ai-accelerator/off` exists. Codex runs the
+entries once you trust them in its hook review; a scripted install leaves the
+setup to the project's first Codex session in its root
+([Codex started in a worktree](../docs/MEMORY-INTEGRATION.md#codex-started-in-a-worktree)).
+
 ## 6. Validate the Installation
 
 From the target project root:

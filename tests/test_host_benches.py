@@ -266,6 +266,38 @@ class CodexAttachedTest(unittest.TestCase):
         self.assertIn("--attached runs a fresh project", said.getvalue())
 
 
+class CodexWorktreeTest(unittest.TestCase):
+    def refused(self, *options: str) -> str:
+        argv = ["codex_bench.py", *options, "--codex", sys.executable]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(codex_bench.sys, "platform", "linux"), \
+                mock.patch.object(codex_bench.shutil, "which", return_value="/usr/bin/true"):
+            with contextlib.redirect_stderr(io.StringIO()) as said:
+                self.assertEqual(2, codex_bench.main())
+        return said.getvalue()
+
+    def test_a_worktree_run_needs_an_install_the_sandbox_writes_and_one_turn(self) -> None:
+        self.assertIn("--worktree runs Codex", self.refused("--worktree", "--attached"))
+        self.assertIn("--worktree runs Codex", self.refused("--worktree", "beside", "--sandbox", "read-only"))
+        self.assertIn("--app-server runs one turn", self.refused("--app-server", "--queued", "8"))
+
+    def test_only_the_approvals_of_the_persons_hooks_file_count_as_the_setups(self) -> None:
+        # The setup must leave the approval to the person: an approval of a
+        # project's hooks or a plugin's is not one of its entries.
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            mine = f"{home / 'hooks.json'}:session_start:0:0"
+            (home / "config.toml").write_text(
+                f'model = "m"\n\n[hooks.state."/p/next/.codex/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:1"\n\n'
+                f'[hooks.state."ponytail@ponytail:hooks/hooks.json:session_start:0:0"]\ntrusted_hash = "sha256:2"\n',
+                encoding="utf-8")
+            self.assertEqual([], codex_bench.user_approvals(home))
+            with (home / "config.toml").open("a", encoding="utf-8") as config:
+                config.write(f'\n[hooks.state."{mine}"]\ntrusted_hash = "sha256:3"\n')
+            self.assertEqual([mine], codex_bench.user_approvals(home))
+            with mock.patch.dict(sys.modules, {"tomllib": None}):
+                self.assertEqual([mine], codex_bench.user_approvals(home))
+
+
 class PersonTrustTest(unittest.TestCase):
     def test_the_bench_reads_whether_your_claude_code_trusts_the_target(self) -> None:
         # next had never had its trust accepted: there `claude -p` refused

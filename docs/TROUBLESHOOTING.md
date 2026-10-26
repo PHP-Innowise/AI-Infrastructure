@@ -757,7 +757,18 @@ blocked, or a hook times out.
     sandbox writes only below that folder, so the save waits in a temporary
     folder (`ai-accelerator-native-spool-<uid>`) and the next hook saves it
     (journal `saved` with code `spooled`: the sandbox cannot write the
-    journal either).
+    journal either). Codex started in a Git worktree of the project without
+    the installation runs the root's hooks only through a dispatcher in your
+    own Codex folder, whose entries Codex runs once you have trusted them:
+    `~/.codex/ai-accelerator/projects` (or the same under `$CODEX_HOME`)
+    lists the project root and `~/.codex/hooks.json` holds
+    `ai-accelerator-dispatch.sh` entries. If they are missing, start one Codex
+    session in the root; if Codex skips them - `codex exec` does so without a
+    word - trust them in its terminal's `/hooks` or the app's Settings >
+    Hooks. Nothing is set up for hooks kept in `~/.codex/config.toml` or
+    while `~/.codex/ai-accelerator/off` exists; to remove the dispatcher,
+    create that file and delete the entries from `hooks.json`
+    ([Codex started in a worktree](MEMORY-INTEGRATION.md#codex-started-in-a-worktree)).
 
 ### Recover
 

@@ -19,6 +19,8 @@ Project-scoped hooks load only when the project is **trusted**.
 No `matcher` is set on any group: each script self-filters on its input before doing any real work — `bash-validator.sh` exits unless the payload carries a `command`/`cmd` key, and `file-naming-validator.sh` and `loop-detection.sh` exit unless `tool_name` is a file-editing tool (or is absent) — so it is safe to run on every tool call and returns `0` when not applicable.
 
 
+**In a worktree:** Codex reads `.codex/` only in the folders between the session's folder and the nearest `.git`, so a session in a Git worktree of the project - which has none of an installation Git does not track - runs none of these hooks. In a session in the project root `local-context.sh` also runs `memory-bank/scripts/codex_worktrees.py` in the background, which keeps a dispatcher in your own Codex folder (`~/.codex`, or `$CODEX_HOME`): one entry per hook here in `hooks.json`, and one that brings `AGENTS.md`. For a session in a worktree of this project they run these scripts, with the root's memory and the worktree's own task; anywhere else they do nothing. Codex runs them once you have trusted them in its own hook review (`/hooks`, or "Trust all" when it asks); nothing here writes that approval, nor `config.toml`. The installer does the same when run in a terminal. Nothing is written for hooks kept in `config.toml`, nor once `ai-accelerator/off` exists there (`docs/MEMORY-INTEGRATION.md` in the accelerator's repository).
+
 `subagent-dispatch.sh` exists here as a byte-identical mirror of the canonical hook but stays unregistered: multi-agent is disabled in this edition's `config.toml`, so there are no subagent stops to observe.
 ## Supported events (Codex)
 

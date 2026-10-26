@@ -52,6 +52,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   `memory_results.py`, `mcp_server.py` and `context.py` change in the asset;
   the policy lock was rewritten.
 
+### Codex in a worktree of a generated project runs its hooks — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): memory-seed copies
+  `codex_worktrees.py`, `codex_dispatch.py` and `codex_dispatch.sh` (it now
+  copies every `assets/scripts/*.sh`), `native_results.py` and
+  `context_retrieval.py` change in the asset, and hook-forge has the Codex
+  copy of `local-context.sh` run `codex_worktrees.py` where the others run
+  `claude_subfolders.py`. Its skill-body total is 305,085 bytes, under the
+  306,200 ceiling. The policy lock was rewritten.
+
 ### The seeded dispatcher serves the project's worktrees — 2026-10-25
 
 - As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,

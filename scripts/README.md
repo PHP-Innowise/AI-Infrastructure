@@ -863,9 +863,37 @@ bubblewrap sandbox mounts its own `/dev` and writes `/tmp`, so a project in
 question moves the request aside (`previous-in-flight`) and the save still
 lands through the spool.
 
+`--worktree [inside|beside]` runs the measured session in a Git worktree of
+the project on a branch of its own: inside the project where Claude Code makes
+its worktrees (`.claude/worktrees/bench`), or beside it where Codex makes its
+own (`CODEX_HOME/worktrees/<id>/project`). The installation is not committed,
+so the worktree has none of it, and the branch commits a file of its own. A
+session in the root first sets up the dispatcher in the isolated `CODEX_HOME`
+(`memory-bank/scripts/codex_worktrees.py`); a session in the worktree before
+anybody approved its entries runs no hook; the entries are then approved by
+their hashes, the records Codex's "Trust all" writes, and the measured session
+runs. The run passes when the setup wrote no approval, the unapproved session
+ran no hook, and the measured one got the capsule and every line of
+`AGENTS.md`, its save of a learning citing the branch's file waited in the
+spool and landed in the root's Project Brain under the worktree's branch, the
+worktree got its own index in the root, and nothing was written into the
+worktree. It combines with `--subfolder`, `--queued` and `--app-server`; its
+work folder is on disk, as for `--subfolder`.
+
+`--app-server` runs the measured turn through `codex app-server`, as the Codex
+desktop app drives one: a thread started in the session's folder with the
+workspace-write sandbox and on-request approvals, a turn, and every approval
+Codex asks the client for refused and counted; the run passes only when none
+was asked.
+
+The stand-in opens its stream before it writes, as a model does: Codex
+0.164's terminal, after an earlier session in the same `CODEX_HOME`, cut a
+response that stayed silent for 8 seconds and never ran the save it carried.
+
 ```bash
 python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
-  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--subfolder src] [--timeout 240] [--keep]
+  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--subfolder src] \
+  [--worktree [inside|beside]] [--app-server] [--timeout 240] [--keep]
 ```
 
 - **Outputs:** a JSON report:
@@ -874,7 +902,11 @@ python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox 
   - how many messages carried the step, whether as a `<hook_prompt>` and
     XML-escaped;
   - whether the save ran and the second Stop saw the recovery (the journal's
-    events).
+    events);
+  - with `--worktree`, what the setup wrote and the unapproved session did,
+    and whether the measured one got the capsule and the policy, saved under
+    the worktree's branch, got its own index and left the worktree clean;
+    with `--app-server`, the approvals Codex asked for.
 
   Exit 0 when the save ran and one message carried the step; 1 otherwise; 2
   without Linux namespaces. `CODEX_BENCH_DUMP=DIR` keeps every request body.
