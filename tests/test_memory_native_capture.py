@@ -695,6 +695,36 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
                 self.assertEqual([],list(spool.rglob('*.json')))
                 self.assertEqual(1,len(self.records('tasks')))
 
+    @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,'permission bits do not stop root')
+    def test_a_save_claude_codes_sandbox_spools_under_its_own_folder_is_made_by_the_next_hook(self):
+        # Claude Code's sandbox gives a command claude-<uid> under its own
+        # temporary directory as TMPDIR; its hooks run outside the sandbox,
+        # with that directory itself. A session below the root or in a
+        # worktree may not write the project, so its save waits there.
+        base=Path(tempfile.mkdtemp(prefix='claude-sandbox-',dir=self.root.parent))
+        inside=base/f'claude-{os.getuid()}'
+        inside.mkdir(mode=0o700)
+        hooks=dict(self.env,TMPDIR=str(base))
+        self.call('native-prompt','--host','claude','--task-id','research','--json',env=hooks,
+                  data={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Inspect it.'})
+        self.call('native-stop','--host','claude','--task-id','research',env=hooks,data=self.STOP)
+        candidate,state=self.state()
+        modes=self.readonly()
+        try:
+            spooled=self.call('native-result','--request',candidate.stem,'--token',state['token'],'--input','-',
+                              '--json',data=self.payload,env=dict(self.env,TMPDIR=str(inside)),ok=False)
+            self.assertEqual(0,spooled.returncode,spooled.stderr.decode())
+            self.assertEqual('spooled',json.loads(spooled.stdout)['state'])
+        finally:
+            for path,mode in modes.items():path.chmod(mode)
+        self.assertEqual(1,len(list(inside.rglob('*.json'))))
+        lines=[(line['stage'],line['event'],line.get('code')) for line in self.written(
+            lambda:self.call('native-stop','--host','claude','--task-id','research',env=hooks,
+                             data=dict(self.STOP,stop_hook_active=True)))]
+        self.assertEqual(('save','saved','spooled'),lines[0])
+        self.assertEqual([],list(inside.rglob('*.json')))
+        self.assertEqual(1,len(self.records('tasks')))
+
     def test_each_stop_path_writes_one_line_with_its_code(self):
         def request(payload=self.STOP,host='codex',**values):
             return self.call('native-stop','--host',host,'--task-id','research',data=payload,

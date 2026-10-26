@@ -747,6 +747,12 @@ blocked, or a hook times out.
     dispatcher, create that `off` file and delete the entries from
     `settings.json`. What the dispatcher does and how it was checked:
     [Claude Code started below the project root](MEMORY-INTEGRATION.md#claude-code-started-below-the-project-root).
+    A Git worktree of the project has only what Git tracks: when the
+    installation is not committed, the dispatcher serves a session started
+    in the worktree too - the root's memory, the worktree's own task and an
+    index of its own under the root's `memory-bank/local/worktrees/` - but
+    not a session that entered the worktree after starting in the root
+    ([Claude Code started in a worktree](MEMORY-INTEGRATION.md#claude-code-started-in-a-worktree)).
     Codex started in a subdirectory finds and runs the project's hooks; its
     sandbox writes only below that folder, so the save waits in a temporary
     folder (`ai-accelerator-native-spool-<uid>`) and the next hook saves it

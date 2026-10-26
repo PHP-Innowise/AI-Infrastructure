@@ -28,6 +28,145 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A worktree's state spelled another way is still its installation — 2026-10-26
+
+- The Windows memory job on #66 failed twice in
+  `tests/test_memory_worktree_sessions.py`. `local-context.sh` told an
+  attached project from a worktree by comparing ACCELERATOR_STATE_DIR with
+  its own root as text: Git Bash spells the root `/c/...`, the variable
+  spelled it `C:\...`, and the banner said "attached from" where the
+  worktree shares the installation's memory. The hook now compares where
+  the two lead (`pwd -P`, as it already did for ACCELERATOR_HOME) and, when
+  the state is this installation, uses the root's spelling; on Linux a
+  trailing separator showed the same mistake and is now part of the test.
+  The test's cleanup could not remove the worktree's index because the
+  test's own SQLite connections stayed open: `with sqlite3.connect(...)`
+  ends a transaction, not the connection, and on Windows an open database
+  cannot be deleted. They are closed with `contextlib.closing` now.
+
+### Claude Code's sandbox below the root or in a worktree saves through the spool — 2026-10-26
+
+- Claude Code's Bash sandbox lets a command write only the folder its
+  session started in and claude-<uid> under its own temporary directory
+  (CLAUDE_CODE_TMPDIR, else the system's), which it gives the command as
+  TMPDIR. A save from a session below the project root or in a worktree
+  cannot write the project there, so it was spooled into that folder - and
+  the next hook, which runs outside the sandbox with the temporary
+  directory itself, never looked in it: the turn ended `stop` `failed`
+  `unsaved` (Claude Code 2.1.299, offline, with the sandbox on and the
+  project on disk). `native_results._spool_dirs` now looks in claude-<uid>
+  under each temporary directory too; the command still takes the first
+  folder it can write, its own TMPDIR. With it, both sessions saved
+  (`saved` `spooled`, then `recovery-saved`). A session in the root, which
+  the sandbox lets write the project, saves as before. The attached layout
+  - the Harness lending an edition, its state kept outside the project -
+  had the same loss under the sandbox, every answer, and saves through the
+  spool now too (`--sandbox --attached` fails without the change).
+  `tests/test_memory_native_capture.py` repeats it with the two TMPDIRs;
+  dropping the new folders fails it. `scripts/claude_code_bench.py
+  --sandbox` turns the sandbox on in the bench (the project on disk under
+  `/var/tmp`, Claude Code started without the namespace's capabilities):
+  on 2.1.278 and 2.1.299 the root saved as before, and below it, in a
+  worktree and in the desktop app's mode the save went through the spool.
+
+### Claude Code started in a worktree of the project — 2026-10-25
+
+- Git gives a linked worktree only what it tracks, and none of the four
+  real installations checked was tracked: Claude Code's own worktrees
+  (`claude --worktree`, the desktop app's `.claude/worktrees/<name>`)
+  copy `settings.local.json` and `.worktreeinclude` files, not the
+  installation. The real Claude Code 2.1.278 started in such a worktree
+  ran no project hook - no project context, no `AGENTS.md`, no capsule,
+  no save - and 12 of the person's 90 Claude Code sessions in October
+  started in one of its worktrees.
+- The dispatcher (`claude_dispatch.sh`, version 3) now serves a session
+  started in a linked worktree of a listed root's repository that has no
+  installation of its own: it finds the worktree by its `.git` file,
+  which names `<main checkout>/.git/worktrees/<name>`, a folder Git keeps
+  with a `gitdir` file, without starting a process; a project installed
+  in a folder of a monorepo is that folder of the worktree. It runs the
+  root's hooks in the worktree with `ACCELERATOR_HOME` and
+  `ACCELERATOR_STATE_DIR` naming the root and `ACCELERATOR_PROJECT_DIR`
+  the worktree; `environment` gives the session's commands the same
+  three variables, so the save step serves the worktree; `permissions`
+  decides for the worktree's files by the root's rules, a deny or ask
+  also covering the root's own files from there; the policy comes in
+  parts whatever Claude Code was told about imports. A forged `.git`
+  file, a submodule, a worktree of another repository or one with an
+  installation of its own is left alone, and so is a session a launcher
+  lends an accelerator to (`ACCELERATOR_HOME` set: the Harness opening a
+  worktree of an installed project, which has none of the installation,
+  would otherwise run every hook twice). A root the session's folder is
+  below, in its own checkout or one around it, comes first: an installed
+  worktree of an installed project is served as itself whatever the
+  lengths of the two roots - found by a test, before it shipped.
+- The dispatcher's permissions entry, which runs before every tool call
+  below the root or in a worktree, starts a third faster: `shutil`,
+  `subprocess` and `urllib.parse` are imported where they are used, and the
+  helper runs isolated and without site (`-I -S`), so a person's
+  `PYTHONPATH` cannot shadow the standard library either - 32 ms a call
+  before, 22 ms after. The guard, `bash-validator.sh`, now runs there as in
+  the root, without the helper, unless the command names `context.py`:
+  the helper only adds the allow the project's rules give the memory CLI,
+  and its Python start cost every other Bash call five times the guard's
+  own - 37 ms before, 7.5 ms after; a block is the guard's as before.
+- The runtime's shared layout (`workspace_roots.py`): the three variables
+  with the state root equal to the tooling root - an installation lent
+  to its own worktree. The Project Brain and Memory Bank are the root's,
+  keyed as there (`key_for`); the worktree is the project, whose branch
+  names the task; the index is the worktree's own,
+  `memory-bank/local/worktrees/<hash>/context.db` (`default_database`);
+  the accelerator's policy, skills, `specs/` and `tasks/` are indexed
+  from the root, where the worktree has no copy (`source_scan_plan`), and
+  a citation of them by the root's key resolves there (`resolve`). The
+  installed state keeps its permissions: no owner-only `umask`, no
+  `ensure_attached_state`. A file named `worktree` beside the index names
+  the worktree (`remember_worktree_index`), and a checkpoint removes the
+  index of a worktree that is gone (`prune_worktree_indexes`, beside the
+  consolidation and compaction it runs with).
+- The hooks tell a worktree from the root by `PROJECT_DIR`, not
+  `STATE_DIR`: `local-context.sh` describes the worktree, names the
+  installation whose memory it shares and the Memory Bank's files by
+  their full path, and `working-memory-read.sh` (with its mirrors' rule in
+  `context_retrieval.py`) gives the advice to build the index by hand only
+  in the root, where the command it names works.
+- Offline with the real Claude Code 2.1.278 and 2.1.299 (the version the
+  desktop app bundles; without the dispatcher a worktree session there got
+  nothing either), in `.claude/worktrees/<name>`
+  and in a folder of a worktree beside the project: project context,
+  policy, a capsule with the worktree's own task, and the save into the
+  root's Brain under the worktree's branch; 280 randomized permission
+  calls in seven rule sets decided in a worktree for its files as in the
+  root for the root's. `scripts/memory_rollout_rehearsal.py --worktree`
+  runs the hooks through the copy's dispatcher in a worktree of each copy,
+  the save with the `environment` entry's variables: on the four client
+  installations, under both profiles, every save landed under the
+  worktree's branch, was recalled, and left the worktree clean
+  (`tests/test_memory_rollout_rehearsal.py` covers it).
+  `scripts/claude_code_bench.py --desktop` drives a session as the
+  desktop app drives Claude Code (stream-json, the initialize request,
+  `--setting-sources user,project,local`, permission prompts over stdio,
+  each refused and listed) and fails on any prompt: in the root, below it
+  and in a worktree, 2.1.278 and 2.1.299 asked none; with the memory CLI's
+  allow taken out it lists the save's command. Left without a mode, 2.1.299
+  under those flags decides an ask in auto mode, which needs a classifier
+  no offline run has, so the bench names the mode as the app does.
+  `scripts/claude_code_bench.py --worktree` (and
+  `--worktree --subfolder src`) repeats the host run and passes only when
+  the save went to the worktree's branch, the worktree got its own index
+  and stayed clean. `tests/test_memory_claude_subfolders.py`
+  (`Worktrees`) and the new `tests/test_memory_worktree_sessions.py`, in
+  CI's memory job, cover both halves; mutating any of the changes fails
+  them.
+- Not covered: a session that enters a worktree after starting in the
+  root (`EnterWorktree`) keeps the root's hooks, which leave the memory
+  out there, as before; Codex and Cursor started in such a worktree run
+  no hooks; the memory MCP server, found by the nearest `.mcp.json`,
+  serves a worktree inside the root as the root. Documented in
+  `docs/MEMORY-INTEGRATION.md` ("Claude Code
+  started in a worktree"), `docs/TROUBLESHOOTING.md` item 11 and
+  `install/README.md`.
+
 ### The spool's journal line, as it lands — 2026-10-25
 
 - Documentation: below the project root Codex's sandbox cannot write the
@@ -62,6 +201,24 @@ edition's own files remain in that edition's changelog.
   through below it. Claude Code also reads the root's `settings.local.json`
   in a session below it, resolving its paths from that session's folder:
   stricter there, never looser (`docs/MEMORY-INTEGRATION.md`).
+
+### The Codex bench starts below the project root — 2026-10-25
+
+- `scripts/codex_bench.py --subfolder DIR` starts Codex in DIR below the
+  project root, in `codex exec` or, with `--queued`, in its terminal: the
+  save goes through the spool of 2a31787a and the run passes when the
+  journal says `saved` with code `spooled` and the recovery was seen. Its
+  work folder is on disk under `~/.cache/ai-infrastructure-benches/`:
+  Codex 0.163's bubblewrap sandbox mounts its own `/dev` and writes `/tmp`,
+  so a project in `/dev/shm` was invisible to a command started below its
+  root (`can't open file .../context.py`) and one in `/tmp` writable. The
+  stand-in reads its file from the folder Codex starts in.
+- Offline on Codex 0.163: from `src/` in `codex exec` and in the terminal
+  with a second question typed during the save (`previous-in-flight`), the
+  save landed through the spool; nothing said it was not saved.
+  `claude_code_bench.py`'s check of a queued save counts a spooled one as
+  landed. The sandbox below the root writes no journal either, so the
+  `save` `spooled` line is never there; the next hook's `saved` line is.
 
 ### Below the project root on Windows too; the dispatcher keeps its newest copy — 2026-10-25
 

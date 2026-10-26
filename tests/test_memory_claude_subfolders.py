@@ -257,7 +257,7 @@ class PolicyImport(Fixture):
 class DispatcherVersion(Fixture):
     # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
     # then record the scripts' new fingerprint here.
-    FINGERPRINTS = {2: "adb3f5ec8149fa0f9b127fe3ff7b0ba1cf1cd5811d85ea8ca22cabf822d06578"}
+    FINGERPRINTS = {3: "01f6a42d684516ea4f8aa8025f2186e2f1ea29cf4f7e6b5893b1b8c30a3c024b"}
 
     def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
         shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")
@@ -767,6 +767,194 @@ class Dispatcher(Fixture):
         done = call("rm -rf /")
         self.assertEqual(done.returncode, 2)
         self.assertNotIn(b"allow", done.stdout)
+
+
+class Worktrees(Fixture):
+    """A linked worktree has none of an installation Git does not track, so
+    Claude Code started there ran nothing of it. The dispatcher runs the
+    root's hooks there for the worktree: the root keeps the tooling and the
+    memory, the worktree is the project its branch names the task of."""
+    ECHO = ('printf "%s|%s|%s|%s|%s|%s" "$PWD" "$CLAUDE_PROJECT_DIR" "$ACCELERATOR_HOME" '
+            '"$ACCELERATOR_STATE_DIR" "$ACCELERATOR_PROJECT_DIR" "$(cat)"\n')
+
+    def committed(self):
+        """A project whose code is committed and whose installation is not."""
+        root = self.project(hooks={"echo.sh": self.ECHO}, policy="# Policy\nRule.\n")
+        (root / "src" / "Billing" / "Invoice.php").write_text("<?php\n", encoding="utf-8")
+        git(root, "add", "src")
+        git(root, "commit", "-qm", "base")
+        self.setup_dispatcher(root)
+        return root
+
+    def assert_served(self, done, root, project, payload="{}"):
+        self.assertEqual(done.returncode, 0, done.stderr)
+        fields = done.stdout.decode().split("|", 5)
+        self.assertEqual(len(fields), 6, done.stdout)
+        where, named, home, state, served, given = fields
+        self.assertEqual([shown(where), shown(named), shown(served), given], [shown(project)] * 3 + [payload],
+                         done.stdout)
+        self.assertEqual((home, state), (str(root), str(root)))
+
+    def test_a_worktree_in_the_project_or_beside_it_gets_the_roots_hooks(self):
+        root = self.committed()
+        inner = root / ".claude" / "worktrees" / "refunds"
+        beside = self.base / "project-credit-notes"
+        git(root, "worktree", "add", "-q", str(inner), "-b", "feature/SHOP-9-refunds")
+        git(root, "worktree", "add", "-q", str(beside), "-b", "feature/SHOP-10-credit-notes")
+        for project in (inner, beside):
+            for start in (project, project / "src" / "Billing"):
+                with self.subTest(start=start):
+                    self.assert_served(self.run_dispatcher("echo.sh", start, b'{"hook": 1}'), root, project,
+                                       '{"hook": 1}')
+        self.assertFalse((inner / "memory-bank").exists() or (beside / "memory-bank").exists(),
+                         "nothing is written into a worktree")
+
+    def test_a_project_in_a_folder_of_a_monorepo_is_that_folder_of_its_worktree(self):
+        monorepo = self.base / "monorepo"
+        monorepo.mkdir()
+        git(monorepo, "init", "-q")
+        root = self.project("monorepo/backend", hooks={"echo.sh": self.ECHO}, policy="# Policy\n")
+        shutil.rmtree(root / ".git")
+        (root / "src" / "Billing" / "Invoice.php").write_text("<?php\n", encoding="utf-8")
+        git(monorepo, "add", "backend/src")
+        git(monorepo, "commit", "-qm", "base")
+        self.setup_dispatcher(root)
+        worktree = self.base / "monorepo-feature"
+        git(monorepo, "worktree", "add", "-q", str(worktree), "-b", "feature/x")
+        self.assert_served(self.run_dispatcher("echo.sh", worktree / "backend" / "src"), root, worktree / "backend")
+        done = self.run_dispatcher("echo.sh", worktree)
+        self.assertEqual((done.returncode, done.stdout), (0, b""), "the monorepo's root is not the project")
+
+    def test_an_installed_worktree_of_an_installed_project_is_served_as_itself(self):
+        # Its own root comes first, whatever the lengths of the two roots.
+        main = self.project("a-main-checkout-with-a-name-longer-than-its-worktree",
+                            hooks={"echo.sh": self.ECHO}, policy="# Main\n")
+        (main / "src" / "Billing" / "Invoice.php").write_text("<?php\n", encoding="utf-8")
+        git(main, "add", "src")
+        git(main, "commit", "-qm", "base")
+        self.setup_dispatcher(main)
+        worktree = self.base / "wt"
+        git(main, "worktree", "add", "-q", str(worktree), "-b", "feature/own")
+        for name in ("memory-bank", ".claude"):
+            shutil.copytree(main / name, worktree / name, dirs_exist_ok=True)
+        shutil.copy2(main / "AGENTS.md", worktree / "AGENTS.md")
+        self.setup_dispatcher(worktree)
+        done = self.run_dispatcher("echo.sh", worktree / "src" / "Billing")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        where, named, home, state, served, _ = done.stdout.decode().split("|", 5)
+        self.assertEqual((shown(where), shown(named), home, state, served),
+                         (shown(worktree), shown(worktree), "", "", ""))
+
+    def test_a_worktree_git_records_by_a_relative_path(self):
+        # Git 2.48 and later write both links relative under
+        # worktree.useRelativePaths.
+        root = self.committed()
+        inner = root / ".claude" / "worktrees" / "relative"
+        beside = self.base / "project-relative"
+        for path, branch in ((inner, "feature/relative"), (beside, "feature/beside")):
+            git(root, "-c", "worktree.useRelativePaths=true", "worktree", "add", "-q", str(path), "-b", branch)
+        if os.path.isabs((inner / ".git").read_text(encoding="utf-8").strip()[len("gitdir: "):]):
+            self.skipTest("this Git writes worktree links absolute")
+        for project in (inner, beside):
+            with self.subTest(project=project):
+                self.assert_served(self.run_dispatcher("echo.sh", project / "src" / "Billing"), root, project)
+
+    def test_a_session_a_launcher_lends_an_accelerator_to_is_left_to_it(self):
+        # The Harness's attached launch: its own hooks run through --settings.
+        root = self.committed()
+        inner = root / ".claude" / "worktrees" / "refunds"
+        git(root, "worktree", "add", "-q", str(inner), "-b", "feature/SHOP-9-refunds")
+        self.env["ACCELERATOR_HOME"] = str(self.base / "clone" / "PHP Core")
+        for start in (inner, root / "src"):
+            with self.subTest(start=start):
+                done = self.run_dispatcher("echo.sh", start)
+                self.assertEqual((done.returncode, done.stdout), (0, b""), done.stderr)
+
+    def test_a_worktree_with_an_installation_of_its_own_or_of_another_repository_is_left_alone(self):
+        root = self.committed()
+        own = root / ".claude" / "worktrees" / "own"
+        git(root, "worktree", "add", "-q", str(own), "-b", "feature/own")
+        (own / "memory-bank" / "scripts").mkdir(parents=True)
+        (own / "memory-bank" / "scripts" / "context.py").write_text("# its own runtime\n", encoding="utf-8")
+        other = self.base / "other"
+        (other / "src").mkdir(parents=True)
+        (other / "src" / "a.php").write_text("<?php\n", encoding="utf-8")
+        git(other, "init", "-q")
+        git(other, "add", ".")
+        git(other, "commit", "-qm", "base")
+        foreign = self.base / "other-feature"
+        git(other, "worktree", "add", "-q", str(foreign), "-b", "feature/x")
+        # A .git file naming a worktree Git does not know, and a submodule's.
+        forged = self.base / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {root / '.git' / 'worktrees' / 'ghost'}\n", encoding="utf-8")
+        module = root / "src" / "module"
+        module.mkdir()
+        (module / ".git").write_text("gitdir: ../../.git/modules/module\n", encoding="utf-8")
+        for start in (own, own / "src" / "Billing", foreign, foreign / "src", forged, module):
+            with self.subTest(start=start):
+                done = self.run_dispatcher("echo.sh", start)
+                self.assertEqual((done.returncode, done.stdout), (0, b""), done.stderr)
+
+    def test_the_policy_comes_whatever_claude_code_was_told_about_imports(self):
+        root = self.committed()
+        inner = root / ".claude" / "worktrees" / "refunds"
+        git(root, "worktree", "add", "-q", str(inner), "-b", "feature/SHOP-9-refunds")
+        # The dialog's Yes is filed under the main checkout, and the worktree
+        # has no .claude/CLAUDE.md to import anything from.
+        (self.config / ".claude.json").write_text(json.dumps({"projects": {key_of(root): {
+            "hasClaudeMdExternalIncludesApproved": True}}}), encoding="utf-8")
+        done = self.run_dispatcher("policy-1", inner)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(done.stdout.decode("utf-8").endswith("# Policy\nRule.\n"), done.stdout)
+        self.assertEqual(self.run_dispatcher("policy-1", root / "src").stdout, b"", "below the root it is imported")
+        (inner / "AGENTS.md").write_text("# The worktree's own\n", encoding="utf-8")
+        self.assertEqual(self.run_dispatcher("policy-1", inner).stdout, b"")
+
+    def test_the_sessions_commands_get_the_variables_the_save_step_needs(self):
+        root = self.committed()
+        inner = root / ".claude" / "worktrees" / "refunds"
+        git(root, "worktree", "add", "-q", str(inner), "-b", "feature/SHOP-9-refunds")
+        target = self.base / "session.env"
+        self.env["CLAUDE_ENV_FILE"] = str(target)
+        done = self.run_dispatcher("environment", inner / "src")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        sourced = subprocess.run(
+            [BASH, "-c", f"source {shlex.quote(target.as_posix())}; "
+                         'printf "%s|%s|%s" "$ACCELERATOR_HOME" "$ACCELERATOR_STATE_DIR" "$ACCELERATOR_PROJECT_DIR"'],
+            capture_output=True, text=True, env=self.env)
+        home, state, project = sourced.stdout.split("|")
+        self.assertEqual((home, state, shown(project)), (str(root), str(root), shown(inner)))
+        target.unlink()
+        self.run_dispatcher("environment", root / "src")
+        self.assertNotIn("ACCELERATOR_", target.read_text(encoding="utf-8") if target.exists() else "",
+                         "below the root the root itself is the project")
+
+    def test_the_roots_rules_decide_for_the_worktrees_files_and_keep_the_roots_secrets(self):
+        root = self.committed()
+        inner = root / ".claude" / "worktrees" / "refunds"
+        git(root, "worktree", "add", "-q", str(inner), "-b", "feature/SHOP-9-refunds")
+        for folder in (root, inner):
+            (folder / ".env").write_text("SECRET=x\n", encoding="utf-8")
+            (folder / "secrets").mkdir(exist_ok=True)
+            (folder / "secrets" / "key.txt").write_text("x\n", encoding="utf-8")
+
+        def decide(path, tool="Read"):
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config)}):
+                answer = dispatch.permission({"tool_name": tool, "tool_input": {"file_path": str(path)}},
+                                             str(root), str(inner / "src"), str(inner))
+            return answer["hookSpecificOutput"]["permissionDecision"] if answer else None
+
+        self.assertEqual([decide(inner / ".env"), decide(inner / "secrets" / "key.txt"),
+                          decide(inner / "src" / "Billing" / "Invoice.php")], ["deny", "deny", "allow"])
+        self.assertEqual(decide(inner / ".env", "Edit"), "deny")
+        # The root's own secrets stay denied; its other files are the
+        # worktree session's to ask about.
+        self.assertEqual([decide(root / ".env"), decide(root / "secrets" / "key.txt"),
+                          decide(root / "src" / "Billing" / "Invoice.php")], ["deny", "deny", None])
+        payload = {"tool_name": "Read", "tool_input": {"file_path": str(inner / ".env")}}
+        done = self.run_dispatcher("permissions", inner / "src", json.dumps(payload).encode())
+        self.assertEqual(json.loads(done.stdout)["hookSpecificOutput"]["permissionDecision"], "deny")
 
 
 class InstallTime(Fixture):

@@ -562,6 +562,14 @@ For each `--target` it does the following:
   - the closing Stop;
   - a new session's prompt, whose capsule must recall the learning.
 
+With `--worktree`, Claude Code is also rehearsed, under each profile, in a
+Git worktree of a copy (`.claude/worktrees/rehearsal`, on a branch of its
+own), which has none of an installation Git does not track: the hooks run
+through the dispatcher the copy carries, as your Claude Code configuration
+runs them, and the save takes the variables its `environment` entry gives a
+session's commands. Such a run also has to save under the worktree's branch
+and leave the worktree clean.
+
 No model runs. HOME and TMPDIR point into the work directory, the copies are
 removed unless `--keep`, and the project is never written. A symbolic link
 that leads out of the project is left out of the copy, because a hook would
@@ -573,7 +581,7 @@ that file. Any other profile is forced through `CONTEXT_CAPSULE_PROFILE`.
 ```bash
 python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
   [--hosts claude,codex,cursor] [--profiles config,recall] [--work DIR] [--exclude NAME] \
-  [--timeout 60] [--keep] [--json]
+  [--worktree] [--timeout 60] [--keep] [--json]
 ```
 
 - **Outputs:**
@@ -588,7 +596,9 @@ python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
     - every hook's exit and time;
     - whether the save was requested, made or refused (with its code);
     - the native journal's lines;
-    - whether the next capsule recalled the save.
+    - whether the next capsule recalled the save;
+    - in a worktree, whether the save went to its branch and the worktree
+      stayed clean.
 
   Exit 0 when every run saved and recalled with every hook exiting 0, 1
   otherwise, 2 for a target it will not copy (this clone, a folder with no
@@ -664,6 +674,34 @@ DIR. The run passes when that session got the capsule and every line of the
 project's `AGENTS.md` in the conversation itself - not in a file Claude Code
 keeps an over-long hook output in - and its save landed.
 
+`--worktree` does the same in a Git worktree of the project made where
+Claude Code makes its own (`.claude/worktrees/bench`, on a branch of its
+own), with `--subfolder DIR` in DIR of it. The installation is not
+committed, so the worktree has none of it; the run also passes only when the
+save landed in the root's Project Brain under the worktree's branch, the
+worktree got an index of its own in the root, and nothing was written into
+the worktree.
+
+`--desktop` drives the measured session as the Claude desktop app drives
+Claude Code: stream-json both ways, the initialize request first
+(`--await-initialize`), `--setting-sources user,project,local`, the mode
+named, and every permission prompt sent to the host over stdio, which the
+bench refuses and lists. The run passes only when the session saved without
+one: a save the app has to ask about asks the person after every answer.
+With the dispatcher's allow for the memory CLI taken out, it fails there
+with the save's command as the prompt. Left without a mode, Claude Code
+2.1.299 under the app's flags decides an ask in auto mode, whose classifier
+no offline run has: the app names the mode, and so does the bench.
+
+`--sandbox` turns Claude Code's Bash sandbox (bubblewrap) on in the bench's
+own settings, with the project on disk under `/var/tmp`: the sandbox mounts
+a /dev of its own, and its bridge sockets under the run's temporary
+directory must fit a socket path, which a run below `~/.cache` did not in
+the desktop app's mode. Claude Code then starts without the namespace's
+capabilities, which bubblewrap refuses. In the root the save writes the
+project; below it and in a worktree it waits in the spool and the next
+hook makes it (`spooled`).
+
 `--permissions` (with `--subfolder`, `src` by default) has the stand-in try
 nineteen tool calls in both sessions - reads of secrets the project denies
 at the root and below it, of files it allows and of one outside, writes,
@@ -677,7 +715,7 @@ path matching was probed, not documented.
 ```bash
 python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
   [--target DIR [--sync] [--exclude NAME] | --attached] [--shell /usr/bin/zsh] [--mode dontAsk] \
-  [--queued 8 | --subfolder src [--permissions]] [--timeout 180] [--keep]
+  [--queued 8 | --subfolder src [--permissions] | --worktree [--subfolder src]] [--desktop] [--sandbox] [--timeout 180] [--keep]
 ```
 
 - **Outputs:** a JSON report:
@@ -688,7 +726,10 @@ python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
     the stream;
   - with `--queued`, whether the screen said the result was not saved;
   - with `--subfolder`, the folder, and whether the capsule and the whole
-    policy reached the session.
+    policy reached the session;
+  - with `--worktree`, also whether the save went to the worktree's branch,
+    its own index exists and the worktree stayed clean;
+  - with `--desktop`, the permission prompts the app would have shown.
 
   Exit 0 when the save ran, one message carried the step and no hook error
   was recorded; 1 otherwise; 2 without Linux namespaces.
@@ -735,9 +776,21 @@ the run's `CODEX_HOME`: at the end of every run the bench stops each process
 whose `CODEX_HOME` is the run's, and the report says how many
 (`helpers_stopped`).
 
+`--subfolder DIR` starts Codex in DIR below the project root. Its
+workspace-write sandbox writes only below DIR - not the project's Brain, nor
+its journal - so the save waits in the temporary directory and the session's
+next hook, outside the sandbox, writes it: the run passes when the journal
+says `save` `saved` with code `spooled` and the recovery was seen. Its work
+folder is on disk, under `~/.cache/ai-infrastructure-benches/`: Codex's
+bubblewrap sandbox mounts its own `/dev` and writes `/tmp`, so a project in
+`/dev/shm` was invisible to a command started below its root, and one in
+`/tmp` writable. With `--queued` it runs in Codex's terminal: the second
+question moves the request aside (`previous-in-flight`) and the save still
+lands through the spool.
+
 ```bash
 python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
-  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--timeout 240] [--keep]
+  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--subfolder src] [--timeout 240] [--keep]
 ```
 
 - **Outputs:** a JSON report:

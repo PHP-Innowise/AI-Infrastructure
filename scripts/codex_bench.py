@@ -31,6 +31,17 @@ project as an added directory), with the hooks trusted the way
   python3 scripts/codex_bench.py --target ~/Desktop/next --sync
   python3 scripts/codex_bench.py --attached
   python3 scripts/codex_bench.py --queued 8
+  python3 scripts/codex_bench.py --subfolder src
+
+`--subfolder DIR` starts Codex in DIR below the project root (in its terminal
+too, with `--queued`). Its
+workspace-write sandbox then writes only below DIR, so the save cannot write
+the project - nor its journal: it waits in the temporary directory, and the
+session's next hook, outside the sandbox, writes it. The run passes when the
+save went that way (journal `save` `saved` with code `spooled`) and the
+recovery was seen. Its work folder is on disk under ~/.cache: Codex's
+bubblewrap sandbox mounts its own /dev and writes /tmp, so a project in
+/dev/shm or /tmp would be invisible or writable below its root.
 
 `--queued SECONDS` runs Codex in its terminal instead, through a
 pseudo-terminal, as claude_code_bench.py does: the stand-in takes SECONDS to
@@ -72,6 +83,7 @@ class Scripted(BaseHTTPRequestHandler):
     lock = threading.Lock()
     save_delay = 0.0
     save_begun = threading.Event()
+    read = ""
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -161,7 +173,7 @@ class Scripted(BaseHTTPRequestHandler):
             command = (command.replace("'<JSON>'", quoted) if "'<JSON>'" in command
                        else f"printf '%s' {quoted} | {command}")
             return [shell_call(tools, command, f"call_save_{number}")], since
-        return [shell_call(tools, f"cat {self.source}", f"call_read_{number}")], since
+        return [shell_call(tools, f"cat {getattr(self, 'read', '') or self.source}", f"call_read_{number}")], since
 
 
 def message(number: int, text: str) -> Dict[str, Any]:
@@ -233,6 +245,8 @@ def inside(args: argparse.Namespace) -> int:
     project, home = work / "project", work / "codex-home"
     home.mkdir(exist_ok=True)
     Scripted.source = args.source
+    # The file the stand-in reads, from the folder Codex starts in.
+    Scripted.read = os.path.relpath(project / args.source, project / args.subfolder) if args.subfolder else args.source
     server = ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     (home / "config.toml").write_text(
@@ -258,7 +272,9 @@ def inside(args: argparse.Namespace) -> int:
             trust = approve_hooks(args.codex, project)
     except Exception as error:  # the run below shows whether hooks ran without it
         trust = {"error": f"{type(error).__name__}: {error}"}
-    command = [args.codex, "exec", "-C", str(project), "--skip-git-repo-check", "--sandbox", args.sandbox,
+    start = project / args.subfolder if args.subfolder else project
+    start.mkdir(parents=True, exist_ok=True)
+    command = [args.codex, "exec", "-C", str(start), "--skip-git-repo-check", "--sandbox", args.sandbox,
                "How are invoices numbered?"]
     if args.attached:
         command = attach.apply_overlay("codex", command, overlay)
@@ -270,12 +286,12 @@ def inside(args: argparse.Namespace) -> int:
             (home / "packages").symlink_to(args.packages)
         Scripted.save_delay = args.queued
         # The terminal reads the sandbox from config.toml and starts in the project.
-        screen = bench.terminal([args.codex], project, dict(env, TERM="xterm-256color"), journal_file,
+        screen = bench.terminal([args.codex], start, dict(env, TERM="xterm-256color"), journal_file,
                                 args.timeout, Scripted.save_begun, Scripted.requests, settle=8.0)
         (work / "screen.txt").write_text(screen, encoding="utf-8")
         done = subprocess.CompletedProcess([], 0, "", "")
     else:
-        done = subprocess.run(command, cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+        done = subprocess.run(command, cwd=start, env=env, stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=args.timeout)
     server.shutdown()
     helpers = stop_helpers(home)
@@ -300,6 +316,12 @@ def inside(args: argparse.Namespace) -> int:
     if args.queued is not None:
         report["unsaved_on_screen"] = bench.UNSAVED in screen
         report["ok"] = bench.queued_ok(events, screen)
+    if args.subfolder:
+        # The sandbox writes only below the folder - not the journal either -
+        # so the line is the next hook's: saved, through the spool.
+        report["started_in"] = args.subfolder
+        report["spooled"] = "save:saved:spooled" in events
+        report["ok"] = report["ok"] and report["spooled"]
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -357,6 +379,8 @@ def main() -> int:
     parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
                         help="in Codex's terminal, type a second question while the save, which the stand-in "
                              "takes SECONDS to write, is in flight")
+    parser.add_argument("--subfolder", metavar="DIR", default=None,
+                        help="start Codex in DIR below the project root; the save goes through the spool")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--work", help=argparse.SUPPRESS)
     parser.add_argument("--source", help=argparse.SUPPRESS)
@@ -375,6 +399,13 @@ def main() -> int:
         print("codex_bench: --queued runs an installed edition in the terminal; it takes no --attached",
               file=sys.stderr)
         return 2
+    if args.subfolder is not None and (args.attached is not None or args.sandbox != "workspace-write"):
+        print("codex_bench: --subfolder runs Codex with the workspace-write sandbox in an installed project; "
+              "it takes no --attached or --sandbox read-only", file=sys.stderr)
+        return 2
+    if args.subfolder is not None and (Path(args.subfolder).is_absolute() or ".." in Path(args.subfolder).parts):
+        print("codex_bench: --subfolder names a folder inside the project", file=sys.stderr)
+        return 2
     if args.target:
         problem = bench.target_problem(Path(args.target).expanduser().resolve())
         if problem:
@@ -382,6 +413,14 @@ def main() -> int:
             return 2
     shm = Path("/dev/shm")
     base = shm if shm.is_dir() and os.access(shm, os.W_OK) else None
+    if args.subfolder:
+        # Codex's bubblewrap sandbox mounts its own /dev, and /tmp and $TMPDIR
+        # are among its writable roots: below a project kept in /dev/shm or
+        # /tmp a command would see none of it or could write all of it. On
+        # disk, the project is read-only to a command started below its root,
+        # as in a person's checkout.
+        base = Path.home() / ".cache" / "ai-infrastructure-benches"
+        base.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="codex-bench-", dir=str(base) if base else None))
     try:
         if args.target:
@@ -397,6 +436,7 @@ def main() -> int:
                                "--source", bench.source_in(project), "--timeout", str(args.timeout),
                                "--edition", args.edition,
                                *(["--attached", args.attached] if args.attached else []),
+                               *(["--subfolder", args.subfolder] if args.subfolder else []),
                                *(["--queued", str(args.queued), "--packages", str(Path.home() / ".codex/packages")]
                                  if args.queued is not None else [])],
                               timeout=args.timeout + 120)
