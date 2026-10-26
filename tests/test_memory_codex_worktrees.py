@@ -287,9 +287,13 @@ class Setup(Fixture):
     def test_nothing_for_a_person_who_keeps_hooks_in_config_toml(self):
         # Codex loads both forms and warns at every start that a layer has two.
         root = self.project()
-        for config in ('[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "true"\n',
-                       '[hooks]\nSessionStart = [{ hooks = [{ type = "command", command = "true" }] }]\n',
-                       'hooks.PreToolUse = []\n', 'not = [valid toml\n'):
+        configs = ['[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "true"\n',
+                   '[hooks]\nSessionStart = [{ hooks = [{ type = "command", command = "true" }] }]\n',
+                   'hooks.PreToolUse = []\n']
+        if sys.version_info >= (3, 11):
+            # One tomllib cannot parse; Codex refuses it too.
+            configs.append('not = [valid toml\n')
+        for config in configs:
             with self.subTest(config=config):
                 (self.home / "config.toml").write_text(config, encoding="utf-8")
                 self.setup_dispatcher(root)
