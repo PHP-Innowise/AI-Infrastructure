@@ -425,6 +425,46 @@ class SharedWorktree(unittest.TestCase):
         self.assertEqual(git(self.worktree, "status", "--porcelain", "--ignored"), "")
 
 
+class AttachedWorktree(unittest.TestCase):
+    """An attached project's worktree keeps an index of its own in the state.
+
+    The Harness keeps one state for a project and all its checkouts. With one
+    index between checkouts whose documents differ, a lookup that followed
+    one in the other checkout rebuilt it: 580 ms against 250 ms on 400
+    notes, at every switch."""
+
+    def test_the_worktree_indexes_apart_and_the_main_checkout_as_before(self):
+        temporary = tempfile.TemporaryDirectory(prefix="attached-worktree-")
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name).resolve()
+        project, state = base / "shop", base / "state"
+        (project / "docs").mkdir(parents=True)
+        (project / "README.md").write_text("# Shop\n\nThe saffron checkout settles every order.\n",
+                                           encoding="utf-8")
+        git(project, "init", "-q", "-b", "main")
+        git(project, "add", ".")
+        git(project, "commit", "-qm", "Shop")
+        worktree = base / "shop-refunds"
+        git(project, "worktree", "add", "-q", str(worktree), "-b", "feature/refunds")
+        edition = ROOT / "PHP Core"
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("CLAUDE", "ACCELERATOR_", "CONTEXT_", "GIT_"))}
+        env.update(PYTHONDONTWRITEBYTECODE="1", ACCELERATOR_HOME=str(edition), ACCELERATOR_STATE_DIR=str(state))
+
+        def database(folder):
+            done = subprocess.run([sys.executable, str(edition / "memory-bank" / "scripts" / "context.py"),
+                                   "status", "--json"], cwd=folder, env=dict(env, ACCELERATOR_PROJECT_DIR=str(folder)),
+                                  capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            return Path(json.loads(done.stdout)["database"])
+
+        self.assertEqual(database(project), state / "memory-bank" / "local" / "context.db")
+        own = database(worktree)
+        self.assertEqual(own.parent.parent, state / "memory-bank" / "local" / "worktrees")
+        self.assertEqual((own.parent / "worktree").read_text(encoding="utf-8"), os.path.realpath(worktree))
+        self.assertEqual(git(worktree, "status", "--porcelain", "--ignored"), "")
+
+
 class SpacedWorktree(unittest.TestCase):
     """A main checkout whose path has a space: the memory CLI the worktree's
     banner names runs as named, and the dispatcher's allow for the memory

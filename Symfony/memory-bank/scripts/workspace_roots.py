@@ -237,17 +237,13 @@ def start_directory() -> str:
     return _WORKING_DIRECTORY
 
 
-def worktree_project(start: str) -> Optional[Path]:
-    """The folder of a linked worktree this installation serves, when `start` is in it.
+def linked_worktree(start: str) -> Optional[tuple[Path, Path]]:
+    """The top of the linked worktree `start` is in and its main checkout,
+    or None: a checkout with a `.git` directory, a submodule, a bare
+    repository's worktree and a folder outside Git are none.
 
     A linked worktree's `.git` is a file naming <main>/.git/worktrees/<name>,
-    where Git keeps the worktree's back-reference (`gitdir`). When this
-    installation lies in <main> and the worktree has no runtime of its own
-    at the same place, that place in the worktree is the project - what
-    claude_dispatch.sh decides for a session's hooks, here for a run without
-    its variables. A checkout with a `.git` directory, a submodule, a bare
-    repository's worktree and a folder outside Git are none.
-    """
+    where Git keeps the worktree's back-reference (`gitdir`)."""
     if not start:
         return None
     folder = Path(start)
@@ -273,9 +269,24 @@ def worktree_project(start: str) -> Optional[Path]:
     if (gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git"
             or not (gitdir / "gitdir").is_file()):
         return None
+    return top, gitdir.parent.parent.parent
+
+
+def worktree_project(start: str) -> Optional[Path]:
+    """The folder of a linked worktree this installation serves, when `start` is in it.
+
+    When this installation lies in the worktree's main checkout and the
+    worktree has no runtime of its own at the same place, that place in the
+    worktree is the project - what claude_dispatch.sh decides for a
+    session's hooks, here for a run without its variables.
+    """
+    found = linked_worktree(start)
+    if found is None:
+        return None
+    top, main = found
     try:
-        project = (top / TOOLING_ROOT.relative_to(gitdir.parent.parent.parent.resolve())).resolve()
-        folder.resolve().relative_to(project)
+        project = (top / TOOLING_ROOT.relative_to(main.resolve())).resolve()
+        Path(start).resolve().relative_to(project)
     except (OSError, ValueError):
         return None
     if not project.is_dir() or (project / "memory-bank" / "scripts" / "context.py").exists():

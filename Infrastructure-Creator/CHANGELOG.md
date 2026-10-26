@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime gives an attached project's worktree its own index — 2026-10-26
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `workspace_roots.py` change in the asset; the policy lock was rewritten.
+
 ### The seeded runtime's sandboxed lookup publishes locally — 2026-10-26
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes

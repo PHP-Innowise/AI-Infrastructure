@@ -341,12 +341,21 @@ def default_root() -> Path:
 WORKTREE_INDEX_MARKER = "worktree"
 
 
+def own_index(layout: workspace_roots.Roots) -> bool:
+    """Whether the project's checkout keeps an index of its own in the state:
+    a worktree its main checkout's installation serves, or an attached
+    project's worktree, whose state the launcher keeps for the project and
+    all its checkouts (the Harness). One index between checkouts whose
+    documents differ was rebuilt at every switch between them."""
+    return layout.shared or (layout.attached
+                             and workspace_roots.linked_worktree(str(layout.project)) is not None)
+
+
 def default_database(repository: Path) -> Path:
     layout = workspace_roots.roots(repository)
-    if layout.shared:
-        # A worktree served by its main checkout's installation shares the
-        # state, not the index: the two checkouts' documents differ. One
-        # index per worktree, kept with the state it borrows.
+    if own_index(layout):
+        # A worktree shares the state, not the index: the two checkouts'
+        # documents differ. One index per worktree, kept with the state.
         checkout = os.path.realpath(str(layout.project))
         digest = hashlib.sha256(os.fsencode(checkout)).hexdigest()[:16]
         return repository / "memory-bank" / "local" / "worktrees" / digest / "context.db"
@@ -396,7 +405,7 @@ def sandbox_index(repository: Path) -> Path:
 def remember_worktree_index(repository: Path, database: Path) -> None:
     """Name the worktree beside its index (see WORKTREE_INDEX_MARKER)."""
     layout = workspace_roots.roots(repository)
-    if not layout.shared or database != default_database(repository).resolve():
+    if not own_index(layout) or database != default_database(repository).resolve():
         return
     checkout = os.path.realpath(str(layout.project))
     marker = database.parent / WORKTREE_INDEX_MARKER

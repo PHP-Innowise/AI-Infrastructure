@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### An attached project's worktree keeps an index of its own — 2026-10-26
+
+- The Harness keeps one state for a project and all its checkouts, and the
+  runtime kept one index in it. The checkouts' documents differ, so a lookup
+  after one in the other checkout rebuilt the index: 580 ms against 250 ms a
+  lookup on 400 notes, at every switch between the project and a worktree.
+  An attached project's linked worktree now keeps its index in
+  `memory-bank/local/worktrees/<hash>/` of the state, as an installation's
+  worktree does in the installation, named and removed the same way; the
+  project's own checkout keeps the index where it was.
+  `workspace_roots.linked_worktree` recognises the worktree as the
+  dispatcher does. `tests/test_memory_worktree_sessions.py` (`AttachedWorktree`)
+  fails without the change.
+
 ### A sandboxed lookup of a task publishes its manifest locally — 2026-10-26
 
 - A lookup that the sandbox keeps from the index (see the entry below) still
