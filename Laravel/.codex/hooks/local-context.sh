@@ -23,9 +23,13 @@ PROJECT_DIR=$ROOT_DIR
 STATE_DIR=$ROOT_DIR
 accelerator_absolute() { case "$1" in /*|[A-Za-z]:[\\/]*) return 0 ;; esac; return 1; }
 if accelerator_absolute "${ACCELERATOR_STATE_DIR:-}" && accelerator_absolute "${ACCELERATOR_PROJECT_DIR:-}" \
-  && [ "$(cd "${ACCELERATOR_HOME:-/nonexistent}" 2>/dev/null && pwd -P)" = "$(cd "$ROOT_DIR" && pwd -P)" ]; then
+  && ROOT_REAL=$(cd "$ROOT_DIR" && pwd -P) \
+  && [ "$(cd "${ACCELERATOR_HOME:-/nonexistent}" 2>/dev/null && pwd -P)" = "$ROOT_REAL" ]; then
   PROJECT_DIR=$ACCELERATOR_PROJECT_DIR
   STATE_DIR=$ACCELERATOR_STATE_DIR
+  # A state that is this installation, however it is spelled (C:\... where
+  # Git Bash says /c/..., a trailing separator), is a worktree's, not attached.
+  [ "$(cd "$STATE_DIR" 2>/dev/null && pwd -P)" = "$ROOT_REAL" ] && STATE_DIR=$ROOT_DIR
 fi
 if [ "$PROJECT_DIR" != "$ROOT_DIR" ]; then
   # Attached, or a worktree its main checkout's installation serves:

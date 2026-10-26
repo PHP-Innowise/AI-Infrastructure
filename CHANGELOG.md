@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A worktree's state spelled another way is still its installation — 2026-10-26
+
+- The Windows memory job on #66 failed twice in
+  `tests/test_memory_worktree_sessions.py`. `local-context.sh` told an
+  attached project from a worktree by comparing ACCELERATOR_STATE_DIR with
+  its own root as text: Git Bash spells the root `/c/...`, the variable
+  spelled it `C:\...`, and the banner said "attached from" where the
+  worktree shares the installation's memory. The hook now compares where
+  the two lead (`pwd -P`, as it already did for ACCELERATOR_HOME) and, when
+  the state is this installation, uses the root's spelling; on Linux a
+  trailing separator showed the same mistake and is now part of the test.
+  The test's cleanup could not remove the worktree's index because the
+  test's own SQLite connections stayed open: `with sqlite3.connect(...)`
+  ends a transaction, not the connection, and on Windows an open database
+  cannot be deleted. They are closed with `contextlib.closing` now.
+
 ### Claude Code's sandbox below the root or in a worktree saves through the spool — 2026-10-26
 
 - Claude Code's Bash sandbox lets a command write only the folder its
