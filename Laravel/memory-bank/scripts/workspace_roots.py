@@ -224,8 +224,8 @@ _NAMED_START: Optional[str] = None
 
 def serve_from(folder: str) -> None:
     """Take `folder` as where this run is (context.py --project): a save
-    made from this installation's root for a session that works in a
-    worktree, which the root alone does not show."""
+    made from this installation's root - or, attached, from the clone - for
+    a session that works in a worktree, which neither shows alone."""
     global _NAMED_START
     _NAMED_START = folder
 
@@ -305,8 +305,40 @@ def worktree_project(start: str) -> Optional[Path]:
     return project
 
 
+def attached_worktree(named: str, project: Path) -> Optional[Path]:
+    """The checkout `named` puts an attached run in, or None.
+
+    A launcher lends this edition to a project and keeps one state for it
+    and all its worktrees (the Harness does). A session it started there
+    that entered another worktree - Claude Code's EnterWorktree - is served
+    there by the hooks, and its save names that worktree (context.py
+    --project): a checkout of the project's repository, at the project's
+    place in it, with no runtime of its own.
+    """
+    def main_and_top(folder: Path) -> Optional[tuple[Path, Path]]:
+        found = linked_worktree(str(folder))
+        if found is not None:
+            return found[1].resolve(), found[0].resolve()
+        for top in (folder, *folder.parents):
+            if (top / ".git").is_dir():
+                return top, top
+        return None
+    try:
+        named_path, project_path = Path(named).resolve(), project.resolve()
+        theirs, mine = main_and_top(named_path), main_and_top(project_path)
+        if theirs is None or mine is None or theirs[0] != mine[0]:
+            return None
+        place = theirs[1] / project_path.relative_to(mine[1])
+        if (place != named_path or not place.is_dir()
+                or (place / "memory-bank" / "scripts" / "context.py").exists()):
+            return None
+    except (OSError, ValueError):
+        return None
+    return place
+
+
 @functools.lru_cache(maxsize=32)
-def _roots(repository: str, home: str, state: str, project: str, start: str = "") -> Roots:
+def _roots(repository: str, home: str, state: str, project: str, start: str = "", named: str = "") -> Roots:
     root = Path(repository)
     if home and state and project:
         try:
@@ -321,7 +353,8 @@ def _roots(repository: str, home: str, state: str, project: str, start: str = ""
                 and project_path.is_dir()
                 and project_path.resolve() != root.resolve()
             ):
-                return Roots(TOOLING_ROOT, project_path, root, TOOLING_ROOT == root.resolve())
+                served = attached_worktree(named, project_path) if named else None
+                return Roots(TOOLING_ROOT, served or project_path, root, TOOLING_ROOT == root.resolve())
         except OSError:
             pass
     try:
@@ -349,6 +382,7 @@ def roots(repository: Path) -> Roots:
         os.environ.get(STATE_VARIABLE, "").strip(),
         os.environ.get(PROJECT_VARIABLE, "").strip(),
         start_directory(),
+        _NAMED_START or "",
     )
 
 

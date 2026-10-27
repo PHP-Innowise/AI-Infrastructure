@@ -143,7 +143,7 @@ def result_for(source: str) -> Dict[str, Any]:
     }
 
 
-SAVE = re.compile(r"exact command: (cd .*?--json|\(cd .*?--json\))\n")
+SAVE = re.compile(r"exact command: (cd [^\n]*?--json(?: && cd [^\n]*)?|\(cd .*?--json\))\n")
 CLI_HINT = re.compile(r"Memory CLI: [^`\n]* - run the commands the policy and skills name with `([^`]+)` in place of")
 # The branch the fixture's root is on.
 ROOT_BRANCH = "feature/SHOP-7-invoices"
@@ -667,7 +667,8 @@ def inside(args: argparse.Namespace) -> int:
                         *mode, *lent], cwd=project, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                        timeout=args.timeout)
         listed = work / "home/.claude/ai-accelerator/projects"
-        deadline = time.time() + 15
+        # Attached, the lent hooks set up no dispatcher: nothing to wait for.
+        deadline = time.time() + (15 if not args.attached else 0)
         while time.time() < deadline and str(project) not in (listed.read_text().splitlines() if listed.exists() else []):
             time.sleep(0.2)
         first_lines = len(journal_file.read_text().splitlines()) if journal_file.exists() else 0
@@ -775,8 +776,9 @@ def inside(args: argparse.Namespace) -> int:
         # The session moved into the worktree mid-turn, with the root's hooks:
         # its save is the worktree's branch's, and the worktree is left clean.
         entered = project / ENTERED
+        # Attached, the tasks are in the project's state, apart from it.
         tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
-                 for path in (project / "project-brain/dynamic/tasks").glob("*.md")]
+                 for path in (Path(args.attached) if args.attached else project).glob("project-brain/dynamic/tasks/*.md")]
         report["entered"] = entered.is_dir()
         report["entered_task"] = any(task.get("external_id") == ENTERED_BRANCH and task.get("progress")
                                      for task in tasks)
@@ -906,10 +908,10 @@ def main() -> int:
         print("claude_code_bench: --desktop drives one turn as the app does; it takes no --queued or --permissions",
               file=sys.stderr)
         return 2
-    if args.enter_worktree and (args.worktree or args.subfolder or args.attached is not None
+    if args.enter_worktree and (args.worktree or args.subfolder
                                 or args.queued is not None or args.permissions or args.mode == "plan"):
         print("claude_code_bench: --enter-worktree starts one session in the project root; it takes no --worktree, "
-              "--subfolder, --attached, --queued, --permissions or --mode plan", file=sys.stderr)
+              "--subfolder, --queued, --permissions or --mode plan", file=sys.stderr)
         return 2
     if args.cli and not (args.worktree or args.subfolder):
         print("claude_code_bench: --cli runs the memory CLI the banner of a session in a worktree or below the "

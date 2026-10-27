@@ -678,7 +678,7 @@ def _adapter():
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
-def _instruction(root,key,state,*,brief=False,host=None,full=True):
+def _instruction(root,key,state,*,brief=False,host=None,full=True,entered=False,back=None):
     tooling=Path(__file__).resolve().parents[2]
     interpreter=['python3']
     if os.name == 'nt':
@@ -686,9 +686,12 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True):
     # Keep the documented CLI spelling covered by the installed Bash
     # permission rules, even when the session's cwd is a subdirectory. In a
     # worktree this installation serves, the command names the worktree: run
-    # from the root, nothing else would show it to a session that entered it.
+    # from the root, nothing else would show it to a session that entered it -
+    # nor, attached, from the clone, where the session's own variables name
+    # the folder the launcher started it in.
     layout=workspace_roots.roots(Path(root))
-    place=['--project',str(layout.project)] if layout.shared else []
+    named=layout.shared or entered
+    place=['--project',str(layout.project)] if named else []
     def cli(*tail):
         return shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),*place,'native-result',
             '--request',key,'--token',state['token'],*tail])
@@ -704,11 +707,19 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True):
         # In a worktree the command reads the result from stdin without
         # naming the descriptor: once a session has entered a worktree,
         # Claude Code refuses a program fed a descriptor it names ("-").
-        piped=() if layout.shared else ('--input','-')
+        piped=() if named else ('--input','-')
+        # Attached, the cd is into the clone, which the launch adds as a
+        # working directory: Claude Code's shell stayed there, and every
+        # command the agent ran after the save - for good, in a session a
+        # person drives - ran in the clone. A save that went through goes
+        # back to where the session was; a refused one keeps its exit status
+        # (after `;` the cd's 0 hid it). `cd -` an entered worktree refuses
+        # ("a program assembled at runtime").
+        back=' && cd '+shlex.quote(back) if layout.attached and not layout.shared and back else ''
         ask=('Use your shell tool to run this exact command: '+enter+"echo -E '<JSON>' | "
-             +cli(*piped,'--json')+'\n'
+             +cli(*piped,'--json')+back+'\n'
              "Put one JSON object in place of <JSON>, writing each ' inside it as '\\''. ")
-        skip='run this command instead: '+enter+cli('--skip','--json')+'\n'
+        skip='run this command instead: '+enter+cli('--skip','--json')+back+'\n'
     else:
         ask='Use your shell tool to pipe one JSON object into this exact command: (' \
             +enter+cli('--input','-','--json')+')\n'
@@ -837,7 +848,10 @@ def _stop(step, root, task_id, host, payload, *, owner, mode, entered=False):
         # summarized conversation could not be checked here: it gets the
         # full step every time, as before.
         full=configured_instruction(root)=='full' or host=='cursor' or not _rules_in_context(payload)
-        instruction=_instruction(root,key,state,brief=brief,host=host,full=full)
+        where=payload.get('cwd')
+        instruction=_instruction(root,key,state,brief=brief,host=host,full=full,entered=entered,
+                                 back=where if (isinstance(where,str) and os.path.isabs(where)
+                                                and not any(c in where for c in '\n\r\0')) else None)
     # Claude Code labels a block a hook error, notifies one after every
     # answer and hands the model the reason twice. Its Stop additionalContext
     # (2.1.163 and later) continues the turn as hook feedback, once, through

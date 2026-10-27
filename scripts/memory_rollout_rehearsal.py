@@ -83,7 +83,7 @@ PROFILES = ("config", "full", "navigation", "recall")
 # The command the Stop request names, verbatim: Claude Code's
 # `cd ROOT && echo -E '<JSON>' | python3 ... --json` takes the JSON in
 # place of <JSON>; Codex's and Cursor's `(cd ROOT && python3 ... --json)` on stdin.
-SAVE_COMMAND = re.compile(r"exact command: (\(cd .*?--json\)|cd .*?--json)\n")
+SAVE_COMMAND = re.compile(r"exact command: (\(cd .*?--json\)|cd [^\n]*?--json(?: && cd [^\n]*)?)\n")
 REFUSAL = re.compile(r"\b(memory-result-v1:[a-z_]+|native-result:[a-z-]+)")
 # A learning cites a file of the project, not the accelerator's own.
 ACCELERATOR_PREFIXES = (".agents/", ".claude/", ".codex/", ".cursor/", "memory-bank/", "project-brain/",

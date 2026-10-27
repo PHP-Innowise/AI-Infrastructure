@@ -657,11 +657,11 @@ With `--attached` nothing is installed: every session is launched as the
 Harness launches it, the edition lent from this clone through the overlay of
 `accelerator_attach.py` (the project being the folder the session starts in)
 and one state directory for the project and its worktrees. Claude Code and
-Codex sessions start in the root or in a worktree; none enters one, since
-the hooks lent to a session leave the memory out of a worktree it enters.
-Besides the above, neither the project nor this clone's edition may be
-written into (bytecode caches aside), and the Memory Bank is checked by
-`context.py validate` alone: its `README.md` is the clone's.
+Codex sessions start in the root or in a worktree, and a Claude Code session
+in the root may enter one. Besides the above, neither the project nor this
+clone's edition may be written into (bytecode caches aside), and the Memory
+Bank is checked by `context.py validate` alone: its `README.md` is the
+clone's.
 
 ```bash
 python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP Core"|Laravel|Symfony|WordPress] \
@@ -681,7 +681,8 @@ python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP 
 - **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, the
   `memory-lifecycles` job, runs seeds 1 and 2 on PHP Core, which between
   them reach every host, a worktree entered, bursts, a commit during a save
-  and a rebase stopped, continued and aborted, and seed 2 attached. A
+  and a rebase stopped, continued and aborted, and seed 4 attached, whose
+  root session enters a worktree. A
   failing seed reproduces with the same `--seed` and `--steps`, apart from
   which of two sessions answering at once saves first; `--verbose` prints
   every step.

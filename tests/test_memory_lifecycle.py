@@ -26,7 +26,7 @@ GIT = ("git", "-c", "user.name=Lifecycle test", "-c", "user.email=lifecycle-test
 def save_command(step: str, result: dict) -> tuple:
     """The save a Stop step asks for, ready to run, and its stdin: Claude
     Code's command takes the JSON in place of <JSON>, the others' a pipe."""
-    command = re.search(r"exact command: (\(cd .*?--json\)|cd .*?--json)\n", step).group(1)
+    command = re.search(r"exact command: (\(cd .*?--json\)|cd [^\n]*?--json(?: && cd [^\n]*)?)\n", step).group(1)
     data = json.dumps(result)
     if "'<JSON>'" in command:
         return command.replace("'<JSON>'", "'" + data.replace("'", "'\\''") + "'"), None
