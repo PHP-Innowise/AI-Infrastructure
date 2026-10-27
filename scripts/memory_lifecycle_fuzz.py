@@ -17,7 +17,8 @@ installation not) and takes random steps from a seed:
   in the root may enter a worktree during a turn, as Claude Code's
   EnterWorktree does: the root's hooks, the input's cwd the worktree. Codex
   sessions start in the root or below it, Cursor sessions in the root;
-- a burst: turns of up to three sessions at once, in different folders;
+- a burst: turns of up to three sessions at once, two of them in one folder
+  too (never two Cursor sessions, which would share one rule file);
 - a new session, a /clear or a compaction;
 - Git: commits, branches made, renamed, detached and re-attached, a rebase
   stopped on a conflict - HEAD detached, the branch named only in the
@@ -36,13 +37,23 @@ removed worktree is left; Project Brain and the Memory Bank validate; no
 worktree was written into. Only a save asked for before its branch moved
 may be refused.
 
-Nothing leaves the work directory: HOME, TMPDIR and the dispatcher's folder
-are inside it, a new temporary directory unless --work names a missing or
-empty one. No model and no network. Maintainer-only and standard library
+With --attached nothing is installed: every session is launched as the
+Harness launches it, with the edition lent from this clone (the overlay of
+scripts/accelerator_attach.py, project = the folder the session starts in)
+and one state directory for the project and all its worktrees. Claude Code
+and Codex sessions start in the root or in a worktree; none enters one,
+since the hooks lent to a session leave the memory out of a worktree it
+enters (docs/MEMORY-INTEGRATION.md). There, besides the above, neither the
+project nor this clone's edition may be written into.
+
+Nothing leaves the work directory: HOME, TMPDIR, the dispatcher's folder and
+an attached project's state are inside it, a new temporary directory unless
+--work names a missing or empty one. No model and no network. Maintainer-only and standard library
 only; never installed into a project.
 
     memory_lifecycle_fuzz.py --seed 7 --steps 60
     memory_lifecycle_fuzz.py --seed 21 --steps 70 --edition Laravel --verbose --work /var/tmp/fuzz-21
+    memory_lifecycle_fuzz.py --seed 3 --attached
 
 Prints a JSON summary. Exit status: 0 when everything held, 1 otherwise.
 """
@@ -73,12 +84,17 @@ HOOK_TIMEOUT = 60
 # Cursor there was not checked, and only Claude Code runs a worktree's hooks
 # through the dispatcher or enters a worktree.
 HOSTS = {"root": ("claude", "claude", "codex", "cursor"), "sub": ("claude", "codex"), "worktree": ("claude",)}
+# The Harness launches a session in the project or one of its worktrees.
+ATTACHED_HOSTS = {"root": ("claude", "claude", "codex"), "worktree": ("claude", "codex")}
 STAGES = ("start", "prompt", "stop")
 
 
 class Fuzz:
-    def __init__(self, work: Path, seed: int, verbose: bool, edition: str = "PHP Core") -> None:
+    def __init__(self, work: Path, seed: int, verbose: bool, edition: str = "PHP Core",
+                 attached: bool = False) -> None:
         self.work, self.seed, self.verbose, self.edition = work, seed, verbose, edition
+        self.attached = attached
+        self.overlays: Dict[Tuple[str, str], Any] = {}
         self.rng = random.Random(seed)
         self.lock = threading.RLock()
         self.log: List[str] = []
@@ -105,6 +121,19 @@ class Fuzz:
         self.env = rehearsal.child_env(self.work / "home", self.work / "tmp", {})
         for argv in (["init", "-q", "-b", "feature/SHOP-1"], ["add", "."], ["commit", "-qm", "Shop"]):
             subprocess.run([*GIT, *argv], cwd=shop, env=self.env, check=True, capture_output=True)
+        self.checkouts["root"] = shop
+        if self.attached:
+            # Nothing installed: the edition is lent from this clone, the
+            # state kept apart, as the Harness keeps it.
+            import accelerator_attach as attach
+            self.attach = attach
+            self.home = attach.edition_directory(self.edition)
+            self.data = attach.state_directory(shop, self.work / "state-base")
+            attach.prepare_state(self.edition, shop, self.data)
+            self.dispatcher = None
+            self.clone_before = self.clone_status()
+            return
+        self.home = self.data = shop
         done = subprocess.run([sys.executable, str(rehearsal.INSTALLER), "--edition", self.edition, "--target",
                                str(shop), "--merge-existing"], cwd=ROOT, env=self.env, capture_output=True,
                               text=True, stdin=subprocess.DEVNULL)
@@ -119,7 +148,20 @@ class Fuzz:
             shutil.copy2(shop / "memory-bank/scripts" / script, folder / name)
         (folder / "projects").write_text(str(shop) + "\n", encoding="utf-8")
         self.dispatcher = folder / "ai-accelerator-dispatch.sh"
-        self.checkouts["root"] = shop
+
+    def clone_status(self) -> str:
+        """What Git sees changed in this clone's edition, bytecode caches aside."""
+        done = subprocess.run(["git", "status", "--porcelain", "--ignored", "--", str(self.home)], cwd=ROOT,
+                              capture_output=True, text=True)
+        return "\n".join(line for line in done.stdout.splitlines() if "__pycache__" not in line)
+
+    def overlay(self, host: str, launch: Path) -> Any:
+        """The Harness's overlay for a session of `host` started in `launch`."""
+        with self.lock:
+            key = (host, str(launch))
+            if key not in self.overlays:
+                self.overlays[key] = self.attach.overlay(host, self.edition, launch, self.data)
+            return self.overlays[key]
 
     # -- helpers -----------------------------------------------------------
 
@@ -167,6 +209,14 @@ class Fuzz:
         """How the host runs this session's hooks: the environment, the
         dispatcher they go through, and the folder they run in."""
         place = self.place(session)
+        if self.attached:
+            # The overlay of the folder the Harness launched the session in.
+            launch = self.checkouts[session["launch"]]
+            overlay = self.overlay(session["host"], launch)
+            env = dict(self.env, **(overlay.settings.get("env") or {}), **overlay.environment)
+            if session["host"] == "claude":
+                env["CLAUDE_PROJECT_DIR"] = str(launch)
+            return env, None, place
         if session["host"] != "claude":
             return dict(self.env), None, place
         if session["kind"] in ("worktree", "sub"):
@@ -194,11 +244,35 @@ class Fuzz:
                        "transcript_path": str(self.work / "transcripts" / f"{session_id}.jsonl"), **fields}
             if host == "codex":
                 payload["turn_id"] = f"t{self.counter}"
-        results = rehearsal.run_event(self.shop, host, name, payload, env, HOOK_TIMEOUT, through, place)
+        if self.attached:
+            results = self.run_attached(session, name, payload, env, place)
+        else:
+            results = rehearsal.run_event(self.shop, host, name, payload, env, HOOK_TIMEOUT, through, place)
         for item in results:
             if item["exit"] != 0:
                 self.fail(f"{host} {name} {item['hook']} exit {item['exit']} in {session['kind']} {place}: "
                           f"{item['stderr'][-200:]}")
+        return results
+
+    def run_attached(self, session: Dict[str, Any], name: str, payload: Dict[str, Any], env: Dict[str, str],
+                     place: Path) -> List[Dict[str, Any]]:
+        """Run the lent hooks for `name` as the host would: Claude Code's from
+        the overlay's settings, Codex's as `-c hooks.*` names them."""
+        if session["host"] == "claude":
+            groups = (self.overlay("claude", self.checkouts[session["launch"]]).settings.get("hooks") or {}).get(name, [])
+        else:
+            groups = self.attach.codex_hooks(self.edition).get(name, [])
+        results = []
+        for command in [hook["command"] for group in groups for hook in group.get("hooks", [])]:
+            try:
+                done = subprocess.run(["bash", "-c", command], input=json.dumps(payload).encode("utf-8"), cwd=place,
+                                      env=env, capture_output=True, timeout=HOOK_TIMEOUT)
+                code, stdout, stderr = done.returncode, done.stdout.decode("utf-8", "replace"), \
+                    done.stderr.decode("utf-8", "replace")
+            except subprocess.TimeoutExpired:
+                code, stdout, stderr = "timeout", "", ""
+            results.append({"hook": command.rsplit("/", 1)[-1][:60], "exit": code, "stdout": stdout,
+                            "stderr": stderr.strip()[-400:]})
         return results
 
     @staticmethod
@@ -237,10 +311,10 @@ class Fuzz:
                       "memory not consulted")
         live = [name for name in self.checkouts if name != "root" and name not in self.removed]
         if (not burst and session["host"] == "claude" and session["kind"] == "root" and live
-                and rng.random() < 0.15):
+                and not self.attached and rng.random() < 0.15):
             # The session enters a worktree during this turn.
             target = rng.choice(live)
-            session.update(kind="entered", checkout=target, sub="")
+            session.update(kind="entered", checkout=target, sub="")  # launched where it was
             self.note(f"turn {session_id}: enters {target}")
             self.events["worktree entered"] += 1
         request = self.request_of(self.event(session_id, "stop", stop_hook_active=False,
@@ -270,7 +344,7 @@ class Fuzz:
             self.note(f"turn {session_id}: a commit before the save")
             self.events["commit during a save"] += 1
         env, _, place = self.hooks_of(session)
-        if session["kind"] == "worktree":
+        if session["kind"] == "worktree" and not self.attached:
             env.update(rehearsal.dispatched_environment(self.dispatcher, place, dict(self.env), HOOK_TIMEOUT))
         choice = rng.random()
         if choice < 0.8:
@@ -313,11 +387,12 @@ class Fuzz:
     def new_session(self) -> str:
         session_id = f"s{len(self.sessions) + 1}"
         live = [name for name in self.checkouts if name != "root" and name not in self.removed]
-        kind = self.rng.choice(["root", "sub", *(["worktree"] if live else [])])
+        kind = self.rng.choice(["root", *([] if self.attached else ["sub"]), *(["worktree"] if live else [])])
         checkout = self.rng.choice(live) if kind == "worktree" else "root"
-        sub = "src" if kind == "sub" or (kind == "worktree" and self.rng.random() < 0.3) else ""
-        host = self.rng.choice(HOSTS[kind])
-        self.sessions[session_id] = {"kind": kind, "checkout": checkout, "sub": sub, "host": host}
+        sub = "src" if kind == "sub" or (kind == "worktree" and not self.attached and self.rng.random() < 0.3) else ""
+        host = self.rng.choice((ATTACHED_HOSTS if self.attached else HOSTS)[kind])
+        self.sessions[session_id] = {"kind": kind, "checkout": checkout, "sub": sub, "host": host,
+                                     "launch": checkout}
         self.counts[f"{host} {kind}"] += 1
         self.note(f"session {session_id}: {host} {kind} in {checkout}/{sub}")
         self.event(session_id, "start", source="startup")
@@ -398,14 +473,18 @@ class Fuzz:
             self.note(f"worktree added: {name} at {folder}")
 
     def burst(self) -> None:
-        """Turns of up to three sessions at once, each in a folder of its own."""
-        chosen, places = [], set()
+        """Turns of up to three sessions at once - two in one folder too, as two
+        terminals or two Harness chats on a project - but never two Cursor
+        sessions in one folder, which share its rule file."""
+        chosen, cursors = [], set()
         for session_id in self.rng.sample(sorted(self.sessions), min(3, len(self.sessions))):
             session = self.sessions[session_id]
             place = (session["checkout"], session["sub"])
-            if place not in places and not self.gone(session):
-                chosen.append(session_id)
-                places.add(place)
+            if self.gone(session) or (session["host"] == "cursor" and place in cursors):
+                continue
+            chosen.append(session_id)
+            if session["host"] == "cursor":
+                cursors.add(place)
         self.note(f"burst: {chosen}")
         self.events["burst"] += 1
         threads = [threading.Thread(target=self.turn, args=(session_id, random.Random(self.rng.random()), True))
@@ -440,12 +519,18 @@ class Fuzz:
 
     # -- what must hold ----------------------------------------------------
 
+    def cli_env(self, folder: Path) -> Dict[str, str]:
+        """The environment the memory CLI runs with for a session in `folder`."""
+        if self.attached:
+            return dict(self.env, **self.attach.environment(self.edition, folder, self.data))
+        return dict(self.env, CLAUDE_PROJECT_DIR=str(folder))
+
     def check(self) -> Dict[str, Any]:
         for name, folder in self.checkouts.items():
             if name not in self.removed and self.rebasing(folder):
                 self.git(folder, "rebase", "--abort")
         tasks = {}
-        for path in (self.shop / "project-brain/dynamic/tasks").glob("*.md"):
+        for path in (self.data / "project-brain/dynamic/tasks").glob("*.md"):
             record = json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
             tasks[record["id"]] = record["external_id"]
         for marker, (branch, task, session_id) in self.saved.items():
@@ -454,27 +539,35 @@ class Fuzz:
             elif tasks[task] != branch and not tasks[task].startswith(branch):
                 # A rename after the save keeps the task.
                 self.fail(f"{marker} ({session_id}): saved under {tasks[task]}, asked on {branch}")
-        scripts = self.shop / "memory-bank/scripts"
+        scripts = self.home / "memory-bank/scripts"
+        # An attached bank keeps its README in the clone (ACCELERATOR_HOME):
+        # `context.py validate` checks it there.
         for argv in ([str(scripts / "context.py"), "validate", "--json"],
-                     [str(scripts / "validate.py"), str(self.shop / "memory-bank")]):
-            done = subprocess.run([sys.executable, *argv], cwd=self.shop, env=self.env, capture_output=True,
-                                  text=True)
+                     *([] if self.attached else [[str(scripts / "validate.py"), str(self.data / "memory-bank")]])):
+            done = subprocess.run([sys.executable, *argv], cwd=self.shop, env=self.cli_env(self.shop),
+                                  capture_output=True, text=True)
             if done.returncode != 0:
                 self.fail(f"{Path(argv[0]).name}: exit {done.returncode}: {(done.stdout + done.stderr)[-300:]}")
         for name, folder in self.checkouts.items():
-            if name == "root" or name in self.removed:
+            if (name == "root" and not self.attached) or name in self.removed:
                 continue
-            status = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=folder, env=self.env,
-                                    capture_output=True, text=True).stdout
-            if status.strip():
-                self.fail(f"worktree {name} written into: {status.splitlines()[:3]}")
+            # An attached project, root included, is never written into; the
+            # worktrees made in its .claude/worktrees are the host's.
+            status = subprocess.run(["git", "status", "--porcelain", "--ignored", "--untracked-files=all"],
+                                    cwd=folder, env=self.env, capture_output=True, text=True).stdout
+            written = [line for line in status.splitlines()
+                       if not line[3:].strip('"').startswith(".claude/worktrees/")]
+            if written:
+                self.fail(f"{'project' if name == 'root' else 'worktree ' + name} written into: {written[:3]}")
+        if self.attached and self.clone_status() != self.clone_before:
+            self.fail(f"this clone's edition written into: {self.clone_status().splitlines()[:3]}")
         # A saved learning is found from the root and from every worktree left.
         places = [self.shop] + [folder for name, folder in self.checkouts.items()
                                 if name != "root" and name not in self.removed]
         for marker in self.rng.sample(sorted(self.saved), min(4, len(self.saved))):
             for folder in places:
                 done = subprocess.run([sys.executable, str(scripts / "context.py"), "search", marker, "--json"],
-                                      cwd=folder, env=dict(self.env, CLAUDE_PROJECT_DIR=str(folder)),
+                                      cwd=folder, env=self.cli_env(folder),
                                       capture_output=True, text=True, timeout=HOOK_TIMEOUT)
                 if done.returncode != 0 or marker not in done.stdout:
                     self.fail(f"search {marker} from {folder.name}: exit {done.returncode}: "
@@ -486,7 +579,7 @@ class Fuzz:
         if branch:
             def turn(*flush: str) -> None:
                 subprocess.run([sys.executable, str(scripts / "context.py"), "turn", "--task-id", branch, *flush],
-                               cwd=self.shop, env=dict(self.env, CLAUDE_PROJECT_DIR=str(self.shop)),
+                               cwd=self.shop, env=self.cli_env(self.shop),
                                capture_output=True, text=True, timeout=HOOK_TIMEOUT)
             turn()
             (self.shop / "src" / "Final.php").write_text("<?php\n", encoding="utf-8")
@@ -496,18 +589,19 @@ class Fuzz:
             turn("--flush")
             live = {os.path.realpath(str(folder)) for name, folder in self.checkouts.items()
                     if name != "root" and name not in self.removed}
-            for marker in (self.shop / "memory-bank/local/worktrees").glob("*/worktree"):
+            for marker in (self.data / "memory-bank/local/worktrees").glob("*/worktree"):
                 if marker.read_text(encoding="utf-8") not in live:
                     self.fail(f"the index of a removed worktree is left: {marker.read_text(encoding='utf-8')}")
         # A hook exits 0 whatever its runtime did: the journal says what failed.
-        journal = self.shop / "memory-bank/local/native-results.ndjson"
+        journal = self.data / "memory-bank/local/native-results.ndjson"
         lines = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()] \
             if journal.exists() else []
         for line in lines:
             if line.get("event") == "error" or (line.get("stage") == "stop-hook" and line.get("status") not in (None, 0)):
                 self.fail(f"journal: {line}")
         saves = Counter(line.get("code") or line.get("event") for line in lines if line.get("stage") == "save")
-        return {"seed": self.seed, "edition": self.edition, "sessions": dict(sorted(self.counts.items())),
+        return {"seed": self.seed, "edition": self.edition, "attached": self.attached,
+                "sessions": dict(sorted(self.counts.items())),
                 "events": dict(sorted(self.events.items())), "saves": len(self.saved),
                 "save_lines": dict(sorted(saves.items())),
                 "worktrees": len(self.checkouts) - 1, "removed": len(self.removed),
@@ -518,6 +612,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--edition", choices=EDITIONS, default="PHP Core")
+    parser.add_argument("--attached", action="store_true",
+                        help="launch every session as the Harness does, the edition lent from this clone")
     parser.add_argument("--steps", type=int, default=60)
     parser.add_argument("--work", type=Path, help="a missing or empty directory to work in, kept afterwards")
     parser.add_argument("--verbose", action="store_true", help="print each step to stderr")
@@ -532,7 +628,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         work = Path(tempfile.mkdtemp(prefix="memory-fuzz-"))
     try:
-        fuzz = Fuzz(work, args.seed, args.verbose, args.edition)
+        fuzz = Fuzz(work, args.seed, args.verbose, args.edition, args.attached)
         fuzz.install()
         fuzz.run(args.steps)
         summary = fuzz.check()

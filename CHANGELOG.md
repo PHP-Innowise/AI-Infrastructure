@@ -97,17 +97,20 @@ edition's own files remain in that edition's changelog.
   learnings be found by `search` from the root and from every worktree
   left, no index of a removed worktree outlive the next turn checkpoint,
   Project Brain and the Memory Bank validate and no worktree be written
-  into. `--edition` runs it on Laravel, Symfony or WordPress. On 24 seeds
-  of 60 steps nothing failed, nor on seed 1 of the other editions; before
-  the change, seeds lost saves to both refusals.
+  into. `--edition` runs it on Laravel, Symfony or WordPress; `--attached`
+  launches every session as the Harness does, the edition lent from the
+  clone and the state apart, and neither the project nor the clone may be
+  written into. Bursts put two sessions in one folder too. On 24 seeds of
+  60 steps, installed and attached, nothing failed, nor on seed 1 of the
+  other editions; before the change, seeds lost saves to both refusals.
 - Tests: `tests/test_memory_native_capture.py` - two sessions saving in the
   same seconds, a turn checkpoint in between, a task the other session
   created and a commit made while the save is written, each failing
   without the change, and a replaced task, a save delayed past ten minutes
   and a moved detached HEAD still refused. `tests/test_memory_lifecycle_fuzz.py`
-  runs seeds 2 and 7 in a step of its own in the `memory` job (about
-  80 s); on the runtime before the change seed 7 fails by the first
-  refusal and seed 2 by the second.
+  runs seeds 1 and 2, and seed 2 attached, in a step of its own in the
+  `memory` job (about two minutes); on the runtime before the change seed
+  1 fails by the first refusal and seed 2 by the second.
 
 ### A session that entered a worktree keeps its memory there — 2026-10-26
 

@@ -203,7 +203,8 @@ The memory runtime's own regression steps: the memory evaluation stand
 boundaries, Git source scope and branch identity, UTF-8 isolation, Cursor rule
 custody, result saves and their replay and evidence, random session and Git
 lifecycles driven through a fresh installation's hooks
-(`scripts/memory_lifecycle_fuzz.py`, two fixed seeds, about 80 s), the
+(`scripts/memory_lifecycle_fuzz.py`, two fixed seeds installed and one
+attached, about two minutes), the
 Brain read once per command, Git starts per prompt, a working task swept away
 by `git stash -u`,
 the Harness memory delivery and accounting modules, promotion admission, and

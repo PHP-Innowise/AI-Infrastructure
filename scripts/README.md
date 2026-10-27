@@ -631,7 +631,8 @@ committed, the installation not) and random steps follow:
   root and below it and of Cursor sessions in the root: the prompt hook,
   the Stop hook, the save it asks for - made, skipped or ignored - and the
   Stop that settles it;
-- bursts of up to three such turns at once, in different folders;
+- bursts of up to three such turns at once, two of them in one folder too
+  (never two Cursor sessions, which would share one rule file);
 - new sessions, `/clear` and compactions;
 - commits, branches made, renamed, detached and re-attached, a rebase
   stopped on a conflict (HEAD detached, the branch named only in the
@@ -646,30 +647,41 @@ of the branch it was asked on (in a stopped rebase, the branch being
 rebased), and a sample of the saved learnings is found by `context.py
 search` from the root and from every worktree left; after a turn checkpoint
 in the root no index of a removed worktree is left; `context.py validate`
-and the Memory Bank's `validate.py` pass; no worktree is written into. Only a save asked for
-before its branch moved may be refused.
+and the Memory Bank's `validate.py` pass; no worktree is written into. Only
+a save asked for before its branch moved may be refused.
+
+With `--attached` nothing is installed: every session is launched as the
+Harness launches it, the edition lent from this clone through the overlay of
+`accelerator_attach.py` (the project being the folder the session starts in)
+and one state directory for the project and its worktrees. Claude Code and
+Codex sessions start in the root or in a worktree; none enters one, since
+the hooks lent to a session leave the memory out of a worktree it enters.
+Besides the above, neither the project nor this clone's edition may be
+written into (bytecode caches aside), and the Memory Bank is checked by
+`context.py validate` alone: its `README.md` is the clone's.
 
 ```bash
 python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP Core"|Laravel|Symfony|WordPress] \
-  [--work DIR] [--verbose]
+  [--attached] [--work DIR] [--verbose]
 ```
 
-- **Outputs:** a JSON summary - the edition, the sessions by host and
-  kind, the events (bursts, worktrees entered, commits during a save,
+- **Outputs:** a JSON summary - the edition and layout, the sessions by host
+  and kind, the events (bursts, worktrees entered, commits during a save,
   rebases stopped, continued and aborted), saves, the save lines of the
   native journal by code (`rebased` for a save another session overtook),
   worktrees added and removed, and every violation with the last steps
   before it. Exit 0 when everything held, 1 otherwise.
 - **Writes:** only its work directory: a new temporary one, removed
   afterwards, unless `--work` names a missing or empty folder, which is
-  kept. HOME, TMPDIR and the dispatcher's folder are inside it; no model and
-  no network.
+  kept. HOME, TMPDIR, the dispatcher's folder and an attached project's
+  state are inside it; no model and no network.
 - **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, a step of its
-  own in the `memory` job, runs seeds 2 and 7 on PHP Core, which between
+  own in the `memory` job, runs seeds 1 and 2 on PHP Core, which between
   them reach every host, a worktree entered, bursts, a commit during a save
-  and a rebase stopped, continued and aborted. A failing seed reproduces
-  with the same `--seed` and `--steps`, apart from which of two sessions
-  answering at once saves first; `--verbose` prints every step.
+  and a rebase stopped, continued and aborted, and seed 2 attached. A
+  failing seed reproduces with the same `--seed` and `--steps`, apart from
+  which of two sessions answering at once saves first; `--verbose` prints
+  every step.
 
 ### `claude_code_bench.py`
 
