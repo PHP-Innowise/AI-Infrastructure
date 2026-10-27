@@ -110,7 +110,7 @@
     ".agents/skills/memory-seed/assets/scripts/mcp_config.py": "d3bac7148db0afbc84d71772e76bbe20729f157e4ade571261e9b61c39bbe87c",
     ".agents/skills/memory-seed/assets/scripts/mcp_server.py": "3e6c14860aa06b2091f48859acadc7ed3734665e91fefa55b5c901b3b7fb1d0d",
     ".agents/skills/memory-seed/assets/scripts/memory_results.py": "e75f7ddecd8abe9cb4528ae7203bc26bcb779742a19d49955a0ee8851de80d2a",
-    ".agents/skills/memory-seed/assets/scripts/native_results.py": "2a3b183c140d25c72e72d22ef398734cda83380704d6faa2f9d4718fec88c74a",
+    ".agents/skills/memory-seed/assets/scripts/native_results.py": "a07758b0b2f1dae7d1cc7d39a4e0bfcf66d95606f267dbfbf770dd9db9843275",
     ".agents/skills/memory-seed/assets/scripts/telemetry.py": "e67ab23577fedacd824247d6e94f2983bcb4ba668dd6c0cf05d77d454f815ab3",
     ".agents/skills/memory-seed/assets/scripts/validate.py": "893fd4d0f6714b88a2864c4438c8cf9b2516512f90b0dc9eef6dd133a7e2b3fb",
     ".agents/skills/memory-seed/assets/scripts/workspace_roots.py": "08d5a6760c69e1d9f6c97a0d475b24ed85536660507aa5c9829ab0d735e8e2f4",
@@ -177,7 +177,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "620ce9db606a53c545b1ff28929fee18d47d8b5e62fe9f218cb1b53ba3798265",
+  "policy_digest": "d71715b474861feedb00b18751222c0fe8f8f3b9ee50f5f6046fc9bddfb20a52",
   "release": "2.5.0",
   "schema_version": 1
 }

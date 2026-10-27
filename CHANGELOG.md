@@ -57,6 +57,53 @@ edition's own files remain in that edition's changelog.
   5-second budget. The test gives the hooks 60 seconds, as
   `tests.test_windows_memory_hooks` does. Not run on Windows locally.
 
+### A save survives another session's writes and a commit — 2026-10-26
+
+- Why: a native save is pinned when the Stop asks for it, and two things
+  that happen in the seconds the agent takes to write it refused it. The
+  task's revision moved - the other session's save, the turn checkpoint a
+  Stop hook writes every fifth turn of a checkout or, in a new project, the
+  other session creating the branch task - or a commit landed: the request
+  was pinned to the HEAD commit, so the person's commit, or another
+  session's on the branch, refused it as `native-result:scope-changed`.
+  Nothing of the save was written, its learnings included, and the agent
+  was told to report the held save to a person who had already read the
+  answer; a save a moment later replaced the other's progress all the same.
+  Neither was driven by any test: the new lifecycle fuzzer found both.
+- What changes: under the save's lock, where nothing else writes, a save
+  made within ten minutes of its request (`IN_FLIGHT_SECONDS`, the window in
+  which a prompt sent meanwhile treats it as still being written) takes the
+  task's current revision, as the Harness retries its own, and a task
+  created since the request takes it as well; the journal records it as
+  `saved` with code `rebased`. Its progress and next steps replace the
+  other session's, and its learnings are recorded as any are. A later
+  save - spooled until a hook long after - still yields to what was written
+  since, and a task replaced since the request (completed and started
+  again) still refuses it with `native-result:task-changed`. The request is pinned to its
+  branch; to its commit only on a detached HEAD, as in the middle of a
+  rebase, and a branch switched in between still refuses it.
+  `record-result` keeps its revision fence. `docs/MEMORY-INTEGRATION.md`
+  records the decision this replaces.
+- `scripts/memory_lifecycle_fuzz.py` (new) installs PHP Core into a scratch
+  project and drives random steps from a seed through the real hooks:
+  turns of Claude Code sessions in the root, below it and in worktrees
+  (through the dispatcher), a root session entering a worktree, Codex and
+  Cursor sessions, bursts of turns at once, saves made, skipped and
+  ignored, commits, branches made, renamed, detached and moved under a
+  pending save, worktrees added and removed. Every hook must exit 0 with no
+  error in the native journal, every save land in its branch's task, a
+  sample of the saved learnings be found by `search` from the root and from
+  every worktree left, Project Brain and the Memory Bank validate and no
+  worktree be written into. On 24 seeds of 60 steps nothing failed; before the change, seeds
+  lost saves to both refusals.
+- Tests: `tests/test_memory_native_capture.py` - two sessions saving in the
+  same seconds, a turn checkpoint in between, a task the other session
+  created and a commit made while the save is written, each failing
+  without the change, and a replaced task, a save delayed past ten minutes
+  and a moved detached HEAD still refused; `tests/test_memory_lifecycle_fuzz.py` runs seeds 1 and 9 in a
+  step of its own in the `memory` job (about 80 s) and fails on the
+  runtime before the change.
+
 ### A session that entered a worktree keeps its memory there — 2026-10-26
 
 - Claude Code's `EnterWorktree` moves a session that started in the project

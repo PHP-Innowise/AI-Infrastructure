@@ -458,6 +458,7 @@ def _memory_commands(version: str) -> List[Command]:
                 unittests_leg('Cursor prompt report JSON transport', ['tests.test_memory_cursor_report']),
                 unittests_leg('Native CLI MCP promoted-memory roundtrips', ['tests.test_memory_native_roundtrip', 'tests.test_memory_native_capture', 'tests.test_memory_lifecycle']),
                 unittests_leg('Claude Code started below the project root or in a worktree', ['tests.test_memory_claude_subfolders', 'tests.test_memory_worktree_sessions']),
+                unittests_leg('Random session and Git lifecycles through the memory hooks', ['tests.test_memory_lifecycle_fuzz']),
                 unittests_leg('Typed health source-notice summaries', ['tests.test_memory_health_notices']),
                 unittests_leg('Final memory source-image custody', ['tests.test_memory_final_source_image', 'tests.test_memory_final_task_fifo', 'tests.test_memory_final_reader_abort']),
                 unittests_leg('Cursor memory rule custody', ['tests.test_cursor_memory_rule', 'tests.test_cursor_portable_custody', 'tests.test_cursor_continuation', 'tests.test_cursor_root_rename', 'tests.test_cursor_continuation_state']),

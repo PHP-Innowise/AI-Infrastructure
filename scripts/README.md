@@ -612,6 +612,58 @@ python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
   capsule is the rule file its prompt hook renders, and its Stop request
   arrives as `followup_message`.
 
+### `memory_lifecycle_fuzz.py`
+
+**Purpose and status.** A maintainer tool, and a CI test, that drives random
+session and Git lifecycles through a fresh installation's memory hooks,
+offline, and checks what must hold after any of them. The other tests of the
+hooks run scripted sequences; what a person does between them - a branch
+made or renamed under a running session, a worktree removed while a session
+still names it, a session that enters a worktree, two sessions of a branch
+answering in the same seconds, a commit while the agent writes its save -
+was driven nowhere.
+
+From a seed, PHP Core is installed into a scratch project (its code
+committed, the installation not) and random steps follow:
+- turns of Claude Code sessions in the root, below it (`src/`) and in
+  worktrees (through the dispatcher the installation carries), of a root
+  session that enters a worktree during a turn, of Codex sessions in the
+  root and below it and of Cursor sessions in the root: the prompt hook,
+  the Stop hook, the save it asks for - made, skipped or ignored - and the
+  Stop that settles it;
+- bursts of up to three such turns at once, in different folders;
+- new sessions, `/clear` and compactions;
+- commits, branches made, renamed, detached and re-attached, and a commit or
+  a branch move between a Stop and its save;
+- worktrees added in `.claude/worktrees` and beside the root, some with
+  spaces in their names, and removed.
+
+What must hold: every hook exits 0 and the native journal records no error;
+no prompt is told the memory was not consulted; every save lands in the task
+of the branch it was asked on, and a sample of the saved learnings is found
+by `context.py search` from the root and from every worktree left;
+`context.py validate` and the Memory Bank's `validate.py` pass; no worktree
+is written into. Only a save asked for
+before its branch moved may be refused.
+
+```bash
+python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--work DIR] [--verbose]
+```
+
+- **Outputs:** a JSON summary - the sessions by host and kind, bursts,
+  saves, the save lines of the native journal by code (`rebased` for a save
+  another session overtook), worktrees added and removed, and every
+  violation with the last steps before it. Exit 0 when everything held, 1
+  otherwise.
+- **Writes:** only its work directory: a new temporary one, removed
+  afterwards, unless `--work` names a missing or empty folder, which is
+  kept. HOME, TMPDIR and the dispatcher's folder are inside it; no model and
+  no network.
+- **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, in the step for
+  Claude Code below the project root or in a worktree, runs fixed seeds.
+  A failing seed reproduces with the same `--seed` and `--steps`; `--verbose`
+  prints every step.
+
 ### `claude_code_bench.py`
 
 **Purpose and status.** A maintainer-only check of the native save step on the
