@@ -27,15 +27,18 @@ installation not) and takes random steps from a seed:
 - worktrees added in .claude/worktrees and beside the root, some with spaces
   in their names, and removed.
 
-What must hold afterwards: every hook exited 0 and the runtime journaled no
-error; no prompt was told that the memory was not consulted; every save
-landed in the task of the branch it was asked on - in a stopped rebase,
-the branch being rebased - a save another session overtook included, and a
-sample of the learnings saved is found by `search` from the root and from
-every worktree left; after a turn checkpoint in the root, no index of a
-removed worktree is left; Project Brain and the Memory Bank validate; no
-worktree was written into. Only a save asked for before its branch moved
-may be refused.
+What must hold afterwards: every hook exited 0, the runtime journaled no
+error and no prompt hook's refresh failed or timed out - a refresh that
+another session's write lock kept past its share of the hook's budget
+delivers the working state without retrieval and says so, and is counted
+(`refresh degraded`); no prompt was told that the memory was not
+consulted; every save landed in the task of the branch it was asked on -
+in a stopped rebase, the branch being rebased - a save another session
+overtook included, and a sample of the learnings saved is found by
+`search` from the root and from every worktree left; after a turn
+checkpoint in the root, no index of a removed worktree is left; Project
+Brain and the Memory Bank validate; no worktree was written into. Only a
+save asked for before its branch moved may be refused.
 
 With --attached nothing is installed: every session is launched as the
 Harness launches it, with the edition lent from this clone (the overlay of
@@ -48,8 +51,8 @@ project nor this clone's edition may be written into.
 
 Nothing leaves the work directory: HOME, TMPDIR, the dispatcher's folder and
 an attached project's state are inside it, a new temporary directory unless
---work names a missing or empty one. No model and no network. Maintainer-only and standard library
-only; never installed into a project.
+--work names a missing or empty one. No model and no network.
+Maintainer-only and standard library only; never installed into a project.
 
     memory_lifecycle_fuzz.py --seed 7 --steps 60
     memory_lifecycle_fuzz.py --seed 21 --steps 70 --edition Laravel --verbose --work /var/tmp/fuzz-21
@@ -306,9 +309,21 @@ class Fuzz:
             self.counter += 1
             marker = f"m{self.counter:03d}x{rng.randrange(16 ** 4):04x}"
         prompt = self.event(session_id, "prompt", prompt=f"How is the invoice numbered? {marker}")
-        if "Memory not consulted" in "".join(item["stdout"] for item in prompt):
-            self.fail(f"prompt {session_id} ({session['host']} {session['kind']}) in {self.place(session)}: "
-                      "memory not consulted")
+        said = "".join(item["stdout"] for item in prompt)
+        if session["host"] == "cursor":
+            # Cursor's capsule is the rule its prompt hook renders.
+            rule = self.checkouts[session["checkout"]] / rehearsal.CURSOR_RULE
+            said = rule.read_text(encoding="utf-8") if rule.is_file() else ""
+        if "Memory refresh incomplete" in said:
+            # Another session held the index's write lock past this refresh's
+            # share of its budget: the capsule carries the working state and
+            # says retrieval was not consulted - the runtime's own fallback.
+            self.events["refresh degraded"] += 1
+        for words in ("Memory not consulted", "Memory refresh unavailable"):
+            if words in said:
+                line = said[said.index(words):].split("\n", 1)[0]
+                self.fail(f"prompt {session_id} ({session['host']} {session['kind']}) in {self.place(session)}: "
+                          f"{line[:300]}")
         live = [name for name in self.checkouts if name != "root" and name not in self.removed]
         if (not burst and session["host"] == "claude" and session["kind"] == "root" and live
                 and not self.attached and rng.random() < 0.15):
@@ -599,6 +614,20 @@ class Fuzz:
         for line in lines:
             if line.get("event") == "error" or (line.get("stage") == "stop-hook" and line.get("status") not in (None, 0)):
                 self.fail(f"journal: {line}")
+        # The prompt hook records its refresh's exit status: 4 is Cursor's
+        # "keep the rule you have", 1 a degraded capsule (counted above) or a
+        # failure (reported above), anything else - 124, a timeout - a failure.
+        health = self.data / "memory-bank/local/refresh-health.ndjson"
+        records = [json.loads(line) for line in health.read_text(encoding="utf-8").splitlines()] \
+            if health.exists() else []
+        hooks = [record.get("hook_status") for record in records if record.get("source") == "hook"]
+        for status in hooks:
+            if status not in (0, 1, 4):
+                self.fail(f"prompt hook refresh exited {status}")
+        unexplained = hooks.count(1) - self.events["refresh degraded"] - sum(
+            "Memory refresh unavailable" in violation for violation in self.violations)
+        if unexplained > 0:
+            self.fail(f"{unexplained} prompt hook refresh(es) exited 1 without a degraded capsule")
         saves = Counter(line.get("code") or line.get("event") for line in lines if line.get("stage") == "save")
         return {"seed": self.seed, "edition": self.edition, "attached": self.attached,
                 "sessions": dict(sorted(self.counts.items())),

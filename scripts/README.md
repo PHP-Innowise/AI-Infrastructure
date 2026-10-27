@@ -641,7 +641,10 @@ committed, the installation not) and random steps follow:
 - worktrees added in `.claude/worktrees` and beside the root, some with
   spaces in their names, and removed.
 
-What must hold: every hook exits 0 and the native journal records no error;
+What must hold: every hook exits 0, the native journal records no error,
+and no prompt hook's refresh fails or times out (one that another session's
+write lock keeps past its share of the budget delivers the working state
+alone and says so; it is counted as `refresh degraded`);
 no prompt is told the memory was not consulted; every save lands in the task
 of the branch it was asked on (in a stopped rebase, the branch being
 rebased), and a sample of the saved learnings is found by `context.py

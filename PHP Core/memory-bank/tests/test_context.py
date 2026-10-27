@@ -35,11 +35,17 @@ finally:
 
 
 class PrefetchedCursor:
-    def __init__(self, row: object) -> None:
-        self.row = row
+    def __init__(self, rows: list[object]) -> None:
+        self.rows = rows
 
     def fetchone(self) -> object:
-        return self.row
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self) -> list[object]:
+        return self.rows
+
+    def __iter__(self):
+        return iter(self.rows)
 
 
 class SynchronizedConnection:
@@ -67,12 +73,12 @@ class SynchronizedConnection:
     ) -> object:
         cursor = self.connection.execute(statement, parameters)
         if " ".join(statement.split()).startswith(self.select_prefix):
-            row = cursor.fetchone()
+            rows = cursor.fetchall()
             try:
                 self.barrier.wait(timeout=1)
             except threading.BrokenBarrierError:
                 pass
-            return PrefetchedCursor(row)
+            return PrefetchedCursor(rows)
         return cursor
 
     def commit(self) -> None:
@@ -80,6 +86,10 @@ class SynchronizedConnection:
 
     def rollback(self) -> None:
         self.connection.rollback()
+
+    def __getattr__(self, name: str) -> object:
+        # executemany, in_transaction and the rest: the connection's own.
+        return getattr(self.connection, name)
 
 
 class ContextEngineTest(unittest.TestCase):
@@ -1346,6 +1356,38 @@ class ContextEngineTest(unittest.TestCase):
             ["First synchronized step.", "Second synchronized step."],
             sorted(task["next_steps"]),
         )
+
+    def test_two_refreshes_that_find_one_new_document_both_index_it(self) -> None:
+        # Two sessions' prompt hooks refresh at once after a document - most
+        # often the Brain record one of them just saved - appeared. Each read
+        # what the index held before the other wrote, and the second inserted
+        # the first one's new rows again: "UNIQUE constraint failed:
+        # document_metadata.path", its capsule out with the working state alone.
+        self.repository.joinpath("specs/billing.md").write_text(
+            "# Billing\n\nThe saffron ledger settles invoices.\n", encoding="utf-8"
+        )
+        connection = CONTEXT.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            CONTEXT.index_repository(connection, self.repository, incremental=True)
+        finally:
+            connection.close()
+        self.repository.joinpath("specs/refunds.md").write_text(
+            "# Refunds\n\nThe cobalt desk approves refunds.\n", encoding="utf-8"
+        )
+
+        def refresh(connection: SynchronizedConnection) -> object:
+            return CONTEXT.index_repository(connection, self.repository, incremental=True)
+
+        results = self.run_concurrently("SELECT path FROM documents", refresh)
+        self.assertTrue(all(isinstance(result, dict) for result in results), results)
+        connection = sqlite3.connect(self.repository / "memory-bank/local/context.db")
+        try:
+            rows = connection.execute(
+                "SELECT COUNT(*) FROM documents WHERE path = 'specs/refunds.md'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(1, rows)
 
     def test_concurrent_duplicate_starts_return_clean_already_exists_error(self) -> None:
         def start(connection: SynchronizedConnection) -> object:

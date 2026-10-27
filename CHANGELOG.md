@@ -57,6 +57,32 @@ edition's own files remain in that edition's changelog.
   5-second budget. The test gives the hooks 60 seconds, as
   `tests.test_windows_memory_hooks` does. Not run on Windows locally.
 
+### Two refreshes that find one new document both index it — 2026-10-27
+
+- Why: a refresh read which documents the index held without the write
+  lock, and wrote its changes in a transaction begun later. When two
+  sessions' prompt hooks refreshed at once after a document appeared -
+  most often the Brain record one of them had just saved - the second
+  inserted the rows the first had committed meanwhile:
+  "UNIQUE constraint failed: document_metadata.path". Its capsule went out
+  with the working state alone (procedural, semantic and episodic
+  `failed`), and the hook's health line recorded exit 1. The lifecycle
+  fuzzer's new health check found it: 45 of 120 runs of 80 steps.
+- What changes: before it writes, `index_documents` takes the write lock
+  and reads again what the index holds, so the rows it drops and the rows
+  it writes are one transaction's. A refresh that finds nothing to change
+  still decides that without the lock, so a prompt is not held up behind
+  another session's write; one that another session's lock keeps past its
+  share of the hook's budget still falls back to the working state and
+  says so, as before.
+- `scripts/memory_lifecycle_fuzz.py` reads the prompt hook's health lines
+  and Cursor's rule: a refresh that exited non-zero without the degraded
+  capsule that says why, or timed out, fails the run; a degraded one is
+  counted (`refresh degraded`).
+- Tests: `memory-bank/tests/test_context.py` runs two incremental
+  refreshes that meet at that read; on the indexer before the change one
+  of them fails with the constraint, 3 times in 3.
+
 ### A save survives another session's writes and a commit — 2026-10-26
 
 - Why: a native save is pinned when the Stop asks for it, and two things
