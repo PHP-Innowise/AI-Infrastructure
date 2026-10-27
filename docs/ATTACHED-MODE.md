@@ -111,6 +111,13 @@ project id is the one the Harness lists for the project. The runtime lays the
 directory out on first use from the edition's defaults; detaching keeps it, so
 attaching again picks the memory up.
 
+A session in a Git worktree of the project uses the project's state too:
+what it saves is the project's, under the worktree's branch. The index alone
+is the worktree's own, in `memory-bank/local/worktrees/<hash>/` of the state,
+because the checkouts' documents differ - with one index, a lookup after one
+in the other checkout rebuilt it (580 ms against 250 ms on 400 notes). A
+checkpoint after the worktree is removed removes its index.
+
 On Linux and macOS the state is its owner's alone - directories 0700, files
 0600 - whatever the umask: the launcher and the runtime create it that way, and
 tighten a state made before, where it is the accelerator's (never through a

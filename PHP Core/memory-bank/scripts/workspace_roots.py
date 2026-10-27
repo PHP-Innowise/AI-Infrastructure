@@ -42,6 +42,16 @@ the index is the worktree's own (context.py's `default_database`), because
 the two checkouts' documents differ; and the accelerator's own files a
 record cites - AGENTS.md, skills, specs/, tasks/ - are read from the main
 checkout when the worktree has none.
+
+Without the variables, the installation's runtime run in such a worktree
+finds the same layout by itself (`worktree_project`): a Codex command, the
+memory MCP server, a terminal - nothing exported them there, and the
+installed layout took the main checkout's branch and refused a citation of
+a file only the worktree's branch has. Where the run happens is the
+session's project as Claude Code names it to hooks and MCP servers
+(CLAUDE_PROJECT_DIR), else the working directory, so the hooks of a
+session in the main checkout stay there after its shell moved into a
+worktree inside it.
 """
 
 from __future__ import annotations
@@ -208,8 +218,84 @@ def default_state_root() -> Path:
     return TOOLING_ROOT
 
 
+_WORKING_DIRECTORY: Optional[str] = None
+
+
+def start_directory() -> str:
+    """Where this run is: CLAUDE_PROJECT_DIR, which Claude Code gives its
+    hooks and MCP servers, else the directory the process started in (the
+    runtime never changes it)."""
+    named = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    if named and os.path.isabs(named):
+        return named
+    global _WORKING_DIRECTORY
+    if _WORKING_DIRECTORY is None:
+        try:
+            _WORKING_DIRECTORY = os.getcwd()
+        except OSError:
+            _WORKING_DIRECTORY = ""
+    return _WORKING_DIRECTORY
+
+
+def linked_worktree(start: str) -> Optional[tuple[Path, Path]]:
+    """The top of the linked worktree `start` is in and its main checkout,
+    or None: a checkout with a `.git` directory, a submodule, a bare
+    repository's worktree and a folder outside Git are none.
+
+    A linked worktree's `.git` is a file naming <main>/.git/worktrees/<name>,
+    where Git keeps the worktree's back-reference (`gitdir`)."""
+    if not start:
+        return None
+    folder = Path(start)
+    for top in (folder, *folder.parents):
+        marker = top / ".git"
+        if marker.is_dir():
+            return None
+        if marker.is_file():
+            break
+    else:
+        return None
+    try:
+        with open(marker, encoding="utf-8", errors="replace") as handle:
+            line = handle.readline(4096).strip()
+    except OSError:
+        return None
+    if not line.startswith("gitdir:"):
+        return None
+    gitdir = Path(line[len("gitdir:"):].strip())
+    if not gitdir.is_absolute():
+        gitdir = top / gitdir
+    gitdir = Path(os.path.normpath(gitdir))
+    if (gitdir.parent.name != "worktrees" or gitdir.parent.parent.name != ".git"
+            or not (gitdir / "gitdir").is_file()):
+        return None
+    return top, gitdir.parent.parent.parent
+
+
+def worktree_project(start: str) -> Optional[Path]:
+    """The folder of a linked worktree this installation serves, when `start` is in it.
+
+    When this installation lies in the worktree's main checkout and the
+    worktree has no runtime of its own at the same place, that place in the
+    worktree is the project - what claude_dispatch.sh decides for a
+    session's hooks, here for a run without its variables.
+    """
+    found = linked_worktree(start)
+    if found is None:
+        return None
+    top, main = found
+    try:
+        project = (top / TOOLING_ROOT.relative_to(main.resolve())).resolve()
+        Path(start).resolve().relative_to(project)
+    except (OSError, ValueError):
+        return None
+    if not project.is_dir() or (project / "memory-bank" / "scripts" / "context.py").exists():
+        return None
+    return project
+
+
 @functools.lru_cache(maxsize=32)
-def _roots(repository: str, home: str, state: str, project: str) -> Roots:
+def _roots(repository: str, home: str, state: str, project: str, start: str = "") -> Roots:
     root = Path(repository)
     if home and state and project:
         try:
@@ -227,6 +313,13 @@ def _roots(repository: str, home: str, state: str, project: str) -> Roots:
                 return Roots(TOOLING_ROOT, project_path, root, TOOLING_ROOT == root.resolve())
         except OSError:
             pass
+    try:
+        if root.resolve() == TOOLING_ROOT:
+            served = worktree_project(start)
+            if served is not None:
+                return Roots(TOOLING_ROOT, served, root, True)
+    except OSError:
+        pass
     return Roots(root, root, root)
 
 
@@ -236,13 +329,15 @@ def roots(repository: Path) -> Roots:
     Attached mode needs all three variables, ACCELERATOR_HOME naming this copy
     and ACCELERATOR_STATE_DIR naming `repository`; anything else is the
     installed layout, so a stray or stale variable can never move an
-    installed project's state.
+    installed project's state - or, run in a worktree this installation
+    serves, the shared one (`worktree_project`).
     """
     return _roots(
         str(repository),
         os.environ.get(HOME_VARIABLE, "").strip(),
         os.environ.get(STATE_VARIABLE, "").strip(),
         os.environ.get(PROJECT_VARIABLE, "").strip(),
+        start_directory(),
     )
 
 
@@ -714,6 +809,18 @@ ACCELERATOR_OWNED_PREFIXES = (
 
 def accelerator_owned_source(name: str) -> bool:
     return name in ACCELERATOR_OWNED_FILES or name.startswith(ACCELERATOR_OWNED_PREFIXES)
+
+
+def citation_base(repository: Path, relative: str) -> Path:
+    """The root a cited path is checked under: the project's, or in a
+    worktree the installation serves the main checkout's for the
+    accelerator's own files the worktree has none of - where `resolve`
+    reads them, so what retrieval delivers can be cited."""
+    layout = roots(repository)
+    if (layout.shared and accelerator_owned_source(relative)
+            and not os.path.lexists(layout.project / relative)):
+        return layout.tooling
+    return layout.project
 
 
 def project_source_key(repository: Path, name: str) -> Optional[str]:

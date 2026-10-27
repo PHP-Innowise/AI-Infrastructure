@@ -4,6 +4,22 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime gives an attached project's worktree its own index — 2026-10-26
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `workspace_roots.py` change in the asset; the policy lock was rewritten.
+
+### The seeded runtime's sandboxed lookup publishes locally — 2026-10-26
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes
+  in the asset; the policy lock was rewritten.
+
+### The seeded runtime finds a worktree by itself — 2026-10-26
+
+- As the editions' does (root `CHANGELOG.md`, same day): `workspace_roots.py`,
+  `memory_results.py`, `mcp_server.py` and `context.py` change in the asset;
+  the policy lock was rewritten.
+
 ### The seeded dispatcher serves the project's worktrees — 2026-10-25
 
 - As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.py`,

@@ -45,6 +45,12 @@ there got the capsule and the policy, its save landed in the root's Project
 Brain under the worktree's branch, the worktree got an index of its own in
 the root, and nothing was written into the worktree.
 
+`--cli` (with `--worktree` or `--subfolder`) has the stand-in first run the
+memory CLI as the session's banner names it - a worktree has no
+memory-bank/scripts/ of its own, and a session below the root runs its
+commands there - with a `retrieve` for the session's branch: the run passes
+when the banner named it, the command ran and its answer was for that task.
+
 `--desktop` runs the measured session as the Claude desktop app drives
 Claude Code: questions and answers as stream-json, the project's settings
 named (`--setting-sources user,project,local`), and every permission prompt
@@ -127,6 +133,9 @@ def result_for(source: str) -> Dict[str, Any]:
 
 
 SAVE = re.compile(r"exact command: (cd .*?--json|\(cd .*?--json\))\n")
+CLI_HINT = re.compile(r"Memory CLI: [^`\n]* - run the commands the policy and skills name with `([^`]+)` in place of")
+# The branch the fixture's root is on.
+ROOT_BRANCH = "feature/SHOP-7-invoices"
 
 
 class Scripted(BaseHTTPRequestHandler):
@@ -141,6 +150,11 @@ class Scripted(BaseHTTPRequestHandler):
     save_begun = threading.Event()
     # --permissions: the tool calls to try, one a turn, before answering.
     probes: List[Dict[str, Any]] = []
+    # --cli: the task to retrieve for with the CLI the banner names, the
+    # commands it named, and what running one answered.
+    cli_task = ""
+    cli_named: List[str] = []
+    cli_answers: List[Dict[str, Any]] = []
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -225,9 +239,25 @@ class Scripted(BaseHTTPRequestHandler):
                 probe = probes[issued]
                 return [{"type": "tool_use", "id": f"toolu_probe_{issued}", "name": probe["name"],
                          "input": probe["input"]}], "tool_use", texts
+        if getattr(self, "cli_task", "") and not any(block.get("id") == "toolu_cli" for item in messages
+                                     if item.get("role") == "assistant" and isinstance(item.get("content"), list)
+                                     for block in item["content"] if isinstance(block, dict)):
+            heard = "\n".join([text_of(body.get("system")), *(text_of(item.get("content")) for item in messages)])
+            named = CLI_HINT.search(heard)
+            if named is None:
+                return [{"type": "text", "text": "The banner named no memory CLI."}], "end_turn", texts
+            self.cli_named.append(named.group(1))
+            command = f"{named.group(1)} retrieve 'invoice numbering' --task-id {self.cli_task} --json"
+            return [{"type": "tool_use", "id": "toolu_cli", "name": "Bash",
+                     "input": {"command": command, "description": "Retrieve the task's memory"}}], "tool_use", texts
         if start >= 0 and any(block.get("type") == "tool_result" for block in blocks):
             used = [block for block in messages[start].get("content", [])
                     if isinstance(block, dict) and block.get("type") == "tool_use"]
+            if used and used[-1].get("id") == "toolu_cli":
+                answer = next(block for block in blocks if block.get("type") == "tool_result")
+                self.cli_answers.append({"error": bool(answer.get("is_error")), "text": text_of(answer.get("content"))})
+                return [{"type": "tool_use", "id": "toolu_read", "name": "Read",
+                         "input": {"file_path": os.path.join(self.project, self.source)}}], "tool_use", texts
             if used and used[-1]["name"] == "Bash":
                 return [{"type": "text", "text": "Saved."}], "end_turn", texts
             return [{"type": "text", "text": f"Invoices are numbered per tenant ({self.source})."}], "end_turn", texts
@@ -351,7 +381,7 @@ def shop(work: Path) -> Path:
     (project / "composer.json").write_text('{"name": "acme/shop"}\n', encoding="utf-8")
     (project / "src/Invoice.php").write_text("<?php\nfinal class Invoice {}\n", encoding="utf-8")
     env = clean_env()
-    for args in (["init", "-q", "-b", "feature/SHOP-7-invoices"], ["add", "."], ["commit", "-qm", "Shop baseline"]):
+    for args in (["init", "-q", "-b", ROOT_BRANCH], ["add", "."], ["commit", "-qm", "Shop baseline"]):
         subprocess.run([*GIT, *args], cwd=project, env=env, check=True, capture_output=True)
     return project
 
@@ -628,6 +658,8 @@ def inside(args: argparse.Namespace) -> int:
                            check=True, capture_output=True)
             # The stand-in reads the worktree's copy of the project's file.
             Scripted.project = str(place)
+        if args.cli:
+            Scripted.cli_task = WORKTREE_BRANCH if args.worktree else ROOT_BRANCH
         project_cwd = place / (args.subfolder or "")
         project_cwd.mkdir(parents=True, exist_ok=True)
     else:
@@ -687,7 +719,6 @@ def inside(args: argparse.Namespace) -> int:
     if args.desktop:
         # A prompt the app would have shown the person: the save's above all.
         report["permission_prompts"] = [str(item["tool"]) + ": " + json.dumps(item["input"])[:120] for item in asked]
-        report["ok"] = report["ok"] and not asked
     if args.queued is not None:
         report["unsaved_on_screen"] = UNSAVED in screen
         report["ok"] = queued_ok(events, screen) and not errors
@@ -714,6 +745,18 @@ def inside(args: argparse.Namespace) -> int:
                                                   capture_output=True, text=True).stdout == ""
         report["ok"] = (report["ok"] and report["worktree_task"] and report["own_index"]
                         and report["worktree_clean"])
+    if args.cli:
+        # The banner named the memory CLI, and run as named it answered for
+        # the worktree's task.
+        report["cli_named"] = Scripted.cli_named[:1]
+        answer = Scripted.cli_answers[0] if Scripted.cli_answers else {"error": True, "text": ""}
+        report["cli_answer"] = answer["text"][:200]
+        report["cli_ran"] = (not answer["error"]
+                             and re.search(r'"task_id":\s*"' + re.escape(Scripted.cli_task) + '"', answer["text"]) is not None)
+        report["ok"] = report["ok"] and bool(Scripted.cli_named) and report["cli_ran"]
+    if args.desktop:
+        # Checked last: the subfolder and worktree verdicts above are made anew.
+        report["ok"] = report["ok"] and not asked
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -779,6 +822,9 @@ def main() -> int:
     parser.add_argument("--worktree", action="store_true",
                         help="after a session in the project root, run the measured one in a Git worktree of the "
                              "project (in DIR of it with --subfolder)")
+    parser.add_argument("--cli", action="store_true",
+                        help="with --worktree or --subfolder: the stand-in first runs the memory CLI as the session's "
+                             "banner names it")
     parser.add_argument("--permissions", action="store_true",
                         help="try the same tool calls in the root and below it, and compare the decisions")
     parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
@@ -819,6 +865,10 @@ def main() -> int:
     if args.desktop and (args.queued is not None or args.permissions):
         print("claude_code_bench: --desktop drives one turn as the app does; it takes no --queued or --permissions",
               file=sys.stderr)
+        return 2
+    if args.cli and not (args.worktree or args.subfolder):
+        print("claude_code_bench: --cli runs the memory CLI the banner of a session in a worktree or below the "
+              "root names; it needs --worktree or --subfolder", file=sys.stderr)
         return 2
     if args.worktree and (args.permissions or args.target):
         print("claude_code_bench: --worktree makes a worktree of a fresh install; it takes no --permissions or "
@@ -875,6 +925,7 @@ def main() -> int:
                                *(["--queued", str(args.queued)] if args.queued is not None else []),
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
                                *(["--worktree"] if args.worktree else []),
+                               *(["--cli"] if args.cli else []),
                                *(["--desktop"] if args.desktop else []),
                                *(["--sandbox"] if args.sandbox else []),
                                *(["--permissions"] if args.permissions else []),
