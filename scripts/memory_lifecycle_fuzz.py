@@ -19,19 +19,22 @@ installation not) and takes random steps from a seed:
   sessions start in the root or below it, Cursor sessions in the root;
 - a burst: turns of up to three sessions at once, in different folders;
 - a new session, a /clear or a compaction;
-- Git: commits, branches made, renamed, detached and re-attached, and a
-  commit made or a branch moved under a session between its Stop and its
-  save;
+- Git: commits, branches made, renamed, detached and re-attached, a rebase
+  stopped on a conflict - HEAD detached, the branch named only in the
+  rebase's state - then continued or aborted, and a commit made or a branch
+  moved under a session between its Stop and its save;
 - worktrees added in .claude/worktrees and beside the root, some with spaces
   in their names, and removed.
 
 What must hold afterwards: every hook exited 0 and the runtime journaled no
 error; no prompt was told that the memory was not consulted; every save
-landed in the task of the branch it was asked on, a save another session
-overtook included, and a sample of the learnings saved is found by `search`
-from the root and from every worktree left; Project Brain and the Memory
-Bank validate; no worktree was written into. Only a save asked for before
-its branch moved may be refused.
+landed in the task of the branch it was asked on - in a stopped rebase,
+the branch being rebased - a save another session overtook included, and a
+sample of the learnings saved is found by `search` from the root and from
+every worktree left; after a turn checkpoint in the root, no index of a
+removed worktree is left; Project Brain and the Memory Bank validate; no
+worktree was written into. Only a save asked for before its branch moved
+may be refused.
 
 Nothing leaves the work directory: HOME, TMPDIR and the dispatcher's folder
 are inside it, a new temporary directory unless --work names a missing or
@@ -39,7 +42,7 @@ empty one. No model and no network. Maintainer-only and standard library
 only; never installed into a project.
 
     memory_lifecycle_fuzz.py --seed 7 --steps 60
-    memory_lifecycle_fuzz.py --seed 21 --steps 70 --verbose --work /var/tmp/fuzz-21
+    memory_lifecycle_fuzz.py --seed 21 --steps 70 --edition Laravel --verbose --work /var/tmp/fuzz-21
 
 Prints a JSON summary. Exit status: 0 when everything held, 1 otherwise.
 """
@@ -63,7 +66,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import memory_rollout_rehearsal as rehearsal  # noqa: E402
 
 GIT = ["git", "-c", "user.name=Fuzz", "-c", "user.email=fuzz@example.invalid", "-c", "commit.gpgsign=false",
-       "-c", "core.hooksPath=/dev/null", "-c", "maintenance.auto=false"]
+       "-c", "core.hooksPath=/dev/null", "-c", "maintenance.auto=false", "-c", "core.editor=true"]
+EDITIONS = ("PHP Core", "Laravel", "Symfony", "WordPress")
 HOOK_TIMEOUT = 60
 # Who may run where: Codex runs the project's hooks from below the root;
 # Cursor there was not checked, and only Claude Code runs a worktree's hooks
@@ -73,8 +77,8 @@ STAGES = ("start", "prompt", "stop")
 
 
 class Fuzz:
-    def __init__(self, work: Path, seed: int, verbose: bool) -> None:
-        self.work, self.seed, self.verbose = work, seed, verbose
+    def __init__(self, work: Path, seed: int, verbose: bool, edition: str = "PHP Core") -> None:
+        self.work, self.seed, self.verbose, self.edition = work, seed, verbose, edition
         self.rng = random.Random(seed)
         self.lock = threading.RLock()
         self.log: List[str] = []
@@ -85,7 +89,7 @@ class Fuzz:
         # marker -> (branch asked on, task ID the save returned, session)
         self.saved: Dict[str, Tuple[str, Optional[str], str]] = {}
         self.counts: Counter = Counter()   # sessions by host and kind
-        self.events: Counter = Counter()   # bursts, worktrees entered, commits during a save
+        self.events: Counter = Counter()   # bursts, worktrees entered, commits during a save, rebases
         self.counter = 0
 
     # -- setup -------------------------------------------------------------
@@ -101,7 +105,7 @@ class Fuzz:
         self.env = rehearsal.child_env(self.work / "home", self.work / "tmp", {})
         for argv in (["init", "-q", "-b", "feature/SHOP-1"], ["add", "."], ["commit", "-qm", "Shop"]):
             subprocess.run([*GIT, *argv], cwd=shop, env=self.env, check=True, capture_output=True)
-        done = subprocess.run([sys.executable, str(rehearsal.INSTALLER), "--edition", "PHP Core", "--target",
+        done = subprocess.run([sys.executable, str(rehearsal.INSTALLER), "--edition", self.edition, "--target",
                                str(shop), "--merge-existing"], cwd=ROOT, env=self.env, capture_output=True,
                               text=True, stdin=subprocess.DEVNULL)
         if done.returncode != 0:
@@ -135,6 +139,22 @@ class Fuzz:
 
     def branch(self, folder: Path) -> str:
         return self.git(folder, "branch", "--show-current").stdout.strip()
+
+    def rebasing(self, folder: Path) -> str:
+        """The branch a rebase stopped in this checkout is replaying, or ''."""
+        directory = Path(self.git(folder, "rev-parse", "--absolute-git-dir").stdout.strip() or folder)
+        for state in ("rebase-merge", "rebase-apply"):
+            try:
+                name = (directory / state / "head-name").read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if name.startswith("refs/heads/"):
+                return name[len("refs/heads/"):]
+        return ""
+
+    def task_branch(self, folder: Path) -> str:
+        """The branch whose task a turn here works for, as the hooks find it."""
+        return self.branch(folder) or self.rebasing(folder)
 
     def place(self, session: Dict[str, Any]) -> Path:
         folder = self.checkouts[session["checkout"]]
@@ -225,7 +245,7 @@ class Fuzz:
             self.events["worktree entered"] += 1
         request = self.request_of(self.event(session_id, "stop", stop_hook_active=False,
                                              last_assistant_message="Checked."))
-        current = self.branch(self.place(session))
+        current = self.task_branch(self.place(session))
         if request is None:
             self.note(f"turn {session_id} ({session['host']} {session['kind']}, {current or 'detached'}): "
                       "no save asked")
@@ -235,7 +255,9 @@ class Fuzz:
             self.fail(f"turn {session_id}: a request without a command")
             return
         moved, roll = None, rng.random()
-        if not burst and roll < 0.12:
+        if self.rebasing(self.checkouts[session["checkout"]]):
+            pass
+        elif not burst and roll < 0.12:
             moved = f"feature/SHOP-moved-{self.counter}"
             self.git(self.place(session), "checkout", "-q", "-b", moved)
             self.note(f"turn {session_id}: branch moved to {moved} before the save")
@@ -304,10 +326,29 @@ class Fuzz:
     def git_action(self) -> None:
         name = self.rng.choice([name for name in self.checkouts if name not in self.removed])
         folder = self.checkouts[name]
+        stopped = self.rebasing(folder)
+        if stopped:
+            self.settle(name, folder, stopped, abort=self.rng.random() < 0.5)
+            return
         current = self.branch(folder)
-        action = self.rng.choices(["commit", "branch", "rename", "detach", "attach"],
-                                  weights=[30, 25, 15, 10, 20] if current else [10, 10, 0, 0, 80])[0]
-        if action == "commit":
+        action = self.rng.choices(["commit", "branch", "rename", "detach", "attach", "conflict"],
+                                  weights=[30, 25, 15, 10, 20, 8] if current else [10, 10, 0, 0, 80, 0])[0]
+        if action == "conflict":
+            # A rebase that stops on a conflict: HEAD detached, the branch's
+            # name only in the rebase's state, until it is continued or aborted.
+            side = f"{current}-side-{self.counter}"
+            path = folder / "src" / f"Conflict{self.counter}.php"
+            if self.git(folder, "checkout", "-q", "-b", side).returncode == 0:
+                for text, title in (("side", "Side"), ("main", "Main")):
+                    path.write_text(f"<?php // {text}\n", encoding="utf-8")
+                    self.git(folder, "add", "src")
+                    self.git(folder, "commit", "-qm", title)
+                    if text == "side":
+                        self.git(folder, "checkout", "-q", current)
+                self.git(folder, "rebase", side)
+                if self.rebasing(folder):
+                    self.events["rebase stopped"] += 1
+        elif action == "commit":
             (folder / "src" / f"Note{self.counter}.php").write_text("<?php\n", encoding="utf-8")
             self.git(folder, "add", "src")
             self.git(folder, "commit", "-qm", f"Note {self.counter}")
@@ -326,6 +367,18 @@ class Fuzz:
             if free:
                 self.git(folder, "checkout", "-q", self.rng.choice(free))
         self.note(f"git {action} in {name}: {current or 'detached'} -> {self.branch(folder) or 'detached'}")
+
+    def settle(self, name: str, folder: Path, stopped: str, abort: bool) -> None:
+        """Continue a stopped rebase with the replayed side of every conflict, or abort it."""
+        if abort:
+            self.git(folder, "rebase", "--abort")
+        else:
+            self.git(folder, "checkout", "--theirs", "--", "src")
+            self.git(folder, "add", "src")
+            self.git(folder, "rebase", "--continue")
+        self.events["rebase aborted" if abort else "rebase continued"] += 1
+        self.note(f"git rebase {'--abort' if abort else '--continue'} in {name} ({stopped}): "
+                  f"{self.branch(folder) or 'detached, ' + (self.rebasing(folder) or 'no rebase')}")
 
     def worktree_action(self) -> None:
         live = [name for name in self.checkouts if name != "root" and name not in self.removed]
@@ -388,6 +441,9 @@ class Fuzz:
     # -- what must hold ----------------------------------------------------
 
     def check(self) -> Dict[str, Any]:
+        for name, folder in self.checkouts.items():
+            if name not in self.removed and self.rebasing(folder):
+                self.git(folder, "rebase", "--abort")
         tasks = {}
         for path in (self.shop / "project-brain/dynamic/tasks").glob("*.md"):
             record = json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
@@ -423,6 +479,26 @@ class Fuzz:
                 if done.returncode != 0 or marker not in done.stdout:
                     self.fail(f"search {marker} from {folder.name}: exit {done.returncode}: "
                               f"{(done.stdout + done.stderr)[-300:]}")
+        # After a turn checkpoint in the root - a turn that committed, then
+        # its flush - only worktrees that are left keep an index of their own.
+        # A task's first turn only records its HEAD.
+        branch = self.branch(self.shop)
+        if branch:
+            def turn(*flush: str) -> None:
+                subprocess.run([sys.executable, str(scripts / "context.py"), "turn", "--task-id", branch, *flush],
+                               cwd=self.shop, env=dict(self.env, CLAUDE_PROJECT_DIR=str(self.shop)),
+                               capture_output=True, text=True, timeout=HOOK_TIMEOUT)
+            turn()
+            (self.shop / "src" / "Final.php").write_text("<?php\n", encoding="utf-8")
+            self.git(self.shop, "add", "src")
+            self.git(self.shop, "commit", "-qm", "Final")
+            turn()
+            turn("--flush")
+            live = {os.path.realpath(str(folder)) for name, folder in self.checkouts.items()
+                    if name != "root" and name not in self.removed}
+            for marker in (self.shop / "memory-bank/local/worktrees").glob("*/worktree"):
+                if marker.read_text(encoding="utf-8") not in live:
+                    self.fail(f"the index of a removed worktree is left: {marker.read_text(encoding='utf-8')}")
         # A hook exits 0 whatever its runtime did: the journal says what failed.
         journal = self.shop / "memory-bank/local/native-results.ndjson"
         lines = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()] \
@@ -431,7 +507,7 @@ class Fuzz:
             if line.get("event") == "error" or (line.get("stage") == "stop-hook" and line.get("status") not in (None, 0)):
                 self.fail(f"journal: {line}")
         saves = Counter(line.get("code") or line.get("event") for line in lines if line.get("stage") == "save")
-        return {"seed": self.seed, "sessions": dict(sorted(self.counts.items())),
+        return {"seed": self.seed, "edition": self.edition, "sessions": dict(sorted(self.counts.items())),
                 "events": dict(sorted(self.events.items())), "saves": len(self.saved),
                 "save_lines": dict(sorted(saves.items())),
                 "worktrees": len(self.checkouts) - 1, "removed": len(self.removed),
@@ -441,6 +517,7 @@ class Fuzz:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--edition", choices=EDITIONS, default="PHP Core")
     parser.add_argument("--steps", type=int, default=60)
     parser.add_argument("--work", type=Path, help="a missing or empty directory to work in, kept afterwards")
     parser.add_argument("--verbose", action="store_true", help="print each step to stderr")
@@ -455,7 +532,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         work = Path(tempfile.mkdtemp(prefix="memory-fuzz-"))
     try:
-        fuzz = Fuzz(work, args.seed, args.verbose)
+        fuzz = Fuzz(work, args.seed, args.verbose, args.edition)
         fuzz.install()
         fuzz.run(args.steps)
         summary = fuzz.check()

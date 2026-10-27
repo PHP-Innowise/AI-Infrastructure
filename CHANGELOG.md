@@ -71,38 +71,43 @@ edition's own files remain in that edition's changelog.
   answer; a save a moment later replaced the other's progress all the same.
   Neither was driven by any test: the new lifecycle fuzzer found both.
 - What changes: under the save's lock, where nothing else writes, a save
-  made within ten minutes of its request (`IN_FLIGHT_SECONDS`, the window in
-  which a prompt sent meanwhile treats it as still being written) takes the
-  task's current revision, as the Harness retries its own, and a task
+  made within ten minutes of its request (`IN_FLIGHT_SECONDS`, the window
+  in which a prompt sent meanwhile treats it as still being written) takes
+  the task's current revision, as the Harness retries its own, and a task
   created since the request takes it as well; the journal records it as
   `saved` with code `rebased`. Its progress and next steps replace the
   other session's, and its learnings are recorded as any are. A later
-  save - spooled until a hook long after - still yields to what was written
-  since, and a task replaced since the request (completed and started
-  again) still refuses it with `native-result:task-changed`. The request is pinned to its
-  branch; to its commit only on a detached HEAD, as in the middle of a
-  rebase, and a branch switched in between still refuses it.
-  `record-result` keeps its revision fence. `docs/MEMORY-INTEGRATION.md`
-  records the decision this replaces.
-- `scripts/memory_lifecycle_fuzz.py` (new) installs PHP Core into a scratch
-  project and drives random steps from a seed through the real hooks:
-  turns of Claude Code sessions in the root, below it and in worktrees
-  (through the dispatcher), a root session entering a worktree, Codex and
-  Cursor sessions, bursts of turns at once, saves made, skipped and
-  ignored, commits, branches made, renamed, detached and moved under a
-  pending save, worktrees added and removed. Every hook must exit 0 with no
-  error in the native journal, every save land in its branch's task, a
-  sample of the saved learnings be found by `search` from the root and from
-  every worktree left, Project Brain and the Memory Bank validate and no
-  worktree be written into. On 24 seeds of 60 steps nothing failed; before the change, seeds
-  lost saves to both refusals.
+  save - spooled until a hook long after - still yields to what was
+  written since, and a task replaced since the request (completed and
+  started again) still refuses it with `native-result:task-changed`. The
+  request is pinned to its branch; to its commit only on a detached HEAD,
+  as in the middle of a rebase, and a branch switched in between still
+  refuses it. `record-result` keeps its revision fence.
+  `docs/MEMORY-INTEGRATION.md` records the decision this replaces.
+- `scripts/memory_lifecycle_fuzz.py` (new) installs PHP Core into a
+  scratch project and drives random steps from a seed through the real
+  hooks: turns of Claude Code sessions in the root, below it and in
+  worktrees (through the dispatcher), a root session entering a worktree,
+  Codex and Cursor sessions, bursts of turns at once, saves made, skipped
+  and ignored, commits, branches made, renamed, detached and moved under a
+  pending save, a rebase stopped on a conflict and then continued or
+  aborted, worktrees added and removed. Every hook must exit 0 with no
+  error in the native journal, every save land in its branch's task (in a
+  stopped rebase, the branch being rebased), a sample of the saved
+  learnings be found by `search` from the root and from every worktree
+  left, no index of a removed worktree outlive the next turn checkpoint,
+  Project Brain and the Memory Bank validate and no worktree be written
+  into. `--edition` runs it on Laravel, Symfony or WordPress. On 24 seeds
+  of 60 steps nothing failed, nor on seed 1 of the other editions; before
+  the change, seeds lost saves to both refusals.
 - Tests: `tests/test_memory_native_capture.py` - two sessions saving in the
   same seconds, a turn checkpoint in between, a task the other session
   created and a commit made while the save is written, each failing
   without the change, and a replaced task, a save delayed past ten minutes
-  and a moved detached HEAD still refused; `tests/test_memory_lifecycle_fuzz.py` runs seeds 1 and 9 in a
-  step of its own in the `memory` job (about 80 s) and fails on the
-  runtime before the change.
+  and a moved detached HEAD still refused. `tests/test_memory_lifecycle_fuzz.py`
+  runs seeds 2 and 7 in a step of its own in the `memory` job (about
+  80 s); on the runtime before the change seed 7 fails by the first
+  refusal and seed 2 by the second.
 
 ### A session that entered a worktree keeps its memory there — 2026-10-26
 

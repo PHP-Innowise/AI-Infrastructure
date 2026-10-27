@@ -16,8 +16,12 @@ FUZZ = ROOT / "scripts" / "memory_lifecycle_fuzz.py"
 @unittest.skipUnless(shutil.which("bash") and shutil.which("git"), "needs bash and git")
 class LifecycleFuzz(unittest.TestCase):
     # Seeds whose 60 steps cover, between them, every host, a session that
-    # enters a worktree, bursts and a commit made while a save is written.
-    SEEDS = (1, 9)
+    # enters a worktree, bursts, a commit made while a save is written and a
+    # rebase stopped on a conflict, then continued and aborted. On the
+    # runtime before saves followed the task's current revision and the
+    # branch rather than the commit, seed 7 lost saves to the first and
+    # seed 2 to the second.
+    SEEDS = (2, 7)
 
     def test_random_lifecycles_keep_every_save_in_its_branch_task(self):
         seen, events = set(), set()
@@ -33,7 +37,8 @@ class LifecycleFuzz(unittest.TestCase):
                 seen.update(name.split()[0] for name in summary["sessions"])
                 events.update(summary["events"])
         self.assertEqual({"claude", "codex", "cursor"}, seen)
-        self.assertLessEqual({"burst", "worktree entered", "commit during a save"}, events)
+        self.assertLessEqual({"burst", "worktree entered", "commit during a save", "rebase stopped",
+                              "rebase continued", "rebase aborted"}, events)
 
 
 if __name__ == "__main__":

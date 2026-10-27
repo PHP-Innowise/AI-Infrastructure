@@ -620,8 +620,8 @@ offline, and checks what must hold after any of them. The other tests of the
 hooks run scripted sequences; what a person does between them - a branch
 made or renamed under a running session, a worktree removed while a session
 still names it, a session that enters a worktree, two sessions of a branch
-answering in the same seconds, a commit while the agent writes its save -
-was driven nowhere.
+answering in the same seconds, a commit while the agent writes its save, a
+rebase stopped on a conflict - was driven nowhere.
 
 From a seed, PHP Core is installed into a scratch project (its code
 committed, the installation not) and random steps follow:
@@ -633,36 +633,43 @@ committed, the installation not) and random steps follow:
   Stop that settles it;
 - bursts of up to three such turns at once, in different folders;
 - new sessions, `/clear` and compactions;
-- commits, branches made, renamed, detached and re-attached, and a commit or
-  a branch move between a Stop and its save;
+- commits, branches made, renamed, detached and re-attached, a rebase
+  stopped on a conflict (HEAD detached, the branch named only in the
+  rebase's state) and later continued or aborted, and a commit or a branch
+  move between a Stop and its save;
 - worktrees added in `.claude/worktrees` and beside the root, some with
   spaces in their names, and removed.
 
 What must hold: every hook exits 0 and the native journal records no error;
 no prompt is told the memory was not consulted; every save lands in the task
-of the branch it was asked on, and a sample of the saved learnings is found
-by `context.py search` from the root and from every worktree left;
-`context.py validate` and the Memory Bank's `validate.py` pass; no worktree
-is written into. Only a save asked for
+of the branch it was asked on (in a stopped rebase, the branch being
+rebased), and a sample of the saved learnings is found by `context.py
+search` from the root and from every worktree left; after a turn checkpoint
+in the root no index of a removed worktree is left; `context.py validate`
+and the Memory Bank's `validate.py` pass; no worktree is written into. Only a save asked for
 before its branch moved may be refused.
 
 ```bash
-python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--work DIR] [--verbose]
+python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP Core"|Laravel|Symfony|WordPress] \
+  [--work DIR] [--verbose]
 ```
 
-- **Outputs:** a JSON summary - the sessions by host and kind, bursts,
-  saves, the save lines of the native journal by code (`rebased` for a save
-  another session overtook), worktrees added and removed, and every
-  violation with the last steps before it. Exit 0 when everything held, 1
-  otherwise.
+- **Outputs:** a JSON summary - the edition, the sessions by host and
+  kind, the events (bursts, worktrees entered, commits during a save,
+  rebases stopped, continued and aborted), saves, the save lines of the
+  native journal by code (`rebased` for a save another session overtook),
+  worktrees added and removed, and every violation with the last steps
+  before it. Exit 0 when everything held, 1 otherwise.
 - **Writes:** only its work directory: a new temporary one, removed
   afterwards, unless `--work` names a missing or empty folder, which is
   kept. HOME, TMPDIR and the dispatcher's folder are inside it; no model and
   no network.
-- **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, in the step for
-  Claude Code below the project root or in a worktree, runs fixed seeds.
-  A failing seed reproduces with the same `--seed` and `--steps`; `--verbose`
-  prints every step.
+- **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, a step of its
+  own in the `memory` job, runs seeds 2 and 7 on PHP Core, which between
+  them reach every host, a worktree entered, bursts, a commit during a save
+  and a rebase stopped, continued and aborted. A failing seed reproduces
+  with the same `--seed` and `--steps`, apart from which of two sessions
+  answering at once saves first; `--verbose` prints every step.
 
 ### `claude_code_bench.py`
 
