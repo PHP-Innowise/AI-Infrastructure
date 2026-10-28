@@ -1458,13 +1458,15 @@ class PythonResolutionTest(unittest.TestCase):
 
     def windows_python(self) -> dict:
         """Windows as a validator meets it there: no jq and no php, python3
-        the Store stub, and python with the text streams Windows gives it."""
-        streams = self.root / "streams"
-        streams.mkdir(exist_ok=True)
-        (streams / "sitecustomize.py").write_text(self.WINDOWS_STREAMS, encoding="utf-8")
+        the Store stub, and python with the text streams Windows gives it -
+        set at the top of the program it runs, which -I leaves alone."""
         self.stand_in("python3", self.STORE_STUB)
-        self.stand_in("python", f'#!/bin/sh\nPYTHONPATH={shlex.quote(str(streams))} '
-                                f'exec {shlex.quote(sys.executable)} "$@"\n')
+        self.stand_in("python", f"#!{sys.executable}\n"
+                                "import os, sys\n"
+                                "argv = sys.argv[1:]\n"
+                                "if '-c' in argv:\n"
+                                f"    argv[argv.index('-c') + 1] = {self.WINDOWS_STREAMS!r} + argv[argv.index('-c') + 1]\n"
+                                f"os.execv({sys.executable!r}, [{sys.executable!r}, *argv])\n")
         return {"OS": "Windows_NT", "TMPDIR": str(self.root),
                 "PATH": str(self.bin) + os.pathsep + self.without_json_tools()}
 
@@ -1516,6 +1518,23 @@ class PythonResolutionTest(unittest.TestCase):
                     self.setUp()
                     result = self.run_validator(tool, name, self.windows_python(), payload)
                     self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+
+    def test_the_validators_import_nothing_from_the_sessions_folder(self) -> None:
+        # Run in the session's folder, `python -c` put that folder first on
+        # sys.path: a project's own json.py ran in every validator call - and
+        # here, ending the program, let the call through unchecked.
+        for name, payload in self.REFUSED.items():
+            with self.subTest(hook=name):
+                self.setUp()
+                env = self.windows_python()
+                marker = self.root / "imported"
+                (self.root / "claude").mkdir(parents=True, exist_ok=True)
+                (self.root / "claude" / "json.py").write_text(
+                    f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\nraise SystemExit(0)\n",
+                    encoding="utf-8")
+                result = self.run_validator("claude", name, env, payload)
+                self.assertFalse(marker.exists(), f"{name} imported the project's json.py")
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
 
     def test_the_dispatch_hook_reads_a_russian_answer_on_windows(self) -> None:
         # The subagent's answer is in the payload: read by the ANSI code page

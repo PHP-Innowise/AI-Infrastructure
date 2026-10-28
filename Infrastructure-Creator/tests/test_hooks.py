@@ -536,9 +536,15 @@ class WindowsPythonTest(unittest.TestCase):
         stand_ins, streams, tools = root / "bin", root / "streams", root / "tools"
         for folder in (stand_ins, streams, tools):
             folder.mkdir()
-        (streams / "sitecustomize.py").write_text(self.STREAMS, encoding="utf-8")
-        for name, body in (("python3", self.STORE_STUB),
-                           ("python", f'#!/bin/sh\nPYTHONPATH="{streams}" exec "{sys.executable}" "$@"\n')):
+        # The streams are set at the top of the program python runs, which -I
+        # leaves alone.
+        stand_in = (f"#!{sys.executable}\n"
+                    "import os, sys\n"
+                    "argv = sys.argv[1:]\n"
+                    "if '-c' in argv:\n"
+                    f"    argv[argv.index('-c') + 1] = {self.STREAMS!r} + argv[argv.index('-c') + 1]\n"
+                    f"os.execv({sys.executable!r}, [{sys.executable!r}, *argv])\n")
+        for name, body in (("python3", self.STORE_STUB), ("python", stand_in)):
             (stand_ins / name).write_text(body, encoding="utf-8")
             (stand_ins / name).chmod(0o755)
         for directory in os.environ.get("PATH", "").split(os.pathsep):
@@ -554,14 +560,14 @@ class WindowsPythonTest(unittest.TestCase):
         self.env = {**os.environ, "OS": "Windows_NT", "TMPDIR": str(root),
                     "PATH": f"{stand_ins}{os.pathsep}{tools}"}
 
-    def run_in(self, mirror: str, name: str, payload: dict):
+    def run_in(self, mirror: str, name: str, payload: dict, cwd: Path = EDITION_ROOT):
         return subprocess.run(
             [BASH, str(EDITION_ROOT / mirror / name)],
             input=json.dumps(payload, ensure_ascii=False),
             capture_output=True,
             text=True,
             encoding="utf-8",
-            cwd=str(EDITION_ROOT),
+            cwd=str(cwd),
             env=self.env,
             timeout=HOOK_TIMEOUT,
         )
@@ -581,6 +587,20 @@ class WindowsPythonTest(unittest.TestCase):
                     self.assertEqual("deny", json.loads(result.stdout)["permission"], result.stderr)
                 else:
                     self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+
+    def test_nothing_is_imported_from_the_sessions_folder(self) -> None:
+        # Run in the session's folder, `python -c` put that folder first on
+        # sys.path: a project's own json.py ran in every call - and here,
+        # ending the program, let the call through unchecked.
+        with tempfile.TemporaryDirectory(prefix="session-folder-") as folder:
+            marker = Path(folder) / "imported"
+            (Path(folder) / "json.py").write_text(
+                f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\nraise SystemExit(0)\n",
+                encoding="utf-8")
+            result = self.run_in(".claude/hooks", "bash-validator.sh",
+                                 {"tool_name": "Bash", "tool_input": {"command": "git reset --hard"}}, Path(folder))
+            self.assertFalse(marker.exists(), "the project's json.py was imported")
+            self.assertEqual(2, result.returncode, result.stdout + result.stderr)
 
     def test_every_line_of_a_command_is_checked(self) -> None:
         # Python on Windows wrote the command's first line with a \\r after it.

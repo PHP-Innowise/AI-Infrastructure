@@ -61,8 +61,10 @@ extract_tool_names() {
     php -r '$v=json_decode(stream_get_contents(STDIN), true); $found=[]; $walk=function($v) use (&$walk, &$found) { if (!is_array($v)) return; if (isset($v["tool_name"]) && is_string($v["tool_name"])) $found[$v["tool_name"]]=true; foreach ($v as $child) $walk($child); }; $walk($v); echo implode("\n", array_keys($found));'
   elif [ -n "${PYTHON[0]:-}" ]; then
     # Bytes both ways: on Windows a text stream reads by the ANSI code page,
-    # which a Russian word does not fit, and writes \n as \r\n.
-    "${PYTHON[@]}" -c 'import json,sys
+    # which a Russian word does not fit, and writes \n as \r\n. Isolated
+    # (-I): run in the session's folder, Python imported a project's own
+    # json.py before the standard one.
+    "${PYTHON[@]}" -I -c 'import json,sys
 found=[]
 def walk(v):
     if isinstance(v, dict):

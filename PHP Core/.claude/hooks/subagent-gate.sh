@@ -68,8 +68,10 @@ extract_key() {
     KEY="$key" php -r '$key=getenv("KEY"); $v=json_decode(stream_get_contents(STDIN), true); $found=[]; $walk=function($v) use (&$walk, &$found, $key) { if (!is_array($v)) return; if (isset($v[$key]) && is_string($v[$key]) && $v[$key] !== "") $found[$v[$key]]=true; foreach ($v as $child) $walk($child); }; $walk($v); echo implode("\n", array_keys($found));'
   elif [ -n "${PYTHON[0]:-}" ]; then
     # Bytes both ways: on Windows a text stream reads by the ANSI code page,
-    # which a Russian word does not fit, and writes \n as \r\n.
-    KEY="$key" "${PYTHON[@]}" -c 'import json,os,sys
+    # which a Russian word does not fit, and writes \n as \r\n. Isolated
+    # (-I): run in the session's folder, Python imported a project's own
+    # json.py before the standard one.
+    KEY="$key" "${PYTHON[@]}" -I -c 'import json,os,sys
 key=os.environ["KEY"]
 found=[]
 def walk(v):

@@ -14,11 +14,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   "Python 3.9+".
 - `hook-forge` says the same for the validators it writes: they call
   `resolve_python`, and their Python snippets read `sys.stdin.buffer` and
-  write `sys.stdout.buffer` as UTF-8. The skill bodies' ceiling rises from
-  299300 to 299500 bytes for it (299491 now); the policy lock was rewritten.
+  write `sys.stdout.buffer` as UTF-8, and run isolated (`-I`), so a
+  project's own `json.py` in the session's folder is not imported. The
+  skill bodies' ceiling rises from 299300 to 299600 bytes for it (299597
+  now); the policy lock was rewritten.
 - `tests/test_hooks.py` `WindowsPythonTest` stands Windows in: no `jq` or
   `php`, `python3` the Store stub, `python` with cp1252 streams writing
-  `\r\n`; on the old hooks 9 of its checks fail.
+  `\r\n`; on the old hooks 9 of its checks fail. A `json.py` in the
+  session's folder is not imported by `bash-validator.sh`.
 
 ### Seeded memory consolidates only on request — 2026-10-21
 

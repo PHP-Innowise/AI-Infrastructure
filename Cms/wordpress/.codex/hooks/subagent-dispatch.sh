@@ -86,8 +86,10 @@ extract_string() {  # $1 = key; first string value found walking the payload
     # Structure-aware, top-down: a key quoted inside message TEXT can never
     # shadow the real payload field.
     # Bytes both ways: on Windows a text stream reads by the ANSI code page,
-    # which a Russian word does not fit, and writes \n as \r\n.
-    printf '%s' "$INPUT" | "${PYTHON[@]}" -c 'import json, sys
+    # which a Russian word does not fit, and writes \n as \r\n. Isolated
+    # (-I): run in the session's folder, Python imported a project's own
+    # json.py before the standard one.
+    printf '%s' "$INPUT" | "${PYTHON[@]}" -I -c 'import json, sys
 key = sys.argv[1]
 try:
     payload = json.loads(sys.stdin.buffer.read())
@@ -146,7 +148,7 @@ if [ "$EVENT" = "PostToolUse" ]; then
   REPORT=$(tail -n 20 "$TAKEN" 2>/dev/null)
   rm -f "$TAKEN" 2>/dev/null
   [ -n "$REPORT" ] || exit 0
-  printf '%s' "$REPORT" | "${PYTHON[@]}" -c 'import json, sys
+  printf '%s' "$REPORT" | "${PYTHON[@]}" -I -c 'import json, sys
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
                                        "additionalContext": sys.stdin.buffer.read().decode("utf-8", "replace")}}))' 2>/dev/null
   exit 0

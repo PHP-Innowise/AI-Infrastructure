@@ -28,7 +28,7 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
-### The validators check a call on Windows where only Python decodes it — 2026-10-28
+### The validators check a call on Windows where only Python decodes it, and import nothing from the project — 2026-10-28
 
 - Why: `bash-validator.sh`, `file-naming-validator.sh` and `subagent-gate.sh`
   decode a call with `jq`, else `php`, else Python - and named it only
@@ -50,12 +50,22 @@ edition's own files remain in that edition's changelog.
   writes its result as UTF-8 bytes. The four editions and
   Infrastructure-Creator's own hooks; the generator's `hook-forge` says the
   same for the hooks it writes.
+- Isolated: every Python snippet in these hooks runs with `-I`. Run in the
+  session's folder, `python -c` put that folder first on `sys.path`, so a
+  project's own `json.py` ran in every validator call: it could end the
+  program and let the call through, or run anything at all. Measured on
+  the prompt hook, which the memory stack isolates the same way: a
+  `json.py` in the project root ran on every prompt, unseen. Attached, as
+  the Harness lends the edition to any folder it opens, that is code the
+  person never trusted.
 - Tests: `PythonResolutionTest` in each edition's `test_hooks.py` runs the
   validators and the dispatch hook with no `jq` or `php`, `python3` the Store
   stub and `python` with Windows' text streams (`sitecustomize`: cp1252 in,
   cp1252 and `\r\n` out); `WindowsPythonTest` does so for
   Infrastructure-Creator; on the old hooks 15 and 9 of their checks fail,
-  and the dispatch test 1. `tests/test_windows_memory_hooks.py` runs the
+  and the dispatch test 1. A `json.py` in the session's folder is not
+  imported, and the call is still refused; without `-I` it fails.
+  `tests/test_windows_memory_hooks.py` runs the
   installed validators through Git Bash with a python.exe and no `jq` or
   `php` on the Windows runner; not run on Windows locally.
 

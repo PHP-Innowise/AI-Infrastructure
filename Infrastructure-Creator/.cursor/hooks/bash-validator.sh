@@ -71,8 +71,10 @@ extract_command() {
     php -r '$v=json_decode(stream_get_contents(STDIN), true); $found=[]; $find=function($v) use (&$find, &$found) { if (!is_array($v)) return; foreach (["command", "cmd"] as $k) if (isset($v[$k]) && is_string($v[$k]) && $v[$k] !== "") $found[]=$v[$k]; foreach ($v as $child) $find($child); }; $find($v); echo implode("\n", $found);'
   elif [ -n "${PYTHON[0]:-}" ]; then
     # Bytes both ways: on Windows a text stream reads by the ANSI code page,
-    # which a Russian word does not fit, and writes \n as \r\n.
-    "${PYTHON[@]}" -c 'import json,sys
+    # which a Russian word does not fit, and writes \n as \r\n. Isolated
+    # (-I): run in the session's folder, Python imported a project's own
+    # json.py before the standard one.
+    "${PYTHON[@]}" -I -c 'import json,sys
 found=[]
 def find(v):
     if isinstance(v, dict):
