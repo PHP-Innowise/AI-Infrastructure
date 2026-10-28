@@ -25,7 +25,13 @@ installation not) and takes random steps from a seed:
   rebase's state - then continued or aborted, and a commit made or a branch
   moved under a session between its Stop and its save;
 - worktrees added in .claude/worktrees and beside the root, some with spaces
-  in their names, and removed.
+  in their names, and removed; worktrees Codex makes itself, on a detached
+  HEAD whose owning thread (codex-thread.json) names the task;
+- Codex sessions in a worktree, which the Codex dispatcher in the person's
+  configuration serves as Claude Code's serves its own;
+- a checkpoint as the checkpoint skill makes it - an update of the task -
+  half of them under a sandbox that keeps the memory read-only: the update
+  waits, and the session's Stop makes it.
 
 What must hold afterwards: every hook exited 0, the runtime journaled no
 error and no prompt hook's refresh failed or timed out - a refresh that
@@ -37,8 +43,9 @@ in a stopped rebase, the branch being rebased - a save another session
 overtook included, and a sample of the learnings saved is found by
 `search` from the root and from every worktree left; after a turn
 checkpoint in the root, no index of a removed worktree is left; Project
-Brain and the Memory Bank validate; no worktree was written into. Only a
-save asked for before its branch moved may be refused.
+Brain and the Memory Bank validate; no worktree was written into; a
+checkpoint a sandbox held was made by the Stop after it, and none was
+refused. Only a save asked for before its branch moved may be refused.
 
 With --attached nothing is installed: every session is launched as the
 Harness launches it, with the edition lent from this clone (the overlay of
@@ -85,7 +92,7 @@ HOOK_TIMEOUT = 60
 # Who may run where: Codex runs the project's hooks from below the root;
 # Cursor there was not checked, and only Claude Code runs a worktree's hooks
 # through the dispatcher or enters a worktree.
-HOSTS = {"root": ("claude", "claude", "codex", "cursor"), "sub": ("claude", "codex"), "worktree": ("claude",)}
+HOSTS = {"root": ("claude", "claude", "codex", "cursor"), "sub": ("claude", "codex"), "worktree": ("claude", "codex")}
 # The Harness launches a session in the project or one of its worktrees.
 ATTACHED_HOSTS = {"root": ("claude", "claude", "codex"), "worktree": ("claude", "codex")}
 STAGES = ("start", "prompt", "stop")
@@ -150,6 +157,14 @@ class Fuzz:
             shutil.copy2(shop / "memory-bank/scripts" / script, folder / name)
         (folder / "projects").write_text(str(shop) + "\n", encoding="utf-8")
         self.dispatcher = folder / "ai-accelerator-dispatch.sh"
+        # And Codex's, which a Codex session in the root sets up.
+        folder = self.work / "codex-dispatcher"
+        folder.mkdir()
+        for script, name in (("codex_dispatch.sh", "ai-accelerator-dispatch.sh"),
+                             ("codex_dispatch.py", "ai-accelerator-dispatch.py")):
+            shutil.copy2(shop / "memory-bank/scripts" / script, folder / name)
+        (folder / "projects").write_text(str(shop) + "\n", encoding="utf-8")
+        self.codex_dispatcher = folder / "ai-accelerator-dispatch.sh"
 
     def clone_status(self) -> str:
         """What Git sees changed in this clone's edition, bytecode caches aside."""
@@ -196,9 +211,21 @@ class Fuzz:
                 return name[len("refs/heads/"):]
         return ""
 
+    def codex_thread(self, folder: Path) -> str:
+        """The task a worktree Codex made names while its HEAD is detached:
+        codex-thread/<the thread that owns it>, or ''."""
+        directory = Path(self.git(folder, "rev-parse", "--absolute-git-dir").stdout.strip() or folder)
+        try:
+            owner = json.loads((directory / "codex-thread.json").read_text(encoding="utf-8"))["ownerThreadId"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return ""
+        return f"codex-thread/{owner}"
+
     def task_branch(self, folder: Path) -> str:
-        """The branch whose task a turn here works for, as the hooks find it."""
-        return self.branch(folder) or self.rebasing(folder)
+        """The branch whose task a turn here works for, as the hooks find it:
+        the branch, a stopped rebase's, or the thread that owns a worktree
+        Codex made."""
+        return self.branch(folder) or self.rebasing(folder) or self.codex_thread(folder)
 
     def place(self, session: Dict[str, Any]) -> Path:
         folder = self.checkouts[session["checkout"]]
@@ -219,6 +246,10 @@ class Fuzz:
             if session["host"] == "claude":
                 env["CLAUDE_PROJECT_DIR"] = str(launch)
             return env, None, place
+        if session["host"] == "codex" and session["kind"] == "worktree":
+            # Codex reads no .codex/ there: the dispatcher in the person's
+            # configuration runs the project's hooks.
+            return dict(self.env), self.codex_dispatcher, place
         if session["host"] != "claude":
             return dict(self.env), None, place
         if session["kind"] in ("worktree", "sub"):
@@ -358,7 +389,9 @@ class Fuzz:
             self.note(f"turn {session_id}: a commit before the save")
             self.events["commit during a save"] += 1
         env, _, place = self.hooks_of(session)
-        if session["kind"] == "worktree" and not self.attached:
+        if session["kind"] == "worktree" and session["host"] == "claude" and not self.attached:
+            # Codex has no file for its commands' variables: its save step
+            # names the roots itself.
             env.update(rehearsal.dispatched_environment(self.dispatcher, place, dict(self.env), HOOK_TIMEOUT))
         choice = rng.random()
         if choice < 0.8:
@@ -478,6 +511,21 @@ class Fuzz:
             self.note(f"worktree removed: {name}")
             return
         name = f"wt{len(self.checkouts)}"
+        if not self.attached and self.rng.random() < 0.25:
+            # Codex's own worktree: detached, in a folder of its own, the
+            # thread that owns it written into its Git directory.
+            folder = self.work / "codex-worktrees" / name / "shop"
+            folder.parent.mkdir(parents=True)
+            if self.git(self.shop, "worktree", "add", "-q", "--detach", str(folder)).returncode == 0:
+                directory = Path(self.git(folder, "rev-parse", "--absolute-git-dir").stdout.strip())
+                owner = "%08x-%04x-%04x-%04x-%012x" % tuple(self.rng.getrandbits(bits)
+                                                            for bits in (32, 16, 16, 16, 48))
+                (directory / "codex-thread.json").write_text(
+                    json.dumps({"version": 1, "ownerThreadId": owner}), encoding="utf-8")
+                self.checkouts[name] = folder
+                self.events["codex worktree made"] += 1
+                self.note(f"worktree made by Codex: {name} at {folder}, thread {owner}")
+            return
         spelled = f"{name} with spaces" if self.rng.random() < 0.3 else name
         folder = (self.shop / ".claude" / "worktrees" / spelled if self.rng.random() < 0.5
                   else self.work / f"shop-{spelled}")
@@ -485,6 +533,58 @@ class Fuzz:
                     f"feature/SHOP-{200 + len(self.checkouts)}").returncode == 0:
             self.checkouts[name] = folder
             self.note(f"worktree added: {name} at {folder}")
+
+    def checkpoint(self) -> None:
+        """A checkpoint as the checkpoint skill makes it, in a live session's
+        folder: an update of the task its hooks name, through the CLI. Half
+        of them under a sandbox that keeps the memory read-only to it: the
+        update waits, and the session's Stop - the turn ends - makes it."""
+        live = [session_id for session_id, session in self.sessions.items() if not self.gone(session)]
+        if not live:
+            return
+        session_id = self.rng.choice(sorted(live))
+        session = self.sessions[session_id]
+        place, checkout = self.place(session), self.checkouts[session["checkout"]]
+        task = self.task_branch(checkout)
+        cli = [sys.executable, str(self.home / "memory-bank/scripts/context.py")]
+        if not task or self.rebasing(checkout) or subprocess.run(
+                [*cli, "get", "--task-id", task, "--json"], cwd=place, env=self.cli_env(place),
+                capture_output=True, timeout=HOOK_TIMEOUT).returncode != 0:
+            self.note(f"checkpoint {session_id}: no task {task or '(none)'} to update")
+            return
+        locked = [folder for folder in (self.data / "project-brain/local", self.data / "memory-bank/local")
+                  if folder.is_dir()] if not self.attached and self.rng.random() < 0.5 else []
+        modes = [folder.stat().st_mode & 0o777 for folder in locked]
+        try:
+            for folder in locked:
+                folder.chmod(0o555)
+            done = subprocess.run([*cli, "update", "--task-id", task, "--revision", "auto", "--progress",
+                                   f"Checkpoint {self.counter}.", "--json"],
+                                  cwd=place, env=self.cli_env(place), capture_output=True, text=True,
+                                  timeout=HOOK_TIMEOUT)
+        finally:
+            for folder, mode in zip(locked, modes):
+                folder.chmod(mode)
+        if done.returncode != 0:
+            self.fail(f"checkpoint {session_id} ({session['host']} {session['kind']}, {task}): exit "
+                      f"{done.returncode}: {(done.stdout + done.stderr)[-240:]}")
+            return
+        if not json.loads(done.stdout).get("queued"):
+            self.events["checkpoint made"] += 1
+            self.note(f"checkpoint {session_id} ({task}): made")
+            return
+        self.events["checkpoint held"] += 1
+        journal = self.data / "memory-bank/local/native-results.ndjson"
+        before = len(journal.read_text(encoding="utf-8").splitlines()) if journal.exists() else 0
+        self.event(session_id, "stop", stop_hook_active=False, last_assistant_message="Checkpointed.")
+        self.event(session_id, "stop", stop_hook_active=True, last_assistant_message="Done.")
+        made = [line.get("event") for line in map(json.loads, journal.read_text(encoding="utf-8").splitlines()[before:])
+                if line.get("stage") == "queue"] if journal.exists() else []
+        if made != ["made"]:
+            self.fail(f"checkpoint {session_id} ({session['host']} {session['kind']}, {task}) held by the "
+                      f"sandbox: the Stop after it made {made or 'nothing'}")
+        else:
+            self.note(f"checkpoint {session_id} ({task}): held, then made by its Stop")
 
     def burst(self) -> None:
         """Turns of up to three sessions at once - two in one folder too, as two
@@ -520,8 +620,10 @@ class Fuzz:
                 self.new_session()
             elif roll < 0.8:
                 self.git_action()
-            elif roll < 0.92:
+            elif roll < 0.89:
                 self.worktree_action()
+            elif roll < 0.93:
+                self.checkpoint()
             else:
                 session_id = self.rng.choice(sorted(self.sessions))
                 source = self.rng.choice(["clear", "compact"])
@@ -613,6 +715,8 @@ class Fuzz:
         for line in lines:
             if line.get("event") == "error" or (line.get("stage") == "stop-hook" and line.get("status") not in (None, 0)):
                 self.fail(f"journal: {line}")
+            if line.get("stage") == "queue" and line.get("event") != "made":
+                self.fail(f"journal: a held checkpoint was not made: {line}")
         # The prompt hook records its refresh's exit status: 4 is Cursor's
         # "keep the rule you have", 1 a degraded capsule (counted above) or a
         # failure (reported above), anything else - 124, a timeout - a failure.

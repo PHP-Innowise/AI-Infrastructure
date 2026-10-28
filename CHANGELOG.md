@@ -28,6 +28,28 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The lifecycle fuzzer drives Codex in worktrees and held checkpoints — 2026-10-28
+
+- Why: the fuzzer drove Claude Code in worktrees, but Codex only in the root
+  and below it, never a worktree Codex makes, and never the explicit memory
+  commands. That is the stack carried onto the worktree stack the same day,
+  which its own tests covered one piece at a time.
+- What changes: `scripts/memory_lifecycle_fuzz.py` also runs Codex sessions
+  in worktrees, through the Codex dispatcher as a root Codex session sets it
+  up. It makes worktrees as Codex does: on a detached HEAD, the owning
+  thread in `codex-thread.json`, so the task is `codex-thread/<thread>`. And
+  it makes checkpoints as the checkpoint skill does, half of them under
+  read-only memory folders. A checkpoint a sandbox held must be made by the
+  session's Stop; one never made, or refused, is a violation.
+  `tests/test_memory_lifecycle_fuzz.py` asserts the new coverage on seeds 1
+  and 2, and its attached seed is 9 (4 no longer reached a Codex session in
+  the root; of 18 attached seeds none had a violation, 5 cover every path
+  the test names); `scripts/README.md` and `docs/CI.md` say what it drives.
+- Tests: seeds 1 to 3 at 60 steps, and a campaign of 24 seeds at 80 steps
+  over the four editions, a quarter attached: 936 saves, 29 Codex worktree
+  sessions, 23 worktrees Codex made, 23 checkpoints held and made, no
+  violation.
+
 ### The session banner reads the index Windows names — 2026-10-28
 
 - Why: `local-context.sh` takes its status fields from Python's `print`,

@@ -17,15 +17,16 @@ FUZZ = ROOT / "scripts" / "memory_lifecycle_fuzz.py"
 class LifecycleFuzz(unittest.TestCase):
     # Seeds whose 60 steps cover, between them, every host, a session that
     # enters a worktree, bursts, a commit made while a save is written and a
-    # rebase stopped on a conflict, then continued and aborted. On the
-    # runtime before saves followed the task's current revision and the
-    # branch rather than the commit, seed 1 lost saves to the first and
-    # seed 2 to the second.
+    # rebase stopped on a conflict, then continued and aborted, Codex in a
+    # worktree, a worktree Codex made, and checkpoints a sandbox held until
+    # the session's Stop. On the runtime before saves followed the task's
+    # current revision and the branch rather than the commit, seed 1 lost
+    # saves to the first and seed 2 to the second.
     SEEDS = (1, 2)
     # Launched as the Harness launches them: Claude Code and Codex in the
     # root and in worktrees, a root session entering one, two at once in
     # one folder, the state apart.
-    ATTACHED_SEED = 4
+    ATTACHED_SEED = 9
 
     def fuzz(self, *arguments):
         done = subprocess.run([sys.executable, str(FUZZ), *arguments, "--steps", "60"], cwd=ROOT,
@@ -37,15 +38,18 @@ class LifecycleFuzz(unittest.TestCase):
         return summary
 
     def test_random_lifecycles_keep_every_save_in_its_branch_task(self):
-        seen, events = set(), set()
+        seen, sessions, events = set(), set(), set()
         for seed in self.SEEDS:
             with self.subTest(seed=seed):
                 summary = self.fuzz("--seed", str(seed))
                 seen.update(name.split()[0] for name in summary["sessions"])
+                sessions.update(summary["sessions"])
                 events.update(summary["events"])
         self.assertEqual({"claude", "codex", "cursor"}, seen)
+        self.assertIn("codex worktree", sessions)
         self.assertLessEqual({"burst", "worktree entered", "commit during a save", "rebase stopped",
-                              "rebase continued", "rebase aborted"}, events)
+                              "rebase continued", "rebase aborted", "codex worktree made",
+                              "checkpoint held"}, events)
 
     def test_attached_sessions_keep_the_project_and_the_clone_unwritten(self):
         summary = self.fuzz("--attached", "--seed", str(self.ATTACHED_SEED))

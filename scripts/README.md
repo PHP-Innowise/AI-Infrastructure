@@ -629,7 +629,8 @@ committed, the installation not) and random steps follow:
 - turns of Claude Code sessions in the root, below it (`src/`) and in
   worktrees (through the dispatcher the installation carries), of a root
   session that enters a worktree during a turn, of Codex sessions in the
-  root and below it and of Cursor sessions in the root: the prompt hook,
+  root, below it and in worktrees (through the Codex dispatcher, as a root
+  Codex session sets it up) and of Cursor sessions in the root: the prompt hook,
   the Stop hook, the save it asks for - made, skipped or ignored - and the
   Stop that settles it;
 - bursts of up to three such turns at once, two of them in one folder too
@@ -640,7 +641,12 @@ committed, the installation not) and random steps follow:
   rebase's state) and later continued or aborted, and a commit or a branch
   move between a Stop and its save;
 - worktrees added in `.claude/worktrees` and beside the root, some with
-  spaces in their names, and removed.
+  spaces in their names, and removed, and worktrees made as Codex makes
+  them: on a detached HEAD, the owning thread in `codex-thread.json`, so
+  the task is `codex-thread/<thread>`;
+- checkpoints as the checkpoint skill makes them (an update of the task),
+  half of them under read-only memory folders, as a sandbox keeps them:
+  the update waits, and the session's Stop makes it.
 
 What must hold: every hook exits 0, the native journal records no error,
 and no prompt hook's refresh fails or times out (one that another session's
@@ -651,8 +657,9 @@ of the branch it was asked on (in a stopped rebase, the branch being
 rebased), and a sample of the saved learnings is found by `context.py
 search` from the root and from every worktree left; after a turn checkpoint
 in the root no index of a removed worktree is left; `context.py validate`
-and the Memory Bank's `validate.py` pass; no worktree is written into. Only
-a save asked for before its branch moved may be refused.
+and the Memory Bank's `validate.py` pass; no worktree is written into; a
+checkpoint a sandbox held is made by the Stop after it, and none is refused.
+Only a save asked for before its branch moved may be refused.
 
 With `--attached` nothing is installed: every session is launched as the
 Harness launches it, the edition lent from this clone through the overlay of
@@ -682,7 +689,8 @@ python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP 
 - **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, the
   `memory-lifecycles` job, runs seeds 1 and 2 on PHP Core, which between
   them reach every host, a worktree entered, bursts, a commit during a save
-  and a rebase stopped, continued and aborted, and seed 4 attached, whose
+  and a rebase stopped, continued and aborted, Codex in a worktree, a
+  worktree Codex made and a checkpoint a sandbox held, and seed 9 attached, whose
   root session enters a worktree. A
   failing seed reproduces with the same `--seed` and `--steps`, apart from
   which of two sessions answering at once saves first; `--verbose` prints
