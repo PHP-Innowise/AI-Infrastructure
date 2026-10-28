@@ -60,6 +60,12 @@ edition's own files remain in that edition's changelog.
     and parsed on its own, as bash runs it; nested escaped backquotes become
     nested commands.
   - The nesting limit (`BV_MAX_NEST`) applies to `${` and `$((` too.
+  - `$'...'` is decoded as bash decodes it: `\xHH`, `\uHHHH`, `\UHHHHHHHH`
+    and `\NNN` make their character, and a NUL ends the string. Before,
+    `$'\x67h' repo delete x` and `git push $'--\x66orce'` passed. A name
+    or option assembled at run time (a variable, a substitution's output, a
+    brace expansion like `{gh,}`) is still not followed; the hooks README
+    lists it under Limits.
   - A heredoc body is looked for in the parser's window before the rest of
     the command is copied, and the heredocs of one line are split once:
     8,000 heredocs take 2.2 s instead of 8.7 s.
@@ -75,7 +81,7 @@ edition's own files remain in that edition's changelog.
   2026-10-19 (3,000 more) lets none through either (the old validator 3, all
   backquoted heredocs). 100 KB of `${...}` or `$((...))` takes 1.1 s instead
   of 0.6 s, since their inside is read now.
-- Corpus 338 -> 359 cases, with `expansions` and `time` decisions; every new
+- Corpus 338 -> 365 cases, with `expansions` and `time` decisions; every new
   case was checked against bash. The parse-cost test covers default values,
   arithmetic and many heredocs (on the old validator 4x the heredocs took
   8.7x the time), nesting `${` and `$((` thousands deep (refused, no crash),

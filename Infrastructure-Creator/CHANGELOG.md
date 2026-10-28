@@ -9,11 +9,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - Infrastructure-Creator's own `bash-validator.sh` carries the generic
   section's fix (root `CHANGELOG.md`, same day): substitutions inside
   `${...}` and `$((...))` are checked, a backquoted command ends where bash
-  ends it, `$` before a line continuation is joined, `${`/`$((` nesting is
-  limited, heredoc bodies no longer cost a copy of the rest of the command
-  each, and a command not checked within two to three seconds is refused as
-  `command too long to check in time` instead of left to the host's 5 s
-  timeout, which runs it. Its hooks README says so.
+  ends it, `$` before a line continuation is joined, `$'...'` is decoded
+  as bash decodes it, `${`/`$((` nesting is limited, heredoc bodies no
+  longer cost a copy of the rest of the command each, and a command not
+  checked within two to three seconds is refused as `command too long to
+  check in time` instead of left to the host's 5 s timeout, which runs it.
+  Its hooks README says so.
 
 ### The validators check a call on Windows where only Python decodes it — 2026-10-28
 

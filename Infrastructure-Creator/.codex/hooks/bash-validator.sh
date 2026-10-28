@@ -449,7 +449,9 @@ bv_dollar() {
       if (( indq )); then
         word=$word'$'; BV_P=$(( BV_P + 1 ))
       else
-        BV_P=$(( BV_P + 2 )); quoted=1
+        # Decoded as bash decodes it: $'\x67h' is gh. A NUL ends the
+        # string; what follows it up to the quote is dropped.
+        BV_P=$(( BV_P + 2 )); quoted=1; BV_NUL=0
         while (( BV_P < BV_L )); do
           (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
           (( ${#word} < 1024 )) || { wordh=$wordh$word; word=''; }
@@ -458,12 +460,21 @@ bv_dollar() {
             "'") BV_P=$(( BV_P + 1 )); break ;;
             '\')
               c3=${BV_WIN:BV_P-BV_WB+1:1}
-              case $c3 in n) c3=$BV_NL ;; t) c3=$BV_TAB ;; esac
-              BV_P=$(( BV_P + 2 )); word=$word$c3 ;;
+              BV_P=$(( BV_P + 2 ))
+              case $c3 in
+                n) c3=$BV_NL ;;
+                t) c3=$BV_TAB ;;
+                r) c3=$BV_CR ;;
+                x|u|U|[0-7]) bv_ansi_code "$c3"; c3=$BV_CHAR ;;
+                c) BV_P=$(( BV_P + 1 )); c3='?' ;;
+                a|b|e|E|f|v) c3='?' ;;
+              esac
+              (( BV_NUL )) || word=$word$c3 ;;
             *)
               rest=${BV_WIN:BV_P-BV_WB:256}
               chunk=${rest%%[\'\\]*}
-              word=$word$chunk; BV_P=$(( BV_P + ${#chunk} )) ;;
+              (( BV_NUL )) || word=$word$chunk
+              BV_P=$(( BV_P + ${#chunk} )) ;;
           esac
         done
       fi ;;
@@ -503,6 +514,35 @@ bv_dquote() {
         word=$word$chunk; BV_P=$(( BV_P + ${#chunk} )) ;;
     esac
   done
+}
+
+# bv_ansi_code KIND: the character a \xHH, \uHHHH, \UHHHHHHHH or \NNN escape
+# of $'...' names, into BV_CHAR; BV_P is past the escape's letter (for \NNN,
+# its first digit) and moves past its digits. A code past ASCII stands as
+# '?' - no rule's word holds one - and NUL sets BV_NUL. Without a digit,
+# \x stays as written, as in bash.
+bv_ansi_code() {
+  local digits value octal
+  case $1 in
+    x) [[ ${BV_WIN:BV_P-BV_WB:2} =~ ^[0-9A-Fa-f]+ ]] ;;
+    u) [[ ${BV_WIN:BV_P-BV_WB:4} =~ ^[0-9A-Fa-f]+ ]] ;;
+    U) [[ ${BV_WIN:BV_P-BV_WB:8} =~ ^[0-9A-Fa-f]+ ]] ;;
+    *) BV_P=$(( BV_P - 1 )); [[ ${BV_WIN:BV_P-BV_WB:3} =~ ^[0-7]+ ]] ;;
+  esac || { BV_CHAR="\\$1"; return 0; }
+  digits=${BASH_REMATCH[0]}
+  BV_P=$(( BV_P + ${#digits} ))
+  case $1 in
+    x|u|U) value=$(( 16#$digits )) ;;
+    *) value=$(( 8#$digits & 255 )) ;;
+  esac
+  BV_CHAR='?'
+  if (( value == 0 )); then
+    BV_CHAR=''; BV_NUL=1
+  elif (( value < 128 )); then
+    printf -v octal '%03o' "$value"
+    # shellcheck disable=SC2059 # the format is the octal escape itself
+    printf -v BV_CHAR "\\$octal"
+  fi
 }
 
 # bv_brace DEPTH SEG INDQ walks a ${...} from after its "${" to after its
