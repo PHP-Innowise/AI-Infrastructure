@@ -88,7 +88,9 @@ HOOK_STDIN=$(cat 2>/dev/null)
 # next session's "recent files"; the runtime keeps their paths only. Bytes
 # both ways: on Windows a text stream writes \n as \r\n, and the flag read
 # "1\r" - a continuation checkpointed the turn again - and no field was a path.
-HOOK_FIELDS=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
+# Isolated (-I): run in the session's folder, Python imported a project's own
+# json.py before the standard one.
+HOOK_FIELDS=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -I -c '
 import json, os, sys
 try:
     payload = json.loads(sys.stdin.buffer.read())

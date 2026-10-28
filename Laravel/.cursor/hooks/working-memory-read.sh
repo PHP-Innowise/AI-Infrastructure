@@ -164,7 +164,9 @@ run() {
 # from eating the prompt's own trailing newlines. Bytes both ways: on Windows
 # a text stream writes \n as \r\n - every field cut here kept a \r, and the
 # session's directory was no directory - and reads by the ANSI code page.
-HOOK_INPUT=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
+# Isolated (-I): run in the session's folder, Python imported a project's own
+# json.py before the standard one, on every prompt.
+HOOK_INPUT=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -I -c '
 import json
 import os
 import re

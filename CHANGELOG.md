@@ -28,6 +28,23 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The memory hooks' Python imports nothing from the project's folder — 2026-10-28
+
+- Why: the prompt hook, the Stop hook and the session banner run Python
+  snippets in the session's folder, and `python -c` puts that folder first
+  on `sys.path`. A project's own `json.py` was imported before the standard
+  one, on every prompt. Measured: a `json.py` in the project root wrote its
+  marker, and the hook went on as usual. Attached - the Harness lends the
+  edition to any folder it opens - that is code the person never trusted.
+- What changes: those snippets run with `-I`: no session folder, no
+  `PYTHON*` variables, no user site. The validators get the same in their
+  own change, from `main`. The runtime's CLI is untouched: run as a script,
+  it imports from its own folder.
+- Tests: `PythonResolutionTest` runs the three hooks with a `json.py` in the
+  session's folder. It is not imported, and without `-I` the test fails. The
+  Windows banner test now sets the stream at the top of the program
+  `python` runs, which `-I` leaves alone, where `PYTHONPATH` it ignores.
+
 ### A session that entered a worktree keeps the root's permission rules, measured — 2026-10-28
 
 - Why: the worktree stack said, as a limit it had not measured, that after

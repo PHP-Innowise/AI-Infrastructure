@@ -1369,23 +1369,41 @@ class PythonResolutionTest(unittest.TestCase):
         # Python on Windows ends a printed line with \r\n: the database path,
         # the last field, kept the \r, named no file, and the banner read
         # index=missing over an index that was there.
-        streams = self.root / "streams"
-        streams.mkdir()
-        (streams / "sitecustomize.py").write_text(
-            "import io, sys\n"
-            "sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='cp1252', newline='\\r\\n')\n",
-            encoding="utf-8")
+        # The stream is set at the top of the program python runs, which -I
+        # leaves alone.
+        streams = ("import io, sys\n"
+                   "sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='cp1252', newline='\\r\\n')\n")
         database = self.root / "context.db"
         database.write_bytes(b"")
         self.stand_in("python3", self.STORE_STUB)
-        self.stand_in("python", f'#!/bin/sh\nPYTHONPATH={shlex.quote(str(streams))} '
-                                f'exec {shlex.quote(sys.executable)} "$@"\n')
+        self.stand_in("python", f"#!{sys.executable}\n"
+                                "import os, sys\n"
+                                "argv = sys.argv[1:]\n"
+                                "if '-c' in argv:\n"
+                                f"    argv[argv.index('-c') + 1] = {streams!r} + argv[argv.index('-c') + 1]\n"
+                                f"os.execv({sys.executable!r}, [{sys.executable!r}, *argv])\n")
         env = {"OS": "Windows_NT", "TMPDIR": str(self.root),
                "PATH": str(self.bin) + os.pathsep + self.without_python()}
         result, _ = self.run_hook("claude", "local-context.sh", env, {},
                                   status={"mode": "governed", "working": 0, "documents": 3,
                                           "database": str(database)})
         self.assertIn("Context governance: mode=governed, index=healthy/", result.stdout)
+
+    def test_the_memory_hooks_import_nothing_from_the_sessions_folder(self) -> None:
+        # Run in the session's folder, `python -c` put that folder first on
+        # sys.path: a project's own json.py ran in the prompt hook on every
+        # prompt, and in the Stop hook and the session banner.
+        for name, payload in (("working-memory-read.sh", None), ("working-memory-write.sh", {}),
+                              ("local-context.sh", {})):
+            with self.subTest(hook=name):
+                self.setUp()
+                marker = self.root / "imported"
+                (self.root / "claude").mkdir(parents=True, exist_ok=True)
+                (self.root / "claude" / "json.py").write_text(
+                    f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\n", encoding="utf-8")
+                result, _ = self.run_hook("claude", name, {}, payload)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertFalse(marker.exists(), f"{name} imported the project's json.py")
 
     def test_the_session_names_the_interpreter_where_python3_is_not_python(self) -> None:
         # The policy names the CLI as python3; the agent needs the name that

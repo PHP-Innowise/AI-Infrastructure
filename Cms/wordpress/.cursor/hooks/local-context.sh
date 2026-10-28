@@ -280,8 +280,9 @@ if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ]; then
   # The two counts come before the database path, which may be empty, and
   # are "-" when unknown: read splits on tabs and would shift an empty field.
   # Bytes: on Windows print ends the line with \r\n, the path kept the \r,
-  # and the banner read index=missing.
-  STATUS_FIELDS=$("${PYTHON[@]}" -c 'import json,sys; d=json.loads(sys.argv[1]); sys.stdout.buffer.write("{}\t{}\t{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("uncommitted", "-"), d.get("accelerator_uncommitted", "-"), d.get("database", "")).encode("utf-8", "replace"))' "$CONTEXT_STATUS" 2>/dev/null || true)
+  # and the banner read index=missing. Isolated (-I): run in the session's
+  # folder, Python imported a project's own json.py before the standard one.
+  STATUS_FIELDS=$("${PYTHON[@]}" -I -c 'import json,sys; d=json.loads(sys.argv[1]); sys.stdout.buffer.write("{}\t{}\t{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("uncommitted", "-"), d.get("accelerator_uncommitted", "-"), d.get("database", "")).encode("utf-8", "replace"))' "$CONTEXT_STATUS" 2>/dev/null || true)
   if [ -n "$STATUS_FIELDS" ]; then
     IFS=$'\t' read -r CONTEXT_MODE ACTIVE_BINDINGS INDEX_DOCUMENTS UNCOMMITTED ACCELERATOR_UNCOMMITTED INDEX_DB <<< "$STATUS_FIELDS"
     branch_line
