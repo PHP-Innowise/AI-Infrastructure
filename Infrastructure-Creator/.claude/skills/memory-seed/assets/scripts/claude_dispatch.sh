@@ -105,7 +105,9 @@ while IFS= read -r listed || [ -n "$listed" ]; do
     esac
   fi
   case "$start" in "$path"/*) [ ${#path} -gt ${#below} ] && below=$path && below_native=$listed ;; esac
-  [ "$start" = "$path" ] && exact=$path && exact_native=$listed
+  # A pattern, as above: on Windows names ignore case (nocasematch), and the
+  # list's C:\ reads /C/ where the session's folder reads /c/.
+  case "$start" in "$path") exact=$path exact_native=$listed ;; esac
 done < "$here/projects"
 # A root in the session's own checkout, or in one around it - a monorepo it
 # is installed in - comes first. A folder of another checkout inside the

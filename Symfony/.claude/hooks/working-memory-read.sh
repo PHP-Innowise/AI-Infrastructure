@@ -118,7 +118,9 @@ run() {
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
 # Output: the session id, the transcript path, the session's directory, the
 # prompt, one per line, and a final "\n." that keeps command substitution
-# from eating the prompt's own trailing newlines.
+# from eating the prompt's own trailing newlines. Bytes both ways: on Windows
+# a text stream writes \n as \r\n - every field cut here kept a \r, and the
+# session's directory was no directory - and reads by the ANSI code page.
 HOOK_INPUT=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
 import json
 import os
@@ -126,7 +128,7 @@ import re
 import sys
 
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(sys.stdin.buffer.read())
 except (UnicodeDecodeError, ValueError):
     data = {}
 if not isinstance(data, dict):
@@ -149,7 +151,7 @@ if not isinstance(transcript, str) or len(transcript) > 4096 or "\n" in transcri
 cwd = data.get("cwd", "")
 if not isinstance(cwd, str) or len(cwd) > 4096 or "\n" in cwd or "\0" in cwd or not os.path.isabs(cwd):
     cwd = ""
-sys.stdout.write(session + "\n" + transcript + "\n" + cwd + "\n" + prompt + "\n.")
+sys.stdout.buffer.write((session + "\n" + transcript + "\n" + cwd + "\n" + prompt + "\n.").encode("utf-8", "replace"))
 ' 2>/dev/null)
 case "$HOOK_INPUT" in *$'\n'*$'\n'*$'\n'*) ;; *) HOOK_INPUT=$'\n\n\n\n.' ;; esac
 SESSION_ID=${HOOK_INPUT%%$'\n'*}

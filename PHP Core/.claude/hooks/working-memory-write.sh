@@ -90,11 +90,13 @@ esac
 
 # A bookkeeping continuation must not checkpoint the same turn again. The
 # transcript the host names gives the files this turn read or changed, for the
-# next session's "recent files"; the runtime keeps their paths only.
+# next session's "recent files"; the runtime keeps their paths only. Bytes
+# both ways: on Windows a text stream writes \n as \r\n, and the flag read
+# "1\r" - a continuation checkpointed the turn again - and no field was a path.
 HOOK_FIELDS=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
 import json, os, sys
 try:
-    payload = json.load(sys.stdin)
+    payload = json.loads(sys.stdin.buffer.read())
 except (ValueError, UnicodeError):
     payload = {}
 if not isinstance(payload, dict):
@@ -107,7 +109,7 @@ if not isinstance(transcript, str) or len(transcript) > 4096 or "\n" in transcri
 cwd = payload.get("cwd", "")
 if not isinstance(cwd, str) or len(cwd) > 4096 or "\n" in cwd or "\0" in cwd or not os.path.isabs(cwd):
     cwd = ""
-sys.stdout.write(("1" if active else "0") + "\n" + transcript + "\n" + cwd + "\n.")
+sys.stdout.buffer.write((("1" if active else "0") + "\n" + transcript + "\n" + cwd + "\n.").encode("utf-8", "replace"))
 ' --host claude 2>/dev/null)
 MEMORY_RECOVERY=${HOOK_FIELDS%%$'\n'*}
 TRANSCRIPT=

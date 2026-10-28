@@ -28,6 +28,28 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The hooks read their input as bytes on Windows — 2026-10-28
+
+- Why: the Windows CI job ran the tests of a session that entered a
+  worktree for the first time and failed them. The prompt and Stop hooks
+  hand their JSON input to Python, which writes back one field per line;
+  on Windows a text stream writes `\n` as `\r\n`, so every field bash cut
+  kept a `\r`. The session's folder was no folder (an entered worktree
+  was never seen), the transcript path no path (the transcript's recent
+  files were never read there), and the Stop hook's continuation flag read
+  `1\r`, so a save's continuation checkpointed the turn a second time.
+  Python also decoded the input by the ANSI code page. And the dispatcher
+  compared the session's folder with a listed root case-sensitively for an
+  entered worktree's allow: the list's `C:\` reads `/C/` there, the
+  folder `/c/`.
+- What changes: both snippets read their input as bytes and write their
+  fields as UTF-8 bytes; the dispatcher matches the root by a pattern, as
+  its other comparisons do (`nocasematch` on Windows). Version 4 has not
+  shipped: its fingerprint is recorded again.
+- Tests: the Windows CI job's `tests.test_memory_worktree_sessions` and
+  `tests.test_memory_claude_subfolders`, which failed (four failures, one
+  error); not run on Windows locally.
+
 ### A session that entered a worktree keeps its memory there — 2026-10-26
 
 - Claude Code's `EnterWorktree` moves a session that started in the project
