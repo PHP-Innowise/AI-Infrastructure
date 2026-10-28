@@ -270,6 +270,18 @@ if [ -f "$ROOT_DIR/memory-bank/scripts/native_results.py" ] && [ -n "$TASK_ID" ]
   fi
 fi
 
+# The Stop hook's save continuation, which Codex and Cursor send back as a
+# prompt, is this turn's bookkeeping, not a request: the turn's own prompt
+# brought the capsule. Cursor reads its rule before this hook runs, so a
+# capsule rendered here for the instruction's words would be what the
+# person's next request carries instead of the last prompt's.
+case "$QUERY" in
+  "INTERNAL_NATIVE_MEMORY_RESULT "*)
+    [ -z "${NATIVE_PID:-}" ] || wait "$NATIVE_PID"
+    [ -z "${NATIVE_FILE:-}" ] || [ "$NATIVE_FILE" = /dev/null ] || rm -f "$NATIVE_FILE" 2>/dev/null
+    exit 0 ;;
+esac
+
 # One process refreshes all three layers and assembles the capsule. Splitting
 # them would index twice, because retrieval refreshes the index itself.
 # --ephemeral keeps the per-request manifest, including the query text, in
