@@ -646,7 +646,11 @@ committed, the installation not) and random steps follow:
   the task is `codex-thread/<thread>`;
 - checkpoints as the checkpoint skill makes them (an update of the task),
   half of them under read-only memory folders, as a sandbox keeps them:
-  the update waits, and the session's Stop makes it.
+  the update waits, and the session's Stop makes it;
+- where `bwrap` is, a fifth of the saves outside a burst under bubblewrap
+  (everything read-only but the temporary folder, as Claude Code's sandbox
+  on Linux): the save waits in the spool, and the Stop after it makes it,
+  under the branch's task.
 
 What must hold: every hook exits 0, the native journal records no error,
 and no prompt hook's refresh fails or times out (one that another session's
@@ -658,7 +662,8 @@ rebased), and a sample of the saved learnings is found by `context.py
 search` from the root and from every worktree left; after a turn checkpoint
 in the root no index of a removed worktree is left; `context.py validate`
 and the Memory Bank's `validate.py` pass; no worktree is written into; a
-checkpoint a sandbox held is made by the Stop after it, and none is refused.
+checkpoint or save a sandbox held is made by the Stop after it, and none is
+refused.
 Only a save asked for before its branch moved may be refused.
 
 With `--attached` nothing is installed: every session is launched as the

@@ -30,8 +30,11 @@ installation not) and takes random steps from a seed:
 - Codex sessions in a worktree, which the Codex dispatcher in the person's
   configuration serves as Claude Code's serves its own;
 - a checkpoint as the checkpoint skill makes it - an update of the task -
-  half of them under a sandbox that keeps the memory read-only: the update
-  waits, and the session's Stop makes it.
+  half of them under a sandbox (read-only memory folders): the update
+  waits, and the session's Stop makes it. Where bubblewrap is, a fifth of
+  the saves outside a burst run under it - everything read-only but the
+  temporary folder, as Claude Code's sandbox on Linux - and wait in the
+  spool for the Stop after them.
 
 What must hold afterwards: every hook exited 0, the runtime journaled no
 error and no prompt hook's refresh failed or timed out - a refresh that
@@ -44,8 +47,8 @@ overtook included, and a sample of the learnings saved is found by
 `search` from the root and from every worktree left; after a turn
 checkpoint in the root, no index of a removed worktree is left; Project
 Brain and the Memory Bank validate; no worktree was written into; a
-checkpoint a sandbox held was made by the Stop after it, and none was
-refused. Only a save asked for before its branch moved may be refused.
+checkpoint or save a sandbox held was made by the Stop after it, and none
+was refused. Only a save asked for before its branch moved may be refused.
 
 With --attached nothing is installed: every session is launched as the
 Harness launches it, with the edition lent from this clone (the overlay of
@@ -116,6 +119,7 @@ class Fuzz:
         self.counts: Counter = Counter()   # sessions by host and kind
         self.events: Counter = Counter()   # bursts, worktrees entered, commits during a save, rebases
         self.counter = 0
+        self.held: set = set()          # saves a sandbox held, waiting for the Stop after them
 
     # -- setup -------------------------------------------------------------
 
@@ -394,8 +398,14 @@ class Fuzz:
             # names the roots itself.
             env.update(rehearsal.dispatched_environment(self.dispatcher, place, dict(self.env), HOOK_TIMEOUT))
         choice = rng.random()
+        # A save a sandbox cannot write waits in the spool for the session's
+        # next hook. Drawn apart from the run's own stream, so the seeds keep
+        # their steps; never in a burst, whose other sessions would move the
+        # task's progress before it is read back.
+        held = (not burst and not self.attached and moved is None and current and bool(shutil.which("bwrap"))
+                and random.Random(marker).random() < 0.2)
         if choice < 0.8:
-            self.save(session_id, session, found.group(1), marker, current, moved, env, place)
+            self.save(session_id, session, found.group(1), marker, current, moved, env, place, held=held)
         elif choice < 0.9:
             command = found.group(1).replace("echo -E '<JSON>' | ", "")
             command = (command.replace("--input - --json", "--skip --json") if "--input - --json" in command
@@ -405,18 +415,62 @@ class Fuzz:
         else:
             self.note(f"turn {session_id}: the request is ignored")
         self.event(session_id, "stop", stop_hook_active=True, last_assistant_message="Done.")
+        if choice < 0.8 and held and marker in self.held:
+            # The Stop above ran outside the sandbox: it made the save.
+            self.held.discard(marker)
+            made = [record for record in self.tasks().values()
+                    if record["external_id"] == current and record.get("progress") == f"Turn {marker}."]
+            if not made:
+                self.fail(f"{marker} ({session_id}): the save a sandbox held was not made by the Stop after it")
+            else:
+                with self.lock:
+                    self.saved[marker] = (current, made[0]["id"], session_id)
+                self.events["save held"] += 1
+                self.note(f"turn {session_id} ({session['host']} {session['kind']}, {current}): held {marker}, "
+                          "then made by its Stop")
+
+    def sandboxed(self, argv: List[str]) -> List[str]:
+        """`argv` as a sandbox that lets a command write only the temporary
+        folder runs it - bubblewrap, the rest of the file system read-only,
+        as Claude Code's sandbox on Linux. A save is held only where bwrap
+        is; read-only folders alone are no sandbox to it: it opens the
+        index, whose file they leave writable, before it takes its lock."""
+        temporary = str(self.work / "tmp")
+        return ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
+                "--bind", temporary, temporary, "--", *argv]
+
+    def tasks(self) -> Dict[str, Dict[str, Any]]:
+        """Project Brain's tasks by ID."""
+        records = {}
+        for path in (self.data / "project-brain/dynamic/tasks").glob("*.md"):
+            record = json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
+            records[record["id"]] = record
+        return records
 
     def save(self, session_id: str, session: Dict[str, Any], command: str, marker: str, current: str,
-             moved: Optional[str], env: Dict[str, str], place: Path) -> None:
+             moved: Optional[str], env: Dict[str, str], place: Path, held: bool = False) -> None:
         data = json.dumps({"progress": f"Turn {marker}.", "verified": True, "learnings": [
             {"type": "finding", "title": f"Invoice numbering {marker}",
              "consequence": f"Invoices are numbered per tenant ({marker}).", "sources": ["src/Invoice.php"]}]})
         stdin: Optional[bytes] = data.encode("utf-8")
         if "'<JSON>'" in command:
             command, stdin = command.replace("'<JSON>'", "'" + data.replace("'", "'\\''") + "'"), None
-        done = subprocess.run(["bash", "-c", command], cwd=place, env=env, input=stdin, capture_output=True,
-                              timeout=HOOK_TIMEOUT)
+        argv = ["bash", "-c", command]
+        done = subprocess.run(self.sandboxed(argv) if held else argv, cwd=place, env=env, input=stdin,
+                              capture_output=True, timeout=HOOK_TIMEOUT)
         output = (done.stdout + done.stderr).decode("utf-8", "replace")
+        if held and done.returncode == 0:
+            try:
+                state = json.loads(done.stdout).get("state")
+            except ValueError:
+                state = None
+            if state != "spooled":
+                self.fail(f"save {session_id} ({session['host']} {session['kind']}, {current}) under a sandbox: "
+                          f"{state or output[-200:]}, not spooled")
+            else:
+                with self.lock:
+                    self.held.add(marker)
+            return
         if done.returncode != 0 and moved is not None:
             self.note(f"turn {session_id}: save refused after the move: {output.strip()[-120:]}")
         elif done.returncode != 0:
@@ -552,6 +606,8 @@ class Fuzz:
                 capture_output=True, timeout=HOOK_TIMEOUT).returncode != 0:
             self.note(f"checkpoint {session_id}: no task {task or '(none)'} to update")
             return
+        # The update decides by trying to write the memory's folders, so
+        # read-only folders stand in for the sandbox here.
         locked = [folder for folder in (self.data / "project-brain/local", self.data / "memory-bank/local")
                   if folder.is_dir()] if not self.attached and self.rng.random() < 0.5 else []
         modes = [folder.stat().st_mode & 0o777 for folder in locked]

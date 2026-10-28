@@ -28,6 +28,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The lifecycle fuzzer holds saves in a sandbox, as Claude Code's does — 2026-10-28
+
+- Why: a save a sandbox cannot write waits in the spool, and the session's
+  next hook makes it. The benches drive that once per run; the fuzzer
+  never did, between other sessions' saves, commits and branch moves.
+- What changes: where `bwrap` is, `scripts/memory_lifecycle_fuzz.py` runs a
+  fifth of the saves outside a burst under bubblewrap, everything read-only
+  but the temporary folder, as Claude Code's sandbox on Linux. The save
+  must say `spooled`, and the Stop after it must make it under the branch's
+  task. Read-only memory folders alone are no stand-in for that sandbox:
+  the save opens the index, whose file they leave writable, before it
+  takes its lock, and fails on the database's journal. The CI job
+  `memory-lifecycles` installs bubblewrap and lifts the runner's AppArmor
+  restriction, as `system-orchestration` does; its test asserts a held
+  save where `bwrap` is. The draw is apart from the run's own random
+  stream, so the seeds keep their steps.
+- Tests: seeds 1 and 2 at 60 steps hold 7 and 9 saves, all made by the Stop
+  after them, with no violation; `tests.test_check` accepts the job's
+  setup lines.
+
 ### The memory hooks' Python imports nothing from the project's folder — 2026-10-28
 
 - Why: the prompt hook, the Stop hook and the session banner run Python

@@ -375,7 +375,15 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Random session and Git lifecycles through the memory hooks
-        run: python3 -m unittest tests.test_memory_lifecycle_fuzz
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+          # Saves a sandbox holds run under bubblewrap, as Claude Code's sandbox
+          # does; Ubuntu 24.04 runners block the unprivileged user namespaces it
+          # needs through AppArmor.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          python3 -m unittest tests.test_memory_lifecycle_fuzz
 
   windows-harness:
     name: "Windows Harness (Python 3.13)"

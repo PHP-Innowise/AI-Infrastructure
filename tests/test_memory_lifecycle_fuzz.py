@@ -19,7 +19,8 @@ class LifecycleFuzz(unittest.TestCase):
     # enters a worktree, bursts, a commit made while a save is written and a
     # rebase stopped on a conflict, then continued and aborted, Codex in a
     # worktree, a worktree Codex made, and checkpoints a sandbox held until
-    # the session's Stop. On the runtime before saves followed the task's
+    # the session's Stop, and - where bubblewrap is - saves a sandbox held
+    # until the Stop after them. On the runtime before saves followed the task's
     # current revision and the branch rather than the commit, seed 1 lost
     # saves to the first and seed 2 to the second.
     SEEDS = (1, 2)
@@ -50,6 +51,9 @@ class LifecycleFuzz(unittest.TestCase):
         self.assertLessEqual({"burst", "worktree entered", "commit during a save", "rebase stopped",
                               "rebase continued", "rebase aborted", "codex worktree made",
                               "checkpoint held"}, events)
+        if shutil.which("bwrap"):
+            # A save the sandbox held, made by the Stop after it.
+            self.assertIn("save held", events)
 
     def test_attached_sessions_keep_the_project_and_the_clone_unwritten(self):
         summary = self.fuzz("--attached", "--seed", str(self.ATTACHED_SEED))
