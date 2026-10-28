@@ -50,7 +50,7 @@
     ".agents/skills/content-reviewer/SKILL.md": "e3a251e3e17b2ba071e19e4e2b4effb6436914b976f97bb72a06417cdd29ae09",
     ".agents/skills/conventions-scanner/SKILL.md": "119cba519974503387230005f7b675a3538087954b48a5f99098745764588c3b",
     ".agents/skills/domain-behavior-scanner/SKILL.md": "9eabf86c922b5234fcb47c1ab6e2563e9935f9a7b382a75fe66347a997b738e6",
-    ".agents/skills/hook-forge/SKILL.md": "bdd0e756efda62c12e525c64f0fc4dc2523962a70baa73c6df24297fb1cc5df0",
+    ".agents/skills/hook-forge/SKILL.md": "245f152cc9f9e8b413a3696dda5fcc3ca9c32f20a272580a4520213e5d1372e3",
     ".agents/skills/infra-build/SKILL.md": "8f9b505b3bf22b742e83a897de2b12457371e8cec9f90551ce487351d11e8856",
     ".agents/skills/infra-generate/SKILL.md": "ce862c37391a5a27d4c8d5f43306465f687d25b888bfe9583c6cfbe9ae5fb559",
     ".agents/skills/infra-ops-scanner/SKILL.md": "1248ce50011d346ed1c05ddaf5493550b8146619ac151849d0702ab89c55fe93",
@@ -174,7 +174,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "a2512653831a2a24f32bc3d84a485aa6c443e4048df2800e792e966a65ce76b8",
+  "policy_digest": "3ab9640fd50b87f6e002727f71a8ff31a5dc1f0f66b5e861c6d62b5b1f26fb2d",
   "release": "2.5.0",
   "schema_version": 1
 }

@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -212,7 +213,7 @@ class BashValidatorTest(unittest.TestCase):
         secret = "SECRET-COMMAND-BODY"
         expected = (
             "[bash-validator] no JSON extractor available "
-            "(jq/php/python3), validation skipped"
+            "(jq/php/Python 3.9+), validation skipped"
         )
         result = run_hook(
             self.HOOK,
@@ -506,6 +507,88 @@ class SubagentGateTest(unittest.TestCase):
                 {"tool_name": "Shell", "tool_input": {"command": "ls"}},
             ).returncode,
         )
+
+
+class WindowsPythonTest(unittest.TestCase):
+    """Where Git Bash has neither jq nor php, the validator and the gates
+    decode a call with Python. On Windows python3 is often the Microsoft
+    Store stub, which runs nothing, and Python's text streams read by the
+    ANSI code page and write \\n as \\r\\n. The hooks named only python3 and
+    read and wrote text: a call went through unchecked. Windows is stood in
+    for here: no jq or php, the stub, and python with those streams."""
+
+    STORE_STUB = (
+        "#!/bin/sh\n"
+        "echo 'Python was not found; run without arguments to install from the Microsoft Store, "
+        "or disable this shortcut from Settings > Manage App Execution Aliases.' >&2\n"
+        "exit 49\n"
+    )
+    STREAMS = (
+        "import io, sys\n"
+        "sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='cp1252')\n"
+        "sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='cp1252', newline='\\r\\n')\n"
+    )
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="windows-python-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        stand_ins, streams, tools = root / "bin", root / "streams", root / "tools"
+        for folder in (stand_ins, streams, tools):
+            folder.mkdir()
+        (streams / "sitecustomize.py").write_text(self.STREAMS, encoding="utf-8")
+        for name, body in (("python3", self.STORE_STUB),
+                           ("python", f'#!/bin/sh\nPYTHONPATH="{streams}" exec "{sys.executable}" "$@"\n')):
+            (stand_ins / name).write_text(body, encoding="utf-8")
+            (stand_ins / name).chmod(0o755)
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            try:
+                entries = list(os.scandir(directory or "."))
+            except OSError:
+                continue
+            for entry in entries:
+                if entry.name.startswith(("python", "php")) or entry.name in ("py", "jq"):
+                    continue
+                if not (tools / entry.name).exists() and os.access(entry.path, os.X_OK):
+                    (tools / entry.name).symlink_to(entry.path)
+        self.env = {**os.environ, "OS": "Windows_NT", "TMPDIR": str(root),
+                    "PATH": f"{stand_ins}{os.pathsep}{tools}"}
+
+    def run_in(self, mirror: str, name: str, payload: dict):
+        return subprocess.run(
+            [BASH, str(EDITION_ROOT / mirror / name)],
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(EDITION_ROOT),
+            env=self.env,
+            timeout=HOOK_TIMEOUT,
+        )
+
+    def test_a_russian_call_is_checked(self) -> None:
+        command = {"tool_name": "Bash", "tool_input": {"command": "git reset --hard # откат"}}
+        spawn = {"tool_name": "Agent", "tool_input": {"subagent_type": "Explore",
+                                                      "prompt": "Найди, где считается скидка"}}
+        for mirror in MIRROR_DIRS:
+            with self.subTest(mirror=mirror, hook="bash-validator.sh"):
+                result = self.run_in(mirror, "bash-validator.sh", command)
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+            with self.subTest(mirror=mirror, hook="subagent-gate.sh"):
+                result = self.run_in(mirror, "subagent-gate.sh", spawn)
+                if mirror == ".cursor/hooks":
+                    # Cursor's gate answers with JSON and always exits 0.
+                    self.assertEqual("deny", json.loads(result.stdout)["permission"], result.stderr)
+                else:
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+
+    def test_every_line_of_a_command_is_checked(self) -> None:
+        # Python on Windows wrote the command's first line with a \\r after it.
+        command = {"tool_name": "Bash", "tool_input": {"command": "git reset --hard\necho done"}}
+        for mirror in MIRROR_DIRS:
+            with self.subTest(mirror=mirror):
+                result = self.run_in(mirror, "bash-validator.sh", command)
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
 
 
 class MirrorConsistencyTest(unittest.TestCase):

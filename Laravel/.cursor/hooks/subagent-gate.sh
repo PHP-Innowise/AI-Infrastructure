@@ -19,13 +19,55 @@
 INPUT=
 IFS= read -r -d '' INPUT || :
 
+# Python 3.9+ by whichever name this shell knows it. Native Windows (Git Bash)
+# often has no working python3: the python.org installer provides python and
+# py, and the python3 found there may be the Microsoft Store stub, which only
+# offers to install Python. Elsewhere python3 is taken without a probe.
+resolve_python() {
+  PYTHON=()
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 > /dev/null 2>&1; then
+    PYTHON=(python3)
+    return 0
+  fi
+  # On Windows the name found is remembered per user, and taken again while
+  # the shell finds it at the same path (the hash table, no process): every
+  # hook otherwise started an interpreter just to ask its version.
+  local name path remembered="${TMPDIR:-/tmp}/ai-accelerator-python-${UID:-0}"
+  if [ "${OS:-}" = "Windows_NT" ] && [ -f "$remembered" ] && [ ! -L "$remembered" ] \
+      && IFS=$'\t' read -r name path < "$remembered" && [ -n "$path" ]; then
+    case "$name" in
+      python|py|python3)
+        if hash "$name" 2> /dev/null && [ "${BASH_CMDS[$name]:-}" = "$path" ]; then
+          PYTHON=("$name")
+          [ "$name" = py ] && PYTHON+=(-3)
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  for name in python py python3; do
+    PYTHON=("$name")
+    [ "$name" = py ] && PYTHON+=(-3)
+    if "${PYTHON[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      if [ "${OS:-}" = "Windows_NT" ] && [ ! -L "$remembered" ] && hash "$name" 2> /dev/null; then
+        printf '%s\t%s\n' "$name" "${BASH_CMDS[$name]:-}" > "$remembered" 2> /dev/null
+      fi
+      return 0
+    fi
+  done
+  PYTHON=()
+  return 1
+}
+
 extract_sub_type() {
   if command -v jq >/dev/null 2>&1; then
     jq -r '[.. | objects | .subagent_type? | select(type == "string" and length > 0)] | unique | .[0] // empty'
   elif command -v php >/dev/null 2>&1; then
     php -r '$v=json_decode(stream_get_contents(STDIN), true); $found=[]; $walk=function($v) use (&$walk, &$found) { if (!is_array($v)) return; if (isset($v["subagent_type"]) && is_string($v["subagent_type"]) && $v["subagent_type"] !== "") $found[$v["subagent_type"]]=true; foreach ($v as $child) $walk($child); }; $walk($v); echo array_key_first($found) ?? "";'
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import json,sys
+  elif [ -n "${PYTHON[0]:-}" ]; then
+    # Bytes both ways: on Windows a text stream reads by the ANSI code page,
+    # which a Russian word does not fit, and writes \n as \r\n.
+    "${PYTHON[@]}" -c 'import json,sys
 found=[]
 def walk(v):
     if isinstance(v, dict):
@@ -33,8 +75,8 @@ def walk(v):
         for child in v.values(): walk(child)
     elif isinstance(v, list):
         for child in v: walk(child)
-walk(json.load(sys.stdin))
-print(found[0] if found else "", end="")'
+walk(json.loads(sys.stdin.buffer.read()))
+sys.stdout.buffer.write((found[0] if found else "").encode("utf-8", "replace"))'
   else
     return 1
   fi
@@ -42,8 +84,10 @@ print(found[0] if found else "", end="")'
 
 allow() { printf '{"permission":"allow"}\n'; exit 0; }
 
+# Python only where neither jq nor php is: found once, here.
+command -v jq >/dev/null 2>&1 || command -v php >/dev/null 2>&1 || resolve_python
 SUB_TYPE=$(printf '%s' "$INPUT" | extract_sub_type 2>/dev/null) || {
-  echo "subagent-gate: no JSON extractor (jq/php/python3); failing open" >&2
+  echo "subagent-gate: no JSON extractor (jq/php/Python 3.9+); failing open" >&2
   allow
 }
 # No type in the payload: nothing to judge; do not brick delegation.

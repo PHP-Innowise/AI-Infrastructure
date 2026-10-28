@@ -4,6 +4,22 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The validators check a call on Windows where only Python decodes it — 2026-10-28
+
+- Infrastructure-Creator's own `bash-validator.sh` and its three
+  `subagent-gate.sh` find Python with `resolve_python`, only where neither
+  `jq` nor `php` is, and read and write bytes (root `CHANGELOG.md`, same
+  day): on Windows they named only `python3`, often the Store stub, and read
+  a call by the ANSI code page. The "no JSON extractor" warning names
+  "Python 3.9+".
+- `hook-forge` says the same for the validators it writes: they call
+  `resolve_python`, and their Python snippets read `sys.stdin.buffer` and
+  write `sys.stdout.buffer` as UTF-8. The skill bodies' ceiling rises from
+  299300 to 299500 bytes for it (299491 now); the policy lock was rewritten.
+- `tests/test_hooks.py` `WindowsPythonTest` stands Windows in: no `jq` or
+  `php`, `python3` the Store stub, `python` with cp1252 streams writing
+  `\r\n`; on the old hooks 9 of its checks fail.
+
 ### Seeded memory consolidates only on request — 2026-10-21
 
 - memory-seed's `runtime.json.template` ships `automatic_consolidation` and

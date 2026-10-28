@@ -20,14 +20,56 @@ case "$INPUT" in
   *) exit 0 ;;
 esac
 
+# Python 3.9+ by whichever name this shell knows it. Native Windows (Git Bash)
+# often has no working python3: the python.org installer provides python and
+# py, and the python3 found there may be the Microsoft Store stub, which only
+# offers to install Python. Elsewhere python3 is taken without a probe.
+resolve_python() {
+  PYTHON=()
+  if [ "${OS:-}" != "Windows_NT" ] && command -v python3 > /dev/null 2>&1; then
+    PYTHON=(python3)
+    return 0
+  fi
+  # On Windows the name found is remembered per user, and taken again while
+  # the shell finds it at the same path (the hash table, no process): every
+  # hook otherwise started an interpreter just to ask its version.
+  local name path remembered="${TMPDIR:-/tmp}/ai-accelerator-python-${UID:-0}"
+  if [ "${OS:-}" = "Windows_NT" ] && [ -f "$remembered" ] && [ ! -L "$remembered" ] \
+      && IFS=$'\t' read -r name path < "$remembered" && [ -n "$path" ]; then
+    case "$name" in
+      python|py|python3)
+        if hash "$name" 2> /dev/null && [ "${BASH_CMDS[$name]:-}" = "$path" ]; then
+          PYTHON=("$name")
+          [ "$name" = py ] && PYTHON+=(-3)
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  for name in python py python3; do
+    PYTHON=("$name")
+    [ "$name" = py ] && PYTHON+=(-3)
+    if "${PYTHON[@]}" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 9))' > /dev/null 2>&1; then
+      if [ "${OS:-}" = "Windows_NT" ] && [ ! -L "$remembered" ] && hash "$name" 2> /dev/null; then
+        printf '%s\t%s\n' "$name" "${BASH_CMDS[$name]:-}" > "$remembered" 2> /dev/null
+      fi
+      return 0
+    fi
+  done
+  PYTHON=()
+  return 1
+}
+
 # Decode JSON instead of scraping quoted strings; nested shell commands contain escaped quotes.
 extract_command() {
   if command -v jq >/dev/null 2>&1; then
     jq -r '[.. | objects | .command?, .cmd? | select(type == "string" and length > 0)] | join("\n")'
   elif command -v php >/dev/null 2>&1; then
     php -r '$v=json_decode(stream_get_contents(STDIN), true); $found=[]; $find=function($v) use (&$find, &$found) { if (!is_array($v)) return; foreach (["command", "cmd"] as $k) if (isset($v[$k]) && is_string($v[$k]) && $v[$k] !== "") $found[]=$v[$k]; foreach ($v as $child) $find($child); }; $find($v); echo implode("\n", $found);'
-  elif command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import json,sys
+  elif [ -n "${PYTHON[0]:-}" ]; then
+    # Bytes both ways: on Windows a text stream reads by the ANSI code page,
+    # which a Russian word does not fit, and writes \n as \r\n.
+    "${PYTHON[@]}" -c 'import json,sys
 found=[]
 def find(v):
     if isinstance(v, dict):
@@ -38,15 +80,15 @@ def find(v):
     elif isinstance(v, list):
         for child in v:
             find(child)
-find(json.load(sys.stdin))
-print("\n".join(found), end="")'
+find(json.loads(sys.stdin.buffer.read()))
+sys.stdout.buffer.write("\n".join(found).encode("utf-8", "replace"))'
   else
     return 1
   fi
 }
 
-if ! command -v jq >/dev/null 2>&1 && ! command -v php >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
-  echo "bash-validator: no JSON extractor available (jq/php/python3), validation skipped" >&2
+if ! command -v jq >/dev/null 2>&1 && ! command -v php >/dev/null 2>&1 && ! resolve_python; then
+  echo "bash-validator: no JSON extractor available (jq/php/Python 3.9+), validation skipped" >&2
   exit 0
 fi
 

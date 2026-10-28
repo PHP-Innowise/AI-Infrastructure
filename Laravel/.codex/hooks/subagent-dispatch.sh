@@ -85,10 +85,12 @@ extract_string() {  # $1 = key; first string value found walking the payload
   if [ -n "${PYTHON[0]:-}" ]; then
     # Structure-aware, top-down: a key quoted inside message TEXT can never
     # shadow the real payload field.
+    # Bytes both ways: on Windows a text stream reads by the ANSI code page,
+    # which a Russian word does not fit, and writes \n as \r\n.
     printf '%s' "$INPUT" | "${PYTHON[@]}" -c 'import json, sys
 key = sys.argv[1]
 try:
-    payload = json.load(sys.stdin)
+    payload = json.loads(sys.stdin.buffer.read())
 except Exception:
     sys.exit(0)
 def walk(value):
@@ -105,7 +107,7 @@ def walk(value):
             if found:
                 return found
     return ""
-print(walk(payload), end="")' "$key" 2>/dev/null
+sys.stdout.buffer.write(walk(payload).encode("utf-8", "replace"))' "$key" 2>/dev/null
   else
     # Degraded fallback (lock release only - the journal write below needs
     # Python anyway): greedy, may match a quoted key inside message text.
@@ -145,7 +147,8 @@ if [ "$EVENT" = "PostToolUse" ]; then
   rm -f "$TAKEN" 2>/dev/null
   [ -n "$REPORT" ] || exit 0
   printf '%s' "$REPORT" | "${PYTHON[@]}" -c 'import json, sys
-print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": sys.stdin.read()}}))' 2>/dev/null
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                       "additionalContext": sys.stdin.buffer.read().decode("utf-8", "replace")}}))' 2>/dev/null
   exit 0
 fi
 
