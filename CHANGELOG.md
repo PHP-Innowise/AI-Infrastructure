@@ -28,6 +28,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The Codex bench passes a read-only turn that asks for no save — 2026-10-28
+
+- Why: `scripts/codex_bench.py --sandbox read-only` shows that the Stop skips
+  the save request where the turn can write nothing, but its verdict was
+  still "saved", so the run that showed the right thing exited 1.
+- What changes: under `--sandbox read-only` the run passes when the stand-in
+  got no save step and the journal says `stop:skipped:read-only-sandbox`.
+- Tests: on Codex 0.163 offline the run exits 0 with exactly those two
+  events; the workspace-write runs are unchanged.
+
 ### The lifecycle fuzzer drives Codex in worktrees and held checkpoints — 2026-10-28
 
 - Why: the fuzzer drove Claude Code in worktrees, but Codex only in the root

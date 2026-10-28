@@ -455,6 +455,11 @@ def inside(args: argparse.Namespace) -> int:
         "helpers_stopped": helpers,
     }
     report["ok"] = report["saved"] and len(carried) == 1
+    if args.sandbox == "read-only":
+        # The turn can write nothing, so the Stop asks for no save: the
+        # stand-in got no save step, and the journal says why. A save asked
+        # for there would be the failure.
+        report["ok"] = not carried and "stop:skipped:read-only-sandbox" in events
     if args.queued is not None:
         report["unsaved_on_screen"] = bench.UNSAVED in screen
         report["ok"] = bench.queued_ok(events, screen)
