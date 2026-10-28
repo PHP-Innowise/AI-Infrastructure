@@ -285,6 +285,12 @@ class ParseCostTest(unittest.TestCase):
             # Walked for $(...) and `...`, line by line for joined lines.
             "unquoted heredoc body": "cat > f <<EOF\n" + "$a ${b} \\$c text \\\n" * n + "EOF",
             "tab-indented heredoc line": "cat <<-EOF\n" + "\t" * (n * 5) + "x\n\tEOF",
+            # Walked for the substitutions bash runs in them.
+            "default values": "echo " + "${a:-$b} ${c#x} " * n,
+            "arithmetic": "echo " + "$((a + (b * 2))) " * n,
+            # The body of each was found by copying all that followed it:
+            # 4x as many took 9x the time.
+            "many heredocs": ("cat <<E\n" + "line of text " * 8 + "\nE\n") * (n // 4) + "true",
         }[kind]
 
     def best_time(self, command: str) -> float:
@@ -303,6 +309,9 @@ class ParseCostTest(unittest.TestCase):
             "long word list",
             "unquoted heredoc body",
             "tab-indented heredoc line",
+            "default values",
+            "arithmetic",
+            "many heredocs",
         ):
             with self.subTest(kind=kind):
                 small = self.best_time(self.dense(kind, 2000))
@@ -317,6 +326,36 @@ class ParseCostTest(unittest.TestCase):
         command = "cat > tests/Feature/BigTest.php <<'PHP'\n<?php\nclass BigTest {\n" + body + "\n}\nPHP"
         self.assertGreater(len(command), 100_000)
         self.assertLess(self.best_time(command), 2.5)
+
+
+    def test_deep_expansions_are_refused_not_crashed_on(self) -> None:
+        # ${...} and $((...)) recurse without a bv_parse in between; bash
+        # crashing on the depth (SIGSEGV) is a hook that lets the command run.
+        for name, command in (
+            ("defaults", "echo " + "${X:-" * 3000 + "$(gh repo delete x)" + "}" * 3000),
+            ("arithmetic", "echo " + "$((" * 3000 + "1" + "))" * 3000 + "; gh repo delete x"),
+            ("unterminated", "echo " + "${" * 3000 + "\ngh repo delete x"),
+        ):
+            with self.subTest(name=name):
+                result = run_hook(self.HOOK, ".claude", command)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("command too complex", result.stderr)
+
+    def test_a_command_not_checked_in_time_is_refused(self) -> None:
+        # The host runs a command whose hook times out, so a check that
+        # cannot finish refuses instead. With no time at all, every command
+        # meets the deadline: on the parser's way or the rules'.
+        text = self.HOOK.read_text(encoding="utf-8")
+        self.assertEqual(text.count("BV_TIME_LIMIT=3\n"), 1)
+        with tempfile.TemporaryDirectory(prefix="bash-validator-deadline-") as folder:
+            hook = Path(folder) / "edition" / ".claude" / "hooks" / "bash-validator.sh"
+            hook.parent.mkdir(parents=True)
+            hook.write_text(text.replace("BV_TIME_LIMIT=3\n", "BV_TIME_LIMIT=0\n"), encoding="utf-8")
+            for command in ('echo "$HOME"', "ls -la"):
+                with self.subTest(command=command):
+                    result = run_hook(hook, ".claude", command)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("command too long to check in time", result.stderr)
 
 
 class GenericSectionTest(unittest.TestCase):
