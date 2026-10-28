@@ -1560,8 +1560,11 @@ class PythonResolutionTest(unittest.TestCase):
                     resolver = resolver or text[start:end]
                     self.assertEqual(resolver, text[start:end])
                     rest = text[:start] + text[end:]
-                    # A python3 or python standing as a command, not named in text.
-                    call = re.compile(r"(?:^|[;&|(]|\$\(|\btimeout\s+\S+|\brun|\bexec)\s*python3?\b")
+                    # A python3 or python standing as a command, not named in text:
+                    # after the variables a command may set, and before an argument
+                    # or the end - in a pattern, as in `(python3?|py)`, it is text.
+                    call = re.compile(r"""(?:^|[;&|(]|\$\(|\btimeout\s+\S+|\brun|\bexec)\s*"""
+                                      r"""(?:\w+=(?:"[^"]*"|'[^']*'|\S*)\s+)*python3?(?=\s|$)""")
                     bare = [line for line in rest.splitlines()
                             if not line.lstrip().startswith(("#", "echo ")) and call.search(line.strip())]
                     self.assertEqual([], bare)
