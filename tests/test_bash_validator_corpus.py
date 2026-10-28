@@ -272,9 +272,26 @@ class ParseCostTest(unittest.TestCase):
     cannot push the hook past its 5 s timeout, which fails open. Measured
     as a ratio (4x the input must cost well under 16x the time) so that a
     slow machine does not fail it; the generic section is identical in
-    every copy, so one copy stands for all."""
+    every copy, so one copy stands for all. The copy measured has its time
+    limit lifted: on a loaded machine (check.py runs its jobs side by side)
+    a large input could reach the limit and be refused, which is what the
+    deadline's own test checks, not the parser's cost."""
 
-    HOOK = REPO_ROOT / "Laravel" / ".claude" / "hooks" / "bash-validator.sh"
+    SOURCE = REPO_ROOT / "Laravel" / ".claude" / "hooks" / "bash-validator.sh"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        folder = Path(tempfile.mkdtemp(prefix="bash-validator-cost-"))
+        cls.addClassCleanup(shutil.rmtree, folder, True)
+        cls.HOOK = folder / "edition" / ".claude" / "hooks" / "bash-validator.sh"
+        cls.HOOK.parent.mkdir(parents=True)
+        cls.HOOK.write_text(cls.limited(60), encoding="utf-8")
+
+    @classmethod
+    def limited(cls, seconds: int) -> str:
+        text = cls.SOURCE.read_text(encoding="utf-8")
+        assert text.count("BV_TIME_LIMIT=3\n") == 1
+        return text.replace("BV_TIME_LIMIT=3\n", "BV_TIME_LIMIT=%d\n" % seconds)
 
     @staticmethod
     def dense(kind: str, n: int) -> str:
@@ -345,12 +362,10 @@ class ParseCostTest(unittest.TestCase):
         # The host runs a command whose hook times out, so a check that
         # cannot finish refuses instead. With no time at all, every command
         # meets the deadline: on the parser's way or the rules'.
-        text = self.HOOK.read_text(encoding="utf-8")
-        self.assertEqual(text.count("BV_TIME_LIMIT=3\n"), 1)
         with tempfile.TemporaryDirectory(prefix="bash-validator-deadline-") as folder:
             hook = Path(folder) / "edition" / ".claude" / "hooks" / "bash-validator.sh"
             hook.parent.mkdir(parents=True)
-            hook.write_text(text.replace("BV_TIME_LIMIT=3\n", "BV_TIME_LIMIT=0\n"), encoding="utf-8")
+            hook.write_text(self.limited(0), encoding="utf-8")
             for command in ('echo "$HOME"', "ls -la"):
                 with self.subTest(command=command):
                     result = run_hook(hook, ".claude", command)
