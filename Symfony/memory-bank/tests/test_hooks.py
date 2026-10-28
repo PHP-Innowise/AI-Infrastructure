@@ -1298,8 +1298,9 @@ class PythonResolutionTest(unittest.TestCase):
                 self.stand_in(name, f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
         return {"OS": "Windows_NT", "PATH": str(self.bin) + os.pathsep + self.without_python()}
 
-    def run_hook(self, tool: str, name: str, env: dict, payload=None, runtime="context.py"):
-        """``name`` against a runtime stand-in that records its arguments."""
+    def run_hook(self, tool: str, name: str, env: dict, payload=None, runtime="context.py", status=None):
+        """``name`` against a runtime stand-in that records its arguments;
+        ``status`` is what its `status --json` answers."""
         project = self.root / tool
         hooks = project / MIRRORS[tool][0]
         hooks.mkdir(parents=True, exist_ok=True)
@@ -1311,7 +1312,7 @@ class PythonResolutionTest(unittest.TestCase):
             "import json, pathlib, sys\n"
             f"pathlib.Path({str(argv_file)!r}).write_text(json.dumps(sys.argv[1:]))\n"
             "if sys.argv[1:2] == ['status']:\n"
-            "    print(json.dumps({'mode': 'governed', 'working': 0, 'documents': 3, 'database': ''}))\n"
+            f"    print(json.dumps({status or {'mode': 'governed', 'working': 0, 'documents': 3, 'database': ''}!r}))\n"
             "else:\n"
             "    print('working: TASK-INPUT')\n",
             encoding="utf-8",
@@ -1363,6 +1364,28 @@ class PythonResolutionTest(unittest.TestCase):
         result, _ = self.run_hook("claude", "local-context.sh", self.windows(), {})
         self.assertIn("Context governance: unavailable - no Python 3.9+ found", result.stdout)
         self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_the_session_banner_reads_the_index_python_names_on_windows(self) -> None:
+        # Python on Windows ends a printed line with \r\n: the database path,
+        # the last field, kept the \r, named no file, and the banner read
+        # index=missing over an index that was there.
+        streams = self.root / "streams"
+        streams.mkdir()
+        (streams / "sitecustomize.py").write_text(
+            "import io, sys\n"
+            "sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='cp1252', newline='\\r\\n')\n",
+            encoding="utf-8")
+        database = self.root / "context.db"
+        database.write_bytes(b"")
+        self.stand_in("python3", self.STORE_STUB)
+        self.stand_in("python", f'#!/bin/sh\nPYTHONPATH={shlex.quote(str(streams))} '
+                                f'exec {shlex.quote(sys.executable)} "$@"\n')
+        env = {"OS": "Windows_NT", "TMPDIR": str(self.root),
+               "PATH": str(self.bin) + os.pathsep + self.without_python()}
+        result, _ = self.run_hook("claude", "local-context.sh", env, {},
+                                  status={"mode": "governed", "working": 0, "documents": 3,
+                                          "database": str(database)})
+        self.assertIn("Context governance: mode=governed, index=healthy/", result.stdout)
 
     def test_the_session_names_the_interpreter_where_python3_is_not_python(self) -> None:
         # The policy names the CLI as python3; the agent needs the name that

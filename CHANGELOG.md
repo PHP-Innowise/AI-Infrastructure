@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The session banner reads the index Windows names — 2026-10-28
+
+- Why: `local-context.sh` takes its status fields from Python's `print`,
+  which on Windows ends the line with `\r\n`. The last field, the index's
+  path, kept the `\r` and named no file, so the banner of every session on
+  Windows said `index=missing` over an index that was there.
+- What changes: the four editions' `local-context.sh` write the fields as
+  UTF-8 bytes, as the memory hooks' snippets do.
+- Tests: `PythonResolutionTest` runs the banner with `python` writing its
+  stream as on Windows (`sitecustomize`: cp1252, `\r\n`) and a status that
+  names an existing index; on the old hook it reads `index=missing`.
+
 ### Codex in worktrees and the explicit memory commands, on the worktree stack — 2026-10-28
 
 - Why: two stacks grew apart from the same base. One served Codex started in
