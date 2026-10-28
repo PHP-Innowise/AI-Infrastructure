@@ -578,9 +578,12 @@ class SaveInWorktree(unittest.TestCase):
         result = json.dumps({"progress": "Refunds checked.", "verified": True, "learnings": [
             {"type": "finding", "title": "Refunds reuse the invoice number",
              "consequence": "A refund cites the invoice it reverses.", "sources": ["src/Refund.php"]}]})
-        # Without the roots the command serves the main checkout, which has
-        # no such file: the worktree's learning is refused.
-        bare = re.sub(r"ACCELERATOR_\w+=\S+ ", "", command)
+        # The worktree is named after --root too, as every host's save step
+        # in the shared layout names it. Without the roots and that name the
+        # command serves the main checkout, which has no such file: the
+        # worktree's learning is refused.
+        self.assertEqual(words[words.index("--project") + 1], str(self.worktree))
+        bare = re.sub(r" --project \S+", "", re.sub(r"ACCELERATOR_\w+=\S+ ", "", command))
         refused = subprocess.run([BASH, "-c", bare], input=result, env=self.env, cwd=self.worktree,
                                  capture_output=True, text=True, timeout=120)
         self.assertNotEqual(refused.returncode, 0, refused.stdout)
