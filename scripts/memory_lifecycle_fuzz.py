@@ -435,9 +435,11 @@ class Fuzz:
         as Claude Code's sandbox on Linux. A save is held only where bwrap
         is; read-only folders alone are no sandbox to it: it opens the
         index, whose file they leave writable, before it takes its lock."""
-        temporary = str(self.work / "tmp")
+        work, temporary = str(self.work), str(self.work / "tmp")
+        # The work directory again, read-only: under /dev/shm, as check.py's
+        # TMPDIR may put it, the sandbox's own /dev hides it.
         return ["bwrap", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc",
-                "--bind", temporary, temporary, "--", *argv]
+                "--ro-bind", work, work, "--bind", temporary, temporary, "--", *argv]
 
     def tasks(self) -> Dict[str, Dict[str, Any]]:
         """Project Brain's tasks by ID."""
