@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The lifecycle fuzzer runs as a CI job of its own — 2026-10-28
+
+- Why: as a step of the `memory` job it took about three minutes on a
+  hosted runner, and with it that job's Python 3.x leg ran into its
+  15-minute limit and was cancelled on two pull requests (15m7s and
+  15m16s; 9 to 11 minutes before the step).
+- What changes: `tests.test_memory_lifecycle_fuzz` runs in a job of its own,
+  `memory-lifecycles`, on the same two Pythons with a 10-minute limit, beside
+  `memory`; `scripts/check.py` has the group of the same name, and
+  `docs/CI.md` and `scripts/README.md` say where it runs.
+- Tests: `tests.test_check` (40 tests) holds `check.py` to the workflow.
+
 ### The hooks read their input as bytes on Windows, and name the drive as Windows does — 2026-10-28
 
 - Why: the Windows CI job ran the tests of a session that entered a

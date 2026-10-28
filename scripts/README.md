@@ -678,8 +678,8 @@ python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP 
   afterwards, unless `--work` names a missing or empty folder, which is
   kept. HOME, TMPDIR, the dispatcher's folder and an attached project's
   state are inside it; no model and no network.
-- **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, a step of its
-  own in the `memory` job, runs seeds 1 and 2 on PHP Core, which between
+- **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, the
+  `memory-lifecycles` job, runs seeds 1 and 2 on PHP Core, which between
   them reach every host, a worktree entered, bursts, a commit during a save
   and a rebase stopped, continued and aborted, and seed 2 attached. A
   failing seed reproduces with the same `--seed` and `--steps`, apart from

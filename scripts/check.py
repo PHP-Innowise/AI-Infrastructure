@@ -419,6 +419,13 @@ def _parity_commands(edition: str) -> List[Command]:
     return commands
 
 
+def _memory_lifecycle_commands(version: str) -> List[Command]:
+    leg = f"Python {version}"
+    python = "" if version == "3.x" else version
+    return [unittests("Random session and Git lifecycles through the memory hooks",
+                      ["tests.test_memory_lifecycle_fuzz"], leg=leg, python=python)]
+
+
 def _memory_commands(version: str) -> List[Command]:
     leg = f"Python {version}"
     python = "" if version == "3.x" else version
@@ -458,7 +465,6 @@ def _memory_commands(version: str) -> List[Command]:
                 unittests_leg('Cursor prompt report JSON transport', ['tests.test_memory_cursor_report']),
                 unittests_leg('Native CLI MCP promoted-memory roundtrips', ['tests.test_memory_native_roundtrip', 'tests.test_memory_native_capture', 'tests.test_memory_lifecycle']),
                 unittests_leg('Claude Code started below the project root or in a worktree', ['tests.test_memory_claude_subfolders', 'tests.test_memory_worktree_sessions']),
-                unittests_leg('Random session and Git lifecycles through the memory hooks', ['tests.test_memory_lifecycle_fuzz']),
                 unittests_leg('Typed health source-notice summaries', ['tests.test_memory_health_notices']),
                 unittests_leg('Final memory source-image custody', ['tests.test_memory_final_source_image', 'tests.test_memory_final_task_fifo', 'tests.test_memory_final_reader_abort']),
                 unittests_leg('Cursor memory rule custody', ['tests.test_cursor_memory_rule', 'tests.test_cursor_portable_custody', 'tests.test_cursor_continuation', 'tests.test_cursor_root_rename', 'tests.test_cursor_continuation_state']),
@@ -643,6 +649,16 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
             timeout_minutes=15,
             weight=95,
             commands=tuple(command for version in MEMORY_PYTHONS for command in _memory_commands(version)),
+        ),
+        Group(
+            name="memory-lifecycles",
+            matrix=True,
+            title=f"memory lifecycles (matrix: Python {', '.join(MEMORY_PYTHONS)})",
+            job="memory-lifecycles",
+            timeout_minutes=10,
+            weight=50,
+            commands=tuple(command for version in MEMORY_PYTHONS
+                           for command in _memory_lifecycle_commands(version)),
         ),
         Group(
             name="harness-fleet",
