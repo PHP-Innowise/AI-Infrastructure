@@ -588,8 +588,10 @@ class AttachedWorktree(unittest.TestCase):
         edition = ROOT / "PHP Core"
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("CLAUDE", "ACCELERATOR_", "CONTEXT_", "GIT_"))}
+        # The first refresh in the worktree builds its index: as in SharedWorktree,
+        # a runner's would be a timing test under the hooks' 5-second budget.
         env.update(PYTHONDONTWRITEBYTECODE="1", ACCELERATOR_HOME=str(edition), ACCELERATOR_STATE_DIR=str(state),
-                   ACCELERATOR_PROJECT_DIR=str(project))
+                   ACCELERATOR_PROJECT_DIR=str(project), CONTEXT_HOOK_BUDGET="60")
 
         def hook(name, payload, cwd):
             return subprocess.run([BASH, (edition / ".claude" / "hooks" / name).as_posix()],
