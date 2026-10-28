@@ -58,6 +58,8 @@ edition's own files remain in that edition's changelog.
   for a worktree keeps the name (`--project=<worktree>` in what waits), so it
   is made for the worktree it was asked for. `docs/MEMORY-INTEGRATION.md` no
   longer says Codex started in a worktree runs no hooks.
+- The generator's skill bodies: each stack added to `hook-forge` within the
+  306,200-byte ceiling, together 306,727; the ceiling rises to 306,800.
 - Tests: `SharedWorktree` holds an update for an entered worktree under a
   sandbox and makes it at the hook's turn there; without the name in what
   waits it fails.
