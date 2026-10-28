@@ -6130,13 +6130,18 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
     nothing still counted toward a checkpoint. A file the team has edited
     since differs from the record and stays.
     """
+    paths = [path for path in status_paths(repository) if not accelerator_owned(repository, path)]
+    excluded = sorted({item for item in paths if TURN_PATH_DENYLIST.search(item)})
+    allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
+    return allowed, excluded
+
+
+def status_paths(repository: Path) -> list[str]:
+    """Every path `git status` reports under the repository, relative to it,
+    untracked directories collapsed as `git status --short` shows them."""
     prefix = os.fsdecode(
         git_output(repository, ["rev-parse", "--show-prefix"], "Git prefix probe")
     ).strip()
-    runtime_owned = re.compile(
-        rf"^project-brain/({'|'.join(TURN_RUNTIME_DIRECTORIES)})/"
-    )
-    footprint = installed_footprint(repository)
     fields = git_output(
         repository,
         [
@@ -6157,14 +6162,33 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
         path = os.fsdecode(entry[3:])
         if prefix and path.startswith(prefix):
             path = path[len(prefix):]
-        if path == "project-brain/" or runtime_owned.match(path) or TURN_RUNTIME_MEMORY.match(path):
-            continue
-        if footprint and _installed_as_written(repository, path, footprint):
-            continue
         paths.append(path)
-    excluded = sorted({item for item in paths if TURN_PATH_DENYLIST.search(item)})
-    allowed = [item for item in dict.fromkeys(paths) if item not in set(excluded)]
-    return allowed, excluded
+    return paths
+
+
+def accelerator_owned(repository: Path, path: str, footprint: Optional[dict[str, str]] = None) -> bool:
+    """Whether a changed path is the runtime's own memory writing or the
+    accelerator's install as it was written, never the team's work."""
+    if (path == "project-brain/" or TURN_RUNTIME_MEMORY.match(path)
+            or re.match(rf"^project-brain/({'|'.join(TURN_RUNTIME_DIRECTORIES)})/", path)):
+        return True
+    footprint = installed_footprint(repository) if footprint is None else footprint
+    return bool(footprint) and _installed_as_written(repository, path, footprint)
+
+
+def uncommitted_counts(repository: Path) -> Optional[tuple[int, int]]:
+    """How many entries `git status` reports: the team's, and the
+    accelerator's own (its untouched install and the memory the runtime
+    writes). A project that neither commits nor ignores the accelerator
+    otherwise reads as holding uncommitted work in every session. None
+    outside Git."""
+    try:
+        paths = status_paths(repository)
+    except ContextError:
+        return None
+    footprint = installed_footprint(repository)
+    owned = sum(accelerator_owned(repository, path, footprint) for path in paths)
+    return len(paths) - owned, owned
 
 # What one shell command does to the files it names. Measured reads: a turn's
 # files were named far more often through cat, sed -n, grep and git diff than
@@ -9276,6 +9300,9 @@ def _command() -> int:
                     "consolidation": consolidation,
                     "workspace": workspace_roots.describe(repository),
                 }
+                counts = uncommitted_counts(repository)
+                if counts is not None:
+                    result["uncommitted"], result["accelerator_uncommitted"] = counts
                 if arguments.json:
                     print(json.dumps(result, ensure_ascii=False))
                 else:

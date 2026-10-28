@@ -11408,6 +11408,33 @@ class DeliveryTest(RuntimeHarness):
                 self.assertIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
                 self.assertNotIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
 
+    def test_a_transcript_written_after_the_first_turn_still_shows_a_compaction(self) -> None:
+        # Claude Code writes a new conversation's transcript after its first
+        # prompt hook has run. That turn found no file and kept no position,
+        # so a /compact before the second turn went unseen and the capsule
+        # said memory the summary had dropped "still applies".
+        self.write_auth_guide()
+        self.start("TASK-DELIVER")
+        folder = tempfile.TemporaryDirectory(prefix="transcript-")
+        self.addCleanup(folder.cleanup)
+        query = "how do I revoke sessions after a password reset"
+        for compacted in (True, False):
+            with self.subTest(compacted=compacted):
+                transcript = Path(folder.name) / f"{compacted}.jsonl"
+                conversation = ("--session-id", f"c-new-{compacted}", "--transcript", str(transcript))
+                self.assertIn("SessionStore::purge", self.refresh(query, *conversation)["capsule_text"])
+                self.assertFalse(transcript.exists())
+                records = ['{"type":"user"}', '{"type":"assistant"}']
+                if compacted:
+                    records.append('{"type":"system","subtype":"compact_boundary","content":"Conversation compacted"}')
+                transcript.write_text("\n".join(records) + "\n", encoding="utf-8")
+                second = self.refresh(query, *conversation)
+                self.assertEqual(compacted, "SessionStore::purge" in second["capsule_text"], second["capsule_text"])
+                if compacted:
+                    self.assertEqual(0, second["capsule"]["repeated"])
+                else:
+                    self.assertGreater(second["capsule"]["repeated"], 0)
+
     def test_one_rare_word_admits_a_document_only_when_it_names_something(self) -> None:
         # In a small index most words are rare; one of them shared with the
         # request is not evidence unless it is an identifier or the document's

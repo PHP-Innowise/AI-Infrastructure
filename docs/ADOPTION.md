@@ -311,6 +311,31 @@ without starting a model or writing to the project. `--sync` never changes
 `project-brain/config/runtime.json`, so the rehearsal's `config` profile is
 the capsule the project will run.
 
+The rehearsal runs the hooks as the hosts would, but it cannot see what the
+hosts themselves do with them. On Linux, two more commands run the installed
+Claude Code and Codex in such a synced copy, offline and without a model:
+
+```bash
+python3 scripts/claude_code_bench.py --target DIR --sync
+python3 scripts/codex_bench.py --target DIR --sync
+```
+
+Each reports whether the save after an answer ran, how many messages carried
+the request to the model, and, for Claude Code, whether its transcript
+recorded a hook error. A refused save there is what a person would see as a
+permission prompt after every answer.
+
+The Claude Code bench runs in a HOME of its own that trusts the copy. With
+`--target` it also reads your own Claude Code configuration and says when the
+project's trust dialog was never accepted there. In such a project
+`claude -p` runs the hooks but ignores the project's allow rules and refuses
+the save, so open the project once in interactive Claude Code first.
+
+For a project the Harness attaches without copying, run
+`python3 scripts/claude_code_bench.py --attached` and
+`python3 scripts/codex_bench.py --attached`: they launch Claude Code and Codex
+the same way, with the edition lent from the clone and nothing installed.
+
 For heavily adapted or drifting installations, regenerate from current
 project evidence with Infrastructure-Creator rather than repeatedly layering
 generic files over the project.

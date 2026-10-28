@@ -11,6 +11,13 @@ it at the top of every session.
 
 ## Unreleased
 
+- `AGENTS.md` asks for an explicit memory save (`context.py record-result`,
+  `memory_record_result`, Harness `memory-draft`) only where the Stop hook
+  requests no `native-result` save; where it does, the save rule opens with
+  the prohibition on saving the answer another way, a closing `update`
+  included, and that request is the save. Details in the root
+  [`CHANGELOG.md`](../CHANGELOG.md). Policy lock regenerated.
+
 - `runtime.json` ships `capsule_profile: recall`: the automatic Task Capsule
   carries the working state, the recent files and what the task itself
   saved, and `AGENTS.md` says so; `retrieve` still searches everything.

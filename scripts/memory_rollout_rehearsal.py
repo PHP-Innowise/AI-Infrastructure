@@ -70,8 +70,10 @@ EVENTS = {
 CURSOR_RULE = ".cursor/rules/working-memory.mdc"
 CURSOR_VERSION = "1.7.36"
 PROFILES = ("config", "full", "navigation", "recall")
-# The command the Stop request names, verbatim: `(cd ROOT && python3 ... --json)`.
-SAVE_COMMAND = re.compile(r"exact command: (\(cd .*?--json\))")
+# The command the Stop request names, verbatim: Claude Code's
+# `cd ROOT && echo -E '<JSON>' | python3 ... --json` takes the JSON in
+# place of <JSON>; Codex's and Cursor's `(cd ROOT && python3 ... --json)` on stdin.
+SAVE_COMMAND = re.compile(r"exact command: (\(cd .*?--json\)|cd .*?--json)\n")
 REFUSAL = re.compile(r"\b(memory-result-v1:[a-z_]+|native-result:[a-z-]+)")
 # A learning cites a file of the project, not the accelerator's own.
 ACCELERATOR_PREFIXES = (".agents/", ".claude/", ".codex/", ".cursor/", "memory-bank/", "project-brain/",
@@ -266,8 +268,12 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) ->
             continue
         if not isinstance(decision, dict):
             continue
+        feedback = decision.get("hookSpecificOutput")
         if host == "cursor" and isinstance(decision.get("followup_message"), str):
             request = decision["followup_message"]
+        elif (host == "claude" and isinstance(feedback, dict)
+              and "native-result --request" in str(feedback.get("additionalContext"))):
+            request = feedback["additionalContext"]
         elif decision.get("decision") == "block":
             request = str(decision.get("reason") or "")
     save: Dict[str, Any] = {"requested": request is not None, "saved": False, "refusal": None}
@@ -282,8 +288,12 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float) ->
                       "learnings": [{"type": "finding", "title": f"Configuration entry point {marker}",
                                      "consequence": f"The project's configuration starts at {source} ({marker}).",
                                      "sources": [source]}]}
+            command, data = match.group(1), json.dumps(result)
+            stdin: Optional[bytes] = data.encode("utf-8")
+            if "'<JSON>'" in command:
+                command, stdin = command.replace("'<JSON>'", "'" + data.replace("'", "'\\''") + "'"), None
             started = time.monotonic()
-            done = subprocess.run(["bash", "-c", match.group(1)], input=json.dumps(result).encode("utf-8"),
+            done = subprocess.run(["bash", "-c", command], input=stdin,
                                   cwd=copy, env=env, capture_output=True, timeout=timeout)
             save["save_ms"] = round((time.monotonic() - started) * 1000)
             output = done.stdout.decode("utf-8", "replace") + done.stderr.decode("utf-8", "replace")
@@ -323,6 +333,11 @@ def rehearse_target(target: Path, hosts: List[str], profiles: List[str], work: P
     prepare_home(work / "home")
     (work / "tmp").mkdir(parents=True, exist_ok=True)
     report: Dict[str, Any] = {"target": str(target), "runs": []}
+    if "claude" in hosts:
+        # The copy runs with a HOME of its own; your Claude Code decides
+        # whether the project's allow rules count at all.
+        import claude_code_bench
+        report["claude_trust"] = claude_code_bench.person_trust(target)
     copy_tree(target, base, excludes)
     try:
         report["sync"] = sync(base, child_env(work / "home", work / "tmp", {}), timeout * 10)
@@ -357,6 +372,9 @@ def print_report(reports: List[Dict[str, Any]]) -> None:
         print(f"  sync: {sync_state.get('changed')} changed, {sync_state.get('kept')} kept"
               + (f"; {sync_state['partial']}" if sync_state.get("partial") else ""))
         print(f"  capsule profile in runtime.json: {report.get('profile_in_config')}")
+        if report.get("claude_trust") is False:
+            print("  claude trust: never accepted in your Claude Code; there `claude -p` ignores the project's "
+                  "allow rules and refuses the save. Open the project once in interactive Claude Code.")
         for run in report["runs"]:
             if run.get("skipped"):
                 print(f"  {run['host']:6}  skipped: {run['skipped']}")

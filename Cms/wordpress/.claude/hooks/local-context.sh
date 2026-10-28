@@ -62,12 +62,28 @@ if [ -d "$TRACK_DIR" ] && [ ! -L "$TRACK_DIR" ] && [ -O "$TRACK_DIR" ]; then
     -delete 2>/dev/null || true
 fi
 
-# Git info
+# Git info. The branch line waits for the runtime's status below, which
+# tells the team's uncommitted changes from the accelerator's own files: a
+# project that neither commits nor ignores the accelerator otherwise reads
+# as holding uncommitted work in every session.
+BRANCH_LINE=""
 if git rev-parse --git-dir > /dev/null 2>&1; then
-  BRANCH=$(git branch --show-current 2>/dev/null)
-  STATUS=$(git status --short 2>/dev/null | wc -l)
-  echo "Branch: $BRANCH ($STATUS uncommitted changes)"
+  BRANCH_LINE="Branch: $(git branch --show-current 2>/dev/null)"
 fi
+UNCOMMITTED="-"
+ACCELERATOR_UNCOMMITTED="-"
+branch_line() {
+  [ -n "$BRANCH_LINE" ] || return 0
+  case "$UNCOMMITTED" in
+    ''|*[!0-9]*)
+      echo "$BRANCH_LINE ($(git status --short 2>/dev/null | wc -l | tr -d ' ') uncommitted changes)" ;;
+    *)
+      case "$ACCELERATOR_UNCOMMITTED" in
+        ''|0|*[!0-9]*) echo "$BRANCH_LINE ($UNCOMMITTED uncommitted changes)" ;;
+        *) echo "$BRANCH_LINE ($UNCOMMITTED uncommitted changes; $ACCELERATOR_UNCOMMITTED more are the accelerator's own files)" ;;
+      esac ;;
+  esac
+}
 
 # Dependency managers
 MANAGERS=""
@@ -183,9 +199,12 @@ fi
 
 if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ]; then
   CONTEXT_STATUS=$("${PYTHON[@]}" "$CONTEXT_CLI" status --json 2>/dev/null || true)
-  STATUS_FIELDS=$("${PYTHON[@]}" -c 'import json,sys; d=json.loads(sys.argv[1]); print("{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("database", "")))' "$CONTEXT_STATUS" 2>/dev/null || true)
+  # The two counts come before the database path, which may be empty, and
+  # are "-" when unknown: read splits on tabs and would shift an empty field.
+  STATUS_FIELDS=$("${PYTHON[@]}" -c 'import json,sys; d=json.loads(sys.argv[1]); print("{}\t{}\t{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("uncommitted", "-"), d.get("accelerator_uncommitted", "-"), d.get("database", "")))' "$CONTEXT_STATUS" 2>/dev/null || true)
   if [ -n "$STATUS_FIELDS" ]; then
-    IFS=$'\t' read -r CONTEXT_MODE ACTIVE_BINDINGS INDEX_DOCUMENTS INDEX_DB <<< "$STATUS_FIELDS"
+    IFS=$'\t' read -r CONTEXT_MODE ACTIVE_BINDINGS INDEX_DOCUMENTS UNCOMMITTED ACCELERATOR_UNCOMMITTED INDEX_DB <<< "$STATUS_FIELDS"
+    branch_line
     INDEX_HEALTH="healthy"
     INDEX_STALENESS="unknown"
     if [ ! -f "$INDEX_DB" ]; then
@@ -211,12 +230,16 @@ if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ]; then
     fi
     echo "Context governance: mode=$CONTEXT_MODE, index=$INDEX_HEALTH/$INDEX_STALENESS, active-bindings=$ACTIVE_BINDINGS, brain-validation=$VALIDATION_STATUS."
   else
+    branch_line
     echo "Context governance: mode/index/bindings/validation unavailable."
   fi
 elif [ -f "$CONTEXT_CLI" ]; then
+  branch_line
   # The memory hooks stay silent without Python, prompt after prompt; this is
   # the one place a session hears why memory is neither read nor written.
   echo "Context governance: unavailable - no Python 3.9+ found (python3, python or py -3), so memory is neither read nor written."
+else
+  branch_line
 fi
 
 if [ -f "$ROOT_DIR/memory-bank/README.md" ] && [ -f "$STATE_DIR/memory-bank/INDEX.md" ]; then

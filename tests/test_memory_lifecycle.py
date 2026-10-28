@@ -4,7 +4,8 @@ The rollout rehearsal (scripts/memory_rollout_rehearsal.py) runs one turn and th
 recall. A task lives longer than that: a learning in one session, a progress and a next step in
 the next turn, a commit, a new session, another branch with its own task, and the way back. This
 follows that life with Claude Code, where a person reads the session, and with Codex, whose save
-continuation comes back through the prompt hook.
+continuation is also fed back through the prompt hook here: Codex 0.163 adds it to the turn as a
+<hook_prompt> item instead, and the hook's guard stays for a host that sends it as a prompt.
 """
 import json
 import os
@@ -20,6 +21,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 GIT = ("git", "-c", "user.name=Lifecycle test", "-c", "user.email=lifecycle-test@example.invalid",
        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null")
+
+
+def save_command(step: str, result: dict) -> tuple:
+    """The save a Stop step asks for, ready to run, and its stdin: Claude
+    Code's command takes the JSON in place of <JSON>, the others' a pipe."""
+    command = re.search(r"exact command: (\(cd .*?--json\)|cd .*?--json)\n", step).group(1)
+    data = json.dumps(result)
+    if "'<JSON>'" in command:
+        return command.replace("'<JSON>'", "'" + data.replace("'", "'\\''") + "'"), None
+    return command, data
 
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash") and shutil.which("git"), "POSIX shell hooks")
@@ -74,14 +85,19 @@ class MemoryLifecycleTest(unittest.TestCase):
         stop = self.hook(host, "working-memory-write.sh",
                          dict(base, hook_event_name="Stop", stop_hook_active=False), env)
         if result is not None:
-            reason = json.loads(stop.strip().splitlines()[0])["reason"]
+            output = json.loads(stop.strip().splitlines()[0])
             if host == "codex":
-                # The continuation comes back as a prompt; the turn's own prompt brought the capsule.
+                reason = output["reason"]
+                # Fed back as a prompt, the continuation gets no second capsule: the turn's own prompt brought one.
                 echoed = self.hook(host, "working-memory-read.sh",
                                    dict(base, hook_event_name="UserPromptSubmit", prompt=reason), env)
                 self.assertEqual("", echoed.strip())
-            command = re.search(r"exact command: (\(cd .*?--json\))", reason).group(1)
-            saved = subprocess.run(["bash", "-c", command], input=json.dumps(result), cwd=self.project,
+            else:
+                # Hook feedback, not a block: Claude Code would label a block a hook error.
+                self.assertNotIn("decision", output)
+                reason = output["hookSpecificOutput"]["additionalContext"]
+            command, data = save_command(reason, result)
+            saved = subprocess.run(["bash", "-c", command], input=data, cwd=self.project,
                                    env=env, capture_output=True, text=True, timeout=120)
             self.assertEqual(0, saved.returncode, saved.stdout[-400:] + saved.stderr[-400:])
         self.hook(host, "working-memory-write.sh", dict(base, hook_event_name="Stop", stop_hook_active=True), env)
@@ -153,13 +169,13 @@ class MemoryLifecycleTest(unittest.TestCase):
 
         prompt("g1", "How are invoices numbered per tenant?")
         followup = json.loads(stop("g1", 0))["followup_message"]
-        command = re.search(r"exact command: (\(cd .*?--json\))", followup).group(1)
-        saved = subprocess.run(["bash", "-c", command], input=json.dumps({
+        command, data = save_command(followup, {
             "progress": "Read billing.md; invoice numbering is per tenant.", "verified": True,
             "learnings": [{"type": "finding", "title": "Invoices are numbered per tenant",
                            "consequence": "Invoice numbering restarts per tenant and per year.",
-                           "sources": ["billing.md"]}]}), cwd=self.project, env=self.env,
-            capture_output=True, text=True, timeout=120)
+                           "sources": ["billing.md"]}]})
+        saved = subprocess.run(["bash", "-c", command], input=data, cwd=self.project, env=self.env,
+                               capture_output=True, text=True, timeout=120)
         self.assertEqual(0, saved.returncode, saved.stdout[-400:] + saved.stderr[-400:])
         stop("g1", 1)
 
@@ -170,6 +186,24 @@ class MemoryLifecycleTest(unittest.TestCase):
         self.assertIn(b"Invoices are numbered per tenant", before)
         self.assertEqual({"continue": True}, json.loads(prompt("g3", followup)))
         self.assertEqual(before, rule.read_bytes())
+
+    def test_the_session_banner_counts_the_accelerator_apart(self) -> None:
+        # Installed here, neither committed nor ignored: git status lists the
+        # accelerator, and the banner used to report it as uncommitted work.
+        def banner() -> str:
+            env = dict(self.env, CLAUDE_PROJECT_DIR=str(self.project))
+            started = self.hook("claude", "local-context.sh",
+                                {"session_id": "banner", "hook_event_name": "SessionStart", "source": "startup"}, env)
+            return next(line for line in started.splitlines() if line.startswith("Branch: "))
+
+        accelerator = len(self.git("status", "--short").splitlines())
+        self.assertGreater(accelerator, 0)
+        self.assertEqual(f"Branch: feature/SHOP-7-invoices (0 uncommitted changes; {accelerator} more are "
+                         "the accelerator's own files)", banner())
+        with open(self.project / "src/Ledger.php", "a", encoding="utf-8") as handle:
+            handle.write("// edited\n")
+        self.assertEqual(f"Branch: feature/SHOP-7-invoices (1 uncommitted changes; {accelerator} more are "
+                         "the accelerator's own files)", banner())
 
     def test_claude_code_follows_a_task_across_sessions_a_commit_and_a_branch(self) -> None:
         self.follow_a_task("claude")

@@ -4,6 +4,101 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### policy-forge asks for an explicit save only where no Stop request comes — 2026-10-24
+
+- `policy-forge`'s working-memory rules: where the generated Stop hook
+  requests the `native-result` save (governed Claude Code, Codex and Cursor
+  sessions running the hooks, outside Harness sessions, unless
+  `native_result_request` is `off`), that request is the save. The generated
+  save rule opens with the prohibition on saving the answer's result another
+  way (`record-result`, the MCP tool, a closing `update`), and an answer's
+  end is not a stage boundary that asks for `update`; only where Stop
+  requests none does the agent save explicitly (Harness `memory-draft`, the
+  Memory MCP, or `record-result`). The policy names those cases. A policy
+  that asked for the explicit save after every answer made an agent save
+  each answer twice, and one that opened with "MUST save" still drew it on
+  a session's first answer (root `CHANGELOG.md`, same day).
+- The memory-seed asset's `mcp_server.py` (server instructions and the
+  `memory_record_result` description) and `MCP.md` say the same, as the
+  editions' do. The policy lock was rewritten.
+
+### The seeded runtime's later save steps point back to the full one — 2026-10-24
+
+- The memory runtime memory-seed copies sends the save step's full rules only
+  while the conversation lacks them, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
+### The seeded runtime stops asking a session whose host refused the save — 2026-10-24
+
+- The memory runtime memory-seed copies reads Claude Code's denial of the
+  save command from the transcript, at the recovery Stop or, after No in the
+  terminal dialog, at the next prompt, and does not ask that session again
+  for a day, as the editions' runtime does (root `CHANGELOG.md`, same day).
+  `native_results.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime says to report a save another session overtook — 2026-10-24
+
+- The memory runtime memory-seed copies explains the stale-revision and
+  task-changed refusals of a native save, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
+### The seeded runtime names the echo behind a raw newline — 2026-10-24
+
+- The memory runtime memory-seed copies adds to the raw-newline refusal that
+  a plain `echo` in zsh turns `\n` into a line break and that `echo -E`
+  keeps it, as the editions' runtime does (root `CHANGELOG.md`, same day).
+  `native_results.py` changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime sees a compaction after a conversation's first turn — 2026-10-24
+
+- The memory runtime memory-seed copies takes a transcript not written yet
+  as a position, its start. A compaction before the second turn of a new
+  Claude Code conversation then hands its memory again, as the editions'
+  runtime does (root `CHANGELOG.md`, same day). `context_retrieval.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime's status counts the accelerator's own files apart — 2026-10-24
+
+- `context.py status --json` in the runtime memory-seed copies reports
+  `uncommitted` and `accelerator_uncommitted`, as the editions' runtime does
+  (root `CHANGELOG.md`, same day). Generated hooks are unchanged. `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime says what to correct in a refused save — 2026-10-23
+
+- The memory runtime memory-seed copies names the JSON error, with its line
+  and column, of an input that is not one JSON object, and names the missing
+  and unexpected fields of a learning, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` and `memory_results.py`
+  change in the asset; the policy lock was rewritten.
+
+### The seeded runtime asks no save of a Codex Plan-mode or read-only turn — 2026-10-23
+
+- The memory runtime memory-seed copies reads the Codex turn's
+  `turn_context` from the rollout and skips the save request in Plan
+  collaboration mode and in a read-only sandbox, as the editions' runtime
+  does (root `CHANGELOG.md`, same day). `native_results.py` changes in the
+  asset; the policy lock was rewritten.
+
+### The seeded runtime asks no save of a plan-mode turn — 2026-10-23
+
+- The memory runtime memory-seed copies skips the save request when the
+  Stop's `permission_mode` is `plan`, as the editions' runtime does (root
+  `CHANGELOG.md`, same day). `native_results.py` changes in the asset; the
+  policy lock was rewritten.
+
+### The seeded runtime asks Claude Code for its save without a prompt or a hook error — 2026-10-23
+
+- The memory runtime memory-seed copies answers Claude Code's Stop with
+  `hookSpecificOutput.additionalContext` instead of a block. Its save command
+  holds no subshell: `cd ROOT && echo -E '<JSON>' | python3 … --json`.
+  This matches the editions' runtime (root `CHANGELOG.md`, same day): Claude
+  Code asked before the old command after every answer and showed the step as
+  a hook error. `native_results.py` changes in the asset; the policy lock was
+  rewritten.
+
 ### The seeded runtime closes Claude Code's save request with its marker — 2026-10-23
 
 - The memory runtime memory-seed copies puts the save request's marker last

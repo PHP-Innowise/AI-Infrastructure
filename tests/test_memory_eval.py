@@ -2566,6 +2566,34 @@ class SaveContinuationCostTest(unittest.TestCase):
                                                                    "codex": memory_eval.continuation_summary([])})))
         self.assertNotIn("endings", summary)
 
+    def test_a_claude_request_sent_as_hook_feedback_counts_once(self) -> None:
+        # Claude Code records a Stop hook's additionalContext three times at
+        # one instant: the hook's stdout, the context it hands the model, and
+        # the summary a person sees. It is one request.
+        def assistant(seconds: int, identifier: str, output: int) -> Dict[str, Any]:
+            return {"timestamp": self.at(seconds), "type": "assistant",
+                    "message": {"id": identifier, "role": "assistant", "content": [{"type": "text", "text": "x"}],
+                                "usage": {"output_tokens": output}}}
+
+        step = ("This is an internal continuation. The person has already read your answer above this "
+                "continuation: after a successful save or skip, do not repeat it.\n" + self.TOKEN)
+        stdout = json.dumps({"hookSpecificOutput": {"hookEventName": "Stop", "additionalContext": step}})
+        path = self.write_lines([
+            {"timestamp": self.at(0), "type": "user", "message": {"role": "user", "content": "Explain the import"}},
+            assistant(10, "msg-1", 500),
+            {"timestamp": self.at(11), "type": "attachment",
+             "attachment": {"type": "hook_success", "hookEvent": "Stop", "stdout": stdout, "exitCode": 0}},
+            {"timestamp": self.at(11), "type": "attachment",
+             "attachment": {"type": "hook_additional_context", "hookEvent": "Stop", "content": [step]}},
+            {"timestamp": self.at(11), "type": "system", "subtype": "stop_hook_summary", "hookErrors": [],
+             "hookAdditionalContext": [step]},
+            assistant(14, "msg-2", 60),
+            {"timestamp": self.at(30), "type": "user", "message": {"role": "user", "content": "Thanks"}},
+        ])
+        [cost] = memory_eval.continuation_costs(path, "claude")
+        self.assertEqual({"answer_seconds": 11.0, "answer_output_tokens": 500, "ending": "brief",
+                          "save_seconds": 3.0, "save_output_tokens": 60}, cost)
+
     def test_requests_are_told_apart_by_how_they_ask_to_end(self) -> None:
         def message(seconds: int, role: str, text: str) -> Dict[str, Any]:
             return {"timestamp": self.at(seconds), "type": "response_item",

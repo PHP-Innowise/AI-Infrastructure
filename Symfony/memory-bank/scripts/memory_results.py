@@ -136,9 +136,10 @@ def check_source(root: Path, value: object, *, require_file: bool = True) -> str
     for part in relative.parts:
         current = current / part
         if current.is_symlink():
-            raise ResultRefused("source_path", "Symlink source paths are refused")
+            raise ResultRefused("source_path", f"Symlink source paths are refused: {head[:200]}")
+    # Named, so an agent with several learnings knows which citation to fix.
     if not current.is_file():
-        raise ResultRefused("source_missing", "Source is missing or is not a regular file")
+        raise ResultRefused("source_missing", f"Source is missing or is not a regular file: {head[:200]}")
     return value
 
 
@@ -183,7 +184,18 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
         fields = {"type", "title", "consequence", "sources"}
         if (not isinstance(learning, dict) or not fields <= set(learning)
                 or set(learning) - fields - {"expected_revision"}):
-            raise ResultRefused("learning_fields", "Each learning needs type, title, consequence and sources")
+            # Name what to correct; `verified` inside a learning is the usual one.
+            detail = ""
+            if isinstance(learning, dict):
+                missing = sorted(fields - set(learning))
+                extra = sorted(str(key)[:40] for key in set(learning) - fields - {"expected_revision"})
+                if missing:
+                    detail += "; missing: " + ", ".join(missing)
+                if extra:
+                    detail += "; unexpected: " + ", ".join(extra[:5])
+                if "verified" in extra:
+                    detail += " (verified is a top-level boolean, never a learning field)"
+            raise ResultRefused("learning_fields", "Each learning needs type, title, consequence and sources" + detail)
         if "expected_revision" in learning and (type(learning["expected_revision"]) is not int
                                                 or learning["expected_revision"] < 1):
             raise ResultRefused("schema", "Learning expected_revision must be a positive original revision")
@@ -210,12 +222,13 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
         identity = (item["type"], " ".join(item["title"].casefold().split()),
                     tuple(sorted(item["sources"])))
         if identity in identities and identities[identity] != item:
-            raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result")
+            raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result: two "
+                                f"{item['type']}s titled {item['title'][:80]!r} cite the same sources; merge them")
         identities[identity] = item
     if checked and data.get("verified") is not True:
         raise ResultRefused("unverified", "Attest that each learning was checked against its sources with verified=true")
     if progress is None and steps is None and not checked:
-        raise ResultRefused("nothing", "Nothing to record")
+        raise ResultRefused("nothing", "Nothing to record: give a progress summary, next steps or a checked learning")
     return {"progress": progress, "next_steps": steps, "learnings": checked}
 
 
@@ -893,7 +906,8 @@ def record_result(
             for learning in result["learnings"]:
                 identifier = learning_id(canonical, learning)
                 if identifier in identities and identities[identifier] != learning:
-                    raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result")
+                    raise ResultRefused("conflicting_learnings", "Conflicting learning identities in one result: "
+                                        f"{learning['title'][:80]!r}")
                 identities[identifier] = learning
                 for source in learning["sources"]:
                     check_source(root, source)

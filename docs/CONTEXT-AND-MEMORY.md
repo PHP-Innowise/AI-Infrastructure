@@ -1087,6 +1087,9 @@ thing while its id and content are. A host that compacts a conversation
 records it in the transcript the hook is given (`--transcript`): Claude Code
 writes a `compact_boundary` record, Codex a `compacted` one. After one, nothing
 counts as handed any more, because the conversation holds a summary of it.
+Claude Code writes a new conversation's transcript only after the first prompt
+hook, so a transcript not written yet counts from its start: a compaction
+before the second turn is seen too.
 Only what the capsule shows counts as handed: an item its rendered text had no
 room for is excluded from the manifest as `capsule-limit` and is handed on a
 later turn.
@@ -1744,7 +1747,11 @@ chunk whose reviewed or automatic provenance is acceptable for the environment.
 
 Session-start hooks can report metadata such as:
 
-- branch and uncommitted-change count;
+- branch and uncommitted-change count. Changes that are the accelerator's own
+  files are counted apart: its install, untouched since the install record or
+  the generator's manifest, and the memory the runtime writes. Without that,
+  a project that neither commits nor ignores the accelerator reads as holding
+  uncommitted work in every session;
 - dependency/runtime markers;
 - selected context mode;
 - index existence and approximate staleness;

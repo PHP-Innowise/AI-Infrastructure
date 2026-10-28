@@ -615,6 +615,8 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                 unittests("Hook wiring runs from any working directory", ["tests.test_hook_wiring"]),
                 unittests("Attach an edition without copying it", ["tests.test_accelerator_attach"]),
                 unittests("Rehearse a sync and one turn of hooks on a copy", ["tests.test_memory_rollout_rehearsal"]),
+                unittests("Host benches find the save step and take a turn as each host sends it",
+                          ["tests.test_host_benches"]),
                 unittests("Preserve framework-specific skill semantics", ["tests.test_framework_semantics"]),
                 unittests("Project Brain active-alias creation is atomic", ["tests.test_brain_create_atomic_alias"]),
                 unittests("Generated memory promotion preserves admission fairness", ["tests.test_generator_promotion_admission"]),

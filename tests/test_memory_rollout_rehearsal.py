@@ -69,8 +69,13 @@ class RolloutRehearsalTest(unittest.TestCase):
         return directory
 
     def rehearse(self, *arguments: str) -> subprocess.CompletedProcess:
+        # Your own Claude Code configuration, as the rehearsal reads it: one
+        # that never accepted this project's trust dialog.
+        config = Path(self._tmp.name) / "claude-config"
+        config.mkdir(exist_ok=True)
+        (config / ".claude.json").write_text(json.dumps({"projects": {}}), encoding="utf-8")
         return subprocess.run([sys.executable, str(SCRIPT), *arguments], cwd=ROOT,
-                              env={**clean_env(), "PYTHONDONTWRITEBYTECODE": "1"},
+                              env={**clean_env(), "PYTHONDONTWRITEBYTECODE": "1", "CLAUDE_CONFIG_DIR": str(config)},
                               capture_output=True, text=True, timeout=600)
 
     def test_each_host_and_profile_saves_and_recalls_and_the_project_is_untouched(self) -> None:
@@ -84,6 +89,8 @@ class RolloutRehearsalTest(unittest.TestCase):
         [report] = json.loads(result.stdout)
         self.assertIsNone(report["sync"]["error"])
         self.assertEqual("recall", report["profile_in_config"])
+        # The copy trusts itself; the person's Claude Code never did.
+        self.assertIs(False, report["claude_trust"])
         runs = report["runs"]
         self.assertEqual({(host, profile) for host in ("claude", "codex", "cursor") for profile in ("config", "recall")},
                          {(run["host"], run["profile"]) for run in runs})

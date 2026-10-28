@@ -5447,9 +5447,17 @@ def transcript_compacted(
         return False, None
     try:
         path = Path(transcript)
-        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        if not path.is_absolute() or path.is_symlink():
             return False, None
-        size = path.stat().st_size
+        # Claude Code writes a new conversation's transcript only after the
+        # first prompt hook has run. A file not written yet is a position, its
+        # start, or a compaction before the second turn would go unseen.
+        if not path.exists():
+            size = 0
+        elif path.is_file():
+            size = path.stat().st_size
+        else:
+            return False, None
     except (OSError, ValueError):
         return False, None
     file_key = hashlib.sha256(
@@ -5466,6 +5474,8 @@ def transcript_compacted(
     start = previous["offset"]
     if size < start or size - start > TRANSCRIPT_SCAN_BYTES:
         return True, state
+    if size == start:
+        return False, state
     try:
         with path.open("rb") as handle:
             # From the start of the line that was being written last turn, if

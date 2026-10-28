@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,12 @@ JOURNAL = 'memory-bank/local/native-results.ndjson'
 # All a journal line may hold: when, which host, which step, a short code, the
 # Stop hook's exit status and two counts - never text, paths or identifiers.
 JOURNAL_FIELDS = {'at','host','stage','event','code','status','learnings','promoted','answer'}
+
+
+def requested(host,output):
+    """The save step a Stop hook's output asks for, as each host carries it."""
+    if host=='claude':return output['hookSpecificOutput']['additionalContext']
+    return output['followup_message'] if host=='cursor' else output['reason']
 
 
 class NativeCaptureFixture(unittest.TestCase):
@@ -271,7 +278,9 @@ class NativeCaptureTests(NativeCaptureFixture):
                                       'prompt':'Inspect the Amber routing policy.'})
         response=hook('working-memory-write.sh',{'hook_event_name':'Stop','session_id':'session-a',
                      'stop_hook_active':False,'last_assistant_message':'Inspected the retry contract.'})
-        self.assertEqual('block',json.loads(response.stdout)['decision'])
+        output=json.loads(response.stdout)
+        self.assertNotIn('decision',output)
+        self.assertIn('native-result --request',requested('claude',output))
         self.assertEqual([],self.records('tasks'));self.save();before=self.authority()
         hook('working-memory-write.sh',{'hook_event_name':'Stop','session_id':'session-a',
                                        'stop_hook_active':True,'last_assistant_message':'Saved.'})
@@ -569,6 +578,118 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.one(self.written(lambda:request(recovery)),'stop','failed','unsaved')
         self.one(self.written(lambda:request(recovery)),'stop','skipped','recovery-failed')
 
+    def refused_transcript(self,token,kind):
+        """A Claude Code transcript whose save command the host refused."""
+        path=self.root.parent/'transcript.jsonl'
+        call={'type':'tool_use','id':'toolu_save','name':'Bash',
+              'input':{'command':f'cd x && echo -E \'{{}}\' | python3 memory-bank/scripts/context.py native-result '
+                                  f'--request r --token {token} --input - --json'}}
+        result={'type':'tool_result','tool_use_id':'toolu_save','is_error':True,
+                'content':'This Bash command contains multiple operations. The following part requires approval'}
+        # A line that is not a message, or whose message is not an object, is passed over.
+        records=[{'type':'summary','message':'tool_result in a string'},['tool_result'],
+                 {'type':'assistant','message':{'role':'assistant','content':[call]}},
+                 {'type':'user','message':{'role':'user','content':[result]},**({'toolDenialKind':kind} if kind else {})}]
+        path.write_text(''.join(json.dumps(record)+'\n' for record in records),encoding='utf-8')
+        return str(path)
+
+    def test_a_session_whose_host_refused_the_save_is_not_asked_again(self):
+        # Offline, Claude Code under -p in a project whose trust was never
+        # accepted ignored its allow rules and refused the save after every
+        # answer: two model calls each time and a warning on every prompt.
+        def request(payload,host='claude'):
+            return self.call('native-stop','--host',host,'--task-id','research',data=payload)
+        def prompt(host='claude'):
+            return self.call('native-prompt','--host',host,'--task-id','research',data={
+                'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Next question'})
+        self.begin(host='claude')
+        self.one(self.written(lambda:request(self.STOP)),'stop','requested',host='claude')
+        token=self.state()[1]['token']
+        recovery={**self.STOP,'stop_hook_active':True,'transcript_path':self.refused_transcript(token,'user-rejected')}
+        self.one(self.written(lambda:request(recovery)),'stop','failed','host-refused',host='claude')
+        warned=[]
+        self.one(self.written(lambda:warned.append(prompt())),'prompt','skipped','host-refused',host='claude')
+        self.assertEqual(b'Previous native memory result was not saved completely.\n',warned[0].stdout)
+        quiet=[]
+        self.one(self.written(lambda:quiet.append(prompt())),'prompt','skipped','host-refused',host='claude')
+        self.assertEqual(b'',quiet[0].stdout)
+        self.one(self.written(lambda:request(self.STOP)),'stop','skipped','phase-declined',host='claude')
+        # A day later the session is asked again.
+        candidate,state=self.state();state['updated']-=24*60*60+1;candidate.write_text(json.dumps(state))
+        self.one(self.written(prompt),'prompt','armed',host='claude')
+
+    def test_a_save_refused_in_the_dialog_is_not_asked_again(self):
+        # Claude Code's terminal, offline: a person answered No to the save
+        # command and the turn ended without a Stop, so the request stayed
+        # pending and the next answer asked again.
+        def prompt(transcript=None):
+            payload={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Next question'}
+            if transcript: payload['transcript_path']=transcript
+            return self.call('native-prompt','--host','claude','--task-id','research',data=payload)
+        self.begin(host='claude')
+        self.call('native-stop','--host','claude','--task-id','research',data=self.STOP)
+        token=self.state()[1]['token']
+        warned=[]
+        lines=self.written(lambda:warned.append(prompt(self.refused_transcript(token,'user-rejected'))))
+        self.one(lines,'prompt','skipped','host-refused',host='claude')
+        self.assertEqual(b'Previous native memory result was not saved completely.\n',warned[0].stdout)
+        self.one(self.written(prompt),'prompt','skipped','host-refused',host='claude')
+        self.one(self.written(lambda:self.call('native-stop','--host','claude','--task-id','research',
+                                               data=self.STOP)),'stop','skipped','phase-declined',host='claude')
+
+    def test_a_refusal_written_after_the_stop_is_read_at_the_next_prompt(self):
+        # Offline in auto mode: the denial was created 10 ms before the
+        # recovery Stop and was not on disk when that Stop read the transcript.
+        self.begin(host='claude')
+        self.call('native-stop','--host','claude','--task-id','research',data=self.STOP)
+        token=self.state()[1]['token']
+        late=self.root.parent/'late.jsonl'
+        late.write_text('',encoding='utf-8')
+        recovery={**self.STOP,'stop_hook_active':True,'transcript_path':str(late)}
+        self.one(self.written(lambda:self.call('native-stop','--host','claude','--task-id','research',data=recovery)),
+                 'stop','failed','unsaved',host='claude')
+        payload={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Next question',
+                 'transcript_path':self.refused_transcript(token,'automode-blocked')}
+        lines=self.written(lambda:self.call('native-prompt','--host','claude','--task-id','research',data=payload))
+        self.one(lines,'prompt','skipped','host-refused',host='claude')
+
+    def test_an_interrupted_save_is_not_a_refusal(self):
+        self.begin(host='claude')
+        self.call('native-stop','--host','claude','--task-id','research',data=self.STOP)
+        token=self.state()[1]['token']
+        for kind in ('interrupted','automode-parsing-error',None):
+            with self.subTest(kind=kind):
+                candidate,state=self.state();state['phase']='requested';candidate.write_text(json.dumps(state))
+                recovery={**self.STOP,'stop_hook_active':True,'transcript_path':self.refused_transcript(token,kind)}
+                lines=self.written(lambda:self.call('native-stop','--host','claude','--task-id','research',data=recovery))
+                self.one(lines,'stop','failed','unsaved',host='claude')
+
+    def test_a_save_another_session_overtook_says_to_report_it(self):
+        # Two Claude Code sessions on one branch, offline: the first to save
+        # moved the task's revision, and the second was refused with a bare
+        # code. Nothing is written either way; now the refusal says why and
+        # what to do, and the journal keeps its code.
+        self.call('start','--task-id','research','--goal','Inspect routing')
+        self.begin();self.stop()
+        self.call('update','--task-id','research','--revision','auto','--progress','Another session saved first.')
+        before=self.authority();refused=[]
+        lines=self.written(lambda:refused.append(self.save(ok=False)))
+        self.one(lines,'save','refused','memory-result-v1:prepared_stale_no_write')
+        self.assertIn(b'memory-result-v1:prepared_stale_no_write: another session or a person saved the task after '
+                      b'this save was requested; nothing was written: report the held save, do not retry it',
+                      refused[0].stderr)
+        self.assertEqual(before,self.authority())
+
+    def test_a_task_created_since_the_request_says_to_report_the_save(self):
+        # In a new project the other session's save created the branch task.
+        self.begin();self.stop()
+        self.call('start','--task-id','research','--goal','Inspect routing')
+        refused=[]
+        lines=self.written(lambda:refused.append(self.save(ok=False)))
+        self.one(lines,'save','refused','native-result:task-changed')
+        self.assertIn(b'native-result:task-changed: the branch task was created after this save was requested; '
+                      b'nothing was written',refused[0].stderr)
+
     def test_a_save_that_began_and_stopped_fails_as_incomplete(self):
         lines=self.written(self.interrupt_save)
         self.assertEqual([('prompt','armed',None),('stop','requested',None),('save','error','OSError'),
@@ -630,6 +751,38 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
                     '--token',token,'--input','-','--json',data=data))),'save','refused',code)
                 self.assertNotEqual(0,results[0].returncode)
         self.assertEqual([],self.records('tasks'))
+        self.assertEqual('requested',self.state()[1]['phase'])
+
+    def test_a_refused_input_says_what_to_correct(self):
+        # The agent gets one retry. A code alone does not say what to fix;
+        # a shell's echo turns the \\n of a JSON string into a real newline.
+        self.begin();self.stop();candidate,state=self.state()
+        cases=((b'{"progress": "Line one\nline two", "verified": true, "learnings": []}',
+                'write a newline as \\n and a tab as \\t (a plain echo in zsh turns \\n into a line break: pipe with echo -E)'),
+               (b'{"progress": "a"}{"progress": "b"}','more than one JSON object'),
+               (b'[]','got an array'),
+               (b'progress: read the file','not one JSON object (Expecting value at line 1 column 1)'))
+        for data,text in cases:
+            with self.subTest(text=text):
+                results=[]
+                self.one(self.written(lambda:results.append(self.raw('native-result','--request',candidate.stem,
+                    '--token',state['token'],'--input','-','--json',data=data))),
+                    'save','refused','native-result:invalid-input')
+                self.assertIn(text.encode(),results[0].stderr)
+        learning={**self.payload['learnings'][0],'verified':True}
+        refused=self.save({**self.payload,'learnings':[learning]},ok=False)
+        self.assertIn(b'unexpected: verified (verified is a top-level boolean',refused.stderr)
+        missing={key:value for key,value in self.payload['learnings'][0].items() if key!='sources'}
+        refused=self.save({**self.payload,'learnings':[missing]},ok=False)
+        self.assertIn(b'missing: sources',refused.stderr)
+        gone={**self.payload['learnings'][0],'sources':['src/Gone.php#L3']}
+        refused=self.save({**self.payload,'learnings':[gone]},ok=False)
+        self.assertIn(b'Source is missing or is not a regular file: src/Gone.php\n',refused.stderr)
+        twice=[self.payload['learnings'][0],{**self.payload['learnings'][0],'consequence':'Another rule.'}]
+        refused=self.save({**self.payload,'learnings':twice},ok=False)
+        self.assertIn(b"two findings titled 'Amber retry boundary' cite the same sources; merge them",refused.stderr)
+        refused=self.save({'verified':True,'learnings':[]},ok=False)
+        self.assertIn(b'Nothing to record: give a progress summary',refused.stderr)
         self.assertEqual('requested',self.state()[1]['phase'])
 
     def test_saved_held_and_omitted_lines_count_learnings_and_chunks_only(self):
@@ -785,10 +938,11 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
 
     @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell hook profile')
     def test_a_codex_save_continuation_gets_no_second_capsule(self):
-        """Codex sends the Stop hook's save continuation back through
-        UserPromptSubmit. The turn's own prompt brought the capsule; the
-        continuation is bookkeeping and gets none, while the arm still
-        records it as a continuation."""
+        """A save continuation sent back through UserPromptSubmit gets no
+        capsule: the turn's own prompt brought one, and the continuation is
+        bookkeeping, while the arm still records it as a continuation.
+        Codex 0.163 adds the continuation to the turn as a <hook_prompt>
+        item instead; the guard stays for a host that sends it as a prompt."""
         hooks=self.install_hooks('codex')
         ask={'hook_event_name':'UserPromptSubmit','session_id':'cont-codex','cwd':str(self.root),
              'prompt':'Inspect the Amber retry policy.','turn_id':'t1','model':'m','permission_mode':'default'}
@@ -823,6 +977,76 @@ class NativeRequestSwitchTests(NativeCaptureFixture):
     def journal(self):
         path=self.root/JOURNAL
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_a_plan_mode_turn_is_not_asked_to_save(self):
+        # Claude Code and Codex both send permission_mode; in plan mode the
+        # host tells the agent to change nothing, overriding the request.
+        for host in ('claude','codex'):
+            with self.subTest(host=host):
+                session='plan-'+host
+                stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,
+                      'permission_mode':'plan','last_assistant_message':'Planned the change.'}
+                self.assertTrue(self.begin(host=host,session=session)['armed'])
+                before=len(self.journal())
+                planned=self.call('native-stop','--host',host,'--task-id','research',data=stop)
+                self.assertEqual(b'',planned.stdout.strip())
+                self.assertEqual([('stop','skipped','plan-mode')],
+                                 [(line['stage'],line['event'],line.get('code')) for line in self.journal()[before:]])
+                # Out of plan mode, the next answer is asked as before.
+                self.begin(host=host,session=session)
+                asked=self.call('native-stop','--host',host,'--task-id','research',
+                                data=dict(stop,permission_mode='default'))
+                self.assertIn('native-result --request',asked.stdout.decode())
+
+    def rollout(self,name,turns,pad=0):
+        """A Codex rollout: session_meta, then one turn_context per (turn, mode, sandbox)."""
+        path=self.root.parent/name
+        lines=[json.dumps({'type':'session_meta','payload':{'id':'0','source':'vscode'}})]
+        for turn,mode,sandbox in turns:
+            lines.append(json.dumps({'type':'turn_context','payload':{'turn_id':turn,
+                'collaboration_mode':{'mode':mode},'sandbox_policy':{'type':sandbox}}}))
+            lines.append(json.dumps({'type':'response_item','payload':{'type':'message','role':'user',
+                'content':[{'type':'input_text','text':'x'*pad}]}}))
+        path.write_text('\n'.join(lines)+'\n')
+        return path
+
+    def test_a_codex_plan_or_read_only_turn_is_not_asked_to_save(self):
+        # Codex's permission_mode follows the approval policy; its Plan mode
+        # and sandbox show only in the rollout's turn_context.
+        cases={'plan mode':('plan','workspace-write','plan-mode'),
+               'read-only sandbox':('default','read-only','read-only-sandbox'),
+               'default':('default','workspace-write',None)}
+        for n,(name,(mode,sandbox,skipped)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                session=f'turn-{n}'
+                path=self.rollout(f'{session}.jsonl',[('t0','default','workspace-write'),('t1',mode,sandbox)])
+                stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,'turn_id':'t1',
+                      'permission_mode':'bypassPermissions','transcript_path':str(path),
+                      'last_assistant_message':'Answered.'}
+                self.begin(host='codex',session=session)
+                before=len(self.journal())
+                out=self.call('native-stop','--host','codex','--task-id','research',data=stop).stdout
+                lines=[(line['event'],line.get('code')) for line in self.journal()[before:] if line['stage']=='stop']
+                if skipped:
+                    self.assertEqual(b'',out.strip())
+                    self.assertEqual([('skipped',skipped)],lines)
+                else:
+                    self.assertIn(b'native-result --request',out)
+
+    def test_an_unknown_codex_turn_is_asked_as_before(self):
+        # Another turn's context, or one beyond the tail the Stop reads, is unknown.
+        cases={'other turn':(self.rollout('other.jsonl',[('t1','plan','read-only')]),'t2'),
+               'beyond the tail':(self.rollout('far.jsonl',[('t1','plan','read-only')],pad=600*1024),'t1'),
+               'no rollout':(self.root.parent/'gone.jsonl','t1')}
+        for n,(name,(path,turn)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                session=f'unknown-{n}'
+                stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,'turn_id':turn,
+                      'permission_mode':'bypassPermissions','transcript_path':str(path),
+                      'last_assistant_message':'Answered.'}
+                self.begin(host='codex',session=session)
+                out=self.call('native-stop','--host','codex','--task-id','research',data=stop).stdout
+                self.assertIn(b'native-result --request',out)
 
     def test_switched_off_no_prompt_arms_and_no_stop_asks(self):
         self.set_request('off')
@@ -881,8 +1105,7 @@ class NativeAnswerTests(NativeCaptureFixture):
         environment=dict(self.env,**(env or {}))
         self.call('native-prompt','--host',host,'--task-id','research','--json',data=prompt,env=environment)
         reply=self.call('native-stop','--host',host,'--task-id','research',data=stop,env=environment)
-        reason=json.loads(reply.stdout)
-        return reason.get('followup_message') if host=='cursor' else reason['reason']
+        return requested(host,json.loads(reply.stdout))
 
     def rollout(self,name,source,pad=0):
         path=self.root.parent/name
@@ -959,6 +1182,120 @@ class NativeAnswerTests(NativeCaptureFixture):
         last=[line for line in self.journal() if line['stage']=='stop'][-1]
         self.assertEqual(('requested','native-result:invalid-answer-setting','repeat'),
                          (last['event'],last.get('code'),last.get('answer')))
+
+
+class NativeInstructionTests(NativeCaptureFixture):
+    """The full save step while the conversation lacks one, a short one after."""
+
+    ask=NativeAnswerTests.ask
+    FULL='Exact schema example (replace placeholders, never save the example)'
+    BACK='the rules of the full save step earlier in this conversation'
+
+    def transcript(self,name,*records):
+        # Claude Code and Codex write their records as compact JSON lines.
+        path=self.root.parent/name
+        path.write_text(''.join(json.dumps(record,separators=(',',':'))+'\n' for record in records),
+                        encoding='utf-8')
+        return path
+
+    def test_a_later_step_points_back_to_the_full_one_the_conversation_holds(self):
+        # Every answer carried the whole step, about 2,600 characters, and
+        # Claude Code's terminal showed it whole each time.
+        for host in ('claude','codex','cursor'):
+            with self.subTest(host=host):
+                first=self.ask(host=host,session=host+'-first')
+                self.assertIn(self.FULL,first)
+                held=self.transcript(host+'.jsonl',{'type':'user','message':{'content':first}})
+                later=self.ask(host=host,session=host+'-later',transcript=held)
+                self.assertNotIn(self.FULL,later)
+                self.assertIn(self.BACK,later)
+                self.assertIn('exact command: ',later)
+                self.assertLess(len(later),len(first)-800)
+
+    def test_the_full_step_comes_back_after_a_compaction_or_without_a_transcript(self):
+        first=self.ask(session='before')
+        for record in ({'type':'system','subtype':'compact_boundary'},{'type':'compacted','payload':{}}):
+            with self.subTest(record=record['type']):
+                path=self.transcript('compacted.jsonl',{'type':'user','message':{'content':first}},record)
+                self.assertIn(self.FULL,self.ask(session='after-'+record['type'],transcript=path))
+        self.assertIn(self.FULL,self.ask(session='gone',transcript=self.root.parent/'gone.jsonl'))
+        self.assertIn(self.FULL,self.ask(session='none'))
+
+    def test_the_setting_can_send_the_full_step_every_time(self):
+        first=self.ask(session='setting-first')
+        held=self.transcript('held.jsonl',{'type':'user','message':{'content':first}})
+        cfg_file=self.root/'project-brain/config/runtime.json'
+        for value in ('full','bogus'):
+            with self.subTest(value=value):
+                cfg=json.loads(cfg_file.read_text());cfg['native_result_instruction']=value
+                cfg_file.write_text(json.dumps(cfg))
+                self.assertIn(self.FULL,self.ask(session='setting-'+value,transcript=held))
+        cfg=json.loads(cfg_file.read_text());cfg['native_result_instruction']='auto'
+        cfg_file.write_text(json.dumps(cfg))
+        self.assertNotIn(self.FULL,self.ask(session='setting-auto',transcript=held))
+        self.assertIn(self.FULL,self.ask(session='setting-env',transcript=held,
+                                         env={'CONTEXT_NATIVE_RESULT_INSTRUCTION':'full'}))
+
+
+class ClaudeSaveStepTests(NativeCaptureFixture):
+    """Claude Code drew the save step after every answer as a hook error,
+    with an error notification, and handed the model its text twice; and it
+    asked before the save command each time, whatever the allow rules say,
+    because the command held a subshell. Found by driving Claude Code 2.1.278
+    offline against a scripted model."""
+
+    def ask(self,host,session):
+        self.call('native-prompt','--host',host,'--task-id','research','--json',
+                  data={'hook_event_name':'UserPromptSubmit','session_id':session,'prompt':'Inspect the retry policy.'})
+        stop={'hook_event_name':'Stop','session_id':session,'stop_hook_active':False,
+              'last_assistant_message':'The Amber dispatcher retries only idempotent requests.'}
+        return json.loads(self.call('native-stop','--host',host,'--task-id','research',data=stop).stdout)
+
+    @staticmethod
+    def command(text,name='exact command: '):
+        return text.split(name,1)[1].split('\n',1)[0]
+
+    def test_claude_continues_with_hook_feedback_and_codex_with_a_block(self):
+        output=self.ask('claude','feedback-claude')
+        self.assertEqual({'hookSpecificOutput'},set(output))
+        self.assertEqual('Stop',output['hookSpecificOutput']['hookEventName'])
+        self.assertIn('native-result --request',output['hookSpecificOutput']['additionalContext'])
+        self.assertEqual('block',self.ask('codex','feedback-codex')['decision'])
+
+    def test_the_claude_save_command_holds_no_subshell_group_or_heredoc(self):
+        command=self.command(requested('claude',self.ask('claude','shape')))
+        self.assertTrue(command.startswith('cd '))
+        self.assertRegex(command,r" && echo -E '<JSON>' \| (python3|python|py -3) memory-bank/scripts/context\.py ")
+        bare=re.sub(r"'[^']*'","''",command)
+        for operator in ('(',')','{','}','<<','`','$',';'):
+            with self.subTest(operator=operator):self.assertNotIn(operator,bare)
+
+    @unittest.skipUnless(os.name=='posix','POSIX shells')
+    def test_the_claude_save_command_keeps_the_json_verbatim_in_each_shell(self):
+        # Claude Code's Bash tool runs bash or zsh, zsh first unless $SHELL is
+        # bash; zsh's plain echo would turn the JSON's backslashes into characters.
+        shells=[shell for shell in ('bash','zsh') if shutil.which(shell)]
+        work=self.root/'src';work.mkdir()
+        for n,shell in enumerate(shells):
+            with self.subTest(shell=shell):
+                progress=(f"Run {n}: `Invoice::next($tenant)` costs $5; line one.\nTab\there; "
+                          f"path C:\\shop\\src; it's \"quoted\"; счёт.")
+                data=dict(self.payload,progress=progress,learnings=[])
+                quoted="'"+json.dumps(data,ensure_ascii=False).replace("'","'\\''")+"'"
+                command=self.command(requested('claude',self.ask('claude',f'verbatim-{n}'))).replace("'<JSON>'",quoted)
+                done=subprocess.run([shell,'-c',command],cwd=work,env=self.env,capture_output=True)
+                self.assertEqual(0,done.returncode,done.stdout.decode()+done.stderr.decode())
+                self.assertEqual(progress,self.records('tasks')[0]['progress'])
+
+    @unittest.skipUnless(os.name=='posix' and shutil.which('bash'),'POSIX shell')
+    def test_the_claude_skip_command_runs_as_given(self):
+        text=requested('claude',self.ask('claude','skip'))
+        command=self.command(text,'run this command instead: ')
+        self.assertTrue(command.endswith('--skip --json'))
+        done=subprocess.run(['bash','-c',command],cwd=self.root.parent,env=self.env,capture_output=True)
+        self.assertEqual(0,done.returncode,done.stderr.decode())
+        self.assertEqual('omitted',json.loads(done.stdout)['state'])
+        self.assertEqual([],self.records('tasks'))
 
 
 if __name__=='__main__':unittest.main()

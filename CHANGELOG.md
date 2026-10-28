@@ -28,6 +28,399 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The policy asks for an explicit save only where no Stop request comes — 2026-10-24
+
+- Why: each edition's `AGENTS.md` said "MUST finish authorized work with
+  progress/next steps and source-backed reusable findings/decisions (Harness
+  `memory-draft`, `memory_record_result` MCP, or `context.py
+  record-result`)", and the Memory MCP server asked for
+  `memory_record_result` "before finishing authorized work". The Stop hook
+  asks for the `native-result` save after every answer, so an agent that
+  follows the policy saves each answer twice. On a synced copy of a client
+  project, gpt-6.1-sol on Codex 0.163 ran `context.py record-result` itself
+  in all 12 answers of a 12-answer plan (13 calls; the run's own count of 10
+  missed `Result already recorded`), and a closing `context.py update` in 7.
+  The native save then saved each answer again, with `learnings: []` every
+  time.
+- What changes: the save rule in `AGENTS.md` opens with what not to do:
+  MUST NOT save an answer's result yourself - no `record-result`,
+  `memory_record_result` or closing `update` - where Stop requests it. The
+  Stop bullet names where that is: governed Claude Code, Codex and Cursor
+  sessions running the hooks, outside the Harness, unless
+  `native_result_request` is `off`. The stage-boundary `update` rule leaves
+  out an answer's end that Stop's request saves. Where no request comes - a
+  Harness session's `memory-draft` block, lightweight mode,
+  `native_result_request: off`, a host without the hooks - the explicit save
+  is still required before finishing. Plan mode and a read-only sandbox get
+  no request and stay read-only scopes. "Report save failures; claim saves
+  only after success" stays. The Memory MCP server's instructions, the
+  `memory_record_result` description, `memory-bank/MCP.md` and the
+  generator's `policy-forge` say the same.
+- Measured live on copies of that project, same model and prompts, one
+  copy per session: under the old policy `record-result` ran in 12 of 12
+  answers and `update` in 7, and a same-day control answer saved explicitly
+  too. A first rewording that kept "MUST save" in front and made the
+  prohibition conditional did not change a session's first answer (1 of 1
+  still saved). The rule as shipped: `record-result` in 2 of 12 answers (one
+  a first answer, one beside the rule a person asked to keep), `update` in
+  0; all 12 native saves landed on the first try, and 5 of them carried
+  learnings, against 0 of 12 before.
+  Asked to keep a rule, the agent re-verified a chunk, created a finding or
+  edited `AGENTS.md`, as before. `native_result_request: off` is not visible
+  to an agent unless it reads `runtime.json`.
+- Budget: `AGENTS.md` grows 379 bytes in each edition, about 80 tokens per
+  session; the four `agents_md_bytes` ceilings rise by that much, and the
+  generator's `body_bytes` by 745 for `policy-forge`. The policy locks were
+  rewritten.
+- Tests: `NativeSaveRequestPolicyTest` in `tests/test_framework_semantics.py`
+  holds the rule in every edition whose Stop hook asks for the save, and in
+  the MCP server; `tests/fixtures/memory_native_roundtrip_public.json`
+  carries the server's new instructions.
+
+### A save step points back to the rules the conversation holds — 2026-10-24
+
+- Why: every answer carried the whole save step, about 2,600 characters, of
+  which the rules (the JSON fields, the schema example, what belongs in
+  learnings) were about 1,150. The conversation already held them from the
+  first step. Claude Code's terminal showed the whole step after every
+  answer.
+- What changes: the Stop reads the transcript's last 2 MiB. When a full step
+  is there after the last compaction record, the step carries its commands,
+  its ending, its refusal rules and a pointer back to the full step, 903
+  characters shorter. After a compaction, or without a readable transcript,
+  the full step comes back. `"native_result_instruction": "full"` (or
+  `CONTEXT_NATIVE_RESULT_INSTRUCTION=full`) sends it every time. The first
+  step of a conversation is byte for byte what it was.
+- Tests: `NativeInstructionTests` in `tests/test_memory_native_capture.py`,
+  failing without the change. Offline on Claude Code 2.1.278, three turns of
+  one session: 3,117 characters, then 2,214 twice, all three saved. On Codex
+  0.163, `exec` then `exec resume`: 2,516 then 1,613, both saved.
+
+### The Claude Code bench runs attached, as the Harness launches it — 2026-10-24
+
+- Why: the Harness lends an edition from the clone without copying it
+  (`accelerator_attach.py`): `--add-dir`, one `--settings` with the edition's
+  permissions and hooks, and the accelerator's state outside the project.
+  The bench only ran installed editions, so that launch, and whether its save
+  passes Claude Code's permission check, had never run offline.
+- What changes: `claude_code_bench.py --attached` runs a fresh project with
+  nothing installed and that overlay, leaving the project untrusted, and
+  reads the journal from the state directory. Offline on Claude Code 2.1.278
+  it saves, under `default` and `dontAsk` alike: permissions from
+  `--settings` count without the trust dialog, and the `cd` into the
+  added directory passes.
+- Tests: `AttachedTest` in `tests/test_host_benches.py`.
+- `codex_bench.py --attached` does the same for Codex: the edition's hooks and
+  instructions as `-c` options, the state as an added directory, and the
+  hooks trusted as `accelerator_attach.py trust-codex-hooks` records them.
+  Offline on Codex 0.163 it saves. `CodexAttachedTest` holds it.
+
+### The rollout rehearsal says when your Claude Code does not trust a target — 2026-10-24
+
+- Why: the rehearsal is the step before a rollout, and its copies run with a
+  HOME of their own. On `next` it passed while your own Claude Code had never
+  accepted the project's trust dialog, so `claude -p` there would refuse the
+  save after every answer.
+- What changes: with Claude Code among the hosts,
+  `memory_rollout_rehearsal.py` reports `claude_trust` per target, read as
+  the Claude Code bench reads it, and prints a line when the dialog was never
+  accepted. The exit status is unchanged.
+- Tests: `tests/test_memory_rollout_rehearsal.py` runs it against a Claude
+  Code configuration that never trusted the project.
+
+### The Claude Code bench says when your Claude Code does not trust the target — 2026-10-24
+
+- Why: the bench runs in a HOME of its own that trusts the copy, so it passed
+  on `next`, whose trust dialog your own Claude Code never accepted. There
+  `claude -p` refuses the save after every answer.
+- What changes: with `--target`, `claude_code_bench.py` reads your own Claude
+  Code configuration (`~/.claude.json`, or `$CLAUDE_CONFIG_DIR`) for that
+  project's `hasTrustDialogAccepted` and nothing else. When the dialog was
+  never accepted, it says so and how to fix it. The run's outcome is
+  unchanged.
+- Tests: `PersonTrustTest` in `tests/test_host_benches.py`.
+
+### A session whose host refused the save is not asked again for a day — 2026-10-24
+
+- Why: offline on Claude Code 2.1.278, `claude -p` in a project whose trust
+  dialog was never accepted ran the hooks but ignored the project's allow
+  rules. The save command was refused after every answer ("requires
+  approval"): two wasted model calls and a "not saved completely" warning on
+  each prompt. The same happens when a person keeps saying no or a rule or
+  auto mode denies the command. Of the four client projects, `next` has never
+  had its trust accepted.
+- What changes: the recovery Stop reads the transcript's last 512 KiB for
+  the save command's result. When Claude Code recorded a refusal there
+  (`toolDenialKind` `user-rejected`, `permission-rule` or `automode-blocked`;
+  not `interrupted`, `cancelled` or auto mode's classifier failing), the
+  journal says `failed` `host-refused`.
+  The next prompt prints the usual warning once, and the session is not
+  asked again for a day (`prompt` `skipped` `host-refused`). A new session is
+  asked again. A person who answers No in Claude Code's terminal dialog ends
+  the turn before any Stop runs (seen offline: the transcript records
+  `user-rejected`, no recovery Stop follows), so the next prompt reads the
+  refusal from the transcript and does the same. It also catches a refusal
+  the recovery Stop missed: Claude Code writes its transcript in batches, and
+  a denial made 10 ms before that Stop was not on disk yet.
+- Tests: three in `tests/test_memory_native_capture.py`. The two refusal
+  tests fail without the change; the third holds that an interrupted or
+  plain unsaved request stays `unsaved`. On the real host, a turn after the
+  refusal has no save step, after `claude -p` in an untrusted project and
+  after No in the terminal dialog alike.
+
+### The host benches run the WordPress edition — 2026-10-24
+
+- Why: `claude_code_bench.py` and `codex_bench.py` handed the installer the
+  edition's directory, `Cms/wordpress`, where it takes the name `WordPress`.
+  `--edition WordPress` failed before Claude Code or Codex started.
+- What changes: both benches hand the installer the edition's name.
+- Tests: `EditionTest` in `tests/test_host_benches.py` holds the name `main()`
+  hands on, failing on the old code, and installs WordPress through
+  `prepare()`. Offline, both benches pass on WordPress.
+
+### The Claude Code bench runs a permission mode, as your own uid — 2026-10-24
+
+- Why: inside `unshare -rn` the bench ran Claude Code as root, and Claude
+  Code refuses `bypassPermissions` to root ("cannot be used with root/sudo
+  privileges"). The bench also ran only the default mode, while the
+  Harness fleet worker runs `dontAsk`.
+- What changes: `scripts/claude_code_bench.py --mode` takes `default`,
+  `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions` or `plan`. The
+  namespace maps your own uid where `unshare` can (util-linux 2.38 and
+  later) and falls back to `unshare -rn`. In `plan` the run passes when no
+  save was asked for and the journal records `plan-mode`.
+- Tests: `NamespaceTest` in `tests/test_host_benches.py`. Offline on Claude
+  Code 2.1.278 every mode passes.
+
+### A save another session overtook says to report it — 2026-10-24
+
+- Why: two Claude Code sessions on one branch, driven offline at once with
+  different results: the first save moved the task's revision, and the
+  second was refused with the bare `memory-result-v1:prepared_stale_no_write`.
+  In a new project the second was refused with `native-result:task-changed`,
+  because the first save had created the branch task. Nothing was written
+  either way, as designed, but the agent read only a code.
+- What changes: on the `native-result` path both refusals say what happened
+  and what to do, for example "another session or a person saved the task
+  after this save was requested; nothing was written: report the held save,
+  do not retry it". The journal keeps the codes. `record-result`,
+  which the Harness reads by its exact text, is unchanged.
+- Tests: two in `tests/test_memory_native_capture.py`, one per refusal; both
+  fail without the change.
+
+### A raw newline in a save names the echo that made it — 2026-10-24
+
+- Why: driven offline on Claude Code 2.1.278 under zsh, a save piped with a
+  plain `echo` instead of the command's `echo -E` was refused with "inside a
+  string, write a newline as \n". The agent had written `\n`: zsh's `echo`
+  turned it into a line break. The hint pointed at the JSON, not at the pipe.
+- What changes: the hint adds "(a plain echo in zsh turns \n into a line
+  break: pipe with echo -E)". The journal code is unchanged.
+- Tests: `test_a_refused_input_says_what_to_correct` checks the whole hint.
+  Offline, a stand-in model that pipes with a plain `echo` first and retries
+  as told after the refusal saves on the second call.
+
+### A compaction after a new conversation's first turn hands its memory again — 2026-10-24
+
+- Why: Claude Code writes a new conversation's transcript only after its
+  first prompt hook has run (seen on 2.1.278: the file did not exist at
+  `SessionStart` or at the first `UserPromptSubmit`). That turn kept no
+  transcript position, so a `/compact` or an automatic compaction before the
+  second turn went unseen. The second turn's capsule left out what the first
+  had handed and said `memory: 1 item(s) handed earlier in this conversation
+  still apply`, while the conversation held only the summary.
+- What changes: a transcript not written yet is a position, its start. The
+  next turn reads the file from there and sees the compaction record. Codex
+  0.163 already has its rollout at `SessionStart`, so nothing changes for it.
+- Tests: `test_a_transcript_written_after_the_first_turn_still_shows_a_compaction`
+  in `project-brain/tests/test_runtime.py`, with and without a compaction. It
+  fails without the change. Offline on Claude Code 2.1.278: after a first turn
+  that handed a learning, `/compact` and a second turn, the capsule carries
+  the learning again.
+
+### The session banner counts the accelerator's own files apart — 2026-10-24
+
+- Why: the session-start banner printed `Branch: … (N uncommitted changes)`
+  from `git status --short`. In a project that neither commits nor ignores
+  the accelerator, that count included `.claude/`, `memory-bank/`,
+  `AGENTS.md` and the rest on every session:
+  - on `next`, 8 of 8 entries were the accelerator's;
+  - on `scb`, 14 of 19;
+  - on `bauherrenmappe`, 1 of 1.
+
+  The model was told about uncommitted work nobody had done.
+- `context.py status --json` reports `uncommitted` (the team's entries) and
+  `accelerator_uncommitted` (the accelerator's install as its install record
+  or the generator's manifest says it was written, and the memory the
+  runtime writes). Both come from one `git status`, with the filter
+  `changed_paths` already used, now shared as `accelerator_owned`. Outside
+  Git both fields are left out.
+- The four editions' `local-context.sh` print the branch line after the
+  status call: `Branch: … (0 uncommitted changes; 16 more are the
+  accelerator's own files)`. Without Python, or without the fields, it keeps
+  the plain Git count. The Codex and Cursor mirrors follow.
+- Test (`test_memory_lifecycle.py`): on a fresh install the banner reports 0
+  uncommitted changes and the accelerator's entries apart, and 1 after an
+  edit. It fails on the old hook.
+
+### A refused save says what to correct — 2026-10-23
+
+- Why: the agent gets one retry after a refused save, and two common
+  refusals did not say what to fix.
+  - An input that was not one JSON object came back as the bare code
+    `native-result:invalid-input`. This is what a shell's `echo` causes when it
+    turns a JSON string's `\n` into a real newline, and what any malformed or
+    doubled object causes.
+  - A learning with `verified` inside it got "Each learning needs type, title,
+    consequence and sources", which does not name the extra key.
+- The input refusal keeps its journal code, through the error's `code`, and
+  now says why:
+  - the JSON error with its line and column;
+  - for a control character, how to write a newline or a tab inside a string;
+  - "more than one JSON object", or the kind of value sent instead of an
+    object.
+- The learning refusal keeps its sentence and adds the missing and the
+  unexpected fields (at most five, each cut to 40 characters). It calls
+  `verified` a top-level boolean. The same validation serves `record-result`
+  and the MCP tool.
+- "Nothing to record" says what a result needs (a progress summary, next
+  steps or a checked learning), and the native save's bare
+  `native-result:nothing-to-record` adds that `--skip` is the way out.
+  Conflicting learnings name the title they share.
+- A missing or linked source is named in its refusal, without its `#`
+  anchor and cut to 200 characters, so an agent citing several files knows
+  which to fix.
+- Test (`NativeFunnelJournalTests`): four malformed inputs each journal
+  `native-result:invalid-input` and print their reason; `verified` inside a
+  learning and a missing `sources` are named. It fails on the old runtime.
+
+### The host benches are tested without the hosts — 2026-10-23
+
+- `scripts/claude_code_bench.py` and `scripts/codex_bench.py` run only where
+  Claude Code and Codex are installed, and CI has neither. A change to the
+  save step's wording could break their command search unnoticed.
+- `tests/test_host_benches.py`, in the `installation` job, covers:
+  - each bench finds the save command in the step the runtime writes for
+    Claude Code, Codex and Cursor;
+  - the Claude stand-in reads, answers, saves through `echo -E` and ends;
+  - the Codex stand-in reads Codex's XML-escaped `<hook_prompt>` unescaped,
+    and runs commands through code mode's `exec` script when there is no
+    tool list;
+  - a target the rollout rehearsal refuses is refused.
+
+### Codex's Plan mode and read-only sandbox are not asked to save — 2026-10-23
+
+- Why: Codex's hook `permission_mode` follows its approval policy only. The
+  offline Codex run (`scripts/codex_bench.py`) reported
+  `bypassPermissions` under both the workspace-write and the read-only
+  sandbox. In the read-only sandbox the save after every answer failed
+  (`stop failed unsaved`), and with approvals on request the agent could ask
+  the person to let it write. Codex's Plan collaboration mode, like Claude
+  Code's plan mode, is for no changes. Both show in the rollout's
+  `turn_context` record, as `collaboration_mode.mode` and
+  `sandbox_policy.type`.
+- For Codex the Stop reads the last 512 KiB of the rollout and takes the
+  `turn_context` whose `turn_id` is the Stop's. Plan mode is then skipped as
+  `plan-mode`, and a read-only sandbox as `read-only-sandbox`. Another
+  turn's context, one beyond the tail, or no rollout is unknown, and such a
+  turn is asked as before.
+- Tests (`NativeRequestSwitchTests`): plan mode and a read-only sandbox ask
+  nothing and journal their code, and a default turn is asked; another
+  turn's context, one beyond the tail and a missing rollout are asked.
+
+### A plan-mode turn is not asked to save — 2026-10-23
+
+- Why: in plan mode Claude Code tells the agent it "MUST NOT make any edits,
+  run any non-readonly tools … This supercedes any other instructions you
+  have received". The Stop hook still asked for a save after every answer,
+  so the agent either refused it, at the cost of a model call and a "not
+  saved completely" warning on the next prompt, or wrote memory against the
+  person's choice. The offline Claude Code run showed the save command
+  itself passes the permission check in plan mode, so only the agent's
+  compliance stood between plan mode and a write.
+- The Stop now skips the request when the hook input's `permission_mode` is
+  `plan`. Claude Code and Codex both send that field; Codex's hook schema
+  has the same five values. The journal records `stop` `skipped`
+  `plan-mode`. The prompt still arms, so a turn switched out of plan mode
+  before it ends is asked, and a save asked before the switch is settled as
+  before.
+- Test (`NativeRequestSwitchTests`): for both hosts, a plan-mode Stop asks
+  nothing and journals `plan-mode`, and the next default-mode answer is asked.
+
+### Codex on the real host, offline — 2026-10-23
+
+- Why: the Codex side of the save after every answer had been checked only
+  through simulated hooks. `scripts/codex_bench.py` drives the installed
+  Codex (0.163) the way `claude_code_bench.py` drives Claude Code: a network
+  namespace with loopback only, a scripted stand-in for the Responses API,
+  and an isolated `CODEX_HOME` that approves the project's hooks by hash.
+- What it showed:
+  - Codex adds the Stop hook's continuation to the same turn as a
+    `<hook_prompt>` item, XML-escaped, and runs no prompt hook for it.
+    `docs/MEMORY-INTEGRATION.md` said Codex sends it back through the prompt
+    hook, and is corrected; the prompt-hook guard and the silent `refresh` for
+    such a query stay as defence.
+  - The command's `&&` reaches the model as `&amp;&amp;`. In every real Codex
+    save in the transcripts, the model ran it as `&&`.
+  - A project that pins a gpt-5.6 model gets no tool list. The model then
+    runs commands through code mode's `exec` script.
+- Measured: a fresh PHP Core install and synced copies of the four client
+  projects (one pins gpt-5.6) save and recover in Codex's workspace-write
+  sandbox.
+
+### Claude Code saves without a prompt and without a hook error — 2026-10-23
+
+- Why: no Claude Code session had yet run the save after an answer, so the
+  real binary (2.1.278) was driven offline: a network namespace with
+  loopback only and a scripted stand-in for the Messages API, no model.
+  It found three defects:
+  - Claude Code asked before the save command after every answer, whatever
+    the allow rules say: a command holding a subshell or a `{ }` group always
+    asks, and the command was `(cd ROOT && python3 … --json)`. Under
+    `claude -p` the save was refused and the result lost.
+  - The Stop `decision: "block"` showed in the transcript as "Stop hook
+    error" and raised "Stop hook error occurred · ctrl+o to see" after every
+    answer.
+  - The model got the step twice: as "Stop hook feedback" and again as a
+    blocking-error message, about 2,600 characters a turn.
+- Claude Code's Stop now answers with `hookSpecificOutput.additionalContext`
+  (documented for Stop since 2.1.163). It continues the turn through the
+  same `stop_hook_active` and continuation cap, is labelled hook feedback,
+  and reaches the model once.
+- Its command is `cd ROOT && echo -E '<JSON>' | python3
+  memory-bank/scripts/context.py … --input - --json`, the JSON written in
+  place of `<JSON>`, and the skip has its own line. Offline the `cd`, `echo`
+  and the allowed CLI pass without a prompt. Rejected:
+  - a heredoc: Claude Code asks before one whose body holds braces and
+    quotes;
+  - `printf '%s'`: Claude Code asks before a `printf` operand holding `[`
+    with `$` or a backtick, as a JSON with code in it does;
+  - plain `echo`: Claude Code's Bash tool runs zsh unless `$SHELL` is bash,
+    and zsh's `echo` turned the JSON's `\n` into a newline, so the save was
+    refused. `-E` keeps it, in zsh as in bash.
+- Codex and Cursor get the same text, byte for byte, as before.
+- `memory_rollout_rehearsal.py` and the lifecycle test run either form.
+  `memory_eval.py` already finds the request in the new transcript shape;
+  a test now holds it.
+- Measured offline, one answered turn: the save ran and the second Stop saw
+  the recovery; the continuation fell from 5,250 to 3,141 characters in one
+  message; the stream raised no error notification.
+- Tests (`ClaudeSaveStepTests`): the Stop output per host; the command holds
+  no subshell, group, heredoc, `$`, backtick or `;` outside quotes; it keeps
+  a JSON with backticks, `$`, newlines, tabs, backslashes, quotes and
+  Cyrillic verbatim under bash and zsh from a subdirectory; the skip runs as
+  given. All four fail on the old runtime.
+- `scripts/claude_code_bench.py` repeats the offline run against the
+  installed Claude Code: one answered turn of an installed edition, the save
+  step followed as written with such a JSON, and a report of whether the
+  save ran, how many messages carried the step and whether the transcript
+  recorded a hook error. With `--target DIR --sync` it runs in a synced copy
+  of an installed project. On copies of the four client projects synced to
+  this change, all four saved without a prompt or a hook error. On `next` as
+  installed today, the save was refused. Linux only (user and network
+  namespaces). It is not a CI gate, as CI has no Claude Code; run it when
+  Claude Code updates and before a rollout.
+
 ### Cursor's next request keeps the rule its last prompt wrote — 2026-10-23
 
 - Why: Cursor reads its rule before the prompt hook runs, so the rule a

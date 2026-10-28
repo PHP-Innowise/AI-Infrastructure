@@ -37,7 +37,7 @@ HEX = re.compile(r'[0-9a-f]{64}')
 TOKEN = re.compile(r'[0-9a-f]{32}')
 FIELDS = {'profile','owner','host','session','project','task_id','token','phase',
           'task_uuid','revision','scope','digest','updated','checkout','adapter'}
-PHASES = {'armed','requested','saved','held','omitted','failed'}
+PHASES = {'armed','requested','saved','held','omitted','failed','refused','declined'}
 HOSTS = {'claude','codex','cursor'}
 JOURNAL = 'native-results.ndjson'
 # A fully exercised turn writes about six lines - armed; requested and the
@@ -144,16 +144,50 @@ def read_input(stream, root=None, request=None):
         return _parse_input(stream)
 
 
+def _invalid_input(detail):
+    """The refusal of an input that is not one JSON object: the journal counts
+    its code, the agent reads what to correct in its one retry."""
+    error = BrainError('native-result:invalid-input: ' + detail)
+    error.code = 'native-result:invalid-input'
+    return error
+
+
+def _overtaken(code, what):
+    """The refusal of a save another writer overtook - in practice a second
+    session on the branch saving first. The bare code left the agent to
+    guess; its instruction says to stop and report the held save."""
+    error = BrainError(f'{code}: {what} after this save was requested; nothing was written: '
+                       'report the held save, do not retry it')
+    error.code = code
+    return error
+
+
+JSON_KINDS = {list: 'an array', str: 'a string', int: 'a number', float: 'a number', bool: 'true or false',
+              type(None): 'null'}
+
+
 def _parse_input(stream):
     raw = stream.read(MAX_INPUT + 1)
     if len(raw) > MAX_INPUT:
         raise BrainError('native-result:input-too-large')
     try:
         value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        where = f'line {error.lineno} column {error.colno}'
+        if error.msg == 'Extra data':
+            raise _invalid_input(f'more than one JSON object (more after {where})') from error
+        # json's message for a control character already ends in "at".
+        detail = f'not one JSON object ({error.msg.removesuffix(" at")} at {where})'
+        # A shell's echo turns the \n of a JSON string into a real newline:
+        # the agent did write \n, so the hint names the echo too.
+        if error.msg.startswith('Invalid control character'):
+            detail += ('; inside a string, write a newline as \\n and a tab as \\t (a plain echo in zsh turns '
+                       '\\n into a line break: pipe with echo -E)')
+        raise _invalid_input(detail) from error
     except (ValueError, UnicodeError, RecursionError) as error:
-        raise BrainError('native-result:invalid-input') from error
+        raise _invalid_input('not one UTF-8 JSON object') from error
     if not isinstance(value, dict):
-        raise BrainError('native-result:invalid-input')
+        raise _invalid_input('one JSON object expected, got ' + JSON_KINDS.get(type(value), 'another value'))
     return value
 
 
@@ -202,6 +236,58 @@ ATTENDED_ENTRYPOINTS = frozenset({'cli', 'claude-vscode', 'claude-desktop'})
 # them), `exec` for `codex exec`, an object for a subagent.
 ATTENDED_SOURCES = frozenset({'cli', 'vscode'})
 ROLLOUT_HEAD_BYTES = 256 * 1024
+# The current turn's context is near the rollout's end; one that lies
+# further back is unknown, and an unknown turn is asked as before.
+ROLLOUT_TAIL_BYTES = 512 * 1024
+# Claude Code records on a tool call's result how it refused the call. A save
+# the host refused - a person said no, a rule or auto mode denied it, or `-p`
+# had no one to ask, as in a project whose trust was never accepted, whose
+# allow rules Claude Code ignores - is refused again after every answer,
+# each time for two model calls. Such a session is not asked again for a day.
+# Auto mode's classifier failing (`automode-unavailable`, `-parsing-error`) is
+# "not a judgment that the action is unsafe", and the next answer may pass.
+CLAUDE_REFUSALS = frozenset({'user-rejected','permission-rule','automode-blocked'})
+REFUSED_SECONDS = 24 * 60 * 60
+CLAUDE_TAIL_BYTES = 512 * 1024
+
+
+# The rules a save step carries - the schema, what belongs in learnings - are
+# the same after every answer: about 1,150 of its 2,700 characters, which
+# Claude Code's terminal also shows whole each time. A step whose
+# conversation still holds a full one carries the command and points back to
+# it. The full step is sent again once a compaction has dropped it, or when
+# the transcript cannot say. `full` sends it every time;
+# CONTEXT_NATIVE_RESULT_INSTRUCTION overrides `native_result_instruction`.
+NATIVE_INSTRUCTIONS = ('auto', 'full')
+FULL_RULES = 'Exact schema example (replace placeholders, never save the example)'
+RULES_TAIL_BYTES = 2 * 1024 * 1024
+COMPACTION_RECORDS = (b'"subtype":"compact_boundary"', b'"type":"compacted"')
+
+
+def configured_instruction(root):
+    """Whether a save step may point back to the full one; an unknown value sends it whole."""
+    value = (os.environ.get('CONTEXT_NATIVE_RESULT_INSTRUCTION')
+             or load_config(root).get('native_result_instruction') or 'auto')
+    return value if value in NATIVE_INSTRUCTIONS else 'full'
+
+
+def _rules_in_context(payload):
+    """Whether the conversation still holds a full save step: its rules are
+    in the transcript's last 2 MiB, after the last compaction record."""
+    path = payload.get('transcript_path')
+    if not isinstance(path, str) or not path:
+        return False
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - RULES_TAIL_BYTES))
+            tail = handle.read(RULES_TAIL_BYTES)
+    except OSError:
+        return False
+    start = max(tail.rfind(record) for record in COMPACTION_RECORDS)
+    return tail.find(FULL_RULES.encode(), start + 1 if start >= 0 else 0) >= 0
 
 
 def configured_answer(root):
@@ -229,6 +315,78 @@ def _rollout_source(payload):
     meta = record.get('payload') if isinstance(record, dict) and record.get('type') == 'session_meta' else None
     source = meta.get('source') if isinstance(meta, dict) else None
     return source if isinstance(source, str) else None
+
+
+def _rollout_turn(payload):
+    """The Codex turn behind this Stop: its collaboration mode and sandbox
+    type from the rollout's turn_context record with the Stop's turn_id,
+    or Nones. Codex's permission_mode follows the approval policy only."""
+    path, turn = payload.get('transcript_path'), payload.get('turn_id')
+    if not isinstance(path, str) or not path or not isinstance(turn, str) or not turn:
+        return None, None
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return None, None
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - ROLLOUT_TAIL_BYTES))
+            tail = handle.read(ROLLOUT_TAIL_BYTES)
+    except OSError:
+        return None, None
+    for line in reversed(tail.split(b'\n')):
+        if b'turn_context' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue  # the tail's first line may be cut
+        context = record.get('payload') if isinstance(record, dict) and record.get('type') == 'turn_context' else None
+        if not isinstance(context, dict):
+            continue
+        if context.get('turn_id') != turn:
+            return None, None
+        mode = context.get('collaboration_mode')
+        sandbox = context.get('sandbox_policy')
+        mode = mode.get('mode') if isinstance(mode, dict) else None
+        sandbox = sandbox.get('type') if isinstance(sandbox, dict) else None
+        return (mode if isinstance(mode, str) else None), (sandbox if isinstance(sandbox, str) else None)
+    return None, None
+
+
+def _claude_refusal(payload, token):
+    """Whether Claude Code refused this request's save command: the denial
+    kind it recorded on the command's result in the transcript tail."""
+    path = payload.get('transcript_path')
+    if not isinstance(path, str) or not path:
+        return False
+    try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            return False
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - CLAUDE_TAIL_BYTES))
+            tail = handle.read(CLAUDE_TAIL_BYTES)
+    except OSError:
+        return False
+    calls, refused = set(), False
+    for line in tail.split(b'\n'):
+        if token.encode() not in line and b'tool_result' not in line:
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue  # the tail's first line may be cut
+        message = record.get('message') if isinstance(record, dict) else None
+        content = message.get('content') if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else ():
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'tool_use' and token in json.dumps(block.get('input')):
+                calls.add(block.get('id'))
+            elif block.get('type') == 'tool_result' and block.get('tool_use_id') in calls:
+                # The last attempt decides: a retry the host let through began a save.
+                refused = record.get('toolDenialKind') in CLAUDE_REFUSALS
+    return refused
 
 
 def attended(root, host, payload):
@@ -345,7 +503,24 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
         if (previous and previous['phase']=='requested' and isinstance(prompt,str)
                 and prompt.lstrip().startswith('INTERNAL_NATIVE_MEMORY_RESULT '+previous['token'])):
             return step({'armed':False,'continuation':True},'continuation')
-        warning = bool(previous and previous['phase'] in {'requested','failed','held'})
+        # A person who says no in Claude Code's dialog ends the turn before
+        # any Stop runs, so the request is still pending. And Claude Code
+        # writes its transcript in batches: a refusal just before the
+        # recovery Stop may not be on disk yet, and that Stop calls the
+        # request failed. Either way the refusal is in the transcript the
+        # prompt hook is handed.
+        if (previous and previous['phase'] in {'requested','failed'} and host=='claude' and not previous['digest']
+                and _claude_refusal(payload,previous['token'])):
+            previous.update(phase='refused',updated=time.time())
+        # A session whose host refused the save is not asked again for a day;
+        # the first prompt after says so as any unsaved result does.
+        if (previous and previous['phase'] in {'refused','declined'}
+                and 0 <= time.time()-previous['updated'] < REFUSED_SECONDS):
+            if previous['phase'] == 'declined': return step({'armed':False},'skipped','host-refused')
+            previous.update(phase='declined',updated=time.time());_write(root,key,previous)
+            return step({'armed':False,'warning':'Previous native memory result was not saved completely.'},
+                        'skipped','host-refused')
+        warning = bool(previous and previous['phase'] in {'requested','failed','held','refused'})
         state={'profile':PROFILE,'owner':owner,'host':host,
                'session':hashlib.sha256(str(payload.get('conversation_id' if host=='cursor' else 'session_id')).encode()).hexdigest(),
                'project':_project(root),'task_id':task_id,'token':uuid4().hex,
@@ -378,20 +553,34 @@ def _adapter():
     return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 
-def _instruction(root,key,state,*,brief=False,host=None):
+def _instruction(root,key,state,*,brief=False,host=None,full=True):
     tooling=Path(__file__).resolve().parents[2]
     interpreter=['python3']
     if os.name == 'nt':
         interpreter=['python'] if shutil.which('python') else ['py','-3']
     # Keep the documented CLI spelling covered by the installed Bash
     # permission rules, even when the session's cwd is a subdirectory.
-    command='(cd '+shlex.quote(str(tooling))+' && '+shlex.join([
-        *interpreter,'memory-bank/scripts/context.py','--root',str(root),'native-result',
-        '--request',key,'--token',state['token'],'--input','-','--json'])+')'
-    body=('This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
-        'edit application files, run tests, delegate, or mark the task completed. '
-        'Use your shell tool to pipe one JSON object into this exact command: '+command+'\n'
-        'JSON: progress (summary, at most 1000 characters), optional next_steps '
+    def cli(*tail):
+        return shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),'native-result',
+            '--request',key,'--token',state['token'],*tail])
+    enter='cd '+shlex.quote(str(tooling))+' && '
+    if host=='claude':
+        # Claude Code asks before any command holding a subshell or a { }
+        # group, whatever the allow rules say, so (cd ROOT && ...) asked after
+        # every answer. It also asks before a heredoc whose body holds braces
+        # and quotes, and before a printf operand holding [ with $ or a
+        # backtick, which a JSON with code in it has. A cd into the project,
+        # echo and the allowed CLI pass; -E keeps the JSON's backslashes in
+        # zsh, whose plain echo turns them into characters, as in bash.
+        ask=('Use your shell tool to run this exact command: '+enter+"echo -E '<JSON>' | "
+             +cli('--input','-','--json')+'\n'
+             "Put one JSON object in place of <JSON>, writing each ' inside it as '\\''. ")
+        skip='run this command instead: '+enter+cli('--skip','--json')+'\n'
+    else:
+        ask='Use your shell tool to pipe one JSON object into this exact command: (' \
+            +enter+cli('--input','-','--json')+')\n'
+        skip='use the same command replacing --input - with --skip. '
+    rules=('JSON: progress (summary, at most 1000 characters), optional next_steps '
         '(at most 3 strings of 300 characters; omit to preserve the current plan), '
         'learnings (at most 3 objects with type finding|decision, title, consequence, sources). '
         'Exact schema example (replace placeholders, never save the example): '
@@ -404,8 +593,14 @@ def _instruction(root,key,state,*,brief=False,host=None):
         'Use only canonical project-relative source files you actually checked. Set verified=true '
         'only when you personally checked every learning against current sources; this is agent '
         'attestation, never human review. Empty learnings is valid. No raw requests, transcripts, '
-        'logs, credentials or personal data. If no project result is safe to save, use the same '
-        'command replacing --input - with --skip. Check the command result. '
+        'logs, credentials or personal data. ') if full else (
+        # The conversation holds the full step from an earlier answer.
+        'The JSON follows the rules of the full save step earlier in this conversation: progress, optional '
+        'next_steps, learnings with checked sources, and verified as a top-level boolean. ')
+    body=('This is an internal continuation: do not announce routine memory operations. Save only the result of the work already performed in this session. Do not repeat the task, '
+        'edit application files, run tests, delegate, or mark the task completed. '
+        +ask+rules+'If no project result is safe to save, '+skip+
+        'Check the command result. '
         +('The person has already read your answer above this continuation: after a successful save or skip, '
           'do not repeat it or mention routine memory operations; end with no further text or one short line. '
           'If a save is refused, briefly report the held save. ' if brief else
@@ -449,19 +644,33 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
     # An unknown answer setting costs the turn its short ending, never its save.
     try: brief,code=attended(root,host,payload),None
     except BrainError as error: brief,code=False,refusal_code(error)
+    # Codex reports Plan mode and a read-only sandbox only in the rollout.
+    collaboration,sandbox=_rollout_turn(payload) if host=='codex' else (None,None)
     with mutation_lock(root):
         state=_read(root,key)
         if state is None: return step({},'skipped','not-armed')
         if recovery(host,payload):
             if state['phase']=='requested':
-                state['phase']='held' if _proven(root,state) else 'failed'
-                _write(root,key,state)
                 # Held: a finished save the state never took. Failed: no
-                # save began, or one began and did not finish.
-                return step({},state['phase'],'unconfirmed' if state['phase']=='held'
+                # save began, or one began and did not finish. Refused:
+                # Claude Code refused the save command itself.
+                if _proven(root,state): state['phase']='held'
+                elif host=='claude' and not state['digest'] and _claude_refusal(payload,state['token']):
+                    state['phase']='refused'
+                else: state['phase']='failed'
+                _write(root,key,state)
+                return step({},'held' if state['phase']=='held' else 'failed',
+                            'unconfirmed' if state['phase']=='held' else 'host-refused' if state['phase']=='refused'
                             else 'incomplete' if state['digest'] else 'unsaved')
             return step({},'skipped','recovery-'+state['phase'])
         if state['phase'] != 'armed': return step({},'skipped','phase-'+state['phase'])
+        # The host tells a plan-mode turn to change nothing, overriding any
+        # other instruction: asked to save, the agent refuses after every
+        # answer, or writes against the person's choice. A save asked
+        # before the switch is still settled above.
+        if payload.get('permission_mode') == 'plan' or collaboration == 'plan': return step({},'skipped','plan-mode')
+        # A read-only sandbox lets no save write the project.
+        if sandbox == 'read-only': return step({},'skipped','read-only-sandbox')
         try: task=writable_task(root,task_id,owner)
         except BrainRecordNotFound as error:
             if error.identifier != task_id: raise
@@ -472,9 +681,16 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
         state.update(phase='requested',scope=prepared_scope(root,owner,REASON,'agent'),
                      checkout=_checkout(root),adapter=_adapter(),updated=time.time())
         _write(root,key,state)
-        instruction=_instruction(root,key,state,brief=brief,host=host)
-    return step({'followup_message':instruction} if host=='cursor' else {'decision':'block','reason':instruction},
-                'requested',code,answer='brief' if brief else 'repeat')
+        full=configured_instruction(root)=='full' or not _rules_in_context(payload)
+        instruction=_instruction(root,key,state,brief=brief,host=host,full=full)
+    # Claude Code labels a block a hook error, notifies one after every
+    # answer and hands the model the reason twice. Its Stop additionalContext
+    # (2.1.163 and later) continues the turn as hook feedback, once, through
+    # the same stop_hook_active and continuation cap.
+    if host=='claude': output={'hookSpecificOutput':{'hookEventName':'Stop','additionalContext':instruction}}
+    elif host=='cursor': output={'followup_message':instruction}
+    else: output={'decision':'block','reason':instruction}
+    return step(output,'requested',code,answer='brief' if brief else 'repeat')
 
 
 def save(root,key,token,data,*,owner,mode,provision,skip=False):
@@ -514,12 +730,15 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
         normalized=normalize(root,data,check_files=not begun)
         if (state['task_uuid'] is None and normalized['progress'] is None
                 and not normalized['next_steps'] and not normalized['learnings']):
-            raise BrainError('native-result:nothing-to-record')
+            error=BrainError('native-result:nothing-to-record: no task yet and nothing to start one with; give a '
+                             'progress summary or a learning, or run the command with --skip')
+            error.code='native-result:nothing-to-record'
+            raise error
         if state['task_uuid'] is None:
             try: writable_task(root,state['task_id'],owner)
             except BrainRecordNotFound as error:
                 if error.identifier != state['task_id']: raise
-            else: raise BrainError('native-result:task-changed')
+            else: raise _overtaken('native-result:task-changed','the branch task was created')
             provision(state['task_id'])
             task=writable_task(root,state['task_id'],owner)
             state.update(task_uuid=task['id'],revision=task['revision'])
@@ -527,14 +746,18 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip):
         if not begun:
             task=writable_task(root,state['task_id'],owner)
             if task['id'] != state['task_uuid']:
-                raise BrainError('native-result:task-changed')
+                raise _overtaken('native-result:task-changed','the branch task was replaced')
         digest=request_digest(state['task_uuid'],normalized)
         if state['digest'] is not None and state['digest'] != digest:
             raise BrainError('native-result:content-changed')
         state['digest']=digest;_write(root,key,state)
-        result=record_result(root,state['task_uuid'],'native-'+token,state['revision'],data,
-                             owner=owner,reason=REASON,attestation='agent',prepared=state['scope'],
-                             replay_only=begun)
+        try:
+            result=record_result(root,state['task_uuid'],'native-'+token,state['revision'],data,
+                                 owner=owner,reason=REASON,attestation='agent',prepared=state['scope'],
+                                 replay_only=begun)
+        except BrainError as error:
+            if str(error) != 'memory-result-v1:prepared_stale_no_write': raise
+            raise _overtaken(str(error),'another session or a person saved the task') from error
         held=any(item['state'] in {'differs','archived-differs'} for item in result['records'])
         state['phase']='held' if held else 'saved';_write(root,key,state)
         return step(result,state['phase'],repeat,

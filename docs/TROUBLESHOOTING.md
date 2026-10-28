@@ -477,7 +477,16 @@ IDE extension or terminal UI - ends with at most one short line instead;
 every other session, Cursor's included, repeats (see
 `docs/MEMORY-INTEGRATION.md`). On 21 Codex runs with one save each, the
 continuation cost a median of 10 seconds, 383 output and 59k mostly cached
-input tokens: about half of the answer's own.
+input tokens: about half of the answer's own. Only the first step of a
+conversation, and the first after a compaction, carries the full rules; later
+ones point back to them and are about 900 characters shorter.
+
+An agent that also runs `context.py record-result` or `memory_record_result`
+during the answer saves it twice. The `AGENTS.md` of releases before 24
+October 2026 asked for that explicit save after every answer; the current
+policy asks for it only where the Stop hook requests no save.
+`install_accelerator.py --sync` rewrites the policy's managed block, with
+`--update-tracked` where the project's Git tracks `AGENTS.md`.
 
 ### Recover
 
@@ -497,6 +506,82 @@ recognise as attended, set `"native_result_answer": "brief"` (or
 `CONTEXT_NATIVE_RESULT_ANSWER=brief`). Only do this where nobody reads the
 final message alone: a headless caller would then get one short line instead
 of the answer. `repeat` restores the repeat everywhere.
+
+## Claude Code Asks Before the Save After Every Answer
+
+### Symptom
+
+After each answer Claude Code asks to approve a command like
+`cd <project> && echo -E '{...}' | python3 memory-bank/scripts/context.py ... native-result ...`.
+Under `claude -p` the command is refused instead and the result is not
+saved: `memory-bank/local/native-results.ndjson` records `stop` `failed` with
+the code `host-refused` (`unsaved` on runtimes before 24 October 2026).
+
+### Cause
+
+Claude Code runs that command without asking only when
+`.claude/settings.json` allows the memory CLI
+(`Bash(python3 memory-bank/scripts/context.py:*)`, with `python` and `py -3`
+for Windows) and the project is trusted. Claude Code ignores a project's allow
+rules until its trust dialog has been accepted once. A team-edited
+`settings.json` may have lost the rules.
+
+Runtimes released before 23 October 2026 gave the command as
+`(cd <project> && python3 ...)`. Claude Code asks before any command holding a
+subshell, whatever the allow rules say. They also sent the request as a Stop
+block, which the transcript shows as "Stop hook error" with an error
+notification after every answer.
+
+### Recover
+
+- Accept the trust dialog once in an interactive session.
+  `python3 scripts/claude_code_bench.py --target DIR` says whether your Claude
+  Code has accepted it for that project.
+- Put the three allow rules back into `.claude/settings.json`. The edition's
+  own file lists them. The dialog's "Yes, and don't ask again for: echo *"
+  does not help: it adds `Bash(echo *)` to `.claude/settings.local.json`,
+  which leaves the memory CLI unapproved, and the next session asks again.
+- On an older runtime, update the accelerator (`--sync`). Until then, set
+  `"native_result_request": "off"` to stop the request (see the previous
+  section).
+
+After Claude Code refuses the save once, the session is not asked again for
+a day: the journal records `stop` `failed` `host-refused`, then `prompt`
+`skipped` `host-refused`. A new session is asked again, so check the trust
+and the rules before starting one.
+
+## A Headless Run Hits Its Turn Limit After a Complete Answer
+
+### Symptom
+
+`claude -p ... --max-turns N` (or an Agent SDK query with `maxTurns`) ends
+with `"subtype": "error_max_turns"`, `"is_error": true` and no `result`,
+although the agent had answered. In `memory-bank/local/native-results.ndjson`
+the run's last lines are `stop` `requested`, sometimes followed by `save`
+`saved`.
+
+### Cause
+
+The save continues the turn: one model call runs the save command and one
+more ends the turn. Claude Code counts both against `--max-turns`. An answer
+given in the last two allowed calls leaves the save no room, so the run ends
+on the limit instead of on the answer. Claude Code tells the Stop hook
+neither the limit nor the count, so the hook cannot step aside.
+
+Seen offline on Claude Code 2.1.278, with the answer on the second model call:
+
+- `--max-turns 2`: `error_max_turns`, nothing saved;
+- `--max-turns 3`: the result saved, then `error_max_turns` before the final
+  message.
+
+### Recover
+
+- Give a headless run that keeps the request two more turns than its work
+  needs.
+- Or switch the request off for that run with
+  `CONTEXT_NATIVE_RESULT_REQUEST=off` in its environment. Its results then
+  reach memory only through `context.py record-result`, the MCP
+  `memory_record_result` tool or the Harness.
 
 ## Promotion Review or Apply Fails
 
@@ -638,7 +723,9 @@ blocked, or a hook times out.
     prompt, Stop and save with a fixed code. `stop-hook` `exited` with
     `status` 124 is a save request killed at its budget; `stop-hook`
     `skipped` `capsule-delivered` a Harness turn; `stop` `failed` `unsaved`
-    a request nobody answered; `save` `refused` carries the refusal's code
+    a request nobody answered, `host-refused` one Claude Code refused (the
+    session is then not asked again for a day); `save` `refused` carries the
+    refusal's code
     (`memory-result-v1:learning_fields` is usually `verified` put inside a
     learning). From the repository, `python3 scripts/memory_eval.py realized
     --project DIR` counts the lines per host.

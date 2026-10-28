@@ -579,6 +579,11 @@ python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
 - **Outputs:**
   - what the sync changed and kept;
   - the profile `runtime.json` selects;
+  - with Claude Code among the hosts, whether your own Claude Code ever
+    accepted the project's trust dialog (`~/.claude.json`, or
+    `$CLAUDE_CONFIG_DIR`; that flag and nothing else is read). Without it,
+    `claude -p` there ignores the project's allow rules and refuses the save,
+    which the copy's own HOME would hide. It does not change the exit status;
   - for each run:
     - every hook's exit and time;
     - whether the save was requested, made or refused (with its code);
@@ -596,6 +601,118 @@ python3 scripts/memory_rollout_rehearsal.py --target DIR [--target DIR ...] \
   for byte as it was, and the copy must leave out dependency trees. Cursor's
   capsule is the rule file its prompt hook renders, and its Stop request
   arrives as `followup_message`.
+
+### `claude_code_bench.py`
+
+**Purpose and status.** A maintainer-only check of the native save step on the
+installed Claude Code, without a model. The save after every answer depends on
+what Claude Code does with a Stop hook's output and on its permission check for
+the command the agent runs. Both change between Claude Code releases, and a
+unit test cannot see either.
+
+It installs an edition into a small project. Then, inside a network namespace
+with loopback only, it runs `claude -p` against a scripted
+stand-in for the Messages API. The stand-in reads a file, answers, and follows
+the Stop hook's save step exactly as written. The JSON it saves holds
+backticks, `$`, brackets, an apostrophe, escapes and Cyrillic. Nothing leaves
+the machine and no tokens are spent.
+
+With `--target DIR` it runs in a copy of an installed project instead of a
+fresh install. The copy leaves out dependency trees as the rollout
+rehearsal's does, and `--sync` first brings it up to this clone. The saved
+learning cites one of the project's own tracked files, and the project itself
+is never written. A Git worktree or submodule is refused, as the rehearsal
+refuses it.
+
+With `--target` it also reads your own Claude Code configuration
+(`~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`) for that project's
+trust and nothing else. It warns when the trust dialog was never accepted:
+there `claude -p` ignores the project's allow rules and refuses the save,
+which the bench's own trusted HOME would hide.
+
+`--attached` runs a fresh project with nothing installed and the edition
+lent from this clone, as the Harness launches it (`accelerator_attach.py`:
+`--add-dir`, one `--settings` with the edition's permissions and hooks, the
+state outside the project). The project is left untrusted there, because
+permissions from `--settings` count without the trust dialog.
+
+`--mode` runs one permission mode (`default`, `acceptEdits`, `auto`,
+`dontAsk`, `bypassPermissions` or `plan`). The namespace keeps your own uid
+where `unshare` can map it (util-linux 2.38 and later), because Claude Code
+refuses `bypassPermissions` to root; older `unshare` falls back to
+`unshare -rn`. In `plan` no save is asked for, and the run passes when the
+journal records `plan-mode`.
+
+```bash
+python3 scripts/claude_code_bench.py [--claude PATH] [--edition "PHP Core"] \
+  [--target DIR [--sync] [--exclude NAME] | --attached] [--shell /usr/bin/zsh] [--mode dontAsk] \
+  [--timeout 180] [--keep]
+```
+
+- **Outputs:** a JSON report:
+  - Claude Code's version and the shell its Bash tool ran;
+  - whether the save ran (the journal's events);
+  - how many messages carried the step to the model, and their size;
+  - the hook errors the transcript recorded, and the error notifications in
+    the stream.
+
+  Exit 0 when the save ran, one message carried the step and no hook error
+  was recorded; 1 otherwise; 2 without Linux namespaces.
+- **Writes:** a temporary directory holding the project (or the copy) and an
+  empty HOME, under `/dev/shm` when writable, removed unless `--keep`.
+- **CI relationship:** CI has no Claude Code, so it cannot run the bench.
+  `tests/test_host_benches.py`, in the `installation` job, holds what the
+  bench relies on: the save command found in the step the runtime writes for
+  every host, and the stand-in's turn. Run the bench itself when Claude Code
+  updates, and with `--target … --sync` on a copy of each project before a
+  rollout. Its first run, on 2.1.278, found two problems: the save command
+  asked for permission after every answer, and the Stop block showed as a hook
+  error.
+
+### `codex_bench.py`
+
+**Purpose and status.** The Codex counterpart of `claude_code_bench.py`, with
+the same work directory, `--target` and `--sync`. Codex runs a project's hooks
+only once their hashes are approved, and turns a Stop hook's block into a
+`<hook_prompt>` item of the same turn. The save after every answer depends on
+both, and on Codex's sandbox letting the save write the project.
+
+The stand-in serves the Responses API. It follows the save step as written,
+reading XML entities as a model does. It answers through `exec_command`, or
+through code mode's `exec` script when Codex sends no tool list, as it does
+for a project that pins a gpt-5.6 model.
+
+An isolated `CODEX_HOME` approves the project's hooks by their current hashes,
+as a person does once in `/hooks`. Then `codex exec` runs with the
+workspace-write sandbox.
+
+`--attached` runs a fresh project with nothing installed and the edition lent
+from this clone, as the Harness launches Codex (`accelerator_attach.py`): the
+hooks and instructions as `-c` options, the state as an added directory, and
+the hooks trusted as `accelerator_attach.py trust-codex-hooks` records them.
+
+```bash
+python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
+  [--target DIR [--sync] [--exclude NAME]] [--timeout 240] [--keep]
+```
+
+- **Outputs:** a JSON report:
+  - Codex's version and the tools it offered;
+  - how many hooks were approved;
+  - how many messages carried the step, whether as a `<hook_prompt>` and
+    XML-escaped;
+  - whether the save ran and the second Stop saw the recovery (the journal's
+    events).
+
+  Exit 0 when the save ran and one message carried the step; 1 otherwise; 2
+  without Linux namespaces. `CODEX_BENCH_DUMP=DIR` keeps every request body.
+- **Writes:** as `claude_code_bench.py`.
+- **CI relationship:** CI has no Codex. `tests/test_host_benches.py` holds the
+  stand-in's turn: the escaped `<hook_prompt>` read unescaped, and code mode.
+  Its first run, on 0.163,
+  found that Codex adds the continuation to the same turn as a `<hook_prompt>`
+  item, without running the prompt hook. The editions' documentation had said
+  the continuation came back through the prompt hook.
 
 ### `memory_rerank_pilot.py`
 
