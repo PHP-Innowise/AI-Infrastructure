@@ -28,6 +28,27 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A commit in a worktree Codex made no longer refuses the save — 2026-10-29
+
+- Why: a native save is pinned when the Stop asks for it: to the branch,
+  and on a detached HEAD to the commit. A worktree Codex makes stays
+  detached, and the thread that owns it names the task
+  (`codex-thread/<thread>`), so a commit there - the person's, or another
+  session's - moved the pin and refused the save, learnings and all. The
+  lifecycle fuzzer found it once the two worktree stacks met: 2 of 96 seeds
+  at 80 steps, one of them a save the sandbox held that its Stop then could
+  not make.
+- What changes: on a detached HEAD whose Git directory holds a
+  `codex-thread.json` naming its owner, the save is pinned to that thread,
+  read by the patterns `context.py` reads it by and in the same `git
+  rev-parse` call. A worktree handed to another thread refuses the save, as
+  a branch made there does. A stopped rebase and any other detached HEAD
+  keep the commit, and their pin is the same value as before.
+- Tests: `tests/test_memory_native_capture.py` commits in such a worktree
+  while the save is written, and the save is made; on the old pin it is
+  refused as `scope-changed`. A worktree handed to another thread refuses
+  it; on the old pin that save was made. The two fuzzer seeds pass.
+
 ### The lifecycle fuzzer holds saves in a sandbox, as Claude Code's does — 2026-10-28
 
 - Why: a save a sandbox cannot write waits in the spool, and the session's

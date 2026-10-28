@@ -656,10 +656,29 @@ def recovery(host, payload):
             if host=='cursor' else payload.get('stop_hook_active') is True)
 
 
+# The thread that owns a worktree Codex made, read from codex-thread.json of
+# its Git directory by the patterns context.py's _owner_thread() reads it by.
+_CODEX_THREAD_VERSION=re.compile(rb'"version"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*1[ \t\n\v\f\r]*[,}]')
+_CODEX_THREAD_OWNER=re.compile(
+    rb'"ownerThreadId"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})"')
+
+
+def _codex_owner(git_directory):
+    try:
+        record=Path(os.fsdecode(git_directory))/'codex-thread.json'
+        if record.is_symlink() or not record.is_file(): return None
+        with record.open('rb') as handle: raw=handle.read(4097)
+    except (OSError,ValueError):
+        return None
+    owner=_CODEX_THREAD_OWNER.search(raw)
+    if len(raw) > 4096 or _CODEX_THREAD_VERSION.search(raw) is None or owner is None: return None
+    return owner.group(1)
+
+
 def _checkout(root):
     try:
         result=subprocess.run(['git','-C',str(workspace_roots.project_root(root)),
-            'rev-parse','HEAD','--symbolic-full-name','HEAD'],stdout=subprocess.PIPE,
+            'rev-parse','--absolute-git-dir','HEAD','--symbolic-full-name','HEAD'],stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,timeout=2,check=False)
     except (OSError,subprocess.TimeoutExpired) as error:
         raise BrainError('native-result:checkout-unavailable') from error
@@ -668,10 +687,15 @@ def _checkout(root):
     if result.returncode != 0: return hashlib.sha256(b'no-git-head').hexdigest()
     # The branch the save was asked on, not its commit: a commit made while
     # the agent wrote the save - the person's, or another session's on the
-    # branch - refused it, learnings and all. Detached, as in the middle of
-    # a rebase, the commit is all there is to pin.
-    _,_,name=result.stdout.partition(b'\n')
-    return hashlib.sha256(name.strip() if name.startswith(b'refs/heads/') else result.stdout).hexdigest()
+    # branch - refused it, learnings and all. A worktree Codex made stays
+    # detached, and the thread that owns it names the task: its commits move
+    # HEAD and leave the task as it was, so the thread is pinned. Detached
+    # otherwise, as in the middle of a rebase, the commit is all there is.
+    directory,_,head=result.stdout.partition(b'\n')
+    _,_,name=head.partition(b'\n')
+    if name.startswith(b'refs/heads/'): return hashlib.sha256(name.strip()).hexdigest()
+    owner=_codex_owner(directory.strip())
+    return hashlib.sha256(b'codex-thread/'+owner if owner else head).hexdigest()
 
 
 def _adapter():

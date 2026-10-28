@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime pins a save in a worktree Codex made to its thread — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime keeps a waiting command's worktree — 2026-10-28
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes
