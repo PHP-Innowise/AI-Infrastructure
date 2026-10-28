@@ -7522,7 +7522,10 @@ def queue_write(repository: Path, arguments: argparse.Namespace, owner: str) -> 
     """Check the command as far as nothing has to be written, and leave it
     for the next hook (drain_queued_commands)."""
     task_id = validate_task_id(arguments.task_id)
-    argv = ["--owner=" + owner, *(["--mode=" + arguments.mode] if arguments.mode else [])]
+    # A command for a worktree the installation serves names it, as the save
+    # step does (--project): it is made for that worktree, as it was asked.
+    argv = ["--owner=" + owner, *(["--mode=" + arguments.mode] if arguments.mode else []),
+            *(["--project=" + str(arguments.project)] if arguments.project is not None else [])]
     if arguments.command == "update":
         progress = arguments.progress
         if progress is None and not (arguments.next_step or arguments.file or arguments.source

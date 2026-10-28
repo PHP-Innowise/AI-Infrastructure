@@ -288,6 +288,54 @@ class SharedWorktree(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
         return command.group(1)
 
+    def test_a_command_a_sandbox_holds_for_a_worktree_is_made_for_it(self):
+        # A sandbox that lets a command write only its own folder refuses the
+        # memory's: the command waits for the next hook (the write queue). A
+        # session that entered a worktree names it (--project), as its save
+        # step does; the waiting command keeps the name, and the hook's turn
+        # in that worktree - the roots' variables as the hooks export them -
+        # makes it there, under the worktree's branch.
+        entered = self.main / ".claude" / "worktrees" / "queued"
+        git(self.main, "worktree", "add", "-q", str(entered), "-b", "worktree-queued")
+        self.addCleanup(git, self.main, "worktree", "remove", "--force", str(entered))
+        spool = tempfile.TemporaryDirectory(prefix="queue-")
+        self.addCleanup(spool.cleanup)
+        env = dict(self.env, TMPDIR=spool.name)
+
+        def cli(*arguments, **extra):
+            return subprocess.run([sys.executable, str(self.main / "memory-bank" / "scripts" / "context.py"),
+                                   *arguments], cwd=self.main, env=dict(env, **extra), capture_output=True,
+                                  text=True, timeout=120)
+
+        started = cli("--project", str(entered), "start", "--task-id", "worktree-queued", "--goal", "Queued", "--json")
+        self.assertEqual(started.returncode, 0, started.stderr)
+        locked = [self.main / "project-brain" / "local", self.main / "memory-bank" / "local"]
+        modes = [folder.stat().st_mode for folder in locked]
+
+        def unlock():
+            for folder, mode in zip(locked, modes):
+                folder.chmod(stat.S_IMODE(mode))
+
+        self.addCleanup(unlock)
+        for folder in locked:
+            folder.chmod(0o555)
+        done = cli("--project", str(entered), "update", "--task-id", "worktree-queued", "--revision", "auto",
+                   "--progress", "Made in the worktree", "--json")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(json.loads(done.stdout)["queued"], done.stdout)
+        (record,) = Path(spool.name).glob("ai-accelerator-memory-queue-*/command-*.json")
+        self.assertIn("--project=" + str(entered), json.loads(record.read_text(encoding="utf-8"))["argv"])
+        unlock()
+        turned = cli("turn", "--task-id", "worktree-queued", "--flush-after", "5", "--json",
+                     ACCELERATOR_HOME=str(self.main), ACCELERATOR_STATE_DIR=str(self.main),
+                     ACCELERATOR_PROJECT_DIR=str(entered))
+        self.assertEqual(turned.returncode, 0, turned.stderr)
+        self.assertEqual([], list(Path(spool.name).glob("ai-accelerator-memory-queue-*/command-*.json")))
+        tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
+                 for path in (self.main / "project-brain" / "dynamic" / "tasks").glob("*.md")]
+        self.assertTrue(any(task["external_id"] == "worktree-queued" and task.get("progress") == "Made in the worktree"
+                            for task in tasks), [task["external_id"] for task in tasks])
+
     @unittest.skipIf(BASH is None, "no bash to run hooks with")
     def test_a_session_that_entered_a_worktree_keeps_its_memory_there(self):
         # Claude Code's EnterWorktree makes .claude/worktrees/<name> on a

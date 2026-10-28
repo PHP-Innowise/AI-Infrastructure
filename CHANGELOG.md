@@ -28,6 +28,28 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Codex in worktrees and the explicit memory commands, on the worktree stack — 2026-10-28
+
+- Why: two stacks grew apart from the same base. One served Codex started in
+  a worktree, and in a worktree Codex made on a detached HEAD, and had the
+  explicit memory commands work there (a write a sandbox refuses waits for
+  the next hook, the checkpoint names the hooks' task); the other served
+  Claude Code's `EnterWorktree`, saves another session or a commit overtook,
+  and attached sessions entering worktrees. Each was tested apart.
+- What changes: the first stack's fifteen commits are carried onto the second
+  (the commits both had are kept once). Where they met: a Codex save step in
+  the shared layout names the roots' variables before the command and the
+  worktree after `--root` (`--project`); the Stop hook takes the served
+  worktree first and then the task - the branch, a rebase's branch, the
+  thread that owns a worktree Codex made; `claude_code_bench.py` takes
+  `--enter-worktree` and `--cli checkpoint` both. A command the sandbox holds
+  for a worktree keeps the name (`--project=<worktree>` in what waits), so it
+  is made for the worktree it was asked for. `docs/MEMORY-INTEGRATION.md` no
+  longer says Codex started in a worktree runs no hooks.
+- Tests: `SharedWorktree` holds an update for an entered worktree under a
+  sandbox and makes it at the hook's turn there; without the name in what
+  waits it fails.
+
 ### The lifecycle fuzzer runs as a CI job of its own — 2026-10-28
 
 - Why: as a step of the `memory` job it took about three minutes on a

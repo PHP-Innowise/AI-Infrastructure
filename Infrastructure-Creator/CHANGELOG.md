@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime keeps a waiting command's worktree — 2026-10-28
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes
+  in the asset; the policy lock was rewritten.
+
 ### The seeded dispatcher matches its root on Windows — 2026-10-28
 
 - As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.sh`
