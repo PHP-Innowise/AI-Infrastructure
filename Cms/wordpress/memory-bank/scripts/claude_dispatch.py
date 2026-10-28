@@ -87,7 +87,7 @@ def plain(command: str) -> bool:
 def native_path(path: str) -> str:
     """Git Bash's /c/Users/me as Windows writes it, C:/Users/me."""
     if WINDOWS and re.match(r"/[A-Za-z](/|$)", path):
-        return path[1] + ":" + (path[2:] or "/")
+        return path[1].upper() + ":" + (path[2:] or "/")
     return path
 
 

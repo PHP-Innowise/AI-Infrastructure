@@ -184,7 +184,7 @@ if [ -n "$project" ]; then
   cd -- "$project" || exit 0
   worktree=$project
   if [ -n "$windows" ]; then
-    case "$worktree" in /[A-Za-z]|/[A-Za-z]/*) worktree="${worktree:1:1}:${worktree:2}" ;; esac
+    case "$worktree" in /[A-Za-z]|/[A-Za-z]/*) letter=${worktree:1:1}; worktree="${letter^^}:${worktree:2}" ;; esac
   fi
   export ACCELERATOR_HOME="$native" ACCELERATOR_STATE_DIR="$native" ACCELERATOR_PROJECT_DIR="$worktree"
   export CLAUDE_PROJECT_DIR="$worktree"

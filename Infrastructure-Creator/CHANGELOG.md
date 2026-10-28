@@ -7,7 +7,8 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 ### The seeded dispatcher matches its root on Windows — 2026-10-28
 
 - As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.sh`
-  changes in the asset; the policy lock was rewritten.
+  and `claude_dispatch.py` change in the asset; the policy lock was
+  rewritten.
 
 ### The seeded runtime and dispatcher serve a session that entered a worktree — 2026-10-26
 

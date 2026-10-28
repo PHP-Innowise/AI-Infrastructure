@@ -28,7 +28,7 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
-### The hooks read their input as bytes on Windows — 2026-10-28
+### The hooks read their input as bytes on Windows, and name the drive as Windows does — 2026-10-28
 
 - Why: the Windows CI job ran the tests of a session that entered a
   worktree for the first time and failed them. The prompt and Stop hooks
@@ -41,14 +41,21 @@ edition's own files remain in that edition's changelog.
   Python also decoded the input by the ANSI code page. And the dispatcher
   compared the session's folder with a listed root case-sensitively for an
   entered worktree's allow: the list's `C:\` reads `/C/` there, the
-  folder `/c/`.
+  folder `/c/`. With those fixed, the save step named the worktree
+  `c:\...` beside a root `C:\...`: the hooks and the dispatcher took
+  the drive letter from Git Bash's `/c/` as it was.
 - What changes: both snippets read their input as bytes and write their
   fields as UTF-8 bytes; the dispatcher matches the root by a pattern, as
-  its other comparisons do (`nocasematch` on Windows). Version 4 has not
-  shipped: its fingerprint is recorded again.
+  its other comparisons do (`nocasematch` on Windows). Where the hooks
+  and the dispatcher turn `/c/` into `C:`, the letter is upper case, as
+  Windows writes it (`claude_dispatch.py`'s `native_path` already said
+  so). Version 4 has not shipped: its fingerprint is recorded again.
 - Tests: the Windows CI job's `tests.test_memory_worktree_sessions` and
   `tests.test_memory_claude_subfolders`, which failed (four failures, one
-  error); not run on Windows locally.
+  error), then one: the drive letter, and on the runner the first
+  refresh in the worktree, which builds its index, over the hooks'
+  5-second budget. The test gives the hooks 60 seconds, as
+  `tests.test_windows_memory_hooks` does. Not run on Windows locally.
 
 ### A session that entered a worktree keeps its memory there — 2026-10-26
 

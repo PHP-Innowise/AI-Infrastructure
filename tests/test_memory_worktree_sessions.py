@@ -53,6 +53,10 @@ class SharedWorktree(unittest.TestCase):
         cls.env = {key: value for key, value in os.environ.items()
                    if not key.startswith(("CLAUDE", "ACCELERATOR_", "CONTEXT_", "GIT_"))}
         cls.env["PYTHONDONTWRITEBYTECODE"] = "1"
+        # A runner is slower than a laptop, and the first refresh in a
+        # worktree builds its index: under the hooks' own 5-second budget
+        # this would be a timing test (as in test_windows_memory_hooks).
+        cls.env["CONTEXT_HOOK_BUDGET"] = "60"
         done = subprocess.run([sys.executable, str(ROOT / "scripts" / "install_accelerator.py"), "--edition",
                                "PHP Core", "--target", str(cls.main), "--merge-existing"],
                               cwd=ROOT, env=cls.env, capture_output=True, text=True, stdin=subprocess.DEVNULL)
