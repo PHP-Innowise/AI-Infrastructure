@@ -28,6 +28,23 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A session that entered a worktree keeps the root's permission rules, measured — 2026-10-28
+
+- Why: the worktree stack said, as a limit it had not measured, that after
+  EnterWorktree the root's permission rules decide by the root's paths, so
+  the worktree's `secrets/` and `.env` would go unguarded.
+- What changes: `scripts/claude_code_bench.py` takes `--enter-worktree` with
+  `--permissions`. A session in the root enters a worktree, tries the reads,
+  writes, commands and fetches of `--permissions` on the worktree's files,
+  and passes when each gets the decision it gets in the root. The report
+  carries what EnterWorktree answered. `docs/MEMORY-INTEGRATION.md` drops
+  the limit and says what was measured.
+- Tests: Claude Code 2.1.278 offline. EnterWorktree answered "The session is
+  now working in the worktree", and 19 of 19 decisions matched the root's:
+  the worktree's `.env`, `.env.local` and `secrets/` denied, `rm -rf`,
+  `sudo` and `chmod 777` denied, its own files read. Claude Code takes `./`
+  in a rule from the session's folder, which EnterWorktree moves.
+
 ### The Codex bench passes a read-only turn that asks for no save — 2026-10-28
 
 - Why: `scripts/codex_bench.py --sandbox read-only` shows that the Stop skips

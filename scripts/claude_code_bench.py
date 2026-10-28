@@ -84,7 +84,9 @@ the same reads, writes, commands and fetches in both sessions - secrets the
 project denies, files it allows, commands it denies or allows, the project's
 env, a domain it allows and one it does not - and passes when the session
 below the root got the decision the root got for every one (deny, ask or
-ran) and printed the same env.
+ran) and printed the same env. With `--enter-worktree` instead, the second
+session starts in the root, enters a worktree (EnterWorktree) and tries the
+same calls on the worktree's files.
 
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
@@ -255,6 +257,13 @@ class Scripted(BaseHTTPRequestHandler):
         texts = [text_of(item.get("content")) for item in since]
         blocks = [block for item in since if isinstance(item.get("content"), list) for block in item["content"]]
         probes = getattr(self, "probes", None)
+        if probes and getattr(self, "enter", "") and MARKER not in "\n".join(texts) and not any(
+                isinstance(block, dict) and block.get("id") == "toolu_enter" for item in messages
+                if item.get("role") == "assistant" and isinstance(item.get("content"), list)
+                for block in item["content"]):
+            # --enter-worktree --permissions: into the worktree first.
+            return [{"type": "tool_use", "id": "toolu_enter", "name": "EnterWorktree",
+                     "input": {"name": Path(self.enter).name}}], "tool_use", texts
         if probes and MARKER not in "\n".join(texts):
             issued = sum(1 for item in messages if item.get("role") == "assistant"
                          and isinstance(item.get("content"), list) for block in item["content"]
@@ -390,6 +399,9 @@ def probe_session(args: argparse.Namespace, cwd: Path, env: Dict[str, str], mode
         message = item.get("message") if isinstance(item, dict) else None
         for block in message.get("content") if isinstance(message, dict) and isinstance(message.get("content"), list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_result" \
+                    and block.get("tool_use_id") == "toolu_enter":
+                Scripted.entered_answer = text_of([block])[:200]
+            if isinstance(block, dict) and block.get("type") == "tool_result" \
                     and str(block.get("tool_use_id", "")).startswith("toolu_probe_"):
                 index = int(block["tool_use_id"].rsplit("_", 1)[1])
                 found[index] = verdict(text_of([block]))
@@ -411,16 +423,32 @@ def permission_run(args: argparse.Namespace, work: Path, project: Path, env: Dic
     while time.time() < deadline and str(project) not in (listed.read_text().splitlines() if listed.exists() else []):
         time.sleep(0.2)
     (project / "notes.txt").unlink(missing_ok=True)
-    below_cwd = project / args.subfolder
-    below_cwd.mkdir(parents=True, exist_ok=True)
-    below = probe_session(args, below_cwd, env, mode)
+    if args.enter_worktree:
+        # A session in the root that enters a worktree, then tries the same
+        # calls on the worktree's files: the root's rules decide there as
+        # they do in the root.
+        where = "entered"
+        Scripted.enter = str(project / ENTERED)
+        Scripted.probes = probe_calls(project / ENTERED)
+        below = probe_session(args, project, env, mode)
+        # What EnterWorktree answered: the probes ran in the worktree.
+        entered_answer = getattr(Scripted, "entered_answer", "")
+    else:
+        where = args.subfolder
+        below_cwd = project / args.subfolder
+        below_cwd.mkdir(parents=True, exist_ok=True)
+        below = probe_session(args, below_cwd, env, mode)
     labels = [f"{probe['name']} {probe['input'].get('file_path') or probe['input'].get('command') or probe['input'].get('url')}"
-              .replace(str(project), "<root>") for probe in Scripted.probes]
-    differ = [f"{label}: root {first}, {args.subfolder} {second}"
+              .replace(str(project / ENTERED), "<worktree>").replace(str(project), "<root>") for probe in Scripted.probes]
+    differ = [f"{label}: root {first}, {where} {second}"
               for label, first, second in zip(labels, in_root, below) if first != second]
-    report = {"claude": args.claude, "version": version(args.claude), "mode": args.mode, "started_in": args.subfolder,
+    report = {"claude": args.claude, "version": version(args.claude), "mode": args.mode, "started_in": where,
               "probes": dict(zip(labels, in_root)), "differ": differ,
               "ok": not differ and "missing" not in in_root + below}
+    if args.enter_worktree:
+        report["entered_answer"] = entered_answer
+        report["entered"] = (project / ENTERED).is_dir()
+        report["ok"] = report["ok"] and report["entered"]
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -955,7 +983,7 @@ def main() -> int:
         print("claude_code_bench: plan mode asks for no save, so there is none to type a question during; "
               "--queued takes no --mode plan", file=sys.stderr)
         return 2
-    if args.permissions and args.subfolder is None:
+    if args.permissions and args.subfolder is None and not args.enter_worktree:
         args.subfolder = "src"
     if args.permissions and args.target:
         print("claude_code_bench: --permissions writes probe files into the project; it takes no --target",
@@ -969,9 +997,9 @@ def main() -> int:
               file=sys.stderr)
         return 2
     if args.enter_worktree and (args.worktree or args.subfolder
-                                or args.queued is not None or args.permissions or args.mode == "plan"):
+                                or args.queued is not None or args.mode == "plan"):
         print("claude_code_bench: --enter-worktree starts one session in the project root; it takes no --worktree, "
-              "--subfolder, --queued, --permissions or --mode plan", file=sys.stderr)
+              "--subfolder, --queued or --mode plan", file=sys.stderr)
         return 2
     if args.cli == "retrieve" and not (args.worktree or args.subfolder):
         print("claude_code_bench: --cli runs the memory CLI the banner of a session in a worktree or below the "
