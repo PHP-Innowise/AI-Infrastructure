@@ -23,8 +23,9 @@ class LifecycleFuzz(unittest.TestCase):
     # seed 2 to the second.
     SEEDS = (1, 2)
     # Launched as the Harness launches them: Claude Code and Codex in the
-    # root and in worktrees, two at once in one folder, the state apart.
-    ATTACHED_SEED = 2
+    # root and in worktrees, a root session entering one, two at once in
+    # one folder, the state apart.
+    ATTACHED_SEED = 4
 
     def fuzz(self, *arguments):
         done = subprocess.run([sys.executable, str(FUZZ), *arguments, "--steps", "60"], cwd=ROOT,
@@ -53,6 +54,7 @@ class LifecycleFuzz(unittest.TestCase):
         # Which of two sessions answering at once saves first is the
         # machine's: how many saves were rebased is not asserted.
         self.assertGreater(summary["events"].get("burst", 0), 0)
+        self.assertGreater(summary["events"].get("worktree entered", 0), 0)
 
 
 if __name__ == "__main__":

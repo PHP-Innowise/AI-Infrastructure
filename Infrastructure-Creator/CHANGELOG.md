@@ -10,6 +10,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   and `claude_dispatch.py` change in the asset; the policy lock was
   rewritten.
 
+### The seeded runtime takes an attached project's worktree — 2026-10-27
+
+- As the editions' does (root `CHANGELOG.md`, same day): `workspace_roots.py`
+  and `native_results.py` change in the asset; the policy lock was rewritten.
+
 ### The seeded runtime indexes a document two refreshes find at once — 2026-10-27
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context_retrieval.py`

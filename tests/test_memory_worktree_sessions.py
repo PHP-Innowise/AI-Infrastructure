@@ -277,7 +277,7 @@ class SharedWorktree(unittest.TestCase):
         in the session's folder, with none of the hooks' variables."""
         decision = json.loads(stop.stdout)
         request = decision.get("reason") or decision.get("hookSpecificOutput", {}).get("additionalContext", "")
-        command = re.search(r"exact command: (cd .*?--json)\n", request)
+        command = re.search(r"exact command: (cd [^\n]*?--json(?: && cd [^\n]*)?)\n", request)
         self.assertIsNotNone(command, request[:400])
         result = json.dumps({"progress": f"{title}.", "verified": True,
                              "learnings": [{"type": "finding", "title": title,
@@ -566,6 +566,95 @@ class AttachedWorktree(unittest.TestCase):
         self.assertEqual(own.parent.parent, state / "memory-bank" / "local" / "worktrees")
         self.assertEqual((own.parent / "worktree").read_text(encoding="utf-8"), os.path.realpath(worktree))
         self.assertEqual(git(worktree, "status", "--porcelain", "--ignored"), "")
+
+
+    @unittest.skipIf(BASH is None, "no bash to run hooks with")
+    def test_a_session_it_launched_that_entered_a_worktree_keeps_its_memory_there(self):
+        # A session the Harness started in the project, with the edition lent
+        # from this clone, calls EnterWorktree: the lent hooks keep running,
+        # the launch's variables naming the project and the input's cwd the
+        # worktree. The project's one state takes the worktree's own task.
+        temporary = tempfile.TemporaryDirectory(prefix="attached-entered-")
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name).resolve()
+        project, state = base / "shop", base / "state"
+        (project / "src").mkdir(parents=True)
+        (project / "src" / "Invoice.php").write_text("<?php\nfinal class Invoice {}\n", encoding="utf-8")
+        git(project, "init", "-q", "-b", "feature/SHOP-7-invoices")
+        git(project, "add", ".")
+        git(project, "commit", "-qm", "Shop")
+        entered = project / ".claude" / "worktrees" / "entered"
+        git(project, "worktree", "add", "-q", str(entered), "-b", "worktree-entered")
+        edition = ROOT / "PHP Core"
+        env = {key: value for key, value in os.environ.items()
+               if not key.startswith(("CLAUDE", "ACCELERATOR_", "CONTEXT_", "GIT_"))}
+        # The first refresh in the worktree builds its index: as in SharedWorktree,
+        # a runner's would be a timing test under the hooks' 5-second budget.
+        env.update(PYTHONDONTWRITEBYTECODE="1", ACCELERATOR_HOME=str(edition), ACCELERATOR_STATE_DIR=str(state),
+                   ACCELERATOR_PROJECT_DIR=str(project), CONTEXT_HOOK_BUDGET="60")
+
+        def hook(name, payload, cwd):
+            return subprocess.run([BASH, (edition / ".claude" / "hooks" / name).as_posix()],
+                                  input=json.dumps(payload), cwd=cwd,
+                                  env=dict(env, CLAUDE_PROJECT_DIR=str(project)),
+                                  capture_output=True, text=True, timeout=120)
+
+        for turn, (asked_in, title) in enumerate(((project, "Entering keeps the launched turn"),
+                                                  (entered, "Launched sessions keep an entered worktree"))):
+            with self.subTest(turn=turn):
+                session = {"session_id": "attached-entered"}
+                done = hook("working-memory-read.sh", dict(session, cwd=str(asked_in),
+                            hook_event_name="UserPromptSubmit", prompt="How are invoices numbered?"), asked_in)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertNotIn("Memory not consulted", done.stdout)
+                if asked_in == entered:
+                    self.assertRegex(done.stdout, re.compile(r"^working: (worktree-entered|not recorded yet)", re.M))
+                    self.assertNotIn("SHOP-7", done.stdout)
+                stop = hook("working-memory-write.sh", dict(session, cwd=str(entered), hook_event_name="Stop",
+                            stop_hook_active=False, last_assistant_message="Checked."), entered)
+                self.assertEqual(stop.returncode, 0, stop.stderr)
+                decision = json.loads(stop.stdout)
+                request = decision.get("hookSpecificOutput", {}).get("additionalContext", "")
+                command = re.search(r"exact command: (cd [^\n]*?--json(?: && cd [^\n]*)?)\n", request)
+                self.assertIsNotNone(command, request[:400])
+                # It names the worktree, which the session's own variables do
+                # not, and pipes the result without naming the descriptor.
+                self.assertIn("--project " + shlex.quote(str(entered)), command.group(1))
+                self.assertNotIn("--input -", command.group(1))
+                # And it goes back there: the cd into the clone, which the launch
+                # adds as a working directory, kept the session's shell in it.
+                self.assertTrue(command.group(1).endswith(" && cd " + shlex.quote(str(entered))), command.group(1))
+                result = json.dumps({"progress": f"{title}.", "verified": True, "learnings": [
+                    {"type": "finding", "title": title,
+                     "consequence": "A launched session that entered a worktree saves under its branch.",
+                     "sources": ["src/Invoice.php"]}]})
+                saved = subprocess.run([BASH, "-c", command.group(1).replace("'<JSON>'", shlex.quote(result))],
+                                       cwd=entered, env=env, capture_output=True, text=True, timeout=120)
+                self.assertEqual(saved.returncode, 0, saved.stderr + saved.stdout)
+                done = hook("working-memory-write.sh", dict(session, cwd=str(entered), hook_event_name="Stop",
+                            stop_hook_active=True, last_assistant_message="Saved."), entered)
+                self.assertEqual(done.returncode, 0, done.stderr)
+        tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
+                 for path in (state / "project-brain" / "dynamic" / "tasks").glob("*.md")]
+        self.assertTrue(any(task["external_id"] == "worktree-entered" and task.get("progress") for task in tasks),
+                        [task["external_id"] for task in tasks])
+        findings = [path.read_text(encoding="utf-8")
+                    for path in (state / "project-brain" / "dynamic" / "findings").glob("*.md")]
+        for title in ("Entering keeps the launched turn", "Launched sessions keep an entered worktree"):
+            self.assertTrue(any(title in finding for finding in findings), title)
+        # Nothing written into the project, the worktree Claude Code made aside.
+        self.assertEqual(git(entered, "status", "--porcelain", "--ignored"), "")
+        self.assertEqual([line for line in git(project, "status", "--porcelain", "--ignored",
+                                               "--untracked-files=all").splitlines()
+                          if not line[3:].strip('"').startswith(".claude/worktrees/")], [])
+        # And the CLI takes only that project's checkouts.
+        other = base / "elsewhere"
+        other.mkdir()
+        refused = subprocess.run([sys.executable, str(edition / "memory-bank" / "scripts" / "context.py"),
+                                  "--project", str(other), "status", "--json"], cwd=entered, env=env,
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("--project names neither", refused.stderr)
 
 
 class SpacedWorktree(unittest.TestCase):

@@ -144,11 +144,14 @@ if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$PROJECT_DIR" ] && [ -d "$SESSI
   OTHER_CHECKOUT=${THEIRS%%$'\n'*}
   # Cursor delivers the capsule through a rule file in the project, which in
   # a worktree would be written into it: a Cursor session there is not served.
-  if [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] \
+  # Served are the worktrees of an installation in the root and, attached,
+  # those of the launcher's project, whose one state keeps them all (the
+  # Harness's); a worktree a dispatcher serves keeps to itself.
+  if { [ "$STATE_DIR" != "$ROOT_DIR" ] || [ "$PROJECT_DIR" = "$ROOT_DIR" ]; } \
     && case "$HOOK_STDIN" in *'"cursor_version"'*) false ;; *) true ;; esac \
-    && ROOT_REAL=$(cd "$ROOT_DIR" && pwd -P) && SESSION_REAL=$(cd "$SESSION_DIR" && pwd -P); then
+    && PROJECT_REAL=$(cd "$PROJECT_DIR" && pwd -P) && SESSION_REAL=$(cd "$SESSION_DIR" && pwd -P); then
     MINE_TOP=${MINE%%$'\n'*}
-    SERVED=$OTHER_CHECKOUT${ROOT_REAL:${#MINE_TOP}}
+    SERVED=$OTHER_CHECKOUT${PROJECT_REAL:${#MINE_TOP}}
     case "$SESSION_REAL/" in
       "$SERVED"/*)
         if [ -d "$SERVED" ] && [ ! -f "$SERVED/memory-bank/scripts/context.py" ]; then
@@ -161,7 +164,9 @@ if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$PROJECT_DIR" ] && [ -d "$SESSI
             case "$NATIVE_ROOT" in /[A-Za-z]|/[A-Za-z]/*) letter=${NATIVE_ROOT:1:1}; NATIVE_ROOT="${letter^^}:${NATIVE_ROOT:2}" ;; esac
             case "$NATIVE_SERVED" in /[A-Za-z]|/[A-Za-z]/*) letter=${NATIVE_SERVED:1:1}; NATIVE_SERVED="${letter^^}:${NATIVE_SERVED:2}" ;; esac
           fi
-          export ACCELERATOR_HOME="$NATIVE_ROOT" ACCELERATOR_STATE_DIR="$NATIVE_ROOT" ACCELERATOR_PROJECT_DIR="$NATIVE_SERVED"
+          # Attached, the launcher's home and state stand; installed, they are this root.
+          [ "$STATE_DIR" != "$ROOT_DIR" ] || export ACCELERATOR_HOME="$NATIVE_ROOT" ACCELERATOR_STATE_DIR="$NATIVE_ROOT"
+          export ACCELERATOR_PROJECT_DIR="$NATIVE_SERVED"
           ENTERED=--entered
           OTHER_CHECKOUT=
         fi ;;

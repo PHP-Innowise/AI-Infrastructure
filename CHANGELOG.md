@@ -69,6 +69,48 @@ edition's own files remain in that edition's changelog.
   5-second budget. The test gives the hooks 60 seconds, as
   `tests.test_windows_memory_hooks` does. Not run on Windows locally.
 
+### A launched session keeps its memory in a worktree it enters, and its shell where it was — 2026-10-27
+
+- Why: a Claude Code session launched with the edition lent from the
+  clone (attached: the Harness's native launches, `accelerator_attach.py
+  run claude`) that called `EnterWorktree` read "Memory not consulted"
+  from then on: the hooks served an entered worktree only for an
+  installation in the root. Driving it showed a second fault in every
+  attached session: the save step's `cd <clone>` - the clone is a working
+  directory the launch adds - left Claude Code's shell in the clone, so
+  every command the agent ran after a save, for the rest of a session a
+  person drives, ran in the clone, and the Stop that settles the save no
+  longer saw an entered worktree.
+- What changes: the lent hooks serve a worktree an attached session
+  entered with the project's one state, which keeps the project and all
+  its worktrees: `ACCELERATOR_PROJECT_DIR` names the worktree, the home
+  and the state stay as launched. `context.py --project` takes, attached,
+  a checkout of the project's repository at the project's place in it
+  with no runtime of its own (`workspace_roots.attached_worktree`). A
+  save step asked in an entered worktree names it and pipes without
+  `--input -`, attached as installed. An attached Claude Code save step
+  that goes through ends by going back to the folder the session was in
+  (`&& cd <folder>`), and a refused one keeps its exit status; `cd -` is
+  refused in an entered worktree.
+- Benches: `scripts/claude_code_bench.py --attached --enter-worktree` (now
+  allowed together) has the stand-in enter a worktree and save there: on
+  Claude Code 2.1.278 in default, acceptEdits, auto, dontAsk and
+  bypassPermissions, and on 2.1.299 in the desktop app's mode, the save
+  landed under the worktree's branch in the project's state with no
+  permission prompt, the Stop after it saw it saved, and project and
+  worktree stayed clean; `--attached`, `--enter-worktree` and `--worktree`
+  still pass. Offline probes of the binary: after the step's `cd` into the
+  clone, `pwd` answered the clone; after `&& cd <folder>`, the folder.
+- Tests: `tests/test_memory_worktree_sessions.py` drives an attached
+  session that enters a worktree through two turns and the save step;
+  before the change its Stop asked for no save and its prompt read
+  "Memory not consulted". The lifecycle fuzzer lets attached sessions
+  enter worktrees: 24 seeds of 60 steps in each layout pass (attached: 699
+  saves, 29 worktrees entered); a first version that went back with `;`
+  hid refused saves behind the `cd`'s exit status, which it caught.
+  `tests/test_memory_lifecycle_fuzz.py` runs seed 4 attached, whose root
+  session enters a worktree.
+
 ### Two refreshes that find one new document both index it — 2026-10-27
 
 - Why: a refresh read which documents the index held without the write

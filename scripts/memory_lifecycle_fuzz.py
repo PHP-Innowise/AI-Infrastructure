@@ -44,9 +44,8 @@ With --attached nothing is installed: every session is launched as the
 Harness launches it, with the edition lent from this clone (the overlay of
 scripts/accelerator_attach.py, project = the folder the session starts in)
 and one state directory for the project and all its worktrees. Claude Code
-and Codex sessions start in the root or in a worktree; none enters one,
-since the hooks lent to a session leave the memory out of a worktree it
-enters (docs/MEMORY-INTEGRATION.md). There, besides the above, neither the
+and Codex sessions start in the root or in a worktree, and a Claude Code
+session in the root may enter one. There, besides the above, neither the
 project nor this clone's edition may be written into.
 
 Nothing leaves the work directory: HOME, TMPDIR, the dispatcher's folder and
@@ -326,7 +325,7 @@ class Fuzz:
                           f"{line[:300]}")
         live = [name for name in self.checkouts if name != "root" and name not in self.removed]
         if (not burst and session["host"] == "claude" and session["kind"] == "root" and live
-                and not self.attached and rng.random() < 0.15):
+                and rng.random() < 0.15):
             # The session enters a worktree during this turn.
             target = rng.choice(live)
             session.update(kind="entered", checkout=target, sub="")  # launched where it was
