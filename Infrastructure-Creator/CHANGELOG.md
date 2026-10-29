@@ -4,6 +4,82 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Generated projects run the generator's own bash-validator parser — 2026-10-29
+
+- Why: `hook-forge` step 2 said only "Author `bash-validator.sh` to block
+  only detected risks", so the generating agent wrote a validator from
+  scratch, and `bootstrap-verifier` checked it for presence, `bash -n`, the
+  executable bit and wiring, never for content. A generated project got none
+  of the parsing the five shipped copies share: chains, `$(...)` and
+  backquotes, heredocs, `sh -c`, `eval`, wrappers, launchers, and since
+  today `${...}`, `$((...))` and `case` patterns.
+- `hook-forge` step 2 builds the target's `bash-validator.sh` from the
+  generator's own `.claude/hooks/bash-validator.sh`: everything above the
+  generic section (the payload decoding, its header comment naming the
+  target), every byte from `# >>> bash-validator generic section >>>`
+  through `# <<< bash-validator generic section <<<`, and the call that ends
+  the file (`bv_validate "$cmd"`, the block message with `exit 2`). The
+  agent writes only what goes between: the console settings
+  (`BV_CONSOLE_ENTRIES`, `BV_CONSOLE_PHP_SCRIPTS`, `BV_CONSOLE_VALUES`,
+  `BV_CONSOLE_SHORT_VALUES`) and `BV_FRAMEWORK_RULES` - the generator's own
+  framework lines for a detected framework, and a rule per detected risk
+  (`kubectl delete`, `terraform destroy`; `has:` where global options may
+  come before the subcommand, so `kubectl -n prod delete` is caught too).
+  A framework line is copied with the helper list it expands
+  (`BV_LARAVEL_SECRET_CONFIG`, `BV_WP_SECRETS`). The evidence gate governs
+  what the agent writes; the copied section is never trimmed to the
+  profile, since each generic rule fires only on its own command, so one
+  for a tool the target lacks never fires. The skill's
+  description, overview, guardrail and output template, the `hook-forge`
+  agent's description, the README, the hooks README and the DOD say the
+  same.
+- `bootstrap-verifier`'s `validate_generated.py` runs a new
+  `validate_bash_validators` from `main()`: in each selected edition the
+  manifest-owned `bash-validator.sh` must hold each marker exactly once,
+  and the bytes from the first through the second must equal those in the
+  generator's own `.claude/hooks/bash-validator.sh`, found four levels above
+  the script; the error names the first line that differs. Below the
+  section the hook must assign `BV_CONSOLE_ENTRIES` and
+  `BV_CONSOLE_PHP_SCRIPTS` at the start of a line, assign every variable it
+  expands before that use, up to and including the `bv_validate` call, then
+  exit 2 on a hit. The hook runs under `set -u`, where an unset variable
+  ends it with exit 1, which every host treats as non-blocking: without
+  `BV_CONSOLE_ENTRIES` it exited 1 on `ls` and on `php artisan
+  migrate:fresh` alike, and a `config:show` rule copied without
+  `BV_LARAVEL_SECRET_CONFIG` exited 1 on every command, `git push --force`
+  included - all with `bash -n` passing. All fifteen shipped copies pass the
+  gate. A generator validator that cannot be read or has no section is an
+  error, not a skip. The skill
+  and its report template list the check, and `stack-adapter` says a
+  sibling generator's own validator keeps the markers, since its verbatim
+  copy of the script reads them there.
+- `tests/test_bash_validator_gate.py`: a validator built as step 2 says
+  passes in every edition and, run through bash, blocks the target's
+  `kubectl -n prod delete`, a force push, `gh repo delete` inside `${...}`
+  and in an unquoted heredoc, and SQL behind `docker compose exec ... sh -c`,
+  while `kubectl get pods` and the undetected `php artisan migrate:fresh`
+  pass; a Laravel target's two framework lines copied with their helper
+  list pass and block `php artisan mi:fr` and `config:show database`; the
+  generator's own validator passes as it is. A trimmed rule, a one-byte
+  edit, CRLF and a trailing blank are rejected at their line; a validator
+  written from scratch, a missing marker, a second section and a reversed
+  pair are rejected; an unset setting and a rule without its helper list
+  are rejected and shown to exit 1, as are a setting assigned only in a
+  condition, a comment or after the call, a helper list assigned after its
+  rule, a call on a variable nothing assigns, a call only in a comment and a
+  hit that exits 1, while `${NAME-}` and a `$` between single quotes need no
+  assignment. Only selected, manifest-owned validators are opened, an
+  unreadable or unmarked generator validator fails closed, `main()` runs the
+  gate, and `hook-forge` names the source, both markers, the call, the two
+  settings and every helper list the generator's rules expand. Each test
+  fails against a gate that does nothing, one that skips the code below the
+  section, or one that skips the comparison. The existing fixtures
+  that write a stub `bash-validator.sh` call `validate_hooks`, the wiring
+  checks or other validators directly, never `main()`, so none reaches the
+  new gate.
+- The skill bodies' ceiling rises from 299600 to 303500 bytes for it (303404
+  now); the policy lock was rewritten.
+
 ### bash-validator reads what bash runs in `${...}`, `$((...))` and backquotes — 2026-10-29
 
 - Infrastructure-Creator's own `bash-validator.sh` carries the generic

@@ -29,7 +29,12 @@ Not everything needs to be rewritten - some of Infrastructure-Creator's own bund
   mechanism, and their negative/positive/rollback regression fixtures. These
   enforce evidence, typed operational contracts, provider/capability safety,
   path/invariant/anchor coverage, routing/flow equivalence, transactional, and
-  structural quality without encoding a source stack.
+  structural quality without encoding a source stack. The copied
+  `validate_generated.py` holds each generated `bash-validator.sh` to the
+  section between the `bash-validator generic section` markers of the
+  sibling's own `.claude/hooks/bash-validator.sh`, so that validator keeps its
+  parser between those markers and the sibling's hook-forge copies the
+  section, as this generator's does.
 - **Replicate structurally, then adapt wording only:** the directory layout, `SKILL.md`/agent/command frontmatter contracts, hook *mechanics* (event wiring per edition schema), the three-edition layout, the Orchestration Exception model, and the general shape of `AGENTS.md`/`DOD.md`/`GOLDEN-PRINCIPLES.md`/`STABILIZATION.md`. Only the prose describing the target domain changes (e.g. "PHP project" -> "[Stack] project"); the policy structure itself does not.
 - **Re-author entirely, grounded in fresh research:** all seven scanners' detection signals (including domain behavior), `stack-researcher`, `clarifying-interview`, `profile-synthesizer`, every forge's stack-specific guidance, all `skill-forge/references/*.md` equivalents, and the Project Profile schema.
 - **Re-author with identity swapped, not copied verbatim:** `stack-adapter` itself. Its own copy in the new generator must keep the same mechanism (research -> replicate -> re-author -> mirror -> self-verify -> report) but with every self-reference updated: "PHP" -> the new generator's own domain, "Infrastructure-Creator" -> the new generator's own name, and its own independence guardrail restated in terms of *that* generator's identity (e.g. a Flutter generator's `stack-adapter` copy must forbid mentions of Flutter/Dart or "Infrastructure-Creator-Flutter" in whatever it spawns next, not PHP).

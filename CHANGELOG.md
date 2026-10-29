@@ -28,6 +28,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Generated projects get the shared bash-validator parser: the generator's skill-body ceiling — 2026-10-29
+
+- `scripts/token_budget.json` raises Infrastructure-Creator's `body_bytes`
+  from 299600 to 303500 (303404 now) and no further: `hook-forge` step 2
+  now builds a generated project's `bash-validator.sh` around the generic
+  section above, copied from the generator's own validator, and
+  `bootstrap-verifier` holds every generated copy to it byte for byte
+  (`Infrastructure-Creator/CHANGELOG.md`, same day).
+
 ### bash-validator: substitutions in `${...}`, `$((...))` and backquotes, and a time limit — 2026-10-29
 
 - Why: the parser skipped the inside of `${...}` up to the first `}` and of

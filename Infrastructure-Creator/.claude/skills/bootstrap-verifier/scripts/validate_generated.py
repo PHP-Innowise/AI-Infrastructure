@@ -18,6 +18,12 @@ Checks:
     read hooks point CONTEXT_CLI only at memory-bank/scripts/context_cli.py
     with its context.py fallback, or - generated before the loader - at
     context.py itself.
+  - Every bash-validator.sh runs the generator's own shell parser: its
+    generic section (each marker exactly once) is byte-identical to the one in
+    the generator's .claude/hooks/bash-validator.sh, and below it the hook
+    assigns BV_CONSOLE_ENTRIES and BV_CONSOLE_PHP_SCRIPTS, then runs
+    bv_validate and exits 2 on a hit; up to that call every variable it
+    expands is assigned on an earlier line (set -u).
   - Every flow command's stages name agents that were generated, no parallel
     stage holds two write-capable agents (the gate runs those one at a time),
     and a multi-stage flow declares at least one checkpoint.
@@ -236,6 +242,25 @@ WIRED_HOOKS = {
         hook for hook in REQUIRED_HOOKS["codex"] if hook != "subagent-dispatch.sh"
     ),
 }
+
+# hook-forge step 2 builds every edition's bash-validator.sh around the
+# generator's own shell parser: the bytes from the opening marker through the
+# closing one are copied from the generator's .claude/hooks/bash-validator.sh
+# unchanged, and only the target's console settings and rules are written
+# below them. This script ships four levels below the generator
+# (<generator>/.agents/skills/bootstrap-verifier/scripts/, the same under
+# .claude/ and .cursor/).
+BASH_VALIDATOR = "bash-validator.sh"
+BASH_VALIDATOR_MARKERS = (
+    b"# >>> bash-validator generic section >>>",
+    b"# <<< bash-validator generic section <<<",
+)
+GENERATOR_BASH_VALIDATOR = (
+    SCRIPT_DIR.parent.parent.parent.parent / ".claude" / "hooks" / BASH_VALIDATOR
+)
+# The section reads these under `set -u`: left unset, the hook exits 1 on a
+# command that reaches the console check, and every host lets that call run.
+BASH_VALIDATOR_SETTINGS = ("BV_CONSOLE_ENTRIES", "BV_CONSOLE_PHP_SCRIPTS")
 
 # context-continuity.sh is one script for every lifecycle event it serves: the
 # client names the event in its payload (`hook_event_name`) and the runtime
@@ -1017,6 +1042,150 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
                 errors.append(f"{sh}: not executable (chmod +x needed)")
 
 
+def bash_validator_section(data: bytes) -> tuple:
+    """Where the generic section of a bash-validator.sh lies.
+
+    Returns (start, end, "") with data[start:end] running from the opening
+    marker through the closing one, or (-1, -1, why it cannot be cut out):
+    each marker must occur exactly once, the opening one first.
+    """
+    opening, closing = BASH_VALIDATOR_MARKERS
+    for marker in BASH_VALIDATOR_MARKERS:
+        count = data.count(marker)
+        if count == 0:
+            return -1, -1, f"has no `{marker.decode()}` marker"
+        if count > 1:
+            return -1, -1, f"has the `{marker.decode()}` marker {count} times"
+    start, close = data.index(opening), data.index(closing)
+    if close < start:
+        return -1, -1, "closes the generic section before it opens it"
+    return start, close + len(closing), ""
+
+
+def bash_validator_call(above: str, below: str) -> str:
+    """Why the code below the generic section does not run it, or "".
+
+    hook-forge step 2: below the section the hook assigns the settings the
+    section reads, runs bv_validate on the command and exits 2 on a hit.
+    Under `set -u` a variable expanded before any line assigns it ends the
+    hook with exit 1 on every command - a rule copied without the helper
+    list it names does that - so up to the call each one must be assigned
+    on an earlier line. Comments are not code, and an assignment counts only
+    at the start of a line, where it runs whenever the hook does.
+    """
+    def assigned(line: str) -> str | None:
+        match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\+?=", line)
+        return match.group(1) if match else None
+
+    known = {assigned(line) for line in above.splitlines()} - {None}
+    lines = [
+        line
+        for line in below.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    settings = set()
+    for index, line in enumerate(lines):
+        # Plain $NAME and ${NAME}; ${NAME-default} is safe unset, and
+        # nothing between single quotes expands.
+        for match in re.finditer(
+            r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})",
+            re.sub(r"'[^']*'", "", line),
+        ):
+            name = match.group(1) or match.group(2)
+            if name not in known:
+                return (
+                    f"expands ${name} below the generic section before any line "
+                    "assigns it: unset, it makes the hook exit 1 and the host run "
+                    "the command"
+                )
+        name = assigned(line)
+        if name:
+            known.add(name)
+            settings.add(name)
+        if not re.match(r"\s*bv_validate(\s|$)", line):
+            continue
+        missing = [name for name in BASH_VALIDATOR_SETTINGS if name not in settings]
+        if missing:
+            return (
+                f"runs bv_validate with {' and '.join(missing)} not assigned "
+                "below the generic section: unset, the hook exits 1 and the host "
+                "runs the command (assign '' and 0 for a target without a console)"
+            )
+        if not any(re.search(r"\bexit\s+2\b", later) for later in lines[index + 1:]):
+            return "never exits 2 after bv_validate, so the host runs a refused command"
+        return ""
+    return "never runs bv_validate below the generic section, so its parser checks no command"
+
+
+def validate_bash_validators(target: Path, editions: list, files: dict, errors: list) -> None:
+    """Each edition's bash-validator.sh runs the generator's own shell parser.
+
+    hook-forge step 2 copies the generator's generic section byte for byte -
+    the parser that finds a command inside chains, substitutions, heredocs,
+    wrappers and launchers, and the generic rules - and writes only the
+    target's settings and rules below it. A validator written from scratch,
+    or a section edited or trimmed, still passes bash -n and still blocks
+    the plain command, so nothing else here notices what it lets through.
+    """
+    # An unowned required hook is validate_hooks' error, and an unowned file
+    # is never opened.
+    owned = [
+        (edition, f"{EDITION_HOOK_WIRING[edition][0]}/{BASH_VALIDATOR}")
+        for edition in editions
+    ]
+    owned = [(edition, rel) for edition, rel in owned if is_owned(files, rel)]
+    if not owned:
+        return
+    try:
+        reference = GENERATOR_BASH_VALIDATOR.read_bytes()
+    except OSError as error:
+        errors.append(
+            f"{BASH_VALIDATOR} not checked: the generator's own "
+            f"{GENERATOR_BASH_VALIDATOR} cannot be read ({error.strerror or error})"
+        )
+        return
+    start, end, problem = bash_validator_section(reference)
+    if problem:
+        errors.append(
+            f"{BASH_VALIDATOR} not checked: the generator's own "
+            f"{GENERATOR_BASH_VALIDATOR} {problem}"
+        )
+        return
+    expected = reference[start:end]
+    for edition, relative in owned:
+        try:
+            data = (target / relative).read_bytes()
+        except OSError as error:
+            errors.append(f"[{edition}] {relative} cannot be read ({error.strerror or error})")
+            continue
+        start, end, problem = bash_validator_section(data)
+        if problem:
+            errors.append(
+                f"[{edition}] {relative} {problem}: build it around the generic "
+                f"section of {GENERATOR_BASH_VALIDATOR}, copied byte for byte "
+                "(hook-forge step 2)"
+            )
+            continue
+        section = data[start:end]
+        if section != expected:
+            same = next(
+                (index for index, pair in enumerate(zip(section, expected)) if pair[0] != pair[1]),
+                min(len(section), len(expected)),
+            )
+            line = data.count(b"\n", 0, start + same) + 1
+            errors.append(
+                f"[{edition}] {relative} line {line}: the generic section differs "
+                f"from the one in {GENERATOR_BASH_VALIDATOR}; copy it again byte "
+                "for byte, never edited or trimmed (hook-forge step 2)"
+            )
+        problem = bash_validator_call(
+            data[:end].decode("utf-8", errors="replace"),
+            data[end:].decode("utf-8", errors="replace"),
+        )
+        if problem:
+            errors.append(f"[{edition}] {relative} {problem} (hook-forge step 2)")
+
+
 def collect_wired_commands(node) -> list:
     """Every 'command' string anywhere inside a parsed wiring JSON document."""
     commands: list = []
@@ -1714,6 +1883,7 @@ def main() -> int:
     for edition in editions:
         validate_edition(target, edition, files, errors)
     validate_hooks(target, editions, files, errors)
+    validate_bash_validators(target, editions, files, errors)
     validate_hook_wiring(target, editions, files, errors)
     validate_required_wiring(target, editions, files, errors)
     validate_continuity_wiring(target, editions, files, errors)
