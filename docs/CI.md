@@ -224,7 +224,9 @@ seeds installed and one attached, on Python 3.9 and on the current release.
 One installed seed stops a third of its turns part-way - a prompt hook, a
 Stop hook, a save or the Stop after it, by SIGKILL to the hook's process
 group, SIGTERM to its shell or SIGINT - as a host does at its timeout, a
-closed window or Ctrl+C, and checks that nothing after it breaks.
+closed window or Ctrl+C, and runs a third of the others behind another
+session's hold on the runtime's lock under a one-second budget; it checks
+that nothing after either breaks.
 The job installs bubblewrap and lifts the runner's AppArmor restriction on
 unprivileged user namespaces, as `system-orchestration` does, for the saves
 it holds; without `bwrap` they are left out. About two and a half minutes

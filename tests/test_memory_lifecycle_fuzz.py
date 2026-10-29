@@ -32,8 +32,12 @@ class LifecycleFuzz(unittest.TestCase):
     # hook at its timeout, a closed window or Ctrl+C: its 60 steps stop a
     # prompt hook, a Stop hook, a save and the Stop after a save, by SIGKILL
     # to the hook's process group, SIGTERM to its shell and SIGINT, Cursor's
-    # and Codex's hooks among them.
-    INTERRUPTED_SEED = 6
+    # and Codex's hooks among them. A third of the others run a prompt hook
+    # or the Stop after a save while another session holds the runtime's
+    # lock past a one-second budget; there, a save a sandbox held waits for
+    # the next prompt hook. On the drains that removed a waiting save's file
+    # before making it, that save was lost.
+    INTERRUPTED_SEED = 24
 
     def fuzz(self, *arguments):
         done = subprocess.run([sys.executable, str(FUZZ), *arguments, "--steps", "60"], cwd=ROOT,
@@ -61,16 +65,19 @@ class LifecycleFuzz(unittest.TestCase):
             # A save the sandbox held, made by the Stop after it.
             self.assertIn("save held", events)
 
-    def test_hooks_and_saves_stopped_part_way_break_nothing_after_them(self):
-        summary = self.fuzz("--seed", str(self.INTERRUPTED_SEED), "--interrupt", "0.3")
+    def test_hooks_stopped_or_out_of_their_budget_break_nothing_after_them(self):
+        summary = self.fuzz("--seed", str(self.INTERRUPTED_SEED), "--interrupt", "0.3", "--contention", "0.3")
         events = summary["events"]
         self.assertLessEqual({"prompt hook stopped", "Stop hook stopped", "save stopped",
                               "Stop after the save stopped", "stopped by kill", "stopped by term",
-                              "stopped by int"}, set(events))
+                              "stopped by int", "prompt waited on a lock",
+                              "stop after the save waited on a lock"}, set(events))
         # A stop that lands after the step ended stops nothing; most land
         # while it runs.
         self.assertGreater(events.get("stopped while running", 0), 0)
         self.assertLessEqual({"claude", "codex", "cursor"}, {name.split()[0] for name in summary["sessions"]})
+        if shutil.which("bwrap"):
+            self.assertGreater(events.get("held save made by the next prompt", 0), 0)
 
     def test_attached_sessions_keep_the_project_and_the_clone_unwritten(self):
         summary = self.fuzz("--attached", "--seed", str(self.ATTACHED_SEED))

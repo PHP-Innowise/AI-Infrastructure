@@ -656,7 +656,11 @@ committed, the installation not) and random steps follow:
   window or Ctrl+C: the prompt hook, the Stop hook, the save or the Stop
   after it, by SIGKILL to the hook's process group, SIGTERM to its shell
   alone (what the shell started runs on, unread) or SIGINT to the group,
-  after up to 0.3 s - most while the step runs (`stopped while running`).
+  after up to 0.3 s - most while the step runs (`stopped while running`);
+- with `--contention SHARE`, that share of the other turns outside a burst
+  runs its prompt hook or the Stop after the save while another session
+  holds the runtime's lock for 1.2-2.5 s, under a one-second hook budget, so
+  whatever waits on the lock outlives its hook.
 
 What must hold: every hook exits 0, the native journal records no error,
 and no prompt hook's refresh fails or times out (one that another session's
@@ -672,8 +676,10 @@ checkpoint or save a sandbox held is made by the Stop after it, and none is
 refused.
 Only a save asked for before its branch moved may be refused. A save stopped
 part-way may or may not have landed - what must hold is that nothing after it
-breaks - and a save a sandbox held whose Stop was stopped is made by the
-session's next prompt hook.
+breaks - and a save a sandbox held whose Stop was stopped, or ran out of its
+budget, is made by the session's next prompt hook. A hook out of its budget
+may say so once: the Stop's journal line with `timeout`'s 124, the prompt
+hook's "refresh unavailable".
 
 With `--attached` nothing is installed: every session is launched as the
 Harness launches it, the edition lent from this clone through the overlay of
@@ -687,7 +693,7 @@ clone's.
 
 ```bash
 python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP Core"|Laravel|Symfony|WordPress] \
-  [--attached] [--interrupt SHARE] [--work DIR] [--verbose]
+  [--attached] [--interrupt SHARE] [--contention SHARE] [--work DIR] [--verbose]
 ```
 
 - **Outputs:** a JSON summary - the edition and layout, the sessions by host
@@ -705,10 +711,12 @@ python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP 
   `memory-lifecycles` job, runs seeds 1 and 2 on PHP Core, which between
   them reach every host, a worktree entered, bursts, a commit during a save
   and a rebase stopped, continued and aborted, Codex in a worktree, a
-  worktree Codex made and a checkpoint a sandbox held, seed 6 with
-  `--interrupt 0.3`, which stops a prompt hook, a Stop hook, a save and the
-  Stop after a save, by each of the three signals, and seed 9 attached, whose
-  root session enters a worktree. A
+  worktree Codex made and a checkpoint a sandbox held, seed 24 with
+  `--interrupt 0.3 --contention 0.3`, which stops a prompt hook, a Stop hook,
+  a save and the Stop after a save, by each of the three signals, and runs a
+  prompt hook and a Stop after a save out of their budget behind another
+  session's lock (on the drains before 2026-10-29 its held save was lost),
+  and seed 9 attached, whose root session enters a worktree. A
   failing seed reproduces with the same `--seed` and `--steps`, apart from
   which of two sessions answering at once saves first; `--verbose` prints
   every step.

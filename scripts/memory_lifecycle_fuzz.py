@@ -39,7 +39,11 @@ installation not) and takes random steps from a seed:
   stopped part-way, as a host stops a hook at its timeout, a closed window
   or Ctrl+C: the prompt hook, the Stop hook, the save or the Stop after it,
   by SIGKILL to the whole process group, SIGTERM to the shell alone or
-  SIGINT to the group, after up to 0.3 s.
+  SIGINT to the group, after up to 0.3 s;
+- with --contention, that share of the other turns outside a burst runs its
+  prompt hook or the Stop after the save while another session holds the
+  runtime's lock for 1.2-2.5 s, under a one-second hook budget: whatever
+  waits on the lock outlives its hook, as on a busy machine it outlives five.
 
 What must hold afterwards: every hook exited 0, the runtime journaled no
 error and no prompt hook's refresh failed or timed out - a refresh that
@@ -55,7 +59,10 @@ Brain and the Memory Bank validate; no worktree was written into; a
 checkpoint or save a sandbox held was made by the Stop after it, and none
 was refused. Only a save asked for before its branch moved may be refused.
 A save stopped part-way may or may not have landed; a save a sandbox held
-whose Stop was stopped is made by the session's next prompt hook.
+whose Stop was stopped, or ran out of its budget, is made by the session's
+next prompt hook. A hook out of its budget says so: the Stop's journal line
+carries timeout's 124 and the prompt hook's capsule says the refresh was
+unavailable - once for each such hook.
 
 With --attached nothing is installed: every session is launched as the
 Harness launches it, with the edition lent from this clone (the overlay of
@@ -73,13 +80,14 @@ Maintainer-only and standard library only; never installed into a project.
     memory_lifecycle_fuzz.py --seed 7 --steps 60
     memory_lifecycle_fuzz.py --seed 21 --steps 70 --edition Laravel --verbose --work /var/tmp/fuzz-21
     memory_lifecycle_fuzz.py --seed 3 --attached
-    memory_lifecycle_fuzz.py --seed 6 --interrupt 0.3
+    memory_lifecycle_fuzz.py --seed 24 --interrupt 0.3 --contention 0.3
 
 Prints a JSON summary. Exit status: 0 when everything held, 1 otherwise.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import random
@@ -151,10 +159,11 @@ def run_interrupted(argv: List[str], stdin: bytes, cwd: Path, env: Dict[str, str
 
 class Fuzz:
     def __init__(self, work: Path, seed: int, verbose: bool, edition: str = "PHP Core",
-                 attached: bool = False, interrupt: float = 0.0) -> None:
+                 attached: bool = False, interrupt: float = 0.0, contention: float = 0.0) -> None:
         self.work, self.seed, self.verbose, self.edition = work, seed, verbose, edition
         self.attached = attached
         self.interrupt = interrupt      # the share of turns one of whose steps is stopped part-way
+        self.contention = contention    # the share of turns one of whose hooks waits on another's lock
         self.overlays: Dict[Tuple[str, str], Any] = {}
         self.rng = random.Random(seed)
         self.lock = threading.RLock()
@@ -312,6 +321,35 @@ class Fuzz:
         # In the root, and after EnterWorktree: the root's own hooks.
         return dict(self.env, CLAUDE_PROJECT_DIR=str(self.shop)), None, place
 
+    @contextlib.contextmanager
+    def contended(self, hold: float) -> Any:
+        """Another session's hold on the runtime's lock - an index build, a
+        long flush - for `hold` seconds, taken before the block starts, while
+        the hooks in it run under a one-second budget: whatever waits on the
+        lock outlives its hook, as on a busy machine it outlives five."""
+        import fcntl
+        path = self.data / "project-brain/local/runtime.lock"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        taken = threading.Event()
+
+        def holder() -> None:
+            with open(path, "a+") as handle:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+                taken.set()
+                threading.Event().wait(hold)
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        thread = threading.Thread(target=holder, daemon=True)
+        thread.start()
+        taken.wait(HOOK_TIMEOUT)
+        with self.lock:
+            self.env["CONTEXT_HOOK_BUDGET"] = "1"
+        try:
+            yield
+        finally:
+            with self.lock:
+                self.env.pop("CONTEXT_HOOK_BUDGET", None)
+            thread.join()
+
     def commands(self, session: Dict[str, Any], name: str, through: Optional[Path]) -> List[Tuple[str, List[str]]]:
         """The hooks the host runs for `name`, as (label, argv) - what
         rehearsal.run_event and run_attached run."""
@@ -445,8 +483,18 @@ class Fuzz:
             with self.lock:
                 self.events[STOPPED[at]] += 1
             self.note(f"turn {session_id}: its {at} is stopped part-way")
-        prompt = self.event(session_id, "prompt", interrupt=stop if at == "prompt" else None,
-                            prompt=f"How is the invoice numbered? {marker}")
+        # Apart again: with --contention alone a seed keeps its --interrupt steps.
+        draw = random.Random(f"{self.seed}:{marker}:contention")
+        waits = draw.choice(("prompt", "stop after the save")) \
+            if not burst and at is None and draw.random() < self.contention else None
+        hold = round(draw.uniform(1.2, 2.5), 2)
+        if waits:
+            with self.lock:
+                self.events[f"{waits} waited on a lock"] += 1
+            self.note(f"turn {session_id}: its {waits} waits {hold} s on another session's lock")
+        with self.contended(hold) if waits == "prompt" else contextlib.nullcontext():
+            prompt = self.event(session_id, "prompt", interrupt=stop if at == "prompt" else None,
+                                prompt=f"How is the invoice numbered? {marker}")
         said = "".join(item["stdout"] for item in prompt)
         if session["host"] == "cursor":
             # Cursor's capsule is the rule its prompt hook renders.
@@ -458,7 +506,11 @@ class Fuzz:
             # says retrieval was not consulted - the runtime's own fallback.
             self.events["refresh degraded"] += 1
         for words in ("Memory not consulted", "Memory refresh unavailable"):
-            if words in said:
+            if words in said and waits == "prompt" and words == "Memory refresh unavailable":
+                # The refresh outlived the budget: the hook says so, and the
+                # next prompt refreshes again.
+                self.events["refresh over its budget"] += 1
+            elif words in said:
                 line = said[said.index(words):].split("\n", 1)[0]
                 self.fail(f"prompt {session_id} ({session['host']} {session['kind']}) in {self.place(session)}: "
                           f"{line[:300]}")
@@ -519,16 +571,17 @@ class Fuzz:
             self.note(f"turn {session_id}: skipped")
         else:
             self.note(f"turn {session_id}: the request is ignored")
-        self.event(session_id, "stop", interrupt=stop if at == "stop after the save" else None,
-                   stop_hook_active=True, last_assistant_message="Done.")
+        with self.contended(hold) if waits == "stop after the save" else contextlib.nullcontext():
+            self.event(session_id, "stop", interrupt=stop if at == "stop after the save" else None,
+                       stop_hook_active=True, last_assistant_message="Done.")
         if choice < 0.8 and held and marker in self.held:
             # The Stop above ran outside the sandbox: it made the save.
             self.held.discard(marker)
             made = [record for record in self.tasks().values()
                     if record["external_id"] == current and record.get("progress") == f"Turn {marker}."]
-            if not made and at == "stop after the save":
-                # Stopped before it reached the spool: the session's next
-                # hook - the next prompt's - makes the save.
+            if not made and "stop after the save" in (at, waits):
+                # Stopped, or out of its budget, before the save landed: the
+                # session's next hook - the next prompt's - makes it.
                 self.event(session_id, "prompt", prompt="And the credit notes?")
                 made = [record for record in self.tasks().values()
                         if record["external_id"] == current and record.get("progress") == f"Turn {marker}."]
@@ -893,7 +946,13 @@ class Fuzz:
         journal = self.data / "memory-bank/local/native-results.ndjson"
         lines = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()] \
             if journal.exists() else []
+        # A Stop that waited on another's lock past its one-second budget
+        # records the 124 of `timeout`; one for each such Stop may.
+        over = self.events["stop after the save waited on a lock"]
         for line in lines:
+            if line.get("stage") == "stop-hook" and line.get("status") == 124 and over > 0:
+                over -= 1
+                continue
             if line.get("event") == "error" or (line.get("stage") == "stop-hook" and line.get("status") not in (None, 0)):
                 self.fail(f"journal: {line}")
             if line.get("stage") == "queue" and line.get("event") != "made":
@@ -905,10 +964,14 @@ class Fuzz:
         records = [json.loads(line) for line in health.read_text(encoding="utf-8").splitlines()] \
             if health.exists() else []
         hooks = [record.get("hook_status") for record in records if record.get("source") == "hook"]
+        over = self.events["refresh over its budget"]
         for status in hooks:
+            if status == 124 and over > 0:
+                over -= 1
+                continue
             if status not in (0, 1, 4):
                 self.fail(f"prompt hook refresh exited {status}")
-        unexplained = hooks.count(1) - self.events["refresh degraded"] - sum(
+        unexplained = hooks.count(1) - self.events["refresh degraded"] - over - sum(
             "Memory refresh unavailable" in violation for violation in self.violations)
         if unexplained > 0:
             self.fail(f"{unexplained} prompt hook refresh(es) exited 1 without a degraded capsule")
@@ -928,6 +991,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--attached", action="store_true",
                         help="launch every session as the Harness does, the edition lent from this clone")
     parser.add_argument("--steps", type=int, default=60)
+    parser.add_argument("--contention", type=float, default=0.0, metavar="SHARE",
+                        help="the share of turns whose prompt hook or Stop after the save runs while another "
+                             "session holds the runtime's lock for 1.2-2.5 s, under a one-second hook budget")
     parser.add_argument("--interrupt", type=float, default=0.0, metavar="SHARE",
                         help="the share of turns one of whose hooks or saves is stopped part-way, as a host stops "
                              "it at its timeout, at Ctrl+C or when its window closes")
@@ -944,7 +1010,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         work = Path(tempfile.mkdtemp(prefix="memory-fuzz-"))
     try:
-        fuzz = Fuzz(work, args.seed, args.verbose, args.edition, args.attached, args.interrupt)
+        fuzz = Fuzz(work, args.seed, args.verbose, args.edition, args.attached, args.interrupt, args.contention)
         fuzz.install()
         fuzz.run(args.steps)
         summary = fuzz.check()

@@ -28,6 +28,27 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The lifecycle fuzzer runs hooks behind another session's lock — 2026-10-29
+
+- Why: the lost save fixed below needed a hook's own budget to run out
+  while the save waited on another session's lock. `--interrupt` stops a
+  hook at a random moment, never while it waits, and its 36 seeds found
+  nothing; the loss was found by reading the drain.
+- What changes: `scripts/memory_lifecycle_fuzz.py --contention SHARE` runs
+  that share of the turns outside a burst and not interrupted with their
+  prompt hook or the Stop after the save behind another session's hold on
+  the runtime's lock (1.2-2.5 s) and under a one-second hook budget. A save
+  a sandbox held whose Stop ran out of its budget must be made by the
+  session's next prompt hook. A hook out of its budget may say so, once
+  each: the Stop's journal line with `timeout`'s 124, a refresh reported
+  unavailable.
+- Found: on the drains before the fix below, 8 of 12 seeds (60 steps,
+  `--contention 0.4`) lost a save a sandbox held; on the fix none did, and
+  12 such saves were made by the next prompt hook.
+- Tests: the `memory-lifecycles` job's interrupted seed is now 24 with
+  `--interrupt 0.3 --contention 0.3`: on the drains before the fix it loses
+  its held save.
+
 ### A save or checkpoint a sandbox held survives a hook its budget stops — 2026-10-29
 
 - Why: a save the agent's sandbox could not write waits in the spool, and a
