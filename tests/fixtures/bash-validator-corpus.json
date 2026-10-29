@@ -2549,6 +2549,48 @@
       "expect": "block",
       "editions": "all",
       "note": "outside those quotes it does"
+    },
+    {
+      "command": "trap 'git push --force' EXIT; echo done",
+      "expect": "block",
+      "editions": "all",
+      "note": "a trap's action runs when the shell ends, as soon as the call returns"
+    },
+    {
+      "command": "trap -- 'gh repo delete x' INT TERM",
+      "expect": "block",
+      "editions": "all",
+      "note": "or when the signal comes"
+    },
+    {
+      "command": "tmp=$(mktemp -d); trap 'rm -rf \"$tmp\"' EXIT",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a cleanup trap of the command's own temporary folder"
+    },
+    {
+      "command": "trap - EXIT && trap '' INT && trap -p",
+      "expect": "pass",
+      "editions": "all",
+      "note": "resetting, ignoring and listing traps run nothing"
+    },
+    {
+      "command": "env -S 'git push' --force",
+      "expect": "block",
+      "editions": "all",
+      "note": "env -S splits its string into the command, the words after it follow"
+    },
+    {
+      "command": "env --split-string='gh repo delete x'",
+      "expect": "block",
+      "editions": "all",
+      "note": "the long form too"
+    },
+    {
+      "command": "env -S 'python3 -m http.server 8000'",
+      "expect": "pass",
+      "editions": "all",
+      "note": "an env -S command with no rule against it"
     }
   ]
 }

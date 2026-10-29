@@ -85,6 +85,12 @@ edition's own files remain in that edition's changelog.
   2026-10-19 (3,000 more) lets none through either (the old validator 3, all
   backquoted heredocs). 100 KB of `${...}` or `$((...))` takes 1.1 s instead
   of 0.6 s, since their inside is read now.
+- A `trap` action is checked as a command: it runs when a signal comes or,
+  for `EXIT`, when the shell ends, which is as soon as the call returns
+  (`trap 'git push --force' EXIT` passed). A lone signal or `-` resets and
+  runs nothing. So is the string `env -S` (`--split-string`) splits into
+  the command it runs. Of 142 real commands with a `trap` or `env -S`, all
+  cleanup, none is refused now that was not before.
 - `scripts/bash_validator_fuzz.py` keeps the check: it writes command lines
   around these forms, runs each through bash with a marker, and fails when
   the validator lets through one bash runs the command in. The `mirrors` job
@@ -92,7 +98,7 @@ edition's own files remain in that edition's changelog.
   seconds) and checks that a copy which skips `${...}` again is caught: it
   misses 22 to 28 of every 300 lines. The validator before this change
   misses 169 of 600.
-- Corpus 338 -> 372 cases, with `expansions` and `time` decisions; every new
+- Corpus 338 -> 379 cases, with `expansions` and `time` decisions; every new
   case was checked against bash. The parse-cost test covers default values,
   arithmetic and many heredocs (on the old validator 4x the heredocs took
   8.7x the time), nesting `${` and `$((` thousands deep (refused, no crash),

@@ -880,6 +880,14 @@ bv_skip_wrapper() {
   esac
   while (( i < BV_NW )); do
     w=${BV_W[i]}
+    # env -S STRING splits STRING into the command and its first words.
+    if [[ $1 == env ]]; then
+      case $w in
+        -S|--split-string) bv_env_split "${BV_W[i+1]-}" $(( i + 2 )); i=$BV_NW; break ;;
+        --split-string=*) bv_env_split "${w#*=}" $(( i + 1 )); i=$BV_NW; break ;;
+        -S?*) bv_env_split "${w#-S}" $(( i + 1 )); i=$BV_NW; break ;;
+      esac
+    fi
     case $w in
       --) i=$(( i + 1 )); break ;;
       -) i=$(( i + 1 )) ;;
@@ -910,6 +918,14 @@ bv_php_script() {
 }
 
 # BV_PI/BV_PROG/BV_AI: index, normalised name and first argument of the program.
+# bv_env_split STRING FROM: the command env -S runs - STRING split into words,
+# then the words from FROM on - checked as a command of its own.
+bv_env_split() {
+  local s=$1 j
+  for (( j = $2; j < BV_NW; j++ )); do s="$s ${BV_W[j]}"; done
+  bv_recurse "$s"
+}
+
 bv_locate_program() {
   local i=0 w b
   while (( i < BV_NW )); do
@@ -1361,6 +1377,22 @@ bv_rule_eval() {
   bv_recurse "$s"
 }
 
+# trap ACTION SIGNAL...: the action runs when a signal comes or, for EXIT,
+# when the shell ends - this command's own, as soon as the call returns. A
+# lone signal, or "-", resets instead and runs nothing.
+bv_rule_trap() {
+  local j=$BV_AI
+  while (( j < BV_NW )); do
+    case ${BV_W[j]} in
+      --) j=$(( j + 1 )); break ;;
+      -?*) j=$(( j + 1 )) ;;
+      *) break ;;
+    esac
+  done
+  (( j + 1 < BV_NW )) && [[ ${BV_W[j]} != - ]] || return 0
+  bv_recurse "${BV_W[j]}"
+}
+
 # A `git -c` or `--config-env` setting that disables the repository's hooks.
 bv_git_config() {
   case $1 in
@@ -1597,7 +1629,7 @@ bv_rule_sql() {
 
 # True when the validator has rules keyed on program $1.
 bv_known_program() {
-  case ,git,rm,gh,eval,echo,printf,sed,tee$BV_SEARCH$BV_ARGV_PROGS$BV_READERS in
+  case ,git,rm,gh,eval,trap,echo,printf,sed,tee$BV_SEARCH$BV_ARGV_PROGS$BV_READERS in
     *",$1,"*) return 0 ;;
   esac
   return 1
@@ -1640,6 +1672,7 @@ bv_program_rules() {
     rm) bv_rule_rm ;;
     gh) bv_rule_gh ;;
     eval) bv_rule_eval ;;
+    trap) bv_rule_trap ;;
   esac
 }
 
