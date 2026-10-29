@@ -2537,6 +2537,18 @@
       "expect": "pass",
       "editions": "all",
       "note": "a ${ followed by a name is a parameter expansion"
+    },
+    {
+      "command": "echo \"${X:-'$\\\n(gh repo delete x)'}\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "between single quotes in a double-quoted ${...}, bash does not join $ and a line continuation: the $( never forms"
+    },
+    {
+      "command": "echo \"${X:-$\\\n(gh repo delete x)}\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "outside those quotes it does"
     }
   ]
 }

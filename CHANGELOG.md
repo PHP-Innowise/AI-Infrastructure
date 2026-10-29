@@ -92,7 +92,7 @@ edition's own files remain in that edition's changelog.
   seconds) and checks that a copy which skips `${...}` again is caught: it
   misses 22 to 28 of every 300 lines. The validator before this change
   misses 169 of 600.
-- Corpus 338 -> 370 cases, with `expansions` and `time` decisions; every new
+- Corpus 338 -> 372 cases, with `expansions` and `time` decisions; every new
   case was checked against bash. The parse-cost test covers default values,
   arithmetic and many heredocs (on the old validator 4x the heredocs took
   8.7x the time), nesting `${` and `$((` thousands deep (refused, no crash),

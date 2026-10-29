@@ -596,7 +596,13 @@ bv_brace() {
               else
                 BV_P=$(( BV_P + 2 ))
               fi ;;
-            '$') bv_dollar "$depth" "$seg" 1 ;;
+            '$')
+              # Nor is a backslash-newline dropped here: $\<newline>( is text.
+              if [[ ${BV_WIN:BV_P-BV_WB+1:1} == '\' ]]; then
+                BV_P=$(( BV_P + 1 ))
+              else
+                bv_dollar "$depth" "$seg" 1
+              fi ;;
             '`') bv_backquote "$depth" "$seg" 1 ;;
             *)
               rest=${BV_WIN:BV_P-BV_WB:256}
