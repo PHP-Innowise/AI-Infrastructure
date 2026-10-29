@@ -110,12 +110,12 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 
    Such a file left unanswered is a pending decision that stops the run before step 9; it never defaults to keep. A team that wants a guard switched off cannot get there through keep either: the gate requires every registered hook, so record that request in the report instead. Changed Codex commands stay skipped until someone trusts them again in Codex's `/hooks`; say so in the report.
 
-   **Nor can keep always cover an edition's `bash-validator.sh`.** Step 10's gate holds its generic section - the bytes from `# >>> bash-validator generic section >>>` through `# <<< bash-validator generic section <<<` - to the current generator's byte for byte, while the team's own rules sit below it, where hook-forge step 2 puts them. When one requires a decision, offer only the `choices` printed by `python3 .agents/skills/bootstrap-verifier/scripts/merge_bash_validator.py --target "<target>" --staging "<staging>" --path <file>`: the ordinary ones while its section equals the staged one. Otherwise keeping it would fail step 10 and roll back the whole update, and taking staged drops the team's rules, so the helper offers only:
+   **Nor can keep always cover an edition's `bash-validator.sh`.** hook-forge copies its marked blocks from the generator byte for byte - the generic section from `# >>> bash-validator generic section >>>` through `# <<< bash-validator generic section <<<`, and any other block between `# >>> bash-validator <name> >>>` and `# <<< bash-validator <name> <<<` lines - and step 10's gate holds the section to the current generator's, while the team's own rules sit below it, where hook-forge step 2 puts them. When one requires a decision, offer only the `choices` printed by `python3 .agents/skills/bootstrap-verifier/scripts/merge_bash_validator.py --target "<target>" --staging "<staging>" --path <file>`: the ordinary ones while every block equals the staged one. Otherwise keeping it would fail step 10 and roll back the whole update, and taking staged drops the team's rules, so the helper offers only:
 
    - **take staged version**, or
-   - **section merge** - the target version with only its section replaced by the staged one, everything above and below byte for byte (`above_section: differs`: the staged version also changes the lines above, which the merge keeps - say so). Rerun the helper with `--write --staged-sha256 <the staged_sha256 it printed>` to write it into staging, and record it as `merged` with that hash as `rejected_sha256`.
+   - **section merge** - the target version with each of those blocks replaced by the staged one, everything else byte for byte (`above_section: differs`: the staged version also changes the lines above the section, which the merge keeps - say so). Rerun the helper with `--write --staged-sha256 <the staged_sha256 it printed>` to write it into staging, and record it as `merged` with that hash as `rejected_sha256`.
 
-   It offers no section merge step 10 would reject (no target file, no single section, team code below it the gate refuses). Left unanswered, a file whose choices lack keep stops the run before step 9; it never defaults to keep.
+   It offers no section merge step 10 would reject or with no single place for a block (no target file, a target older than a block, a repeated marker, team code the gate refuses). Left unanswered, a file whose choices lack keep stops the run before step 9; it never defaults to keep.
 7. **Compose shared root-ignore requirements.** Union the task-scoped
    declarations from `memory-seed` and `hook-forge`. Use the deterministic
    helper to classify `.gitignore` as already satisfied, append-required, or
@@ -183,7 +183,7 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 | --- | --- | --- |
 | [path] | user-modified | [kept target / took staged / merged / pending] |
 | [path] | standing decision (manifest `decisions`) | [honored automatically / re-asked - staged changed since the decision] |
-| [hooks dir]/bash-validator.sh | user-modified, generic section out of date | [took staged / section-merged / pending] |
+| [hooks dir]/bash-validator.sh | user-modified, a marked block out of date | [took staged / section-merged / pending] |
 
 ## Untouched
 - [n] files not in the manifest (user-owned, never inspected)
@@ -197,7 +197,7 @@ Allocate a new `tasks/TASK-{N}/` for the update run. Staging output goes to `tas
 - MUST ABORT before any write when `.infra-manifest.json` is missing or unreadable, with the legacy-target explanation and recovery options - never guess ownership of files.
 - MUST NOT overwrite, merge into, or delete any file whose current hash differs from its manifest record - or any manifest-listed file that was deleted - without an explicit per-file human decision.
 - MUST NOT offer keep for, or let an unanswered decision keep, a hook wiring file (`.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`) whose target version is not keepable under step 6 - a hook command that differs from the staged one for the same script, or a staged hook it does not wire; offer take-staged or the re-wire merge, which rewrites only hook `command` strings, so step 10 does not roll back the update.
-- MUST NOT offer keep for, or let an unanswered decision keep, a `bash-validator.sh` whose generic section differs from the staged one; offer only the `choices` `merge_bash_validator.py` prints - take-staged or the section merge it writes, which replaces only that section - so step 10 does not roll back the update.
+- MUST NOT offer keep for, or let an unanswered decision keep, a `bash-validator.sh` whose marked blocks differ from the staged ones; offer only the `choices` `merge_bash_validator.py` prints - take-staged or the section merge it writes, which replaces only those blocks - so step 10 does not roll back the update.
 - MUST NOT auto-replace a file carrying a manifest `decisions` entry - hash equality there records a standing human decision, not generator ownership; the only automatic outcome for such a file is keeping the target version (when the staged sha256 still equals its `rejected_sha256`).
 - MUST persist every keep/merge decision into the manifest's `decisions` map in step 8, and MUST drop an entry only on an explicit take-staged decision (or when its path leaves the manifest entirely).
 - MUST preserve the manifest's `mode` and rebuild membership from `infra-update-write-plan.txt` in both modes - only previous surviving members plus files this run actually wrote and the user accepted may be re-hashed; no target-root walk is allowed.

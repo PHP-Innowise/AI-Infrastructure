@@ -64,8 +64,35 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   at least one test. Restacked onto the repetition guard (same day), the
   test validators carry the guard and `BV_HOST`, as step 2 now builds them,
   and run with a private `TMPDIR` for the guard's counters.
-- The skill bodies' ceiling rises from 306100 to 307900 bytes for it
-  (307837 now); the policy lock was rewritten.
+- The section merge replaces every block the staged version marks, not
+  only the generic section: each block from a line `# >>> bash-validator
+  <name> >>>` through `# <<< bash-validator <name> <<<` (the repetition
+  guard step 2 copies into generated validators is one) becomes
+  the staged block of the same name, cut as the gate cuts the section, and
+  everything outside those blocks stays byte for byte, including a block
+  only the target marks. Replacing the section alone kept the target's
+  older copy of any other block, so after a change to it the merge was
+  withheld again. Keep is withheld while any block differs. A target that
+  lacks a block the staged version has (generated before the block
+  existed, or its markers removed), holds one twice or opens one inside
+  another gets take staged only, since the merge has no single place for
+  it; a staged version that holds a block twice is refused until staging is
+  repaired. The report lists each block's state (`blocks`) and the lines
+  of each block it replaces. Tests use a synthetic second block above the
+  `bv_validate` call (below its `fi` the gate allows only the guard and the
+  final `exit 0`): both blocks are replaced, a changed block alone still
+  withholds keep, a block only the target marks and a marker quoted inside
+  a line are left alone, and the generic section is cut exactly where the
+  gate cuts it. With the real guard, an older guard under a current section
+  - which the gate refuses as kept - is replaced, as is an older guard with
+  an older section, and a target generated before the guard gets take
+  staged only; these three fail against the section-only helper. Each of
+  eight broken helpers (the section only, the last block only, an absent
+  or repeated block ignored, no overlap or staged block check, keep judged
+  by the section alone, a marker matched inside a line) fails at least one
+  test.
+- The skill bodies' ceiling rises from 306100 to 308100 bytes for it
+  (308063 now); the policy lock was rewritten.
 
 ### The bash-validator gate holds the hit branch to `exit 2` — 2026-10-29
 

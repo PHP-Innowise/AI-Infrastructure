@@ -9,9 +9,12 @@ them. Such a file no longer matches its manifest hash, so infra-update step
 generator's: keeping a section an earlier release wrote rolls the whole
 update back, and taking the staged version drops the team's rules.
 merge_bash_validator.py offers the section merge instead - the target
-version with only the section replaced by the staged one - and only a merge
-the gate passes; a target whose section is current keeps the ordinary
-choices.
+version with each block the staged version marks (`# >>> bash-validator
+<name> >>>` through `# <<< bash-validator <name> <<<`, the generic section
+first) replaced by the staged one - and only a merge the gate passes; a
+target whose blocks are current keeps the ordinary choices. This branch's
+generator marks only the generic section, so a synthetic second block
+stands in for the repetition guard another branch adds.
 
 Run from this directory: python3 test_bash_validator_merge.py
 """
@@ -58,6 +61,9 @@ GENERATED_RULE = b'  "argv|kubectl||has:delete|destructive command - kubectl del
 TEAM_RULE = b'  "argv|helm|uninstall||destructive command - helm uninstall"\n'
 # A generic rule the earlier release's section did not have yet.
 NEW_GENERIC_RULE = b'  "argv|dropdb|||destructive command - dropdb"\n'
+# A second block the generator would copy byte for byte, placed as the
+# repetition guard is: between the call's `fi` and the final `exit 0`.
+TEST_BLOCK = b"test block"
 
 
 def generator_parts() -> tuple:
@@ -100,13 +106,16 @@ def older_section() -> bytes:
 
 
 def validator_file(section: bytes, rules: bytes, *, preamble: bytes | None = None,
-                   host: str = "claude") -> bytes:
+                   host: str = "claude", guard: bytes | None = None) -> bytes:
     """A target validator built as hook-forge step 2 says.
 
     host is the edition the copy serves: BV_HOST names the repetition
-    guard's counter directory and must match the edition it sits in.
+    guard's counter directory and must match the edition it sits in. guard
+    replaces the current repetition guard (b"" leaves it out, as a project
+    generated before it was).
     """
     generated_preamble, _, call = generator_parts()
+    guard = repetition_guard() if guard is None else guard
     return (
         (generated_preamble if preamble is None else preamble)
         + section
@@ -117,10 +126,32 @@ def validator_file(section: bytes, rules: bytes, *, preamble: bytes | None = Non
         + b")\n"
         + b"BV_HOST=" + host.encode() + b"\n\n"
         + call
-        + b"\n"
-        + repetition_guard()
-        + b"\n\nexit 0\n"
+        + (b"\n" + guard + b"\n" if guard else b"")
+        + b"\nexit 0\n"
     )
+
+
+def older_guard() -> bytes:
+    """The repetition guard as an earlier release copied it: refusing at ten."""
+    guard = repetition_guard()
+    if b'[ "$COUNT" -ge 12 ]' not in guard:
+        raise AssertionError("the repetition guard has no refusal at twelve to change")
+    return guard.replace(b'[ "$COUNT" -ge 12 ]', b'[ "$COUNT" -ge 10 ]', 1)
+
+
+def marked_block(version: bytes, name: bytes = TEST_BLOCK) -> bytes:
+    opening, closing = merger.markers(name)
+    return opening + b"\n: " + name + b" " + version + b"\n" + closing
+
+
+def with_block(data: bytes, block: bytes) -> bytes:
+    """data with block added just above its bv_validate call.
+
+    Below the call's `fi` the gate allows only the repetition guard and the
+    final `exit 0`, so a second block of the rules' own sits above the call.
+    """
+    call = data.index(b"\n" + CALL) + 1
+    return data[:call] + block + b"\n\n" + data[call:]
 
 
 def line_of(data: bytes, needle: bytes) -> int:
@@ -213,11 +244,11 @@ class OlderSectionTest(MergeFixture):
         closing = line_of(self.team_version, CLOSING)
         self.assertEqual(report, {
             "path": VALIDATOR,
-            "section": "differs",
+            "blocks": {"generic section": "differs", "repetition guard": "current"},
             "choices": ["take-staged", "section-merge"],
             "staged_sha256": ownership.sha256_file(self.staged_file),
             "merged_sha256": merger.sha256(self.expected),
-            "replaced_lines": [opening, closing],
+            "replaced_lines": {"generic section": [opening, closing]},
             "above_section": "same",
             "problems": [],
             "written": False,
@@ -305,7 +336,7 @@ class CurrentSectionTest(MergeFixture):
         staged_version = validator_file(current_section(), GENERATED_RULE)
         staged_file = self.place(self.staging, staged_version)
         report = self.check()
-        self.assertEqual(report["section"], "current")
+        self.assertEqual(report["blocks"], {"generic section": "current", "repetition guard": "current"})
         self.assertEqual(report["choices"], ["keep", "take-staged", "manual-merge"])
         self.assertIsNone(report["merged_sha256"])
         # Keeping it passes step 10.
@@ -325,9 +356,9 @@ class NoSectionMergeTest(MergeFixture):
         self.staged_version = validator_file(current_section(), GENERATED_RULE)
         self.staged_file = self.place(self.staging, self.staged_version)
 
-    def assert_take_staged_only(self, section: str, fragment: str) -> None:
+    def assert_take_staged_only(self, blocks: dict, fragment: str) -> None:
         report = self.check()
-        self.assertEqual(report["section"], section)
+        self.assertEqual(report["blocks"], blocks)
         self.assertEqual(report["choices"], ["take-staged"])
         self.assertIsNone(report["merged_sha256"])
         self.assertTrue(any(fragment in problem for problem in report["problems"]), report)
@@ -337,22 +368,234 @@ class NoSectionMergeTest(MergeFixture):
         self.assertEqual(self.staged_file.read_bytes(), self.staged_version)
 
     def test_a_deleted_validator(self) -> None:
-        self.assert_take_staged_only("missing", "has no .claude/hooks/bash-validator.sh")
+        self.assert_take_staged_only({}, "has no .claude/hooks/bash-validator.sh")
 
     def test_a_validator_without_the_section(self) -> None:
         self.place(self.target, b"#!/bin/bash\ncase \"$1\" in *'push --force'*) exit 2 ;; esac\nexit 0\n")
-        self.assert_take_staged_only("unmarked", f"has no `{OPENING.decode()}` marker")
+        self.assert_take_staged_only(
+            {"generic section": "absent", "repetition guard": "absent"}, "has no generic section"
+        )
 
     def test_a_section_closed_twice(self) -> None:
         self.place(self.target, validator_file(older_section() + b"\n" + CLOSING, TEAM_RULE))
-        self.assert_take_staged_only("unmarked", f"has the `{CLOSING.decode()}` marker 2 times")
+        self.assert_take_staged_only(
+            {"generic section": "malformed", "repetition guard": "current"},
+            f"has the `{CLOSING.decode()}` marker 2 times",
+        )
 
     def test_team_code_below_the_section_the_gate_refuses(self) -> None:
         # Under set -u an unassigned list ends the hook with exit 1 on every
         # command, which the host runs: the merge would fail step 10 too.
         rule = b'  "argv|helm|uninstall|arg:$TEAM_RELEASES|destructive command - helm uninstall"\n'
         self.place(self.target, validator_file(older_section(), GENERATED_RULE + rule))
-        self.assert_take_staged_only("differs", "expands $TEAM_RELEASES")
+        self.assert_take_staged_only(
+            {"generic section": "differs", "repetition guard": "current"}, "expands $TEAM_RELEASES"
+        )
+
+
+class SecondBlockTest(MergeFixture):
+    """Every block the staged version marks is the generator's, not only the section."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.staged_version = with_block(
+            validator_file(current_section(), GENERATED_RULE), marked_block(b"v2")
+        )
+        self.staged_file = self.place(self.staging, self.staged_version)
+
+    def merge(self) -> bytes:
+        report = self.check()
+        self.assertEqual(report["choices"], ["take-staged", "section-merge"], report)
+        result = self.helper("--write", "--staged-sha256", report["staged_sha256"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.gate(self.staging), [])
+        return self.staged_file.read_bytes()
+
+    def test_every_block_the_staged_version_marks_is_replaced(self) -> None:
+        team_version = with_block(
+            validator_file(older_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v1")
+        )
+        self.place(self.target, team_version)
+        report = self.check()
+        self.assertEqual(report["blocks"], {"generic section": "differs", "test block": "differs", "repetition guard": "current"})
+        opening, closing = merger.markers(TEST_BLOCK)
+        self.assertEqual(report["replaced_lines"], {
+            "generic section": [line_of(team_version, OPENING), line_of(team_version, CLOSING)],
+            "test block": [line_of(team_version, opening), line_of(team_version, closing)],
+        })
+        self.assertEqual(self.merge(), with_block(
+            validator_file(current_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v2")
+        ))
+
+    def test_a_changed_block_alone_still_withholds_keep(self) -> None:
+        self.place(self.target, with_block(
+            validator_file(current_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v1")
+        ))
+        report = self.check()
+        self.assertEqual(report["blocks"], {"generic section": "current", "test block": "differs", "repetition guard": "current"})
+        self.assertEqual(list(report["replaced_lines"]), ["test block"])
+        self.assertEqual(self.merge(), with_block(
+            validator_file(current_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v2")
+        ))
+
+    def test_a_block_only_the_target_marks_stays_as_it_is(self) -> None:
+        team_block = marked_block(b"kept", b"team block")
+        self.place(self.target, with_block(with_block(
+            validator_file(older_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v1")
+        ), team_block))
+        self.assertEqual(self.merge(), with_block(with_block(
+            validator_file(current_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v2")
+        ), team_block))
+
+    def test_a_marker_quoted_inside_a_line_opens_no_block(self) -> None:
+        note = b"# Blocks run from `# >>> bash-validator <name> >>>` to their closing line.\n"
+        self.place(self.staging, self.staged_version.replace(
+            b"BV_CONSOLE_ENTRIES=''\n", note + b"BV_CONSOLE_ENTRIES=''\n", 1
+        ))
+        self.place(self.target, with_block(
+            validator_file(older_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v1")
+        ))
+        self.assertEqual(
+            self.check()["blocks"], {"generic section": "differs", "test block": "differs", "repetition guard": "current"}
+        )
+        self.assertEqual(self.merge(), with_block(
+            validator_file(current_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v2")
+        ))
+
+    def assert_take_staged_only(self, blocks: dict, fragment: str) -> None:
+        report = self.check()
+        self.assertEqual(report["blocks"], blocks)
+        self.assertEqual(report["choices"], ["take-staged"])
+        self.assertIsNone(report["merged_sha256"])
+        self.assertTrue(any(fragment in problem for problem in report["problems"]), report)
+        result = self.helper("--write", "--staged-sha256", report["staged_sha256"])
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no section merge to write", result.stderr)
+        self.assertEqual(self.staged_file.read_bytes(), self.staged_version)
+
+    def test_a_target_generated_before_the_block_gets_take_staged_only(self) -> None:
+        self.place(self.target, validator_file(older_section(), GENERATED_RULE + TEAM_RULE))
+        self.assert_take_staged_only(
+            {"generic section": "differs", "test block": "absent", "repetition guard": "current"}, "has no test block"
+        )
+
+    def test_a_block_the_target_holds_twice_gets_take_staged_only(self) -> None:
+        self.place(self.target, with_block(with_block(
+            validator_file(older_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v1")
+        ), marked_block(b"v1")))
+        opening, _ = merger.markers(TEST_BLOCK)
+        self.assert_take_staged_only(
+            {"generic section": "differs", "test block": "malformed", "repetition guard": "current"},
+            f"has the `{opening.decode()}` marker 2 times",
+        )
+
+    def test_a_block_opened_inside_the_section_gets_take_staged_only(self) -> None:
+        section = older_section().replace(CLOSING, marked_block(b"v1") + b"\n" + CLOSING, 1)
+        self.place(self.target, validator_file(section, GENERATED_RULE + TEAM_RULE))
+        self.assert_take_staged_only(
+            {"generic section": "differs", "test block": "differs", "repetition guard": "current"},
+            "opens its test block inside its generic section",
+        )
+
+    def test_a_block_the_staged_version_holds_twice_is_repaired_first(self) -> None:
+        self.place(self.target, with_block(
+            validator_file(older_section(), GENERATED_RULE + TEAM_RULE), marked_block(b"v1")
+        ))
+        self.place(self.staging, with_block(self.staged_version, marked_block(b"v2")))
+        result = self.helper()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("repair staging through hook-forge first", result.stderr)
+        self.assertIn("marker 2 times", result.stderr)
+
+
+class RepetitionGuardBlockTest(MergeFixture):
+    """The repetition guard step 2 copies is a marked block the merge replaces too.
+
+    Replacing the section alone kept a target's older guard, which the gate
+    holds to hook-forge's asset byte for byte: after a change to the asset,
+    a kept validator with team rules failed step 10 again.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.staged_version = validator_file(current_section(), GENERATED_RULE)
+        self.staged_file = self.place(self.staging, self.staged_version)
+
+    def test_an_older_guard_under_a_current_section_is_replaced(self) -> None:
+        team_version = validator_file(
+            current_section(), GENERATED_RULE + TEAM_RULE, guard=older_guard()
+        )
+        self.place(self.target, team_version)
+        errors = self.gate(self.target)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("the repetition guard differs", errors[0])
+        report = self.check()
+        self.assertEqual(
+            report["blocks"], {"generic section": "current", "repetition guard": "differs"}
+        )
+        self.assertEqual(report["choices"], ["take-staged", "section-merge"])
+        opening, closing = validator.REPETITION_GUARD_MARKERS
+        self.assertEqual(report["replaced_lines"], {
+            "repetition guard": [line_of(team_version, opening), line_of(team_version, closing)],
+        })
+        result = self.helper("--write", "--staged-sha256", report["staged_sha256"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.staged_file.read_bytes(),
+            validator_file(current_section(), GENERATED_RULE + TEAM_RULE),
+        )
+        self.assertEqual(self.gate(self.staging), [])
+
+    def test_an_older_section_and_guard_are_both_replaced(self) -> None:
+        self.place(self.target, validator_file(
+            older_section(), GENERATED_RULE + TEAM_RULE, guard=older_guard()
+        ))
+        report = self.check()
+        self.assertEqual(
+            report["blocks"], {"generic section": "differs", "repetition guard": "differs"}
+        )
+        result = self.helper("--write", "--staged-sha256", report["staged_sha256"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.staged_file.read_bytes(),
+            validator_file(current_section(), GENERATED_RULE + TEAM_RULE),
+        )
+
+    def test_a_target_generated_before_the_guard_gets_take_staged_only(self) -> None:
+        self.place(self.target, validator_file(
+            older_section(), GENERATED_RULE + TEAM_RULE, guard=b""
+        ))
+        report = self.check()
+        self.assertEqual(
+            report["blocks"], {"generic section": "differs", "repetition guard": "absent"}
+        )
+        self.assertEqual(report["choices"], ["take-staged"])
+        self.assertTrue(
+            any("has no repetition guard" in problem for problem in report["problems"]), report
+        )
+
+
+class GateParityTest(unittest.TestCase):
+    def test_the_generic_section_is_cut_where_the_gate_cuts_it(self) -> None:
+        self.assertEqual(merger.markers(b"generic section"), validator.BASH_VALIDATOR_MARKERS)
+        data = GENERATOR_VALIDATOR.read_bytes()
+        swapped = (
+            data.replace(OPENING, b"\0", 1).replace(CLOSING, OPENING, 1).replace(b"\0", CLOSING, 1)
+        )
+        for name, sample in (
+            ("as shipped", data),
+            ("no opening marker", data.replace(OPENING, b"# section", 1)),
+            ("closing marker twice", data + CLOSING + b"\n"),
+            ("closed before opened", swapped),
+        ):
+            with self.subTest(sample=name):
+                self.assertEqual(
+                    merger.block_span(sample, b"generic section"),
+                    validator.bash_validator_section(sample),
+                )
+
+    def test_the_generators_own_validator_marks_the_generic_section_only(self) -> None:
+        self.assertEqual(merger.block_names(GENERATOR_VALIDATOR.read_bytes()), [b"generic section"])
 
 
 class RefusalTest(MergeFixture):
@@ -475,6 +718,8 @@ class InfraUpdateContractTest(unittest.TestCase):
             "`bash-validator.sh`",
             f"`{OPENING.decode()}`",
             f"`{CLOSING.decode()}`",
+            "`# >>> bash-validator <name> >>>`",
+            "a target older than a block",
             "merge_bash_validator.py",
             "`choices`",
             "**section merge**",
@@ -487,7 +732,7 @@ class InfraUpdateContractTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, step_6)
         guardrails = text[text.index("## Guardrails"):]
-        self.assertIn("`bash-validator.sh`", guardrails)
+        self.assertIn("`bash-validator.sh` whose marked blocks differ", guardrails)
         self.assertIn("section merge", guardrails)
 
 
