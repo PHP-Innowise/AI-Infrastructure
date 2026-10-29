@@ -15,7 +15,7 @@
     "launchers": "A quoted command line is checked as a command only when a known launcher (BV_LAUNCHERS: ssh, ddev, lando, vagrant, docker, kubectl, tmux, ...) receives it; a quoted argument of any other program is text.",
     "nesting": "Nesting deeper than any real command (BV_MAX_NEST call frames) is refused as 'command too complex' instead of parsed: bash would overflow its stack and the hook would fail open.",
     "heredoc": "A heredoc body is input, not commands: only the SQL rules of the command that owns it read it, unless that command is a shell that reads its stdin. Under an unquoted delimiter (<<EOF) bash expands the body while it reads it, so every $(...) and `...` in it runs then, quotes being plain characters there: those are checked as commands, and the text around them stays data. A quoted delimiter (<<'EOF', <<\"EOF\", <<\\EOF) keeps the whole body data.",
-    "expansions": "bash runs the $(...) and `...` inside ${...} (a default value, a pattern) and inside $((...)) - between single quotes too when the ${...} stands in double quotes or a heredoc body: they are checked as commands. A $(( whose inner parenthesis is not followed by another is read as bash reads it, $( (...) ...). A backslash-newline after a $ is joined first, so $\\<newline>( is $(. bash 5.3's ${ command; } and ${| command; } run their command in the current shell: they are command substitutions, ending at a } where a command would start. A backquoted command ends at the next backquote no backslash escapes - one in quotes or in a heredoc body as well - and only then is parsed, with \\` \\$ \\\\ unescaped. $'...' is decoded as bash decodes it (\\xHH, \\uHHHH, \\NNN; a NUL ends it), so $'\\x67h' is gh. A name or option assembled while the command runs - from a variable, a substitution's output or a brace expansion such as {gh,} - is not followed: the validator guards against accidents, not against a command written to get past it.",
+    "expansions": "bash runs the $(...) and `...` inside ${...} (a default value, a pattern) and inside $((...)) - between single quotes too when the ${...} stands in double quotes or a heredoc body: they are checked as commands. A $(( whose inner parenthesis is not followed by another is read as bash reads it, $( (...) ...). A backslash-newline after a $ is joined first, so $\\<newline>( is $(. bash 5.3's ${ command; } and ${| command; } run their command in the current shell: they are command substitutions, ending at a } where a command would start. A backquoted command ends at the next backquote no backslash escapes - one in quotes or in a heredoc body as well - and only then is parsed, with \\` \\$ \\\\ unescaped. $'...' is decoded as bash decodes it (\\xHH, \\uHHHH, \\NNN; a NUL ends it), so $'\\x67h' is gh. A ( inside a word (arr=(a b), f()) pairs with its ), and the ) after a case pattern does not end the $( or subshell around the case, as in bash. A substitution that reaches the end unclosed, or a double-quoted string nested in another that never closes, is refused as 'command too complex': bash refuses such a line or ends it elsewhere than the parser, and the text after would be read as quoted. An arithmetic expression - $((...)), ((...)), for ((...)) - is expanded as if it stood in double quotes, so a $(...) or backquote between single quotes in it runs and is checked; a (( that does not close as arithmetic is two subshells. A ${...} in it is read as in double quotes, and $(\\<newline>( is $((. An array subscript and a substring offset are expanded that way too, but a substitution between single quotes there, or in the deprecated $[...], is not checked. A name or option assembled while the command runs - from a variable, a substitution's output or a brace expansion such as {gh,} - is not followed: the validator guards against accidents, not against a command written to get past it.",
     "time": "A command not checked within BV_TIME_LIMIT seconds (2 to 3) is refused as 'command too long to check in time': the host gives a hook 5 seconds and runs the command when it times out. Writing a large file through one heredoc stays well inside it."
   },
   "cases": [
@@ -2591,6 +2591,122 @@
       "expect": "pass",
       "editions": "all",
       "note": "an env -S command with no rule against it"
+    },
+    {
+      "command": "echo \"$(a=(x); gh repo delete x)\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "a ( inside a word pairs with its ), as bash pairs it: the $( does not end after the array, so what follows it is a command, not quoted text"
+    },
+    {
+      "command": "echo \"$(arr=(a b); echo \"${arr[1]}\")\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "an array assignment in a quoted substitution"
+    },
+    {
+      "command": "echo \"$(case x in x) echo y;; esac; gh repo delete x)\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "the ) after a case pattern does not end the $( around the case"
+    },
+    {
+      "command": "echo \"$(case y in x) echo y;; *) gh repo delete x;; esac)\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "nor does the ) after a later pattern"
+    },
+    {
+      "command": "echo \"$(if true; then case x in x) echo y;; esac; fi; gh repo delete x)\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "a case after then"
+    },
+    {
+      "command": "echo \"$(case x in\nx) echo y\nesac\ngh repo delete x)\"",
+      "expect": "block",
+      "editions": "all",
+      "note": "patterns and esac on lines of their own"
+    },
+    {
+      "command": "v=$(case $(uname) in Linux) echo l;; Darwin) echo d;; esac); echo \"$v\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a case in a substitution ends at esac, and the substitution at the ) after it"
+    },
+    {
+      "command": "echo \"$(case \"$1\" in (a|b) echo ab;; *) echo other;; esac)\"",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a pattern opened with ( and alternatives"
+    },
+    {
+      "command": "echo $(echo x",
+      "expect": "block",
+      "editions": "all",
+      "category": "command too complex - a substitution that does not close",
+      "note": "bash refuses it too; a substitution that reaches the end unclosed may have been closed by bash where the parser did not, so the rest is not read as its text"
+    },
+    {
+      "command": "grep -n \"get${\\|use\" f; echo \"done\"",
+      "expect": "block",
+      "editions": "all",
+      "category": "command too complex - quotes nested past where bash ends them",
+      "note": "bash refuses it too (an agent ran this); a double-quoted string nested in another that never closes is where bash and the parser part"
+    },
+    {
+      "command": "(( '$(gh repo delete x)' ))",
+      "expect": "block",
+      "editions": "all",
+      "note": "bash expands an arithmetic expression as if it stood in double quotes: a substitution between single quotes runs"
+    },
+    {
+      "command": "echo $(( '`gh repo delete x`' + 1 ))",
+      "expect": "block",
+      "editions": "all",
+      "note": "in $((...)) too"
+    },
+    {
+      "command": "for (( i = '$(gh repo delete x)'; i < 1; i++ )); do :; done",
+      "expect": "block",
+      "editions": "all",
+      "note": "and in a for (( ... )) header"
+    },
+    {
+      "command": "((cd /tmp && git status) || echo fail)",
+      "expect": "pass",
+      "editions": "all",
+      "note": "a (( that does not close as arithmetic is two subshells, as bash reads it"
+    },
+    {
+      "command": "((gh repo delete x) || echo fail)",
+      "expect": "block",
+      "editions": "all",
+      "note": "so their commands are checked"
+    },
+    {
+      "command": "for (( i = 0; i < 3; i++ )); do echo \"$i\"; done; (( $# > 0 )) && echo 'a b'",
+      "expect": "pass",
+      "editions": "all",
+      "note": "plain arithmetic loops and tests"
+    },
+    {
+      "command": "echo $(\\\n( '$(gh repo delete x)' ))",
+      "expect": "block",
+      "editions": "all",
+      "note": "bash drops the line continuation first: $(\\<newline>( is $(("
+    },
+    {
+      "command": "(\\\n( x = '`gh repo delete x`' ))",
+      "expect": "block",
+      "editions": "all",
+      "note": "and (\\<newline>( is (("
+    },
+    {
+      "command": "for (( i = ${X:-'$(gh repo delete x)'}; i < 1; i++ )); do :; done",
+      "expect": "block",
+      "editions": "all",
+      "note": "a ${...} in arithmetic is expanded as in double quotes: its single quotes are plain characters"
     }
   ]
 }

@@ -3,9 +3,9 @@
 The corpus (test_bash_validator_corpus.py) holds the cases someone thought
 of; scripts/bash_validator_fuzz.py writes lines around the forms the parser
 got wrong before - ${...}, $((...)), backquotes, heredocs, quotes, line
-continuations, bash 5.3's ${ command; } - and asks bash which of them run
-the command. A line bash runs it in must be refused. The generic section is
-identical in every copy, so PHP Core's stands for all.
+continuations, bash 5.3's ${ command; }, a case pattern's ) - and asks bash
+which of them run the command. A line bash runs it in must be refused. The
+generic section is identical in every copy, so PHP Core's stands for all.
 """
 from __future__ import annotations
 

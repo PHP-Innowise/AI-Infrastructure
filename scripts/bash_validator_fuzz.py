@@ -5,8 +5,9 @@ Each line puts a command, CMD, inside the forms whose parsing the validator
 has got wrong before: ${...} (default values, patterns, nesting), $((...))
 and the subshell bash reads in place of one, backquotes (escaped, nested,
 ended inside quotes or a heredoc body), quotes, heredocs under quoted and
-unquoted delimiters, line continuations, bash 5.3's ${ command; } - with
-commands after them, so that a form read too far shows too.
+unquoted delimiters, line continuations, bash 5.3's ${ command; }, a
+trap's action - with commands after them, so that a form read too far shows
+too.
 
 bash runs each line with CMD replaced by a function that only writes a
 marker; the validator is handed the same line with CMD replaced by
@@ -66,6 +67,7 @@ class Grammar:
             lambda: "$(CMD)", lambda: "`CMD`", lambda: "$( CMD )", lambda: "$(\nCMD\n)",
             lambda: "$\\\n(CMD)", lambda: "$\\\n\\\n(CMD)", lambda: "${ CMD; }", lambda: "${| CMD; }",
             lambda: "$(echo " + self.word(d - 1) + "; CMD)" if d > 0 else "$(CMD)",
+            lambda: "$(case x in " + self.rng.choice(["x", "(x", "y|x"]) + ") CMD;; esac)",
         )
 
     def literal(self) -> str:
@@ -81,6 +83,12 @@ class Grammar:
         return start + self.rng.choice(["X", "HOME", "#X", "!X"]) + op + body + self.rng.choice(["}", "}", "}", ""])
 
     def arith(self, d: int) -> str:
+        return (self.rng.choice(["$((", "$((", "$( (", "$(\\\n("]) + self.expression(d)
+                + self.rng.choice(["))", "))", ") )", ")", ")+1)", "));CMD;:"]))
+
+    def expression(self, d: int) -> str:
+        """The inside of $((...)) or ((...)): bash expands it as if it stood in
+        double quotes, so a substitution between single quotes runs too."""
         parts = []
         for _ in range(self.rng.randint(1, 3)):
             parts.append(self.pick(
@@ -91,10 +99,10 @@ class Grammar:
                 lambda: self.brace(d - 1),
                 lambda: '"' + self.rng.choice(["1", self.sub(d - 1)]) + '"',
                 lambda: "'1'",
+                lambda: "'" + self.sub(d - 1) + "'",
                 lambda: "CMD",
             ))
-        return (self.rng.choice(["$((", "$((", "$( (", "$(\\\n("]) + "".join(parts)
-                + self.rng.choice(["))", "))", ") )", ")", ")+1)", "));CMD;:"]))
+        return "".join(parts)
 
     def dquoted(self, d: int) -> str:
         return '"' + "".join(self.piece(d - 1, "dq") for _ in range(self.rng.randint(0, 3))) + self.rng.choice(['"', '"', '"', ""])
@@ -117,6 +125,7 @@ class Grammar:
                 lambda: 'echo "' + self.rng.choice(["`", "x", "$(CMD)", '\\"', "\\`CMD\\`"]) + '"',
                 lambda: "echo $(echo " + self.rng.choice(["`", "x", "\\`"]) + ")",
                 lambda: "; CMD ;",
+                lambda: "case x in x) " + self.rng.choice(["CMD", "echo )"]) + ";; esac",
             ))
         return "`" + self.rng.choice([" ", ""]).join(parts) + self.rng.choice(["`", "`", "`", ""])
 
@@ -162,6 +171,14 @@ class Grammar:
             lambda: "`cat <<'EOF'\nx ` ; CMD ; : `\nEOF\n`",
             lambda: "`echo '`; CMD",
             lambda: "$(cat <<EOF\n" + filler() + sub() + filler() + "\nEOF\n)",
+            lambda: "x; trap " + self.rng.choice(["'CMD'", '"CMD"', "-- 'CMD'"]) + " EXIT",
+            # A case pattern's ) does not end the $( around the case.
+            lambda: ('"$(case ' + self.rng.choice(["x", "y"]) + " in " + self.rng.choice(["x", "(x", "x|y", "(y|x"]) + ") "
+                     + self.rng.choice(["CMD", "echo"]) + self.rng.choice([";;", ";&", ";;&", NL])
+                     + self.rng.choice([" esac; CMD)", " *) CMD;; esac)", NL + "esac" + NL + "CMD)"]) + '"'),
+            lambda: '"$(a=(' + filler() + "); CMD)" + '"',
+            # An arithmetic expression is expanded as if in double quotes.
+            lambda: "$(( '" + sub() + "' ))",
         )
 
     def line(self) -> str:
@@ -175,6 +192,8 @@ class Grammar:
             lambda: self.heredoc(d),
             lambda: ": " + self.backquoted(d),
             lambda: head + self.dquoted(d),
+            lambda: "(( x = " + self.expression(d) + self.rng.choice([" ))", ") )"]),
+            lambda: "for (( i = " + self.expression(d) + "; i < 1; i++ )); do :; done",
         )
         roll = self.rng.random()
         if roll < 0.35:
@@ -196,13 +215,18 @@ class Result:
 
 def bash_outcome(line: str, work: str) -> str:
     """'ran' (the marker), 'clean' (ran nothing, said nothing), 'syntax' (bash
-    refused the line) or 'error' (an expansion failed at run time)."""
-    environment = dict(os.environ, X="", HOME=work, LC_ALL="C")
+    refused the line) or 'error' (an expansion failed at run time). Each line
+    runs in an empty folder of its own: a file an earlier line named after
+    the marker (> CMD) would turn a later glob (*CMD) into a call of it."""
+    folder = tempfile.mkdtemp(dir=work)
+    environment = dict(os.environ, X="", HOME=folder, LC_ALL="C")
     try:
         done = subprocess.run([BASH, "-c", PRELUDE + line.replace("CMD", MARK)], stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, cwd=work, timeout=10, env=environment)
+                              capture_output=True, text=True, cwd=folder, timeout=10, env=environment)
     except subprocess.TimeoutExpired:
         return "error"
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
     if "RAN-42" in done.stderr:
         return "ran"
     if any(sign in done.stderr for sign in ("syntax error", "unexpected EOF", "bad substitution")):

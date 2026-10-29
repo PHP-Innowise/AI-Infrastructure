@@ -830,8 +830,9 @@ source-only and not installed. The corpus holds the cases someone thought of;
 this writes command lines around the forms the parser got wrong before -
 `${...}` (default values, patterns, nesting), `$((...))` and the subshell bash
 reads in place of one, backquotes ended inside quotes or a heredoc body,
-heredocs, quotes, line continuations, bash 5.3's `${ command; }` - and asks
-bash which of them run their command.
+heredocs, quotes, line continuations, bash 5.3's `${ command; }`, a `trap`
+action, a `case` pattern's `)` and a `(` inside a word within `$(...)` - and
+asks bash which of them run their command.
 
 ```bash
 python3 scripts/bash_validator_fuzz.py

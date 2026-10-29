@@ -91,14 +91,39 @@ edition's own files remain in that edition's changelog.
   runs nothing. So is the string `env -S` (`--split-string`) splits into
   the command it runs. Of 142 real commands with a `trap` or `env -S`, all
   cleanup, none is refused now that was not before.
+- A `(` inside a word (`arr=(a b)`, `f()`) pairs with its `)`, and the `)`
+  after a `case` pattern no longer ends the `$(...)` or subshell around the
+  `case`. The parser ended a `$(...)` at either, and inside double quotes
+  read the rest as quoted text: `echo "$(a=(x); gh repo delete x)"` and
+  `echo "$(case x in x) echo y;; esac; gh repo delete x)"` passed. A
+  substitution that reaches the end unclosed, or a double-quoted string
+  nested in another that never closes, is refused as `command too complex`:
+  bash refuses such a line or ends it where the parser did not.
+- An arithmetic expression - `$((...))`, `((...))`, `for ((...))` - is
+  expanded as if it stood in double quotes, so a `$(...)` or backquote
+  between single quotes in it runs: `(( '$(gh repo delete x)' ))` passed,
+  also on the validator before this change. Those are checked now, a
+  `${...}` in the expression is read as in double quotes, and a line
+  continuation between the two parentheses is dropped first, as bash drops
+  it (`$(`, backslash-newline, `(` is `$((`). A `((` that does not close as
+  arithmetic is read as two subshells, as bash reads it. An array subscript
+  and a substring offset are expanded the same way but not walked, nor is
+  the deprecated `$[...]`: the hooks README lists them under Limits.
+  Of the 69,404 commands agents ran on this machine, 2 are refused now
+  that were not, both lines bash itself rejects as syntax errors (a
+  nested string that never closes); none of the 427 with a `((` or the 144
+  with a `case` changes.
 - `scripts/bash_validator_fuzz.py` keeps the check: it writes command lines
   around these forms, runs each through bash with a marker, and fails when
-  the validator lets through one bash runs the command in. The `mirrors` job
+  the validator lets through one bash runs the command in. Each line runs
+  in an empty folder of its own, since a file an earlier line named after
+  the marker turned a later glob into a call of it. The `mirrors` job
   runs two seeds (`tests/test_bash_validator_fuzz.py`, 600 lines, under two
   seconds) and checks that a copy which skips `${...}` again is caught: it
-  misses 22 to 28 of every 300 lines. The validator before this change
-  misses 169 of 600.
-- Corpus 338 -> 379 cases, with `expansions` and `time` decisions; every new
+  misses 16 to 27 of every 300 lines. The validator before this change
+  misses 187 of 600, and this one before its `case`, word-parenthesis and
+  arithmetic fixes 26.
+- Corpus 338 -> 398 cases, with `expansions` and `time` decisions; every new
   case was checked against bash. The parse-cost test covers default values,
   arithmetic and many heredocs (on the old validator 4x the heredocs took
   8.7x the time), nesting `${` and `$((` thousands deep (refused, no crash),
