@@ -28,6 +28,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### bash-validator: the generic section's opening comment is true in a generated project — 2026-10-29
+
+- The comment that opens the generic section said the block is
+  byte-identical in the four editions and Infrastructure-Creator, that
+  `tests/test_bash_validator_corpus.py` fails on any drift, and to edit it
+  in one copy and paste the block into the other four. Since `hook-forge`
+  copies the section byte for byte into every project Infrastructure-Creator
+  generates (`Infrastructure-Creator/CHANGELOG.md`, same day), the comment
+  ships there too, where neither the test nor the other four copies exist.
+- It now says where the section is maintained
+  (`github.com/PHP-Innowise/AI-Infrastructure`, the five
+  `.claude/hooks/bash-validator.sh`, a change made in one and pasted into
+  the other four), that every copy is held to it byte for byte (the five and
+  their mirrors by the corpus test, a generated project's copies by
+  `bootstrap-verifier` on each generation and update), and that framework
+  rules and a project's own rules go below the closing marker, in
+  `BV_FRAMEWORK_RULES`. Comment lines only, in all five copies and their
+  `.cursor`/`.codex` mirrors; no parser or rule line changes.
+
 ### Generated projects get the shared bash-validator parser: the generator's skill-body ceiling — 2026-10-29
 
 - `scripts/token_budget.json` raises Infrastructure-Creator's `body_bytes`

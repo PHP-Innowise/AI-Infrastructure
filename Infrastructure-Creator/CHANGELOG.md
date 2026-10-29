@@ -79,6 +79,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   new gate.
 - The skill bodies' ceiling rises from 299600 to 303500 bytes for it (303404
   now); the policy lock was rewritten.
+- The comment that opens the generic section, which every generated project
+  now receives with it, is true there (root `CHANGELOG.md`, same day): it
+  says where the section is maintained, that `bootstrap-verifier` holds a
+  generated project's copies to it byte for byte on each generation and
+  update, and that framework rules and a project's own rules go below the
+  closing marker, in `BV_FRAMEWORK_RULES`. It used to tell the reader to
+  edit one copy and paste the block into the other four, and named
+  `tests/test_bash_validator_corpus.py`; a generated project has neither.
 
 ### bash-validator reads what bash runs in `${...}`, `$((...))` and backquotes — 2026-10-29
 
