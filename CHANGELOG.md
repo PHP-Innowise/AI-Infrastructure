@@ -28,6 +28,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A learning's citation is kept as the file is spelled — 2026-10-30
+
+- Why: a citation was stored as the agent wrote it. `src/a.php`,
+  `./src/a.php` and `src//a.php` were three keys for one file, and on a file
+  system that ignores case - macOS's, Windows' - `SRC/a.php` was found,
+  stored and committed, then failed validation in every clone on Linux (the
+  chunk left retrieval there). `src\a.php`, as an agent on Windows writes
+  it, was refused with "use project-relative source paths", which it is.
+- What changes: `memory_results.check_source` returns the path as it is
+  spelled on disk - each part the entry of that name, else the one entry
+  that differs only in case - and a result's sources are stored that way,
+  two spellings of one file once. A citation not found as written is
+  refused, or kept as written where the file is not required, as before. A
+  backslash is refused with the path written with forward slashes.
+- Tests: `tests/test_memory_native_capture.py` saves learnings citing
+  `./rules.md`, `.//rules.md` and `RULES.md` (stored `rules.md`) and refuses
+  `docs\rules.md` naming `docs/rules.md`; it fails on the check before.
+
 ### A task record left in a merge conflict is not taken for no task — 2026-10-30
 
 - Why: two clones of a branch that both checkpointed its task conflict in

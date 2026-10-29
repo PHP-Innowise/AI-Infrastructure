@@ -1089,6 +1089,21 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.begin()
         self.one(self.written(self.stop),'stop','skipped','task-completed')
 
+    def test_a_citation_is_kept_as_the_file_is_spelled(self):
+        # Kept as written, ./rules.md and rules.md were two keys for one file,
+        # and RULES.md - found on a file system that ignores case, macOS's or
+        # Windows' - was committed and failed validation in every clone on Linux.
+        learning=self.payload['learnings'][0]
+        self.begin();self.stop()
+        refused=self.save(data={**self.payload,'learnings':[{**learning,'sources':['docs\\rules.md']}]},ok=False)
+        self.assertIn(b'Write source paths with forward slashes: docs/rules.md',refused.stderr)
+        spellings=('./rules.md','.//rules.md','RULES.md')
+        self.save(data={**self.payload,'learnings':[{**learning,'title':f'Amber retry boundary {number}',
+                                                     'consequence':f'{learning["consequence"]} ({number})',
+                                                     'sources':[cited]} for number,cited in enumerate(spellings)]})
+        stored={record['title']:record['sources'] for record in self.records('findings')}
+        self.assertEqual({f'Amber retry boundary {number}':['rules.md'] for number in range(len(spellings))},stored)
+
     def test_each_refused_save_writes_one_line_with_its_code(self):
         self.begin();self.stop();candidate,state=self.state()
         learning=self.payload['learnings'][0]
