@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A line cut inside a character no longer stops the refresh health series — 2026-10-29
+
+- Why: the prompt hook appends one line per refresh to
+  `memory-bank/local/refresh-health.ndjson` and trims it to its retention.
+  Both the trim and `context.py health` read the file as strict UTF-8, so
+  one line a full disk or a crash cut inside a character (a Cyrillic branch
+  name, say) made `health` fail with `UnicodeDecodeError` and stopped every
+  later trim: the series grew for good, and every prompt read it whole.
+- What changes: both read past such a line - it is one bad line, which the
+  reader skips as it skips one that is not JSON - and the trim replaces the
+  file whole (`atomic_write_bytes`) instead of rewriting it in place, which a
+  crash could leave empty.
+- Tests: `tests/test_memory_health_notices.py` reads a series with such a
+  line (two turns counted, `health` answers) and appends to one longer than
+  its retention (trimmed, valid UTF-8). Both fail on the reader before.
+
 ### The lifecycle fuzzer runs hooks behind another session's lock — 2026-10-29
 
 - Why: the lost save fixed below needed a hook's own budget to run out

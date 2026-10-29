@@ -42,6 +42,7 @@ from brain_runtime import (
     TERMINAL_STATES,
     append_message,
     atomic_json,
+    atomic_write_bytes,
     auto_compact,
     auto_consolidate,
     auto_promote,
@@ -3186,11 +3187,12 @@ def append_refresh_health(repository: Path, record: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # A line cut inside a character - a full disk, a crash - once stopped
+        # every trim here, and the series grew for good: read past it. The
+        # trim replaces the file whole, never a half-written one.
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         if len(lines) > retention:
-            path.write_text(
-                "\n".join(lines[-retention:]) + "\n", encoding="utf-8"
-            )
+            atomic_write_bytes(path, ("\n".join(lines[-retention:]) + "\n").encode("utf-8"))
     except (OSError, BrainError, ValueError):
         return
 
@@ -5225,7 +5227,8 @@ def refresh_health(repository: Path, window: Optional[int]) -> dict[str, object]
     records: list[dict] = []
     if path.is_file():
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
+            # A line cut inside a character is one bad line, not the series.
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 if not line.strip():
                     continue
                 try:
