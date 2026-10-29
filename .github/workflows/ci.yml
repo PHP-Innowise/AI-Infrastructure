@@ -142,6 +142,11 @@ jobs:
       # all three tool trees) against the shared block/pass corpus.
       - name: Bash validator corpus
         run: python3 -m unittest tests.test_bash_validator_corpus
+      # The corpus holds the cases someone thought of; this asks bash itself
+      # which of 600 generated command lines run their command, and fails if
+      # the validator lets one of those through (scripts/bash_validator_fuzz.py).
+      - name: Bash validator against bash
+        run: python3 -m unittest tests.test_bash_validator_fuzz
       # Mirrors prove the copies agree with canon; this proves canon points at
       # things that exist: every wired hook script is tracked as 100755, every
       # command/agent/flow/AGENTS.md reference resolves in its own tool, and

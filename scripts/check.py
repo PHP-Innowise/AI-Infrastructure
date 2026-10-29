@@ -569,6 +569,7 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
                 unittests("Mirror executor regression tests", ["tests.test_build_mirrors"]),
                 unittests("Executable bits recorded in the Git index", ["tests.test_file_modes"]),
                 unittests("Bash validator corpus", ["tests.test_bash_validator_corpus"]),
+                unittests("Bash validator against bash", ["tests.test_bash_validator_fuzz"]),
                 step("Wiring and routing references resolve", "python3 scripts/check_routes.py"),
                 unittests("Wiring and routing references resolve", ["tests.test_check_routes"]),
             ),
