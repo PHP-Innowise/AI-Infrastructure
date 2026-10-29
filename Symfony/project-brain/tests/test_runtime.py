@@ -10057,6 +10057,38 @@ class MultiMachineContinuityTest(RuntimeHarness):
         self.assertEqual(first["task_uuid"], capsule["task_uuid"])
         self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
 
+    def conflicted(self, task_uuid: str) -> None:
+        """The task record as merging two clones that both checkpointed it
+        leaves it: an unresolved conflict in its frontmatter."""
+        path = self.repository / "project-brain/dynamic/tasks" / f"{task_uuid}.md"
+        raw, body = path.read_text(encoding="utf-8")[4:].split("\n---\n", 1)
+        record = json.loads(raw)
+        sides = [json.dumps(dict(record, revision=record["revision"] + 1, progress=side)) for side in ("Ours.", "Theirs.")]
+        path.write_text(f"---\n<<<<<<< HEAD\n{sides[0]}\n=======\n{sides[1]}\n>>>>>>> 1234567 (more work)\n---\n{body}",
+                        encoding="utf-8")
+
+    def test_a_task_record_left_in_a_merge_conflict_is_not_taken_for_none(self) -> None:
+        # Two clones that both checkpointed the branch's task conflict in its
+        # record. A lookup by the branch said "not found": a clone without a
+        # binding was told "not recorded yet", and its next checkpoint made a
+        # second task beside the one being merged.
+        task = self.start("feature/merged")
+        self.conflicted(task["task_uuid"])
+        self.simulate_second_machine()
+        with self.assertRaises(brain.BrainError) as raised:
+            brain.find_task(self.repository, "feature/merged")
+        self.assertNotIsInstance(raised.exception, brain.BrainRecordNotFound)
+        self.assertIn("unresolved Git merge conflict", str(raised.exception))
+        capsule = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "feature/merged",
+                               "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn(f"Unresolved Git merge conflict in project-brain/dynamic/tasks/{task['task_uuid']}.md",
+                      capsule.stdout)
+        self.assertNotIn("not recorded yet", capsule.stdout)
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.run_cli("turn", "--task-id", "feature/merged", "--flush", "--json")
+        self.assertEqual(1, len(list((self.repository / "project-brain/dynamic/tasks").glob("*.md"))))
+
     def test_a_second_machine_reads_the_task_before_its_first_checkpoint(self) -> None:
         # Until the first checkpoint rebound it, the branch's existing task
         # read as "not recorded yet" - prompt and session capsule alike.

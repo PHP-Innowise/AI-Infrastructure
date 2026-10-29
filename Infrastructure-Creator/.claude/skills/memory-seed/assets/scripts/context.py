@@ -3500,8 +3500,7 @@ def assemble_capsule(
     elif problem is not None:
         # The record is there but cannot be read as one. The turn keeps the
         # rest of its memory; the record is the person's to repair.
-        binding_notices.append(f"The working task has no state this turn: {problem}. "
-                               "Repair or restore that file; checkpoints wait for it.")
+        binding_notices.append(_unreadable_task_notice(problem))
         binding, unreadable = None, True
     served = str(binding["task_uuid"]) if binding is not None else None
     served_id = str(bound_record["external_id"]) if bound_record is not None else task_id
@@ -3513,9 +3512,12 @@ def assemble_capsule(
         # A fresh clone or a second machine holds the branch's task in the
         # Brain but no binding until its first checkpoint: the turns before
         # it read the task's state instead of "not recorded yet".
-        record = _unbound_task(repository, task_id)
+        record, claim_problem = _unbound_task(repository, task_id)
         if record is not None:
             served, served_id = str(record["id"]), str(record["external_id"])
+        elif claim_problem is not None:
+            binding_notices.append(_unreadable_task_notice(claim_problem))
+            unreadable = True
     if served is not None and allow_unprovisioned:
         binding_notices.extend(_twin_notices(connection, served_id, served))
     if _COMMAND_STATE.get("renamed_from") == task_id:
@@ -4014,7 +4016,7 @@ def assemble_hook_context(
             binding = None
         # A fresh clone holds the branch's task in the Brain before its first
         # checkpoint binds it: the session's rule shows that task too.
-        record = _unbound_task(repository, task_id) if binding is None else None
+        record = _unbound_task(repository, task_id)[0] if binding is None else None
         if binding is not None or record is not None:
             query, query_source = hook_capsule_query(
                 repository, task_id, binding["task_uuid"] if binding is not None else str(record["id"])
@@ -5918,18 +5920,34 @@ def _successor(repository: Path, binding: sqlite3.Row, record: Optional[dict[str
     return next((candidate for candidate in active if candidate["id"] != record["id"]), None)
 
 
-def _unbound_task(repository: Path, task_id: str) -> Optional[dict[str, Any]]:
+def _unreadable_task_notice(problem: str) -> str:
+    """What a turn says when the record of its task cannot be read. An
+    unresolved merge conflict comes first, by its file: the capsule cuts a
+    warning short, and the conflict was cut off behind the record's path."""
+    conflict = re.search(r"record invalid: (\S+): unresolved Git merge conflict", problem)
+    if conflict:
+        return (f"Unresolved Git merge conflict in {conflict.group(1)}: keep one side or merge both, "
+                "without the markers; checkpoints wait for it.")
+    return f"The working task has no state this turn: {problem}. Repair or restore that file; checkpoints wait for it."
+
+
+def _unbound_task(repository: Path, task_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """The active task record a task ID names on a machine that holds no
-    binding for it yet - a fresh clone or a second machine - or None."""
+    binding for it yet - a fresh clone or a second machine - or None, and
+    why there is none when a record claiming the ID cannot be read: a turn
+    says so instead of "not recorded yet", which a checkpoint then made true
+    with a second task beside it."""
     try:
         _, record, _ = find_task(repository, task_id)
     except BrainRecordNotFound:
-        return None
+        return None, None
     except BrainError as error:
-        record = _active_claimant(repository, task_id) if "ambiguous" in str(error) else None
+        if "ambiguous" not in str(error):
+            return None, (str(error) if "record invalid" in str(error) else None)
+        record = _active_claimant(repository, task_id)
     if record is None or record.get("status") in TERMINAL_STATES:
-        return None
-    return record
+        return None, None
+    return record, None
 
 
 def _twin_notices(connection: sqlite3.Connection, external_id: str, served: str) -> list[str]:

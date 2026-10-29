@@ -1459,18 +1459,50 @@ def validate_record_image(record: dict[str, Any], text: str, *, archived: bool =
         _VALID_RECORD_IMAGES.add(key)
 
 
+def merge_sides(text: str) -> list[str]:
+    """The two versions an unresolved Git merge conflict in `text` holds -
+    ours, then theirs, each without the other's lines and without a diff3
+    base - or [] when it holds none."""
+    lines = text.splitlines(keepends=True)
+    if not any(line.startswith("<<<<<<< ") for line in lines):
+        return []
+    sides: tuple[list[str], list[str]] = ([], [])
+    state = None
+    for line in lines:
+        if line.startswith("<<<<<<< "):
+            state = "ours"
+        elif state == "ours" and line.startswith("||||||| "):
+            state = "base"
+        elif state in ("ours", "base") and line.rstrip("\r\n") == "=======":
+            state = "theirs"
+        elif state == "theirs" and line.startswith(">>>>>>> "):
+            state = None
+        else:
+            if state in (None, "ours"):
+                sides[0].append(line)
+            if state in (None, "theirs"):
+                sides[1].append(line)
+    return ["".join(side) for side in sides]
+
+
 def _claimed_identity(text: Optional[str]) -> Optional[dict[str, Any]]:
-    """The type/id/external_id a record that failed to parse still names."""
-    if not isinstance(text, str) or not text.startswith("---\n"):
+    """The type/id/external_id a record that failed to parse still names -
+    in either version of an unresolved Git merge conflict too: two clones of
+    a branch that both checkpointed its task conflict in that record, and a
+    lookup by the branch then said "not found" and a checkpoint made a
+    second task beside the one being merged."""
+    if not isinstance(text, str):
         return None
-    try:
-        raw = text[4:].split("\n---\n", 1)[0]
-        metadata = json.loads(raw)
-    except (ValueError, RecursionError):
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    return {key: metadata.get(key) for key in ("type", "id", "external_id")}
+    for version in [text, *merge_sides(text)]:
+        if not version.startswith("---\n"):
+            continue
+        try:
+            metadata = json.loads(version[4:].split("\n---\n", 1)[0])
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(metadata, dict):
+            return {key: metadata.get(key) for key in ("type", "id", "external_id")}
+    return None
 
 
 def _record_problem(repository: Path, path: Path, metadata: Any, error: BrainError, *,
@@ -1687,6 +1719,9 @@ def iter_record_images(repository: Path, *, include_archive: bool = False,
             # (invalid Unicode in a title, say): a lookup for that task then
             # says the record is invalid instead of "not found".
             claimed = _claimed_identity(text)
+            if text is not None and merge_sides(text):
+                error = BrainError(f"{path}: unresolved Git merge conflict (<<<<<<< ... >>>>>>>); keep "
+                                   "one side or merge both, without the markers")
             if claimed is None and is_uuid4(path.stem):
                 # Unreadable bytes name nothing, but the file is named by the
                 # record's UUID: a lookup must say "invalid", not "not found".

@@ -874,6 +874,12 @@ def _stop(step, root, task_id, host, payload, *, owner, mode, entered=False, ser
         except BrainRecordNotFound as error:
             if error.identifier != task_id: raise
             task=None
+        except BrainError as error:
+            # A record claiming the task cannot be read - an unresolved merge
+            # conflict, say. The capsule asks the person to repair it, and a
+            # save could only fail: none is asked until then.
+            if 'record invalid' not in str(error): raise
+            return step({},'skipped','task-unreadable')
         if task is not None:
             if task['status'] in {'completed','cancelled'}: return step({},'skipped','task-'+task['status'])
             state.update(task_uuid=task['id'],revision=task['revision'])

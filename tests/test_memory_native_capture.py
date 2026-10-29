@@ -876,6 +876,17 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         capsule=self.call('refresh','--host','codex','--query','retry','--task-id','research','--ephemeral').stdout.decode()
         self.assertIn(f'this turn uses {twin}',capsule)
 
+    def test_a_branch_task_left_in_a_merge_conflict_asks_no_save(self):
+        # Its lookup said "not found", so a Stop asked a save that made a
+        # second task beside the one being merged.
+        self.begin();self.stop();self.save()
+        [path]=list((self.root/'project-brain/dynamic/tasks').glob('*.md'))
+        raw,body=path.read_text()[4:].split('\n---\n',1);record=json.loads(raw)
+        path.write_text('---\n<<<<<<< HEAD\n'+json.dumps(dict(record,progress='Ours.'))+'\n=======\n'
+                        +json.dumps(dict(record,progress='Theirs.'))+'\n>>>>>>> 1234567 (theirs)\n---\n'+body)
+        self.begin();self.one(self.written(self.stop),'stop','skipped','task-unreadable')
+        self.assertEqual(1,len(list((self.root/'project-brain/dynamic/tasks').glob('*.md'))))
+
     def test_each_stop_path_writes_one_line_with_its_code(self):
         def request(payload=self.STOP,host='codex',**values):
             return self.call('native-stop','--host',host,'--task-id','research',data=payload,

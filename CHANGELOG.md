@@ -28,6 +28,31 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A task record left in a merge conflict is not taken for no task — 2026-10-30
+
+- Why: two clones of a branch that both checkpointed its task conflict in
+  that record and its handoff when one pulls the other. A record that fails
+  to parse kept the identity it claims only while its frontmatter still
+  parsed, and with conflict markers it did not: a lookup by the branch said
+  "not found". A clone without a binding was told "working: not recorded
+  yet", and the save its Stop then asked for made a second task for the
+  branch beside the one being merged - a twin once the conflict was
+  resolved. Found with two clones on `main` that had synced, each saving,
+  then a pull.
+- What changes: a record's claimed identity is read from either side of an
+  unresolved Git merge conflict (`brain_runtime.merge_sides`), so a lookup
+  says the record is invalid, and the error says why: "unresolved Git merge
+  conflict". The capsule of a clone without a binding says so as the bound
+  clone's always did, leading with the file ("Unresolved Git merge conflict
+  in project-brain/dynamic/tasks/<uuid>.md: keep one side or merge both"),
+  and a native Stop asks no save until the file is repaired (`skipped`
+  `task-unreadable`, documented in `docs/MEMORY-INTEGRATION.md` with the
+  `interrupted` refusal).
+- Tests: `project-brain/tests/test_runtime.py` conflicts a task record: the
+  lookup is not "not found", the capsule names the conflict and the file,
+  and a checkpoint makes no second task. `tests/test_memory_native_capture.py`:
+  the Stop asks no save and makes no task. Both fail before.
+
 ### A branch two task records claim is saved where its capsule says — 2026-10-30
 
 - Why: two copies of a branch - two people on `main`, a branch worked on
