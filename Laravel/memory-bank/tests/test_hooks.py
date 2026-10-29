@@ -535,7 +535,7 @@ class BashValidatorTest(FakeRepoMixin, unittest.TestCase):
         secret_command = "git reset --hard SECRET-COMMAND-BODY"
         expected = (
             "bash-validator: no JSON extractor available "
-            "(jq/php/python3), validation skipped"
+            "(jq/php/Python 3.9+), validation skipped"
         )
         for tool in MIRRORS:
             with self.subTest(tool=tool):
@@ -1295,8 +1295,10 @@ class PythonResolutionTest(unittest.TestCase):
                 self.stand_in(name, f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
         return {"OS": "Windows_NT", "PATH": str(self.bin) + os.pathsep + self.without_python()}
 
-    def run_hook(self, tool: str, name: str, env: dict, payload=None, runtime="context.py"):
-        """``name`` against a runtime stand-in that records its arguments."""
+    def run_hook(self, tool: str, name: str, env: dict, payload=None, runtime="context.py", ensure_ascii=True):
+        """``name`` against a runtime stand-in that records its arguments.
+        Claude Code sends text outside ASCII as it is, in UTF-8: pass
+        ensure_ascii=False to send it so."""
         project = self.root / tool
         hooks = project / MIRRORS[tool][0]
         hooks.mkdir(parents=True, exist_ok=True)
@@ -1317,9 +1319,11 @@ class PythonResolutionTest(unittest.TestCase):
         lock_dir.mkdir(exist_ok=True)
         result = subprocess.run(
             [BASH, str(hooks / name)],
-            input=json.dumps(payload if payload is not None else {"prompt": "cobalt allocation"}),
+            input=json.dumps(payload if payload is not None else {"prompt": "cobalt allocation"},
+                             ensure_ascii=ensure_ascii),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             cwd=str(project),
             env={**os.environ, "CONTEXT_TASK_ID": "TASK-INPUT", "CONTEXT_CAPSULE_DELIVERED": "",
                  "SUBAGENT_WRITE_LOCK_DIR": str(lock_dir), **env},
@@ -1417,10 +1421,138 @@ class PythonResolutionTest(unittest.TestCase):
         self.assertIsNone(argv)
         self.assertIn("Memory refresh unavailable: it exited 49", result.stdout)
 
+    VALIDATORS = ("bash-validator.sh", "file-naming-validator.sh", "subagent-gate.sh")
+    # Python's text streams as on an English Windows: read by the ANSI code
+    # page, \n written as \r\n.
+    WINDOWS_STREAMS = (
+        "import io, sys\n"
+        "sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='cp1252')\n"
+        "sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='cp1252', newline='\\r\\n')\n"
+    )
+    # Each validator refuses these; the words people here write are Russian.
+    REFUSED = {
+        "bash-validator.sh": {"tool_name": "Bash", "tool_input": {"command": "rm -rf / # очистка"}},
+        "file-naming-validator.sh": {"tool_name": "Write",
+                                     "tool_input": {"file_path": "tasks/TASK-1/план.md", "content": "Черновик"}},
+        "subagent-gate.sh": {"tool_name": "Agent",
+                             "tool_input": {"subagent_type": "Explore", "prompt": "Найди, где считается скидка"}},
+    }
+
+    def without_json_tools(self) -> str:
+        """This PATH's programs with no Python, jq or php: where Git Bash has
+        neither of those two, the validators decode a call with Python."""
+        tools = self.root / "tools-no-json"
+        if not tools.is_dir():
+            tools.mkdir()
+            for directory in os.environ.get("PATH", "").split(os.pathsep):
+                try:
+                    entries = list(os.scandir(directory or "."))
+                except OSError:
+                    continue
+                for entry in entries:
+                    if entry.name.startswith(("python", "php")) or entry.name in ("py", "jq"):
+                        continue
+                    if not (tools / entry.name).exists() and os.access(entry.path, os.X_OK):
+                        (tools / entry.name).symlink_to(entry.path)
+        return str(tools)
+
+    def windows_python(self) -> dict:
+        """Windows as a validator meets it there: no jq and no php, python3
+        the Store stub, and python with the text streams Windows gives it -
+        set at the top of the program it runs, which -I leaves alone."""
+        self.stand_in("python3", self.STORE_STUB)
+        self.stand_in("python", f"#!{sys.executable}\n"
+                                "import os, sys\n"
+                                "argv = sys.argv[1:]\n"
+                                "if '-c' in argv:\n"
+                                f"    argv[argv.index('-c') + 1] = {self.WINDOWS_STREAMS!r} + argv[argv.index('-c') + 1]\n"
+                                f"os.execv({sys.executable!r}, [{sys.executable!r}, *argv])\n")
+        return {"OS": "Windows_NT", "TMPDIR": str(self.root),
+                "PATH": str(self.bin) + os.pathsep + self.without_json_tools()}
+
+    def run_validator(self, tool: str, name: str, env: dict, payload: dict) -> subprocess.CompletedProcess:
+        """``name`` as ``tool`` runs it, in a project whose roster is one agent."""
+        project = self.root / tool
+        hooks = project / MIRRORS[tool][0]
+        hooks.mkdir(parents=True, exist_ok=True)
+        shutil.copy(hook_path(tool, name), hooks)
+        for folder in (".claude", ".cursor"):
+            agents = project / folder / "agents"
+            agents.mkdir(parents=True, exist_ok=True)
+            (agents / "reviewer.md").write_text("---\nname: reviewer\n---\nReviews.\n", encoding="utf-8")
+        return subprocess.run([BASH, str(hooks / name)], input=json.dumps(payload, ensure_ascii=False),
+                              capture_output=True, text=True, encoding="utf-8", cwd=str(project),
+                              env={**os.environ, "SUBAGENT_WRITE_LOCK_DIR": str(self.root / "locks"), **env},
+                              timeout=HOOK_TIMEOUT)
+
+    def test_the_validators_check_a_call_through_python_on_windows(self) -> None:
+        # Where Git Bash has neither jq nor php, a validator decodes the call
+        # with Python. It named only python3 - the Store stub there - and read
+        # the call by the ANSI code page, which a Russian word does not fit:
+        # either way the call went through unchecked.
+        for tool in MIRRORS:
+            for name, payload in self.REFUSED.items():
+                with self.subTest(tool=tool, hook=name):
+                    self.setUp()
+                    result = self.run_validator(tool, name, self.windows_python(), payload)
+                    if (tool, name) == ("cursor", "subagent-gate.sh"):
+                        # Cursor's gate answers with JSON and always exits 0.
+                        self.assertEqual((0, "deny"), (result.returncode, json.loads(result.stdout)["permission"]),
+                                         result.stdout + result.stderr)
+                        continue
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("BLOCKED", result.stdout + result.stderr)
+
+    def test_a_validator_checks_every_line_python_writes_on_windows(self) -> None:
+        # Python on Windows writes \n as \r\n: each line but the last kept a
+        # \r, and the command or file named there was not the one checked.
+        calls = {
+            "bash-validator.sh": {"tool_name": "Bash", "tool_input": {"command": "rm -rf /\necho done"}},
+            "file-naming-validator.sh": {"tool_name": "apply_patch", "tool_input": {
+                "input": "*** Begin Patch\n*** Add File: tasks/TASK-1/plan.md\n+Plan\n"
+                         "*** Add File: src/Invoice.php\n+<?php\n*** End Patch\n"}},
+        }
+        for tool in MIRRORS:
+            for name, payload in calls.items():
+                with self.subTest(tool=tool, hook=name):
+                    self.setUp()
+                    result = self.run_validator(tool, name, self.windows_python(), payload)
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+
+    def test_the_validators_import_nothing_from_the_sessions_folder(self) -> None:
+        # Run in the session's folder, `python -c` put that folder first on
+        # sys.path: a project's own json.py ran in every validator call - and
+        # here, ending the program, let the call through unchecked.
+        for name, payload in self.REFUSED.items():
+            with self.subTest(hook=name):
+                self.setUp()
+                env = self.windows_python()
+                marker = self.root / "imported"
+                (self.root / "claude").mkdir(parents=True, exist_ok=True)
+                (self.root / "claude" / "json.py").write_text(
+                    f"import pathlib\npathlib.Path({str(marker)!r}).write_text('ran')\nraise SystemExit(0)\n",
+                    encoding="utf-8")
+                result = self.run_validator("claude", name, env, payload)
+                self.assertFalse(marker.exists(), f"{name} imported the project's json.py")
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+
+    def test_the_dispatch_hook_reads_a_russian_answer_on_windows(self) -> None:
+        # The subagent's answer is in the payload: read by the ANSI code page
+        # it failed to decode, no agent was found, and its completion was not
+        # recorded nor its write lock released.
+        result, argv = self.run_hook("claude", "subagent-dispatch.sh", self.windows_python(),
+                                     {"hook_event_name": "SubagentStop", "agent_type": "reviewer",
+                                      "last_assistant_message": "Готово: скидка считается в Invoice.php"},
+                                     ensure_ascii=False)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIsNotNone(argv, result.stdout + result.stderr)
+        self.assertEqual(["msg-dispatch", "--task-id", "TASK-INPUT", "--agent", "reviewer"],
+                         argv[argv.index("msg-dispatch"):argv.index("msg-dispatch") + 5])
+
     def test_every_hook_runs_python_through_one_resolver(self) -> None:
         resolver = None
         for tool in MIRRORS:
-            for name in self.HOOKS:
+            for name in self.HOOKS + self.VALIDATORS:
                 with self.subTest(tool=tool, hook=name):
                     text = hook_path(tool, name).read_text(encoding="utf-8")
                     start = text.index("resolve_python() {\n")
@@ -1428,8 +1560,11 @@ class PythonResolutionTest(unittest.TestCase):
                     resolver = resolver or text[start:end]
                     self.assertEqual(resolver, text[start:end])
                     rest = text[:start] + text[end:]
-                    # A python3 or python standing as a command, not named in text.
-                    call = re.compile(r"(?:^|[;&|(]|\$\(|\btimeout\s+\S+|\brun|\bexec)\s*python3?\b")
+                    # A python3 or python standing as a command, not named in text:
+                    # after the variables a command may set, and before an argument
+                    # or the end - in a pattern, as in `(python3?|py)`, it is text.
+                    call = re.compile(r"""(?:^|[;&|(]|\$\(|\btimeout\s+\S+|\brun|\bexec)\s*"""
+                                      r"""(?:\w+=(?:"[^"]*"|'[^']*'|\S*)\s+)*python3?(?=\s|$)""")
                     bare = [line for line in rest.splitlines()
                             if not line.lstrip().startswith(("#", "echo ")) and call.search(line.strip())]
                     self.assertEqual([], bare)

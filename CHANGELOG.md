@@ -28,6 +28,47 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The validators check a call on Windows where only Python decodes it, and import nothing from the project — 2026-10-28
+
+- Why: `bash-validator.sh`, `file-naming-validator.sh` and `subagent-gate.sh`
+  decode a call with `jq`, else `php`, else Python - and named it only
+  `python3`. Native Windows (Git Bash) often has neither `jq` nor `php`, and
+  its `python3` is often the Microsoft Store stub, which runs nothing: the
+  call went through unchecked. Where a real `python3` ran, it read the call
+  by the ANSI code page, which a Russian word does not fit (`rm -rf / #
+  очистка` passed `bash-validator.sh`, emulated on Linux with Python's
+  streams as on an English Windows), and wrote `\n` as `\r\n`, so the first
+  line of a command of two (`rm -rf /` before `echo done`), or every file of
+  a patch but the last, was not the one checked. `subagent-dispatch.sh`
+  found Python by every name already, but read the payload by the same code
+  page: a subagent's answer in Russian left the agent unnamed, its
+  completion unrecorded and its write lock held.
+- What changes: the three validators and the Codex and Cursor gates find
+  Python with the memory hooks' `resolve_python` (python, py -3, python3 on
+  Windows, remembered per user), only where neither `jq` nor `php` is; every
+  Python snippet in them and in `subagent-dispatch.sh` reads the payload and
+  writes its result as UTF-8 bytes. The four editions and
+  Infrastructure-Creator's own hooks; the generator's `hook-forge` says the
+  same for the hooks it writes.
+- Isolated: every Python snippet in these hooks runs with `-I`. Run in the
+  session's folder, `python -c` put that folder first on `sys.path`, so a
+  project's own `json.py` ran in every validator call: it could end the
+  program and let the call through, or run anything at all. Measured on
+  the prompt hook, which the memory stack isolates the same way: a
+  `json.py` in the project root ran on every prompt, unseen. Attached, as
+  the Harness lends the edition to any folder it opens, that is code the
+  person never trusted.
+- Tests: `PythonResolutionTest` in each edition's `test_hooks.py` runs the
+  validators and the dispatch hook with no `jq` or `php`, `python3` the Store
+  stub and `python` with Windows' text streams (`sitecustomize`: cp1252 in,
+  cp1252 and `\r\n` out); `WindowsPythonTest` does so for
+  Infrastructure-Creator; on the old hooks 15 and 9 of their checks fail,
+  and the dispatch test 1. A `json.py` in the session's folder is not
+  imported, and the call is still refused; without `-I` it fails.
+  `tests/test_windows_memory_hooks.py` runs the
+  installed validators through Git Bash with a python.exe and no `jq` or
+  `php` on the Windows runner; not run on Windows locally.
+
 ### A navigation-only capsule, behind an experiment switch — 2026-10-21
 
 - `capsule_profile` in `runtime.json` (or `CONTEXT_CAPSULE_PROFILE`) chooses

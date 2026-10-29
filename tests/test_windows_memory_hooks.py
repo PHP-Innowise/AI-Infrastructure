@@ -37,6 +37,9 @@ HOOK_TIMEOUT = 180
 # or Windows finds a program by.
 PYTHON_NAMES = tuple(name + suffix for name in ("python", "python3", "py")
                      for suffix in ("", ".exe", ".com", ".bat", ".cmd"))
+# jq and php, which the validators decode a call with before Python.
+JSON_TOOLS = tuple(name + suffix for name in ("jq", "php")
+                   for suffix in ("", ".exe", ".bat", ".cmd"))
 # A remembered-interpreter file this old was not written by a later hook run;
 # a hook that writes it again gives it that run's time.
 LONG_AGO = 1_000_000_000
@@ -238,6 +241,34 @@ class WindowsMemoryHooksTest(unittest.TestCase):
         env = self.hook_env(second, first)
         self.assertIn(WORKING, self.hook(env, "UserPromptSubmit", "working-memory-read.sh", PROMPT).stdout)
         self.assert_remembers(remembered, "python", second)
+
+    def test_the_validators_check_a_russian_call_through_python(self) -> None:
+        # Where Git Bash has neither jq nor php, the validators decode a call
+        # with Python. They named only python3, and Python read the call by
+        # the ANSI code page - a Russian word failed to decode - and wrote \n
+        # as \r\n: either way the call went through unchecked.
+        env = self.hook_env(self.interpreter("venv-1"))
+        env["PATH"] = os.pathsep.join(folder for folder in env["PATH"].split(os.pathsep)
+                                      if not any(os.path.lexists(os.path.join(folder, name))
+                                                 for name in JSON_TOOLS))
+        if any(self.bash_run(env, f"command -v {name}").returncode == 0 for name in ("jq", "php")):
+            self.skipTest("jq or php is still on PATH")
+        settings = json.loads((self.project / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        commands = [hook["command"] for group in settings["hooks"]["PreToolUse"] for hook in group["hooks"]]
+        calls = {
+            "bash-validator.sh": {"tool_name": "Bash", "tool_input": {"command": "rm -rf / # очистка\necho done"}},
+            "file-naming-validator.sh": {"tool_name": "Write",
+                                         "tool_input": {"file_path": "tasks/TASK-1/план.md", "content": "Черновик"}},
+            "subagent-gate.sh": {"tool_name": "Agent",
+                                 "tool_input": {"subagent_type": "Explore", "prompt": "Найди, где считается скидка"}},
+        }
+        for script, payload in calls.items():
+            with self.subTest(script=script):
+                command = next((command for command in commands if command.endswith(f"/.claude/hooks/{script}")), None)
+                self.assertIsNotNone(command, f"PreToolUse does not run {script}: {commands}")
+                result = self.bash_run(env, command, json.dumps(
+                    {"session_id": "windows-hooks", "hook_event_name": "PreToolUse", **payload}, ensure_ascii=False))
+                self.assertEqual(2, result.returncode, f"{script}\n{result.stdout}\n{result.stderr}")
 
 
 if __name__ == "__main__":
