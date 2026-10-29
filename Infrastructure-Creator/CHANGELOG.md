@@ -4,6 +4,23 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### bash-validator reads what bash runs in `${...}`, `$((...))` and backquotes — 2026-10-29
+
+- Infrastructure-Creator's own `bash-validator.sh` carries the generic
+  section's fix (root `CHANGELOG.md`, same day): substitutions inside
+  `${...}` and `$((...))` are checked, a backquoted command ends where bash
+  ends it, `$` before a line continuation is joined, `$'...'` is decoded as
+  bash decodes it, bash 5.3's `${ command; }`, a `trap` action and `env -S`
+  are checked as commands, a `(` inside a word and the `)` after a `case`
+  pattern no longer end a `$(...)` early, a substitution between single
+  quotes in an arithmetic expression is checked, a substitution or nested
+  double-quoted string that never closes is refused as `command too
+  complex`, `${`/`$((` nesting is limited, heredoc bodies no longer cost a
+  copy of the rest of the command each, and a command not checked within
+  two to three seconds is refused as `command too long to check in time`
+  instead of left to the host's 5 s timeout, which runs it. Its hooks
+  README says so.
+
 ### The validators check a call on Windows where only Python decodes it — 2026-10-28
 
 - Infrastructure-Creator's own `bash-validator.sh` and its three
@@ -159,6 +176,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
   files the line leaves out counted in the compaction line. The transcript
   is read after the turn's record and within a second, an attached checkout
   keeps its own recent files, and excerpt growth leaves the line its room.
+
+### The generator's validator reads unquoted heredocs — 2026-10-19
+
+- The generator's own `bash-validator.sh` takes the shared generic section's
+  heredoc fix (see the root `CHANGELOG.md`). Under an unquoted delimiter
+  (`<<EOF`) bash runs the `$(...)` and backticks of a heredoc body while it
+  reads it, so they are checked as commands now; a quoted delimiter
+  (`<<'EOF'`) keeps the body data.
 
 ### Generated projects on native Windows — 2026-10-16
 

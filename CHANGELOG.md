@@ -28,6 +28,109 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### bash-validator: substitutions in `${...}`, `$((...))` and backquotes, and a time limit — 2026-10-29
+
+- Why: the parser skipped the inside of `${...}` up to the first `}` and of
+  `$((...))` up to the first `))`, so `echo ${X:-$(gh repo delete x)}` and
+  `echo $(( $(gh repo delete x) + 1 ))` passed. So did `$((gh repo delete x) )`,
+  which bash reads as a subshell, and when no `))` followed, everything after
+  it went unread. A `$` followed by a line continuation (`$\` newline `(...)`)
+  was not joined. A backquoted command was parsed in place, so a backquote
+  inside a quoted heredoc body or between single quotes, where bash ends it,
+  did not end it: the commands after it ran unchecked. Against bash itself,
+  of 18,000 generated command lines the old validator let 982 through while
+  bash ran the destructive command in them. And two inputs made the hook
+  fail open with no parse error at all: `${X:-${X:-...}}` nested a few
+  thousand deep crashed bash (SIGSEGV), and 8,000 heredocs took 8.7 s, past
+  the host's 5 s, after which the host runs the command.
+- What changes, in the generic section (all five copies and their mirrors):
+  - `${...}` is walked to the `}` bash ends it at (quotes and nested
+    expansions keep a `}` from ending it), and its `$(...)` and backticks are
+    parsed; inside double quotes or a heredoc body also those between single
+    quotes, where `\$` still escapes. A `${` with no `}` before the end is
+    read again as plain text instead of swallowing the rest.
+  - `$((...))` is walked for its substitutions, `<<` staying a shift; when the
+    parenthesis that closes the inner one is not followed by another, it is
+    read again as `$( (...) ...)`, as bash reads it. Text read a second time
+    is bounded (`BV_MAX_REREAD`, 16; past it, `command too complex`).
+  - A backslash-newline after `$` is joined first, also in double quotes and
+    unquoted heredoc bodies.
+  - A backquoted command is cut out at the next backquote no backslash
+    escapes, unescaped (`` \` ``, `\$`, `\\`, and `\"` inside double quotes)
+    and parsed on its own, as bash runs it; nested escaped backquotes become
+    nested commands.
+  - bash 5.3's `${ command; }` and `${| command; }` run their command in the
+    current shell: they are parsed as command substitutions, ending at a `}`
+    where a command would start. Before, `echo ${ gh repo delete x; }`
+    passed.
+  - The nesting limit (`BV_MAX_NEST`) applies to `${` and `$((` too.
+  - `$'...'` is decoded as bash decodes it: `\xHH`, `\uHHHH`, `\UHHHHHHHH`
+    and `\NNN` make their character, and a NUL ends the string. Before,
+    `$'\x67h' repo delete x` and `git push $'--\x66orce'` passed. A name
+    or option assembled at run time (a variable, a substitution's output, a
+    brace expansion like `{gh,}`) is still not followed; the hooks README
+    lists it under Limits.
+  - A heredoc body is looked for in the parser's window before the rest of
+    the command is copied, and the heredocs of one line are split once:
+    8,000 heredocs take 2.2 s instead of 8.7 s.
+  - A command not checked within `BV_TIME_LIMIT` (3, so two to three
+    seconds) is refused as `command too long to check in time` instead of
+    left to the host's timeout. One 390 KB file written through a heredoc
+    still takes 0.7 s.
+- Measured: of the same 18,000 command lines the new validator lets none
+  through. It blocks 9 that bash ran cleanly without running the destructive
+  command, each because a variable's value kept bash from expanding a
+  default or a pattern (`${HOME:-$(...)}` with `HOME` set, `${X#$(...)}` with
+  `X` empty); a static check cannot know values. The heredoc fuzzer of
+  2026-10-19 (3,000 more) lets none through either (the old validator 3, all
+  backquoted heredocs). 100 KB of `${...}` or `$((...))` takes 1.1 s instead
+  of 0.6 s, since their inside is read now.
+- A `trap` action is checked as a command: it runs when a signal comes or,
+  for `EXIT`, when the shell ends, which is as soon as the call returns
+  (`trap 'git push --force' EXIT` passed). A lone signal or `-` resets and
+  runs nothing. So is the string `env -S` (`--split-string`) splits into
+  the command it runs. Of 142 real commands with a `trap` or `env -S`, all
+  cleanup, none is refused now that was not before.
+- A `(` inside a word (`arr=(a b)`, `f()`) pairs with its `)`, and the `)`
+  after a `case` pattern no longer ends the `$(...)` or subshell around the
+  `case`. The parser ended a `$(...)` at either, and inside double quotes
+  read the rest as quoted text: `echo "$(a=(x); gh repo delete x)"` and
+  `echo "$(case x in x) echo y;; esac; gh repo delete x)"` passed. A
+  substitution that reaches the end unclosed, or a double-quoted string
+  nested in another that never closes, is refused as `command too complex`:
+  bash refuses such a line or ends it where the parser did not.
+- An arithmetic expression - `$((...))`, `((...))`, `for ((...))` - is
+  expanded as if it stood in double quotes, so a `$(...)` or backquote
+  between single quotes in it runs: `(( '$(gh repo delete x)' ))` passed,
+  also on the validator before this change. Those are checked now, a
+  `${...}` in the expression is read as in double quotes, and a line
+  continuation between the two parentheses is dropped first, as bash drops
+  it (`$(`, backslash-newline, `(` is `$((`). A `((` that does not close as
+  arithmetic is read as two subshells, as bash reads it. An array subscript
+  and a substring offset are expanded the same way but not walked, nor is
+  the deprecated `$[...]`: the hooks README lists them under Limits.
+  Of the 69,404 commands agents ran on this machine, 2 are refused now
+  that were not, both lines bash itself rejects as syntax errors (a
+  nested string that never closes); none of the 427 with a `((` or the 144
+  with a `case` changes.
+- `scripts/bash_validator_fuzz.py` keeps the check: it writes command lines
+  around these forms, runs each through bash with a marker, and fails when
+  the validator lets through one bash runs the command in. Each line runs
+  in an empty folder of its own, since a file an earlier line named after
+  the marker turned a later glob into a call of it. The `mirrors` job
+  runs two seeds (`tests/test_bash_validator_fuzz.py`, 600 lines, under two
+  seconds) and checks that a copy which skips `${...}` again is caught: it
+  misses 16 to 27 of every 300 lines. The validator before this change
+  misses 187 of 600, and this one before its `case`, word-parenthesis and
+  arithmetic fixes 26.
+- Corpus 338 -> 398 cases, with `expansions` and `time` decisions; every new
+  case was checked against bash. The parse-cost test covers default values,
+  arithmetic and many heredocs (on the old validator 4x the heredocs took
+  8.7x the time), nesting `${` and `$((` thousands deep (refused, no crash),
+  and a copy with no time, which refuses every command. The editions' and
+  Infrastructure-Creator's hooks README say what is read inside `${...}`,
+  `$((...))` and backquotes, and the time limit.
+
 ### The validators check a call on Windows where only Python decodes it, and import nothing from the project — 2026-10-28
 
 - Why: `bash-validator.sh`, `file-naming-validator.sh` and `subagent-gate.sh`
@@ -666,6 +769,35 @@ change below has a test that fails on `a47e1eb8`.
   capsule carries one, so a grown excerpt no longer makes the renderer cut
   the later ones. `test_attached.py::AttachedRecentFilesTest`,
   `RecentFilesExcerptRoomTest`.
+
+### bash-validator: substitutions in unquoted heredocs — 2026-10-19
+
+- Under an unquoted heredoc delimiter (`<<EOF`) bash expands the body while it
+  reads it: every `$(...)` and backtick substitution in it runs, also between
+  quotes, which are plain characters there. The validator treated every
+  heredoc body as data, so `cat > f <<EOF` holding `$(gh repo delete x)`, or a
+  commit message written through `git commit -m "$(cat <<EOF ...)"` with
+  `` `git push --force` `` in Markdown backticks, passed. The generic section
+  (all five copies and their `.cursor`/`.codex` mirrors) now keeps whether
+  the delimiter is quoted (`'EOF'`, `"EOF"`, `\EOF`, `E"O"F`, `$'EOF'`).
+  An unquoted body is walked for `$(...)` and backticks, including those
+  inside `${...}`; they become segments of their own under the command that
+  owns the heredoc and are checked by the same rules as the rest of the line.
+  The text around them stays data, and a quoted body stays data as before.
+- An unquoted body also loses its backslash-newlines as bash reads it, so a
+  line `EO\` followed by `F` ends the heredoc and the next line runs. The
+  delimiter is now matched against the joined line, which also stops a body
+  ending in a backslash from ending early. Leading tabs of a `<<-` line are
+  stripped in one step instead of one per tab: 40,000 tabs took 1.3 s, now
+  0.05 s.
+- The corpus grows from 323 to 338 cases and gains a `heredoc` decision; the
+  parse-cost test covers an unquoted body and a tab-indented line. An
+  unquoted body costs what the same text costs in double quotes: a 100 KB PHP
+  file written through `<<EOF` takes 0.16 s instead of 0.10 s. Against bash
+  itself, none of 7,500 generated heredoc commands was let through while
+  bash ran its destructive command, or blocked while bash did not; the old
+  validator let 179 of the first 1,500 through. The editions' hooks README
+  says which heredocs are data.
 
 ### Excerpts grow into the capsule's room — 2026-10-17
 

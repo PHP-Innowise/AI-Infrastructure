@@ -823,6 +823,40 @@ python3 scripts/check_routes.py --json
 - **Writes:** none.
 - **CI relationship:** the `mirrors` job runs it and its regression tests.
 
+### `bash_validator_fuzz.py`
+
+**Purpose and status.** Checks `bash-validator.sh` against bash itself;
+source-only and not installed. The corpus holds the cases someone thought of;
+this writes command lines around the forms the parser got wrong before -
+`${...}` (default values, patterns, nesting), `$((...))` and the subshell bash
+reads in place of one, backquotes ended inside quotes or a heredoc body,
+heredocs, quotes, line continuations, bash 5.3's `${ command; }`, a `trap`
+action, a `case` pattern's `)` and a `(` inside a word within `$(...)` - and
+asks bash which of them run their command.
+
+```bash
+python3 scripts/bash_validator_fuzz.py
+python3 scripts/bash_validator_fuzz.py --seeds 7,8 --cases 2000 --show 10
+python3 scripts/bash_validator_fuzz.py --hook Laravel/.claude/hooks/bash-validator.sh
+```
+
+- **Oracle:** bash runs each line with the command replaced by a function that
+  only writes a marker; the validator is handed the line with
+  `gh repo delete x` there, which it always refuses. Nothing else ever runs.
+- **Outputs:** counts, then up to `--show` lines of each kind. Exit 1 when bash
+  ran the marker in a line the validator let through (a miss), or a hook run
+  neither passed nor refused; 2 when the bash on PATH is older than 5. A line
+  the validator refused though bash ran nothing cleanly is counted, not
+  failed: it depends on values a static check cannot know
+  (`${HOME:-$(...)}` with `HOME` set).
+- **Options:** `--hook` (a `.claude` copy; default PHP Core's), `--seeds`
+  (comma-separated, default `1,2,3`), `--cases` per seed (default 400),
+  `--jobs`, `--show`.
+- **Dependencies:** Python 3.9+ standard library and bash 5+.
+- **Writes:** a temporary folder it removes.
+- **CI relationship:** `tests/test_bash_validator_fuzz.py` in the `mirrors`
+  job runs two seeds and checks that a copy skipping `${...}` again is caught.
+
 ### `check_stabilization.py`
 
 **Purpose and status.** Policy structure gate; source-only and not installed.

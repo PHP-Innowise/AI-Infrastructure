@@ -117,7 +117,9 @@ fi
 #     shell that reads stdin, directly or through a launcher (docker exec -i
 #     app bash, ssh host bash -s), or to ssh HOST with no remote command;
 #   - any other heredoc body is data: only the SQL rules of the segment that
-#     owns it read it;
+#     owns it read it. Under an unquoted delimiter (<<EOF, not <<'EOF',
+#     <<"EOF" or <<\EOF) bash expands the body while it reads it, so the
+#     $(...) and `...` bodies in it become segments of their own as well;
 #   - VAR=value prefixes, wrappers (command, builtin, exec, nohup, time,
 #     sudo, doas, env, nice, ionice, timeout, stdbuf, xargs) and a binary's
 #     directory (/usr/bin/git -> git) are stripped; `php script` runs the
@@ -138,7 +140,9 @@ fi
 # This is a guard against accidental destruction, not a sandbox: a script
 # written to disk and run later, or text piped into a shell, is not inspected.
 # Nesting deeper than any real command (BV_MAX_NEST call frames) is refused
-# instead of parsed, since bash would run out of stack and fail open.
+# instead of parsed, since bash would run out of stack and fail open. So is
+# a command not checked within BV_TIME_LIMIT seconds: the host gives a hook
+# 5 and runs the command when it times out.
 #
 # Rule syntax (BV_GENERIC_RULES below, BV_FRAMEWORK_RULES after the block),
 # fields separated by "|" (so no field may contain one), lists by ",":
@@ -166,6 +170,13 @@ BV_TAB=$'\t'
 BV_CR=$'\r'
 BV_MAX_DEPTH=8
 BV_MAX_NEST=100
+# A $(( that is not arithmetic is read again as $( (..., a ${ with no }
+# as plain text; past this many, the command is refused (bv_reread).
+BV_MAX_REREAD=16
+# Seconds a command may take to check (SECONDS counts whole ones, so 2 to 3);
+# bv_validate starts the clock, this default only keeps it defined.
+BV_TIME_LIMIT=3
+BV_DEADLINE=$(( SECONDS + BV_TIME_LIMIT ))
 BV_SEARCH=',grep,egrep,fgrep,rg,ag,ack,git,'
 # Programs that run a command line given to them as one quoted word.
 BV_LAUNCHERS=',ssh,sshpass,mosh,ddev,lando,vagrant,sail,docker,docker-compose,podman,podman-compose,nerdctl,kubectl,oc,gcloud,heroku,fly,flyctl,tmux,screen,watch,script,flock,parallel,nix-shell,devbox,distrobox,toolbox,multipass,limactl,'
@@ -173,6 +184,9 @@ BV_LAUNCHERS=',ssh,sshpass,mosh,ddev,lando,vagrant,sail,docker,docker-compose,po
 BV_NOT_PLAIN=$'*[!]A-Za-z0-9_./:=@%+,~^!?*{}[;&| \t-]*'
 BV_RE_ASSIGN='^[A-Za-z_][A-Za-z0-9_]*[+]?='
 BV_RE_BROAD='^(/[^/]*|~[A-Za-z0-9._-]*|(\.\.?/)*\.\.?)$'
+# A line ending in an unpaired backslash, which an unquoted heredoc body
+# joins to the next line.
+BV_RE_JOIN='(^|[^\\])(\\\\)*\\$'
 BV_SQL_WS="[[:space:]${BV_US}]+"
 BV_RE_SQL_DROP="(^|[^[:alnum:]_])[Dd][Rr][Oo][Pp]${BV_SQL_WS}([Tt][Aa][Bb][Ll][Ee]|[Dd][Aa][Tt][Aa][Bb][Aa][Ss][Ee]|[Ss][Cc][Hh][Ee][Mm][Aa])([^[:alnum:]_]|\$)"
 BV_RE_SQL_TRUNCATE="(^|[^[:alnum:]_])[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]${BV_SQL_WS}[Tt][Aa][Bb][Ll][Ee]([^[:alnum:]_]|\$)"
@@ -201,19 +215,30 @@ BV_GENERIC_RULES=(
 bv_hit() { [[ -n $BV_HIT ]] || BV_HIT=$1; }
 
 # ---- parser ---------------------------------------------------------------
-# bv_parse STOP DEPTH PARENT walks BV_S from BV_P. STOP is "" (end of text),
-# ")" or "`". Segments are appended to the BV_SEG_* arrays; the helpers below
-# work on bv_parse's locals (word, have, want, words, docs, seg). A long word
-# or word list is kept in two parts (wordh/word, wordsh/words) so that each
-# append copies at most a short tail instead of everything collected so far.
+# bv_parse STOP DEPTH PARENT walks BV_S from BV_P to BV_L. STOP is "" (end of
+# text), ")" or "}" (a } where a command would start). Segments are appended to the BV_SEG_* arrays; the helpers
+# below work on bv_parse's locals (word, have, quoted, want, words, docs,
+# seg). A long word or word list is kept in two parts (wordh/word,
+# wordsh/words) so that each append copies at most a short tail instead of
+# everything collected so far.
 #
 # Characters are read through BV_WIN, the text of BV_S from BV_WB to BV_WE:
 # every ${BV_S:offset:length} copies the whole of BV_S, so reading a long
 # command from it a character at a time would be quadratic. A loop moves the
-# window (bv_win) before it can come within reach of its end.
+# window (bv_win) before it can come within reach of its end. Nothing is read
+# past BV_L, which bv_heredoc_expand lowers to the end of a heredoc body.
 
 bv_win() {
-  BV_WIN=${BV_S:BV_P:1024}
+  local n
+  # Every walk moves the window as it goes: past the deadline, it ends here.
+  if (( SECONDS >= BV_DEADLINE )); then
+    bv_hit 'command too long to check in time'
+    BV_P=$BV_L
+  fi
+  n=$(( BV_L - BV_P ))
+  (( n <= 1024 )) || n=1024
+  (( n >= 0 )) || n=0
+  BV_WIN=${BV_S:BV_P:n}
   BV_WB=$BV_P; BV_WE=$(( BV_P + ${#BV_WIN} ))
 }
 
@@ -234,9 +259,19 @@ bv_upto() {
   (( BV_P + 512 <= BV_WE || BV_WE >= BV_L )) || bv_win
   w=${BV_WIN:BV_P-BV_WB}
   if [[ $w == *"$1"* ]]; then BV_UPTO=${w%%"$1"*}; return 0; fi
-  (( BV_WE >= BV_L )) || w=${BV_S:BV_P}
+  (( BV_WE >= BV_L )) || w=${BV_S:BV_P:BV_L-BV_P}
   BV_UPTO=${w%%"$1"*}
   [[ $w == *"$1"* ]]
+}
+
+# A backslash-newline outside quotes is dropped before bash reads on: move
+# BV_P past those at BV_P.
+bv_joined() {
+  while :; do
+    (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+    [[ ${BV_WIN:BV_P-BV_WB:2} == "\\$BV_NL" ]] || return 0
+    BV_P=$(( BV_P + 2 ))
+  done
 }
 
 bv_new_seg() {
@@ -255,12 +290,38 @@ bv_word() {
   case $want in
     '')
       words=$words$BV_US$word
-      (( ${#words} < 1024 )) || { wordsh=$wordsh$words; words=''; } ;;
-    '<<'|'<<-') docs=$docs$BV_RS$seg$BV_GS$want$BV_GS$word ;;
+      (( ${#words} < 1024 )) || { wordsh=$wordsh$words; words=''; }
+      (( quoted )) || [[ $word != in && $word != esac ]] || bv_case_word ;;
+    '<<'|'<<-') docs=$docs$BV_RS$seg$BV_GS$quoted$want$BV_GS$word ;;
     '<<<') BV_SEG_DOC[seg]=${BV_SEG_DOC[seg]}$BV_US$word ;;
     *) BV_SEG_REDIR[seg]=${BV_SEG_REDIR[seg]}$BV_US$want$BV_GS$word ;;
   esac
-  word=''; have=0; want=''
+  word=''; have=0; quoted=0; want=''
+}
+
+# bv_case_word: the word just ended is an unquoted `in` or `esac`. After
+# `case WORD in` (or `then case WORD in`, `do case ...`) come patterns, and
+# the ) that ends one does not end the $( or subshell around the case:
+# bv_parse counts the cases open (cases) and whether a pattern is next
+# (casepat). `esac` as the first word of a command closes one.
+bv_case_word() {
+  local w=$words k s
+  while :; do
+    k=${w#"$BV_US"}; k=${k%%"$BV_US"*}
+    case $k in
+      '!'|'{'|if|then|elif|else|do|while|until|time) w=${w#"$BV_US$k"} ;;
+      *) break ;;
+    esac
+  done
+  if [[ $word == esac ]]; then
+    if (( cases )) && [[ $w == "$BV_US"esac ]]; then cases=$(( cases - 1 )); casepat=0; fi
+    return 0
+  fi
+  s=${w#"$BV_US"case"$BV_US"}
+  [[ $s != "$w" && $s == *"$BV_US"in ]] || return 0
+  s=${s%"$BV_US"in}
+  [[ -n $s && $s != *"$BV_US"* ]] || return 0
+  cases=$(( cases + 1 )); casepat=1
 }
 
 bv_end_seg() {
@@ -268,68 +329,163 @@ bv_end_seg() {
   wordsh=''; words=''; want=''
 }
 
+# The bodies of the heredocs whose line just ended, in order. A docs entry is
+# the owning segment, then 1 or 0 (delimiter quoted or not) and the operator,
+# then the delimiter.
 bv_heredocs() {
-  local list=$docs$BV_RS entry owner op delim rest line body part
+  local entry owner op quoted delim rest line piece body part start end at saved=$IFS
+  local -a entries
+  # Split once: taking each entry off the front copied the rest of the list.
+  IFS=$BV_RS
+  set -f
+  # shellcheck disable=SC2206 # deliberate split on the record separator, globbing off
+  entries=(${docs#"$BV_RS"})
+  set +f
+  IFS=$saved
   docs=''
-  list=${list#"$BV_RS"}
-  while [[ -n $list ]]; do
-    entry=${list%%"$BV_RS"*}; list=${list#*"$BV_RS"}
+  for entry in "${entries[@]}"; do
     owner=${entry%%"$BV_GS"*}; entry=${entry#*"$BV_GS"}
     op=${entry%%"$BV_GS"*}; delim=${entry#*"$BV_GS"}
-    body=''
-    rest=${BV_S:BV_P}
-    # Fast path: a plain << body ends at the first line that is the delimiter.
-    if [[ $op == '<<' && $BV_NL$rest == *"$BV_NL$delim$BV_NL"* && $rest != *"$BV_CR"* ]]; then
-      if [[ $rest == "$delim$BV_NL"* ]]; then
-        BV_P=$(( BV_P + ${#delim} + 1 ))
-      else
-        body=${rest%%"$BV_NL$delim$BV_NL"*}$BV_NL
-        BV_P=$(( BV_P + ${#body} + ${#delim} + 1 ))
-      fi
-      BV_SEG_DOC[owner]=${BV_SEG_DOC[owner]}$BV_US$body
-      continue
+    quoted=${op:0:1}; op=${op:1}
+    body='' rest='' start=$BV_P end=-1
+    # Fast path: a plain << body ends at the first line that is the
+    # delimiter, unless an unquoted body has a backslash-newline to join.
+    # The window is searched first: copying all that follows for every
+    # heredoc made thousands of them take longer than a hook may run. A
+    # body the window does not hold is long enough to pay for the copy.
+    if (( BV_P < BV_L )); then
+      (( BV_P + 512 <= BV_WE || BV_WE >= BV_L )) || bv_win
+      rest=${BV_WIN:BV_P-BV_WB}
+      [[ $BV_NL$rest == *"$BV_NL$delim$BV_NL"* ]] || (( BV_WE >= BV_L )) ||
+        rest=${BV_S:BV_P:BV_L-BV_P}
     fi
-    part=''
-    while (( BV_P < BV_L )); do
-      bv_upto "$BV_NL"
-      line=$BV_UPTO
-      BV_P=$(( BV_P + ${#line} + 1 ))
-      line=${line%"$BV_CR"}
-      if [[ $op == '<<-' ]]; then
-        while [[ $line == "$BV_TAB"* ]]; do line=${line#"$BV_TAB"}; done
+    if [[ $op == '<<' && $BV_NL$rest == *"$BV_NL$delim$BV_NL"* ]]; then
+      [[ $rest == "$delim$BV_NL"* ]] || body=${rest%%"$BV_NL$delim$BV_NL"*}$BV_NL
+      if [[ $body != *"$BV_CR"* ]] && [[ $quoted == 1 || $body != *'\'"$BV_NL"* ]]; then
+        end=$(( BV_P + ${#body} )); BV_P=$(( end + ${#delim} + 1 ))
+      else
+        body=''
       fi
-      [[ $line == "$delim" ]] && break
-      part=$part$line$BV_NL
-      (( ${#part} < 1024 )) || { body=$body$part; part=''; }
-    done
-    BV_SEG_DOC[owner]=${BV_SEG_DOC[owner]}$BV_US$body$part
+    fi
+    if (( end < 0 )); then
+      part='' end=$BV_L
+      while (( BV_P < BV_L )); do
+        at=$BV_P; line=''
+        while :; do
+          bv_upto "$BV_NL"; piece=$BV_UPTO
+          BV_P=$(( BV_P + ${#piece} + 1 ))
+          if [[ $op == '<<-' && -z $line && $piece == "$BV_TAB"* && $piece =~ ^$BV_TAB+ ]]; then
+            piece=${piece:${#BASH_REMATCH}}
+          fi
+          # bash drops every backslash-newline of an unquoted body while it
+          # reads it, so a line ending in an unpaired backslash goes on in
+          # the next one. Only as much of the joined line is kept as can
+          # still equal the delimiter.
+          [[ $quoted == 0 && $piece == *'\' ]] && (( BV_P <= BV_L )) &&
+            [[ $piece =~ $BV_RE_JOIN ]] || break
+          (( ${#line} > ${#delim} )) || line=$line${piece%'\'}
+          part=$part$piece$BV_NL
+          (( ${#part} < 1024 )) || { body=$body$part; part=''; }
+        done
+        piece=${piece%"$BV_CR"}
+        (( ${#line} > ${#delim} )) || line=$line$piece
+        if [[ $line == "$delim" ]]; then end=$at; break; fi
+        part=$part$piece$BV_NL
+        (( ${#part} < 1024 )) || { body=$body$part; part=''; }
+      done
+      body=$body$part
+    fi
+    BV_SEG_DOC[owner]=${BV_SEG_DOC[owner]}$BV_US$body
+    [[ $quoted == 1 || $body != *[\$\`]* ]] || bv_heredoc_expand "$start" "$end" "$owner"
   done
 }
 
+# bv_heredoc_expand START END OWNER: bash expands the body of a heredoc whose
+# delimiter is unquoted (START to END of BV_S) while it reads it, the way it
+# expands double-quoted text, except that quotes are plain characters: its
+# $(...) and `...` run. They are parsed by the rules of any other word, into
+# segments under OWNER, with BV_L lowered to END so that none reads past the
+# body.
+bv_heredoc_expand() {
+  local seg=$3 depth=${BV_SEG_DEPTH[$3]} at=$BV_P bound=$BV_L word='' wordh='' c rest chunk
+  BV_P=$1; BV_L=$2
+  bv_win
+  while (( BV_P < BV_L )); do
+    (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+    c=${BV_WIN:BV_P-BV_WB:1}
+    case $c in
+      '\') BV_P=$(( BV_P + 2 )) ;;
+      '$')
+        # Only $( and bash 5.3's ${ command; } run anything - a
+        # backslash-newline after the $ is dropped first; the text of
+        # ${...} is walked on, so a $(...) in a default value is found too.
+        BV_P=$(( BV_P + 1 )); bv_joined
+        case ${BV_WIN:BV_P-BV_WB:2} in
+          '('*|'{ '*|"{$BV_TAB"*|"{$BV_NL"*|'{|'*)
+            BV_P=$(( BV_P - 1 )); word=''; bv_dollar "$depth" "$seg" 1 ;;
+        esac ;;
+      '`') bv_backquote "$depth" "$seg" 0 ;;
+      *)
+        rest=${BV_WIN:BV_P-BV_WB:256}
+        chunk=${rest%%[\\\$\`]*}
+        BV_P=$(( BV_P + ${#chunk} )) ;;
+    esac
+  done
+  BV_P=$at; BV_L=$bound
+  bv_win
+}
+
 bv_dollar() {
-  local depth=$1 seg=$2 indq=$3 c2 c3 start rest chunk
-  (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+  local depth=$1 seg=$2 indq=$3 c2 c3 start=$BV_P open rest chunk
+  # ${...} and $((...)) nest without a bv_parse between: the same limit.
+  if (( ${#FUNCNAME[@]} > BV_MAX_NEST )); then
+    bv_hit 'command too complex - nesting too deep to check'
+    BV_P=$BV_L; return 0
+  fi
+  # bash drops a backslash-newline before it reads what follows the $:
+  # $\<newline>( is $(.
+  BV_P=$(( BV_P + 1 )); bv_joined; BV_P=$(( BV_P - 1 ))
   c2=${BV_WIN:BV_P-BV_WB+1:1}
   case $c2 in
     '(')
-      start=$BV_P
-      if [[ ${BV_WIN:BV_P-BV_WB+2:1} == '(' ]]; then
-        bv_upto '))'
-        BV_P=$(( BV_P + ${#BV_UPTO} + 2 ))
+      open=$(( BV_P + 2 ))
+      if bv_dparen 1; then
+        # $((...)) is arithmetic only when the parenthesis that closes the
+        # inner one is followed by another; bash reads anything else as
+        # $( (...) ...). The $(...) and `...` of either run.
+        BV_P=$(( BV_P + BV_DPAREN + 1 ))
+        if ! bv_arith "$depth" "$seg"; then
+          bv_reread || return 0
+          # The window has moved on: it is set again from where the
+          # reading starts over.
+          BV_P=$open; bv_win
+          bv_parse ')' $(( depth + 1 )) "$seg"
+        fi
       else
-        BV_P=$(( BV_P + 2 ))
+        BV_P=$open
         bv_parse ')' $(( depth + 1 )) "$seg"
       fi
       bv_slice "$start"; word=$word$BV_SLICE ;;
     '{')
-      bv_upto '}'
-      BV_P=$(( BV_P + ${#BV_UPTO} + 1 ))
-      word=$word$BV_UPTO'}' ;;
+      case ${BV_WIN:BV_P-BV_WB+2:1} in
+        ' '|"$BV_TAB"|"$BV_NL"|'|')
+          # bash 5.3 runs ${ command; } and ${| command; } in the current
+          # shell: a command substitution that ends at a } in command
+          # position. Earlier bash refuses them.
+          BV_P=$(( BV_P + 3 ))
+          bv_parse '}' $(( depth + 1 )) "$seg" ;;
+        *)
+          BV_P=$(( BV_P + 2 ))
+          bv_brace "$depth" "$seg" "$indq" ;;
+      esac
+      bv_slice "$start"; word=$word$BV_SLICE ;;
     "'")
       if (( indq )); then
         word=$word'$'; BV_P=$(( BV_P + 1 ))
       else
-        BV_P=$(( BV_P + 2 ))
+        # Decoded as bash decodes it: $'\x67h' is gh. A NUL ends the
+        # string; what follows it up to the quote is dropped.
+        BV_P=$(( BV_P + 2 )); quoted=1; BV_NUL=0
         while (( BV_P < BV_L )); do
           (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
           (( ${#word} < 1024 )) || { wordh=$wordh$word; word=''; }
@@ -338,12 +494,21 @@ bv_dollar() {
             "'") BV_P=$(( BV_P + 1 )); break ;;
             '\')
               c3=${BV_WIN:BV_P-BV_WB+1:1}
-              case $c3 in n) c3=$BV_NL ;; t) c3=$BV_TAB ;; esac
-              BV_P=$(( BV_P + 2 )); word=$word$c3 ;;
+              BV_P=$(( BV_P + 2 ))
+              case $c3 in
+                n) c3=$BV_NL ;;
+                t) c3=$BV_TAB ;;
+                r) c3=$BV_CR ;;
+                x|u|U|[0-7]) bv_ansi_code "$c3"; c3=$BV_CHAR ;;
+                c) BV_P=$(( BV_P + 1 )); c3='?' ;;
+                a|b|e|E|f|v) c3='?' ;;
+              esac
+              (( BV_NUL )) || word=$word$c3 ;;
             *)
               rest=${BV_WIN:BV_P-BV_WB:256}
               chunk=${rest%%[\'\\]*}
-              word=$word$chunk; BV_P=$(( BV_P + ${#chunk} )) ;;
+              (( BV_NUL )) || word=$word$chunk
+              BV_P=$(( BV_P + ${#chunk} )) ;;
           esac
         done
       fi ;;
@@ -355,14 +520,20 @@ bv_dollar() {
   esac
 }
 
+# bv_dquote walks "..." from after its opening quote. One nested in another
+# (in a ${...}, $((...)) or $(...) of it) that never closes is where bash
+# and this parser part: bash may well have ended the outer string at that
+# quote and run what follows, which here would be read as quoted text. The
+# command is refused then (BV_DQ counts the strings open).
 bv_dquote() {
   local depth=$1 seg=$2 c c2 rest chunk start
+  BV_DQ=$(( BV_DQ + 1 ))
   while (( BV_P < BV_L )); do
     (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
     (( ${#word} < 1024 )) || { wordh=$wordh$word; word=''; }
     c=${BV_WIN:BV_P-BV_WB:1}
     case $c in
-      '"') BV_P=$(( BV_P + 1 )); return 0 ;;
+      '"') BV_P=$(( BV_P + 1 )); BV_DQ=$(( BV_DQ - 1 )); return 0 ;;
       '\')
         c2=${BV_WIN:BV_P-BV_WB+1:1}
         case $c2 in
@@ -373,8 +544,8 @@ bv_dquote() {
         BV_P=$(( BV_P + 2 )) ;;
       '$') bv_dollar "$depth" "$seg" 1 ;;
       '`')
-        start=$BV_P; BV_P=$(( BV_P + 1 ))
-        bv_parse '`' $(( depth + 1 )) "$seg"
+        start=$BV_P
+        bv_backquote "$depth" "$seg" 1
         bv_slice "$start"; word=$word$BV_SLICE ;;
       *)
         rest=${BV_WIN:BV_P-BV_WB:256}
@@ -383,18 +554,236 @@ bv_dquote() {
         word=$word$chunk; BV_P=$(( BV_P + ${#chunk} )) ;;
     esac
   done
+  (( BV_DQ-- <= 1 )) || { bv_hit 'command too complex - quotes nested past where bash ends them'; BV_P=$BV_L; }
+}
+
+# bv_ansi_code KIND: the character a \xHH, \uHHHH, \UHHHHHHHH or \NNN escape
+# of $'...' names, into BV_CHAR; BV_P is past the escape's letter (for \NNN,
+# its first digit) and moves past its digits. A code past ASCII stands as
+# '?' - no rule's word holds one - and NUL sets BV_NUL. Without a digit,
+# \x stays as written, as in bash.
+bv_ansi_code() {
+  local digits value octal
+  case $1 in
+    x) [[ ${BV_WIN:BV_P-BV_WB:2} =~ ^[0-9A-Fa-f]+ ]] ;;
+    u) [[ ${BV_WIN:BV_P-BV_WB:4} =~ ^[0-9A-Fa-f]+ ]] ;;
+    U) [[ ${BV_WIN:BV_P-BV_WB:8} =~ ^[0-9A-Fa-f]+ ]] ;;
+    *) BV_P=$(( BV_P - 1 )); [[ ${BV_WIN:BV_P-BV_WB:3} =~ ^[0-7]+ ]] ;;
+  esac || { BV_CHAR="\\$1"; return 0; }
+  digits=${BASH_REMATCH[0]}
+  BV_P=$(( BV_P + ${#digits} ))
+  case $1 in
+    x|u|U) value=$(( 16#$digits )) ;;
+    *) value=$(( 8#$digits & 255 )) ;;
+  esac
+  BV_CHAR='?'
+  if (( value == 0 )); then
+    BV_CHAR=''; BV_NUL=1
+  elif (( value < 128 )); then
+    printf -v octal '%03o' "$value"
+    # shellcheck disable=SC2059 # the format is the octal escape itself
+    printf -v BV_CHAR "\\$octal"
+  fi
+}
+
+# bv_brace DEPTH SEG INDQ walks a ${...} from after its "${" to after its
+# "}". bash runs the $(...) and `...` in it - a default value, a pattern -
+# and quotes in it keep a } from ending it. Inside double quotes (INDQ 1)
+# even the text between single quotes is expanded. With no } before the
+# end, bash either refuses the line or never read a ${ there (a
+# backslash-newline after the $ is not always joined): the text after it is
+# then read again as it stands, not swallowed.
+bv_brace() {
+  local depth=$1 seg=$2 indq=$3 word='' wordh='' quoted=0 c rest chunk from=$BV_P
+  while (( BV_P < BV_L )); do
+    (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+    word=''
+    c=${BV_WIN:BV_P-BV_WB:1}
+    case $c in
+      '}') BV_P=$(( BV_P + 1 )); return 0 ;;
+      '\') BV_P=$(( BV_P + 2 )) ;;
+      '$') bv_dollar "$depth" "$seg" "$indq" ;;
+      '`') bv_backquote "$depth" "$seg" "$indq" ;;
+      '"')
+        BV_P=$(( BV_P + 1 ))
+        bv_dquote "$depth" "$seg" ;;
+      "'")
+        BV_P=$(( BV_P + 1 ))
+        if (( ! indq )); then
+          bv_upto "'"
+          BV_P=$(( BV_P + ${#BV_UPTO} + 1 ))
+          continue
+        fi
+        while (( BV_P < BV_L )); do
+          (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+          word=''
+          c=${BV_WIN:BV_P-BV_WB:1}
+          case $c in
+            "'") BV_P=$(( BV_P + 1 )); break ;;
+            '\')
+              # \$ \` \\ are escaped here as well; a quote still ends it.
+              if [[ ${BV_WIN:BV_P-BV_WB+1:1} == "'" ]]; then
+                BV_P=$(( BV_P + 1 ))
+              else
+                BV_P=$(( BV_P + 2 ))
+              fi ;;
+            '$')
+              # Nor is a backslash-newline dropped here: $\<newline>( is text.
+              if [[ ${BV_WIN:BV_P-BV_WB+1:1} == '\' ]]; then
+                BV_P=$(( BV_P + 1 ))
+              else
+                bv_dollar "$depth" "$seg" 1
+              fi ;;
+            '`') bv_backquote "$depth" "$seg" 1 ;;
+            *)
+              rest=${BV_WIN:BV_P-BV_WB:256}
+              chunk=${rest%%[\'\\\$\`]*}
+              [[ -n $chunk ]] || chunk=$c
+              BV_P=$(( BV_P + ${#chunk} )) ;;
+          esac
+        done ;;
+      *)
+        rest=${BV_WIN:BV_P-BV_WB:256}
+        chunk=${rest%%[\}\\\$\`\"\']*}
+        [[ -n $chunk ]] || chunk=$c
+        BV_P=$(( BV_P + ${#chunk} )) ;;
+    esac
+  done
+  bv_reread || return 0
+  BV_P=$from; bv_win
+}
+
+# bv_dparen FIRST: the ( at BV_P+FIRST is followed by another, with any line
+# continuations between them dropped as bash drops them - $(\<newline>( is
+# $((. BV_DPAREN is then the second one's offset from BV_P.
+bv_dparen() {
+  local k=$(( $1 + 1 ))
+  while [[ ${BV_WIN:BV_P-BV_WB+k:2} == "\\$BV_NL" ]]; do k=$(( k + 2 )); done
+  [[ ${BV_WIN:BV_P-BV_WB+k:1} == '(' ]] || return 1
+  BV_DPAREN=$k
+}
+
+# Text read again costs another walk over it; nested, that would grow
+# exponentially. Past BV_MAX_REREAD, the command is refused instead.
+bv_reread() {
+  (( ++BV_REREAD > BV_MAX_REREAD )) || return 0
+  bv_hit 'command too complex - too many expansions to read twice'
+  BV_P=$BV_L
+  return 1
+}
+
+# bv_arith DEPTH SEG walks a $((...)) from after its "$((" to after its "))"
+# and succeeds, or fails at the parenthesis that closes the inner one when
+# no other follows it, or at the end. Its $(...) and `...` are parsed; the
+# rest is numbers and operators - a << in it is a shift, not a heredoc.
+# bash expands it as if it stood in double quotes, ${...} in it included.
+bv_arith() {
+  local depth=$1 seg=$2 open=1 word='' wordh='' quoted=0 c rest chunk end l
+  while (( BV_P < BV_L )); do
+    (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+    word=''
+    c=${BV_WIN:BV_P-BV_WB:1}
+    case $c in
+      '(') open=$(( open + 1 )); BV_P=$(( BV_P + 1 )) ;;
+      ')')
+        BV_P=$(( BV_P + 1 )); open=$(( open - 1 ))
+        if (( open == 0 )); then
+          bv_joined
+          [[ ${BV_WIN:BV_P-BV_WB:1} == ')' ]] || return 1
+          BV_P=$(( BV_P + 1 )); return 0
+        fi ;;
+      '\') BV_P=$(( BV_P + 2 )) ;;
+      '$') bv_dollar "$depth" "$seg" 1 ;;
+      '`') bv_backquote "$depth" "$seg" 1 ;;
+      '"')
+        BV_P=$(( BV_P + 1 ))
+        bv_dquote "$depth" "$seg" ;;
+      "'")
+        # bash pairs single quotes to find where the expression ends, but
+        # expands it as if it stood in double quotes: the $(...), ${...}
+        # and backquotes between them run.
+        BV_P=$(( BV_P + 1 ))
+        bv_upto "'"
+        end=$(( BV_P + ${#BV_UPTO} ))
+        if [[ $BV_UPTO == *[\$\`]* ]]; then
+          l=$BV_L; BV_L=$end
+          while (( BV_P < BV_L )); do
+            (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+            c=${BV_WIN:BV_P-BV_WB:1}
+            case $c in
+              '$') bv_dollar "$depth" "$seg" 1 ;;
+              '`') bv_backquote "$depth" "$seg" 1 ;;
+              '\') BV_P=$(( BV_P + 2 )) ;;
+              *)
+                rest=${BV_WIN:BV_P-BV_WB:256}
+                chunk=${rest%%[\\\$\`]*}
+                [[ -n $chunk ]] || chunk=$c
+                BV_P=$(( BV_P + ${#chunk} )) ;;
+            esac
+          done
+          BV_L=$l
+        fi
+        BV_P=$(( end + 1 )) ;;
+      *)
+        rest=${BV_WIN:BV_P-BV_WB:256}
+        chunk=${rest%%[\(\)\\\$\`\"\']*}
+        [[ -n $chunk ]] || chunk=$c
+        BV_P=$(( BV_P + ${#chunk} )) ;;
+    esac
+  done
+  return 1
+}
+
+# bv_backquote DEPTH SEG INDQ: BV_P is at a backquote. bash ends `...` at
+# the next backquote no backslash escapes - one in quotes, in a heredoc body
+# or in a $(...) of it as well - and only then parses the text between, with
+# \$, \` and \\ (and \" inside double quotes, INDQ 1) unescaped. So the text
+# is cut out here, unescaped and parsed on its own, as bash runs it.
+bv_backquote() {
+  local depth=$1 seg=$2 indq=$3 cmd='' cmdh='' c rest chunk s=$BV_S at l=$BV_L open
+  local bs='\' bq='`' dl='$' dq='"'
+  BV_P=$(( BV_P + 1 ))
+  while (( BV_P < BV_L )); do
+    (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
+    (( ${#cmd} < 1024 )) || { cmdh=$cmdh$cmd; cmd=''; }
+    c=${BV_WIN:BV_P-BV_WB:1}
+    case $c in
+      '`') BV_P=$(( BV_P + 1 )); break ;;
+      '\') cmd=$cmd${BV_WIN:BV_P-BV_WB:2}; BV_P=$(( BV_P + 2 )) ;;
+      *)
+        rest=${BV_WIN:BV_P-BV_WB:256}
+        chunk=${rest%%[\\\`]*}
+        cmd=$cmd$chunk; BV_P=$(( BV_P + ${#chunk} )) ;;
+    esac
+  done
+  (( BV_P <= BV_L )) || BV_P=$BV_L
+  cmd=$cmdh$cmd
+  case $cmd in
+    *"$bs"*)
+      cmd=${cmd//"$bs$bs"/$BV_US}
+      cmd=${cmd//"$bs$bq"/$bq}
+      cmd=${cmd//"$bs$dl"/$dl}
+      (( ! indq )) || cmd=${cmd//"$bs$dq"/$dq}
+      cmd=${cmd//"$BV_US"/$bs} ;;
+  esac
+  at=$BV_P open=$BV_DQ
+  BV_S=$cmd; BV_P=0; BV_L=${#cmd}; BV_DQ=0
+  bv_win
+  bv_parse '' $(( depth + 1 )) "$seg"
+  BV_S=$s; BV_P=$at; BV_L=$l; BV_DQ=$open
+  bv_win
 }
 
 bv_parse() {
   local stop=$1 depth=$2 parent=$3
-  local seg word='' wordh='' have=0 words='' wordsh='' want='' docs='' c c2 rest chunk start
+  local seg word='' wordh='' have=0 quoted=0 words='' wordsh='' want='' docs='' c c2 rest chunk start wparen=0 cases=0 casepat=0 subshells=-1
   # Every ( $( ` <( level costs call frames; far past any real command bash
   # would run out of stack and the hook would die without blocking.
   if (( ${#FUNCNAME[@]} > BV_MAX_NEST )); then
     bv_hit 'command too complex - nesting too deep to check'
     BV_P=$BV_L; return 0
   fi
-  bv_new_seg "$depth" "$parent"; seg=$BV_SEG
+  bv_new_seg "$depth" "$parent"; seg=$BV_SEG; wparen=0
   while (( BV_P < BV_L )); do
     (( BV_P + 300 <= BV_WE || BV_WE >= BV_L )) || bv_win
     (( ${#word} < 1024 )) || { wordh=$wordh$word; word=''; }
@@ -403,7 +792,7 @@ bv_parse() {
       "$BV_NL")
         bv_word; bv_end_seg; BV_P=$(( BV_P + 1 ))
         [[ -z $docs ]] || bv_heredocs
-        bv_new_seg "$depth" "$parent"; seg=$BV_SEG ;;
+        bv_new_seg "$depth" "$parent"; seg=$BV_SEG; wparen=0 ;;
       ' '|"$BV_TAB"|"$BV_CR")
         (( ! have )) || bv_word
         BV_P=$(( BV_P + 1 )) ;;
@@ -417,25 +806,51 @@ bv_parse() {
         fi
         bv_end_seg; BV_P=$(( BV_P + 1 ))
         case $c$c2 in '&&'|'||'|'|&'|';;'|';&') BV_P=$(( BV_P + 1 )) ;; esac
-        bv_new_seg "$depth" "$parent"; seg=$BV_SEG ;;
+        (( ! cases )) || case $c$c2 in ';;'|';&') casepat=1 ;; esac
+        bv_new_seg "$depth" "$parent"; seg=$BV_SEG; wparen=0 ;;
       '(')
         if (( have )); then
-          word=$word$c; BV_P=$(( BV_P + 1 ))
+          # Inside a word - arr=(a b), f(), a(b) - bash still pairs it with
+          # a ) when it looks for the end of a $( or a subshell.
+          word=$word$c; BV_P=$(( BV_P + 1 )); wparen=$(( wparen + 1 ))
+        elif (( casepat )); then
+          # case x in (a|b) ...: a pattern may open with a (.
+          BV_P=$(( BV_P + 1 ))
+        elif (( BV_P != subshells )) && bv_dparen 0; then
+          # ((...)) and for ((...)) are arithmetic, walked as $((...)) is;
+          # when they do not close as one, bash reads ( (...) ...).
+          start=$BV_P
+          bv_end_seg; BV_P=$(( BV_P + BV_DPAREN + 1 ))
+          if bv_arith "$depth" "$seg"; then
+            bv_new_seg "$depth" "$parent"; seg=$BV_SEG; wparen=0
+          else
+            bv_reread || return 0
+            subshells=$start; BV_P=$start; bv_win
+            bv_new_seg "$depth" "$parent"; seg=$BV_SEG; wparen=0
+          fi
         else
           bv_end_seg; BV_P=$(( BV_P + 1 ))
           bv_parse ')' "$depth" "$parent"
-          bv_new_seg "$depth" "$parent"; seg=$BV_SEG
+          bv_new_seg "$depth" "$parent"; seg=$BV_SEG; wparen=0
         fi ;;
       ')')
-        bv_word; bv_end_seg; BV_P=$(( BV_P + 1 ))
-        [[ $stop != ')' ]] || return 0
-        bv_new_seg "$depth" "$parent"; seg=$BV_SEG ;;
-      '`')
-        if [[ $stop == '`' ]]; then
-          bv_word; bv_end_seg; BV_P=$(( BV_P + 1 )); return 0
+        if (( wparen )); then
+          word=$word$c; have=1; BV_P=$(( BV_P + 1 )); wparen=$(( wparen - 1 ))
+          continue
         fi
-        start=$BV_P; BV_P=$(( BV_P + 1 ))
-        bv_parse '`' $(( depth + 1 )) "$seg"
+        bv_word
+        if (( casepat )); then
+          # The ) after a case pattern: that pattern's commands follow.
+          bv_end_seg; BV_P=$(( BV_P + 1 )); casepat=0
+          bv_new_seg "$depth" "$parent"; seg=$BV_SEG; wparen=0
+          continue
+        fi
+        bv_end_seg; BV_P=$(( BV_P + 1 ))
+        [[ $stop != ')' ]] || return 0
+        bv_new_seg "$depth" "$parent"; seg=$BV_SEG; wparen=0 ;;
+      '`')
+        start=$BV_P
+        bv_backquote "$depth" "$seg" 0
         bv_slice "$start"; word=$word$BV_SLICE; have=1 ;;
       '<'|'>')
         c2=${BV_WIN:BV_P-BV_WB+1:1}
@@ -447,7 +862,7 @@ bv_parse() {
           continue
         fi
         # An all-digit word glued to the operator is a file descriptor.
-        if (( have )) && [[ -z $wordh && $word =~ ^[0-9]+$ ]]; then word=''; have=0; else bv_word; fi
+        if (( have )) && [[ -z $wordh && $word =~ ^[0-9]+$ ]]; then word=''; have=0; quoted=0; else bv_word; fi
         BV_P=$(( BV_P + 1 )); want=$c
         case $c$c2 in
           '<<')
@@ -462,13 +877,13 @@ bv_parse() {
       "'")
         BV_P=$(( BV_P + 1 ))
         bv_upto "'"
-        word=$word$BV_UPTO; have=1; BV_P=$(( BV_P + ${#BV_UPTO} + 1 )) ;;
+        word=$word$BV_UPTO; have=1; quoted=1; BV_P=$(( BV_P + ${#BV_UPTO} + 1 )) ;;
       '"')
-        BV_P=$(( BV_P + 1 )); have=1
+        BV_P=$(( BV_P + 1 )); have=1; quoted=1
         bv_dquote "$depth" "$seg" ;;
       '\')
         c2=${BV_WIN:BV_P-BV_WB+1:1}
-        if [[ $c2 != "$BV_NL" ]]; then word=$word$c2; have=1; fi
+        if [[ $c2 != "$BV_NL" ]]; then word=$word$c2; have=1; quoted=1; fi
         BV_P=$(( BV_P + 2 )) ;;
       '$')
         have=1
@@ -481,6 +896,9 @@ bv_parse() {
           BV_P=$(( BV_P + ${#BV_UPTO} ))
         fi ;;
       *)
+        if [[ $stop == '}' && $c == '}' ]] && (( ! have )) && [[ -z $words$wordsh ]]; then
+          bv_end_seg; BV_P=$(( BV_P + 1 )); return 0
+        fi
         rest=${BV_WIN:BV_P-BV_WB:256}
         chunk=${rest%%[[:space:]\;\&\|\(\)\<\>\'\"\\\$\`\#]*}
         [[ -n $chunk ]] || chunk=$c
@@ -488,6 +906,10 @@ bv_parse() {
     esac
   done
   bv_word; bv_end_seg
+  # A ( $( <( or ${ that reaches the end unclosed: bash either refuses the
+  # line, or closed it where this parser did not - inside a ${...} or a
+  # $((...)) read another way - and runs what follows.
+  [[ -z $stop ]] || bv_hit 'command too complex - a substitution that does not close'
   return 0
 }
 
@@ -555,6 +977,14 @@ bv_skip_wrapper() {
   esac
   while (( i < BV_NW )); do
     w=${BV_W[i]}
+    # env -S STRING splits STRING into the command and its first words.
+    if [[ $1 == env ]]; then
+      case $w in
+        -S|--split-string) bv_env_split "${BV_W[i+1]-}" $(( i + 2 )); i=$BV_NW; break ;;
+        --split-string=*) bv_env_split "${w#*=}" $(( i + 1 )); i=$BV_NW; break ;;
+        -S?*) bv_env_split "${w#-S}" $(( i + 1 )); i=$BV_NW; break ;;
+      esac
+    fi
     case $w in
       --) i=$(( i + 1 )); break ;;
       -) i=$(( i + 1 )) ;;
@@ -585,6 +1015,14 @@ bv_php_script() {
 }
 
 # BV_PI/BV_PROG/BV_AI: index, normalised name and first argument of the program.
+# bv_env_split STRING FROM: the command env -S runs - STRING split into words,
+# then the words from FROM on - checked as a command of its own.
+bv_env_split() {
+  local s=$1 j
+  for (( j = $2; j < BV_NW; j++ )); do s="$s ${BV_W[j]}"; done
+  bv_recurse "$s"
+}
+
 bv_locate_program() {
   local i=0 w b
   while (( i < BV_NW )); do
@@ -1036,6 +1474,22 @@ bv_rule_eval() {
   bv_recurse "$s"
 }
 
+# trap ACTION SIGNAL...: the action runs when a signal comes or, for EXIT,
+# when the shell ends - this command's own, as soon as the call returns. A
+# lone signal, or "-", resets instead and runs nothing.
+bv_rule_trap() {
+  local j=$BV_AI
+  while (( j < BV_NW )); do
+    case ${BV_W[j]} in
+      --) j=$(( j + 1 )); break ;;
+      -?*) j=$(( j + 1 )) ;;
+      *) break ;;
+    esac
+  done
+  (( j + 1 < BV_NW )) && [[ ${BV_W[j]} != - ]] || return 0
+  bv_recurse "${BV_W[j]}"
+}
+
 # A `git -c` or `--config-env` setting that disables the repository's hooks.
 bv_git_config() {
   case $1 in
@@ -1272,7 +1726,7 @@ bv_rule_sql() {
 
 # True when the validator has rules keyed on program $1.
 bv_known_program() {
-  case ,git,rm,gh,eval,echo,printf,sed,tee$BV_SEARCH$BV_ARGV_PROGS$BV_READERS in
+  case ,git,rm,gh,eval,trap,echo,printf,sed,tee$BV_SEARCH$BV_ARGV_PROGS$BV_READERS in
     *",$1,"*) return 0 ;;
   esac
   return 1
@@ -1315,6 +1769,7 @@ bv_program_rules() {
     rm) bv_rule_rm ;;
     gh) bv_rule_gh ;;
     eval) bv_rule_eval ;;
+    trap) bv_rule_trap ;;
   esac
 }
 
@@ -1360,12 +1815,16 @@ bv_check_seg() {
 bv_validate() {
   local i=0
   export LC_ALL=C
-  BV_HIT=''
+  BV_HIT=''; BV_REREAD=0; BV_DQ=0; BV_DEADLINE=$(( SECONDS + BV_TIME_LIMIT ))
   BV_SEG_WORDS=(); BV_SEG_REDIR=(); BV_SEG_DOC=(); BV_SEG_PROG=()
   BV_SEG_DEPTH=(); BV_SEG_PARENT=()
   [[ -n ${BV_ARGV_PROGS-} ]] || bv_index_rules
   bv_run_parse "$1" 0 -1
   while (( i < ${#BV_SEG_WORDS[@]} )); do
+    if (( SECONDS >= BV_DEADLINE )); then
+      bv_hit 'command too long to check in time'
+      return 0
+    fi
     bv_check_seg "$i"
     [[ -z $BV_HIT ]] || return 0
     i=$(( i + 1 ))
