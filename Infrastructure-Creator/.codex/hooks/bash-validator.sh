@@ -218,7 +218,7 @@ bv_hit() { [[ -n $BV_HIT ]] || BV_HIT=$1; }
 
 # ---- parser ---------------------------------------------------------------
 # bv_parse STOP DEPTH PARENT walks BV_S from BV_P to BV_L. STOP is "" (end of
-# text) or ")". Segments are appended to the BV_SEG_* arrays; the helpers
+# text), ")" or "}" (a } where a command would start). Segments are appended to the BV_SEG_* arrays; the helpers
 # below work on bv_parse's locals (word, have, quoted, want, words, docs,
 # seg). A long word or word list is kept in two parts (wordh/word,
 # wordsh/words) so that each append copies at most a short tail instead of
@@ -392,13 +392,14 @@ bv_heredoc_expand() {
     case $c in
       '\') BV_P=$(( BV_P + 2 )) ;;
       '$')
-        # Only $( runs anything - a backslash-newline between the two is
-        # dropped first; the text of ${...} is walked on, so a $(...) in a
-        # default value is found too.
+        # Only $( and bash 5.3's ${ command; } run anything - a
+        # backslash-newline after the $ is dropped first; the text of
+        # ${...} is walked on, so a $(...) in a default value is found too.
         BV_P=$(( BV_P + 1 )); bv_joined
-        if [[ ${BV_WIN:BV_P-BV_WB:1} == '(' ]]; then
-          BV_P=$(( BV_P - 1 )); word=''; bv_dollar "$depth" "$seg" 1
-        fi ;;
+        case ${BV_WIN:BV_P-BV_WB:2} in
+          '('*|'{ '*|"{$BV_TAB"*|"{$BV_NL"*|'{|'*)
+            BV_P=$(( BV_P - 1 )); word=''; bv_dollar "$depth" "$seg" 1 ;;
+        esac ;;
       '`') bv_backquote "$depth" "$seg" 0 ;;
       *)
         rest=${BV_WIN:BV_P-BV_WB:256}
@@ -442,8 +443,17 @@ bv_dollar() {
       fi
       bv_slice "$start"; word=$word$BV_SLICE ;;
     '{')
-      BV_P=$(( BV_P + 2 ))
-      bv_brace "$depth" "$seg" "$indq"
+      case ${BV_WIN:BV_P-BV_WB+2:1} in
+        ' '|"$BV_TAB"|"$BV_NL"|'|')
+          # bash 5.3 runs ${ command; } and ${| command; } in the current
+          # shell: a command substitution that ends at a } in command
+          # position. Earlier bash refuses them.
+          BV_P=$(( BV_P + 3 ))
+          bv_parse '}' $(( depth + 1 )) "$seg" ;;
+        *)
+          BV_P=$(( BV_P + 2 ))
+          bv_brace "$depth" "$seg" "$indq" ;;
+      esac
       bv_slice "$start"; word=$word$BV_SLICE ;;
     "'")
       if (( indq )); then
@@ -787,6 +797,9 @@ bv_parse() {
           BV_P=$(( BV_P + ${#BV_UPTO} ))
         fi ;;
       *)
+        if [[ $stop == '}' && $c == '}' ]] && (( ! have )) && [[ -z $words$wordsh ]]; then
+          bv_end_seg; BV_P=$(( BV_P + 1 )); return 0
+        fi
         rest=${BV_WIN:BV_P-BV_WB:256}
         chunk=${rest%%[[:space:]\;\&\|\(\)\<\>\'\"\\\$\`\#]*}
         [[ -n $chunk ]] || chunk=$c
