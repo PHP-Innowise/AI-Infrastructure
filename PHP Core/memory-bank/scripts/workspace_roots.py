@@ -64,7 +64,7 @@ import stat as stat_module
 import subprocess
 import time
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import Iterator, NamedTuple, Optional
 
 
 TOOLING_ROOT = Path(__file__).resolve().parents[2]
@@ -938,3 +938,42 @@ def spool_directories(name: str) -> list[Path]:
         if child and child not in bases:
             bases.append(child)
     return [Path(base) / f"{name}-{owner}" for base in bases]
+
+
+@contextlib.contextmanager
+def draining(folder: Path, name: str) -> Iterator[bool]:
+    """True inside the block while this process alone drains `name`'s files
+    in `folder`, False while another one does.
+
+    A drain renames a file for its attempt and removes it once the work has
+    answered, so a file left under an attempt's name is one whose drain was
+    stopped - unless that drain still runs, in another session's hook. The
+    lock file beside the files says which: it is taken without waiting, and
+    the system lets it go when its holder ends, however it ends.
+    """
+    try:
+        descriptor = os.open(folder / f".{name}.drain-lock",
+                             os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o600)
+    except OSError:
+        yield False
+        return
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            if os.name == "nt":
+                import msvcrt
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    finally:
+        os.close(descriptor)

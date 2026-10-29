@@ -48,6 +48,8 @@ JOURNAL = 'native-results.ndjson'
 # session's next hook, which runs outside the sandbox, saves it.
 SPOOL_PROFILE = 'native-result-spool-v1'
 SPOOL_NAME = 'ai-accelerator-native-spool'
+# How many hooks may start one spooled save before it is given up (drain).
+DRAIN_ATTEMPTS = 3
 UNWRITABLE = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
 # A fully exercised turn writes about six lines - armed; requested and the
 # Stop hook's exit; the save; the closing Stop and its exit - and Codex one
@@ -970,26 +972,56 @@ def _read_spool(path):
     return value
 
 
+def _spooled(directory, key):
+    """The spool files `key` has in `directory`, as (path, attempts begun):
+    those an earlier hook began first (drain), then the one the sandbox left."""
+    found=[(directory/f'{key}.attempt{attempt}.json',attempt) for attempt in range(DRAIN_ATTEMPTS,0,-1)]
+    return [(path,attempt) for path,attempt in found+[(directory/(key+'.json'),0)] if os.path.lexists(path)]
+
+
 def drain(root, task_id, host, payload, *, owner, mode, provision):
     """Save what the agent's sandbox left in the spool (_spool), from a hook,
-    which runs outside the sandbox. One attempt each: the file goes before
-    the save, whatever the save then says."""
+    which runs outside the sandbox.
+
+    The file goes once the save has answered, whatever it said. Removed
+    before, a save that waited on another session's lock was lost when the
+    hook's own budget (`timeout`) or its host stopped the hook: the file
+    gone, the save never made, nothing journaled. So the file is first
+    renamed for the attempt, and an attempt that never answers leaves it for
+    the next hook, which begins it again - up to DRAIN_ATTEMPTS, then gives
+    it up as refused (`interrupted`). Beginning again a save that had landed
+    only repeats it: the request's token keys it."""
     try: task_id=check_task_id(task_id)
     except BrainError: return None
     key=_key(root,host,payload,task_id,owner) if isinstance(payload,dict) else None
     if key is None: return None
+    result=None
     for directory in _spool_dirs():
-        path=directory/(key+'.json')
-        record=_read_spool(path)
-        if record is None: continue
-        try: path.unlink()
-        except OSError: return None
-        try:
-            return save(root,key,record['token'],record['data'],owner=owner,mode=mode,provision=provision,
-                        skip=record['skip'],spooled=True)
-        except BrainError:
-            return None  # journaled as the save's refusal; the Stop settles the request
-    return None
+        if not _spooled(directory,key): continue
+        # A file under an attempt's name is a stopped drain's only while no
+        # other drain - a hook its host left running - still holds it.
+        with workspace_roots.draining(directory,'spool') as alone:
+            if not alone: continue
+            for path,begun in _spooled(directory,key):
+                record=_read_spool(path)
+                if record is None: continue
+                if begun >= DRAIN_ATTEMPTS:
+                    try: path.unlink()
+                    except OSError: continue
+                    _journal(root,host,'save','refused','interrupted')
+                    continue
+                attempt=directory/f'{key}.attempt{begun+1}.json'
+                try: os.replace(path,attempt)
+                except OSError: continue
+                try:
+                    result=save(root,key,record['token'],record['data'],owner=owner,mode=mode,provision=provision,
+                                skip=record['skip'],spooled=True)
+                except BrainError:
+                    pass  # journaled as the save's refusal; the Stop settles the request
+                finally:
+                    try: attempt.unlink()
+                    except OSError: pass
+    return result
 
 
 def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False):

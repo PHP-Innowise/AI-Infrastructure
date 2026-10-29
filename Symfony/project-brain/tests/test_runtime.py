@@ -10639,6 +10639,91 @@ class SandboxQueueTest(RuntimeHarness):
         # Another project's queue is left to it.
         self.assertEqual([other], self.waiting())
 
+    @unittest.skipUnless(os.name == "posix", "a flock and a process group stand in for the hook")
+    def test_a_command_a_stopped_hook_began_is_made_by_the_next_hook(self) -> None:
+        # The Stop hook's turn drains the queue under `timeout` with a 5 s
+        # budget. A command that waited on another session's lock outlived
+        # it: its file was removed before it ran, and the checkpoint was
+        # lost with nothing journaled.
+        import fcntl
+        import signal
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Kept", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.unsandboxed()
+        before = self.task()["revision"]
+        lock = (self.repository / "project-brain/local/runtime.lock").open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        turn = subprocess.Popen([sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository), "turn",
+                                 "--task-id", self.TASK, "--flush-after", "5", "--json"],
+                                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        deadline = time.monotonic() + 10
+        while not any(".attempt1." in path.name for path in self.waiting()) and turn.poll() is None \
+                and time.monotonic() < deadline:
+            time.sleep(0.02)
+        begun = [path.name for path in self.waiting()]
+        # The command waits on the lock; the budget ends the hook's whole
+        # process group as timeout does.
+        os.killpg(turn.pid, signal.SIGTERM)
+        turn.wait()
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        self.assertEqual(1, len(begun))
+        self.assertIn(".attempt1.", begun[0])
+        self.assertEqual(begun, [path.name for path in self.waiting()])
+        self.assertEqual(before, self.task()["revision"])
+        self.hook_turn()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)], self.journal())
+        self.assertEqual("Kept", self.task()["progress"])
+
+    @unittest.skipUnless(os.name == "posix", "a flock stands in for another session's lock")
+    def test_two_hooks_draining_at_once_make_a_command_once(self) -> None:
+        # The queue is the project's, not a session's: two sessions' Stops
+        # drain it at once. The one that came second took a file the first
+        # had begun - still running, waiting on the lock - for a stopped
+        # drain's and made the command again.
+        import fcntl
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Once", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.unsandboxed()
+        before = self.task()["revision"]
+        lock = (self.repository / "project-brain/local/runtime.lock").open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        turns = []
+        for _ in range(2):
+            turns.append(subprocess.Popen([sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository),
+                                           "turn", "--task-id", self.TASK, "--flush-after", "5", "--json"],
+                                          env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            deadline = time.monotonic() + 10
+            while not any(".attempt" in path.name for path in self.waiting()) and time.monotonic() < deadline:
+                time.sleep(0.02)
+        time.sleep(0.3)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        for turn in turns:
+            self.assertEqual(0, turn.wait(timeout=60))
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)], self.journal())
+        self.assertEqual(before + 1, self.task()["revision"])
+
+    def test_a_command_three_stopped_hooks_began_is_given_up_as_interrupted(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Lost", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        [waiting] = self.waiting()
+        waiting.rename(waiting.with_name(waiting.stem + ".attempt3.json"))
+        self.hook_turn()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("refused", "interrupted")], self.journal())
+        self.assertNotEqual("Lost", self.task()["progress"])
+        capsule = self.cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK, "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn("queued memory command not made: update - it was stopped before it finished, 3 times",
+                      capsule.stdout)
+
     def test_a_command_a_drain_runs_fails_instead_of_waiting_again(self) -> None:
         self.sandboxed()
         done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Again",

@@ -28,6 +28,44 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A save or checkpoint a sandbox held survives a hook its budget stops — 2026-10-29
+
+- Why: a save the agent's sandbox could not write waits in the spool, and a
+  checkpoint (`update`, `turn --flush`) in the command queue, until a hook
+  outside the sandbox makes it. Both drains removed the file before the save
+  or the command ran ("one attempt each"). The hooks run them under
+  `timeout` with a 5 s budget, so one that waited on another session's
+  runtime lock - an index build, a long flush - was ended with its file
+  already gone: the save or checkpoint was lost, and nothing was journaled.
+  Reproduced with the lock held and a 1 s budget: 3 of 3 spooled saves and
+  2 of 2 queued checkpoints never made, by that hook or any later one.
+- What changes: a drain renames the file for its attempt and removes it
+  once the save or command has answered, whatever it said, so an attempt a
+  budget or a host cuts off leaves it to the next hook, which begins it
+  again. A save that had landed is only repeated - the request's token keys
+  it - and a waiting `update` is made once unless its hook was stopped after
+  the command finished and before the file went. After three beginnings the
+  save or command is given up as refused with code `interrupted`; a
+  command's refusal is named in the next capsule, as other refusals are.
+  While it works a drain holds a lock file beside the files, taken without
+  waiting and let go by the system however the drain ends: the queue is the
+  project's, so two sessions' Stops drain it at once, and the second took a
+  file the first was still making - waiting on the lock - for a stopped
+  drain's and made the command twice. Now the second leaves the queue to
+  the first. The lock file is made only when there is something to drain.
+- Tests: `tests/test_memory_native_capture.py` holds the runtime lock while
+  a Stop drains a spooled save, ends the Stop's process group as `timeout`
+  does, and has the next prompt hook make the save; a save three hooks
+  began is given up as `interrupted`. `project-brain/tests/test_runtime.py`
+  (`SandboxQueueTest`) does the same for a queued `update`, checks that the
+  refusal reaches the capsule, and has two Stops drain one queued `update`
+  at once while the lock is held: made once, one revision. Each fails on the
+  drains before (the last one on the drain without its lock).
+- Not covered: a drain whose hook runs Python without `timeout` (macOS
+  without coreutils) is in the hook's own process group; a host that kills
+  that group mid-drain is covered by the same rename, a machine that loses
+  power by nothing new.
+
 ### The lifecycle fuzzer stops hooks and saves part-way — 2026-10-29
 
 - Why: a host stops a hook at its timeout (Claude Code gives the Stop hooks

@@ -7481,6 +7481,8 @@ QUEUE_PROFILE = "memory-command-queue-v1"
 QUEUE_MAX_AGE_SECONDS = 24 * 60 * 60
 QUEUE_MAX_BYTES = 64 * 1024
 QUEUE_UNWRITABLE = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
+# How many hooks may begin one waiting command before it is given up.
+QUEUE_ATTEMPTS = 3
 # Set for the commands a drain runs: one that still cannot write fails
 # instead of waiting again.
 QUEUE_DRAIN_VARIABLE = "CONTEXT_QUEUE_DRAIN"
@@ -7608,11 +7610,65 @@ def _queued_arguments(repository: Path, argv: list) -> Optional[argparse.Namespa
     return parsed
 
 
+def _drain_waiting(repository: Path, waiting: list, prefix: str) -> list:
+    """drain_queued_commands' work on the files it alone holds, oldest first."""
+    outcomes = []
+    for stamp, begun, folder, path in sorted(waiting):
+        record = _queued_record(path)
+        parsed = _queued_arguments(repository, record["argv"]) if record else None
+        command = parsed.command if parsed else None
+        if begun >= QUEUE_ATTEMPTS:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            outcomes.append({"command": command, "made": False, "code": "interrupted",
+                             "detail": f"it was stopped before it finished, {QUEUE_ATTEMPTS} times"})
+            continue
+        attempt = folder / f"{prefix}{stamp}.attempt{begun + 1}.json"
+        try:
+            os.replace(path, attempt)
+        except OSError:
+            continue
+        try:
+            if parsed is None or not 0 <= time.time() - record["created"] <= QUEUE_MAX_AGE_SECONDS:
+                outcomes.append({"command": command, "made": False,
+                                 "code": "unreadable" if parsed is None else "expired",
+                                 "detail": "the waiting command could not be read" if parsed is None
+                                 else "it waited more than a day"})
+                continue
+            try:
+                done = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--root", str(repository),
+                                       *record["argv"]], cwd=str(workspace_roots.project_root(repository)),
+                                      env={**os.environ, QUEUE_DRAIN_VARIABLE: "1", "PYTHONIOENCODING": "utf-8"},
+                                      stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                outcomes.append({"command": command, "made": False, "code": "unfinished",
+                                 "detail": "it did not finish"})
+                continue
+            lines = [line.strip() for line in done.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
+            outcomes.append({"command": command, "made": done.returncode == 0,
+                             **({} if done.returncode == 0 else {"code": "refused",
+                                                                 "detail": (lines[-1] if lines else "")[:200]})})
+        finally:
+            try:
+                attempt.unlink()
+            except OSError:
+                pass
+    return outcomes
+
+
 def drain_queued_commands(repository: Path) -> list:
     """Make what a sandbox left waiting for this project (queue_write),
     oldest first, from a run that writes its memory: a hook's turn, outside
-    the sandbox. Each file goes before its command runs, whatever it then
-    says; a command refused is journaled and named in the next capsule."""
+    the sandbox. A command refused is journaled and named in the next
+    capsule.
+
+    Each file goes once its command has answered, whatever it said, as a
+    spooled save's does (native_results.drain): renamed for the attempt
+    first, so a hook its budget or its host stops while the command waits on
+    another session's lock leaves it for the next hook - up to QUEUE_ATTEMPTS
+    beginnings, then it is given up as `interrupted`."""
     if os.environ.get(QUEUE_DRAIN_VARIABLE) == "1":
         return []
     prefix = f"command-{_queue_key(repository)}-"
@@ -7624,34 +7680,19 @@ def drain_queued_commands(repository: Path) -> list:
             names = [name for name in os.listdir(folder) if name.startswith(prefix) and name.endswith(".json")]
         except OSError:
             continue
-        waiting.extend((name[len(prefix):], folder / name) for name in names)
-    outcomes = []
-    for _, path in sorted(waiting):
-        record = _queued_record(path)
-        try:
-            path.unlink()
-        except OSError:
-            continue
-        parsed = _queued_arguments(repository, record["argv"]) if record else None
-        command = parsed.command if parsed else None
-        if parsed is None or not 0 <= time.time() - record["created"] <= QUEUE_MAX_AGE_SECONDS:
-            outcomes.append({"command": command, "made": False, "code": "unreadable" if parsed is None else "expired",
-                             "detail": "the waiting command could not be read" if parsed is None
-                             else "it waited more than a day"})
-            continue
-        try:
-            done = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--root", str(repository),
-                                   *record["argv"]], cwd=str(workspace_roots.project_root(repository)),
-                                  env={**os.environ, QUEUE_DRAIN_VARIABLE: "1", "PYTHONIOENCODING": "utf-8"},
-                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
-            outcomes.append({"command": command, "made": False, "code": "unfinished",
-                             "detail": "it did not finish"})
-            continue
-        lines = [line.strip() for line in done.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
-        outcomes.append({"command": command, "made": done.returncode == 0,
-                         **({} if done.returncode == 0 else {"code": "refused",
-                                                             "detail": (lines[-1] if lines else "")[:200]})})
+        for name in names:
+            stamp, attempt = name[len(prefix):-len(".json")], 0
+            begun = re.fullmatch(r"(.+)\.attempt([1-9])", stamp)
+            if begun:
+                stamp, attempt = begun.group(1), int(begun.group(2))
+            waiting.append((stamp, attempt, folder, folder / name))
+    with contextlib.ExitStack() as held:
+        # A file under an attempt's name is a stopped drain's only while no
+        # other drain - another session's hook at the same moment - holds
+        # this project's queue in that folder.
+        alone = {folder for folder in {entry[2] for entry in waiting}
+                 if held.enter_context(workspace_roots.draining(folder, prefix.rstrip("-")))}
+        outcomes = _drain_waiting(repository, [entry for entry in waiting if entry[2] in alone], prefix)
     if outcomes:
         import native_results
         for outcome in outcomes:

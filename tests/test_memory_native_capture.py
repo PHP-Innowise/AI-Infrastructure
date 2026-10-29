@@ -746,6 +746,69 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
                 self.assertEqual([],list(spool.rglob('*.json')))
                 self.assertEqual(1,len(self.records('tasks')))
 
+    def spooled_save(self):
+        """A Codex save its sandbox could not write: the spool folder, the
+        environment its hooks run with, and their next prompt hook."""
+        spool=Path(tempfile.mkdtemp(prefix='native-spool-',dir=self.root.parent))
+        env=dict(self.env,TMPDIR=str(spool))
+        def prompt():
+            return self.call('native-prompt','--host','codex','--task-id','research','--json',env=env,
+                             data={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Inspect it.'})
+        prompt();self.call('native-stop','--host','codex','--task-id','research',env=env,data=self.STOP)
+        candidate,state=self.state()
+        modes=self.readonly()
+        try:
+            spooled=self.call('native-result','--request',candidate.stem,'--token',state['token'],'--input','-',
+                              '--json',data=self.payload,env=env)
+            self.assertEqual('spooled',json.loads(spooled.stdout)['state'])
+        finally:
+            for path,mode in modes.items():path.chmod(mode)
+        return spool,env,prompt
+
+    @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,
+                         'permission bits do not stop root; a flock and a process group stand in for the hook')
+    def test_a_save_whose_hook_was_stopped_while_it_waited_is_made_by_the_next_hook(self):
+        # The Stop hook drains the spool under `timeout` with a 5 s budget. A
+        # save that waited on another session's lock outlived it: its file
+        # was removed before the save began, and the save was lost with
+        # nothing journaled.
+        import fcntl,signal,time
+        spool,env,prompt=self.spooled_save()
+        lock=(self.root/'project-brain/local/runtime.lock').open('a+')
+        self.addCleanup(lock.close)
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        stop=subprocess.Popen([sys.executable,'-B',str(self.root/'memory-bank/scripts/context.py'),
+                               '--root',str(self.root),'native-stop','--host','codex','--task-id','research'],
+                              cwd=self.root,env=env,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL,start_new_session=True)
+        stop.stdin.write(json.dumps(dict(self.STOP,stop_hook_active=True)).encode());stop.stdin.close()
+        deadline=time.monotonic()+10
+        while not list(spool.rglob('*.attempt1.json')) and stop.poll() is None and time.monotonic()<deadline:
+            time.sleep(0.02)
+        begun=list(spool.rglob('*.attempt1.json'))
+        # The save waits on the lock; the budget ends the hook as timeout does.
+        os.killpg(stop.pid,signal.SIGTERM);stop.wait()
+        fcntl.flock(lock,fcntl.LOCK_UN)
+        self.assertEqual(1,len(begun))
+        self.assertEqual(begun,list(spool.rglob('*.json')))
+        self.assertEqual([],self.records('tasks'))
+        lines=[(line['stage'],line['event'],line.get('code')) for line in self.written(prompt)]
+        self.assertEqual(('save','saved','spooled'),lines[0])
+        self.assertEqual([],list(spool.rglob('*.json')))
+        self.assertEqual(1,len(self.records('tasks')))
+
+    @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,'permission bits do not stop root')
+    def test_a_save_three_stopped_hooks_began_is_given_up_as_interrupted(self):
+        spool,env,_=self.spooled_save()
+        [waiting]=list(spool.rglob('*.json'))
+        waiting.rename(waiting.with_name(waiting.stem+'.attempt3.json'))
+        lines=[(line['stage'],line['event'],line.get('code')) for line in self.written(
+            lambda:self.call('native-stop','--host','codex','--task-id','research',env=env,
+                             data=dict(self.STOP,stop_hook_active=True)))]
+        self.assertEqual(('save','refused','interrupted'),lines[0])
+        self.assertEqual([],list(spool.rglob('*.json')))
+        self.assertEqual([],self.records('tasks'))
+
     @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,'permission bits do not stop root')
     def test_a_save_claude_codes_sandbox_spools_under_its_own_folder_is_made_by_the_next_hook(self):
         # Claude Code's sandbox gives a command claude-<uid> under its own
