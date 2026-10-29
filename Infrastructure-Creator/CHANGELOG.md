@@ -4,6 +4,88 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Generated validators run the editions' command repetition guard — 2026-10-29
+
+- Why: the four editions' `bash-validator.sh` counts a command's identical
+  reruns in a session once the rules let it through, warns at the sixth and
+  refuses the twelfth: a failing command rerun forever touches no file, so
+  `loop-detection.sh` never sees that loop. A generated validator had no
+  such guard. Step 2 builds it from the generator's own validator, which
+  has none, and step 5 left the counter files of the generated
+  `loop-detection.sh` unnamed, so the editions' guard, which starts a
+  count over on those `edit-*` counters, could not simply be pasted in.
+- `hook-forge` ships the guard as `assets/bash-validator-repetition-guard.sh`,
+  and step 2 copies the block between its `bash-validator repetition guard`
+  markers byte for byte, between the `bv_validate` call's `fi` and the final
+  `exit 0`. It is the editions' guard - the status-query exemption, counters
+  per session and exact command in a private
+  `${TMPDIR:-/tmp}/<tool>-loop-detection-<uid>-<repo-key>/`, a linked or
+  foreign directory and a linked counter never trusted, counts read as
+  base-10 digits, a warning at six through `additionalContext` (Cursor:
+  stderr and exit 1), a refusal at twelve, a restart on a newer `edit-*`
+  counter - reading the copied payload decoding's `$cmd` and `$input`, and
+  naming no skill, since a generated project has the debugging skills its
+  scan supports. The hook assigns a new setting below the generic section,
+  `BV_HOST` (`claude`, `cursor` or `codex`), which names the counter
+  directory and selects Cursor's warning channel, so the block is the same
+  bytes in every edition. Step 5 has `loop-detection.sh` compute that
+  directory with the guard's own four lines and write each file's count to
+  `"$TRACK_DIR/edit-$SESSION_KEY-<hash of its path>"`, and `local-context.sh`
+  prune the session's `cmd-` counters with its `edit-` ones. The generator's
+  own validator stays without a guard: its own `loop-detection.sh` keeps no
+  edit counters to start a count over.
+- `validate_generated.py`'s `validate_bash_validators` checks, without
+  running a hook, that each edition's validator holds the guard block (each
+  marker once, the bytes of the asset's; the error names the first
+  differing line) after the `bv_validate` call, with no `exit` before it and
+  only `exit 0` after it, and that the last `BV_HOST` assigned at the start
+  of a line below the generic section is the edition; and that each
+  edition's `loop-detection.sh` holds the guard's four directory lines with
+  the host spelled out and keeps an `edit-` counter in `$TRACK_DIR`. Placed
+  before the call, the guard's exemption let `tail .env` past the generic
+  rule; with `BV_HOST` unset the hook exits 1 on every command the rules let
+  through; with the counters named otherwise, an edit-and-rerun cycle was
+  refused at its twelfth run. The call check no longer reads the guard
+  block, whose own `exit 2` would have passed for the call's. An asset that
+  cannot be read, has no block or computes no directory is an error, not a
+  skip.
+- `tests/test_repetition_guard_gate.py` (23 tests): the asset holds one
+  guard that passes `bash -n`, names its directory by `BV_HOST` and names no
+  skill, and `hook-forge` names the asset, its markers, `BV_HOST`, the four
+  directory lines and the counter name. A validator without the guard (the
+  generator's own included) is rejected; an edited threshold, a dropped
+  polling exemption and CRLF are rejected at their line, as are a missing,
+  doubled or reversed marker; a guard before the call and an `exit` before
+  the guard are rejected and shown to let `tail .env` through and to count
+  nothing; anything but `exit 0` after the guard is rejected. `BV_HOST`
+  unset is rejected and shown to exit 1; another edition's name, a computed
+  value, an assignment in a condition or a comment are rejected, quoted
+  forms pass and the last assignment counts. A `loop-detection.sh` written
+  to step 5 passes in every edition, while step 5's earlier one-liner,
+  another host's directory, the line in a comment and counters without the
+  `edit-` prefix are rejected; only selected, manifest-owned hooks are
+  opened, and an unreadable, unmarked or directory-less asset fails closed.
+  Run through bash, the built pair warns from the sixth rerun (Claude Code
+  and Codex in `additionalContext`, Cursor on stderr with exit 1), refuses
+  the twelfth, counts a changed command anew, each edition in its own
+  directory; an edit the step 5 hook records starts the count over, and
+  counters under another name do not; status queries and refused commands
+  are not counted, a status query chained with an action is; sessions keep
+  their own counts; a planted directory or a linked counter is never
+  trusted, `08` reads as 8 and a stored count is never evaluated. Each new
+  check, disabled alone, fails at least one test.
+  `tests/test_bash_validator_gate.py` builds its validators with the guard
+  and the edition's `BV_HOST`, checks the generator's own rules in a built
+  validator rather than its guardless file, and runs its hooks in the
+  target under a private `TMPDIR`, so no count reaches this checkout.
+  The root `tests/test_bash_validator_corpus.py` fails when the editions'
+  guard changes its code and the asset does not.
+- `bootstrap-verifier`'s checklist and report template, the DOD, the hooks
+  README and `stack-adapter` (a sibling generator's verbatim copy of the
+  script reads the asset from its own `hook-forge`) say the same. The skill
+  bodies' ceiling rises from 303500 to 306100 bytes (305989 now); the
+  policy lock was rewritten.
+
 ### Generated projects run the generator's own bash-validator parser — 2026-10-29
 
 - Why: `hook-forge` step 2 said only "Author `bash-validator.sh` to block

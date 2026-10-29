@@ -28,6 +28,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Generated projects get the editions' repetition guard: the generator's skill-body ceiling — 2026-10-29
+
+- `scripts/token_budget.json` raises Infrastructure-Creator's `body_bytes`
+  from 303500 to 306100 (305989 now) and no further: `hook-forge` steps 2
+  and 5 now give a generated project's `bash-validator.sh` the four
+  editions' command repetition guard and its `loop-detection.sh` the
+  `edit-*` counters the guard starts a count over on, and
+  `bootstrap-verifier` checks both (`Infrastructure-Creator/CHANGELOG.md`,
+  same day).
+- The generator copies the guard from
+  `Infrastructure-Creator/.agents/skills/hook-forge/assets/bash-validator-repetition-guard.sh`,
+  so a fix to the editions' guard no longer reaches generated projects by
+  itself. `tests/test_bash_validator_corpus.py` compares the guard's code in
+  the four editions' `.claude` validators with the asset's - `$COMMAND`,
+  `$INPUT` and the `claude-` directory prefix read as the generated copy
+  names them, messages and the asset's Cursor branch left out, as they
+  differ on purpose - and names the asset when they part.
+
 ### bash-validator: the generic section's opening comment is true in a generated project — 2026-10-29
 
 - The comment that opens the generic section said the block is

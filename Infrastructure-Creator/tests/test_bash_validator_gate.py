@@ -12,7 +12,9 @@ section the hook must assign the two settings the section reads and every
 variable it expands before it runs bv_validate, then exit 2 on a hit: the
 hook runs under `set -u`, so an unset variable makes it exit 1 and the host
 runs the command - on every command, for a rule copied without the helper
-list it names.
+list it names. The repetition guard that follows the call has its own tests
+in test_repetition_guard_gate.py; the validators built here carry it, as
+step 2 says.
 
 Run from this directory: python3 test_bash_validator_gate.py
 """
@@ -23,6 +25,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -42,6 +45,7 @@ SPEC.loader.exec_module(validator)
 
 HOOK_FORGE = ROOT / ".agents/skills/hook-forge/SKILL.md"
 GENERATOR_VALIDATOR = ROOT / ".claude/hooks/bash-validator.sh"
+REPETITION_GUARD = ROOT / ".agents/skills/hook-forge/assets/bash-validator-repetition-guard.sh"
 BASH = shutil.which("bash") or "/bin/bash"
 EDITIONS = ["claude", "cursor", "codex"]
 OPENING, CLOSING = validator.BASH_VALIDATOR_MARKERS
@@ -62,26 +66,58 @@ TARGET_RULES = (
 
 
 def generator_parts() -> tuple:
-    """The generator validator's payload decoding, generic section and call."""
+    """The generator validator's payload decoding, generic section and call.
+
+    The call runs from `bv_validate "$cmd"` through the `fi` of its block:
+    step 2 puts the repetition guard between that `fi` and the `exit 0` that
+    ends the generator's own file.
+    """
     data = GENERATOR_VALIDATOR.read_bytes()
     start, end, problem = validator.bash_validator_section(data)
     if problem:
         raise AssertionError(f"{GENERATOR_VALIDATOR} {problem}")
-    return data[:start], data[start:end], data[data.index(b"\n" + CALL) + 1:]
+    ending = data[data.index(b"\n" + CALL) + 1:]
+    return data[:start], data[start:end], ending[:ending.rindex(b"\nexit 0")].rstrip(b"\n") + b"\n"
 
 
-def built(rules: bytes = TARGET_RULES, *, section: bytes | None = None,
-          call: bytes | None = None) -> bytes:
-    """A target's validator built the way hook-forge step 2 says."""
-    preamble, generic, ending = generator_parts()
+def generator_rules() -> bytes:
+    """The generator's own settings and rules, between its section and call."""
+    data = GENERATOR_VALIDATOR.read_bytes()
+    _, end, _ = validator.bash_validator_section(data)
+    return data[end:data.index(b"\n" + CALL) + 1].strip(b"\n") + b"\n"
+
+
+def repetition_guard() -> bytes:
+    """hook-forge's repetition guard, from its opening marker through its closing one."""
+    data = REPETITION_GUARD.read_bytes()
+    start, end, problem = validator.marked_block(
+        data, validator.REPETITION_GUARD_MARKERS, "repetition guard"
+    )
+    if problem:
+        raise AssertionError(f"{REPETITION_GUARD} {problem}")
+    return data[start:end]
+
+
+def built(rules: bytes = TARGET_RULES, *, host: str | None = "claude",
+          section: bytes | None = None, call: bytes | None = None,
+          guard: bytes | None = None) -> bytes:
+    """A target's validator built the way hook-forge step 2 says.
+
+    host is the edition the copy serves (BV_HOST); None leaves it unset.
+    """
+    preamble, generic, generator_call = generator_parts()
     preamble = preamble.replace(b"(Infrastructure-Creator)", b"(Acme Shop)", 1)
     return (
         preamble
         + (generic if section is None else section)
         + b"\n\n"
         + rules
+        + (b"" if host is None else b"BV_HOST=" + host.encode() + b"\n")
         + b"\n"
-        + (ending if call is None else call)
+        + (generator_call if call is None else call)
+        + b"\n"
+        + (repetition_guard() if guard is None else guard)
+        + b"\n\nexit 0\n"
     )
 
 
@@ -122,6 +158,12 @@ class GateFixture(unittest.TestCase):
         # A space in the path proves the quoting, not just the resolution.
         self.target = Path(temporary.name).resolve() / "target project"
         self.target.mkdir()
+        # The repetition guard counts what a hook lets through in
+        # ${TMPDIR:-/tmp}, keyed by the repository the hook runs in: the hooks
+        # here run in the target with a TMPDIR of their own, so no count
+        # reaches this checkout's counters or outlives the test.
+        self.tmpdir = Path(temporary.name).resolve() / "tmp"
+        self.tmpdir.mkdir()
         self.files: dict = {}
 
     def relative(self, edition: str) -> str:
@@ -149,13 +191,19 @@ class GateFixture(unittest.TestCase):
             self.assertIn(fragment, errors[0])
         return errors[0]
 
-    def run_hook(self, path: Path, command: str) -> subprocess.CompletedProcess:
-        payload = {"tool_name": "Bash", "tool_input": {"command": command}}
+    def run_hook(self, path: Path, command: str, **fields) -> subprocess.CompletedProcess:
+        """Run a hook on a shell command; fields join the payload (session_id)."""
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}, **fields}
+        return self.run_payload(path, payload)
+
+    def run_payload(self, path: Path, payload: dict) -> subprocess.CompletedProcess:
         return subprocess.run(
             [BASH, str(path)],
             input=json.dumps(payload),
             capture_output=True,
             text=True,
+            cwd=self.target,
+            env={**os.environ, "TMPDIR": str(self.tmpdir)},
             timeout=30,
         )
 
@@ -173,12 +221,14 @@ class ExactSectionTest(GateFixture):
 
     def test_a_validator_built_as_step_2_says_passes_in_every_edition(self) -> None:
         for edition in EDITIONS:
-            self.write(edition, built())
+            self.write(edition, built(host=edition))
         self.assertEqual(self.errors(), [])
 
-    def test_the_generators_own_validator_passes_as_it_is(self) -> None:
+    def test_the_generators_own_rules_pass_in_a_built_validator(self) -> None:
+        # Every framework line with the helper list it expands, as a target
+        # running all four frameworks would take them.
         for edition in EDITIONS:
-            self.write(edition, GENERATOR_VALIDATOR.read_bytes())
+            self.write(edition, built(generator_rules(), host=edition))
         self.assertEqual(self.errors(), [])
 
     def test_the_built_validator_runs_the_shipped_parser_and_the_target_rule(self) -> None:
@@ -221,7 +271,7 @@ class EditedSectionTest(GateFixture):
         rule = b'  "argv|dropdb|||destructive command - dropdb"\n'
         _, generic, _ = generator_parts()
         complete = built()
-        self.write("cursor", built(section=generic.replace(rule, b"", 1)))
+        self.write("cursor", built(section=generic.replace(rule, b"", 1), host="cursor"))
         self.assert_one_error(
             "cursor",
             f"line {line_of(complete, rule)}:",
@@ -244,7 +294,7 @@ class EditedSectionTest(GateFixture):
             ("trailing blank", generic.replace(b"BV_MAX_DEPTH=8\n", b"BV_MAX_DEPTH=8 \n", 1)),
         ):
             with self.subTest(name=name):
-                self.write("codex", built(section=section))
+                self.write("codex", built(section=section, host="codex"))
                 self.assert_one_error("codex", "the generic section differs")
 
 
@@ -267,12 +317,12 @@ class MissingMarkersTest(GateFixture):
     def test_a_missing_opening_or_closing_marker_is_rejected(self) -> None:
         for marker in (OPENING, CLOSING):
             with self.subTest(marker=marker.decode()):
-                self.write("cursor", built().replace(marker, b"# section", 1))
+                self.write("cursor", built(host="cursor").replace(marker, b"# section", 1))
                 self.assert_one_error("cursor", f"has no `{marker.decode()}` marker")
 
     def test_a_second_section_is_rejected(self) -> None:
         _, generic, _ = generator_parts()
-        self.write("codex", built(section=generic + b"\n" + generic))
+        self.write("codex", built(section=generic + b"\n" + generic, host="codex"))
         self.assert_one_error("codex", f"has the `{OPENING.decode()}` marker 2 times")
 
     def test_a_section_closed_before_it_opens_is_rejected(self) -> None:
@@ -315,28 +365,30 @@ class SectionRunsTest(GateFixture):
         }
         for name, rules in variants.items():
             with self.subTest(variant=name):
-                self.write("cursor", built(rules))
+                self.write("cursor", built(rules, host="cursor"))
                 self.assert_one_error("cursor", "runs bv_validate with BV_CONSOLE_ENTRIES not assigned")
 
     def test_settings_assigned_after_the_call_are_rejected(self) -> None:
         _, _, ending = generator_parts()
-        self.write("codex", built(b"", call=ending.replace(CALL, CALL + TARGET_RULES, 1)))
+        self.write("codex", built(b"", call=ending.replace(CALL, CALL + TARGET_RULES, 1), host="codex"))
         self.assert_one_error(
             "codex",
             "runs bv_validate with BV_CONSOLE_ENTRIES and BV_CONSOLE_PHP_SCRIPTS not assigned",
         )
 
     def test_a_section_nothing_runs_is_rejected(self) -> None:
+        # The repetition guard still follows; an exit before it is its own
+        # error (test_repetition_guard_gate.py).
         for name, call in (
-            ("no call", b"exit 0\n"),
-            ("call in a comment", b'# bv_validate "$cmd"\nexit 0\n'),
+            ("no call", b""),
+            ("call in a comment", b'# bv_validate "$cmd"\n'),
         ):
             with self.subTest(variant=name):
                 self.write("claude", built(call=call))
                 self.assert_one_error("claude", "never runs bv_validate below the generic section")
 
     def test_a_rule_copied_without_its_helper_list_is_rejected_and_lets_all_through(self) -> None:
-        hook = self.write("cursor", built(laravel_rules(helper=False)))
+        hook = self.write("cursor", built(laravel_rules(helper=False), host="cursor"))
         self.assert_one_error(
             "cursor",
             "expands $BV_LARAVEL_SECRET_CONFIG below the generic section before any line assigns it",
@@ -348,7 +400,7 @@ class SectionRunsTest(GateFixture):
 
     def test_a_helper_list_assigned_after_its_rule_is_rejected(self) -> None:
         helper = generator_line(b"BV_LARAVEL_SECRET_CONFIG=")
-        self.write("codex", built(laravel_rules().replace(helper, b"", 1) + helper))
+        self.write("codex", built(laravel_rules().replace(helper, b"", 1) + helper, host="codex"))
         self.assert_one_error("codex", "expands $BV_LARAVEL_SECRET_CONFIG")
 
     def test_a_call_on_a_variable_nothing_assigns_is_rejected(self) -> None:
@@ -362,8 +414,11 @@ class SectionRunsTest(GateFixture):
         self.assertEqual(self.errors(), [])
 
     def test_a_hit_that_does_not_exit_2_is_rejected(self) -> None:
+        # The repetition guard below the call exits 2 on its own refusal; that
+        # is no exit for a command the rules refused.
         _, _, ending = generator_parts()
         self.assertIn(b"  exit 2\n", ending)
+        self.assertIn(b"  exit 2\n", repetition_guard())
         self.write("claude", built(call=ending.replace(b"  exit 2\n", b"  exit 1\n", 1)))
         self.assert_one_error("claude", "never exits 2 after bv_validate")
 

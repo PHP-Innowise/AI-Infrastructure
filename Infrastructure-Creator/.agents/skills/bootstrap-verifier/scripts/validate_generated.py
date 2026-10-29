@@ -24,6 +24,15 @@ Checks:
     assigns BV_CONSOLE_ENTRIES and BV_CONSOLE_PHP_SCRIPTS, then runs
     bv_validate and exits 2 on a hit; up to that call every variable it
     expands is assigned on an earlier line (set -u).
+  - Every bash-validator.sh runs the editions' command repetition guard: the
+    block between its `bash-validator repetition guard` markers (each once)
+    is byte-identical to the one in hook-forge's
+    assets/bash-validator-repetition-guard.sh and follows the bv_validate
+    call, with no exit before it and only `exit 0` after it, and BV_HOST is
+    assigned the edition's name below the generic section. The edition's
+    loop-detection.sh computes the guard's counter directory with the guard's
+    own lines and keeps its edit-* counters there, which restart a command's
+    count.
   - Every flow command's stages name agents that were generated, no parallel
     stage holds two write-capable agents (the gate runs those one at a time),
     and a multi-stage flow declares at least one checkpoint.
@@ -261,6 +270,25 @@ GENERATOR_BASH_VALIDATOR = (
 # The section reads these under `set -u`: left unset, the hook exits 1 on a
 # command that reaches the console check, and every host lets that call run.
 BASH_VALIDATOR_SETTINGS = ("BV_CONSOLE_ENTRIES", "BV_CONSOLE_PHP_SCRIPTS")
+# Step 2 also copies the four editions' command repetition guard, unchanged,
+# between the bv_validate call's `fi` and the final `exit 0`: the bytes from
+# the opening marker through the closing one in hook-forge's own asset, which
+# sits beside this script's skill (<generator>/.agents/skills/hook-forge/, the
+# same under .claude/ and .cursor/).
+REPETITION_GUARD_MARKERS = (
+    b"# >>> bash-validator repetition guard >>>",
+    b"# <<< bash-validator repetition guard <<<",
+)
+REPETITION_GUARD = (
+    SCRIPT_DIR.parent.parent / "hook-forge" / "assets" / "bash-validator-repetition-guard.sh"
+)
+# The guard counts in a directory named for its host - BV_HOST, which the hook
+# assigns below the generic section - and starts a command's count over when
+# loop-detection.sh wrote an edit-* counter there since the command last ran
+# (step 5). loop-detection.sh computes that directory with the guard's own
+# lines, assigning these names, with the host spelled out.
+LOOP_DETECTION = "loop-detection.sh"
+REPETITION_GUARD_DIRECTORY = ("REPO_ROOT", "REPO_KEY", "TRACK_BASE", "TRACK_DIR")
 
 # context-continuity.sh is one script for every lifecycle event it serves: the
 # client names the event in its payload (`hook_event_name`) and the runtime
@@ -1042,15 +1070,15 @@ def validate_hooks(target: Path, editions: list, files: dict, errors: list) -> N
                 errors.append(f"{sh}: not executable (chmod +x needed)")
 
 
-def bash_validator_section(data: bytes) -> tuple:
-    """Where the generic section of a bash-validator.sh lies.
+def marked_block(data: bytes, markers: tuple, name: str) -> tuple:
+    """Where the block between a pair of markers lies.
 
     Returns (start, end, "") with data[start:end] running from the opening
     marker through the closing one, or (-1, -1, why it cannot be cut out):
     each marker must occur exactly once, the opening one first.
     """
-    opening, closing = BASH_VALIDATOR_MARKERS
-    for marker in BASH_VALIDATOR_MARKERS:
+    opening, closing = markers
+    for marker in markers:
         count = data.count(marker)
         if count == 0:
             return -1, -1, f"has no `{marker.decode()}` marker"
@@ -1058,8 +1086,115 @@ def bash_validator_section(data: bytes) -> tuple:
             return -1, -1, f"has the `{marker.decode()}` marker {count} times"
     start, close = data.index(opening), data.index(closing)
     if close < start:
-        return -1, -1, "closes the generic section before it opens it"
+        return -1, -1, f"closes the {name} before it opens it"
     return start, close + len(closing), ""
+
+
+def bash_validator_section(data: bytes) -> tuple:
+    """Where the generic section of a bash-validator.sh lies (marked_block)."""
+    return marked_block(data, BASH_VALIDATOR_MARKERS, "generic section")
+
+
+def differing_line(data: bytes, start: int, block: bytes, expected: bytes) -> int:
+    """The line of data, which holds block at start, where it leaves expected."""
+    same = next(
+        (index for index, pair in enumerate(zip(block, expected)) if pair[0] != pair[1]),
+        min(len(block), len(expected)),
+    )
+    return data.count(b"\n", 0, start + same) + 1
+
+
+def code_lines(text: str) -> list:
+    """The lines of shell text that are neither blank nor comments, unstripped."""
+    return [line for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+
+def repetition_guard_lines(guard: bytes) -> dict:
+    """The guard's lines that compute its counter directory, by assigned name."""
+    found: dict = {}
+    for line in code_lines(guard.decode("utf-8", errors="replace")):
+        name = next((name for name in REPETITION_GUARD_DIRECTORY if line.startswith(name + "=")), None)
+        if name and name not in found:
+            found[name] = line
+    return found
+
+
+def repetition_guard_problems(data: bytes, section_end: int, guard: bytes, edition: str) -> list:
+    """Why a bash-validator.sh does not run the repetition guard as copied.
+
+    hook-forge step 2 puts the guard's bytes between the bv_validate call's
+    `fi` and the final `exit 0`, and assigns BV_HOST the edition's name below
+    the generic section. Run before the rules, the guard would count refused
+    commands and its status-query exemption would skip the rules; an `exit`
+    before it, or BV_HOST left unset (set -u), and it counts nothing; another
+    host's name, and it counts beside none of this edition's edit counters.
+    """
+    start, end, problem = marked_block(data, REPETITION_GUARD_MARKERS, "repetition guard")
+    if problem:
+        return [
+            f"{problem}: copy the repetition guard from {REPETITION_GUARD} byte for "
+            "byte, after the bv_validate call"
+        ]
+    problems = []
+    if data[start:end] != guard:
+        problems.append(
+            f"line {differing_line(data, start, data[start:end], guard)}: the repetition "
+            f"guard differs from the one in {REPETITION_GUARD}; copy it again byte for "
+            "byte, never edited or trimmed"
+        )
+    if start < section_end:
+        return problems + [
+            "runs the repetition guard above the end of the generic section; it "
+            "follows the bv_validate call"
+        ]
+    before = code_lines(data[section_end:start].decode("utf-8", errors="replace"))
+    after = [line.strip() for line in code_lines(data[end:].decode("utf-8", errors="replace"))]
+    if any(re.match(r"\s*bv_validate(\s|$)", line) for line in after):
+        problems.append(
+            "runs the repetition guard before bv_validate: it would count a command the "
+            "rules refuse, and its status-query exemption would skip the rules"
+        )
+    elif after not in ([], ["exit 0"]):
+        problems.append(f"runs `{after[0]}` after the repetition guard; only `exit 0` follows it")
+    if any(re.match(r"exit\b", line) for line in before):
+        problems.append("exits before the repetition guard, which then counts no command")
+    # The last assignment at the start of a line is the one the guard reads.
+    assigned = [line for line in before if line.startswith("BV_HOST=")]
+    if not assigned:
+        problems.append(
+            "never assigns BV_HOST below the generic section before the repetition "
+            "guard: unset, the hook exits 1 on every command the guard would count "
+            f"(assign BV_HOST={edition})"
+        )
+    else:
+        value = re.fullmatch(
+            r"BV_HOST=(?:'([^']*)'|\"([^\"]*)\"|([A-Za-z0-9_.-]*))\s*(?:#.*)?", assigned[-1]
+        )
+        if not value or (value.group(1) or value.group(2) or value.group(3)) != edition:
+            problems.append(
+                f"assigns `{assigned[-1].strip()}` in the {edition} edition: the guard "
+                "counts in the directory that name selects, beside none of this "
+                f"edition's edit counters (assign BV_HOST={edition})"
+            )
+    return problems
+
+
+def loop_detection_problem(source: str, edition: str, directory: dict) -> str:
+    """Why loop-detection.sh does not feed the repetition guard, or "".
+
+    hook-forge step 5: it computes the guard's counter directory with the
+    guard's own lines, the host spelled out, and keeps its counters there as
+    edit-* files; the guard starts a command's count over on one newer than
+    that command's counter. Comments are not code.
+    """
+    lines = {line.strip() for line in code_lines(source)}
+    for name in REPETITION_GUARD_DIRECTORY:
+        wanted = directory[name].replace("$BV_HOST", edition)
+        if wanted not in lines:
+            return f"lacks the repetition guard's line `{wanted}`"
+    if not any(re.search(r"\$\{?TRACK_DIR\}?/edit-", line) for line in lines):
+        return "keeps no edit- counter in $TRACK_DIR"
+    return ""
 
 
 def bash_validator_call(above: str, below: str) -> str:
@@ -1117,8 +1252,38 @@ def bash_validator_call(above: str, below: str) -> str:
     return "never runs bv_validate below the generic section, so its parser checks no command"
 
 
+def load_repetition_guard(errors: list) -> tuple:
+    """hook-forge's repetition guard block and its directory lines.
+
+    (None, None) after an error: a guard that cannot be read, has no block or
+    computes no counter directory checks nothing.
+    """
+    try:
+        data = REPETITION_GUARD.read_bytes()
+    except OSError as error:
+        errors.append(
+            f"repetition guard not checked: hook-forge's own {REPETITION_GUARD} "
+            f"cannot be read ({error.strerror or error})"
+        )
+        return None, None
+    start, end, problem = marked_block(data, REPETITION_GUARD_MARKERS, "repetition guard")
+    if problem:
+        errors.append(f"repetition guard not checked: hook-forge's own {REPETITION_GUARD} {problem}")
+        return None, None
+    guard = data[start:end]
+    directory = repetition_guard_lines(guard)
+    missing = [name for name in REPETITION_GUARD_DIRECTORY if name not in directory]
+    if missing:
+        errors.append(
+            f"repetition guard not checked: hook-forge's own {REPETITION_GUARD} "
+            f"assigns no {missing[0]} at the start of a line"
+        )
+        return None, None
+    return guard, directory
+
+
 def validate_bash_validators(target: Path, editions: list, files: dict, errors: list) -> None:
-    """Each edition's bash-validator.sh runs the generator's own shell parser.
+    """Each edition's bash-validator.sh runs the shared parser and guard.
 
     hook-forge step 2 copies the generator's generic section byte for byte -
     the parser that finds a command inside chains, substitutions, heredocs,
@@ -1126,15 +1291,20 @@ def validate_bash_validators(target: Path, editions: list, files: dict, errors: 
     target's settings and rules below it. A validator written from scratch,
     or a section edited or trimmed, still passes bash -n and still blocks
     the plain command, so nothing else here notices what it lets through.
+    After the bv_validate call the hook carries hook-forge's repetition
+    guard, which counts a command's identical reruns and starts the count
+    over on an edit counter loop-detection.sh (step 5) keeps in the directory
+    both compute; a guard left out or misplaced, or edit counters kept
+    elsewhere, pass bash -n too.
     """
     # An unowned required hook is validate_hooks' error, and an unowned file
     # is never opened.
-    owned = [
-        (edition, f"{EDITION_HOOK_WIRING[edition][0]}/{BASH_VALIDATOR}")
-        for edition in editions
-    ]
-    owned = [(edition, rel) for edition, rel in owned if is_owned(files, rel)]
-    if not owned:
+    def owned(name: str) -> list:
+        paths = [(edition, f"{EDITION_HOOK_WIRING[edition][0]}/{name}") for edition in editions]
+        return [(edition, rel) for edition, rel in paths if is_owned(files, rel)]
+
+    validators, detectors = owned(BASH_VALIDATOR), owned(LOOP_DETECTION)
+    if not validators and not detectors:
         return
     try:
         reference = GENERATOR_BASH_VALIDATOR.read_bytes()
@@ -1152,7 +1322,8 @@ def validate_bash_validators(target: Path, editions: list, files: dict, errors: 
         )
         return
     expected = reference[start:end]
-    for edition, relative in owned:
+    guard, directory = load_repetition_guard(errors)
+    for edition, relative in validators:
         try:
             data = (target / relative).read_bytes()
         except OSError as error:
@@ -1168,22 +1339,47 @@ def validate_bash_validators(target: Path, editions: list, files: dict, errors: 
             continue
         section = data[start:end]
         if section != expected:
-            same = next(
-                (index for index, pair in enumerate(zip(section, expected)) if pair[0] != pair[1]),
-                min(len(section), len(expected)),
-            )
-            line = data.count(b"\n", 0, start + same) + 1
             errors.append(
-                f"[{edition}] {relative} line {line}: the generic section differs "
-                f"from the one in {GENERATOR_BASH_VALIDATOR}; copy it again byte "
-                "for byte, never edited or trimmed (hook-forge step 2)"
+                f"[{edition}] {relative} line {differing_line(data, start, section, expected)}: "
+                f"the generic section differs from the one in {GENERATOR_BASH_VALIDATOR}; "
+                "copy it again byte for byte, never edited or trimmed (hook-forge step 2)"
             )
+        # The call is checked without the guard, which is checked on its own:
+        # the guard's exit 2 refuses a rerun, not a command a rule refused.
+        below = data[end:]
+        guard_start, guard_end, unmarked = marked_block(
+            data, REPETITION_GUARD_MARKERS, "repetition guard"
+        )
+        if not unmarked and guard_start >= end:
+            below = data[end:guard_start] + data[guard_end:]
         problem = bash_validator_call(
             data[:end].decode("utf-8", errors="replace"),
-            data[end:].decode("utf-8", errors="replace"),
+            below.decode("utf-8", errors="replace"),
         )
         if problem:
             errors.append(f"[{edition}] {relative} {problem} (hook-forge step 2)")
+        if guard is not None:
+            errors.extend(
+                f"[{edition}] {relative} {reason} (hook-forge step 2)"
+                for reason in repetition_guard_problems(data, end, guard, edition)
+            )
+    if directory is None:
+        return
+    for edition, relative in detectors:
+        try:
+            source = (target / relative).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            errors.append(f"[{edition}] {relative} cannot be read ({error.strerror or error})")
+            continue
+        problem = loop_detection_problem(source, edition, directory)
+        if problem:
+            errors.append(
+                f"[{edition}] {relative} {problem}: the repetition guard in "
+                f"{EDITION_HOOK_WIRING[edition][0]}/{BASH_VALIDATOR} counts in that "
+                "directory and starts a command's count over only on an edit- counter "
+                "newer than it there, so it would refuse every edit-and-rerun cycle at "
+                "its twelfth run (hook-forge step 5)"
+            )
 
 
 def collect_wired_commands(node) -> list:

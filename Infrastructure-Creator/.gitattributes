@@ -35,6 +35,7 @@
 .claude/skills/conventions-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/domain-behavior-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/hook-forge/SKILL.md -diff linguist-generated=true
+.claude/skills/hook-forge/assets/bash-validator-repetition-guard.sh -diff linguist-generated=true
 .claude/skills/infra-build/SKILL.md -diff linguist-generated=true
 .claude/skills/infra-generate/SKILL.md -diff linguist-generated=true
 .claude/skills/infra-ops-scanner/SKILL.md -diff linguist-generated=true
@@ -183,6 +184,7 @@
 .cursor/skills/conventions-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/domain-behavior-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/hook-forge/SKILL.md -diff linguist-generated=true
+.cursor/skills/hook-forge/assets/bash-validator-repetition-guard.sh -diff linguist-generated=true
 .cursor/skills/infra-build/SKILL.md -diff linguist-generated=true
 .cursor/skills/infra-generate/SKILL.md -diff linguist-generated=true
 .cursor/skills/infra-ops-scanner/SKILL.md -diff linguist-generated=true
