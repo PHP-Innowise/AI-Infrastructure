@@ -3954,6 +3954,30 @@ def index_documents(
             "canonical_edition": config["canonical_edition"],
             "parity_drift": parity_drift,
         }
+    # What the index holds is read again under the write lock its rows are
+    # then written with. Read only before it, rows another session committed
+    # meanwhile - the Brain record its save had just created, most often -
+    # were neither dropped nor known, and inserting them again failed this
+    # refresh with "UNIQUE constraint failed: document_metadata.path": the
+    # turn's capsule went out with the working state alone. A refresh that
+    # finds nothing to change, above, still reads without the lock.
+    began = not connection.in_transaction
+    if began:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        existing = {
+            row[0] for row in connection.execute("SELECT path FROM documents").fetchall()
+        }
+        missing = keep - existing
+        if missing:
+            raise RetrievalError(
+                f"Index cache is inconsistent for {len(missing)} path(s); "
+                "a full refresh is required"
+            )
+    except BaseException:
+        if began:
+            connection.rollback()
+        raise
     with connection:
         if not keep:
             # Nothing to reuse, so drop the tables outright rather than paying

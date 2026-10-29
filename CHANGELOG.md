@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The lifecycle fuzzer runs as a CI job of its own — 2026-10-28
+
+- Why: as a step of the `memory` job it took about three minutes on a
+  hosted runner, and with it that job's Python 3.x leg ran into its
+  15-minute limit and was cancelled on two pull requests (15m7s and
+  15m16s; 9 to 11 minutes before the step).
+- What changes: `tests.test_memory_lifecycle_fuzz` runs in a job of its own,
+  `memory-lifecycles`, on the same two Pythons with a 10-minute limit, beside
+  `memory`; `scripts/check.py` has the group of the same name, and
+  `docs/CI.md` and `scripts/README.md` say where it runs.
+- Tests: `tests.test_check` (40 tests) holds `check.py` to the workflow.
+
 ### The hooks read their input as bytes on Windows, and name the drive as Windows does — 2026-10-28
 
 - Why: the Windows CI job ran the tests of a session that entered a
@@ -56,6 +68,87 @@ edition's own files remain in that edition's changelog.
   refresh in the worktree, which builds its index, over the hooks'
   5-second budget. The test gives the hooks 60 seconds, as
   `tests.test_windows_memory_hooks` does. Not run on Windows locally.
+
+### Two refreshes that find one new document both index it — 2026-10-27
+
+- Why: a refresh read which documents the index held without the write
+  lock, and wrote its changes in a transaction begun later. When two
+  sessions' prompt hooks refreshed at once after a document appeared -
+  most often the Brain record one of them had just saved - the second
+  inserted the rows the first had committed meanwhile:
+  "UNIQUE constraint failed: document_metadata.path". Its capsule went out
+  with the working state alone (procedural, semantic and episodic
+  `failed`), and the hook's health line recorded exit 1. The lifecycle
+  fuzzer's new health check found it: 45 of 120 runs of 80 steps.
+- What changes: before it writes, `index_documents` takes the write lock
+  and reads again what the index holds, so the rows it drops and the rows
+  it writes are one transaction's. A refresh that finds nothing to change
+  still decides that without the lock, so a prompt is not held up behind
+  another session's write; one that another session's lock keeps past its
+  share of the hook's budget still falls back to the working state and
+  says so, as before.
+- `scripts/memory_lifecycle_fuzz.py` reads the prompt hook's health lines
+  and Cursor's rule: a refresh that exited non-zero without the degraded
+  capsule that says why, or timed out, fails the run; a degraded one is
+  counted (`refresh degraded`).
+- Tests: `memory-bank/tests/test_context.py` runs two incremental
+  refreshes that meet at that read; on the indexer before the change one
+  of them fails with the constraint, 3 times in 3.
+
+### A save survives another session's writes and a commit — 2026-10-26
+
+- Why: a native save is pinned when the Stop asks for it, and two things
+  that happen in the seconds the agent takes to write it refused it. The
+  task's revision moved - the other session's save, the turn checkpoint a
+  Stop hook writes every fifth turn of a checkout or, in a new project, the
+  other session creating the branch task - or a commit landed: the request
+  was pinned to the HEAD commit, so the person's commit, or another
+  session's on the branch, refused it as `native-result:scope-changed`.
+  Nothing of the save was written, its learnings included, and the agent
+  was told to report the held save to a person who had already read the
+  answer; a save a moment later replaced the other's progress all the same.
+  Neither was driven by any test: the new lifecycle fuzzer found both.
+- What changes: under the save's lock, where nothing else writes, a save
+  made within ten minutes of its request (`IN_FLIGHT_SECONDS`, the window
+  in which a prompt sent meanwhile treats it as still being written) takes
+  the task's current revision, as the Harness retries its own, and a task
+  created since the request takes it as well; the journal records it as
+  `saved` with code `rebased`. Its progress and next steps replace the
+  other session's, and its learnings are recorded as any are. A later
+  save - spooled until a hook long after - still yields to what was
+  written since, and a task replaced since the request (completed and
+  started again) still refuses it with `native-result:task-changed`. The
+  request is pinned to its branch; to its commit only on a detached HEAD,
+  as in the middle of a rebase, and a branch switched in between still
+  refuses it. `record-result` keeps its revision fence.
+  `docs/MEMORY-INTEGRATION.md` records the decision this replaces.
+- `scripts/memory_lifecycle_fuzz.py` (new) installs PHP Core into a
+  scratch project and drives random steps from a seed through the real
+  hooks: turns of Claude Code sessions in the root, below it and in
+  worktrees (through the dispatcher), a root session entering a worktree,
+  Codex and Cursor sessions, bursts of turns at once, saves made, skipped
+  and ignored, commits, branches made, renamed, detached and moved under a
+  pending save, a rebase stopped on a conflict and then continued or
+  aborted, worktrees added and removed. Every hook must exit 0 with no
+  error in the native journal, every save land in its branch's task (in a
+  stopped rebase, the branch being rebased), a sample of the saved
+  learnings be found by `search` from the root and from every worktree
+  left, no index of a removed worktree outlive the next turn checkpoint,
+  Project Brain and the Memory Bank validate and no worktree be written
+  into. `--edition` runs it on Laravel, Symfony or WordPress; `--attached`
+  launches every session as the Harness does, the edition lent from the
+  clone and the state apart, and neither the project nor the clone may be
+  written into. Bursts put two sessions in one folder too. On 24 seeds of
+  60 steps, installed and attached, nothing failed, nor on seed 1 of the
+  other editions; before the change, seeds lost saves to both refusals.
+- Tests: `tests/test_memory_native_capture.py` - two sessions saving in the
+  same seconds, a turn checkpoint in between, a task the other session
+  created and a commit made while the save is written, each failing
+  without the change, and a replaced task, a save delayed past ten minutes
+  and a moved detached HEAD still refused. `tests/test_memory_lifecycle_fuzz.py`
+  runs seeds 1 and 2, and seed 2 attached, in a step of its own in the
+  `memory` job (about two minutes); on the runtime before the change seed
+  1 fails by the first refusal and seed 2 by the second.
 
 ### A session that entered a worktree keeps its memory there — 2026-10-26
 

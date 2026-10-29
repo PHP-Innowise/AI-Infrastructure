@@ -1,6 +1,7 @@
 """Automatic native Stop continuation and guarded semantic-result saves."""
 import contextlib
 from datetime import datetime, timedelta
+import hashlib
 import importlib
 import json
 import os
@@ -379,11 +380,25 @@ class NativeCaptureTests(NativeCaptureFixture):
         self.assertNotEqual(0,result.returncode);self.assertEqual([],self.records('tasks'))
 
     def test_newer_task_revision_holds_delayed_result(self):
+        # A save made more than ten minutes after its request - spooled, say,
+        # until the session's next hook - yields to what was written since.
+        # One made within them is recorded where the task now is
+        # (NativeFunnelJournalTests).
         self.call('start','--task-id','research','--goal','Inspect routing')
         self.begin();self.stop()
         self.call('update','--task-id','research','--revision','auto','--progress','A newer human plan.')
+        candidate,state=self.state();state['updated']-=11*60;candidate.write_text(json.dumps(state))
         before=self.authority();result=self.save(ok=False)
         self.assertNotEqual(0,result.returncode);self.assertEqual(before,self.authority())
+        self.assertIn(b'memory-result-v1:prepared_stale_no_write',result.stderr)
+
+    def test_a_task_created_since_a_delayed_request_holds_its_result(self):
+        self.begin();self.stop()
+        self.call('start','--task-id','research','--goal','Inspect routing')
+        candidate,state=self.state();state['updated']-=11*60;candidate.write_text(json.dumps(state))
+        before=self.authority();result=self.save(ok=False)
+        self.assertIn(b'native-result:task-changed: the branch task was created',result.stderr)
+        self.assertEqual(before,self.authority())
 
     def test_changed_task_uuid_in_local_metadata_cannot_redirect_save(self):
         self.call('start','--task-id','research','--goal','Inspect routing')
@@ -410,6 +425,24 @@ class NativeCaptureTests(NativeCaptureFixture):
         self.begin();self.stop();self.git('checkout','-qb','other-work')
         before=self.authority();result=self.save(ok=False)
         self.assertNotEqual(0,result.returncode);self.assertEqual(before,self.authority())
+
+    def test_a_commit_while_the_save_is_written_does_not_refuse_it(self):
+        # The person, or another session of the branch, commits while the
+        # agent writes the save: the branch and the work are the same, and
+        # the save was refused as scope-changed, learnings and all.
+        self.begin();self.stop()
+        (self.root/'notes.md').write_text('# Notes\n');self.git('add','notes.md');self.git('commit','-qm','Notes')
+        saved=json.loads(self.save().stdout)
+        self.assertEqual(['created'],[item['state'] for item in saved['records']])
+
+    def test_a_detached_head_moved_since_the_request_refuses_the_save(self):
+        # Detached - in the middle of a rebase - the commit is all a save
+        # can be pinned to.
+        self.git('checkout','-q','--detach')
+        self.begin();self.stop()
+        (self.root/'notes.md').write_text('# Notes\n');self.git('add','notes.md');self.git('commit','-qm','Notes')
+        before=self.authority();result=self.save(ok=False)
+        self.assertIn(b'native-result:scope-changed',result.stderr);self.assertEqual(before,self.authority())
 
     def test_adapter_change_invalidates_pending_request(self):
         self.begin();self.stop()
@@ -831,31 +864,77 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
                 lines=self.written(lambda:self.call('native-stop','--host','claude','--task-id','research',data=recovery))
                 self.one(lines,'stop','failed','unsaved',host='claude')
 
-    def test_a_save_another_session_overtook_says_to_report_it(self):
-        # Two Claude Code sessions on one branch, offline: the first to save
-        # moved the task's revision, and the second was refused with a bare
-        # code. Nothing is written either way; now the refusal says why and
-        # what to do, and the journal keeps its code.
+    def session_state(self,session):
+        digest=hashlib.sha256(session.encode()).hexdigest()
+        for candidate in (self.root/'project-brain/local/native-results').glob('*.json'):
+            state=json.loads(candidate.read_text())
+            if state['session']==digest: return candidate,state
+        self.fail('no request for '+session)
+
+    def save_as(self,session,data,ok=True):
+        candidate,state=self.session_state(session)
+        return self.call('native-result','--request',candidate.stem,'--token',state['token'],
+                         '--input','-','--json',data=data,ok=ok)
+
+    OTHER={'progress':'Checked the callers of the dispatcher.','verified':True,'learnings':[
+        {'type':'decision','title':'Callers send idempotent requests',
+         'consequence':'Callers of the Amber dispatcher send it only idempotent requests.','sources':['rules.md']}]}
+
+    def test_two_sessions_of_a_branch_both_save_in_the_same_seconds(self):
+        # Offline, two sessions of one branch were asked to save at once. The
+        # first save moved the task's revision, and the second was refused -
+        # its learning with it - and told its agent to report a held save to
+        # a person who had read the answer. It is recorded at the task as it
+        # now is, and its progress is the task's, as a moment later.
+        self.call('start','--task-id','research','--goal','Inspect routing')
+        for session in ('session-a','session-b'):
+            self.begin(session=session);self.stop(session=session)
+        self.one(self.written(lambda:self.save_as('session-b',self.OTHER)),'save','saved')
+        saved=[]
+        lines=self.written(lambda:saved.append(json.loads(self.save_as('session-a',self.payload).stdout)))
+        self.assertEqual(1,self.one(lines,'save','saved','rebased')['learnings'])
+        self.assertEqual(['created'],[item['state'] for item in saved[0]['records']])
+        task,=self.records('tasks')
+        self.assertEqual((self.payload['progress'],self.payload['next_steps']),(task['progress'],task['next_steps']))
+        self.assertEqual({'Amber retry boundary','Callers send idempotent requests'},
+                         {record['title'] for kind in ('findings','decisions') for record in self.records(kind)})
+        # Its own Stop settles it as any save.
+        self.one(self.written(lambda:self.stop(session='session-a',active=True)),'stop','skipped','recovery-saved')
+
+    def test_a_turn_checkpoint_since_the_request_takes_the_save(self):
+        # The other session's Stop hook flushed its turns into the task.
         self.call('start','--task-id','research','--goal','Inspect routing')
         self.begin();self.stop()
-        self.call('update','--task-id','research','--revision','auto','--progress','Another session saved first.')
+        self.call('update','--task-id','research','--revision','auto','--file','rules.md')
+        self.one(self.written(lambda:self.save()),'save','saved','rebased')
+        task,=self.records('tasks')
+        self.assertEqual(self.payload['progress'],task['progress'])
+
+    def test_a_task_another_session_created_since_the_request_takes_the_save(self):
+        # In a new project the other session's save created the branch task.
+        for session in ('session-a','session-b'):
+            self.begin(session=session);self.stop(session=session)
+        self.one(self.written(lambda:self.save_as('session-b',self.OTHER)),'save','saved')
+        saved=[]
+        lines=self.written(lambda:saved.append(json.loads(self.save_as('session-a',self.payload).stdout)))
+        self.one(lines,'save','saved','rebased')
+        self.assertEqual(['created'],[item['state'] for item in saved[0]['records']])
+        task,=self.records('tasks')
+        self.assertEqual(self.payload['progress'],task['progress'])
+
+    def test_a_task_replaced_since_the_request_still_refuses_the_save(self):
+        # Completed and started again: the save was asked for the task before.
+        self.call('start','--task-id','research','--goal','Inspect routing')
+        self.begin();self.stop()
+        task,=self.records('tasks')
+        self.call('complete','--task-id','research','--outcome','Routing inspected.','--revision',str(task['revision']))
+        self.call('start','--task-id','research','--goal','Inspect routing again')
         before=self.authority();refused=[]
         lines=self.written(lambda:refused.append(self.save(ok=False)))
-        self.one(lines,'save','refused','memory-result-v1:prepared_stale_no_write')
-        self.assertIn(b'memory-result-v1:prepared_stale_no_write: another session or a person saved the task after '
-                      b'this save was requested; nothing was written: report the held save, do not retry it',
-                      refused[0].stderr)
-        self.assertEqual(before,self.authority())
-
-    def test_a_task_created_since_the_request_says_to_report_the_save(self):
-        # In a new project the other session's save created the branch task.
-        self.begin();self.stop()
-        self.call('start','--task-id','research','--goal','Inspect routing')
-        refused=[]
-        lines=self.written(lambda:refused.append(self.save(ok=False)))
         self.one(lines,'save','refused','native-result:task-changed')
-        self.assertIn(b'native-result:task-changed: the branch task was created after this save was requested; '
-                      b'nothing was written',refused[0].stderr)
+        self.assertIn(b'native-result:task-changed: the branch task was replaced after this save was requested; '
+                      b'nothing was written: report the held save, do not retry it',refused[0].stderr)
+        self.assertEqual(before,self.authority())
 
     def test_a_save_that_began_and_stopped_fails_as_incomplete(self):
         lines=self.written(self.interrupt_save)

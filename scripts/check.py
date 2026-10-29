@@ -419,6 +419,13 @@ def _parity_commands(edition: str) -> List[Command]:
     return commands
 
 
+def _memory_lifecycle_commands(version: str) -> List[Command]:
+    leg = f"Python {version}"
+    python = "" if version == "3.x" else version
+    return [unittests("Random session and Git lifecycles through the memory hooks",
+                      ["tests.test_memory_lifecycle_fuzz"], leg=leg, python=python)]
+
+
 def _memory_commands(version: str) -> List[Command]:
     leg = f"Python {version}"
     python = "" if version == "3.x" else version
@@ -642,6 +649,16 @@ def build_groups(root: Path = ROOT, base_ref: Optional[str] = None) -> List[Grou
             timeout_minutes=15,
             weight=95,
             commands=tuple(command for version in MEMORY_PYTHONS for command in _memory_commands(version)),
+        ),
+        Group(
+            name="memory-lifecycles",
+            matrix=True,
+            title=f"memory lifecycles (matrix: Python {', '.join(MEMORY_PYTHONS)})",
+            job="memory-lifecycles",
+            timeout_minutes=10,
+            weight=50,
+            commands=tuple(command for version in MEMORY_PYTHONS
+                           for command in _memory_lifecycle_commands(version)),
         ),
         Group(
             name="harness-fleet",

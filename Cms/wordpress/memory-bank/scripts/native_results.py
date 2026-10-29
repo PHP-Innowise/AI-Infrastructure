@@ -162,8 +162,10 @@ def _invalid_input(detail):
 
 
 def _overtaken(code, what):
-    """The refusal of a save another writer overtook - in practice a second
-    session on the branch saving first. The bare code left the agent to
+    """The refusal of a save another writer overtook in a way it cannot
+    follow: the branch task replaced since the request, a task created or
+    moved on since a request older than IN_FLIGHT_SECONDS, or a begun save
+    whose task moved on before it finished. The bare code left the agent to
     guess; its instruction says to stop and report the held save."""
     error = BrainError(f'{code}: {what} after this save was requested; nothing was written: '
                        'report the held save, do not retry it')
@@ -663,7 +665,13 @@ def _checkout(root):
         raise BrainError('native-result:checkout-unavailable') from error
     # A project without Git has no checkout identity to pin. The project
     # root still participates in the challenge's identity and prepared scope.
-    return hashlib.sha256(result.stdout if result.returncode==0 else b'no-git-head').hexdigest()
+    if result.returncode != 0: return hashlib.sha256(b'no-git-head').hexdigest()
+    # The branch the save was asked on, not its commit: a commit made while
+    # the agent wrote the save - the person's, or another session's on the
+    # branch - refused it, learnings and all. Detached, as in the middle of
+    # a rebase, the commit is all there is to pin.
+    _,_,name=result.stdout.partition(b'\n')
+    return hashlib.sha256(name.strip() if name.startswith(b'refs/heads/') else result.stdout).hexdigest()
 
 
 def _adapter():
@@ -992,19 +1000,36 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False):
                              'progress summary or a learning, or run the command with --skip')
             error.code='native-result:nothing-to-record'
             raise error
+        # Another session of the branch may have created the task or moved
+        # its revision since this save was requested: its own save, or the
+        # turn checkpoint its Stop hook writes every few turns. That refused
+        # this save, learnings included, and had the agent report it to a
+        # person who had already read the answer. Nothing else writes under
+        # this lock, so a save asked for while it could still be written -
+        # IN_FLIGHT_SECONDS, as for a prompt sent meanwhile - is recorded at
+        # the task as it now is, as the Harness retries its own: its progress
+        # and steps replace the other's, as they would have a moment later.
+        # An older one, spooled until a hook long after, yields to what was
+        # written since, and a task replaced since - completed and started
+        # again - is another task's.
+        fresh=0 <= time.time()-state['updated'] < IN_FLIGHT_SECONDS
+        rebased=False
         if state['task_uuid'] is None:
-            try: writable_task(root,state['task_id'],owner)
+            try: task=writable_task(root,state['task_id'],owner)
             except BrainRecordNotFound as error:
                 if error.identifier != state['task_id']: raise
-            else: raise _overtaken('native-result:task-changed','the branch task was created')
-            provision(state['task_id'])
-            task=writable_task(root,state['task_id'],owner)
+                provision(state['task_id'])
+                task=writable_task(root,state['task_id'],owner)
+            else:
+                if not fresh: raise _overtaken('native-result:task-changed','the branch task was created')
+                rebased=True
             state.update(task_uuid=task['id'],revision=task['revision'])
             _write(root,slot,state)
-        if not begun:
+        elif not begun:
             task=writable_task(root,state['task_id'],owner)
             if task['id'] != state['task_uuid']:
                 raise _overtaken('native-result:task-changed','the branch task was replaced')
+            if task['revision'] != state['revision'] and fresh: state['revision'],rebased=task['revision'],True
         digest=request_digest(state['task_uuid'],normalized)
         if state['digest'] is not None and state['digest'] != digest:
             raise BrainError('native-result:content-changed')
@@ -1018,8 +1043,10 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False):
             raise _overtaken(str(error),'another session or a person saved the task') from error
         held=any(item['state'] in {'differs','archived-differs'} for item in result['records'])
         state['phase']='held' if held else 'saved';_write(root,slot,state)
-        # For the journal: a save the agent's sandbox spooled, or one that
-        # landed after a prompt moved its request aside.
-        return step(result,state['phase'],repeat or ('spooled' if spooled else 'in-flight' if slot != key else None),
+        # For the journal: a save the agent's sandbox spooled, one that landed
+        # after a prompt moved its request aside, or one recorded at a task
+        # another session created or moved since the request.
+        return step(result,state['phase'],repeat or ('spooled' if spooled else 'in-flight' if slot != key
+                                                     else 'rebased' if rebased else None),
                     learnings=sum(item['state'] in {'created','completed','updated'} for item in result['records']),
                     promoted=len((result['promotion'] or {}).get('promoted') or ()))
