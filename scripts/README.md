@@ -562,13 +562,14 @@ For each `--target` it does the following:
   - the closing Stop;
   - a new session's prompt, whose capsule must recall the learning.
 
-With `--worktree`, Claude Code is also rehearsed, under each profile, in a
-Git worktree of a copy (`.claude/worktrees/rehearsal`, on a branch of its
-own), which has none of an installation Git does not track: the hooks run
-through the dispatcher the copy carries, as your Claude Code configuration
-runs them, and the save takes the variables its `environment` entry gives a
-session's commands. Such a run also has to save under the worktree's branch
-and leave the worktree clean.
+With `--worktree`, Claude Code and Codex are also rehearsed, under each
+profile, in a Git worktree of a copy (`.claude/worktrees/rehearsal`, on a
+branch of its own), which has none of an installation Git does not track: the
+hooks run through the dispatcher the copy carries, as your Claude Code
+configuration or Codex hooks run them. Claude Code's save takes the variables
+the dispatcher's `environment` entry gives a session's commands, Codex's the
+roots its command names. Such a run also has to save under the worktree's
+branch and leave the worktree clean.
 
 No model runs. HOME and TMPDIR point into the work directory, the copies are
 removed unless `--keep`, and the project is never written. A symbolic link
@@ -628,7 +629,8 @@ committed, the installation not) and random steps follow:
 - turns of Claude Code sessions in the root, below it (`src/`) and in
   worktrees (through the dispatcher the installation carries), of a root
   session that enters a worktree during a turn, of Codex sessions in the
-  root and below it and of Cursor sessions in the root: the prompt hook,
+  root, below it and in worktrees (through the Codex dispatcher, as a root
+  Codex session sets it up) and of Cursor sessions in the root: the prompt hook,
   the Stop hook, the save it asks for - made, skipped or ignored - and the
   Stop that settles it;
 - bursts of up to three such turns at once, two of them in one folder too
@@ -639,7 +641,16 @@ committed, the installation not) and random steps follow:
   rebase's state) and later continued or aborted, and a commit or a branch
   move between a Stop and its save;
 - worktrees added in `.claude/worktrees` and beside the root, some with
-  spaces in their names, and removed.
+  spaces in their names, and removed, and worktrees made as Codex makes
+  them: on a detached HEAD, the owning thread in `codex-thread.json`, so
+  the task is `codex-thread/<thread>`;
+- checkpoints as the checkpoint skill makes them (an update of the task),
+  half of them under read-only memory folders, as a sandbox keeps them:
+  the update waits, and the session's Stop makes it;
+- where `bwrap` is, a fifth of the saves outside a burst under bubblewrap
+  (everything read-only but the temporary folder, as Claude Code's sandbox
+  on Linux): the save waits in the spool, and the Stop after it makes it,
+  under the branch's task.
 
 What must hold: every hook exits 0, the native journal records no error,
 and no prompt hook's refresh fails or times out (one that another session's
@@ -650,8 +661,10 @@ of the branch it was asked on (in a stopped rebase, the branch being
 rebased), and a sample of the saved learnings is found by `context.py
 search` from the root and from every worktree left; after a turn checkpoint
 in the root no index of a removed worktree is left; `context.py validate`
-and the Memory Bank's `validate.py` pass; no worktree is written into. Only
-a save asked for before its branch moved may be refused.
+and the Memory Bank's `validate.py` pass; no worktree is written into; a
+checkpoint or save a sandbox held is made by the Stop after it, and none is
+refused.
+Only a save asked for before its branch moved may be refused.
 
 With `--attached` nothing is installed: every session is launched as the
 Harness launches it, the edition lent from this clone through the overlay of
@@ -681,7 +694,8 @@ python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP 
 - **CI relationship:** `tests/test_memory_lifecycle_fuzz.py`, the
   `memory-lifecycles` job, runs seeds 1 and 2 on PHP Core, which between
   them reach every host, a worktree entered, bursts, a commit during a save
-  and a rebase stopped, continued and aborted, and seed 4 attached, whose
+  and a rebase stopped, continued and aborted, Codex in a worktree, a
+  worktree Codex made and a checkpoint a sandbox held, and seed 9 attached, whose
   root session enters a worktree. A
   failing seed reproduces with the same `--seed` and `--steps`, apart from
   which of two sessions answering at once saves first; `--verbose` prints
@@ -863,9 +877,50 @@ bubblewrap sandbox mounts its own `/dev` and writes `/tmp`, so a project in
 question moves the request aside (`previous-in-flight`) and the save still
 lands through the spool.
 
+`--worktree [inside|beside]` runs the measured session in a Git worktree of
+the project on a branch of its own: inside the project where Claude Code makes
+its worktrees (`.claude/worktrees/bench`), or beside it where Codex makes its
+own (`CODEX_HOME/worktrees/<id>/project`). The installation is not committed,
+so the worktree has none of it, and the branch commits a file of its own. A
+session in the root first sets up the dispatcher in the isolated `CODEX_HOME`
+(`memory-bank/scripts/codex_worktrees.py`); a session in the worktree before
+anybody approved its entries runs no hook; the entries are then approved by
+their hashes, the records Codex's "Trust all" writes, and the measured session
+runs. The run passes when the setup wrote no approval, the unapproved session
+ran no hook, and the measured one got the capsule and every line of
+`AGENTS.md`, its save of a learning citing the branch's file waited in the
+spool and landed in the root's Project Brain under the worktree's branch, the
+worktree got its own index in the root, and nothing was written into the
+worktree. It combines with `--subfolder`, `--queued` and `--app-server`; its
+work folder is on disk, as for `--subfolder`.
+
+`--worktree codex` lets Codex make the worktree, as `codex --worktree` and a
+new worktree in the Codex app do: `codex exec --worktree` checks `HEAD` out in
+`CODEX_HOME/worktrees/<id>/project` on a detached HEAD and writes the session's
+thread into `codex-thread.json` of the worktree's Git directory. `HEAD` has a
+file the main checkout's working tree has deleted, which the save's learning
+cites; the unapproved session and the measured one each get a worktree of
+their own. It passes as above, the save landing under the task the owning
+thread names, `codex-thread/<thread>`, the measured session's own, with the
+worktree still detached. With `--app-server` the bench makes the worktree the
+way the app does - the app-server has no request for one - and writes the
+owner record, one key a line, once the thread has started. It takes no
+`--queued`.
+
+`--app-server` runs the measured turn through `codex app-server`, as the Codex
+desktop app drives one: a thread started in the session's folder with the
+workspace-write sandbox and on-request approvals, a turn, and every approval
+Codex asks the client for refused and counted; the run passes only when none
+was asked.
+
+The stand-in opens its stream before it writes, as a model does: Codex
+0.164's terminal, after an earlier session in the same `CODEX_HOME`, cut a
+response that stayed silent for 8 seconds and never ran the save it carried.
+
 ```bash
 python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox read-only] \
-  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--subfolder src] [--timeout 240] [--keep]
+  [--target DIR [--sync] [--exclude NAME]] [--queued 8] [--subfolder src] \
+  [--worktree [inside|beside|codex]] [--app-server] [--timeout 240] [--keep]
 ```
 
 - **Outputs:** a JSON report:
@@ -874,7 +929,13 @@ python3 scripts/codex_bench.py [--codex PATH] [--edition "PHP Core"] [--sandbox 
   - how many messages carried the step, whether as a `<hook_prompt>` and
     XML-escaped;
   - whether the save ran and the second Stop saw the recovery (the journal's
-    events).
+    events);
+  - with `--worktree`, what the setup wrote and the unapproved session did,
+    and whether the measured one got the capsule and the policy, saved under
+    the worktree's branch, got its own index and left the worktree clean;
+    with `--worktree codex`, the task the owning thread names, whether the
+    worktree stayed detached and its owner is the measured session's thread;
+    with `--app-server`, the approvals Codex asked for.
 
   Exit 0 when the save ran and one message carried the step; 1 otherwise; 2
   without Linux namespaces. `CODEX_BENCH_DUMP=DIR` keeps every request body.

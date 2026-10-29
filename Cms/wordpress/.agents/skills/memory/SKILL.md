@@ -16,8 +16,11 @@ and stops. It never completes, promotes, or invents task state.
 
 1. Resolve the repository root with `git rev-parse --show-toplevel`; stop without
    touching context state if it fails.
-2. Read `project-brain/config/runtime.json` when present and determine whether
-   the explicitly configured mode is `governed` or `lightweight`.
+2. Take the mode `python3 memory-bank/scripts/context.py status --json`
+   reports (`mode`) - `governed`, or `lightweight` where that is explicitly
+   configured. It reads the installation's `project-brain/config/runtime.json`,
+   which a worktree the installation serves, or a project an accelerator is
+   lent to, does not hold.
 3. In governed mode:
    - treat Project Brain as the only authority for active tasks and handoffs;
    - run `python3 memory-bank/scripts/context.py validate`;

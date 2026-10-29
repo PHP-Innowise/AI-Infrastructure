@@ -88,7 +88,9 @@ HOOK_STDIN=$(cat 2>/dev/null)
 # next session's "recent files"; the runtime keeps their paths only. Bytes
 # both ways: on Windows a text stream writes \n as \r\n, and the flag read
 # "1\r" - a continuation checkpointed the turn again - and no field was a path.
-HOOK_FIELDS=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
+# Isolated (-I): run in the session's folder, Python imported a project's own
+# json.py before the standard one.
+HOOK_FIELDS=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -I -c '
 import json, os, sys
 try:
     payload = json.loads(sys.stdin.buffer.read())
@@ -175,6 +177,8 @@ if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$PROJECT_DIR" ] && [ -d "$SESSI
 fi
 [ -z "$OTHER_CHECKOUT" ] || exit 0
 
+# The task as the prompt hook (working-memory-read.sh) names it: the branch,
+# the branch a rebase replays, or the thread that owns a worktree Codex made.
 rebased_branch() {
   local directory state name
   directory=$(git -C "$PROJECT_DIR" rev-parse --absolute-git-dir 2>/dev/null) || return 1
@@ -186,8 +190,18 @@ rebased_branch() {
   done
   return 1
 }
+codex_thread_task() {
+  local directory record= version=$'"version"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*1[ \t\n\v\f\r]*[,}]'
+  local owner=$'"ownerThreadId"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*"([0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12})"'
+  directory=$(git -C "$PROJECT_DIR" rev-parse --absolute-git-dir 2>/dev/null) || return 1
+  [ -f "$directory/codex-thread.json" ] && [ ! -L "$directory/codex-thread.json" ] || return 1
+  IFS= read -r -d '' -n 4097 record < "$directory/codex-thread.json"
+  [ "${#record}" -le 4096 ] && [[ $record =~ $version ]] && [[ $record =~ $owner ]] || return 1
+  printf 'codex-thread/%s' "${BASH_REMATCH[1]}"
+}
 TASK_ID="${CONTEXT_TASK_ID:-$(git -C "$PROJECT_DIR" branch --show-current 2>/dev/null)}"
 [ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)
+[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)
 [ -n "$TASK_ID" ] || exit 0
 
 TURN_ARGUMENTS=(turn --task-id "$TASK_ID" --flush-after "$FLUSH_AFTER")

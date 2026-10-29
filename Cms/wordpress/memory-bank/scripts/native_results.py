@@ -656,10 +656,29 @@ def recovery(host, payload):
             if host=='cursor' else payload.get('stop_hook_active') is True)
 
 
+# The thread that owns a worktree Codex made, read from codex-thread.json of
+# its Git directory by the patterns context.py's _owner_thread() reads it by.
+_CODEX_THREAD_VERSION=re.compile(rb'"version"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*1[ \t\n\v\f\r]*[,}]')
+_CODEX_THREAD_OWNER=re.compile(
+    rb'"ownerThreadId"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})"')
+
+
+def _codex_owner(git_directory):
+    try:
+        record=Path(os.fsdecode(git_directory))/'codex-thread.json'
+        if record.is_symlink() or not record.is_file(): return None
+        with record.open('rb') as handle: raw=handle.read(4097)
+    except (OSError,ValueError):
+        return None
+    owner=_CODEX_THREAD_OWNER.search(raw)
+    if len(raw) > 4096 or _CODEX_THREAD_VERSION.search(raw) is None or owner is None: return None
+    return owner.group(1)
+
+
 def _checkout(root):
     try:
         result=subprocess.run(['git','-C',str(workspace_roots.project_root(root)),
-            'rev-parse','HEAD','--symbolic-full-name','HEAD'],stdout=subprocess.PIPE,
+            'rev-parse','--absolute-git-dir','HEAD','--symbolic-full-name','HEAD'],stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,timeout=2,check=False)
     except (OSError,subprocess.TimeoutExpired) as error:
         raise BrainError('native-result:checkout-unavailable') from error
@@ -668,10 +687,15 @@ def _checkout(root):
     if result.returncode != 0: return hashlib.sha256(b'no-git-head').hexdigest()
     # The branch the save was asked on, not its commit: a commit made while
     # the agent wrote the save - the person's, or another session's on the
-    # branch - refused it, learnings and all. Detached, as in the middle of
-    # a rebase, the commit is all there is to pin.
-    _,_,name=result.stdout.partition(b'\n')
-    return hashlib.sha256(name.strip() if name.startswith(b'refs/heads/') else result.stdout).hexdigest()
+    # branch - refused it, learnings and all. A worktree Codex made stays
+    # detached, and the thread that owns it names the task: its commits move
+    # HEAD and leave the task as it was, so the thread is pinned. Detached
+    # otherwise, as in the middle of a rebase, the commit is all there is.
+    directory,_,head=result.stdout.partition(b'\n')
+    _,_,name=head.partition(b'\n')
+    if name.startswith(b'refs/heads/'): return hashlib.sha256(name.strip()).hexdigest()
+    owner=_codex_owner(directory.strip())
+    return hashlib.sha256(b'codex-thread/'+owner if owner else head).hexdigest()
 
 
 def _adapter():
@@ -683,6 +707,16 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True,entered=False,
     interpreter=['python3']
     if os.name == 'nt':
         interpreter=['python'] if shutil.which('python') else ['py','-3']
+    # A worktree its main checkout's installation serves: Claude Code gets the
+    # roots' variables for its commands from the dispatcher's environment
+    # entry, Codex has no file a hook can give its commands variables through
+    # - the command names them, so the save serves the worktree as the hooks do.
+    layout=workspace_roots.roots(root)
+    assign=''
+    if layout.shared and host=='codex':
+        assign=' '.join(name+'='+shlex.quote(str(value)) for name,value in (
+            (workspace_roots.HOME_VARIABLE,layout.tooling),(workspace_roots.STATE_VARIABLE,layout.state),
+            (workspace_roots.PROJECT_VARIABLE,layout.project)))+' '
     # Keep the documented CLI spelling covered by the installed Bash
     # permission rules, even when the session's cwd is a subdirectory. In a
     # worktree this installation serves, the command names the worktree: run
@@ -693,7 +727,7 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True,entered=False,
     named=layout.shared or entered
     place=['--project',str(layout.project)] if named else []
     def cli(*tail):
-        return shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),*place,'native-result',
+        return assign+shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),*place,'native-result',
             '--request',key,'--token',state['token'],*tail])
     enter='cd '+shlex.quote(str(tooling))+' && '
     if host=='claude':
@@ -882,24 +916,9 @@ def _under(path, base):
 
 def _spool_dirs():
     """The folders a save the project cannot take waits in: one of this
-    user's in each temporary directory a sandbox lets a command write.
-
-    Claude Code's sandbox gives its commands claude-<uid> under its own
-    temporary directory (CLAUDE_CODE_TMPDIR, else the system's) as TMPDIR,
-    so a save from a session below the root or in a worktree, which may not
-    write the project, waits there - and the hook, outside the sandbox,
-    looks there too. A command takes the first folder it can write."""
-    owner = str(os.getuid()) if hasattr(os, 'getuid') else 'user'
-    bases = []
-    for base in (os.environ.get('TMPDIR'), tempfile.gettempdir(), '/tmp' if os.name == 'posix' else None):
-        if base and os.path.isabs(base) and base not in bases:
-            bases.append(base)
-    claude = f"claude-{os.getuid() if hasattr(os, 'getuid') else 0}"
-    for base in (os.environ.get('CLAUDE_CODE_TMPDIR'), *list(bases)):
-        child = os.path.join(base, claude) if base and os.path.isabs(base) else None
-        if child and child not in bases:
-            bases.append(child)
-    return [Path(base) / f'{SPOOL_NAME}-{owner}' for base in bases]
+    user's in each temporary directory a sandbox lets a command write
+    (workspace_roots.spool_directories)."""
+    return workspace_roots.spool_directories(SPOOL_NAME)
 
 
 def _own(image):

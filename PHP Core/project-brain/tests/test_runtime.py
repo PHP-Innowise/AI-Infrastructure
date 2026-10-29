@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8423,6 +8424,37 @@ class AutomaticWorkingMemoryTest(RuntimeHarness):
             self.run_cli("get", "--task-id", task_id, "--json").stdout
         )["auto_checkpoint"]
 
+    def test_an_explicit_flush_with_nothing_buffered_makes_the_task(self) -> None:
+        # The checkpoint skill flushes, then updates: on a new branch with
+        # nothing buffered the flush made no task and the update was
+        # refused ("Working task not found").
+        self.commit_main()
+        self.git("checkout", "-q", "-b", "feature/discussed")
+        visit = json.loads(self.run_cli("turn", "--task-id", "feature/discussed", "--json").stdout)
+        self.assertFalse(visit["provisioned"])
+        self.assertNotEqual(0, self.run_cli("get", "--task-id", "feature/discussed", "--json").returncode)
+        flushed = self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json")
+        self.assertEqual(0, flushed.returncode, flushed.stderr)
+        self.assertEqual((True, False), (json.loads(flushed.stdout)["provisioned"], json.loads(flushed.stdout)["flushed"]))
+        updated = self.run_cli("update", "--task-id", "feature/discussed", "--revision", "auto",
+                               "--progress", "Agreed to date refunds by their invoice", "--json")
+        self.assertEqual(0, updated.returncode, updated.stderr)
+        task = json.loads(self.run_cli("get", "--task-id", "feature/discussed", "--json").stdout)
+        self.assertEqual("Agreed to date refunds by their invoice", task["progress"])
+        again = json.loads(self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json").stdout)
+        self.assertFalse(again["provisioned"])
+        # A completed task is not made again.
+        revision = json.loads(self.run_cli("get", "--task-id", "feature/discussed", "--json").stdout)["revision"]
+        done = self.run_cli("complete", "--task-id", "feature/discussed", "--revision", str(revision),
+                            "--summary", "Refunds dated", "--outcome", "done", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        closed = self.run_cli("turn", "--task-id", "feature/discussed", "--flush", "--json")
+        self.assertEqual(0, closed.returncode, closed.stderr)
+        self.assertFalse(json.loads(closed.stdout)["provisioned"])
+        tasks = [path for path in (self.repository / "project-brain/dynamic/tasks").glob("*.md")
+                 if "feature/discussed" in path.read_text(encoding="utf-8")]
+        self.assertEqual(1, len(tasks))
+
     def test_a_checkpoint_names_the_branch_commits(self) -> None:
         # Paths said where the work happened; nothing said what it was, though
         # every commit already carried a person's one-line summary of it.
@@ -10342,6 +10374,284 @@ class RenamedBranchTaskTest(RuntimeHarness):
         started = self.run_cli("start", "--task-id", "feature/ledger-sync-v2", "--goal", "Next", "--json")
         self.assertEqual(0, started.returncode, started.stderr)
         self.assertEqual("feature/ledger-sync-v2", json.loads(started.stdout)["task_id"])
+
+
+class CodexThreadTaskTest(RuntimeHarness):
+    """A worktree Codex makes for a thread - `codex --worktree`, a new worktree
+    in the Codex app - is checked out on a detached HEAD, with the thread that
+    owns it in codex-thread.json of its Git directory. The hooks name its task
+    codex-thread/<thread>; `status` said HEAD could not supply one and told
+    the person to set CONTEXT_TASK_ID."""
+
+    OWNER = "01a1776d-b888-7ac2-8a1b-9557bdbd1dad"
+    TASK = "codex-thread/" + OWNER
+
+    def git(self, *arguments: str, where: Path | None = None) -> str:
+        return subprocess.run(["git", "-C", str(where or self.repository), "-c", "user.email=h@example.invalid",
+                               "-c", "user.name=H", *arguments], check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.git("commit", "-q", "--allow-empty", "-m", "base")
+        self.git("checkout", "-q", "--detach")
+        self.record = self.repository / ".git" / "codex-thread.json"
+        self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode("utf-8"))
+
+    def identity(self) -> dict:
+        status = self.run_cli("status", "--json")
+        self.assertEqual(0, status.returncode, status.stderr)
+        return json.loads(status.stdout)["automatic_memory"]
+
+    def test_status_names_the_owning_thread_while_head_is_detached(self) -> None:
+        readiness = self.identity()
+        self.assertEqual("active", readiness["status"])
+        self.assertEqual(("active", "codex-thread", self.TASK),
+                         tuple(readiness["task_identity"][key] for key in ("status", "source", "task_id")))
+        self.assertEqual("detached-head", readiness["git_metadata"]["state"])
+        self.assertIsNone(readiness["git_metadata"]["remediation"])
+        # Any other detached HEAD names none, as before.
+        self.record.unlink()
+        readiness = self.identity()
+        self.assertEqual(("degraded", None), (readiness["task_identity"]["status"],
+                                              readiness["task_identity"]["task_id"]))
+        self.assertIn("CONTEXT_TASK_ID", readiness["git_metadata"]["remediation"])
+        # A branch made in the worktree names the task from then on.
+        self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode("utf-8"))
+        self.git("switch", "-q", "-c", "codex/refunds")
+        self.assertEqual(("git-branch", "codex/refunds"),
+                         tuple(self.identity()["task_identity"][key] for key in ("source", "task_id")))
+
+    def prompt_as_the_hooks_do(self) -> subprocess.CompletedProcess[str]:
+        return self.run_cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK,
+                            "--expected-branch", self.TASK, "--ephemeral", "--sanitize")
+
+    def test_the_thread_task_is_read_and_recorded(self) -> None:
+        def prompt() -> str:
+            read = self.prompt_as_the_hooks_do()
+            self.assertEqual(0, read.returncode, read.stderr)
+            return read.stdout
+
+        # No branch tells the agent the task's ID before it is recorded.
+        self.assertIn(f"working: not recorded yet (task {self.TASK}; the task starts at the", prompt())
+        self.repository.joinpath("app.txt").write_text("refunds\n", encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", self.TASK, "--flush", "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        self.assertTrue(json.loads(turn.stdout)["provisioned"])
+        # The goal keeps the thread's ID whole instead of reading it as words.
+        self.assertIn(f"working: {self.TASK} — Work of the Codex thread that owns its worktree "
+                      f"(auto-provisioned from {self.TASK})", prompt())
+        record = json.loads(self.run_cli("get", "--task-id", self.TASK, "--json").stdout)
+        self.assertIn("app.txt", record["files"])
+
+    def test_the_thread_task_is_admitted_only_while_the_thread_owns_the_detached_checkout(self) -> None:
+        # The hooks inferred it; before anything is delivered the runtime
+        # checks it still holds, as it checks a branch.
+        self.assertEqual(0, self.prompt_as_the_hooks_do().returncode)
+        for change, undo in (
+                (lambda: self.record.write_bytes(
+                    b'{"version":1,"ownerThreadId":"01a1776e-0000-7000-8000-000000000001"}'),
+                 lambda: self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode())),
+                (lambda: self.record.unlink(),
+                 lambda: self.record.write_bytes(('{"version":1,"ownerThreadId":"%s"}' % self.OWNER).encode())),
+                (lambda: self.git("switch", "-q", "-c", "codex/refunds"),
+                 lambda: self.git("checkout", "-q", "--detach"))):
+            change()
+            refused = self.prompt_as_the_hooks_do()
+            self.assertNotEqual(0, refused.returncode)
+            self.assertIn("Inferred task branch changed or unavailable", refused.stderr)
+            undo()
+            self.assertEqual(0, self.prompt_as_the_hooks_do().returncode)
+
+    def test_a_rebase_there_or_a_branch_shaped_like_the_task_is_not_the_thread(self) -> None:
+        # During a rebase the hooks name the branch being rebased, not the thread.
+        rebase = self.repository / ".git" / "rebase-merge"
+        rebase.mkdir()
+        (rebase / "head-name").write_text("refs/heads/feature/refunds\n", encoding="utf-8")
+        self.assertNotEqual("codex-thread", self.identity()["task_identity"]["source"])
+        shutil.rmtree(rebase)
+        self.assertEqual("codex-thread", self.identity()["task_identity"]["source"])
+        self.assertFalse(context_cli.derive_goal("codex-thread/notes").startswith("Work of the Codex thread"))
+
+    def test_a_linked_worktree_keeps_its_owner_in_its_own_git_directory(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="codex-made worktree ")
+        self.addCleanup(temporary.cleanup)
+        worktree = Path(temporary.name) / "worktrees" / "b3c4" / "project"
+        self.git("worktree", "add", "-q", "--detach", str(worktree))
+        git_dir = Path(self.git("rev-parse", "--absolute-git-dir", where=worktree))
+        self.assertIsNone(context_cli._owner_thread(worktree))
+        other = "01a1776e-0000-7000-8000-000000000001"
+        # The app writes it one key a line.
+        (git_dir / "codex-thread.json").write_bytes(
+            ('{\n  "version": 1,\n  "ownerThreadId": "%s"\n}\n' % other).encode("utf-8"))
+        self.assertEqual(other, context_cli._owner_thread(worktree))
+        (worktree / "src").mkdir()
+        self.assertEqual(other, context_cli._owner_thread(worktree / "src"))
+        self.assertEqual(self.OWNER, context_cli._owner_thread(self.repository))
+
+
+@unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                 "a read-only folder of the owner's own needs POSIX permissions and a user they bind")
+class SandboxQueueTest(RuntimeHarness):
+    """A sandbox that lets a command write only its own folder - Codex's in a
+    worktree or below the root, Claude Code's - refused the memory writes the
+    policy and the checkpoint skill have an agent run: `update` at the Brain's
+    lock, `turn --flush` at the index. Read-only folders stand in for it here;
+    the commands wait in a temporary folder of the user's, and the next turn
+    a hook records, outside the sandbox, makes them."""
+
+    TASK = "feature/refunds"
+
+    def setUp(self) -> None:
+        super().setUp()
+        spool = tempfile.TemporaryDirectory(prefix="queue tmp ")
+        self.addCleanup(spool.cleanup)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("GIT_", "CONTEXT_", "ACCELERATOR_", "CLAUDE"))}
+        self.env.update(TMPDIR=spool.name, PROJECT_BRAIN_OWNER="local")
+        self.spool = Path(spool.name)
+        started = self.cli("start", "--task-id", self.TASK, "--goal", "Date refunds", "--json")
+        self.assertEqual(0, started.returncode, started.stderr)
+
+    def cli(self, *arguments: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        return self.run_cli(*arguments, env=dict(self.env, **extra))
+
+    def tearDown(self) -> None:
+        self.unsandboxed()
+        super().tearDown()
+
+    def sandboxed(self) -> None:
+        """The project's memory read-only to this user's commands, as a
+        sandbox mounts it; undone before the hook's turn."""
+        for folder in (self.repository / "project-brain/local", self.repository / "memory-bank/local"):
+            folder.chmod(0o555)
+
+    def unsandboxed(self) -> None:
+        for folder in (self.repository / "project-brain/local", self.repository / "memory-bank/local"):
+            if folder.is_dir():
+                folder.chmod(0o755)
+
+    def waiting(self) -> list:
+        return sorted(self.spool.glob("ai-accelerator-memory-queue-*/command-*.json"))
+
+    def task(self) -> dict:
+        found = self.cli("get", "--task-id", self.TASK, "--json")
+        self.assertEqual(0, found.returncode, found.stderr)
+        return json.loads(found.stdout)
+
+    def hook_turn(self) -> None:
+        """The Stop hook's turn, outside the sandbox."""
+        self.unsandboxed()
+        done = self.cli("turn", "--task-id", self.TASK, "--flush-after", "5", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+
+    def journal(self) -> list:
+        path = self.repository / "memory-bank/local/native-results.ndjson"
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        return [(line["event"], line.get("code")) for line in map(json.loads, lines) if line["stage"] == "queue"]
+
+    def test_the_checkpoints_writes_wait_and_the_next_hook_makes_them_in_order(self) -> None:
+        before = self.task()["revision"]
+        self.repository.joinpath("refund.txt").write_text("refunds keep their invoice date\n", encoding="utf-8")
+        self.sandboxed()
+        for arguments in (("turn", "--task-id", self.TASK, "--flush", "--json"),
+                          ("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "First",
+                           "--next-step", "Write the refund test", "--json"),
+                          # A value that reads like an option is still the value.
+                          ("update", "--task-id", self.TASK, "--revision", "auto",
+                           "--progress", "--dated refunds: last", "--json")):
+            with self.subTest(command=arguments[0]):
+                done = self.cli(*arguments)
+                self.assertEqual(0, done.returncode, done.stderr)
+                answer = json.loads(done.stdout)
+                self.assertEqual((self.TASK, True), (answer["task_id"], answer["queued"]))
+                self.assertIn("when this turn ends", answer["detail"])
+        self.assertEqual(3, len(self.waiting()))
+        self.assertEqual(before, self.task()["revision"])
+        for record in self.waiting():
+            self.assertEqual(0o600, record.stat().st_mode & 0o777)
+        self.hook_turn()
+        task = self.task()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)] * 3, self.journal())
+        # Oldest first: the flush recorded the file, each update a revision,
+        # and the last one's progress stands.
+        self.assertIn("refund.txt", task["files"])
+        self.assertEqual(before + 3, task["revision"])
+        self.assertEqual("--dated refunds: last", task["progress"])
+        self.assertEqual(["Write the refund test"], task["next_steps"])
+
+    def test_what_a_command_refuses_it_still_refuses_at_once(self) -> None:
+        self.sandboxed()
+        for arguments, refusal in (
+                (("update", "--task-id", self.TASK, "--revision", "auto",
+                  "--progress", "token sk-live-1234567890abcdef1234567890abcdef"), "token"),
+                (("update", "--task-id", self.TASK, "--revision", "auto"), "requires a changed field"),
+                (("update", "--task-id", "bad task!", "--progress", "x"), "Task ID")):
+            with self.subTest(refusal=refusal):
+                done = self.cli(*arguments)
+                self.assertEqual(1, done.returncode, done.stdout)
+                self.assertIn(refusal, done.stderr)
+        self.assertEqual([], self.waiting())
+
+    def test_a_command_refused_when_made_reaches_the_next_capsule(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", "feature/never-started", "--revision", "auto",
+                        "--progress", "Lost refunds", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.hook_turn()
+        self.assertEqual([("refused", "refused")], self.journal())
+        capsule = self.cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK, "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn("queued memory command not made: update - context: Working task not found: "
+                      "feature/never-started", capsule.stdout)
+
+    def test_only_a_waiting_update_or_flush_of_this_project_is_made(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Kept", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        [kept] = self.waiting()
+        record = json.loads(kept.read_text(encoding="utf-8"))
+        folder, key = kept.parent, record["key"]
+
+        def plant(name: str, **changes: object) -> Path:
+            path = folder / f"command-{key}-{name}.json"
+            path.write_text(json.dumps(dict(record, **changes)), encoding="utf-8")
+            path.chmod(0o600)
+            return path
+
+        # What a file could name besides: another command, the index, another root.
+        plant("00000000000000000001-1-a", argv=["complete", "--task-id", self.TASK, "--json"])
+        plant("00000000000000000002-1-b", argv=["--db=/tmp/elsewhere.db", *record["argv"]])
+        plant("00000000000000000003-1-c", argv=["--root=/tmp", *record["argv"]])
+        plant("00000000000000000004-1-d", argv=["turn", "--task-id", self.TASK, "--json"])
+        plant("00000000000000000005-1-e", created=time.time() - 2 * 24 * 60 * 60)
+        linked = folder / f"command-{key}-00000000000000000006-1-f.json"
+        linked.symlink_to(kept)
+        other = folder / f"command-{'0' * 16}-00000000000000000007-1-g.json"
+        other.write_text(kept.read_text(encoding="utf-8"), encoding="utf-8")
+        other.chmod(0o600)
+        self.hook_turn()
+        task = self.task()
+        self.assertEqual(("active", "Kept"), (task["status"], task["progress"]))
+        self.assertEqual([("refused", "unreadable")] * 4 + [("refused", "expired")] + [("refused", "unreadable")]
+                         + [("made", None)], self.journal())
+        # Another project's queue is left to it.
+        self.assertEqual([other], self.waiting())
+
+    def test_a_command_a_drain_runs_fails_instead_of_waiting_again(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Again",
+                        CONTEXT_QUEUE_DRAIN="1")
+        self.assertNotEqual(0, done.returncode)
+        self.assertEqual([], self.waiting())
+
+    def test_a_writable_project_writes_as_before(self) -> None:
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Direct", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.assertNotIn("queued", json.loads(done.stdout))
+        self.assertEqual([], self.waiting())
+        self.assertEqual("Direct", self.task()["progress"])
 
 
 class AutoCheckpointFieldTest(RuntimeHarness):

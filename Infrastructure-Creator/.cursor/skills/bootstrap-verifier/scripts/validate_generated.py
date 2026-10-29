@@ -761,6 +761,10 @@ def memory_hook_early_exit(lines: list, end: int) -> bool:
 # fallback: during a rebase the branch being rebased (the runtime admits it as
 # the inferred branch only while that rebase runs).
 REBASE_FALLBACK = '[ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)'
+# And right after that one: the thread that owns a worktree Codex made
+# (`codex --worktree`, the Codex app's), detached until a branch is made
+# there - the runtime admits it only while HEAD stays detached.
+THREAD_FALLBACK = '[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)'
 
 
 def memory_hook_identity_contract(source: str, edition: str, name: str) -> bool:
@@ -785,6 +789,9 @@ def memory_hook_identity_contract(source: str, edition: str, name: str) -> bool:
     fallback = admitted[0]
     rebase = [index for index, line in enumerate(lines) if line == REBASE_FALLBACK]
     if rebase and (not rebase_allowed or len(rebase) > 1 or rebase[0] != lines.index(fallback) + 1):
+        return False
+    thread = [index for index, line in enumerate(lines) if line == THREAD_FALLBACK]
+    if thread and (not rebase or len(thread) > 1 or thread[0] != rebase[0] + 1):
         return False
     if prompt:
         initial = "ARGUMENTS=(refresh --host " + edition + (" --delivery-profile cursor-rule" if edition == "cursor" else "") + ")"
@@ -874,7 +881,8 @@ def memory_hook_identity_contract(source: str, edition: str, name: str) -> bool:
         write = (re.search(rf"\b{protected}(?:\[[^]]*\])?\s*(?::?[+*/%&|^<>-]*=|\+\+|--)", line)
                  or re.search(rf"(?:\+\+|--)\s*\b{protected}\b", line))
         mutator = re.search(rf"\b(?:unset|declare|typeset|local|read|mapfile)\b.*\b{protected}\b|\bprintf\s+-v\s+[\"']?{protected}\b", line)
-        if (write or mutator) and line != fallback and not (rebase_allowed and line == REBASE_FALLBACK):
+        if (write or mutator) and line != fallback and not (rebase_allowed
+                                                             and line in (REBASE_FALLBACK, THREAD_FALLBACK)):
             return False
         if "CONTEXT_CLI" in line and re.search(r"\b(?:refresh|hook-context)\b", line) and line not in reads:
             return False

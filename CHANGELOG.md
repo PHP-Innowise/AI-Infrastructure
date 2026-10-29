@@ -28,6 +28,149 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A commit in a worktree Codex made no longer refuses the save — 2026-10-29
+
+- Why: a native save is pinned when the Stop asks for it: to the branch,
+  and on a detached HEAD to the commit. A worktree Codex makes stays
+  detached, and the thread that owns it names the task
+  (`codex-thread/<thread>`), so a commit there - the person's, or another
+  session's - moved the pin and refused the save, learnings and all. The
+  lifecycle fuzzer found it once the two worktree stacks met: 2 of 96 seeds
+  at 80 steps, one of them a save the sandbox held that its Stop then could
+  not make.
+- What changes: on a detached HEAD whose Git directory holds a
+  `codex-thread.json` naming its owner, the save is pinned to that thread,
+  read by the patterns `context.py` reads it by and in the same `git
+  rev-parse` call. A worktree handed to another thread refuses the save, as
+  a branch made there does. A stopped rebase and any other detached HEAD
+  keep the commit, and their pin is the same value as before.
+- Tests: `tests/test_memory_native_capture.py` commits in such a worktree
+  while the save is written, and the save is made; on the old pin it is
+  refused as `scope-changed`. A worktree handed to another thread refuses
+  it; on the old pin that save was made. The two fuzzer seeds pass.
+
+### The lifecycle fuzzer holds saves in a sandbox, as Claude Code's does — 2026-10-28
+
+- Why: a save a sandbox cannot write waits in the spool, and the session's
+  next hook makes it. The benches drive that once per run; the fuzzer
+  never did, between other sessions' saves, commits and branch moves.
+- What changes: where `bwrap` is, `scripts/memory_lifecycle_fuzz.py` runs a
+  fifth of the saves outside a burst under bubblewrap, everything read-only
+  but the temporary folder, as Claude Code's sandbox on Linux. The save
+  must say `spooled`, and the Stop after it must make it under the branch's
+  task. Read-only memory folders alone are no stand-in for that sandbox:
+  the save opens the index, whose file they leave writable, before it
+  takes its lock, and fails on the database's journal. The CI job
+  `memory-lifecycles` installs bubblewrap and lifts the runner's AppArmor
+  restriction, as `system-orchestration` does; its test asserts a held
+  save where `bwrap` is. The draw is apart from the run's own random
+  stream, so the seeds keep their steps.
+- Tests: seeds 1 and 2 at 60 steps hold 7 and 9 saves, all made by the Stop
+  after them, with no violation; `tests.test_check` accepts the job's
+  setup lines.
+
+### The memory hooks' Python imports nothing from the project's folder — 2026-10-28
+
+- Why: the prompt hook, the Stop hook and the session banner run Python
+  snippets in the session's folder, and `python -c` puts that folder first
+  on `sys.path`. A project's own `json.py` was imported before the standard
+  one, on every prompt. Measured: a `json.py` in the project root wrote its
+  marker, and the hook went on as usual. Attached - the Harness lends the
+  edition to any folder it opens - that is code the person never trusted.
+- What changes: those snippets run with `-I`: no session folder, no
+  `PYTHON*` variables, no user site. The validators get the same in their
+  own change, from `main`. The runtime's CLI is untouched: run as a script,
+  it imports from its own folder.
+- Tests: `PythonResolutionTest` runs the three hooks with a `json.py` in the
+  session's folder. It is not imported, and without `-I` the test fails. The
+  Windows banner test now sets the stream at the top of the program
+  `python` runs, which `-I` leaves alone, where `PYTHONPATH` it ignores.
+
+### A session that entered a worktree keeps the root's permission rules, measured — 2026-10-28
+
+- Why: the worktree stack said, as a limit it had not measured, that after
+  EnterWorktree the root's permission rules decide by the root's paths, so
+  the worktree's `secrets/` and `.env` would go unguarded.
+- What changes: `scripts/claude_code_bench.py` takes `--enter-worktree` with
+  `--permissions`. A session in the root enters a worktree, tries the reads,
+  writes, commands and fetches of `--permissions` on the worktree's files,
+  and passes when each gets the decision it gets in the root. The report
+  carries what EnterWorktree answered. `docs/MEMORY-INTEGRATION.md` drops
+  the limit and says what was measured.
+- Tests: Claude Code 2.1.278 offline. EnterWorktree answered "The session is
+  now working in the worktree", and 19 of 19 decisions matched the root's:
+  the worktree's `.env`, `.env.local` and `secrets/` denied, `rm -rf`,
+  `sudo` and `chmod 777` denied, its own files read. Claude Code takes `./`
+  in a rule from the session's folder, which EnterWorktree moves.
+
+### The Codex bench passes a read-only turn that asks for no save — 2026-10-28
+
+- Why: `scripts/codex_bench.py --sandbox read-only` shows that the Stop skips
+  the save request where the turn can write nothing, but its verdict was
+  still "saved", so the run that showed the right thing exited 1.
+- What changes: under `--sandbox read-only` the run passes when the stand-in
+  got no save step and the journal says `stop:skipped:read-only-sandbox`.
+- Tests: on Codex 0.163 offline the run exits 0 with exactly those two
+  events; the workspace-write runs are unchanged.
+
+### The lifecycle fuzzer drives Codex in worktrees and held checkpoints — 2026-10-28
+
+- Why: the fuzzer drove Claude Code in worktrees, but Codex only in the root
+  and below it, never a worktree Codex makes, and never the explicit memory
+  commands. That is the stack carried onto the worktree stack the same day,
+  which its own tests covered one piece at a time.
+- What changes: `scripts/memory_lifecycle_fuzz.py` also runs Codex sessions
+  in worktrees, through the Codex dispatcher as a root Codex session sets it
+  up. It makes worktrees as Codex does: on a detached HEAD, the owning
+  thread in `codex-thread.json`, so the task is `codex-thread/<thread>`. And
+  it makes checkpoints as the checkpoint skill does, half of them under
+  read-only memory folders. A checkpoint a sandbox held must be made by the
+  session's Stop; one never made, or refused, is a violation.
+  `tests/test_memory_lifecycle_fuzz.py` asserts the new coverage on seeds 1
+  and 2, and its attached seed is 9 (4 no longer reached a Codex session in
+  the root; of 18 attached seeds none had a violation, 5 cover every path
+  the test names); `scripts/README.md` and `docs/CI.md` say what it drives.
+- Tests: seeds 1 to 3 at 60 steps, and a campaign of 24 seeds at 80 steps
+  over the four editions, a quarter attached: 936 saves, 29 Codex worktree
+  sessions, 23 worktrees Codex made, 23 checkpoints held and made, no
+  violation.
+
+### The session banner reads the index Windows names — 2026-10-28
+
+- Why: `local-context.sh` takes its status fields from Python's `print`,
+  which on Windows ends the line with `\r\n`. The last field, the index's
+  path, kept the `\r` and named no file, so the banner of every session on
+  Windows said `index=missing` over an index that was there.
+- What changes: the four editions' `local-context.sh` write the fields as
+  UTF-8 bytes, as the memory hooks' snippets do.
+- Tests: `PythonResolutionTest` runs the banner with `python` writing its
+  stream as on Windows (`sitecustomize`: cp1252, `\r\n`) and a status that
+  names an existing index; on the old hook it reads `index=missing`.
+
+### Codex in worktrees and the explicit memory commands, on the worktree stack — 2026-10-28
+
+- Why: two stacks grew apart from the same base. One served Codex started in
+  a worktree, and in a worktree Codex made on a detached HEAD, and had the
+  explicit memory commands work there (a write a sandbox refuses waits for
+  the next hook, the checkpoint names the hooks' task); the other served
+  Claude Code's `EnterWorktree`, saves another session or a commit overtook,
+  and attached sessions entering worktrees. Each was tested apart.
+- What changes: the first stack's fifteen commits are carried onto the second
+  (the commits both had are kept once). Where they met: a Codex save step in
+  the shared layout names the roots' variables before the command and the
+  worktree after `--root` (`--project`); the Stop hook takes the served
+  worktree first and then the task - the branch, a rebase's branch, the
+  thread that owns a worktree Codex made; `claude_code_bench.py` takes
+  `--enter-worktree` and `--cli checkpoint` both. A command the sandbox holds
+  for a worktree keeps the name (`--project=<worktree>` in what waits), so it
+  is made for the worktree it was asked for. `docs/MEMORY-INTEGRATION.md` no
+  longer says Codex started in a worktree runs no hooks.
+- The generator's skill bodies: each stack added to `hook-forge` within the
+  306,200-byte ceiling, together 306,727; the ceiling rises to 306,800.
+- Tests: `SharedWorktree` holds an update for an entered worktree under a
+  sandbox and makes it at the hook's turn there; without the name in what
+  waits it fails.
+
 ### The lifecycle fuzzer runs as a CI job of its own — 2026-10-28
 
 - Why: as a step of the `memory` job it took about three minutes on a
@@ -247,6 +390,88 @@ edition's own files remain in that edition's changelog.
   dispatcher does. `tests/test_memory_worktree_sessions.py` (`AttachedWorktree`)
   fails without the change.
 
+### Explicit memory commands in a worktree: writes a sandbox refuses wait, the checkpoint names the hooks' task — 2026-10-26
+
+- The memory commands an agent runs itself - the policy's stage-boundary
+  `update`, the `checkpoint` skill's `turn --flush` and `update` - failed in
+  a worktree the installation serves. With the CLI named by its path in the
+  root (entries below), three things still stood in the way. Codex's
+  workspace-write sandbox writes only the worktree, `/tmp` and `$TMPDIR`:
+  under Codex 0.164's own sandbox (`codex sandbox -P :workspace`) `update`
+  failed at the Brain's lock (`Read-only file system:
+  project-brain/local/runtime.lock`) and `turn --flush` at the index
+  (`attempt to write a readonly database`), and Claude Code's sandbox does
+  the same there. The skill stopped on a detached HEAD, where the hooks name
+  `codex-thread/<thread>` or a rebase's branch. And on a task with nothing
+  buffered yet - a new branch, a worktree's first answer, in the root too -
+  `turn --flush` made no task, so the `update` after it was refused
+  ("Working task not found").
+- **A write a sandbox refuses waits.** An `update` or a `turn --flush` that
+  cannot write the Brain's lock folder (governed) and the index's is checked
+  as far as nothing has to be written - the task ID, a changed field, the
+  secret and personal-data refusals - and waits, owner-only, in
+  `ai-accelerator-memory-queue-<uid>` in the first temporary folder the
+  sandbox writes (`$TMPDIR`, `/tmp`, Claude Code's `claude-<uid>`: the
+  save's spool folders, now `workspace_roots.spool_directories`). It answers
+  `queued` and exits 0. The next turn a hook records - this turn's Stop,
+  outside the sandbox - makes what waits for its project (the state it
+  writes and the checkout it reads), oldest first, after the turn and
+  before the Stop's save request. Each is journaled (`native-results.ndjson`,
+  stage `queue`); one refused is named in the next capsule's last-turn line.
+  Only these two commands, rebuilt from their own options, for this project,
+  younger than a day; a file naming anything else, or a link, is refused
+  unread, and a command a drain runs fails rather than waiting again. A
+  drain with nothing waiting costs 0.07 ms a turn.
+- **The checkpoint names the hooks' task.** Its step 1 takes
+  `CONTEXT_TASK_ID`, otherwise the branch, and on a detached HEAD the
+  `automatic_memory.task_identity.task_id` of `context.py status --json`,
+  which now names a rebase's branch too (source `git-rebase`) where it told
+  the person to set `CONTEXT_TASK_ID`. The lightweight checkpoint and the
+  generator's (`skill-forge/references/php-process-skills.md`) resolve it
+  the same way; the skill reports a `queued` command as made when the turn
+  ends. It and the `memory` skill took the mode from
+  `project-brain/config/runtime.json` under `git rev-parse --show-toplevel`,
+  which a worktree the installation serves, or a project an accelerator is
+  lent to, does not hold; both take the `mode` `status --json` reports now.
+- **An explicit flush makes the task**, as the memory MCP server's
+  checkpoint already did; the Stop hook never flushes explicitly, so
+  visiting a branch still mints nothing, and a completed task is not made
+  again.
+- Offline, scripted model, the same stand-in before and after
+  (`--cli checkpoint` in `scripts/claude_code_bench.py` and
+  `scripts/codex_bench.py`, `scripts/bench_checkpoint.py`): it makes a
+  checkpoint as the installed skill says - step 1, `turn --flush`,
+  `update` - with the memory CLI the session was told of, else the
+  policy's. Before (912a0bbf): in `.claude/worktrees/<name>` under Claude
+  Code 2.1.299 and in a worktree inside and beside the root under Codex
+  0.164, the flush failed (`can't open file
+  '<worktree>/memory-bank/scripts/context.py'`); in a worktree Codex made,
+  the skill stopped on the detached HEAD. The save after the answer worked
+  in all four. After: every checkpoint landed in the root's Project
+  Brain under the task of the checkout it ran in - the worktree's branch,
+  or `codex-thread/<thread>` - in those four, in Claude Code's desktop
+  mode (no permission prompt), with its sandbox on, under the Codex
+  app-server (no approval asked) and in the project root of a fresh
+  install of either host, where the `update` had been refused ("Working
+  task not found"). Under either sandbox both writes answered `queued`
+  and the Stop made both (journal `queue made` twice); the save after
+  the answer, the capsule, the policy and a clean worktree held in every
+  run.
+- `project-brain/tests/test_runtime.py` (`SandboxQueueTest`, read-only
+  folders standing in for the sandbox; an explicit flush on a new branch)
+  and `memory-bank/tests/test_checkpoint.py` (the prompt hook's `--task-id`
+  against the skill's step 1 for a branch, `CONTEXT_TASK_ID`, both rebase
+  backends, both owner records and a worktree Codex made);
+  `tests/test_host_benches.py` holds the stand-in. Each of twelve
+  pieces taken out fails a test: the rebase in `status`, the skill's step 1
+  and its `queued` line, the queue, the drain, the command allow-list, the
+  capsule line, the drain's no-wait guard, the queue-time refusals, the
+  explicit flush, and each skill's mode from `status`.
+- Not covered: the Codex app was not driven (the bench makes its worktree
+  as the app does); Cursor in a worktree still runs no hooks; `refresh`,
+  which the `memory` skill runs, reports its layers failed in such a sandbox
+  - the hooks refresh the index on every prompt.
+
 ### A sandboxed lookup of a task publishes its manifest locally — 2026-10-26
 
 - A lookup that the sandbox keeps from the index (see the entry below) still
@@ -340,6 +565,136 @@ edition's own files remain in that edition's changelog.
   test's own SQLite connections stayed open: `with sqlite3.connect(...)`
   ends a transaction, not the connection, and on Windows an open database
   cannot be deleted. They are closed with `contextlib.closing` now.
+
+### A worktree Codex made names its task by its owning thread — 2026-10-26
+
+- `codex --worktree` and `codex exec --worktree` (0.164) check the session's
+  `HEAD` out - committed work only - in `$CODEX_HOME/worktrees/<4 hex>/<repo>`
+  on a detached HEAD and write the thread that owns the checkout into
+  `codex-thread.json` of its Git directory (`{"version":1,"ownerThreadId":
+  "<UUID>"}`, the session's own ID). The Codex app makes its worktrees the
+  same way - `git worktree add --detach`, the record one key a line - and a
+  branch comes there only by an act: its "Create branch" (`codex/` and the
+  title's first words), the agent, told to name its branches `codex/...`, or
+  "Move to worktree"; "Hand off to local" moves the work to a branch in the
+  main checkout and detaches the worktree. A detached HEAD named no task, so
+  a session there, the root's hooks run for it by the dispatcher, got neither
+  capsule nor save (offline, real Codex 0.164: hooks ran, no journal line).
+- The hooks now name such a checkout's task `codex-thread/<UUID>`, after
+  `CONTEXT_TASK_ID`, the branch and a rebase's branch:
+  `[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)` follows the rebase
+  line in every copy of `working-memory-read.sh` and
+  `working-memory-write.sh`. Any other detached HEAD still names none. The
+  thread, not the folder: it is Codex's own link between thread and
+  checkout, unique, and the same for the checkout's life; the folder's four
+  hex digits, a name the person gives it and Git's name for the worktree
+  come back for other work once a worktree is removed. A branch made there
+  names the task from the next hook on; the thread's task is not carried
+  over, since the branch travels - to the main checkout at "Hand off to
+  local", to a pull request - and the record does not. The hooks pass the
+  thread's task as the inferred identity (`--expected-branch`), and the
+  runtime delivers its capsule only while `HEAD` stays detached and the
+  record still names that thread (`_admit_inferred_task_branch`), as it
+  admits a rebase's branch only while the rebase runs. `context.py status`
+  reports it (`automatic_memory.task_identity.source` `codex-thread`) where
+  it told the person to set `CONTEXT_TASK_ID`; the first capsule, before the
+  task is recorded, names it, since no branch does; its goal reads "Work of
+  the Codex thread that owns its worktree", where the thread's ID read as
+  words came apart at its hyphens. The runtime reads the record by the hooks'
+  two patterns, so the two never name different tasks.
+- Offline, real Codex 0.164, scripted model, isolated `CODEX_HOME`:
+  `scripts/codex_bench.py --worktree codex` (new: `codex exec --worktree`
+  makes the worktree) passed - capsule, every line of `AGENTS.md`, a save
+  through the spool under the measured session's own `codex-thread/<UUID>`,
+  of a learning citing a file only that worktree had, the worktree still
+  detached and clean - and so did `--subfolder src` and `--app-server`, where
+  the bench makes the worktree as the app does (no approval asked); with the
+  hook line taken out the same run got no capsule and no save.
+  `--worktree beside` still saves under its branch.
+  `memory-bank/tests/test_hooks.py` (`CodexWorktreeOwnerTest`: the CLI's and
+  the app's record for each host, the order, twelve refused records, the
+  hooks and the runtime reading the same records) and
+  `project-brain/tests/test_runtime.py` (`CodexThreadTaskTest`: admission,
+  refusal once a branch, another owner or no record, `status`, the capsule
+  and the goal) fail on each of eight reverted pieces. The generator's
+  memory hook contract (`validate_generated.py`), which the shipped hooks
+  must pass, admits the line right after the rebase one only, and hook-forge
+  documents the resolver (`tests/test_memory_prompt_generator.py`).
+- Not covered: the Codex app was not driven - its worktrees were read from
+  its code. When the app hands the record to another thread (it archives the
+  owner while another thread still works there), that thread's task starts
+  empty. The `checkpoint` skill still stops on a detached HEAD, and the
+  explicit `context.py` commands find no runtime in a worktree without the
+  installation, branch or not.
+
+### Codex started in a worktree of the project — 2026-10-26
+
+- Codex reads a project's `.codex/` - `hooks.json` and `config.toml` - and
+  `AGENTS.md` only in the folders between the session's folder and the
+  nearest `.git`, which in a linked worktree is the worktree's own, inside
+  the project too. A worktree of an installation Git does not track has none
+  of them: Codex 0.164 started in a worktree of an installed project, the
+  main checkout's hooks approved, ran none of them - no capsule, no save, no
+  guard. A Codex session in the root now sets up, in the background from the
+  Codex copy of `local-context.sh`, a dispatcher in the person's own Codex
+  folder (`memory-bank/scripts/codex_worktrees.py`, the scripts
+  `codex_dispatch.sh` and `.py` copied to `$CODEX_HOME/ai-accelerator/`):
+  one entry per hook of the project's `.codex/hooks.json` in
+  `$CODEX_HOME/hooks.json`, with its matcher, timeout and context limit, and
+  one named `policy`. The installer run in a terminal does it at once
+  (`CODEX worktrees <folder>`). The person's own entries keep their place -
+  Codex keys an approval by the file and the entry's position - and the
+  dispatcher's are written the same way every time, since Codex asks again
+  for a changed definition but not for an edited script. Nothing goes into
+  `config.toml`: Codex runs the entries only once the person trusts them in
+  its own review (the terminal's "Trust all and continue" at start, `/hooks`,
+  Settings > Hooks in the app; `codex exec` skips them silently). Nothing is
+  written either for hooks kept in `config.toml`, where Codex would warn at
+  every start that the layer has two forms, for a `hooks.json` that is not an
+  object, once `ai-accelerator/off` exists, for a hook another program
+  started, or on Windows.
+- The dispatcher serves only a session in a linked worktree of a listed
+  root, in the root's folder of it, without an installation of its own: it
+  runs the root's `.codex/hooks/<script>` there with `ACCELERATOR_HOME` and
+  `ACCELERATOR_STATE_DIR` naming the root and `ACCELERATOR_PROJECT_DIR` the
+  worktree, the shared layout Claude Code's dispatcher uses. In the root and
+  below it Codex runs the project's own hooks, so there - and in every other
+  project and in a launcher's attached session - it exits after a string
+  match. `policy` prints the root's `AGENTS.md` whole
+  (`additionalContextLimit` 32,768 tokens; Codex's default keeps 2,500) at a
+  new, cleared or compacted start, not on resume, whose history replays it,
+  and not where the worktree has an `AGENTS.md` of its own.
+- `native_results`: Codex has no file a hook can give the session's
+  commands variables through, so in the shared layout its save step names
+  the three roots in the command. Without them the save checked the main
+  checkout's files and refused a learning citing the branch's own file
+  (`stop:failed:unsaved`).
+- Offline with the real Codex 0.164 and a scripted model, an isolated
+  `CODEX_HOME`: the root session set up eleven entries and wrote no
+  approval; a worktree session before they were approved ran no hook; after
+  "Trust all" a session in `.claude/worktrees/<name>`, in
+  `$CODEX_HOME/worktrees/<id>/project` and in `src/` of one got the capsule
+  and every line of `AGENTS.md`, and its save went through the spool into the
+  root's Project Brain under the worktree's branch, with an index of its own
+  and the worktree left clean - through `codex exec` in all four editions,
+  and in PHP Core also through `codex app-server` as the desktop app drives
+  it (no approval asked) and the terminal with a question typed during the
+  save.
+  On synced copies of the four client installations the rollout rehearsal
+  (`--hosts codex --worktree`, which now rehearses Codex in a worktree too)
+  saved under the worktree's branch, recalled it and left the worktree clean
+  under both profiles, 8 of 8, and the real Codex passed the bench in a
+  worktree of two of them (inside and beside). Where the dispatcher does not
+  serve, an entry costs 2.3 ms, 1.2 ms more than an empty hook.
+  `scripts/codex_bench.py --worktree [inside|beside]` and `--app-server`
+  repeat it; `tests/test_memory_codex_worktrees.py` (28 cases, CI's memory
+  job) covers the setup, the dispatcher, the policy and the save step, and
+  each of nine reverted pieces fails it. The bench's stand-in now opens its
+  stream before it writes: Codex 0.164's terminal, after an earlier session
+  in the same `CODEX_HOME`, cut a response silent for 8 seconds.
+- Not covered: Codex's own `--worktree` starts on a detached HEAD, which
+  named no task (see the entry above); the desktop app's worktrees were not
+  run; Cursor in a worktree without the installation still runs no hooks.
 
 ### Claude Code's sandbox below the root or in a worktree saves through the spool — 2026-10-26
 

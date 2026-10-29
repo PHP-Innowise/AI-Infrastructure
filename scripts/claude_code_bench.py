@@ -50,6 +50,12 @@ memory CLI as the session's banner names it - a worktree has no
 memory-bank/scripts/ of its own, and a session below the root runs its
 commands there - with a `retrieve` for the session's branch: the run passes
 when the banner named it, the command ran and its answer was for that task.
+`--cli checkpoint` has it make a checkpoint instead, as the project's
+`checkpoint` skill says (scripts/bench_checkpoint.py): the task, `turn
+--flush` and `update`, with the memory CLI the session was told to run, else
+the policy's - in the root too. The run passes only when that checkpoint
+landed in the root's Project Brain under the task of the checkout the
+session worked in.
 
 `--enter-worktree` starts the session in the project root - after a first
 one there, as for `--subfolder` - and has the stand-in call Claude Code's
@@ -78,7 +84,9 @@ the same reads, writes, commands and fetches in both sessions - secrets the
 project denies, files it allows, commands it denies or allows, the project's
 env, a domain it allows and one it does not - and passes when the session
 below the root got the decision the root got for every one (deny, ask or
-ran) and printed the same env.
+ran) and printed the same env. With `--enter-worktree` instead, the second
+session starts in the root, enters a worktree (EnterWorktree) and tries the
+same calls on the worktree's files.
 
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
@@ -92,6 +100,7 @@ is never written.
   python3 scripts/claude_code_bench.py --queued 8
   python3 scripts/claude_code_bench.py --subfolder src
   python3 scripts/claude_code_bench.py --worktree --subfolder src
+  python3 scripts/claude_code_bench.py --worktree --cli checkpoint
   python3 scripts/claude_code_bench.py --desktop --worktree
   python3 scripts/claude_code_bench.py --sandbox --worktree
   python3 scripts/claude_code_bench.py --permissions --mode bypassPermissions
@@ -113,6 +122,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+import bench_checkpoint  # noqa: E402
 # The installer's edition names; WordPress lives in Cms/wordpress.
 EDITIONS = ("PHP Core", "Laravel", "Symfony", "WordPress")
 # Where Claude Code makes its own worktrees, and the branch of the bench's.
@@ -168,6 +179,8 @@ class Scripted(BaseHTTPRequestHandler):
     cli_answers: List[Dict[str, Any]] = []
     # --enter-worktree: the folder EnterWorktree moves the session to.
     enter = ""
+    # --cli checkpoint: the checkpoint the stand-in makes before it reads.
+    checkpoint: Optional[bench_checkpoint.Checkpoint] = None
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -244,6 +257,13 @@ class Scripted(BaseHTTPRequestHandler):
         texts = [text_of(item.get("content")) for item in since]
         blocks = [block for item in since if isinstance(item.get("content"), list) for block in item["content"]]
         probes = getattr(self, "probes", None)
+        if probes and getattr(self, "enter", "") and MARKER not in "\n".join(texts) and not any(
+                isinstance(block, dict) and block.get("id") == "toolu_enter" for item in messages
+                if item.get("role") == "assistant" and isinstance(item.get("content"), list)
+                for block in item["content"]):
+            # --enter-worktree --permissions: into the worktree first.
+            return [{"type": "tool_use", "id": "toolu_enter", "name": "EnterWorktree",
+                     "input": {"name": Path(self.enter).name}}], "tool_use", texts
         if probes and MARKER not in "\n".join(texts):
             issued = sum(1 for item in messages if item.get("role") == "assistant"
                          and isinstance(item.get("content"), list) for block in item["content"]
@@ -268,6 +288,10 @@ class Scripted(BaseHTTPRequestHandler):
             command = f"{named.group(1)} retrieve 'invoice numbering' --task-id {self.cli_task} --json"
             return [{"type": "tool_use", "id": "toolu_cli", "name": "Bash",
                      "input": {"command": command, "description": "Retrieve the task's memory"}}], "tool_use", texts
+        if getattr(self, "checkpoint", None) is not None and MARKER not in "\n".join(texts):
+            planned = self.checkpoint_step(body, messages, start)
+            if planned is not None:
+                return planned, "tool_use", texts
         if start >= 0 and any(block.get("type") == "tool_result" for block in blocks):
             used = [block for block in messages[start].get("content", [])
                     if isinstance(block, dict) and block.get("type") == "tool_use"]
@@ -295,6 +319,35 @@ class Scripted(BaseHTTPRequestHandler):
                      "input": {"command": command, "description": "Save the turn's memory result"}}], "tool_use", texts
         return [{"type": "tool_use", "id": "toolu_read", "name": "Read",
                  "input": {"file_path": os.path.join(self.project, self.source)}}], "tool_use", texts
+
+
+    def checkpoint_step(self, body: Dict[str, Any], messages: List[Dict[str, Any]], start: int
+                        ) -> Optional[List[Dict[str, Any]]]:
+        """--cli checkpoint: its next command, the read once it is over, or
+        None after that."""
+        issued = [block for item in messages if item.get("role") == "assistant" and isinstance(item.get("content"), list)
+                  for block in item["content"] if isinstance(block, dict)
+                  and str(block.get("id", "")).startswith("toolu_ckpt_")]
+        answers = {block.get("tool_use_id"): block for item in messages if isinstance(item.get("content"), list)
+                   for block in item["content"] if isinstance(block, dict) and block.get("type") == "tool_result"}
+        done = []
+        for block in issued:
+            answer = answers.get(block["id"], {})
+            done.append((block["id"].split("_", 3)[3], text_of(answer.get("content")), bool(answer.get("is_error"))))
+        for step in done[len(self.checkpoint.steps):]:
+            self.checkpoint.record(*step)
+        heard = "\n".join([text_of(body.get("system")), *(text_of(item.get("content")) for item in messages)])
+        planned = self.checkpoint.next(heard, done)
+        if planned is not None:
+            name, command = planned
+            return [{"type": "tool_use", "id": f"toolu_ckpt_{len(done)}_{name}", "name": "Bash",
+                     "input": {"command": command, "description": "Checkpoint the task"}}]
+        last = messages[start].get("content") if start >= 0 else None
+        if isinstance(last, list) and any(str(block.get("id", "")).startswith("toolu_ckpt_") for block in last
+                                          if isinstance(block, dict)):
+            return [{"type": "tool_use", "id": "toolu_read", "name": "Read",
+                     "input": {"file_path": os.path.join(self.project, self.source)}}]
+        return None
 
 
 def probe_calls(project: Path) -> List[Dict[str, Any]]:
@@ -346,6 +399,9 @@ def probe_session(args: argparse.Namespace, cwd: Path, env: Dict[str, str], mode
         message = item.get("message") if isinstance(item, dict) else None
         for block in message.get("content") if isinstance(message, dict) and isinstance(message.get("content"), list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_result" \
+                    and block.get("tool_use_id") == "toolu_enter":
+                Scripted.entered_answer = text_of([block])[:200]
+            if isinstance(block, dict) and block.get("type") == "tool_result" \
                     and str(block.get("tool_use_id", "")).startswith("toolu_probe_"):
                 index = int(block["tool_use_id"].rsplit("_", 1)[1])
                 found[index] = verdict(text_of([block]))
@@ -367,16 +423,32 @@ def permission_run(args: argparse.Namespace, work: Path, project: Path, env: Dic
     while time.time() < deadline and str(project) not in (listed.read_text().splitlines() if listed.exists() else []):
         time.sleep(0.2)
     (project / "notes.txt").unlink(missing_ok=True)
-    below_cwd = project / args.subfolder
-    below_cwd.mkdir(parents=True, exist_ok=True)
-    below = probe_session(args, below_cwd, env, mode)
+    if args.enter_worktree:
+        # A session in the root that enters a worktree, then tries the same
+        # calls on the worktree's files: the root's rules decide there as
+        # they do in the root.
+        where = "entered"
+        Scripted.enter = str(project / ENTERED)
+        Scripted.probes = probe_calls(project / ENTERED)
+        below = probe_session(args, project, env, mode)
+        # What EnterWorktree answered: the probes ran in the worktree.
+        entered_answer = getattr(Scripted, "entered_answer", "")
+    else:
+        where = args.subfolder
+        below_cwd = project / args.subfolder
+        below_cwd.mkdir(parents=True, exist_ok=True)
+        below = probe_session(args, below_cwd, env, mode)
     labels = [f"{probe['name']} {probe['input'].get('file_path') or probe['input'].get('command') or probe['input'].get('url')}"
-              .replace(str(project), "<root>") for probe in Scripted.probes]
-    differ = [f"{label}: root {first}, {args.subfolder} {second}"
+              .replace(str(project / ENTERED), "<worktree>").replace(str(project), "<root>") for probe in Scripted.probes]
+    differ = [f"{label}: root {first}, {where} {second}"
               for label, first, second in zip(labels, in_root, below) if first != second]
-    report = {"claude": args.claude, "version": version(args.claude), "mode": args.mode, "started_in": args.subfolder,
+    report = {"claude": args.claude, "version": version(args.claude), "mode": args.mode, "started_in": where,
               "probes": dict(zip(labels, in_root)), "differ": differ,
               "ok": not differ and "missing" not in in_root + below}
+    if args.enter_worktree:
+        report["entered_answer"] = entered_answer
+        report["entered"] = (project / ENTERED).is_dir()
+        report["ok"] = report["ok"] and report["entered"]
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["ok"] else 1
 
@@ -680,7 +752,7 @@ def inside(args: argparse.Namespace) -> int:
                            check=True, capture_output=True)
             # The stand-in reads the worktree's copy of the project's file.
             Scripted.project = str(place)
-        if args.cli:
+        if args.cli == "retrieve":
             Scripted.cli_task = WORKTREE_BRANCH if args.worktree else ROOT_BRANCH
         if args.enter_worktree:
             # Measured once the dispatcher is in place, as it is for a
@@ -691,6 +763,10 @@ def inside(args: argparse.Namespace) -> int:
         project_cwd.mkdir(parents=True, exist_ok=True)
     else:
         project_cwd = project
+    if args.cli == "checkpoint":
+        # The measured session's checkpoint, as the project's skill says.
+        Scripted.checkpoint = bench_checkpoint.Checkpoint(
+            (project / ".claude/skills/checkpoint/SKILL.md").read_text(encoding="utf-8"))
     if args.queued is not None:
         Scripted.save_delay = args.queued
         screen = terminal([args.claude, *mode, *lent], project, env, journal_file, args.timeout, Scripted.save_begun,
@@ -785,7 +861,7 @@ def inside(args: argparse.Namespace) -> int:
         report["entered_clean"] = entered.is_dir() and subprocess.run(
             ["git", "status", "--porcelain", "--ignored"], cwd=entered, capture_output=True, text=True).stdout == ""
         report["ok"] = report["ok"] and report["entered_task"] and report["entered_clean"]
-    if args.cli:
+    if args.cli == "retrieve":
         # The banner named the memory CLI, and run as named it answered for
         # the worktree's task.
         report["cli_named"] = Scripted.cli_named[:1]
@@ -794,6 +870,17 @@ def inside(args: argparse.Namespace) -> int:
         report["cli_ran"] = (not answer["error"]
                              and re.search(r'"task_id":\s*"' + re.escape(Scripted.cli_task) + '"', answer["text"]) is not None)
         report["ok"] = report["ok"] and bool(Scripted.cli_named) and report["cli_ran"]
+    if args.cli == "checkpoint":
+        # The checkpoint landed in the root's Project Brain, under the task
+        # of the checkout the session worked in.
+        task = WORKTREE_BRANCH if args.worktree else subprocess.run(
+            ["git", "-C", str(project), "branch", "--show-current"], capture_output=True, text=True).stdout.strip()
+        report["checkpoint"] = Scripted.checkpoint.report(project, task)
+        path = project / "memory-bank/local/native-results.ndjson"
+        report["checkpoint"]["queue"] = [f"{line['event']}" + (f":{line['code']}" if line.get("code") else "")
+                                         for line in map(json.loads, path.read_text().splitlines()[first_lines:]
+                                                         if path.exists() else []) if line.get("stage") == "queue"]
+        report["ok"] = report["ok"] and report["checkpoint"]["ok"]
     if args.desktop:
         # Checked last: the subfolder and worktree verdicts above are made anew.
         report["ok"] = report["ok"] and not asked
@@ -864,9 +951,10 @@ def main() -> int:
                              "project (in DIR of it with --subfolder)")
     parser.add_argument("--enter-worktree", action="store_true",
                         help="the stand-in calls EnterWorktree first and works, answers and saves in that worktree")
-    parser.add_argument("--cli", action="store_true",
-                        help="with --worktree or --subfolder: the stand-in first runs the memory CLI as the session's "
-                             "banner names it")
+    parser.add_argument("--cli", nargs="?", const="retrieve", choices=("retrieve", "checkpoint"), default=None,
+                        help="the stand-in first runs the memory CLI as the session was told to: a retrieve (the "
+                             "default, with --worktree or --subfolder), or a checkpoint as the project's checkpoint "
+                             "skill says")
     parser.add_argument("--permissions", action="store_true",
                         help="try the same tool calls in the root and below it, and compare the decisions")
     parser.add_argument("--queued", type=float, default=None, metavar="SECONDS",
@@ -895,7 +983,7 @@ def main() -> int:
         print("claude_code_bench: plan mode asks for no save, so there is none to type a question during; "
               "--queued takes no --mode plan", file=sys.stderr)
         return 2
-    if args.permissions and args.subfolder is None:
+    if args.permissions and args.subfolder is None and not args.enter_worktree:
         args.subfolder = "src"
     if args.permissions and args.target:
         print("claude_code_bench: --permissions writes probe files into the project; it takes no --target",
@@ -909,13 +997,18 @@ def main() -> int:
               file=sys.stderr)
         return 2
     if args.enter_worktree and (args.worktree or args.subfolder
-                                or args.queued is not None or args.permissions or args.mode == "plan"):
+                                or args.queued is not None or args.mode == "plan"):
         print("claude_code_bench: --enter-worktree starts one session in the project root; it takes no --worktree, "
-              "--subfolder, --queued, --permissions or --mode plan", file=sys.stderr)
+              "--subfolder, --queued or --mode plan", file=sys.stderr)
         return 2
-    if args.cli and not (args.worktree or args.subfolder):
+    if args.cli == "retrieve" and not (args.worktree or args.subfolder):
         print("claude_code_bench: --cli runs the memory CLI the banner of a session in a worktree or below the "
               "root names; it needs --worktree or --subfolder", file=sys.stderr)
+        return 2
+    if args.cli == "checkpoint" and (args.queued is not None or args.permissions or args.attached is not None
+                                     or args.mode == "plan"):
+        print("claude_code_bench: --cli checkpoint makes a checkpoint before one answered turn of an installed "
+              "project; it takes no --queued, --permissions, --attached or --mode plan", file=sys.stderr)
         return 2
     if args.worktree and (args.permissions or args.target):
         print("claude_code_bench: --worktree makes a worktree of a fresh install; it takes no --permissions or "
@@ -976,7 +1069,7 @@ def main() -> int:
                                *(["--queued", str(args.queued)] if args.queued is not None else []),
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
                                *(["--worktree"] if args.worktree else []),
-                               *(["--cli"] if args.cli else []),
+                               *(["--cli", args.cli] if args.cli else []),
                                *(["--enter-worktree"] if args.enter_worktree else []),
                                *(["--desktop"] if args.desktop else []),
                                *(["--sandbox"] if args.sandbox else []),

@@ -4,6 +4,16 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime pins a save in a worktree Codex made to its thread — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime keeps a waiting command's worktree — 2026-10-28
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes
+  in the asset; the policy lock was rewritten.
+
 ### The seeded dispatcher matches its root on Windows — 2026-10-28
 
 - As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.sh`
@@ -41,6 +51,18 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
   `workspace_roots.py` change in the asset; the policy lock was rewritten.
 
+### Memory writes a sandbox refuses wait; the checkpoint names the hooks' task — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): the memory-seed asset's
+  `context.py` lets an `update` or a `turn --flush` that a sandbox keeps from
+  the project's memory wait in a temporary folder of the user's, made by the
+  next turn a hook records; its `status` names a rebase's branch as the task;
+  and an explicit `turn --flush` makes a task with nothing buffered yet.
+  `workspace_roots.py` and `native_results.py` change with it. skill-forge's
+  `checkpoint` guidance takes the task the hooks name - `CONTEXT_TASK_ID`,
+  else the branch, else on a detached HEAD the one `context.py status --json`
+  reports - where it said the branch task. The policy lock was rewritten.
+
 ### The seeded runtime's sandboxed lookup publishes locally — 2026-10-26
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` changes
@@ -51,6 +73,28 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 - As the editions' does (root `CHANGELOG.md`, same day): `workspace_roots.py`,
   `memory_results.py`, `mcp_server.py` and `context.py` change in the asset;
   the policy lock was rewritten.
+
+### A worktree Codex made names its task by its owning thread — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): the memory-seed asset's
+  `context.py` admits `codex-thread/<thread>` as an inferred task while the
+  worktree Codex made stays detached, `status` reports it, and the first
+  capsule names it; its `MCP.md` says so. hook-forge's identity contract lets
+  the memory hooks follow the rebase line with
+  `[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)`, the resolver the
+  editions ship, and bootstrap-verifier's contract admits that line there
+  only, right after the rebase one. Its skill-body total is 305,962 bytes,
+  under the 306,200 ceiling. The policy lock was rewritten.
+
+### Codex in a worktree of a generated project runs its hooks — 2026-10-26
+
+- As the editions do (root `CHANGELOG.md`, same day): memory-seed copies
+  `codex_worktrees.py`, `codex_dispatch.py` and `codex_dispatch.sh` (it now
+  copies every `assets/scripts/*.sh`), `native_results.py` and
+  `context_retrieval.py` change in the asset, and hook-forge has the Codex
+  copy of `local-context.sh` run `codex_worktrees.py` where the others run
+  `claude_subfolders.py`. Its skill-body total is 305,085 bytes, under the
+  306,200 ceiling. The policy lock was rewritten.
 
 ### The seeded dispatcher serves the project's worktrees — 2026-10-25
 

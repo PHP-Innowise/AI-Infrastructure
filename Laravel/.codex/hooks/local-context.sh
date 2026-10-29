@@ -321,7 +321,10 @@ if [ -n "${PYTHON[0]:-}" ] && [ -f "$CONTEXT_CLI" ]; then
   CONTEXT_STATUS=$("${PYTHON[@]}" "$CONTEXT_CLI" status --json 2>/dev/null || true)
   # The two counts come before the database path, which may be empty, and
   # are "-" when unknown: read splits on tabs and would shift an empty field.
-  STATUS_FIELDS=$("${PYTHON[@]}" -c 'import json,sys; d=json.loads(sys.argv[1]); print("{}\t{}\t{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("uncommitted", "-"), d.get("accelerator_uncommitted", "-"), d.get("database", "")))' "$CONTEXT_STATUS" 2>/dev/null || true)
+  # Bytes: on Windows print ends the line with \r\n, the path kept the \r,
+  # and the banner read index=missing. Isolated (-I): run in the session's
+  # folder, Python imported a project's own json.py before the standard one.
+  STATUS_FIELDS=$("${PYTHON[@]}" -I -c 'import json,sys; d=json.loads(sys.argv[1]); sys.stdout.buffer.write("{}\t{}\t{}\t{}\t{}\t{}".format(d.get("mode", "unknown"), d.get("working", "unknown"), d.get("documents", "unknown"), d.get("uncommitted", "-"), d.get("accelerator_uncommitted", "-"), d.get("database", "")).encode("utf-8", "replace"))' "$CONTEXT_STATUS" 2>/dev/null || true)
   if [ -n "$STATUS_FIELDS" ]; then
     IFS=$'\t' read -r CONTEXT_MODE ACTIVE_BINDINGS INDEX_DOCUMENTS UNCOMMITTED ACCELERATOR_UNCOMMITTED INDEX_DB <<< "$STATUS_FIELDS"
     branch_line
@@ -402,14 +405,16 @@ fi
 # Capsule delivery: this client receives the Task Capsule at prompt time
 # through working-memory-read.sh; session start reports metadata only.
 
-# Claude Code started in a folder below this project reads none of its
-# settings - only the starting folder's - so such a session ran none of these
-# hooks. This keeps a small dispatcher in your own Claude Code settings that
-# runs this project's hooks for it (memory-bank/scripts/claude_subfolders.py):
-# installed projects only, written only for the Claude Code that started this
-# hook, and in the background, so the session's start never waits for it.
-if [ "$STATE_DIR" = "$ROOT_DIR" ] && [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/claude_subfolders.py" ]; then
-  printf '%s' "$LOOP_INPUT" | "${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/claude_subfolders.py" > /dev/null 2>&1 &
+# Codex started in a worktree of this project reads none of its .codex/ -
+# only the worktree's own, which has none of an installation Git does not
+# track - so such a session ran none of these hooks. This keeps a small
+# dispatcher in your own Codex hooks that runs this project's hooks for it,
+# once you have trusted them in Codex's hook review
+# (memory-bank/scripts/codex_worktrees.py): installed projects only, written
+# only for the Codex that started this hook, and in the background, so the
+# session's start never waits for it.
+if [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/codex_worktrees.py" ]; then
+  printf '%s' "$LOOP_INPUT" | "${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/codex_worktrees.py" > /dev/null 2>&1 &
 fi
 
 exit 0

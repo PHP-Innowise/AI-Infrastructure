@@ -444,6 +444,27 @@ class NativeCaptureTests(NativeCaptureFixture):
         before=self.authority();result=self.save(ok=False)
         self.assertIn(b'native-result:scope-changed',result.stderr);self.assertEqual(before,self.authority())
 
+    def test_a_commit_in_a_worktree_codex_made_does_not_refuse_the_save(self):
+        # Codex's own worktree stays on a detached HEAD, where the thread that
+        # owns it names the task: a commit there moves HEAD and leaves the
+        # task as it was. Pinned to the commit, the save was refused.
+        self.git('checkout','-q','--detach')
+        (self.root/'.git'/'codex-thread.json').write_text(json.dumps(
+            {'version':1,'ownerThreadId':'0a664c1a-8a2f-50fc-9fe2-8f660527ee0c'}))
+        self.begin();self.stop()
+        (self.root/'notes.md').write_text('# Notes\n');self.git('add','notes.md');self.git('commit','-qm','Notes')
+        saved=json.loads(self.save().stdout)
+        self.assertEqual(['created'],[item['state'] for item in saved['records']])
+
+    def test_a_worktree_codex_handed_to_another_thread_refuses_the_save(self):
+        self.git('checkout','-q','--detach')
+        record=self.root/'.git'/'codex-thread.json'
+        record.write_text(json.dumps({'version':1,'ownerThreadId':'0a664c1a-8a2f-50fc-9fe2-8f660527ee0c'}))
+        self.begin();self.stop()
+        record.write_text(json.dumps({'version':1,'ownerThreadId':'6329976c-f7d5-d370-c1ae-1282d898694d'}))
+        before=self.authority();result=self.save(ok=False)
+        self.assertIn(b'native-result:scope-changed',result.stderr);self.assertEqual(before,self.authority())
+
     def test_adapter_change_invalidates_pending_request(self):
         self.begin();self.stop()
         module=self.root/'memory-bank/scripts/native_results.py'

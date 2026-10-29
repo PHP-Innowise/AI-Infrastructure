@@ -375,6 +375,33 @@ case "$HOOK_STDIN" in
   *'"cursor_version"'*) [ -f "$ROOT_DIR/.cursor/hooks.json" ] && exit 0 ;;
 esac
 '''
+# A session in the project root keeps the dispatcher that serves the sessions
+# the host does not give the project's hooks to: Claude Code's below the root
+# and in a worktree, Codex's in a worktree (below the root Codex finds the
+# hooks itself). The Codex mirror sets up Codex's; only the root does that,
+# not a worktree the root's hooks serve.
+_LC_DISPATCH = r'''# Claude Code started in a folder below this project reads none of its
+# settings - only the starting folder's - so such a session ran none of these
+# hooks. This keeps a small dispatcher in your own Claude Code settings that
+# runs this project's hooks for it (memory-bank/scripts/claude_subfolders.py):
+# installed projects only, written only for the Claude Code that started this
+# hook, and in the background, so the session's start never waits for it.
+if [ "$STATE_DIR" = "$ROOT_DIR" ] && [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/claude_subfolders.py" ]; then
+  printf '%s' "$LOOP_INPUT" | "${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/claude_subfolders.py" > /dev/null 2>&1 &
+fi
+'''
+_LC_DISPATCH_CODEX = r'''# Codex started in a worktree of this project reads none of its .codex/ -
+# only the worktree's own, which has none of an installation Git does not
+# track - so such a session ran none of these hooks. This keeps a small
+# dispatcher in your own Codex hooks that runs this project's hooks for it,
+# once you have trusted them in Codex's hook review
+# (memory-bank/scripts/codex_worktrees.py): installed projects only, written
+# only for the Codex that started this hook, and in the background, so the
+# session's start never waits for it.
+if [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ -n "${PYTHON[0]:-}" ] && [ -f "$ROOT_DIR/memory-bank/scripts/codex_worktrees.py" ]; then
+  printf '%s' "$LOOP_INPUT" | "${PYTHON[@]}" "$ROOT_DIR/memory-bank/scripts/codex_worktrees.py" > /dev/null 2>&1 &
+fi
+'''
 # Cursor's prompt-time hook is beforeSubmitPrompt: it receives the prompt, but
 # its output can only let the prompt through or stop it, never add context.
 # The Cursor mirror of the read hook therefore always answers "continue" and
@@ -754,6 +781,7 @@ MIRROR_RULES: dict[str, Any] = {
                             "If it keeps failing, systematic-debugger instead",
                         ],
                         [_WM_THIRD_PARTY, ""],
+                        [_LC_DISPATCH, _LC_DISPATCH_CODEX],
                     ],
                 },
             },
@@ -864,8 +892,9 @@ CROSS_EDITION_PATHS = {
 # md5 comparison of the editions before the manifest was frozen.
 CROSS_EDITION_CORE_MANIFEST = (
     "memory-bank/scripts/*.py",
-    # The dispatcher claude_subfolders.py keeps in the person's own Claude
-    # Code settings, for a session started below the project root.
+    # The dispatchers claude_subfolders.py and codex_worktrees.py keep in the
+    # person's own Claude Code settings and Codex hooks, for a session started
+    # below the project root or in a worktree of it.
     "memory-bank/scripts/*.sh",
     "memory-bank/MCP.md",
     "memory-bank/tests/*.py",

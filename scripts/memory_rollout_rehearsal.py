@@ -27,21 +27,23 @@ selects, each hook's exit and time, whether the save was requested, saved or
 refused (with its code), the native journal's lines and whether the next
 capsule recalled the save.
 
-With --worktree, Claude Code is also rehearsed in a Git worktree of each
-copy (`.claude/worktrees/rehearsal`, on a branch of its own), which has none
-of an installation Git does not track. Its hooks run through the dispatcher
-the copy carries (`memory-bank/scripts/claude_dispatch.sh`), as your Claude
-Code configuration would run them, and the save takes the variables the
-dispatcher's `environment` entry gives the session's commands. Such a run
-passes only when, besides the save and the recall, the save went to the
-worktree's branch and nothing was written into the worktree.
+With --worktree, Claude Code and Codex are also rehearsed in a Git worktree
+of each copy (`.claude/worktrees/rehearsal`, on a branch of its own), which
+has none of an installation Git does not track. Their hooks run through the
+dispatcher the copy carries (`memory-bank/scripts/claude_dispatch.sh`,
+`codex_dispatch.sh`), as your Claude Code configuration or Codex hooks would
+run them. Claude Code's save takes the variables the dispatcher's
+`environment` entry gives the session's commands; Codex's, the roots its
+command names. Such a run passes only when, besides the save and the recall,
+the save went to the worktree's branch and nothing was written into the
+worktree.
 
 Maintainer-only and standard library only; never installed into a project.
 The report names the project's paths; write it outside this clone.
 
     memory_rollout_rehearsal.py --target ~/Desktop/next --target ~/Desktop/scb
     memory_rollout_rehearsal.py --target ~/Desktop/next --hosts claude --profiles config,recall --json
-    memory_rollout_rehearsal.py --target ~/Desktop/next --hosts claude --worktree
+    memory_rollout_rehearsal.py --target ~/Desktop/next --hosts claude,codex --worktree
 
 Exit status: 0 when every rehearsal saved and recalled with every hook
 exiting 0, 1 otherwise, 2 for a target this tool will not copy.
@@ -93,6 +95,8 @@ PREFERRED_SOURCES = ("composer.json", "package.json")
 PROMPT = "Rehearsal: where does this project keep its main configuration?"
 # Where Claude Code makes its own worktrees.
 WORKTREE = ".claude/worktrees/rehearsal"
+# The hosts a dispatcher serves in a worktree.
+WORKTREE_HOSTS = ("claude", "codex")
 
 
 def inside(path: Path, parent: Path) -> bool:
@@ -278,12 +282,15 @@ def rehearse(copy: Path, host: str, profile: str, work: Path, timeout: float,
         # scripts and the root it serves, in a folder of their own.
         folder = copy.parent / (copy.name + "-dispatcher")
         folder.mkdir(parents=True, exist_ok=True)
-        for script, name in (("claude_dispatch.sh", "ai-accelerator-dispatch.sh"),
-                             ("claude_dispatch.py", "ai-accelerator-dispatch.py")):
+        for script, name in ((f"{host}_dispatch.sh", "ai-accelerator-dispatch.sh"),
+                             (f"{host}_dispatch.py", "ai-accelerator-dispatch.py")):
             shutil.copy2(copy / "memory-bank/scripts" / script, folder / name)
         (folder / "projects").write_text(str(copy) + "\n", encoding="utf-8")
         dispatcher = folder / "ai-accelerator-dispatch.sh"
-        session_env = {**env, **dispatched_environment(dispatcher, place, env, timeout)}
+        # Codex has no file for the session's commands' variables: its save
+        # step names the roots itself.
+        if host == "claude":
+            session_env = {**env, **dispatched_environment(dispatcher, place, env, timeout)}
 
     started_event, prompt_event, stop_event = EVENTS[host]
 
@@ -424,7 +431,7 @@ def rehearse_target(target: Path, hosts: List[str], profiles: List[str], work: P
                 finally:
                     if not keep:
                         shutil.rmtree(run, ignore_errors=True)
-            if host != "claude" or not worktree:
+            if host not in WORKTREE_HOSTS or not worktree:
                 continue
             for profile in profiles:
                 run = work / name / f"{host}-{profile}-worktree"
@@ -488,7 +495,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="another tree to leave out of the copy: a name at any depth, or a root-relative path")
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds per hook call")
     parser.add_argument("--worktree", action="store_true",
-                        help="also rehearse Claude Code in a Git worktree of each copy, as the dispatcher serves it")
+                        help="also rehearse Claude Code and Codex in a Git worktree of each copy, as their "
+                             "dispatchers serve it")
     parser.add_argument("--keep", action="store_true", help="keep the copies for inspection")
     parser.add_argument("--json", action="store_true", help="print the report as JSON")
     arguments = parser.parse_args(argv)
@@ -498,8 +506,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--hosts must name some of claude, codex, cursor")
     if not profiles or any(profile not in PROFILES for profile in profiles):
         parser.error(f"--profiles must name some of {', '.join(PROFILES)}")
-    if arguments.worktree and "claude" not in hosts:
-        parser.error("--worktree rehearses Claude Code: --hosts must name claude")
+    if arguments.worktree and not set(hosts) & set(WORKTREE_HOSTS):
+        parser.error("--worktree rehearses Claude Code and Codex: --hosts must name one of them")
     base = arguments.work
     if base is None:
         shm = Path("/dev/shm")

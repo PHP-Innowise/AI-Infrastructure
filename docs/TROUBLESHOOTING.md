@@ -446,6 +446,7 @@ or carries a warning about the branch's task.
 | First line or warning | Meaning | What to do |
 |---|---|---|
 | `working: not recorded yet (the task starts at the 5-turn checkpoint)` | The branch has no task yet; a later checkpoint records one. | Nothing, or `context.py start` to record it now. |
+| `working: not recorded yet (task codex-thread/<UUID>; the task starts at ...)` | A worktree Codex made, on a detached HEAD: the thread that owns it names the task, which has no record yet. | Nothing; use that ID with the CLI. |
 | `working: closed (this branch's task is finished; ...)` | The branch's task was completed or cancelled, and turns after it are not recorded. | `python3 memory-bank/scripts/context.py start --task-id <branch> --goal "..."`; the finished record moves to the archive. |
 | `working: unavailable (the task's record cannot be read)` | The record is invalid - a merge conflict, a hand edit; a warning names the file. | Repair or restore that file; checkpoints wait for it. |
 | `working: unavailable (the task's record changed while this turn read it; read <path>)` | Another session's checkpoint rewrote the record in the last moments of this read. | Read the named record; the next prompt carries it again. |
@@ -453,7 +454,8 @@ or carries a warning about the branch's task.
 | `working: <id> — ...` where `<id>` is the branch name with `-` for some characters and eight hex digits at the end | The branch name has characters a task ID does not take; the ID is derived from it. | Nothing; use that ID with the CLI. |
 
 On a detached HEAD there is no task, and the prompt hook stays silent -
-except during a rebase, where it reads the branch being rebased.
+except during a rebase, where it reads the branch being rebased, and in a
+worktree Codex made, where it reads the task of the thread that owns it.
 
 ## The Agent Saves After Every Answer
 
@@ -757,7 +759,24 @@ blocked, or a hook times out.
     sandbox writes only below that folder, so the save waits in a temporary
     folder (`ai-accelerator-native-spool-<uid>`) and the next hook saves it
     (journal `saved` with code `spooled`: the sandbox cannot write the
-    journal either).
+    journal either). Codex started in a Git worktree of the project without
+    the installation runs the root's hooks only through a dispatcher in your
+    own Codex folder, whose entries Codex runs once you have trusted them:
+    `~/.codex/ai-accelerator/projects` (or the same under `$CODEX_HOME`)
+    lists the project root and `~/.codex/hooks.json` holds
+    `ai-accelerator-dispatch.sh` entries. If they are missing, start one Codex
+    session in the root; if Codex skips them - `codex exec` does so without a
+    word - trust them in its terminal's `/hooks` or the app's Settings >
+    Hooks. Nothing is set up for hooks kept in `~/.codex/config.toml` or
+    while `~/.codex/ai-accelerator/off` exists; to remove the dispatcher,
+    create that file and delete the entries from `hooks.json`
+    ([Codex started in a worktree](MEMORY-INTEGRATION.md#codex-started-in-a-worktree)).
+    A worktree Codex made itself - `codex --worktree`, the Codex app's - is on
+    a detached HEAD: its task is `codex-thread/<thread>`, the thread that
+    `codex-thread.json` in `git rev-parse --git-dir` names as owner, until a
+    branch is made there, and `context.py status` says so. Any other detached
+    HEAD names no task: check out a branch, or set `CONTEXT_TASK_ID`
+    ([A worktree Codex made](MEMORY-INTEGRATION.md#a-worktree-codex-made)).
 
 ### Recover
 

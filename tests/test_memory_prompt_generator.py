@@ -122,6 +122,37 @@ class GeneratorPromptReadTests(unittest.TestCase):
         local = (ROOT / 'PHP Core/.cursor/hooks/local-context.sh').read_text(encoding='utf-8')
         self.assertFalse(self.v.memory_hook_identity_contract(local + '\n' + fallback, 'cursor', 'local-context.sh'))
 
+    def test_the_owner_thread_fallback_follows_the_rebase_one(self):
+        # A worktree Codex made is detached until a branch is made there: the
+        # thread that owns it names the task, after the branch and a rebase.
+        rebase = '[ -n "$TASK_ID" ] || TASK_ID=$(rebased_branch)'
+        thread = '[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread_task)'
+        # The contract reads every prompt hook and Cursor's turn hook, which
+        # renders the rule again; the others' turn hooks deliver nothing.
+        for name, host in (('working-memory-read.sh', 'claude'), ('working-memory-read.sh', 'codex'),
+                           ('working-memory-read.sh', 'cursor'), ('working-memory-write.sh', 'cursor')):
+            with self.subTest(hook=name, host=host):
+                source = (ROOT / 'PHP Core' / ('.' + host) / 'hooks' / name).read_text(encoding='utf-8')
+                self.assertIn(rebase + '\n' + thread + '\n', source)
+                self.assertTrue(self.v.memory_hook_identity_contract(source, host, name))
+                for text in (source.replace(rebase + '\n' + thread, thread + '\n' + rebase),
+                             source.replace(rebase + '\n', ''),
+                             source.replace(thread + '\n', thread + '\n' + thread + '\n', 1),
+                             source.replace(thread, '[ -n "$TASK_ID" ] || TASK_ID=$(codex_thread)')):
+                    self.assertFalse(self.v.memory_hook_identity_contract(text, host, name))
+        local = (ROOT / 'PHP Core/.cursor/hooks/local-context.sh').read_text(encoding='utf-8')
+        self.assertFalse(self.v.memory_hook_identity_contract(local + '\n' + rebase + '\n' + thread, 'cursor',
+                                                              'local-context.sh'))
+
+    def test_documented_owner_thread_resolver_is_the_one_the_editions_ship(self):
+        text = (ROOT / "Infrastructure-Creator/.agents/skills/hook-forge/SKILL.md").read_text(encoding="utf-8")
+        documented = re.search(r"^codex_thread_task\(\) \{\n.*?^\}\n", text, re.S | re.M).group(0)
+        for edition in ("PHP Core", "Laravel", "Symfony", "Cms/wordpress"):
+            for tool in (".claude", ".codex", ".cursor"):
+                for name in ("working-memory-read.sh", "working-memory-write.sh"):
+                    with self.subTest(edition=edition, tool=tool, hook=name):
+                        self.assertIn(documented, (ROOT / edition / tool / "hooks" / name).read_text(encoding="utf-8"))
+
     def test_both_runtime_entry_forms_are_accepted(self):
         for host in ("claude", "codex", "cursor"):
             for name, entry in (("loader", LOADER), ("direct", DIRECT),

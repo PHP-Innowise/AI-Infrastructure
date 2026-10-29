@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+import bench_checkpoint  # noqa: E402
 import claude_code_bench  # noqa: E402
 import codex_bench  # noqa: E402
 
@@ -184,6 +186,104 @@ class CodexStandInTest(unittest.TestCase):
         self.assertEqual("message", answer["type"])
 
 
+class CheckpointStandInTest(unittest.TestCase):
+    """--cli checkpoint: the checkpoint skill as a literal model follows it."""
+
+    SKILL = (ROOT / "PHP Core/.agents/skills/checkpoint/SKILL.md").read_text(encoding="utf-8")
+    # Step 1 as it stood before a detached HEAD's task came from status.
+    STOPPING = ("## Governed Workflow\n\n1. The task ID is `CONTEXT_TASK_ID`, otherwise\n"
+                "   `git symbolic-ref --quiet --short HEAD`. Stop with an actionable\n"
+                "   detached-HEAD error rather than inventing an ID.\n2. Run ...")
+    HINT = ("Memory CLI: this worktree has none - run the commands the policy and skills name with "
+            "`python3 /work/shop/memory-bank/scripts/context.py` in place of `python3 memory-bank/scripts/context.py`.")
+    STATUS = json.dumps({"automatic_memory": {"task_identity": {"task_id": "codex-thread/01a1776d-b888-7ac2-8a1b"
+                                                                           "-9557bdbd1dad"}}})
+
+    def steps(self, skill, heard, answers):
+        """The commands the checkpoint runs, given each one's (output, failed)."""
+        checkpoint, done, commands = bench_checkpoint.Checkpoint(skill), [], []
+        while True:
+            planned = checkpoint.next(heard, done)
+            if planned is None:
+                return checkpoint, commands
+            commands.append(planned[1])
+            done.append((planned[0], *answers[planned[0]]))
+
+    def test_the_installed_skill_takes_a_detached_heads_task_from_status(self) -> None:
+        self.assertTrue(bench_checkpoint.takes_status(self.SKILL))
+        self.assertFalse(bench_checkpoint.takes_status(self.STOPPING))
+
+    def test_on_a_branch_it_flushes_and_updates_with_the_cli_it_was_told_of(self) -> None:
+        answers = {"branch": ("feature/SHOP-9-refunds\n", False), "flush": ("{}", False), "update": ("{}", False)}
+        checkpoint, commands = self.steps(self.SKILL, self.HINT, answers)
+        self.assertEqual(3, len(commands))
+        self.assertTrue(commands[1].startswith("python3 /work/shop/memory-bank/scripts/context.py turn --task-id "
+                                               "feature/SHOP-9-refunds --flush"))
+        self.assertIn(" update --task-id feature/SHOP-9-refunds --revision auto", commands[2])
+        self.assertEqual(("feature/SHOP-9-refunds", ""), (checkpoint.task, checkpoint.stopped))
+        # Told of nothing, it runs the policy's own.
+        _, commands = self.steps(self.SKILL, "", answers)
+        self.assertTrue(commands[1].startswith("python3 memory-bank/scripts/context.py turn"))
+
+    def test_on_a_detached_head_it_asks_status_where_the_skill_says_so_and_stops_otherwise(self) -> None:
+        answers = {"branch": ("", True), "status": (self.STATUS, False), "flush": ("{}", False), "update": ("{}", False)}
+        checkpoint, commands = self.steps(self.SKILL, self.HINT, answers)
+        self.assertEqual("python3 /work/shop/memory-bank/scripts/context.py status --json", commands[1])
+        self.assertEqual("codex-thread/01a1776d-b888-7ac2-8a1b-9557bdbd1dad", checkpoint.task)
+        self.assertEqual(4, len(commands))
+        checkpoint, commands = self.steps(self.STOPPING, self.HINT, answers)
+        self.assertEqual((1, "the skill stops on a detached HEAD"), (len(commands), checkpoint.stopped))
+
+    def test_a_queued_answer_is_recorded_as_queued(self) -> None:
+        checkpoint = bench_checkpoint.Checkpoint(self.SKILL)
+        checkpoint.record("update", json.dumps({"task_id": "feature/x", "queued": True}), False)
+        checkpoint.record("flush", "context: Working task not found: feature/x", True)
+        self.assertEqual([("update", True, True), ("flush", False, False)],
+                         [(step["step"], step["ok"], step["queued"]) for step in checkpoint.steps])
+
+    def test_a_codex_command_result_is_read_from_either_tool(self) -> None:
+        exec_command = ("Chunk ID: 1a2b\nWall time: 0.0123 seconds\nProcess exited with code 1\n"
+                        "Original token count: 3\nOutput:\nfatal: not a symbolic ref\n")
+        self.assertEqual(("fatal: not a symbolic ref\n", True), codex_bench.command_result(exec_command))
+        self.assertEqual(("main\n", False), codex_bench.command_result(exec_command.replace("code 1", "code 0")
+                                                                        .replace("fatal: not a symbolic ref", "main")))
+        shell = json.dumps({"output": "{}", "metadata": {"exit_code": 0, "duration_seconds": 0.1}})
+        self.assertEqual(("{}", False), codex_bench.command_result(shell))
+
+    def test_each_stand_in_checkpoints_before_it_reads(self) -> None:
+        answers = {"branch": "feature/SHOP-9-refunds\n", "flush": "{}", "update": "{}"}
+        # Claude Code: Bash calls, their results, then the read.
+        stand_in = SimpleNamespace(project="/work/project", source="src/Invoice.php",
+                                   checkpoint=bench_checkpoint.Checkpoint(self.SKILL))
+        stand_in.checkpoint_step = types.MethodType(claude_code_bench.Scripted.checkpoint_step, stand_in)
+        messages = [{"role": "user", "content": self.HINT + "\nHow are invoices numbered?"}]
+        for name in ("branch", "flush", "update"):
+            [call], stop, _ = claude_code_bench.Scripted.decide(stand_in, {"tools": [{"name": "Bash"}],
+                                                                           "messages": messages})
+            self.assertEqual(("Bash", "tool_use"), (call["name"], stop))
+            self.assertTrue(call["id"].endswith("_" + name))
+            messages += [{"role": "assistant", "content": [call]},
+                         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"],
+                                                       "content": answers[name]}]}]
+        [read], _, _ = claude_code_bench.Scripted.decide(stand_in, {"tools": [{"name": "Bash"}], "messages": messages})
+        self.assertEqual("Read", read["name"])
+        self.assertEqual(["branch", "flush", "update"], [step["step"] for step in stand_in.checkpoint.steps])
+        # Codex: exec_command calls, their outputs, then the read.
+        stand_in = SimpleNamespace(requests=[], source="composer.json", read="",
+                                   checkpoint=bench_checkpoint.Checkpoint(self.SKILL))
+        stand_in.checkpoint_step = types.MethodType(codex_bench.Scripted.checkpoint_step, stand_in)
+        tools = [{"type": "function", "name": "exec_command"}]
+        items = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": self.HINT}]}]
+        for name in ("branch", "flush", "update"):
+            [call], _ = codex_bench.Scripted.decide(stand_in, {"tools": tools, "input": items})
+            self.assertTrue(call["call_id"].endswith("_" + name))
+            items += [call, {"type": "function_call_output", "call_id": call["call_id"],
+                             "output": "Process exited with code 0\nOutput:\n" + answers[name]}]
+        [read], _ = codex_bench.Scripted.decide(stand_in, {"tools": tools, "input": items})
+        self.assertEqual("cat composer.json", json.loads(read["arguments"])["cmd"])
+        self.assertEqual(["branch", "flush", "update"], [step["step"] for step in stand_in.checkpoint.steps])
+
+
 class TargetTest(unittest.TestCase):
     def test_a_target_the_rehearsal_refuses_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -264,6 +364,61 @@ class CodexAttachedTest(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()) as said:
                 self.assertEqual(2, codex_bench.main())
         self.assertIn("--attached runs a fresh project", said.getvalue())
+
+
+class CodexWorktreeTest(unittest.TestCase):
+    def refused(self, *options: str) -> str:
+        argv = ["codex_bench.py", *options, "--codex", sys.executable]
+        with mock.patch.object(sys, "argv", argv), mock.patch.object(codex_bench.sys, "platform", "linux"), \
+                mock.patch.object(codex_bench.shutil, "which", return_value="/usr/bin/true"):
+            with contextlib.redirect_stderr(io.StringIO()) as said:
+                self.assertEqual(2, codex_bench.main())
+        return said.getvalue()
+
+    def test_a_worktree_run_needs_an_install_the_sandbox_writes_and_one_turn(self) -> None:
+        self.assertIn("--worktree runs Codex", self.refused("--worktree", "--attached"))
+        self.assertIn("--worktree runs Codex", self.refused("--worktree", "beside", "--sandbox", "read-only"))
+        self.assertIn("--app-server runs one turn", self.refused("--app-server", "--queued", "8"))
+        self.assertIn("--worktree codex lets", self.refused("--worktree", "codex", "--queued", "8"))
+
+    def test_the_app_worktree_is_detached_marked_and_owned_as_the_app_writes_it(self) -> None:
+        # The app-server has no request for a worktree: the bench makes it the
+        # way the Codex app's own code does, and the owner record as it writes it.
+        with tempfile.TemporaryDirectory() as temporary:
+            project, home = Path(temporary) / "shop", Path(temporary) / "codex-home"
+            project.mkdir()
+            for step in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "base"]):
+                subprocess.run([*claude_code_bench.GIT, *step], cwd=project, check=True, capture_output=True)
+            place = codex_bench.app_worktree(home, project)
+            self.assertEqual([place], codex_bench.managed_worktrees(home))
+            self.assertEqual(home / "worktrees", place.parent.parent)
+            self.assertEqual("shop", place.name)
+            self.assertTrue((place.parent / ".codex-worktree-name").is_file())
+            self.assertEqual(1, subprocess.run(["git", "-C", str(place), "symbolic-ref", "-q", "HEAD"],
+                                               capture_output=True).returncode)
+            self.assertEqual("", codex_bench.owner_of(place))
+            thread = "01a1776d-b888-7ac2-8a1b-9557bdbd1dad"
+            codex_bench.own(place, thread)
+            self.assertEqual('{\n  "version": 1,\n  "ownerThreadId": "%s"\n}\n' % thread,
+                             (codex_bench.git_directory(place) / "codex-thread.json").read_text(encoding="utf-8"))
+            self.assertEqual(thread, codex_bench.owner_of(place))
+
+    def test_only_the_approvals_of_the_persons_hooks_file_count_as_the_setups(self) -> None:
+        # The setup must leave the approval to the person: an approval of a
+        # project's hooks or a plugin's is not one of its entries.
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            mine = f"{home / 'hooks.json'}:session_start:0:0"
+            (home / "config.toml").write_text(
+                f'model = "m"\n\n[hooks.state."/p/next/.codex/hooks.json:stop:0:0"]\ntrusted_hash = "sha256:1"\n\n'
+                f'[hooks.state."ponytail@ponytail:hooks/hooks.json:session_start:0:0"]\ntrusted_hash = "sha256:2"\n',
+                encoding="utf-8")
+            self.assertEqual([], codex_bench.user_approvals(home))
+            with (home / "config.toml").open("a", encoding="utf-8") as config:
+                config.write(f'\n[hooks.state."{mine}"]\ntrusted_hash = "sha256:3"\n')
+            self.assertEqual([mine], codex_bench.user_approvals(home))
+            with mock.patch.dict(sys.modules, {"tomllib": None}):
+                self.assertEqual([mine], codex_bench.user_approvals(home))
 
 
 class PersonTrustTest(unittest.TestCase):

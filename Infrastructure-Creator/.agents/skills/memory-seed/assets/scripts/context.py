@@ -10,6 +10,8 @@ SOURCE_PROVENANCE_PROFILE = "local-source-provenance-v1"
 CAPSULE_PROFILE_FLAG = "capsule-profile-v1"
 
 import argparse
+import contextlib
+import errno
 import hashlib
 import io
 from contextlib import nullcontext
@@ -980,27 +982,84 @@ def _source_git_ignored(project, paths, timeout):
         _environment=_source_git_environment, _frame=_source_git_frame, _run=_source_git_run)
 
 
+def _checkout_git_directory(project: Path) -> Optional[Path]:
+    """The Git directory of the checkout holding ``project``, found as Git
+    finds it - ``.git`` itself, or the ``gitdir:`` a linked worktree's or
+    submodule's ``.git`` file names - without starting Git again."""
+    checkout = _source_git_checkout(project)
+    if checkout is None:
+        return None
+    directory = checkout / ".git"
+    if not directory.is_dir():
+        with directory.open("rb") as handle:
+            pointer = handle.read(4097)
+        line = pointer.decode("utf-8", "strict").splitlines()[0] if pointer else ""
+        if len(pointer) > 4096 or not line.startswith("gitdir: "):
+            return None
+        directory = checkout / line[len("gitdir: "):].strip()
+    return directory
+
+
+# A worktree Codex makes for a thread names its task by that thread. The
+# record is read as the hooks' codex_thread_task() reads it, by the same two
+# patterns, so the runtime admits the task the hooks name, and `status`
+# reports it.
+CODEX_THREAD_TASK_PREFIX = "codex-thread/"
+_CODEX_THREAD_TASK = re.compile(r"codex-thread/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+_CODEX_THREAD_VERSION = re.compile(r'"version"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*1[ \t\n\v\f\r]*[,}]')
+_CODEX_THREAD_OWNER = re.compile(
+    r'"ownerThreadId"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*"([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})"')
+
+
+def _owner_thread(project: Path) -> Optional[str]:
+    """The thread owning a worktree Codex made, while it names the task.
+
+    `codex --worktree` and a new worktree in the Codex app check the project
+    out on a detached HEAD, which stays detached until someone makes a branch
+    there, and write the thread that owns the checkout into
+    ``codex-thread.json`` of its Git directory: ``{"version": 1,
+    "ownerThreadId": "<UUID>"}``, on one line (the CLI) or one key a line (the
+    app). Until a branch names the work, that thread does - the hooks
+    (working-memory-read.sh) name the task ``codex-thread/<UUID>``, admitted
+    while HEAD stays detached (_admit_inferred_task_branch). Any other
+    detached HEAD names none.
+    """
+    try:
+        directory = _checkout_git_directory(project)
+        if directory is None:
+            return None
+        record_path = directory / "codex-thread.json"
+        if record_path.is_symlink() or not record_path.is_file():
+            return None
+        with record_path.open("rb") as handle:
+            raw = handle.read(4097)
+        text = raw.decode("utf-8", "strict")
+    except (SourceGitError, OSError, UnicodeError, ValueError):
+        return None
+    owner = _CODEX_THREAD_OWNER.search(text)
+    if len(raw) > 4096 or _CODEX_THREAD_VERSION.search(text) is None or owner is None:
+        return None
+    return owner.group(1)
+
+
+def _owner_thread_task(project: Path) -> Optional[str]:
+    """``codex-thread/<UUID>`` for a worktree Codex made, as the hooks'
+    codex_thread_task() names it, or None."""
+    owner = _owner_thread(project)
+    return CODEX_THREAD_TASK_PREFIX + owner if owner else None
+
+
 def _rebased_branch(project: Path) -> Optional[str]:
     """The branch a rebase in progress replays onto a detached HEAD.
 
     Git keeps its full name in ``rebase-merge/head-name`` (``rebase-apply/``
     for the apply backend) of the worktree's own Git directory, and removes
-    the directory when the rebase ends or is aborted. The directory is found
-    as Git finds it - ``.git`` itself, or the ``gitdir:`` a linked worktree's
-    or submodule's ``.git`` file names - without starting Git again.
+    the directory when the rebase ends or is aborted.
     """
     try:
-        checkout = _source_git_checkout(project)
-        if checkout is None:
+        directory = _checkout_git_directory(project)
+        if directory is None:
             return None
-        directory = checkout / ".git"
-        if not directory.is_dir():
-            with directory.open("rb") as handle:
-                pointer = handle.read(4097)
-            line = pointer.decode("utf-8", "strict").splitlines()[0] if pointer else ""
-            if len(pointer) > 4096 or not line.startswith("gitdir: "):
-                return None
-            directory = checkout / line[len("gitdir: "):].strip()
         for state in ("rebase-merge", "rebase-apply"):
             try:
                 with (directory / state / "head-name").open("rb") as handle:
@@ -1036,8 +1095,11 @@ def _admit_inferred_task_branch(repository: Path, expected: Optional[str]) -> No
         # Git was slow.
         observed = _source_git_run(project, ["symbolic-ref", "--quiet", "HEAD"],
                                    _source_git_environment(), time.monotonic() + 2.0)
-        # A rebase detaches HEAD; the branch it rewrites stays the task.
-        if observed.returncode == 1 and _rebased_branch(project) == expected:
+        # A rebase detaches HEAD; the branch it rewrites stays the task. A
+        # worktree Codex made is detached until a branch is made there; the
+        # thread that owns it names the task meanwhile.
+        if observed.returncode == 1 and (_rebased_branch(project) == expected
+                                         or _owner_thread_task(project) == expected):
             return
         if (observed.returncode != 0
                 or not isinstance(observed.stdout, bytes) or len(observed.stdout) > 4096
@@ -3218,6 +3280,9 @@ def summarize_last_turn(report: dict[str, object], *, routine: bool = True) -> O
         parts.append(f"turn failed: {error}")
     if report.get("native_capture_incomplete") is True:
         parts.append("native memory result not saved completely; inspect the prior save before relying on it")
+    # A command a sandbox left waiting was refused when the hook made it;
+    # the agent was told only that it waits.
+    parts.extend(f"queued memory command not made: {item}" for item in strings("queued_refused"))
     if report.get("promotion_retry_unavailable") is True:
         parts.append("promotion retry unavailable: local scheduling state could not be saved")
     if count("discarded_turns"):
@@ -4484,10 +4549,13 @@ def _render_capsule(
                     "new one starts: " + _closed_task_remedy(str(capsule.get("task_id") or "")) + ")")
     elif working is None and capsule.get("kind") == "warming":
         # A branch whose task the first checkpoint has not created yet: the
-        # layers below are still this turn's retrieval.
+        # layers below are still this turn's retrieval. A worktree Codex made
+        # has no branch to tell the agent the task's ID, so the line does.
+        task = str(capsule.get("task_id") or "")
         head.append(
-            "working: not recorded yet (the task starts at the "
-            f"{DEFAULT_TURN_FLUSH_AFTER}-turn checkpoint)"
+            "working: not recorded yet ("
+            + (f"task {task}; " if _CODEX_THREAD_TASK.fullmatch(task) else "")
+            + f"the task starts at the {DEFAULT_TURN_FLUSH_AFTER}-turn checkpoint)"
         )
     elif working is None:
         head.append("working: unavailable")
@@ -5359,6 +5427,13 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 # HEAD does not resolve to a commit: the branch is unborn
                 # (fresh init, zero commits) or HEAD itself is broken.
                 git_state = "unborn-head"
+    # A detached HEAD names the task where the hooks name one: the branch a
+    # rebase in progress rewrites (_rebased_branch), else, in a worktree Codex
+    # made for a thread, that thread (_owner_thread). The checkpoint skill
+    # takes its task from here on a detached HEAD.
+    project = workspace_roots.project_root(repository)
+    rebased = _rebased_branch(project) if git_state == "detached-head" else None
+    owner = _owner_thread(project) if git_state == "detached-head" and rebased is None else None
 
     if git_error is not None:
         git_metadata = {
@@ -5400,6 +5475,12 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             "reason": {
                 "worktree": "Git changed-path metadata is available.",
                 "detached-head": (
+                    "Git changed-path metadata is available; HEAD is detached by a "
+                    "rebase, and the branch it rewrites supplies task identity."
+                    if rebased else
+                    "Git changed-path metadata is available; HEAD is detached, and "
+                    "the Codex thread that owns this worktree supplies task identity."
+                    if owner else
                     "Git changed-path metadata is available, but HEAD is "
                     "detached and cannot supply task identity."
                 ),
@@ -5410,7 +5491,7 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             }[git_state],
             "remediation": (
                 "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
-                if git_state == "detached-head"
+                if git_state == "detached-head" and not owner and not rebased
                 else None
             ),
         }
@@ -5454,6 +5535,33 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 "reason": "The current Git branch supplies task identity.",
                 "remediation": None,
             }
+    elif rebased:
+        try:
+            identity = validate_task_id(branch_task_id(rebased))
+        except ContextError:
+            task_identity = {
+                "status": "degraded",
+                "source": "git-rebase",
+                "task_id": None,
+                "reason": "The branch a rebase in progress rewrites is not a valid task identifier.",
+                "remediation": "Set CONTEXT_TASK_ID to a valid task identifier.",
+            }
+        else:
+            task_identity = {
+                "status": "active",
+                "source": "git-rebase",
+                "task_id": identity,
+                "reason": "The branch a rebase in progress rewrites supplies task identity until the rebase ends.",
+                "remediation": None,
+            }
+    elif owner:
+        task_identity = {
+            "status": "active",
+            "source": "codex-thread",
+            "task_id": CODEX_THREAD_TASK_PREFIX + owner,
+            "reason": "The Codex thread that owns this worktree supplies task identity until a branch does.",
+            "remediation": None,
+        }
     else:
         task_identity = {
             "status": "degraded",
@@ -5504,6 +5612,10 @@ def derive_goal(task_id: str) -> str:
     A task goal cannot be edited after creation, so an automatically created
     one states its own provenance instead of pretending someone wrote it.
     """
+    if _CODEX_THREAD_TASK.fullmatch(task_id):
+        # No branch to read words from, and a thread ID read as one comes
+        # apart at its hyphens; the ID stays whole in the provenance.
+        return f"Work of the Codex thread that owns its worktree (auto-provisioned from {task_id})"
     label = task_id
     for prefix in BRANCH_PREFIXES:
         if label.lower().startswith(prefix):
@@ -7356,6 +7468,204 @@ def flush_turn_deltas(
     return {**result, "files_omitted": omitted, **ensured}
 
 
+# A sandbox that lets a command write only its own folder - Codex's in a
+# worktree of the project or below its root, Claude Code's there - refused the
+# memory commands the policy and the checkpoint skill have an agent run: an
+# `update` failed at the Brain's lock, a `turn --flush` at the index. The save
+# after an answer waits in a spool for the session's next hook, which runs
+# outside the sandbox (native_results); these two wait the same way, checked
+# as far as nothing has to be written, and the next turn a hook records - this
+# turn's Stop - makes them, oldest first. Nothing else is queued.
+QUEUE_NAME = "ai-accelerator-memory-queue"
+QUEUE_PROFILE = "memory-command-queue-v1"
+QUEUE_MAX_AGE_SECONDS = 24 * 60 * 60
+QUEUE_MAX_BYTES = 64 * 1024
+QUEUE_UNWRITABLE = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
+# Set for the commands a drain runs: one that still cannot write fails
+# instead of waiting again.
+QUEUE_DRAIN_VARIABLE = "CONTEXT_QUEUE_DRAIN"
+
+
+def queues_from_sandbox(arguments: argparse.Namespace) -> bool:
+    return (arguments.command == "update" or (arguments.command == "turn" and arguments.flush)) \
+        and os.environ.get(QUEUE_DRAIN_VARIABLE) != "1"
+
+
+def memory_writable(repository: Path, database: Path, mode: str) -> bool:
+    """Whether this run may write the project's memory - the Brain's lock,
+    governed, and the index - or a sandbox keeps it from them."""
+    for folder in ((brain_root(repository) / "local",) if mode == "governed" else ()) + (database.parent,):
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            probe = folder / f".write-probe-{os.getpid()}-{os.urandom(4).hex()}"
+            os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            os.unlink(probe)
+        except OSError as error:
+            if error.errno in QUEUE_UNWRITABLE:
+                return False
+    return True
+
+
+def _queue_key(repository: Path) -> str:
+    """One project's queue: the state it writes and the checkout it reads."""
+    layout = workspace_roots.roots(repository)
+    places = os.path.realpath(str(layout.state)) + "\0" + os.path.realpath(str(layout.project))
+    return hashlib.sha256(os.fsencode(places)).hexdigest()[:16]
+
+
+def _own_folder(image: os.stat_result) -> bool:
+    return (stat_module.S_ISDIR(image.st_mode) and not brain_runtime.linked_reparse(image)
+            and (not hasattr(os, "getuid") or image.st_uid == os.getuid()))
+
+
+def queue_write(repository: Path, arguments: argparse.Namespace, owner: str) -> int:
+    """Check the command as far as nothing has to be written, and leave it
+    for the next hook (drain_queued_commands)."""
+    task_id = validate_task_id(arguments.task_id)
+    # A command for a worktree the installation serves names it, as the save
+    # step does (--project): it is made for that worktree, as it was asked.
+    argv = ["--owner=" + owner, *(["--mode=" + arguments.mode] if arguments.mode else []),
+            *(["--project=" + str(arguments.project)] if arguments.project is not None else [])]
+    if arguments.command == "update":
+        progress = arguments.progress
+        if progress is None and not (arguments.next_step or arguments.file or arguments.source
+                                     or arguments.phase or arguments.replace_next_steps):
+            raise ContextError("Working task update requires a changed field")
+        if progress is not None and not progress.strip():
+            raise ContextError("Working task progress must not be empty")
+        next_steps = normalize_values("Working task next step", arguments.next_step)
+        files = validate_paths("Working task file", arguments.file)
+        sources = normalize_values("Working task source", arguments.source)
+        reject_secrets("working task", ([progress] if progress else []) + next_steps + files + sources)
+        if arguments.actor:
+            validate_actor(arguments.actor)
+        argv += ["update", "--task-id=" + task_id,
+                 *(["--progress=" + progress] if progress is not None else []),
+                 *("--next-step=" + value for value in arguments.next_step),
+                 *("--file=" + value for value in arguments.file),
+                 *("--source=" + value for value in arguments.source),
+                 *(["--phase=" + arguments.phase] if arguments.phase else []),
+                 *(["--revision=" + str(arguments.revision)] if arguments.revision is not None else []),
+                 *(["--actor=" + arguments.actor] if arguments.actor else []),
+                 *(["--replace-next-steps"] if arguments.replace_next_steps else []),
+                 *(["--allow-phase-regression"] if arguments.allow_phase_regression else [])]
+    else:
+        argv += ["turn", "--task-id=" + task_id, "--flush", f"--max-files={arguments.max_files}"]
+    key = _queue_key(repository)
+    record = {"profile": QUEUE_PROFILE, "key": key, "created": time.time(), "argv": [*argv, "--json"]}
+    name = f"command-{key}-{time.time_ns():020d}-{os.getpid()}-{os.urandom(3).hex()}.json"
+    for folder in workspace_roots.spool_directories(QUEUE_NAME):
+        try:
+            folder.mkdir(mode=0o700, exist_ok=True)
+            if not _own_folder(folder.lstat()):
+                continue
+            atomic_json(folder / name, record)
+        except OSError:
+            continue
+        break
+    else:
+        raise ContextError("This sandbox cannot write the project's memory, nor a temporary folder of "
+                           "yours for the command to wait in")
+    what = "update" if arguments.command == "update" else "flush"
+    detail = (f"This sandbox cannot write the project's memory: the {what} waits in a temporary folder of yours, "
+              "and the session's next hook - when this turn ends - makes it.")
+    if arguments.json:
+        print(json.dumps({"task_id": task_id, "queued": True, "detail": detail}, ensure_ascii=False))
+    else:
+        print(f"Working task {what} queued: {task_id}. {detail}")
+    return 0
+
+
+def _queued_record(path: Path) -> Optional[dict]:
+    try:
+        image = path.lstat()
+        if (not stat_module.S_ISREG(image.st_mode) or image.st_nlink != 1 or brain_runtime.linked_reparse(image)
+                or (hasattr(os, "getuid") and image.st_uid != os.getuid()) or image.st_size > QUEUE_MAX_BYTES):
+            return None
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError, RecursionError):
+        return None
+    if (not isinstance(value, dict) or value.get("profile") != QUEUE_PROFILE
+            or not isinstance(value.get("argv"), list) or not 2 <= len(value["argv"]) <= 512
+            or not all(isinstance(item, str) and "\0" not in item for item in value["argv"])
+            or type(value.get("created")) not in (int, float)):
+        return None
+    return value
+
+
+def _queued_arguments(repository: Path, argv: list) -> Optional[argparse.Namespace]:
+    """The command a record names, when it is one that may wait - anything
+    else a file in the folder could name is refused."""
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            parsed = build_parser().parse_args(["--root", str(repository), *argv])
+    except SystemExit:
+        return None
+    if (parsed.command not in ("update", "turn") or (parsed.command == "turn" and not parsed.flush)
+            or parsed.db is not None or not parsed.json or Path(parsed.root) != repository
+            or sum(item.startswith("--root") for item in argv)):
+        return None
+    return parsed
+
+
+def drain_queued_commands(repository: Path) -> list:
+    """Make what a sandbox left waiting for this project (queue_write),
+    oldest first, from a run that writes its memory: a hook's turn, outside
+    the sandbox. Each file goes before its command runs, whatever it then
+    says; a command refused is journaled and named in the next capsule."""
+    if os.environ.get(QUEUE_DRAIN_VARIABLE) == "1":
+        return []
+    prefix = f"command-{_queue_key(repository)}-"
+    waiting = []
+    for folder in workspace_roots.spool_directories(QUEUE_NAME):
+        try:
+            if not _own_folder(folder.lstat()):
+                continue
+            names = [name for name in os.listdir(folder) if name.startswith(prefix) and name.endswith(".json")]
+        except OSError:
+            continue
+        waiting.extend((name[len(prefix):], folder / name) for name in names)
+    outcomes = []
+    for _, path in sorted(waiting):
+        record = _queued_record(path)
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        parsed = _queued_arguments(repository, record["argv"]) if record else None
+        command = parsed.command if parsed else None
+        if parsed is None or not 0 <= time.time() - record["created"] <= QUEUE_MAX_AGE_SECONDS:
+            outcomes.append({"command": command, "made": False, "code": "unreadable" if parsed is None else "expired",
+                             "detail": "the waiting command could not be read" if parsed is None
+                             else "it waited more than a day"})
+            continue
+        try:
+            done = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--root", str(repository),
+                                   *record["argv"]], cwd=str(workspace_roots.project_root(repository)),
+                                  env={**os.environ, QUEUE_DRAIN_VARIABLE: "1", "PYTHONIOENCODING": "utf-8"},
+                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            outcomes.append({"command": command, "made": False, "code": "unfinished",
+                             "detail": "it did not finish"})
+            continue
+        lines = [line.strip() for line in done.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
+        outcomes.append({"command": command, "made": done.returncode == 0,
+                         **({} if done.returncode == 0 else {"code": "refused",
+                                                             "detail": (lines[-1] if lines else "")[:200]})})
+    if outcomes:
+        import native_results
+        for outcome in outcomes:
+            native_results._journal(repository, None, "queue", "made" if outcome["made"] else "refused",
+                                    outcome.get("code"))
+        refused = [f"{outcome['command'] or 'command'} - {outcome['detail']}" for outcome in outcomes
+                   if not outcome["made"]]
+        if refused:
+            report = load_last_turn_report(repository) or {"schema_version": 1}
+            report.update(timestamp=datetime.now(timezone.utc).isoformat(), queued_refused=refused[-3:])
+            write_last_turn_report(repository, report)
+    return outcomes
+
+
 def run_turn(
     connection: sqlite3.Connection,
     repository: Path,
@@ -7379,6 +7689,7 @@ def run_turn(
     )
     buffered = len(pending_turn_deltas(connection, task_id))
     flushed = None
+    ensured = None
     if buffered and (arguments.flush or buffered >= arguments.flush_after):
         flushed = flush_turn_deltas(
             connection,
@@ -7388,6 +7699,14 @@ def run_turn(
             owner,
             file_limit=arguments.max_files,
         )
+    elif arguments.flush and (mode == "lightweight" or closed_task_record(connection, repository, task_id) is None):
+        # A checkpoint asked for before anything was buffered - a new branch,
+        # a worktree's first answer - made no task, so the `update` the
+        # checkpoint skill writes next was refused: "Working task not
+        # found". An explicit flush makes the task, as the memory MCP
+        # server's checkpoint does; the Stop hook never flushes explicitly,
+        # so visiting a branch still mints nothing.
+        ensured = ensure_working_task(connection, repository, task_id, mode, owner)
     # Full maintenance remains a flush boundary. A scheduled promotion retry
     # is the only exception: ordinary turns use Git probes and local state,
     # while a due retry shares the Stop hook's timeout and mutation lock.
@@ -7462,10 +7781,10 @@ def run_turn(
         "flushed": flushed is not None and not flushed.get("closed_task"),
         "revision": flushed.get("revision") if flushed else None,
         "files_omitted": flushed.get("files_omitted") if flushed else 0,
-        "provisioned": bool(flushed and flushed.get("provisioned")),
+        "provisioned": bool((flushed or ensured or {}).get("provisioned")),
         # The UUID of the pre-existing record the flush restored the local
         # binding to — the second-machine signal. None on an ordinary flush.
-        "rebound": flushed.get("rebound") if flushed else None,
+        "rebound": (flushed or ensured or {}).get("rebound"),
         # The completed task the buffered turns were meant for, when the
         # branch went on after completion; those turns were dropped.
         "closed_task": flushed.get("closed_task") if flushed else None,
@@ -8760,6 +9079,8 @@ def _command() -> int:
                     if connection is not None:
                         connection.close()
         else:
+            if queues_from_sandbox(arguments) and not memory_writable(repository, database, mode):
+                return queue_write(repository, arguments, owner)
             connection = connect(database)
         try:
             if arguments.command == "index":
@@ -9985,7 +10306,7 @@ def _command() -> int:
                 # report — validation may have rejected it as secret-bearing,
                 # and the report must not preserve what the run refused.
                 try:
-                    return run_turn(connection, repository, arguments, mode, owner)
+                    code = run_turn(connection, repository, arguments, mode, owner)
                 except (ContextError, BrainError, OSError, sqlite3.Error) as error:
                     write_last_turn_report(
                         repository,
@@ -9997,6 +10318,10 @@ def _command() -> int:
                         },
                     )
                     raise
+                # After the turn it records, before the Stop's save request:
+                # what a sandbox left waiting is made in the order it came.
+                drain_queued_commands(repository)
+                return code
 
             if arguments.command == "rebind":
                 if mode == "lightweight":

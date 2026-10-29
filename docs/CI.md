@@ -10,7 +10,7 @@ exceptions: `lint` uses the runner's preinstalled `shellcheck` and `php`;
 `harness-fleet` pip-installs the optional graph runtime into a venv;
 `qa-tooling` pip-installs the pinned `openpyxl` and `jsonschema` from
 [`requirements-qa.txt`](../requirements-qa.txt) into a venv of its own;
-`system-orchestration` installs bubblewrap with `sudo apt-get` and lifts the
+`system-orchestration` and `memory-lifecycles` install bubblewrap with `sudo apt-get` and lift the
 runner's AppArmor restriction on unprivileged user namespaces; and
 `windows-harness` also uses `actions/setup-node`.
 
@@ -217,8 +217,13 @@ python3 scripts/check.py --group memory-lifecycles
 ```
 
 Random session and Git lifecycles driven through a fresh installation's
-hooks (`scripts/memory_lifecycle_fuzz.py`): two fixed seeds installed and
-one attached, on Python 3.9 and on the current release. About two minutes
+hooks (`scripts/memory_lifecycle_fuzz.py`) - Claude Code, Codex and Cursor
+sessions in the root, below it and in worktrees, worktrees Codex makes, and
+checkpoints and saves a sandbox holds until the session's Stop: two fixed
+seeds installed and one attached, on Python 3.9 and on the current release.
+The job installs bubblewrap and lifts the runner's AppArmor restriction on
+unprivileged user namespaces, as `system-orchestration` does, for the saves
+it holds; without `bwrap` they are left out. About two minutes
 a leg locally and three on a hosted runner; as a step of `memory` it took
 that job to its 15-minute limit, so it runs beside it. `timeout-minutes`
 is 10.

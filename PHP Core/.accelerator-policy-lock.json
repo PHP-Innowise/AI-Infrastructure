@@ -40,7 +40,7 @@
     ".agents/skills/architecture-implementer/SKILL.md": "a790cb8ccded49509f1b0e047103fb7f07fb1d22449678582074cd90f3aeb409",
     ".agents/skills/brainstorming/SKILL.md": "bd08a8e563cd551a8c849e57eeb252b59b9e4025bb4724633964a9fc0607e321",
     ".agents/skills/browser-verify/SKILL.md": "e84608b21e4b3501d32cf840605c905bf7574313537815db411ab5bc85796bb7",
-    ".agents/skills/checkpoint/SKILL.md": "7abd321d4496c02df000f1e4791895fa85520f91893c1320c70f8384e7187fd7",
+    ".agents/skills/checkpoint/SKILL.md": "af81c8a793f54b3c93371e405c44b31e5e66923142a9c135dd307a381f1d61b9",
     ".agents/skills/code-reviewer/SKILL.md": "94355008bb376295299e6cf6f6c7bc9c3dd67c771b3596a11496cbd23c4d57a5",
     ".agents/skills/codebase-mapper/SKILL.md": "28d08c6bc4464a33324cf8ab327aa45fa04b6446ab6a5b79bddb808cf0974d2c",
     ".agents/skills/coder-frontend/SKILL.md": "c476a3b8cccec224747acfc50c2febf0c1ef3190dde289fba422be23358dd3c3",
@@ -54,7 +54,7 @@
     ".agents/skills/finishing-branch/SKILL.md": "b62b95cad581a9614de56ad578a3dac57fb7bfafcd29fd8354fa2517d545c156",
     ".agents/skills/frontend-design/SKILL.md": "491a866ae7de0c5ed21210db49b3a784ffd725e36a8cb9888f486808564dd945",
     ".agents/skills/memory-bank/SKILL.md": "69d42e308cbb362de9b8b8e0f01371e8354d637acc48da3e25936a9c04b1264c",
-    ".agents/skills/memory/SKILL.md": "522b72ecc502d650a0df356138f804a2cdbc2c8c41b2422dfdcdc7c64d280e58",
+    ".agents/skills/memory/SKILL.md": "99595693babb5338e87420e5903d3749e0bf7aa3f6ea9c34a822e02a6b19fa84",
     ".agents/skills/performance-optimization/SKILL.md": "cdb584b9f508e247240a1acec566f63f01caa083de3935c831d0c08c821527d2",
     ".agents/skills/project-brain/SKILL.md": "aefea78db64eb1887224d8c4137bd63c92f6e2dfc47abac0fa57b66df5c703a8",
     ".agents/skills/refactorer/SKILL.md": "5e7ba5fe06f738080ed14407139a5155dad9f2f7ee54c6a95806e425a6386f9f",
@@ -219,7 +219,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "de572f92842e839f88cb4d66e47a4ee8be4b1296462783af7a754483745d8db1"
   },
-  "policy_digest": "b0732cc509a92bb959bc4d9729b971ea3133af085297a391429c361b1604f42e",
+  "policy_digest": "a4f0e2595ee9f341ba1076a780fe0e5c856b3c9dd0080add3013f481f822ac83",
   "release": "2.0.0",
   "schema_version": 1
 }
