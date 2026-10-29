@@ -161,7 +161,9 @@ run() {
 # Keep the program in -c: a heredoc would occupy stdin and hide the prompt.
 # Output: the session id, the transcript path, the session's directory, the
 # prompt, one per line, and a final "\n." that keeps command substitution
-# from eating the prompt's own trailing newlines.
+# from eating the prompt's own trailing newlines. Bytes both ways: on Windows
+# a text stream writes \n as \r\n - every field cut here kept a \r, and the
+# session's directory was no directory - and reads by the ANSI code page.
 HOOK_INPUT=$(printf '%s' "$HOOK_STDIN" | "${PYTHON[@]}" -c '
 import json
 import os
@@ -169,7 +171,7 @@ import re
 import sys
 
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(sys.stdin.buffer.read())
 except (UnicodeDecodeError, ValueError):
     data = {}
 if not isinstance(data, dict):
@@ -192,7 +194,7 @@ if not isinstance(transcript, str) or len(transcript) > 4096 or "\n" in transcri
 cwd = data.get("cwd", "")
 if not isinstance(cwd, str) or len(cwd) > 4096 or "\n" in cwd or "\0" in cwd or not os.path.isabs(cwd):
     cwd = ""
-sys.stdout.write(session + "\n" + transcript + "\n" + cwd + "\n" + prompt + "\n.")
+sys.stdout.buffer.write((session + "\n" + transcript + "\n" + cwd + "\n" + prompt + "\n.").encode("utf-8", "replace"))
 ' 2>/dev/null)
 case "$HOOK_INPUT" in *$'\n'*$'\n'*$'\n'*) ;; *) HOOK_INPUT=$'\n\n\n\n.' ;; esac
 SESSION_ID=${HOOK_INPUT%%$'\n'*}
@@ -203,13 +205,15 @@ SESSION_DIR=${HOOK_REST%%$'\n'*}
 QUERY=${HOOK_REST#*$'\n'}
 QUERY=${QUERY%$'\n.'}
 
-# A Claude Code desktop session in its own worktree - and any session after
-# EnterWorktree - runs the hooks of the checkout they are installed in and
-# names its own checkout in the input's "cwd". The memory here follows this
-# checkout's branch: handed to a session on another branch, its task would
-# read as that session's own state. Another checkout of the same repository,
-# then, gets no capsule; a subdirectory of this checkout, or a directory of
-# another repository, changes nothing.
+# A session that entered a worktree of this repository - Claude Code's
+# EnterWorktree - still runs these hooks, and names its own checkout in the
+# input's "cwd". It works there, on that worktree's branch. A worktree that has
+# none of this installation is served as the dispatcher serves a session
+# started in it (memory-bank/scripts/claude_dispatch.sh): this installation's
+# state, the worktree's folder as the project. Any other checkout of the
+# repository gets no capsule: handed to a session on another branch, this
+# checkout's task would read as that session's own state. A subdirectory of
+# this checkout, or a directory of another repository, changes nothing.
 checkout_identity() {
   local directory=$1 output top common
   output=$(git -C "$directory" rev-parse --show-toplevel --git-common-dir 2>/dev/null) || return 1
@@ -221,14 +225,37 @@ checkout_identity() {
   common=$(cd -- "$common" 2>/dev/null && pwd -P) || return 1
   printf '%s\n%s' "$top" "$common"
 }
-in_other_worktree() {
-  local session=$1 mine theirs
-  [ -n "$session" ] && [ "$session" != "$PROJECT_DIR" ] && [ -d "$session" ] || return 1
-  theirs=$(checkout_identity "$session") || return 1
-  mine=$(checkout_identity "$PROJECT_DIR") || return 1
-  [ "${theirs%%$'\n'*}" != "${mine%%$'\n'*}" ] && [ "${theirs#*$'\n'}" = "${mine#*$'\n'}" ]
-}
-if in_other_worktree "$SESSION_DIR"; then
+OTHER_CHECKOUT=
+if [ -n "$SESSION_DIR" ] && [ "$SESSION_DIR" != "$PROJECT_DIR" ] && [ -d "$SESSION_DIR" ] \
+  && THEIRS=$(checkout_identity "$SESSION_DIR") && MINE=$(checkout_identity "$PROJECT_DIR") \
+  && [ "${THEIRS%%$'\n'*}" != "${MINE%%$'\n'*}" ] && [ "${THEIRS#*$'\n'}" = "${MINE#*$'\n'}" ]; then
+  OTHER_CHECKOUT=${THEIRS%%$'\n'*}
+  # Cursor delivers the capsule through a rule file in the project, which in
+  # a worktree would be written into it: a Cursor session there is not served.
+  if [ "$PROJECT_DIR" = "$ROOT_DIR" ] && [ "$STATE_DIR" = "$ROOT_DIR" ] \
+    && case "$HOOK_STDIN" in *'"cursor_version"'*) false ;; *) true ;; esac \
+    && ROOT_REAL=$(cd "$ROOT_DIR" && pwd -P) && SESSION_REAL=$(cd "$SESSION_DIR" && pwd -P); then
+    MINE_TOP=${MINE%%$'\n'*}
+    SERVED=$OTHER_CHECKOUT${ROOT_REAL:${#MINE_TOP}}
+    case "$SESSION_REAL/" in
+      "$SERVED"/*)
+        if [ -d "$SERVED" ] && [ ! -f "$SERVED/memory-bank/scripts/context.py" ]; then
+          PROJECT_DIR=$SERVED
+          # The runtime reads these as Windows writes them: Git Bash spells C:\ as /c/,
+          # which Python on Windows takes for a folder on the current drive, and the
+          # drive letter in upper case, as the save step names the root beside them.
+          NATIVE_ROOT=$ROOT_DIR NATIVE_SERVED=$SERVED
+          if [ "${OS:-}" = "Windows_NT" ]; then
+            case "$NATIVE_ROOT" in /[A-Za-z]|/[A-Za-z]/*) letter=${NATIVE_ROOT:1:1}; NATIVE_ROOT="${letter^^}:${NATIVE_ROOT:2}" ;; esac
+            case "$NATIVE_SERVED" in /[A-Za-z]|/[A-Za-z]/*) letter=${NATIVE_SERVED:1:1}; NATIVE_SERVED="${letter^^}:${NATIVE_SERVED:2}" ;; esac
+          fi
+          export ACCELERATOR_HOME="$NATIVE_ROOT" ACCELERATOR_STATE_DIR="$NATIVE_ROOT" ACCELERATOR_PROJECT_DIR="$NATIVE_SERVED"
+          OTHER_CHECKOUT=
+        fi ;;
+    esac
+  fi
+fi
+if [ -n "$OTHER_CHECKOUT" ]; then
   # Cursor reads only JSON from this hook; its answer is printed on exit.
   case "$HOOK_STDIN" in *'"cursor_version"'*) exit 0 ;; esac
   SESSION_BRANCH=$(git -C "$SESSION_DIR" branch --show-current 2>/dev/null)

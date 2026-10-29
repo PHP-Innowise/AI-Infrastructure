@@ -1633,11 +1633,14 @@ class RebaseIdentityTest(unittest.TestCase):
 
 
 class OtherWorktreeTest(unittest.TestCase):
-    """A Claude Code desktop session in its own worktree - and a session after
-    EnterWorktree - runs the hooks installed in the checkout it started from
-    and names its own checkout in the input's "cwd". The memory here follows
-    this checkout's branch: handed over, its task read as the other branch's
-    state, and that session's turns were recorded into this branch's task."""
+    """A session after Claude Code's EnterWorktree runs the hooks installed in
+    the checkout it started from and names its own checkout in the input's
+    "cwd". A worktree that has none of this installation is served: its
+    branch's task, the worktree as the project. Anything else - a worktree
+    with an installation of its own, a Cursor session, whose capsule would be
+    a rule written into the worktree - gets none of this checkout's memory:
+    handed over, its task read as the other branch's state, and that
+    session's turns were recorded into this branch's task."""
 
     PROMPT = "Why does the invoice total drift by a cent after the discount?"
 
@@ -1650,9 +1653,10 @@ class OtherWorktreeTest(unittest.TestCase):
         self.calls = self.base / "argv.ndjson"
         cli = self.project / "memory-bank/scripts/context.py"
         cli.parent.mkdir(parents=True)
-        cli.write_text("import json, pathlib, sys\n"
+        cli.write_text("import json, os, pathlib, sys\n"
                        f"with pathlib.Path({str(self.calls)!r}).open('a') as out:\n"
-                       "    out.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                       "    out.write(json.dumps(sys.argv[1:] + ['@' + os.environ.get('ACCELERATOR_PROJECT_DIR', '')])"
+                       " + '\\n')\n"
                        "print('working: main-line')\n", encoding="utf-8")
         for tool in MIRRORS:
             hooks = self.project / MIRRORS[tool][0]
@@ -1694,29 +1698,55 @@ class OtherWorktreeTest(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         calls = [json.loads(line) for line in self.calls.read_text(encoding="utf-8").splitlines()] \
             if self.calls.exists() else []
+        # The runtime's project, as the hook named it: last, after an "@".
+        self.projects = [call.pop()[1:] for call in calls]
         return result.stdout, calls
 
-    def test_a_session_in_another_worktree_gets_no_capsule_of_this_branch(self) -> None:
-        for tool in MIRRORS:
-            for cwd, branch in ((self.nested, "feature/nested"), (self.nested / "src", "feature/nested"),
-                                (self.beside, "feature/beside")):
+    def test_a_session_that_entered_a_worktree_is_served_for_its_branch(self) -> None:
+        # With the native result runtime there, Stop asks for the save too.
+        (self.project / "memory-bank/scripts/native_results.py").write_text("", encoding="utf-8")
+        for tool in ("claude", "codex"):
+            for cwd, folder, branch in ((self.nested, self.nested, "feature/nested"),
+                                        (self.nested / "src", self.nested, "feature/nested"),
+                                        (self.beside, self.beside, "feature/beside")):
                 with self.subTest(tool=tool, cwd=cwd.name):
                     stdout, calls = self.hook(tool, "working-memory-read.sh", cwd)
-                    self.assertEqual([], calls)
-                    if tool == "cursor":
-                        # Cursor reads only the JSON answer; the rule is left as it is.
-                        self.assertEqual('{"continue": true}\n', stdout)
-                    else:
-                        self.assertIn(f"another worktree of the repository (branch {branch})", stdout)
-                        self.assertIn("Working memory was NOT consulted this turn.", stdout)
-                        self.assertNotIn("working: main-line", stdout)
-
-    def test_a_turn_in_another_worktree_is_not_recorded_into_this_task(self) -> None:
-        for tool in MIRRORS:
-            for cwd in (self.nested, self.beside):
-                with self.subTest(tool=tool, cwd=cwd.name):
+                    refresh = [args for args in calls if args and args[0] == "refresh"]
+                    self.assertEqual(1, len(refresh), calls)
+                    self.assertEqual(branch, refresh[0][refresh[0].index("--task-id") + 1])
+                    self.assertEqual(str(folder.resolve()), self.projects[calls.index(refresh[0])])
+                    self.assertNotIn("another worktree of the repository", stdout)
                     _, calls = self.hook(tool, "working-memory-write.sh", cwd)
-                    self.assertEqual([], [args for args in calls if args and args[0] == "turn"])
+                    turns = [args for args in calls if args and args[0] == "turn"]
+                    self.assertEqual(1, len(turns), calls)
+                    self.assertEqual(branch, turns[0][turns[0].index("--task-id") + 1])
+                    stops = [args for args in calls if args and args[0] == "native-stop"]
+                    self.assertEqual(1, len(stops), calls)
+                    self.assertIn("--entered", stops[0])
+
+    def test_a_worktree_of_its_own_or_a_cursor_session_gets_no_capsule_of_this_branch(self) -> None:
+        installed = self.base / "installed checkout"
+        self.git(self.project, "worktree", "add", "-q", "-b", "feature/installed", str(installed))
+        runtime = installed / "memory-bank/scripts/context.py"
+        runtime.parent.mkdir(parents=True)
+        runtime.write_text("raise SystemExit(0)\n", encoding="utf-8")
+        cases = [("claude", installed, "feature/installed"), ("codex", installed, "feature/installed")]
+        cases += [("cursor", cwd, branch) for cwd, branch in ((self.nested, "feature/nested"),
+                                                              (self.nested / "src", "feature/nested"),
+                                                              (self.beside, "feature/beside"))]
+        for tool, cwd, branch in cases:
+            with self.subTest(tool=tool, cwd=cwd.name):
+                stdout, calls = self.hook(tool, "working-memory-read.sh", cwd)
+                self.assertEqual([], calls)
+                if tool == "cursor":
+                    # Cursor reads only the JSON answer; the rule is left as it is.
+                    self.assertEqual('{"continue": true}\n', stdout)
+                else:
+                    self.assertIn(f"another worktree of the repository (branch {branch})", stdout)
+                    self.assertIn("Working memory was NOT consulted this turn.", stdout)
+                    self.assertNotIn("working: main-line", stdout)
+                _, calls = self.hook(tool, "working-memory-write.sh", cwd)
+                self.assertEqual([], [args for args in calls if args and args[0] == "turn"])
 
     def test_this_checkout_its_subdirectories_and_other_repositories_keep_their_memory(self) -> None:
         for tool in MIRRORS:

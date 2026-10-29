@@ -572,6 +572,15 @@ def begin(root, task_id, host, payload, *, owner, mode):
         return _begin(step,root,task_id,host,payload,owner=owner,mode=mode)
 
 
+def _armed(root, host, payload, task_id, owner):
+    """A request armed for this turn, not yet asked for."""
+    return {'profile':PROFILE,'owner':owner,'host':host,
+            'session':hashlib.sha256(str(payload.get('conversation_id' if host=='cursor' else 'session_id')).encode()).hexdigest(),
+            'project':_project(root),'task_id':task_id,'token':uuid4().hex,
+            'phase':'armed','task_uuid':None,'revision':None,'scope':None,'digest':None,
+            'checkout':None,'adapter':None,'updated':time.time()}
+
+
 def _begin(step, root, task_id, host, payload, *, owner, mode):
     task_id=check_task_id(task_id)
     if not _enabled(mode): return step({'armed':False},'skipped',_disabled(mode))
@@ -633,12 +642,7 @@ def _begin(step, root, task_id, host, payload, *, owner, mode):
                and 0 <= time.time()-previous['updated'] < IN_FLIGHT_SECONDS)
         if moved: _write(root,_aside(key),previous)
         warning = bool(unsettled) or not moved and bool(previous and previous['phase'] in {'requested','failed','held','refused'})
-        state={'profile':PROFILE,'owner':owner,'host':host,
-               'session':hashlib.sha256(str(payload.get('conversation_id' if host=='cursor' else 'session_id')).encode()).hexdigest(),
-               'project':_project(root),'task_id':task_id,'token':uuid4().hex,
-               'phase':'armed','task_uuid':None,'revision':None,'scope':None,'digest':None,
-               'checkout':None,'adapter':None,'updated':time.time()}
-        _write(root,key,state);_prune(root,key)
+        _write(root,key,_armed(root,host,payload,task_id,owner));_prune(root,key)
     # The warning is counted by what the last request became.
     return step({'armed':True,'request':key,**({'warning':'Previous native memory result was not saved completely.'} if warning else {})},
                 'armed','previous-'+(unsettled or previous['phase']) if warning
@@ -672,9 +676,13 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True):
     if os.name == 'nt':
         interpreter=['python'] if shutil.which('python') else ['py','-3']
     # Keep the documented CLI spelling covered by the installed Bash
-    # permission rules, even when the session's cwd is a subdirectory.
+    # permission rules, even when the session's cwd is a subdirectory. In a
+    # worktree this installation serves, the command names the worktree: run
+    # from the root, nothing else would show it to a session that entered it.
+    layout=workspace_roots.roots(Path(root))
+    place=['--project',str(layout.project)] if layout.shared else []
     def cli(*tail):
-        return shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),'native-result',
+        return shlex.join([*interpreter,'memory-bank/scripts/context.py','--root',str(root),*place,'native-result',
             '--request',key,'--token',state['token'],*tail])
     enter='cd '+shlex.quote(str(tooling))+' && '
     if host=='claude':
@@ -685,8 +693,12 @@ def _instruction(root,key,state,*,brief=False,host=None,full=True):
         # backtick, which a JSON with code in it has. A cd into the project,
         # echo and the allowed CLI pass; -E keeps the JSON's backslashes in
         # zsh, whose plain echo turns them into characters, as in bash.
+        # In a worktree the command reads the result from stdin without
+        # naming the descriptor: once a session has entered a worktree,
+        # Claude Code refuses a program fed a descriptor it names ("-").
+        piped=() if layout.shared else ('--input','-')
         ask=('Use your shell tool to run this exact command: '+enter+"echo -E '<JSON>' | "
-             +cli('--input','-','--json')+'\n'
+             +cli(*piped,'--json')+'\n'
              "Put one JSON object in place of <JSON>, writing each ' inside it as '\\''. ")
         skip='run this command instead: '+enter+cli('--skip','--json')+'\n'
     else:
@@ -741,12 +753,12 @@ def _proven(root,state):
             and proof.get('owner') == state['owner'] and proof.get('attestation') == 'agent')
 
 
-def stop(root, task_id, host, payload, *, owner, mode):
+def stop(root, task_id, host, payload, *, owner, mode, entered=False):
     with _Step(root,'stop',host) as step:
-        return _stop(step,root,task_id,host,payload,owner=owner,mode=mode)
+        return _stop(step,root,task_id,host,payload,owner=owner,mode=mode,entered=entered)
 
 
-def _stop(step, root, task_id, host, payload, *, owner, mode):
+def _stop(step, root, task_id, host, payload, *, owner, mode, entered=False):
     if not _enabled(mode): return step({},'skipped',_disabled(mode))
     # A prompt armed before the switch went off asks nothing either.
     if configured_request(root) == 'off': return step({},'skipped','switched-off')
@@ -761,6 +773,12 @@ def _stop(step, root, task_id, host, payload, *, owner, mode):
     collaboration,sandbox,files=_rollout_turn(payload) if host=='codex' else (None,None,None)
     with mutation_lock(root):
         state=_read(root,key)
+        if state is None and entered and not recovery(host,payload):
+            # The session entered this worktree during the turn (Claude
+            # Code's EnterWorktree): its prompt armed the request where the
+            # session was then. The turn's work is this worktree's, so the
+            # request is armed here.
+            state=_armed(root,host,payload,task_id,owner);_write(root,key,state)
         if state is None: return step({},'skipped','not-armed')
         if recovery(host,payload):
             # The continuation answered the request a prompt sent during its

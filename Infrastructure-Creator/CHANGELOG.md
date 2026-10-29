@@ -4,6 +4,23 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded dispatcher matches its root on Windows — 2026-10-28
+
+- As the editions' does (root `CHANGELOG.md`, same day): `claude_dispatch.sh`
+  and `claude_dispatch.py` change in the asset; the policy lock was
+  rewritten.
+
+### The seeded runtime and dispatcher serve a session that entered a worktree — 2026-10-26
+
+- As the editions' do (root `CHANGELOG.md`, same day): `context.py`,
+  `native_results.py`, `workspace_roots.py`, `claude_dispatch.py` and
+  `claude_dispatch.sh` (dispatcher version 4) change in the asset, and
+  hook-forge's Stop journal fragment passes `${ENTERED:+"$ENTERED"}` to
+  `native-stop` as the editions' hook does; hook-forge tells a generated
+  project's hooks to serve a worktree a session entered as the editions'
+  do (`ENTERED`, the exported layout, Windows paths, Cursor left out); the
+  policy lock was rewritten.
+
 ### The seeded runtime gives an attached project's worktree its own index — 2026-10-26
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` and

@@ -28,6 +28,76 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The hooks read their input as bytes on Windows, and name the drive as Windows does — 2026-10-28
+
+- Why: the Windows CI job ran the tests of a session that entered a
+  worktree for the first time and failed them. The prompt and Stop hooks
+  hand their JSON input to Python, which writes back one field per line;
+  on Windows a text stream writes `\n` as `\r\n`, so every field bash cut
+  kept a `\r`. The session's folder was no folder (an entered worktree
+  was never seen), the transcript path no path (the transcript's recent
+  files were never read there), and the Stop hook's continuation flag read
+  `1\r`, so a save's continuation checkpointed the turn a second time.
+  Python also decoded the input by the ANSI code page. And the dispatcher
+  compared the session's folder with a listed root case-sensitively for an
+  entered worktree's allow: the list's `C:\` reads `/C/` there, the
+  folder `/c/`. With those fixed, the save step named the worktree
+  `c:\...` beside a root `C:\...`: the hooks and the dispatcher took
+  the drive letter from Git Bash's `/c/` as it was.
+- What changes: both snippets read their input as bytes and write their
+  fields as UTF-8 bytes; the dispatcher matches the root by a pattern, as
+  its other comparisons do (`nocasematch` on Windows). Where the hooks
+  and the dispatcher turn `/c/` into `C:`, the letter is upper case, as
+  Windows writes it (`claude_dispatch.py`'s `native_path` already said
+  so). Version 4 has not shipped: its fingerprint is recorded again.
+- Tests: the Windows CI job's `tests.test_memory_worktree_sessions` and
+  `tests.test_memory_claude_subfolders`, which failed (four failures, one
+  error), then one: the drive letter, and on the runner the first
+  refresh in the worktree, which builds its index, over the hooks'
+  5-second budget. The test gives the hooks 60 seconds, as
+  `tests.test_windows_memory_hooks` does. Not run on Windows locally.
+
+### A session that entered a worktree keeps its memory there — 2026-10-26
+
+- Claude Code's `EnterWorktree` moves a session that started in the project
+  root into `.claude/worktrees/<name>`, on a branch of its own. The root's
+  own hooks keep running there - `CLAUDE_PROJECT_DIR` the root, the input's
+  `cwd` the worktree - and saw another checkout of the repository: from
+  that turn on the session got no capsule and saved nothing. They now serve
+  a worktree that has none of the installation as the dispatcher serves a
+  session started in it (shared layout, the worktree's branch, its banner
+  after `/clear` or a compaction); one with an installation of its own is
+  left to it, as before, and so is a Cursor session there, whose capsule
+  would be a rule written into the worktree.
+- On Windows the hooks hand the runtime the root and the worktree as
+  Windows spells them (`c:/...`), as the dispatcher does: Git Bash's `/c/...`
+  read as a folder on the current drive, and the runtime would have taken
+  the root's own layout and task.
+- The turn that enters the worktree was armed by its prompt in the root:
+  its Stop arms the request in the worktree (`native-stop --entered`), so
+  that turn's work - often all of it - is saved under the worktree's branch.
+- The save step names the worktree (`context.py --project <worktree>`, a
+  global option taken only for a worktree the installation serves), since
+  run from the root it shows none of it, and in a worktree pipes the
+  result without naming the descriptor: once a session has entered a
+  worktree, Claude Code refuses "a program fed a descriptor it names"
+  (`--input -`) in every permission mode. `native-result` reads stdin when
+  given neither `--input` nor `--skip`.
+- Claude Code asks before a command that leaves an entered worktree, as the
+  save step's `cd <root>` does. The dispatcher (version 4) gives the memory
+  CLI alone the allow it has in the root there; nothing else, and nothing
+  for a session in the root itself, whose every Bash call it now reads
+  without starting a process (1.7 ms a call, as with version 3).
+- `tests/test_memory_worktree_sessions.py` runs the hooks as Claude Code does
+  after `EnterWorktree`, for the entering turn and the next one, and the
+  save step from the worktree; `tests/test_memory_claude_subfolders.py` the
+  dispatcher's allow and what it refuses. `scripts/claude_code_bench.py
+  --enter-worktree` has the stand-in enter a worktree first: 2.1.278, and
+  2.1.299 in the desktop app's mode, saved under the worktree's branch with
+  no permission prompt and the worktree left clean. A first session's own
+  setting up of the dispatcher made 2.1.278 reread its settings in the
+  worktree, which has no hooks; the bench now enters after a first session.
+
 ### An attached project's worktree keeps an index of its own — 2026-10-26
 
 - The Harness keeps one state for a project and all its checkouts, and the

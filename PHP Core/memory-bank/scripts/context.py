@@ -7773,6 +7773,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="context.py", description=__doc__)
     parser.add_argument("--root", type=Path, default=default_root())
     parser.add_argument("--db", type=Path)
+    parser.add_argument(
+        "--project",
+        type=Path,
+        help=("the folder the session works in, for a command run from elsewhere: a worktree this "
+              "installation serves, whose branch names the task (the save step names it)"),
+    )
     parser.add_argument("--mode", choices=("governed", "lightweight"))
     parser.add_argument(
         "--owner",
@@ -8206,10 +8212,19 @@ def build_parser() -> argparse.ArgumentParser:
         native.add_argument("--host", choices=("claude", "codex", "cursor"), required=True)
         native.add_argument("--task-id", required=True)
         native.add_argument("--json", action="store_true")
+        if action == "native-stop":
+            native.add_argument(
+                "--entered",
+                action="store_true",
+                help="the session entered this worktree during the turn: a turn armed where it was then is armed here",
+            )
     native = commands.add_parser("native-result", help="submit one pending native structured result")
     native.add_argument("--request", required=True)
     native.add_argument("--token", required=True)
-    content = native.add_mutually_exclusive_group(required=True)
+    # Neither: the result on stdin, which a session Claude Code isolates in a
+    # worktree may pipe in only so - a command naming the descriptor ("-") it
+    # refuses, since a program fed so "cannot be shown not to be git".
+    content = native.add_mutually_exclusive_group()
     content.add_argument("--input")
     content.add_argument("--skip", action="store_true")
     native.add_argument("--json", action="store_true")
@@ -8547,6 +8562,8 @@ def main() -> int:
 def _command() -> int:
     utf8_output()
     arguments = build_parser().parse_args()
+    if arguments.project is not None:
+        workspace_roots.serve_from(str(arguments.project))
     _branch_task_identity(arguments)
     if arguments.command in ("cursor-rule", "cursor-rule-retire"):
         from context_retrieval import cursor_rule, CURSOR_RULE_LIMIT
@@ -8601,6 +8618,13 @@ def _command() -> int:
         problem = workspace_roots.configuration_error()
         if problem is not None:
             raise ContextError(problem)
+        if arguments.project is not None:
+            # Only where the layout puts the project anyway, or a worktree this
+            # installation serves: a folder named here moves no state.
+            named, layout = arguments.project, workspace_roots.roots(repository)
+            if not named.is_absolute() or not (layout.shared or os.path.realpath(named)
+                                               == os.path.realpath(layout.project)):
+                raise ContextError("--project names neither this project nor a worktree this installation serves")
         expected_branch = getattr(arguments, "expected_branch", None)
         delivery_admission = None
         if expected_branch is not None:
@@ -9109,7 +9133,9 @@ def _command() -> int:
                 if arguments.command == "native-result":
                     if arguments.skip:
                         data = None
-                    elif arguments.input == "-":
+                    elif arguments.input == "-" or arguments.input is None:
+                        if arguments.input is None and sys.stdin.isatty():
+                            raise ContextError("native-result needs --input, --skip or the result on stdin")
                         data = native_results.read_input(sys.stdin.buffer, repository, arguments.request)
                     else:
                         with Path(arguments.input).open("rb") as stream:
@@ -9124,8 +9150,12 @@ def _command() -> int:
                     # the spool; this hook runs outside the sandbox.
                     native_results.drain(repository, arguments.task_id, arguments.host, payload, owner=owner, mode=mode,
                         provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner))
-                    operation = native_results.begin if arguments.command == "native-prompt" else native_results.stop
-                    result = operation(repository, arguments.task_id, arguments.host, payload, owner=owner, mode=mode)
+                    if arguments.command == "native-prompt":
+                        result = native_results.begin(repository, arguments.task_id, arguments.host, payload,
+                                                      owner=owner, mode=mode)
+                    else:
+                        result = native_results.stop(repository, arguments.task_id, arguments.host, payload,
+                                                     owner=owner, mode=mode, entered=arguments.entered)
                     if arguments.command == "native-stop":
                         if result: print(json.dumps(result, ensure_ascii=False))
                     else:

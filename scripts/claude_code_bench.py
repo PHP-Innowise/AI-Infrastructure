@@ -51,6 +51,14 @@ memory-bank/scripts/ of its own, and a session below the root runs its
 commands there - with a `retrieve` for the session's branch: the run passes
 when the banner named it, the command ran and its answer was for that task.
 
+`--enter-worktree` starts the session in the project root - after a first
+one there, as for `--subfolder` - and has the stand-in call Claude Code's
+EnterWorktree first: the session moves into
+.claude/worktrees/bench on a branch of its own, still with the root's hooks,
+and reads, answers and saves there. The run passes when the save landed in
+the root's Project Brain under the worktree's branch, no hook failed and
+nothing was written into the worktree.
+
 `--desktop` runs the measured session as the Claude desktop app drives
 Claude Code: questions and answers as stream-json, the project's settings
 named (`--setting-sources user,project,local`), and every permission prompt
@@ -109,6 +117,9 @@ ROOT = Path(__file__).resolve().parents[1]
 EDITIONS = ("PHP Core", "Laravel", "Symfony", "WordPress")
 # Where Claude Code makes its own worktrees, and the branch of the bench's.
 WORKTREE = ".claude/worktrees/bench"
+# Where Claude Code's EnterWorktree puts a worktree it is asked to name "entered", and its branch.
+ENTERED = ".claude/worktrees/entered"
+ENTERED_BRANCH = "worktree-entered"
 WORKTREE_BRANCH = "feature/SHOP-9-refunds"
 GIT = ["git", "-c", "user.name=Bench", "-c", "user.email=bench@example.invalid", "-c", "commit.gpgsign=false",
        "-c", "core.hooksPath=/dev/null"]
@@ -155,6 +166,8 @@ class Scripted(BaseHTTPRequestHandler):
     cli_task = ""
     cli_named: List[str] = []
     cli_answers: List[Dict[str, Any]] = []
+    # --enter-worktree: the folder EnterWorktree moves the session to.
+    enter = ""
 
     def log_message(self, *args: Any) -> None:
         pass
@@ -239,6 +252,11 @@ class Scripted(BaseHTTPRequestHandler):
                 probe = probes[issued]
                 return [{"type": "tool_use", "id": f"toolu_probe_{issued}", "name": probe["name"],
                          "input": probe["input"]}], "tool_use", texts
+        issued_ids = [block.get("id") for item in messages if item.get("role") == "assistant"
+                      and isinstance(item.get("content"), list) for block in item["content"] if isinstance(block, dict)]
+        if getattr(self, "enter", "") and "toolu_enter" not in issued_ids and MARKER not in "\n".join(texts):
+            return [{"type": "tool_use", "id": "toolu_enter", "name": "EnterWorktree",
+                     "input": {"name": Path(self.enter).name}}], "tool_use", texts
         if getattr(self, "cli_task", "") and not any(block.get("id") == "toolu_cli" for item in messages
                                      if item.get("role") == "assistant" and isinstance(item.get("content"), list)
                                      for block in item["content"] if isinstance(block, dict)):
@@ -253,6 +271,9 @@ class Scripted(BaseHTTPRequestHandler):
         if start >= 0 and any(block.get("type") == "tool_result" for block in blocks):
             used = [block for block in messages[start].get("content", [])
                     if isinstance(block, dict) and block.get("type") == "tool_use"]
+            if used and used[-1].get("id") == "toolu_enter":
+                return [{"type": "tool_use", "id": "toolu_read", "name": "Read",
+                         "input": {"file_path": os.path.join(self.enter, self.source)}}], "tool_use", texts
             if used and used[-1].get("id") == "toolu_cli":
                 answer = next(block for block in blocks if block.get("type") == "tool_result")
                 self.cli_answers.append({"error": bool(answer.get("is_error")), "text": text_of(answer.get("content"))})
@@ -639,7 +660,7 @@ def inside(args: argparse.Namespace) -> int:
     journal_file = (Path(args.attached) if args.attached else project) / "memory-bank/local/native-results.ndjson"
     screen = ""
     first_lines = 0
-    if args.subfolder or args.worktree:
+    if args.subfolder or args.worktree or args.enter_worktree:
         # A session in the project root first: its session-start hook sets up
         # the dispatcher (in the background), which the session below needs.
         subprocess.run([*started(args), "-p", "How are invoices numbered?", "--output-format", "stream-json", "--verbose",
@@ -660,6 +681,11 @@ def inside(args: argparse.Namespace) -> int:
             Scripted.project = str(place)
         if args.cli:
             Scripted.cli_task = WORKTREE_BRANCH if args.worktree else ROOT_BRANCH
+        if args.enter_worktree:
+            # Measured once the dispatcher is in place, as it is for a
+            # person: set up mid-session, it made Claude Code 2.1.278 reread
+            # its settings in the worktree, where the project has no hooks.
+            Scripted.enter = str(project / ENTERED)
         project_cwd = place / (args.subfolder or "")
         project_cwd.mkdir(parents=True, exist_ok=True)
     else:
@@ -745,6 +771,18 @@ def inside(args: argparse.Namespace) -> int:
                                                   capture_output=True, text=True).stdout == ""
         report["ok"] = (report["ok"] and report["worktree_task"] and report["own_index"]
                         and report["worktree_clean"])
+    if args.enter_worktree:
+        # The session moved into the worktree mid-turn, with the root's hooks:
+        # its save is the worktree's branch's, and the worktree is left clean.
+        entered = project / ENTERED
+        tasks = [json.loads(path.read_text(encoding="utf-8").split("---\n")[1])
+                 for path in (project / "project-brain/dynamic/tasks").glob("*.md")]
+        report["entered"] = entered.is_dir()
+        report["entered_task"] = any(task.get("external_id") == ENTERED_BRANCH and task.get("progress")
+                                     for task in tasks)
+        report["entered_clean"] = entered.is_dir() and subprocess.run(
+            ["git", "status", "--porcelain", "--ignored"], cwd=entered, capture_output=True, text=True).stdout == ""
+        report["ok"] = report["ok"] and report["entered_task"] and report["entered_clean"]
     if args.cli:
         # The banner named the memory CLI, and run as named it answered for
         # the worktree's task.
@@ -822,6 +860,8 @@ def main() -> int:
     parser.add_argument("--worktree", action="store_true",
                         help="after a session in the project root, run the measured one in a Git worktree of the "
                              "project (in DIR of it with --subfolder)")
+    parser.add_argument("--enter-worktree", action="store_true",
+                        help="the stand-in calls EnterWorktree first and works, answers and saves in that worktree")
     parser.add_argument("--cli", action="store_true",
                         help="with --worktree or --subfolder: the stand-in first runs the memory CLI as the session's "
                              "banner names it")
@@ -866,6 +906,11 @@ def main() -> int:
         print("claude_code_bench: --desktop drives one turn as the app does; it takes no --queued or --permissions",
               file=sys.stderr)
         return 2
+    if args.enter_worktree and (args.worktree or args.subfolder or args.attached is not None
+                                or args.queued is not None or args.permissions or args.mode == "plan"):
+        print("claude_code_bench: --enter-worktree starts one session in the project root; it takes no --worktree, "
+              "--subfolder, --attached, --queued, --permissions or --mode plan", file=sys.stderr)
+        return 2
     if args.cli and not (args.worktree or args.subfolder):
         print("claude_code_bench: --cli runs the memory CLI the banner of a session in a worktree or below the "
               "root names; it needs --worktree or --subfolder", file=sys.stderr)
@@ -894,6 +939,10 @@ def main() -> int:
         # would see none of the project. A short path on disk, since the
         # sandbox's bridge sockets under the run's temporary directory must
         # fit a socket path (108 bytes): below ~/.cache they did not.
+        base = Path("/var/tmp")
+    if args.enter_worktree:
+        # A session isolated in a worktree may not cd below /dev or /proc at
+        # all: "what it runs cannot be shown not to be git". Projects are on disk.
         base = Path("/var/tmp")
     work = Path(tempfile.mkdtemp(prefix="claude-code-bench-", dir=str(base) if base else None))
     try:
@@ -926,6 +975,7 @@ def main() -> int:
                                *(["--subfolder", args.subfolder] if args.subfolder else []),
                                *(["--worktree"] if args.worktree else []),
                                *(["--cli"] if args.cli else []),
+                               *(["--enter-worktree"] if args.enter_worktree else []),
                                *(["--desktop"] if args.desktop else []),
                                *(["--sandbox"] if args.sandbox else []),
                                *(["--permissions"] if args.permissions else []),

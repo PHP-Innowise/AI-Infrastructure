@@ -257,7 +257,8 @@ class PolicyImport(Fixture):
 class DispatcherVersion(Fixture):
     # Raise DISPATCH_VERSION with any change to claude_dispatch.sh or .py,
     # then record the scripts' new fingerprint here.
-    FINGERPRINTS = {3: "01f6a42d684516ea4f8aa8025f2186e2f1ea29cf4f7e6b5893b1b8c30a3c024b"}
+    FINGERPRINTS = {3: "01f6a42d684516ea4f8aa8025f2186e2f1ea29cf4f7e6b5893b1b8c30a3c024b",
+                    4: "ffa0d136f1843abd212fe5c8161213a09a84007e05153495289707ffbad0420a"}
 
     def test_both_scripts_carry_the_version_and_a_change_raises_it(self):
         shell = (SCRIPTS / "claude_dispatch.sh").read_text(encoding="utf-8")
@@ -808,6 +809,40 @@ class Worktrees(Fixture):
                                        '{"hook": 1}')
         self.assertFalse((inner / "memory-bank").exists() or (beside / "memory-bank").exists(),
                          "nothing is written into a worktree")
+
+    def test_a_session_that_entered_a_worktree_gets_the_memory_cli_allowed_there(self):
+        # Claude Code's EnterWorktree: the session started in the root keeps
+        # the root's own hooks - CLAUDE_PROJECT_DIR names the root - and its
+        # input's cwd is the worktree. They serve the worktree; the save step
+        # they ask for leaves it, which Claude Code asks about there.
+        root = self.committed()
+        entered = root / ".claude" / "worktrees" / "entered"
+        git(root, "worktree", "add", "-q", str(entered), "-b", "worktree-entered")
+        quoted = shlex.quote(str(root))
+        save = (f"cd {quoted} && echo -E '{{\"progress\": \"Entered.\"}}' | python3 memory-bank/scripts/context.py "
+                f"--root {quoted} --project {shlex.quote(str(entered))} native-result --request r --token t --json")
+
+        def call(command, cwd):
+            payload = {"session_id": "entered", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_input": {"command": command}, "cwd": str(cwd)}
+            return self.run_dispatcher("bash-validator.sh", root, json.dumps(payload).encode())
+
+        done = call(save, entered)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        decision = json.loads(done.stdout)["hookSpecificOutput"]
+        self.assertEqual((decision["hookEventName"], decision["permissionDecision"]), ("PreToolUse", "allow"))
+        # Nothing else: not another command, not the session in the root, not
+        # a worktree with an installation of its own.
+        anything_more = f"cd {quoted} && python3 memory-bank/scripts/context.py status --json && rm -rf src"
+        for command, cwd in ((f"cd {quoted} && rm -rf src", entered), (anything_more, entered), (save, root),
+                             (save, root / "src")):
+            with self.subTest(command=command[:20], cwd=cwd):
+                self.assertEqual(call(command, cwd).stdout, b"")
+        own = root / ".claude" / "worktrees" / "installed"
+        git(root, "worktree", "add", "-q", str(own), "-b", "worktree-installed")
+        (own / "memory-bank" / "scripts").mkdir(parents=True)
+        (own / "memory-bank" / "scripts" / "context.py").write_text("# its own\n", encoding="utf-8")
+        self.assertEqual(call(save, own).stdout, b"")
 
     def test_a_project_in_a_folder_of_a_monorepo_is_that_folder_of_its_worktree(self):
         monorepo = self.base / "monorepo"

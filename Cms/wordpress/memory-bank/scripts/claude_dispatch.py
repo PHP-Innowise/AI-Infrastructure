@@ -54,7 +54,7 @@ WINDOWS = os.name == "nt"
 # One copy serves every project of the person: a session in the root of a
 # project with an older release must not put an older one back. Raise it,
 # with the comment in claude_dispatch.sh, whenever either file changes.
-DISPATCH_VERSION = 3
+DISPATCH_VERSION = 4
 INTERPRETERS = (["python3"], ["python"], ["py", "-3"])
 CLI = "memory-bank/scripts/context.py"
 # How .claude/CLAUDE.md, or the project's own CLAUDE.md, pulls AGENTS.md in.
@@ -87,7 +87,7 @@ def plain(command: str) -> bool:
 def native_path(path: str) -> str:
     """Git Bash's /c/Users/me as Windows writes it, C:/Users/me."""
     if WINDOWS and re.match(r"/[A-Za-z](/|$)", path):
-        return path[1] + ":" + (path[2:] or "/")
+        return path[1].upper() + ":" + (path[2:] or "/")
     return path
 
 
@@ -163,6 +163,26 @@ def main_checkout(checkout: Path) -> Path:
     except (OSError, UnicodeError, ValueError):
         return checkout
     return common.parent if common.name == ".git" else common
+
+
+def entered_worktree(root: str, cwd: str) -> bool:
+    """Whether `cwd` is in a worktree of `root`'s repository that has none of
+    its installation - where a session started in the root works once it has
+    entered the worktree (Claude Code's EnterWorktree), served there by the
+    root's own hooks."""
+    try:
+        folder = Path(native_path(cwd)).resolve()
+        top = next((candidate for candidate in (folder, *folder.parents) if (candidate / ".git").exists()), None)
+        if top is None or not (top / ".git").is_file():
+            return False
+        main = main_checkout(top)
+        if main == top:
+            return False
+        place = top / Path(native_path(root)).resolve().relative_to(main.resolve())
+        folder.relative_to(place)
+    except (OSError, ValueError):
+        return False
+    return place.is_dir() and not (place / "memory-bank" / "scripts" / "context.py").exists()
 
 
 def project_key(start: str) -> str:
@@ -592,6 +612,20 @@ def environment(root: str, project: str = "") -> list:
 def main() -> int:
     hook, root, start = sys.argv[1:4]
     project = sys.argv[4] if len(sys.argv) > 4 else ""
+    if hook == "entered":
+        # A session started in the root that entered a worktree of it: the
+        # root's own guard has run; the memory CLI gets the allow it has in
+        # the root, which the save step its hooks ask for needs there.
+        try:
+            payload = json.loads(sys.stdin.buffer.read() or b"{}")
+        except ValueError:
+            return 0
+        if isinstance(payload, dict) and isinstance(payload.get("cwd"), str) and entered_worktree(root, payload["cwd"]):
+            if memory_command((payload.get("tool_input") or {}).get("command"), root):
+                print(json.dumps({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "permissionDecision": "allow",
+                    "permissionDecisionReason": "the accelerator's memory command, as the project allows it"}}))
+        return 0
     if hook == "environment":
         target = os.environ.get("CLAUDE_ENV_FILE")
         lines = environment(root, project)
