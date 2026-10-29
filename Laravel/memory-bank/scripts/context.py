@@ -5880,6 +5880,33 @@ def _active_claimants(repository: Path, task_id: str) -> Optional[list[dict[str,
                   key=lambda record: (str(record.get("created_at") or ""), str(record["id"])))
 
 
+def served_task_record(connection: sqlite3.Connection, repository: Path, task_id: str) -> Optional[str]:
+    """The UUID of the task record this clone's turns go to when more than
+    one record claims `task_id` - two copies of a branch that each started
+    one, merged - or None to keep the refusal.
+
+    The one the capsule serves and the turn checkpoint writes: the binding's
+    record while it is active, the record that took over a finished bound
+    record's ID, else the earliest created active record, which
+    ensure_working_task binds a clone without a binding to. A native save
+    asked for the task ID alone and failed as ambiguous - its Stop hid it -
+    so the branch's turns went unsaved until a person cancelled a twin.
+    """
+    try:
+        binding = governed_binding(connection, task_id)
+    except ContextError:
+        binding = None
+    if binding is not None:
+        _, record = _bound_record(repository, binding)
+        if record is not None and record.get("status") not in TERMINAL_STATES:
+            return str(record["id"])
+        successor = _successor(repository, binding, record)
+        if successor is not None:
+            return str(successor["id"])
+    claimant = _active_claimant(repository, task_id)
+    return str(claimant["id"]) if claimant is not None else None
+
+
 def _successor(repository: Path, binding: sqlite3.Row, record: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """The active record that took over the task ID of a bound record that is
     finished - a duplicate cancelled after two copies of the branch merged -
@@ -9507,20 +9534,23 @@ def _command() -> int:
                             data = native_results.read_input(stream, repository, arguments.request)
                     result = native_results.save(repository, arguments.request, arguments.token, data,
                         owner=owner, mode=mode, skip=arguments.skip,
-                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner))
+                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner),
+                        served=lambda task_id: served_task_record(connection, repository, task_id))
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     payload = native_results.read_input(sys.stdin.buffer)
                     # A save the agent's sandbox could not write waits in
                     # the spool; this hook runs outside the sandbox.
                     native_results.drain(repository, arguments.task_id, arguments.host, payload, owner=owner, mode=mode,
-                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner))
+                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner),
+                        served=lambda task_id: served_task_record(connection, repository, task_id))
                     if arguments.command == "native-prompt":
                         result = native_results.begin(repository, arguments.task_id, arguments.host, payload,
                                                       owner=owner, mode=mode)
                     else:
                         result = native_results.stop(repository, arguments.task_id, arguments.host, payload,
-                                                     owner=owner, mode=mode, entered=arguments.entered)
+                                                     owner=owner, mode=mode, entered=arguments.entered,
+                                                     served=lambda task_id: served_task_record(connection, repository, task_id))
                     if arguments.command == "native-stop":
                         if result: print(json.dumps(result, ensure_ascii=False))
                     else:

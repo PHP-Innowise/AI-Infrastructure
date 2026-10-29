@@ -28,6 +28,30 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A branch two task records claim is saved where its capsule says — 2026-10-30
+
+- Why: two copies of a branch - two people on `main`, a branch worked on
+  from two machines - each start the branch's task record before they
+  sync, and once they merge the task ID names both. The capsule already
+  settles on one (the clone's binding, else the earliest created active
+  record) and says so, but a native Stop and save asked for the task ID
+  alone and failed as ambiguous: the Stop hook journaled an unclassified
+  error and exited 1, and no save was asked on that branch, in any clone,
+  until a person cancelled a twin. Found by two clones on `main`, each
+  saving, then a third clone.
+- What changes: where the task ID is ambiguous, the native Stop and save
+  take the record `context.served_task_record` names - the one the capsule
+  serves and the turn checkpoint writes - by its UUID. Anything else that
+  makes the ID ambiguous (an unreadable record claiming it) keeps the
+  refusal.
+- Tests: `tests/test_memory_native_capture.py` adds a twin created before
+  the first record; a clone bound to the first saves into it, and a clone
+  without a binding saves into the earlier twin, which its capsule names.
+  Both fail on the native path before ("identifier is ambiguous").
+- Not changed: the two-way conflicts a merge leaves in the derived
+  `project-brain/indexes/active.json` and `memory-bank/INDEX.md`, and the
+  capsule's advice, which names the other record in each clone.
+
 ### A line cut inside a character no longer stops the refresh health series — 2026-10-29
 
 - Why: the prompt hook appends one line per refresh to

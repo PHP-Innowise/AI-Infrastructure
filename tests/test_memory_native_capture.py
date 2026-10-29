@@ -839,6 +839,43 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.assertEqual([],list(inside.rglob('*.json')))
         self.assertEqual(1,len(self.records('tasks')))
 
+    def twin(self,earlier):
+        """A second active record claiming the branch's task ID, as merging two
+        copies of a branch that each started its task leaves one; created
+        before the first or after it. Returns the first's ID and the twin's."""
+        import uuid
+        [path]=list((self.root/'project-brain/dynamic/tasks').glob('*.md'))
+        record=json.loads(path.read_text().split('---',2)[1])
+        twin=str(uuid.uuid4())
+        text=path.read_text().replace(record['id'],twin)
+        if earlier:text=text.replace(record['created_at'],'2020-01-01T00:00:00+00:00')
+        (path.parent/f'{twin}.md').write_text(text)
+        return record['id'],twin
+
+    def saved_into(self):
+        """After the first save, a twin, and another turn and save: which record
+        the second save landed in."""
+        self.begin();self.one(self.written(self.stop),'stop','requested')
+        self.save(data=dict(self.payload,progress='After the merge.'))
+        return {record['id'] for record in self.records('tasks') if record.get('progress')=='After the merge.'}
+
+    def test_a_clone_bound_to_a_twin_saves_into_the_record_its_capsule_serves(self):
+        # Two copies of a branch each started its task; once merged, a native
+        # Stop asked for the task ID alone and failed as ambiguous - the hook
+        # hid it - so no save was asked until a person cancelled a twin.
+        self.begin();self.stop();self.save()
+        bound,twin=self.twin(earlier=True)
+        self.assertEqual({bound},self.saved_into())
+
+    def test_a_clone_without_a_binding_saves_into_the_earliest_active_twin(self):
+        self.begin();self.stop();self.save()
+        _,twin=self.twin(earlier=True)
+        for local in ('memory-bank/local','project-brain/local'):
+            shutil.rmtree(self.root/local)
+        self.assertEqual({twin},self.saved_into())
+        capsule=self.call('refresh','--host','codex','--query','retry','--task-id','research','--ephemeral').stdout.decode()
+        self.assertIn(f'this turn uses {twin}',capsule)
+
     def test_each_stop_path_writes_one_line_with_its_code(self):
         def request(payload=self.STOP,host='codex',**values):
             return self.call('native-stop','--host',host,'--task-id','research',data=payload,

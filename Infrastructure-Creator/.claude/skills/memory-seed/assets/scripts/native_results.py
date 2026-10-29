@@ -808,12 +808,12 @@ def _proven(root,state):
             and proof.get('owner') == state['owner'] and proof.get('attestation') == 'agent')
 
 
-def stop(root, task_id, host, payload, *, owner, mode, entered=False):
+def stop(root, task_id, host, payload, *, owner, mode, entered=False, served=None):
     with _Step(root,'stop',host) as step:
-        return _stop(step,root,task_id,host,payload,owner=owner,mode=mode,entered=entered)
+        return _stop(step,root,task_id,host,payload,owner=owner,mode=mode,entered=entered,served=served)
 
 
-def _stop(step, root, task_id, host, payload, *, owner, mode, entered=False):
+def _stop(step, root, task_id, host, payload, *, owner, mode, entered=False, served=None):
     if not _enabled(mode): return step({},'skipped',_disabled(mode))
     # A prompt armed before the switch went off asks nothing either.
     if configured_request(root) == 'off': return step({},'skipped','switched-off')
@@ -870,7 +870,7 @@ def _stop(step, root, task_id, host, payload, *, owner, mode, entered=False):
         if (files is not None and not _sandbox_writes(files, os.path.realpath(brain_root(root)))
                 and not any(_sandbox_writes(files, os.path.realpath(str(folder.parent))) for folder in _spool_dirs())):
             return step({},'skipped','outside-sandbox')
-        try: task=writable_task(root,task_id,owner)
+        try: task=_task(root,task_id,owner,served)
         except BrainRecordNotFound as error:
             if error.identifier != task_id: raise
             task=None
@@ -898,10 +898,11 @@ def _stop(step, root, task_id, host, payload, *, owner, mode, entered=False):
     return step(output,'requested',code,answer='brief' if brief else 'repeat')
 
 
-def save(root,key,token,data,*,owner,mode,provision,skip=False,spooled=False):
+def save(root,key,token,data,*,owner,mode,provision,skip=False,spooled=False,served=None):
     with _Step(root,'save',key=key) as step:
         try:
-            return _save(step,root,key,token,data,owner=owner,mode=mode,provision=provision,skip=skip,spooled=spooled)
+            return _save(step,root,key,token,data,owner=owner,mode=mode,provision=provision,skip=skip,spooled=spooled,
+                         served=served)
         except OSError as error:
             # A sandbox that writes only below a subdirectory mounts the
             # project read-only: the save's first write, the runtime lock,
@@ -972,6 +973,24 @@ def _read_spool(path):
     return value
 
 
+def _task(root, task_id, owner, served=None):
+    """writable_task, except where more than one record claims the task ID -
+    two copies of a branch that each started its task, merged: then the
+    record `served` names, the one this clone's capsule serves and its turn
+    checkpoint writes (context.served_task_record), so the save goes where
+    the capsule says the turn does."""
+    try:
+        return writable_task(root,task_id,owner)
+    except BrainRecordNotFound:
+        raise
+    except BrainError as error:
+        uuid=served(task_id) if served is not None and 'ambiguous' in str(error) else None
+        if uuid is None: raise
+        task=writable_task(root,uuid,owner)
+        if task['external_id'] != task_id: raise
+        return task
+
+
 def _spooled(directory, key):
     """The spool files `key` has in `directory`, as (path, attempts begun):
     those an earlier hook began first (drain), then the one the sandbox left."""
@@ -979,7 +998,7 @@ def _spooled(directory, key):
     return [(path,attempt) for path,attempt in found+[(directory/(key+'.json'),0)] if os.path.lexists(path)]
 
 
-def drain(root, task_id, host, payload, *, owner, mode, provision):
+def drain(root, task_id, host, payload, *, owner, mode, provision, served=None):
     """Save what the agent's sandbox left in the spool (_spool), from a hook,
     which runs outside the sandbox.
 
@@ -1015,7 +1034,7 @@ def drain(root, task_id, host, payload, *, owner, mode, provision):
                 except OSError: continue
                 try:
                     result=save(root,key,record['token'],record['data'],owner=owner,mode=mode,provision=provision,
-                                skip=record['skip'],spooled=True)
+                                skip=record['skip'],spooled=True,served=served)
                 except BrainError:
                     pass  # journaled as the save's refusal; the Stop settles the request
                 finally:
@@ -1024,7 +1043,7 @@ def drain(root, task_id, host, payload, *, owner, mode, provision):
     return result
 
 
-def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False):
+def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False,served=None):
     if not _enabled(mode): raise BrainError('native-result:governed-session-required')
     if not isinstance(token,str) or not TOKEN.fullmatch(token): raise BrainError('native-result:invalid-token')
     with mutation_lock(root):
@@ -1080,18 +1099,18 @@ def _save(step,root,key,token,data,*,owner,mode,provision,skip,spooled=False):
         fresh=0 <= time.time()-state['updated'] < IN_FLIGHT_SECONDS
         rebased=False
         if state['task_uuid'] is None:
-            try: task=writable_task(root,state['task_id'],owner)
+            try: task=_task(root,state['task_id'],owner,served)
             except BrainRecordNotFound as error:
                 if error.identifier != state['task_id']: raise
                 provision(state['task_id'])
-                task=writable_task(root,state['task_id'],owner)
+                task=_task(root,state['task_id'],owner,served)
             else:
                 if not fresh: raise _overtaken('native-result:task-changed','the branch task was created')
                 rebased=True
             state.update(task_uuid=task['id'],revision=task['revision'])
             _write(root,slot,state)
         elif not begun:
-            task=writable_task(root,state['task_id'],owner)
+            task=_task(root,state['task_id'],owner,served)
             if task['id'] != state['task_uuid']:
                 raise _overtaken('native-result:task-changed','the branch task was replaced')
             if task['revision'] != state['revision'] and fresh: state['revision'],rebased=task['revision'],True
