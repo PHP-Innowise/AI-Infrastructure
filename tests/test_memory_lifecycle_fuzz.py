@@ -28,6 +28,12 @@ class LifecycleFuzz(unittest.TestCase):
     # root and in worktrees, a root session entering one, two at once in
     # one folder, the state apart.
     ATTACHED_SEED = 9
+    # A third of its turns with one step stopped part-way, as a host stops a
+    # hook at its timeout, a closed window or Ctrl+C: its 60 steps stop a
+    # prompt hook, a Stop hook, a save and the Stop after a save, by SIGKILL
+    # to the hook's process group, SIGTERM to its shell and SIGINT, Cursor's
+    # and Codex's hooks among them.
+    INTERRUPTED_SEED = 6
 
     def fuzz(self, *arguments):
         done = subprocess.run([sys.executable, str(FUZZ), *arguments, "--steps", "60"], cwd=ROOT,
@@ -54,6 +60,17 @@ class LifecycleFuzz(unittest.TestCase):
         if shutil.which("bwrap"):
             # A save the sandbox held, made by the Stop after it.
             self.assertIn("save held", events)
+
+    def test_hooks_and_saves_stopped_part_way_break_nothing_after_them(self):
+        summary = self.fuzz("--seed", str(self.INTERRUPTED_SEED), "--interrupt", "0.3")
+        events = summary["events"]
+        self.assertLessEqual({"prompt hook stopped", "Stop hook stopped", "save stopped",
+                              "Stop after the save stopped", "stopped by kill", "stopped by term",
+                              "stopped by int"}, set(events))
+        # A stop that lands after the step ended stops nothing; most land
+        # while it runs.
+        self.assertGreater(events.get("stopped while running", 0), 0)
+        self.assertLessEqual({"claude", "codex", "cursor"}, {name.split()[0] for name in summary["sessions"]})
 
     def test_attached_sessions_keep_the_project_and_the_clone_unwritten(self):
         summary = self.fuzz("--attached", "--seed", str(self.ATTACHED_SEED))

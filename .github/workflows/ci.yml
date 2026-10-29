@@ -361,7 +361,7 @@ jobs:
     name: "memory lifecycles (Python ${{ matrix.python }})"
     runs-on: ubuntu-latest
     # Random session and Git lifecycles through a fresh installation's hooks
-    # (scripts/memory_lifecycle_fuzz.py). About three minutes on a runner:
+    # (scripts/memory_lifecycle_fuzz.py). About four minutes on a runner:
     # as a step of the memory job it took that job to its 15-minute limit,
     # so it runs beside it, on the same two Pythons.
     timeout-minutes: 10

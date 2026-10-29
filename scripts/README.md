@@ -650,7 +650,13 @@ committed, the installation not) and random steps follow:
 - where `bwrap` is, a fifth of the saves outside a burst under bubblewrap
   (everything read-only but the temporary folder, as Claude Code's sandbox
   on Linux): the save waits in the spool, and the Stop after it makes it,
-  under the branch's task.
+  under the branch's task;
+- with `--interrupt SHARE`, that share of the turns outside a burst has one
+  step stopped part-way, as a host stops a hook at its timeout, a closed
+  window or Ctrl+C: the prompt hook, the Stop hook, the save or the Stop
+  after it, by SIGKILL to the hook's process group, SIGTERM to its shell
+  alone (what the shell started runs on, unread) or SIGINT to the group,
+  after up to 0.3 s - most while the step runs (`stopped while running`).
 
 What must hold: every hook exits 0, the native journal records no error,
 and no prompt hook's refresh fails or times out (one that another session's
@@ -664,7 +670,10 @@ in the root no index of a removed worktree is left; `context.py validate`
 and the Memory Bank's `validate.py` pass; no worktree is written into; a
 checkpoint or save a sandbox held is made by the Stop after it, and none is
 refused.
-Only a save asked for before its branch moved may be refused.
+Only a save asked for before its branch moved may be refused. A save stopped
+part-way may or may not have landed - what must hold is that nothing after it
+breaks - and a save a sandbox held whose Stop was stopped is made by the
+session's next prompt hook.
 
 With `--attached` nothing is installed: every session is launched as the
 Harness launches it, the edition lent from this clone through the overlay of
@@ -678,12 +687,13 @@ clone's.
 
 ```bash
 python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP Core"|Laravel|Symfony|WordPress] \
-  [--attached] [--work DIR] [--verbose]
+  [--attached] [--interrupt SHARE] [--work DIR] [--verbose]
 ```
 
 - **Outputs:** a JSON summary - the edition and layout, the sessions by host
   and kind, the events (bursts, worktrees entered, commits during a save,
-  rebases stopped, continued and aborted), saves, the save lines of the
+  rebases stopped, continued and aborted, with `--interrupt` the steps
+  stopped, by which signal and how many while they ran), saves, the save lines of the
   native journal by code (`rebased` for a save another session overtook),
   worktrees added and removed, and every violation with the last steps
   before it. Exit 0 when everything held, 1 otherwise.
@@ -695,7 +705,9 @@ python3 scripts/memory_lifecycle_fuzz.py [--seed N] [--steps N] [--edition "PHP 
   `memory-lifecycles` job, runs seeds 1 and 2 on PHP Core, which between
   them reach every host, a worktree entered, bursts, a commit during a save
   and a rebase stopped, continued and aborted, Codex in a worktree, a
-  worktree Codex made and a checkpoint a sandbox held, and seed 9 attached, whose
+  worktree Codex made and a checkpoint a sandbox held, seed 6 with
+  `--interrupt 0.3`, which stops a prompt hook, a Stop hook, a save and the
+  Stop after a save, by each of the three signals, and seed 9 attached, whose
   root session enters a worktree. A
   failing seed reproduces with the same `--seed` and `--steps`, apart from
   which of two sessions answering at once saves first; `--verbose` prints

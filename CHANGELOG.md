@@ -28,6 +28,32 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The lifecycle fuzzer stops hooks and saves part-way — 2026-10-29
+
+- Why: a host stops a hook at its timeout (Claude Code gives the Stop hooks
+  8 s), when its window closes and at Ctrl+C, and a save, a turn buffer or
+  an index write can be cut anywhere. The fuzzer only ever let a hook finish.
+- What changes: `scripts/memory_lifecycle_fuzz.py --interrupt SHARE` stops
+  one step of that share of the turns outside a burst - the prompt hook,
+  the Stop hook, the save or the Stop after it - by SIGKILL to the hook's
+  process group, SIGTERM to its shell alone or SIGINT to the group, after up
+  to 0.3 s. A save stopped part-way may or may not land; a save a sandbox
+  held whose Stop was stopped must be made by the session's next prompt
+  hook. Off by default, so every other seed takes the steps it always took.
+- Found: nothing in the runtime. 36 seeds with a third of their turns
+  stopped (24 installed at 70 steps, 12 attached at 60): 1078 saves, 224
+  hooks and 55 saves stopped, no violation. The spool's drain removes a held
+  save's file before it makes the save, but the hooks run Python under
+  `timeout`, which leads a process group of its own, so a kill of the
+  hook's group does not reach it: across 36 kills 1.5 ms apart over the
+  drain, every save was made by that Stop or by the next prompt hook.
+  Without `timeout` (macOS without coreutils) the drain runs in the hook's
+  group, and a group kill between its two steps would lose that save.
+- Tests: `tests/test_memory_lifecycle_fuzz.py` runs seed 6 with
+  `--interrupt 0.3` in the `memory-lifecycles` job: a prompt hook, a Stop
+  hook, a save and the Stop after a save stopped, by each of the three
+  signals, most of them while they ran.
+
 ### A commit in a worktree Codex made no longer refuses the save — 2026-10-29
 
 - Why: a native save is pinned when the Stop asks for it: to the branch,
