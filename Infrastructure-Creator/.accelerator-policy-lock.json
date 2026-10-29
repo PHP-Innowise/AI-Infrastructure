@@ -38,7 +38,7 @@
     ".agents/skills/bootstrap-verifier/scripts/publish_staging.py": "f3d6fe428803bf9cd4987d9fe68af20d0429a509714921befb90d4daa78cff02",
     ".agents/skills/bootstrap-verifier/scripts/validate_content_review.py": "47e544546476dcf74cc97f00fffcedc82696106cfa94a95015bf7c5e15a1cd43",
     ".agents/skills/bootstrap-verifier/scripts/validate_flow_contracts.py": "aa84fdaa8461e99e12c4104108ef8316c79bf2ff25ca068c55870dcd926811b3",
-    ".agents/skills/bootstrap-verifier/scripts/validate_generated.py": "6ef73499c681e2665d91603ed7f4b277c3a82361383040714c452d7e25f47da2",
+    ".agents/skills/bootstrap-verifier/scripts/validate_generated.py": "f401e4b812e75e267a0c137095af7cf7a43abca6b776514b615d9f4eeff2dd14",
     ".agents/skills/bootstrap-verifier/scripts/validate_memory_content.py": "b2e75fdcd908494487d3f6f2f85bce813647ca4c6f90c595e05ceca583f682af",
     ".agents/skills/bootstrap-verifier/scripts/validate_plan_mutations.py": "a8c925e0b7979ba4004726834494fc6c88607d6b3e8a109f59960deb413cc354",
     ".agents/skills/bootstrap-verifier/scripts/validate_plan_review.py": "5592efabd9650913edfbbe2576599787303a62172a1182c7c5093b11a8efbb4b",
@@ -175,7 +175,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "337ad312742640911288d4da5765f31f567321dbf812c4160196fbf1a5a9576f",
+  "policy_digest": "975bfcf269ca76ddca5d5a842874a48a93fef799eeda8f493920a87ff782bf18",
   "release": "2.5.0",
   "schema_version": 1
 }

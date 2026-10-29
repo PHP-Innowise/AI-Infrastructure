@@ -22,7 +22,8 @@ Checks:
     generic section (each marker exactly once) is byte-identical to the one in
     the generator's .claude/hooks/bash-validator.sh, and below it the hook
     assigns BV_CONSOLE_ENTRIES and BV_CONSOLE_PHP_SCRIPTS, then runs
-    bv_validate and exits 2 on a hit; up to that call every variable it
+    bv_validate, whose first exit is the `exit 2` of its
+    `if [ -n "$BV_HIT" ]; then` branch; up to that call every variable it
     expands is assigned on an earlier line (set -u).
   - Every bash-validator.sh runs the editions' command repetition guard: the
     block between its `bash-validator repetition guard` markers (each once)
@@ -1197,6 +1198,18 @@ def loop_detection_problem(source: str, edition: str, directory: dict) -> str:
     return ""
 
 
+# An `exit` run as a command, the `if` that opens the hit branch of the
+# bv_validate call, and the words that open, switch or close a block.
+BASH_EXIT = re.compile(r"(?:^\s*|[;&|({]\s*|\b(?:then|else|do)\s+)exit\b")
+BV_HIT_BRANCH = re.compile(r'\s*if\s+\[\[?\s+-n\s+"?\$\{?BV_HIT\}?"?\s+\]\]?\s*;\s*then\s*(?:#.*)?')
+BASH_BLOCK_WORD = re.compile(r"\s*(?:if|elif|else|fi|for|while|until|case|select|do|done|esac)\b")
+
+
+def unquoted(line: str) -> str:
+    """A shell line with its quoted strings emptied: a message is not code."""
+    return re.sub(r'"(?:[^"\\]|\\.)*"', '""', re.sub(r"'[^']*'", "''", line))
+
+
 def bash_validator_call(above: str, below: str) -> str:
     """Why the code below the generic section does not run it, or "".
 
@@ -1206,7 +1219,9 @@ def bash_validator_call(above: str, below: str) -> str:
     hook with exit 1 on every command - a rule copied without the helper
     list it names does that - so up to the call each one must be assigned
     on an earlier line. Comments are not code, and an assignment counts only
-    at the start of a line, where it runs whenever the hook does.
+    at the start of a line, where it runs whenever the hook does. After the
+    call the first exit is the one a hit reaches: `exit 2` on a line of its
+    own inside `if [ -n "$BV_HIT" ]; then`.
     """
     def assigned(line: str) -> str | None:
         match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\+?=", line)
@@ -1246,8 +1261,22 @@ def bash_validator_call(above: str, below: str) -> str:
                 "below the generic section: unset, the hook exits 1 and the host "
                 "runs the command (assign '' and 0 for a target without a console)"
             )
-        if not any(re.search(r"\bexit\s+2\b", later) for later in lines[index + 1:]):
-            return "never exits 2 after bv_validate, so the host runs a refused command"
+        # Any other exit 2 - under a condition of its own, or below a hit
+        # branch that exits 0 - is no refusal of the command a rule matched,
+        # so no other block may open, switch or close between the two.
+        later = lines[index + 1:]
+        first = next((at for at, line in enumerate(later) if BASH_EXIT.search(unquoted(line))), None)
+        opened = [at for at, line in enumerate(later[:first]) if BV_HIT_BRANCH.fullmatch(line)]
+        if (
+            first is None
+            or not re.fullmatch(r"\s*exit\s+2\s*(?:#.*)?", later[first])
+            or not opened
+            or any(BASH_BLOCK_WORD.match(line) for line in later[opened[-1] + 1:first])
+        ):
+            return (
+                "lets a refused command run: the hit branch must exit 2 - after bv_validate "
+                'the first exit is the `exit 2` inside `if [ -n "$BV_HIT" ]; then`'
+            )
         return ""
     return "never runs bv_validate below the generic section, so its parser checks no command"
 

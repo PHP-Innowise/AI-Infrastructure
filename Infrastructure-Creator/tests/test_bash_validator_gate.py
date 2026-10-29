@@ -420,7 +420,88 @@ class SectionRunsTest(GateFixture):
         self.assertIn(b"  exit 2\n", ending)
         self.assertIn(b"  exit 2\n", repetition_guard())
         self.write("claude", built(call=ending.replace(b"  exit 2\n", b"  exit 1\n", 1)))
-        self.assert_one_error("claude", "never exits 2 after bv_validate")
+        self.assert_one_error("claude", "the hit branch must exit 2")
+
+
+def call_problem(data: bytes) -> str:
+    """bash_validator_call's verdict on a whole validator, cut at its section."""
+    _, end, problem = validator.bash_validator_section(data)
+    if problem:
+        raise AssertionError(problem)
+    return validator.bash_validator_call(data[:end].decode("utf-8"), data[end:].decode("utf-8"))
+
+
+class HitBranchTest(GateFixture):
+    """The exit 2 that refuses a command is the hit branch's.
+
+    After bv_validate the first exit must be `exit 2`, on a line of its own
+    inside `if [ -n "$BV_HIT" ]; then`. Any later exit 2 used to do: with
+    the hit branch exiting 0 above `[ -n "${NEVER:-}" ] && exit 2`, the
+    generator's own validator passed the gate and let `git push --force`
+    run.
+    """
+
+    HIT = "the hit branch must exit 2"
+    SHIPPED = ("Laravel", "Symfony", "PHP Core", "Cms/wordpress", "Infrastructure-Creator")
+
+    @unittest.skipUnless(
+        all((ROOT.parent / edition).is_dir() for edition in SHIPPED[:-1]),
+        "the four editions are not beside the generator",
+    )
+    def test_every_shipped_copy_has_the_shape(self) -> None:
+        copies = [
+            ROOT.parent / edition / tree / "hooks/bash-validator.sh"
+            for edition in self.SHIPPED
+            for tree in (".claude", ".cursor", ".codex")
+        ]
+        self.assertEqual(len(copies), 15)
+        for hook in copies:
+            with self.subTest(hook=str(hook.relative_to(ROOT.parent))):
+                self.assertEqual(call_problem(hook.read_bytes()), "")
+
+    def test_a_hit_branch_exiting_0_above_an_exit_2_is_rejected_and_lets_a_force_push_run(self) -> None:
+        _, _, call = generator_parts()
+        mutant = call.replace(b"  exit 2\nfi\n", b'  exit 0\nfi\n[ -n "${NEVER:-}" ] && exit 2\n', 1)
+        self.assertNotEqual(mutant, call)
+        own = GENERATOR_VALIDATOR.read_bytes()
+        self.assertIn(self.HIT, call_problem(own.replace(call, mutant, 1)))
+        hook = self.write("claude", built(call=mutant))
+        self.assert_one_error("claude", self.HIT)
+        result = self.run_hook(hook, "git push --force origin main")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("git force push", result.stderr)
+
+    def test_an_exit_2_outside_the_hit_branch_is_rejected(self) -> None:
+        _, _, call = generator_parts()
+        hit = b"  exit 2\nfi\n"
+        strict = b'if [ -n "${STRICT:-}" ]; then\n  exit 2\nfi\n'
+        variants = {
+            "in a block after a hit branch exiting 0": call.replace(hit, b"  exit 0\nfi\n" + strict, 1),
+            "in a block before it": call.replace(hit, b"  exit 0\nfi\n", 1).replace(CALL, CALL + strict, 1),
+            "under a condition of its own inside it": call.replace(
+                hit, b'  if [ -n "${STRICT:-}" ]; then\n    exit 2\n  fi\nfi\n', 1),
+            "behind && on its line": call.replace(hit, b'  [ -n "${STRICT:-}" ] && exit 2\nfi\n', 1),
+            "after a hit branch with no exit": call.replace(hit, b"fi\n" + strict, 1),
+            "in a branch taken on no hit": call.replace(b'[ -n "$BV_HIT" ]', b'[ -z "$BV_HIT" ]', 1),
+        }
+        for name, variant in variants.items():
+            with self.subTest(variant=name):
+                self.assertNotEqual(variant, call)
+                self.write("codex", built(host="codex", call=variant))
+                self.assert_one_error("codex", self.HIT)
+
+    def test_a_message_that_names_exit_and_double_brackets_keep_the_shape(self) -> None:
+        _, _, call = generator_parts()
+        for name, variant in (
+            ("message", call.replace(
+                b"  exit 2\n", b'  echo "exit 0 would let it run; exit 2 refuses it" >&2\n  exit 2\n', 1)),
+            ("double brackets", call.replace(
+                b'if [ -n "$BV_HIT" ]; then', b'if [[ -n "$BV_HIT" ]]; then', 1)),
+        ):
+            with self.subTest(variant=name):
+                self.assertNotEqual(variant, call)
+                self.write("cursor", built(host="cursor", call=variant))
+                self.assertEqual(self.errors(["cursor"]), [])
 
 
 class ScopeTest(GateFixture):

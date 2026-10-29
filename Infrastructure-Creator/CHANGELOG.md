@@ -4,6 +4,30 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The bash-validator gate holds the hit branch to `exit 2` — 2026-10-29
+
+- Why: `validate_generated.py` took any `exit 2` after the `bv_validate`
+  call for the refusal of a command a rule matched. With the generator's
+  own hit branch changed to `exit 0` and `[ -n "${NEVER:-}" ] && exit 2`
+  added below it, the gate passed the validator, which let
+  `git push --force origin main` run with exit 0 (found in review of the
+  parser gate, same day).
+- After the call, the first `exit` must now be `exit 2` on a line of its
+  own inside `if [ -n "$BV_HIT" ]; then` (or `[[ ... ]]`), with no other
+  block opened, switched or closed between them. Quoted text is not code,
+  so a message that names `exit` is not taken for one. The error says the
+  hit branch must exit 2. All fifteen shipped copies - the four editions'
+  and the generator's, in each tool tree - keep that shape.
+- `tests/test_bash_validator_gate.py`: the review's mutant is rejected, on
+  the generator's own validator and in a built one shown to let the force
+  push run; an `exit 2` in a block after a hit branch exiting 0 or before
+  it, under a condition of its own inside it, behind `&&`, after a hit
+  branch with no exit, or in a branch taken on `-z "$BV_HIT"` is rejected;
+  a message that names `exit` and `[[ -n "$BV_HIT" ]]` pass; the fifteen
+  shipped copies pass (skipped where the editions are not beside the
+  generator). Against the previous check the new rejections fail, and
+  each part of the new one, dropped alone, fails a test.
+
 ### Generated validators run the editions' command repetition guard — 2026-10-29
 
 - Why: the four editions' `bash-validator.sh` counts a command's identical
