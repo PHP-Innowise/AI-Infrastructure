@@ -288,6 +288,8 @@ class SharedWorktree(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr + done.stdout)
         return command.group(1)
 
+    @unittest.skipIf(WINDOWS or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "a folder without write permission stops neither Windows nor root")
     def test_a_command_a_sandbox_holds_for_a_worktree_is_made_for_it(self):
         # A sandbox that lets a command write only its own folder refuses the
         # memory's: the command waits for the next hook (the write queue). A
