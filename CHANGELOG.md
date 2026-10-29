@@ -48,9 +48,17 @@ edition's own files remain in that edition's changelog.
   the first record; a clone bound to the first saves into it, and a clone
   without a binding saves into the earlier twin, which its capsule names.
   Both fail on the native path before ("identifier is ambiguous").
-- Not changed: the two-way conflicts a merge leaves in the derived
-  `project-brain/indexes/active.json` and `memory-bank/INDEX.md`, and the
-  capsule's advice, which names the other record in each clone.
+- The capsule's advice now names the same twin in every clone: never the
+  earliest created record, which a clone without a binding settles on.
+  Each clone named "the other" record before, so the clone bound to the
+  later twin and one bound to the earlier one cancelled one each - both -
+  and the branch was left with no active task. Cancelled, the later twin's
+  clone follows the earliest (its binding's successor).
+  `project-brain/tests/test_runtime.py` binds a clone to the later twin:
+  it is told to cancel its own, and then works with the earliest; on the
+  advice before, it was told to cancel the earliest.
+- Not changed: the conflicts a merge leaves in the derived
+  `project-brain/indexes/active.json` and `memory-bank/INDEX.md`.
 
 ### A line cut inside a character no longer stops the refresh health series — 2026-10-29
 

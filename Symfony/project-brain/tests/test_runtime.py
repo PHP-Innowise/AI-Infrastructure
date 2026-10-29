@@ -10030,6 +10030,33 @@ class MultiMachineContinuityTest(RuntimeHarness):
         self.assertEqual(first["task_uuid"], capsule["task_uuid"])
         self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
 
+    def test_a_clone_bound_to_the_later_twin_is_told_to_cancel_its_own(self) -> None:
+        # Each clone's capsule named the other record: the clone bound to the
+        # later twin and one bound to the earlier cancelled one each, and
+        # the branch was left with no active task.
+        first = self.start("feature/shared")
+        second = self.twin("feature/shared")
+        # The machine that started the later twin: its binding names it.
+        self.simulate_second_machine()
+        rebound = self.run_cli("rebind", "--task-id", "feature/shared", "--record", second["id"], "--json")
+        self.assertEqual(0, rebound.returncode, rebound.stderr)
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(second["id"], capsule["task_uuid"])
+        advice = [warning for warning in capsule["warnings"] if "Keep one task per branch" in warning]
+        self.assertEqual(1, len(advice), capsule["warnings"])
+        self.assertIn(f"--record-id {second['id']}", advice[0])
+        # Followed, the clone works with the earliest record, as every other does.
+        cancel = self.run_cli("brain-update", "--record-id", second["id"], "--revision", "auto",
+                              "--transition", "cancelled")
+        self.assertEqual(0, cancel.returncode, cancel.stderr)
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(first["task_uuid"], capsule["task_uuid"])
+        self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
+
     def test_a_second_machine_reads_the_task_before_its_first_checkpoint(self) -> None:
         # Until the first checkpoint rebound it, the branch's existing task
         # read as "not recorded yet" - prompt and session capsule alike.

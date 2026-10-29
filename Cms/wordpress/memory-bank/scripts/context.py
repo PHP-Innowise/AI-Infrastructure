@@ -5943,8 +5943,14 @@ def _twin_notices(connection: sqlite3.Connection, external_id: str, served: str)
     if not isinstance(claimed, list) or served not in claimed or len(claimed) < 2:
         return []
     other = next(str(identifier) for identifier in claimed if identifier != served)
+    # The records come earliest created first, and the earliest is the one a
+    # clone without a binding settles on: every clone advises cancelling a
+    # later one. Each named "the other" before, so the clone bound to the
+    # later twin and the one bound to the earlier cancelled one each - both.
+    # Cancelled, a bound twin's clone follows the earliest (_successor).
+    cancel = served if served != str(claimed[0]) else other
     return [f"Task record {other} also claims {external_id}; this turn uses {served}.",
-            f"Keep one task per branch: context.py brain-update --record-id {other} "
+            f"Keep one task per branch: context.py brain-update --record-id {cancel} "
             "--revision auto --transition cancelled"]
 
 
