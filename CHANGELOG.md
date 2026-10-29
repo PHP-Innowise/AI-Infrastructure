@@ -57,7 +57,9 @@ edition's own files remain in that edition's changelog.
   a sandbox held whose Stop ran out of its budget must be made by the
   session's next prompt hook. A hook out of its budget may say so, once
   each: the Stop's journal line with `timeout`'s 124, a refresh reported
-  unavailable.
+  unavailable. A degraded refresh is counted under the fuzzer's lock: with
+  16 sessions in a burst, increments lost between threads read as refreshes
+  that failed (3 of 8 in one run).
 - Found: on the drains before the fix below, 8 of 12 seeds (60 steps,
   `--contention 0.4`) lost a save a sandbox held; on the fix none did, and
   12 such saves were made by the next prompt hook.

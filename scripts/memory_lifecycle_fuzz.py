@@ -504,7 +504,10 @@ class Fuzz:
             # Another session held the index's write lock past this refresh's
             # share of its budget: the capsule carries the working state and
             # says retrieval was not consulted - the runtime's own fallback.
-            self.events["refresh degraded"] += 1
+            # Counted under the lock: a burst's turns finish together, and an
+            # increment lost between them read as a refresh that failed.
+            with self.lock:
+                self.events["refresh degraded"] += 1
         for words in ("Memory not consulted", "Memory refresh unavailable"):
             if words in said and waits == "prompt" and words == "Memory refresh unavailable":
                 # The refresh outlived the budget: the hook says so, and the
