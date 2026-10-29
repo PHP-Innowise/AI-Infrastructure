@@ -18,6 +18,7 @@
 .claude/skills/bootstrap-verifier/SKILL.md -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/analyze_commands.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/infra_ownership.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/merge_bash_validator.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/merge_gitignore.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/publish_staging.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_content_review.py -diff linguist-generated=true
@@ -167,6 +168,7 @@
 .cursor/skills/bootstrap-verifier/SKILL.md -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/analyze_commands.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/infra_ownership.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/merge_bash_validator.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/merge_gitignore.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/publish_staging.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_content_review.py -diff linguist-generated=true

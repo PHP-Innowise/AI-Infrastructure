@@ -4,6 +4,69 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### infra-update keeps a generated project's own bash-validator rules — 2026-10-29
+
+- Why: a generated project that adds its own rule to `bash-validator.sh`
+  below the generic section's closing marker - in `BV_FRAMEWORK_RULES`,
+  where the section's opening comment and `hook-forge` step 2 tell it to -
+  no longer matches its `.infra-manifest.json` hash, so `infra-update`
+  step 5 asks for a decision. Keeping the target version kept the section
+  an earlier release had copied, and step 10's full bootstrap gate
+  (`validate_bash_validators`) compares the section with the current
+  generator's: whenever the section had changed since generation, the gate
+  failed and the whole update rolled back. Taking the staged version
+  dropped the team's rules; only a merge by hand worked.
+- `infra-update` step 6 gives every edition's `bash-validator.sh` the rule
+  hook wiring files already have: for a requires-decision validator it
+  offers only the choices printed by a new helper,
+  `bootstrap-verifier/scripts/merge_bash_validator.py --target <target>
+  --staging <staging> --path <hooks dir>/bash-validator.sh`. A target whose
+  section equals the staged one keeps the ordinary choices. Otherwise the
+  choices are take staged or a section merge: the target version with only
+  the bytes from `# >>> bash-validator generic section >>>` through
+  `# <<< bash-validator generic section <<<` replaced by the staged ones,
+  everything above (header, payload decoding) and below (the team's
+  settings and rules, the call) byte for byte. `--write --staged-sha256
+  <hash>` writes it over the staged file, keeping its mode, and refuses
+  when staging no longer holds the version that was checked, so the
+  `merged` decision's `rejected_sha256` is the staged version the merge was
+  built from. Left unanswered, such a file stops the run before step 9
+  instead of defaulting to keep. The output template and guardrails say
+  the same.
+- The helper's verdicts are the gate's own: it runs `validate_generated.py`'s
+  `validate_bash_validators` on the staged version, which must pass (or
+  staging is repaired through `hook-forge` first), and on the merge, and
+  offers no merge the gate would reject - no target file, no single
+  section, or the team's own code below the section failing the call check
+  (a rule expanding a list nothing assigns, under `set -u`). It reports the
+  target lines the merge replaces and whether the staged version also
+  changes the lines above the section (`above_section`), which the merge
+  keeps as the target has them.
+- `tests/test_bash_validator_merge.py`: a target whose section an earlier
+  release copied (without the `dropdb` rule) under an extra team rule
+  (`helm uninstall`) fails the gate as kept, and take staged lacks the
+  team rule; the section merge is the staged section plus the team's rule
+  byte for byte, passes the gate and, run through bash, refuses both
+  `dropdb shop`, which the kept target let through, and `helm uninstall
+  shop`. A target whose section is current stays an ordinary decision and
+  passes the gate as kept. A deleted validator, one without the markers,
+  one closing the section twice and team code the gate refuses get take
+  staged only; a staged validator failing the gate, a path that is no
+  edition's validator and a staged file behind a symlink are refused; a
+  repeated or stale `--write` changes nothing. A lifecycle test generates,
+  edits below the section, classifies (`tracked-file-modified`), merges,
+  builds the refreshed manifest with the `merged` decision, publishes,
+  passes `validate_manifest` and the gate, and on the next run with the
+  same staged output classifies the file `standing-decision-honored`. Each
+  of ten broken helpers (a no-op merge, the whole staged file, the header
+  replaced too, no gate on the merge or on staging, no sha256 check, the
+  mode lost, a section never or always current, a write on a check) fails
+  at least one test. Restacked onto the repetition guard (same day), the
+  test validators carry the guard and `BV_HOST`, as step 2 now builds them,
+  and run with a private `TMPDIR` for the guard's counters.
+- The skill bodies' ceiling rises from 306100 to 307900 bytes for it
+  (307837 now); the policy lock was rewritten.
+
 ### The bash-validator gate holds the hit branch to `exit 2` — 2026-10-29
 
 - Why: `validate_generated.py` took any `exit 2` after the `bv_validate`

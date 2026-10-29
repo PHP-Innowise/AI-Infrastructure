@@ -34,6 +34,7 @@
     ".agents/skills/bootstrap-verifier/SKILL.md": "154f0a58b70f80dfa183292c36e769d93a54b987eabf4b6e29408d35e8755fe1",
     ".agents/skills/bootstrap-verifier/scripts/analyze_commands.py": "98a100eff2dffdf121e2535badf33358fd5612fa914160d4684ae1d5a1822fa8",
     ".agents/skills/bootstrap-verifier/scripts/infra_ownership.py": "a599696f9c457cbf9f867561a84d5c497ff4c3910aafdccb9664e72470affdca",
+    ".agents/skills/bootstrap-verifier/scripts/merge_bash_validator.py": "872e12778c3f602d81ca137b4eef8009bf87a14bca0571b41731ab80cf26f977",
     ".agents/skills/bootstrap-verifier/scripts/merge_gitignore.py": "8c0f14d68748bcc16a01101f77d305646a4d014cf6c3c9a1e794f4e4d4a034c2",
     ".agents/skills/bootstrap-verifier/scripts/publish_staging.py": "f3d6fe428803bf9cd4987d9fe68af20d0429a509714921befb90d4daa78cff02",
     ".agents/skills/bootstrap-verifier/scripts/validate_content_review.py": "47e544546476dcf74cc97f00fffcedc82696106cfa94a95015bf7c5e15a1cd43",
@@ -56,7 +57,7 @@
     ".agents/skills/infra-generate/SKILL.md": "ce862c37391a5a27d4c8d5f43306465f687d25b888bfe9583c6cfbe9ae5fb559",
     ".agents/skills/infra-ops-scanner/SKILL.md": "1248ce50011d346ed1c05ddaf5493550b8146619ac151849d0702ab89c55fe93",
     ".agents/skills/infra-scan/SKILL.md": "43893c459ae4febc0e270a3f11e0d7e8947678e2c91b48152fc41248f7b14283",
-    ".agents/skills/infra-update/SKILL.md": "b981afa285efcd63fc9414b41fc17a8b3d90f078aa628e242375456110e8936d",
+    ".agents/skills/infra-update/SKILL.md": "31730a64a62c145b97e9956643482dc1734f85ac39747029e1803ffb6a277485",
     ".agents/skills/infra-validate/SKILL.md": "e5f8f21ea4d3a2fbd2dbe1f14789702f9f2678e26e28106a225ae2992705b5b8",
     ".agents/skills/integration-scanner/SKILL.md": "b3b8c5a0b417c12990402cddaa98d81b8f37068dfa6e5a033171952565eecff0",
     ".agents/skills/memory-seed/SKILL.md": "0d889a8d0cc40d82bcc6f982f6019e51d5228bf5c15c837b2357698681567253",
@@ -175,7 +176,7 @@
     ".cursor/rules/subagent-policy.mdc": "b2200867b3141faedb982cb12cc58158015ef5d9294c0f8b193bb8b70f61f201",
     "AGENTS.md": "0bb356be443072e6205501f892ff185433406c01a1c860b583876c8ee077c681"
   },
-  "policy_digest": "975bfcf269ca76ddca5d5a842874a48a93fef799eeda8f493920a87ff782bf18",
+  "policy_digest": "8a1a7f6e681ce554d14b8b8e3b3ec93291ada8d426e2e4d87d80cfb2d0a3cf67",
   "release": "2.5.0",
   "schema_version": 1
 }

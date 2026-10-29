@@ -28,6 +28,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Generated projects keep their own bash-validator rules on update: the generator's skill-body ceiling — 2026-10-29
+
+- `scripts/token_budget.json` raises Infrastructure-Creator's `body_bytes`
+  from 306100 to 307900 (307837 now) and no further: `infra-update` step 6
+  now offers a team-edited `bash-validator.sh` whose generic section is out
+  of date only take staged or a section merge, written by a new
+  `bootstrap-verifier` helper, instead of a keep that failed step 10 and
+  rolled the update back (`Infrastructure-Creator/CHANGELOG.md`, same day).
+
 ### Generated projects get the editions' repetition guard: the generator's skill-body ceiling — 2026-10-29
 
 - `scripts/token_budget.json` raises Infrastructure-Creator's `body_bytes`
