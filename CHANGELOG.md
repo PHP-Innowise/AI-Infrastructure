@@ -64,6 +64,8 @@ edition's own files remain in that edition's changelog.
   no branch of this repository. `docs/MEMORY-EVAL.md`'s "440 capsule turns"
   for next's September is 140; the sealed field check counts `realized`'s
   turns with a capsule, so a refused one no longer counts toward its 50.
+  `field-check` names them per host beside the rule, as it names the hooks
+  not found.
 
 ### A capsule asked for and not built is recorded, and the funnel counts it apart — 2026-10-31
 

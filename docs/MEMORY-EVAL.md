@@ -135,7 +135,9 @@ the task records opened, pointers and returned items together; S, the median
 save seconds over the median answer's; and which branch of the rule each
 host meets, or that a host is still below 50 capsule turns. Beside them, not
 part of the rule, it gives the Claude Code hook runs recorded and how many
-were not found: a hook that is not found decides the rule silently. Counts
+were not found: a hook that is not found decides the rule silently - and,
+per host, the prompt-hook turns whose refresh assembled no capsule, which
+are not capsule turns, so a host short of 50 may be short for them. Counts
 only. On
 the four projects' sessions from 2026-09-01 - before any save step ran there -
 it reads K = 0 on both hosts, T = 1 for Claude Code and 9 for Codex: the

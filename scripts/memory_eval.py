@@ -4446,6 +4446,10 @@ def command_field_check(arguments: argparse.Namespace) -> int:
               # silently, as the Bash validator did not run for a month.
               "claude_hooks": {outcome: sum(count for (_, kind), count in hooks.items() if kind == outcome)
                                for outcome in ("ok", "error", "not_found", "blocked")},
+              # Nor are the turns whose refresh assembled no capsule: they are
+              # not capsule turns, and a host short of 50 may be short for this.
+              "no_capsule_turns": {host: sum(1 for turn in turns[host] if turn.get("unassembled") and not turn["output"])
+                                   for host in turns},
               "compressed_unread": len(UNREAD_COMPRESSED)}
     if arguments.json:
         print(json.dumps(report, indent=1, ensure_ascii=False))
@@ -4460,6 +4464,9 @@ def command_field_check(arguments: argparse.Namespace) -> int:
     runs = report["claude_hooks"]
     lines.append(f"  Claude Code hook runs recorded: {runs['ok']} ok, {runs['error']} failed"
                  f" ({runs['not_found']} not found), {runs['blocked']} blocked")
+    lost = report["no_capsule_turns"]
+    lines.append("  prompt-hook turns whose refresh assembled no capsule: "
+                 + ", ".join(f"{host} {count}" for host, count in lost.items()))
     rule = report["rule"]
     if not rule["ready"]:
         lines.append(f"not ready: a host has fewer than {arguments.min_turns} capsule turns")

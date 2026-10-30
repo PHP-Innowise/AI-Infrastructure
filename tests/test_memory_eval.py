@@ -2789,9 +2789,27 @@ class FieldCheckTest(unittest.TestCase):
             "capsule_turns", "knowledge_opened", "task_records_opened")))
         self.assertEqual({"ready": False, "counted": ["codex"], "outcome": {"codex": "report as is"}}, report["rule"])
         self.assertEqual({"ok": 0, "error": 0, "not_found": 0, "blocked": 0}, report["claude_hooks"])
+        self.assertEqual({"claude": 0, "codex": 0}, report["no_capsule_turns"])
         self.assertFalse(self.check()["rule"]["counted"])
-        self.assertIn("not ready", main_output("field-check", "--project", str(self.project), "--claude-root",
-                                               str(self.claude), "--codex-root", str(self.codex)))
+        # A Codex session whose refresh refused the capsule: a turn the rule
+        # does not count, named beside it.
+        refused = ("procedural: updated (85 documents)\nwarning: Capsule unavailable: Capsule profile must be full"
+                   " or navigation. No task context was assembled this turn; read the canonical sources directly.")
+        jsonl(self.codex / "2026" / "09" / "03" / "rollout-2.jsonl", [
+            {"timestamp": "2026-09-03T09:00:00Z", "type": "session_meta",
+             "payload": {"id": "y", "cwd": str(self.project)}},
+            codex_message("user", "Fix the export"),
+            {"timestamp": "2026-09-03T09:00:01Z", "type": "response_item", "payload": {
+                "type": "message", "role": "developer", "content": [{"type": "input_text", "text": refused}],
+                "internal_chat_message_metadata_passthrough": {"content_item_kinds": ["hooks.additional_context"]}}},
+        ])
+        again = self.check("--min-turns", "1")
+        self.assertEqual({"claude": 0, "codex": 1}, again["no_capsule_turns"])
+        self.assertEqual(1, again["hosts"]["codex"]["capsule_turns"])
+        printed = main_output("field-check", "--project", str(self.project), "--claude-root",
+                              str(self.claude), "--codex-root", str(self.codex))
+        self.assertIn("not ready", printed)
+        self.assertIn("prompt-hook turns whose refresh assembled no capsule: claude 0, codex 1", printed)
 
     def test_the_rule_as_sealed(self) -> None:
         def host(turns: int, knowledge: int, records: int, share: Optional[float]) -> Dict[str, Any]:
