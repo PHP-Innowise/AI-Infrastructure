@@ -10650,6 +10650,11 @@ def _command() -> int:
                 if capsule is not None:
                     health_record["capsule"] = capsule_shape(
                         repository, capsule, arguments.capsule_profile, result.get("capsule_text"))
+                elif arguments.query is not None:
+                    # Asked for and none assembled - a refused prompt, a task
+                    # the runtime cannot read: the turn went without a
+                    # capsule, which a funnel must not count as one built.
+                    health_record["capsule"] = None
                 if source_notices:
                     health_record['source_notices'] = source_notices
                 def capture_diagnosis(render: Optional[dict[str, object]]) -> None:

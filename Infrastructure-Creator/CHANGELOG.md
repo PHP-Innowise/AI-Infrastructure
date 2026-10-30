@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime records a capsule it could not build — 2026-10-31
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime's capsule survives a profile it does not know — 2026-10-31
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py` and

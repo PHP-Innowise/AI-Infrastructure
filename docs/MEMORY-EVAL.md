@@ -487,7 +487,12 @@ in total, it counts:
   line has no shape and counts as `unknown`. A refresh line also comes from
   an explicit request (the MCP retrieve, the CLI); a runtime of 2026-10-30 or
   later names the host that asked (`cli` for an explicit request), and the
-  funnel counts capsules by host, an older line as `unknown`;
+  funnel counts capsules by host, an older line as `unknown`. A line that
+  asked for a capsule and got none - a profile the runtime refused, a task ID
+  it cannot read - says so (`"capsule": null`, since 2026-10-31) and counts
+  as "capsules asked for, none built", not as a capsule; on older runtimes it
+  wrote no shape and read as a capsule of `unknown` profile, which is how the
+  four clients' capsule-less turns after 2026-10-30 17:01 would have looked;
 - **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
   requested at Stop, made (saved or held), refused, failed or omitted,
   learnings written and chunks promoted, with every code and its count;

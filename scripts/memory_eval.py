@@ -4178,6 +4178,7 @@ FUNNEL_ROWS = (
     ("prompt hook runs", "hook_runs"),
     ("  timed out", "hook_timeouts"),
     ("  exited non-zero", "hook_failures"),
+    ("capsules asked for, none built", "no_capsule"),
     ("capsules built", "capsules"),
     ("  shape recorded", "shaped"),
     ("  with the working state", "with_working"),
@@ -4223,7 +4224,10 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
     A refresh line also comes from an explicit request (the MCP retrieve, the
     CLI), so "capsules built" counts those too; a runtime of 2026-10-30 or
     later names the host that asked (`cli` for an explicit request), and an
-    older line counts as `unknown`.
+    older line counts as `unknown`. A line that asked for a capsule and got
+    none - a profile the runtime refused, a prompt it would not search - is
+    counted apart; an older runtime wrote no shape for it, so it read as a
+    capsule built.
     """
     def within(record: Dict[str, Any]) -> bool:
         at = parse_instant(record.get("at"))
@@ -4244,6 +4248,11 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
             counts["hook_timeouts"] += status == 124
             counts["hook_failures"] += type(status) is int and status not in (0, 124)
         elif source in ("refresh", "hook-context"):
+            if "capsule" in record and record["capsule"] is None:
+                # Asked for and none assembled, which a runtime of 2026-10-31
+                # or later says: before, such a turn read as a capsule built.
+                counts["no_capsule"] += 1
+                continue
             counts["capsules"] += 1
             host = record.get("host")
             hosts[host if host in FUNNEL_HOSTS else "unknown"] += 1

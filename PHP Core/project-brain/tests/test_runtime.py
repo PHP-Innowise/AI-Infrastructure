@@ -4692,6 +4692,22 @@ class RefreshHealthTest(RuntimeHarness):
         self.assertNotIn("cobalt", text)
         self.assertNotIn("TASK-SHAPE", text)
 
+    def test_a_capsule_asked_for_and_not_assembled_is_recorded_as_none(self) -> None:
+        # A runtime that refused the capsule wrote no shape, as one before
+        # shapes did, and a funnel counted the turn as a capsule built.
+        refused = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "TASK:ODD",
+                               "--ephemeral", "--json")
+        self.assertEqual(0, refused.returncode, refused.stderr)
+        self.assertTrue(any("Capsule unavailable" in warning for warning in json.loads(refused.stdout)["warnings"]))
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIn("capsule", line)
+        self.assertIsNone(line["capsule"])
+        self.assertNotIn("cobalt", path.read_text(encoding="utf-8"))
+        # A refresh that asked for no capsule says nothing of one.
+        self.assertEqual(0, self.run_cli("refresh").returncode)
+        self.assertNotIn("capsule", json.loads(path.read_text(encoding="utf-8").splitlines()[-1]))
+
     def test_a_hook_context_line_counts_the_bytes_it_prints(self) -> None:
         self.start("TASK-HOOK-SHAPE")
         printed = self.run_cli("hook-context", "--task-id", "TASK-HOOK-SHAPE")

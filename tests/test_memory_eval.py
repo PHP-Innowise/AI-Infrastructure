@@ -2951,6 +2951,25 @@ class FunnelTest(unittest.TestCase):
         self.assertEqual({"full": 0, "navigation": 1, "recall": 2, "unknown": 1}, total["profiles"])
         self.assertEqual({"save refused": {"memory-result-v1:unverified": 1}}, total["save_reasons"])
 
+    def test_a_capsule_asked_for_and_not_built_is_not_counted_as_one(self) -> None:
+        # Four projects went without a capsule on every prompt after a sync put
+        # them on a runtime that refused their profile; a runtime that writes
+        # no shape then made each turn read as a capsule built.
+        refused = Path(self.temporary.name) / "clients" / "refused"
+        jsonl(refused / "memory-bank/local/refresh-health.ndjson", [
+            {"at": "2026-10-31T09:00:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-31T09:00:01Z", "source": "refresh", "host": "claude", "capsule": None},
+            {"at": "2026-10-31T09:05:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-31T09:05:01Z", "source": "refresh", "host": "claude", "capsule": None},
+            # A runtime before the shape: still a capsule built, of unknown shape.
+            {"at": "2026-10-31T09:09:01Z", "source": "refresh"},
+        ])
+        project = json.loads(main_output("funnel", "--project", str(refused), "--json"))["projects"]["refused"]
+        self.assertEqual((2, 2, 1, 0), (project["hook_runs"], project["no_capsule"], project["capsules"],
+                                        project["shaped"]))
+        self.assertEqual(0, self.funnel()["total"]["no_capsule"])
+        self.assertIn("capsules asked for, none built", main_output("funnel", "--project", str(refused)))
+
     def test_the_window_bounds_the_journals_not_what_the_project_keeps(self) -> None:
         everything = json.loads(main_output("funnel", "--project", str(self.ledger), "--json"))
         self.assertEqual(4, everything["projects"]["ledger"]["hook_runs"])

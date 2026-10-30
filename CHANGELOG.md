@@ -28,6 +28,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A capsule asked for and not built is recorded, and the funnel counts it apart — 2026-10-31
+
+- A `refresh` that was asked for a capsule (`--query`) and assembled none -
+  a task ID the runtime cannot read, a profile it refused - writes
+  `"capsule": null` in its `refresh-health.ndjson` line, and
+  `memory_eval.py funnel` counts such lines as "capsules asked for, none
+  built" instead of capsules built. Before, the line carried no shape, as an
+  old runtime's does, and read as a capsule of unknown profile: the four
+  clients' turns since the Harness's sync of 2026-10-30, every one without a
+  capsule, would have shown in the weekly funnel as capsules delivered.
+
 ### Install and sync say when Codex would cut the project's policy — 2026-10-31
 
 - Codex reads at most `project_doc_max_bytes` of `AGENTS.md` (32 KiB by
