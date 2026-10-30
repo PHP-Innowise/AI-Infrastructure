@@ -2759,6 +2759,7 @@ class FieldCheckTest(unittest.TestCase):
         self.assertEqual((0, 0, 1), tuple(report["hosts"]["claude"][key] for key in (
             "capsule_turns", "knowledge_opened", "task_records_opened")))
         self.assertEqual({"ready": False, "counted": ["codex"], "outcome": {"codex": "report as is"}}, report["rule"])
+        self.assertEqual({"ok": 0, "error": 0, "not_found": 0, "blocked": 0}, report["claude_hooks"])
         self.assertFalse(self.check()["rule"]["counted"])
         self.assertIn("not ready", main_output("field-check", "--project", str(self.project), "--claude-root",
                                                str(self.claude), "--codex-root", str(self.codex)))

@@ -4403,6 +4403,7 @@ def command_field_check(arguments: argparse.Namespace) -> int:
     turns: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
     retrievals: Dict[str, List[Retrievals]] = {"claude": [], "codex": []}
     costs: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
+    hooks: Counter = Counter()
     UNREAD_COMPRESSED.clear()
     for given in arguments.project:
         project = Path(given).expanduser().resolve()
@@ -4410,6 +4411,7 @@ def command_field_check(arguments: argparse.Namespace) -> int:
             raise EvalError(f"--project {given} is not a directory")
         sessions = project_sessions(project, since, Path(arguments.claude_root).expanduser(),
                                     Path(arguments.codex_root).expanduser())
+        hooks.update(sessions["hooks"])
         for host in turns:
             turns[host].extend(sessions["turns"][host])
             retrievals[host].extend(sessions["retrievals"][host])
@@ -4417,6 +4419,10 @@ def command_field_check(arguments: argparse.Namespace) -> int:
     hosts = {host: field_counts(turns[host], retrievals[host], costs[host]) for host in turns}
     report = {"since": arguments.since, "projects": len(arguments.project), "min_turns": arguments.min_turns,
               "hosts": hosts, "rule": field_rule(hosts, arguments.min_turns),
+              # Not part of the rule: a hook that is not found decides it
+              # silently, as the Bash validator did not run for a month.
+              "claude_hooks": {outcome: sum(count for (_, kind), count in hooks.items() if kind == outcome)
+                               for outcome in ("ok", "error", "not_found", "blocked")},
               "compressed_unread": len(UNREAD_COMPRESSED)}
     if arguments.json:
         print(json.dumps(report, indent=1, ensure_ascii=False))
@@ -4428,6 +4434,9 @@ def command_field_check(arguments: argparse.Namespace) -> int:
         lines.append(f"  {host:<7} capsule turns {counts['capsule_turns']}, knowledge opened (K)"
                      f" {counts['knowledge_opened']}, task records opened (T) {counts['task_records_opened']},"
                      f" save requests {counts['save_requests']}, save share of the answer (S) {share}")
+    runs = report["claude_hooks"]
+    lines.append(f"  Claude Code hook runs recorded: {runs['ok']} ok, {runs['error']} failed"
+                 f" ({runs['not_found']} not found), {runs['blocked']} blocked")
     rule = report["rule"]
     if not rule["ready"]:
         lines.append(f"not ready: a host has fewer than {arguments.min_turns} capsule turns")

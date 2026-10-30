@@ -45,7 +45,8 @@ edition's own files remain in that edition's changelog.
   later tool call opened, from capsules and explicit retrieves together; T,
   the task records opened; S, the median save seconds over the median
   answer's; and which branch of the rule each host meets, or that it is
-  still below 50 capsule turns. `realized` and `field-check` share one
+  still below 50 capsule turns; beside the rule, the Claude Code hook runs
+  recorded and how many were not found. `realized` and `field-check` share one
   collector of a project's sessions. On the four client projects from
   2026-09-01 (no save step then) it reads K = 0 on both hosts, T = 1 and 9:
   the working-state path first.
