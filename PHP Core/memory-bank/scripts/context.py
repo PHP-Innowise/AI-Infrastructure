@@ -6873,6 +6873,41 @@ _TRANSCRIPT_PASSIVE_PREFIXES = (
     "<local-command-caveat", "<bash-stdout", "<bash-stderr",
     "<environment_context", "<user_instructions",
 )
+# What else Codex writes into the user role without starting a turn, every
+# part of the message its AGENTS.md instructions or wholly one of these
+# envelopes: the plugins it recommends, with the instructions and environment
+# beside them, before the first prompt; an app page's context before a
+# prompt; and within a turn a skill's text, a Stop hook's continuation, a
+# subagent's report, the answer to the agent's question and the note that the
+# turn was stopped. Of 3,099 rollouts on the maintainer machine in October
+# 2026, 2,310 began with the plugins or the instructions, which then counted
+# as the session's first prompt. Context around the person's own request is
+# a prompt - `# In app browser:` or `# Files mentioned by the user:` above
+# `## My request`, `<in-app-browser-context>` with the request after it - and
+# so are a notification, a heartbeat and an internal objective, which start
+# a turn as a task notification does in Claude Code.
+_CODEX_CONTEXT_ENVELOPES = frozenset({
+    "recommended_plugins", "environment_context", "user_instructions",
+    "external_codex_apps_open_page", "external_codex_apps_writing_block_edits",
+    "skill", "hook_prompt", "subagent_notification", "send_user_message_question_reply",
+    "turn_aborted",
+})
+_CODEX_ENVELOPE = re.compile(r"\s*<([a-z][a-z0-9_-]*)(?:\s[^<>]*)?>.*</\1\s*>\s*", re.DOTALL)
+_CODEX_INSTRUCTIONS = "# AGENTS.md instructions"
+
+
+def _codex_context(parts: list[str]) -> bool:
+    """Whether a Codex user-role message is wholly context Codex added itself."""
+    for part in parts:
+        if not part.strip():
+            continue
+        header = part.lstrip().split("\n", 1)[0].rstrip("\r")
+        if header == _CODEX_INSTRUCTIONS or header.startswith(_CODEX_INSTRUCTIONS + " for "):
+            continue
+        envelope = _CODEX_ENVELOPE.fullmatch(part)
+        if envelope is None or envelope.group(1) not in _CODEX_CONTEXT_ENVELOPES:
+            return False
+    return True
 
 
 def _transcript_prompt(record: dict[str, object]) -> bool:
@@ -6896,12 +6931,26 @@ def _transcript_prompt(record: dict[str, object]) -> bool:
         payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
         if payload.get("type") != "message" or payload.get("role") != "user":
             return False
-        text = "".join(
+        parts = [
             part["text"] for part in payload.get("content") or []
             if isinstance(part, dict) and isinstance(part.get("text"), str)
-        )
-        return bool(text.strip()) and not text.lstrip().startswith(_TRANSCRIPT_PASSIVE_PREFIXES)
+        ]
+        text = "".join(parts)
+        return (bool(text.strip()) and not text.lstrip().startswith(_TRANSCRIPT_PASSIVE_PREFIXES)
+                and not _codex_context(parts))
     return False
+
+
+def _codex_turn_start(record: dict[str, object]) -> bool:
+    """The event a Codex rollout writes where a turn begins: `task_started`.
+
+    3,078 of the 3,099 rollouts on the maintainer machine in October 2026
+    write it, one a turn: in 3,026 of them it matches the turns that ended or
+    were stopped, the last turn still open in 722. `turn_context` is missing
+    from 3,288 of their 12,795 turns and repeats within 720.
+    """
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    return record.get("type") == "event_msg" and payload.get("type") == "task_started"
 
 
 # Codex 0.162 and later run their tools from one JavaScript cell, the custom
@@ -7223,11 +7272,18 @@ def transcript_turn_files(transcript: Optional[str], repository: Path) -> list[s
             continue
         if isinstance(record, dict):
             records.append(record)
-    begin = 0
-    for index in range(len(records) - 1, -1, -1):
-        if _transcript_prompt(records[index]):
-            begin = index + 1
-            break
+    # A Codex rollout says where its turn began; a message inside the turn - a
+    # skill's text, a Stop hook's continuation - would otherwise cut off the
+    # calls before it. Where the window holds no such event (Claude Code, a
+    # turn longer than the window), the turn begins at its prompt.
+    begin = next((index + 1 for index in range(len(records) - 1, -1, -1)
+                  if _codex_turn_start(records[index])), None)
+    if begin is None:
+        begin = 0
+        for index in range(len(records) - 1, -1, -1):
+            if _transcript_prompt(records[index]):
+                begin = index + 1
+                break
     root = os.path.realpath(str(workspace_roots.project_root(repository)))
     changed: list[str] = []
     read: list[str] = []

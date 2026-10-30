@@ -15651,6 +15651,67 @@ class RecentProjectFilesTest(RuntimeHarness):
         )
         self.assertEqual(2, self.turn(transcript)["recent_files"])
 
+    def codex_user(self, *parts: str) -> dict:
+        return {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": part} for part in parts]}}
+
+    def codex_shell(self, command: str) -> dict:
+        return {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                "arguments": json.dumps({"cmd": command, "workdir": str(self.repository)})}}
+
+    def codex_turn_files(self, *records: dict) -> list[str]:
+        transcript = Path(self.temporary.name) / "codex-rollout.jsonl"
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+        return context_cli.transcript_turn_files(str(transcript), self.repository)
+
+    def test_what_codex_writes_into_the_user_role_starts_no_turn(self) -> None:
+        # Codex writes its own context as user messages: its plugins and
+        # instructions, an app page, a skill's text, a Stop hook's
+        # continuation, a subagent's report, the answer to its question, a
+        # stopped turn's note. Each was taken for a prompt, and the calls
+        # before it fell out of the turn: 229 of 6,298 turns lost calls on
+        # the rollouts of the maintainer machine.
+        user, shell = self.codex_user, self.codex_shell
+        for context in (
+            user("<recommended_plugins>\n- github\n</recommended_plugins>",
+                 f"# AGENTS.md instructions for {self.repository}\n\n<INSTRUCTIONS>\nBe brief.\n</INSTRUCTIONS>",
+                 "<environment_context>\n  <shell>bash</shell>\n</environment_context>"),
+            user("<external_codex_apps_open_page>\nhttps://docs.example.test/refunds\n</external_codex_apps_open_page>"),
+            user("<skill>\n<name>coder</name>\n<path>/skills/coder/SKILL.md</path>\n</skill>"),
+            user('<hook_prompt hook_run_id="stop:1">Save this answer\'s result.</hook_prompt>'),
+            user('<subagent_notification>\n{"agent_id": "a1", "status": "completed"}\n</subagent_notification>'),
+            user("<send_user_message_question_reply>Yes, both.</send_user_message_question_reply>"),
+            user("<turn_aborted>\nThe user interrupted the turn.\n</turn_aborted>"),
+        ):
+            with self.subTest(context=context["payload"]["content"][0]["text"][:24]):
+                self.assertEqual(["src/Refund.php", "src/Ledger.php"], self.codex_turn_files(
+                    user("fix the refund"), shell("cat src/Refund.php"), context, shell("cat src/Ledger.php")))
+        # Context around the person's own request is a prompt, and so is a
+        # turn Codex starts itself.
+        for prompt in (
+            "# In app browser:\n- url: http://localhost:8000/refunds\n\n## My request for Codex:\nfix the export",
+            "# Files mentioned by the user:\n\n## CMS-1.odt: /home/me/CMS-1.odt\n\n## My request:\nfix the export",
+            '<in-app-browser-context source="page">\nurl: http://localhost:8000\n</in-app-browser-context>\n\nfix it',
+            "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+            "<heartbeat>\n<automation_id>nightly</automation_id>\n</heartbeat>",
+        ):
+            with self.subTest(prompt=prompt[:24]):
+                self.assertEqual(["src/Export.php"], self.codex_turn_files(
+                    user("fix the refund"), shell("cat src/Refund.php"), user(prompt), shell("cat src/Export.php")))
+
+    def test_a_codex_turn_begins_where_its_rollout_says(self) -> None:
+        # A message the person sends while a Codex turn runs joins that turn,
+        # as do kinds of context no list names yet: the turn begins at the
+        # rollout's own `task_started`.
+        user, shell = self.codex_user, self.codex_shell
+        started = {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t"}}
+        self.assertEqual(["src/Refund.php", "src/Ledger.php", "src/Guard.php"], self.codex_turn_files(
+            started, user("look at the writer"), shell("cat src/Writer.php"),
+            started, user("fix the refund"), shell("cat src/Refund.php"),
+            user("and check the ledger"), shell("cat src/Ledger.php"),
+            user("<future_codex_context>\nnotes\n</future_codex_context>"), shell("cat src/Guard.php"),
+        ))
+
     def test_task_files_the_recent_files_push_out_are_counted(self) -> None:
         # Ten files the latest turn read fill the line, and the task's own
         # changed file no longer shows: the compaction line has to say so, or

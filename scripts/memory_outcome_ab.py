@@ -199,15 +199,17 @@ def prompt_text(record: Dict[str, Any]) -> str:
     return content if isinstance(content, str) else ""
 
 
-# Messages Codex itself writes in the user role: its instructions, plugin and
-# browser context, notifications, a hook's continuation prompt, an aborted
-# turn. The runtime's prompt test lets most through; of 3,099 rollouts on the
-# maintainer machine in October 2026, 2,310 began with `<recommended_plugins>`
-# or `# AGENTS.md instructions`, which made that the session's first "prompt".
-# A paste is the person's own prompt.
-CODEX_CONTEXT = re.compile(
-    r"\s*(?:<(?!pasted_content\b)[A-Za-z_][\w-]*|# AGENTS\.md instructions\b|# In app browser\b"
-    r"|# Files (?:mentioned|pasted) by the user\b|# Response annotations\b)"
+# A turn Codex starts by itself: a message that is wholly one envelope - a
+# task notification, a heartbeat, a CI event, a voice delegation, an internal
+# objective - or opens with the desktop app's system reminder. The runtime
+# starts a turn there, and leaves out the context Codex adds without one (its
+# instructions and plugins, a skill, a hook's continuation), but nobody wrote
+# it. Context around the person's own request - `# In app browser:` above
+# `## My request for Codex:`, `<in-app-browser-context>` with the request
+# after it - and a paste are the person's prompt.
+CODEX_AUTOMATED = re.compile(
+    r"\s*(?:<(?!pasted_content\b)([A-Za-z_][\w-]*)(?:\s[^<>]*)?>.*</\1\s*>\s*|<system-reminder\b.*)",
+    re.DOTALL,
 )
 
 
@@ -215,7 +217,7 @@ def human_prompt(record: Dict[str, Any]) -> bool:
     """A message a person wrote that starts a turn, on either host."""
     if not runtime()._transcript_prompt(record):
         return False
-    return not (record.get("type") == "response_item" and CODEX_CONTEXT.match(prompt_text(record)))
+    return not (record.get("type") == "response_item" and CODEX_AUTOMATED.fullmatch(prompt_text(record)))
 
 
 def read_records(path: Path) -> Iterator[Dict[str, Any]]:

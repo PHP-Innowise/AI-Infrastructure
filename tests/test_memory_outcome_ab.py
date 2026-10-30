@@ -420,10 +420,17 @@ class CodexSampleTest(DemoProject):
             return {"type": "response_item", "payload": codex_message("user", words)}
 
         for words in ("# AGENTS.md instructions for /w\n\nrules", "<recommended_plugins>x</recommended_plugins>",
-                      "<hook_prompt>save</hook_prompt>", "<turn_aborted>", "# Files mentioned by the user:\n- a"):
+                      "<hook_prompt>save</hook_prompt>", "<turn_aborted>\nstopped\n</turn_aborted>",
+                      "<task-notification>\n<task-id>b1</task-id>\n</task-notification>",
+                      "<heartbeat>\n<automation_id>nightly</automation_id>\n</heartbeat>",
+                      "<system-reminder>a side session ended</system-reminder>\nnote"):
             with self.subTest(words=words[:20]):
                 self.assertFalse(ab.human_prompt(said(words)))
-        for words in ("Fix the totals", '<pasted_content id="1">log</pasted_content> why?', "# Plan\nDo it"):
+        for words in ("Fix the totals", '<pasted_content id="1">log</pasted_content> why?', "# Plan\nDo it",
+                      '<pasted_content id="2">only the log</pasted_content>',
+                      "# In app browser:\n- url: http://localhost\n\n## My request for Codex:\nFix the totals",
+                      "# Files mentioned by the user:\n\n## a.png: /w/a.png\n\n## My request:\nFix the totals",
+                      '<in-app-browser-context source="page">url</in-app-browser-context>\n\nFix the totals'):
             with self.subTest(words=words[:20]):
                 self.assertTrue(ab.human_prompt(said(words)))
 

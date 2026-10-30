@@ -674,16 +674,20 @@ None says whether delivery changes what an agent does.
   draws the same tasks. `--hosts` also decides whose sessions seed the recent
   files: each task records them as `seed_hosts`, and a task from before them
   seeds from Claude Code alone. `recall-sources` takes `--hosts` too.
-  A turn starts at what a person wrote: a message Codex itself puts in the
-  user role - its `AGENTS.md` instructions, recommended plugins, browser
-  context, notifications, a hook's continuation prompt, an aborted turn -
-  does not start one, and a paste does. Of 3,099 rollouts on the maintainer
-  machine, 2,310 began with such a message, which the runtime's own prompt
-  test lets through. Before 2026-10-07 the four client projects hold 38
-  Codex cold starts (37 with 1-10 gold files, none in an earlier sample)
-  beside 117 from Claude Code, and 242 Codex recall sources beside 105: most
-  Codex sessions there began with a read-only review. Its *gold* files are
-  those changed files. Each one must be:
+  A turn starts at what a person wrote. The runtime's prompt test leaves out
+  the context Codex adds in the user role - its `AGENTS.md` instructions,
+  recommended plugins, a skill's text, a hook's continuation prompt, an
+  aborted turn; of 3,099 rollouts on the maintainer machine, 2,310 began
+  with such a message. The stand also leaves out a turn Codex starts by
+  itself: a notification, a heartbeat, a CI event, each a message that is
+  wholly one envelope. Context around the person's request - `# In app
+  browser:` or `# Files mentioned by the user:` above `## My request`,
+  `<in-app-browser-context>` with the request after it - and a paste are the
+  person's prompt. Before 2026-10-07 the four client projects hold 38 Codex
+  cold starts (all with 1-10 gold files, none in an earlier sample) beside
+  117 from Claude Code, and 268 Codex recall sources beside 105: most Codex
+  sessions there began with a read-only review. Its *gold* files are those
+  changed files. Each one must be:
   - a path the project's Git has known;
   - kept by the runtime's recent-files filter;
   - not part of the memory system itself.

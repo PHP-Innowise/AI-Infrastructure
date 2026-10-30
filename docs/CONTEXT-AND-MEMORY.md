@@ -1941,8 +1941,13 @@ argument (`rg "a|b" x.php`), a redirection names its file however it is
 written, `cd` and `git -C` move the words after them, a here-document's body
 is data, and Codex's PowerShell and cmd commands on native Windows are read
 too. The turn starts at the last user message that is not a local command's
-output - a prompt, a slash command, pasted text or a task notification. A task
-file the line leaves out is counted in the compaction line. The transcript is
+output - a prompt, a slash command, pasted text or a task notification. A Codex
+turn starts at the rollout's own `task_started`, so a message the person sends
+while it runs joins it; where the window holds none, at the last user message
+that is not context Codex adds itself - its `AGENTS.md` instructions and
+recommended plugins, a skill's text, a Stop hook's continuation, a subagent's
+report, the answer to its question. A task file the line leaves out is counted
+in the compaction line. The transcript is
 read after the turn is recorded, for a second at most; each checkout of an
 attached project keeps its own list; and excerpt growth leaves the line its
 720 characters.

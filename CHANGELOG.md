@@ -28,6 +28,33 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A Codex turn begins where its rollout says, not at Codex's own context — 2026-10-30
+
+- The Stop hook keeps the files of the transcript's latest turn, which began
+  after the last user message the runtime took for a prompt. Codex also
+  writes its own context in the user role - its `AGENTS.md` instructions and
+  recommended plugins, an app page, a skill's text, a Stop hook's
+  continuation, a subagent's report, the answer to its question, a stopped
+  turn's note - and each was taken for a prompt: on the 3,099 rollouts of
+  the maintainer machine, 229 of 6,298 Codex turns with calls lost the calls
+  made before one, 5,307 of 131,774. `_transcript_prompt` now leaves out a
+  message that is wholly such context (the instructions, or one of those
+  envelopes). Context around the person's own request (`# In app browser:`
+  or `# Files mentioned by the user:` above `## My request`,
+  `<in-app-browser-context>` with the request after it) and a turn Codex
+  starts itself (a notification, a heartbeat) still start a turn.
+- A Codex turn begins at the rollout's own `task_started`: the 29 turns the
+  prompt rule alone still cut were a message the person sent while the turn
+  ran, which Codex adds to that turn. Without the event in the window
+  (Claude Code, a turn longer than the window) the turn begins at its prompt
+  as before.
+- `scripts/memory_outcome_ab.py` had its own test for a Codex prompt, which
+  also dropped context around the person's request: 484 such prompts on the
+  maintainer machine. It now takes the runtime's and leaves out only a turn
+  Codex starts itself. Before 2026-10-07 the four clients give 268 Codex
+  recall sources (242 before) and still 38 Codex cold starts, 6 of them
+  different: the old test had passed over the session's first prompt.
+
 ### The evaluation tools read Codex's compressed rollouts and draw Codex tasks — 2026-10-30
 
 - Codex keeps a finished rollout as `rollout-*.jsonl.zst`: 3,040 of the
