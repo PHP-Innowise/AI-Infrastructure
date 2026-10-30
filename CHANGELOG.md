@@ -28,6 +28,23 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A save the Memory MCP refuses names its code — 2026-10-30
+
+- Why: the Memory MCP answers a refused tool call with fixed text and,
+  as its comment says, with the typed code, the one thing an agent can act
+  on and never the submitted content. It found the code only when the error
+  message was itself a code. A refused save carries its code apart from
+  the message (`ResultRefused.code`), so every refusal of
+  `memory_record_result` read "Memory operation failed" with no reason. A
+  progress too long, a pasted log, a missing source and half a character all
+  looked the same. Found by calling the installed server with refused saves.
+- What changes: the server takes the code through `refusal_code`, as the
+  native save's journal does. The answer names it, for example
+  `(text_limit)`, and still never the submitted text.
+- Tests: `tests/test_memory_mcp.py` makes three refused saves and finds
+  each code, without the submitted text, in the answer. Before, none of
+  the three named its code.
+
 ### A bisect keeps the branch it started from as the task — 2026-10-30
 
 - Why: a bisect tests commits on a detached HEAD. A detached HEAD names no

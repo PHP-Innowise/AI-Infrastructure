@@ -12,7 +12,7 @@ import sys
 
 from brain_runtime import (BrainError, BrainRecordNotFound, create_task, get_record, get_task, guard_shared_text,
     load_config, mutation_lock, validate_actor)
-from memory_results import check_source, record_result
+from memory_results import check_source, record_result, refusal_code
 import workspace_roots
 
 VERSION = '2025-06-18'
@@ -273,10 +273,15 @@ def serve(memory, incoming=sys.stdin.buffer, outgoing=sys.stdout):
                 except (BrainError, ValueError, RecursionError, OSError, subprocess.SubprocessError) as error:
                     # Error text is never the submitted content or a runtime
                     # traceback. A typed result code is fixed vocabulary, and
-                    # it is the one thing an agent can act on.
-                    code = re.fullmatch(r'memory-result-v1:([a-z_]{1,64})', str(error)) if isinstance(error, BrainError) else None
-                    name = code.group(1) if code else next((named for opening, named in NAMED_REFUSALS
-                        if isinstance(error, BrainError) and str(error).startswith(opening)), None)
+                    # it is the one thing an agent can act on. A refused
+                    # save carries it apart from its message, which alone was
+                    # matched: every refusal read "Memory operation failed"
+                    # with no reason - too long, a pasted log, a missing
+                    # source, half a character.
+                    code = refusal_code(error) if isinstance(error, BrainError) else ''
+                    name = (code.split(':', 1)[1] if code and not code.endswith(':unclassified')
+                            else next((named for opening, named in NAMED_REFUSALS
+                                       if isinstance(error, BrainError) and str(error).startswith(opening)), None))
                     result = {'content': [{'type': 'text', 'text': 'Memory operation failed'
                         + (f' ({name})' if name else '')
                         + '. Check arguments, source paths, the current task revision and runtime health. Repeating an interrupted save with the same result_id finishes it without duplicates. Exact completed replay leaves later edits untouched; a new write needs the current task revision, and a learning correction may name the learning\'s current revision as expected_revision.'}], 'isError': True}

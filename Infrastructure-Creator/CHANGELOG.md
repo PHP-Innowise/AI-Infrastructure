@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded Memory MCP names the code of a save it refuses — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `mcp_server.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### hook-forge: a generated project's memory hooks follow a bisect — 2026-10-30
 
 - The canonical `rebased_branch()` in `hook-forge` also reads

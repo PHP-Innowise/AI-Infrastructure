@@ -229,6 +229,20 @@ class MemoryMcpTests(unittest.TestCase):
             self.assertFalse(reply['isError'], reply)
         self.assertEqual('Check cobalt allocation', self.cli_call('get', '--task-id', 'TASK-MCP')['goal'])
 
+    def test_a_refused_save_names_its_code(self):
+        # A refused save carries its code apart from its message: the agent
+        # read "Memory operation failed" with no reason for every refusal.
+        revision = self.start()
+        for progress, code in (('x' * 1001, 'text_limit'), ('stderr: the dispatcher failed', 'raw_text'),
+                               ('Cut \ud83d in two', 'text_unicode')):
+            with self.subTest(code=code):
+                reply = self.call('memory_record_result', **{**self.draft(revision), 'progress': progress,
+                                                             'learnings': []})
+                self.assertTrue(reply['isError'], reply)
+                self.assertIn(f'({code})', reply['content'][0]['text'])
+                # The code, never the submitted text.
+                self.assertNotIn(progress[:12], json.dumps(reply, ensure_ascii=False))
+
     def test_a_result_whose_progress_is_not_text_is_refused_before_anything_is_written(self):
         # The schema says progress is text; null was read as "leave the task
         # alone" and recorded the learnings with it.
