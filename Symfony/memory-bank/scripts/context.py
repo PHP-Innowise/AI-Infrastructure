@@ -3065,7 +3065,12 @@ def governed_binding(connection: sqlite3.Connection, task_id: str) -> sqlite3.Ro
         (task_id, task_id),
     ).fetchone()
     if row is None:
-        raise ContextError(f"Working task not found: {task_id}")
+        # The most frequent refusal agents met (35 of 383 calls in one
+        # client's September): say how a task comes to be bound here.
+        raise ContextError(
+            f"Working task not found: {task_id}; start records it (so does the first checkpoint), "
+            f"and rebind --task-id {task_id} binds one recorded on another machine"
+        )
     return row
 
 
@@ -5754,8 +5759,16 @@ def create_governed_task(
             # archives it - automatic compaction waits for five finished
             # records - and a new task for the same branch was refused. That
             # finished record, and no other, is archived now.
-            if "already exists" not in str(error) or not _finished_records_only(repository, task_id):
+            if "already exists" not in str(error):
                 raise
+            if not _finished_records_only(repository, task_id):
+                # The task under way: agents ran start at the top of every
+                # session (15 times in one client's September), and the
+                # refusal said nothing of what to run instead.
+                raise BrainError(
+                    f"{error}; it is the task under way: context.py get --task-id {task_id} reads it, "
+                    f"and update --task-id {task_id} --revision auto records progress"
+                ) from error
             compact(repository, only_external_id=task_id)
             task = create_task(repository, task_id, goal, files, sources, owner=owner)
         try:
@@ -9053,7 +9066,12 @@ def build_parser() -> argparse.ArgumentParser:
     status = commands.add_parser("status", help="show local context index counts")
     status.add_argument("--json", action="store_true")
 
-    validate = commands.add_parser("validate", help="validate active and archived Brain records")
+    # Agents reach for brain-validate beside brain-create, brain-update and
+    # brain-get: 9 of the 383 context.py calls Codex made in one client
+    # project in September 2026. _command reads it as validate.
+    validate = commands.add_parser(
+        "validate", aliases=["brain-validate"], help="validate active and archived Brain records"
+    )
     validate.add_argument("--json", action="store_true")
 
     parity = commands.add_parser(
@@ -9289,6 +9307,8 @@ def main() -> int:
 def _command() -> int:
     utf8_output()
     arguments = build_parser().parse_args()
+    if arguments.command == "brain-validate":
+        arguments.command = "validate"
     if arguments.project is not None:
         workspace_roots.serve_from(str(arguments.project))
     _branch_task_identity(arguments)
@@ -9689,9 +9709,12 @@ def _command() -> int:
                     result = {"episode_id": episode_id}
                 else:
                     if arguments.revision in (None, AUTO_REVISION):
+                        # Ending a task pins the revision a person or agent
+                        # read; agents passed `auto` (5 times in one client's
+                        # September), so say where the number is.
                         raise ContextError(
                             "Governed completion requires the current numeric "
-                            "--revision"
+                            f"--revision; context.py get --task-id {arguments.task_id} shows it"
                         )
                     result = complete_governed_task(
                         connection,

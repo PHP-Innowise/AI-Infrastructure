@@ -28,6 +28,24 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The CLI answers the refusals agents met most — 2026-10-30
+
+- In the September 2026 sessions of the four client projects Codex ran
+  `context.py` 383 times; 79 of the calls failed on five refusals. Nine called
+  `brain-validate`, beside `brain-create`, `brain-update` and `brain-get`:
+  it is now an alias of `validate`. Fifteen passed an evidence level as a
+  status (`brain-update --transition verified`, or `observed`): the refusal
+  now says it is an evidence level and how it is set (`--authority
+  verified`; a record starts observed). Five passed
+  `complete --revision auto`; completion still pins the revision the caller
+  read, and the refusal now says `context.py get --task-id ID` shows it.
+  Fifteen ran `start` for the task already under way (the runtime of then
+  refused a retrieve before it); the refusal now names `get` to read it and
+  `update --revision auto` to record progress. Thirty-five met "Working task
+  not found" for a task not bound on that machine; it now says `start` (or
+  the first checkpoint) records one and `rebind` binds one recorded
+  elsewhere.
+
 ### A verified record's citation that was never digested stays so — 2026-10-30
 
 - The fingerprint rule of the same day ("a verified record keeps the versions

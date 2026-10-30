@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime's CLI answers the common refusals — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `brain_runtime.py` change in the asset (`brain-validate`, the hint for an
+  evidence level passed as a status, where completion's revision is, what
+  to run instead of a second start, and how a missing task gets bound);
+  the policy lock was rewritten.
+
 ### The seeded runtime leaves an undigested citation undigested — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`

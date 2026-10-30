@@ -2237,9 +2237,17 @@ def update_record(
                 record["status"], set()
             )
             if transition_to not in allowed:
+                # Agents pass an evidence level for a status: 15 of the 383
+                # context.py calls Codex made in one client project in
+                # September 2026 were `--transition verified` or `observed`.
+                hint = ""
+                if transition_to in AUTHORITIES:
+                    hint = f"; {transition_to} is an evidence level, not a {record['type']} status: " + (
+                        "set it with brain-update --authority verified" if transition_to == "verified"
+                        else "a record starts observed, and only brain-update --authority verified changes it")
                 raise BrainError(
                     f"Illegal {record['type']} transition: "
-                    f"{record['status']} -> {transition_to}"
+                    f"{record['status']} -> {transition_to}{hint}"
                 )
             timestamp = utc_now()
             record["transitions"].append(

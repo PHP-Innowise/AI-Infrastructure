@@ -3092,6 +3092,51 @@ class CheckedFingerprintTest(RuntimeHarness):
         self.assertNotIn(current, chunks)
 
 
+class AgentCliSlipTest(RuntimeHarness):
+    """The two slips agents made most in a client project's September
+    sessions are answered: brain-validate is validate, and an evidence level
+    passed as a status says how to set it."""
+
+    def test_brain_validate_is_validate(self) -> None:
+        self.start("TASK-SLIP")
+        plain = self.run_cli("validate", "--json")
+        aliased = self.run_cli("brain-validate", "--json")
+        self.assertEqual((plain.returncode, plain.stdout), (aliased.returncode, aliased.stdout))
+
+    def test_an_evidence_level_passed_as_a_status_says_how_to_set_it(self) -> None:
+        created = json.loads(self.run_cli("brain-create", "finding", "--external-id", "FIND-SLIP", "--title",
+                                          "Cobalt guard", "--source", "specs/authority.md", "--json").stdout)
+        for level, how in (("verified", "set it with brain-update --authority verified"),
+                           ("observed", "a record starts observed, and only brain-update --authority verified "
+                                        "changes it")):
+            with self.subTest(level=level):
+                refused = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                                       "--transition", level, "--json")
+                self.assertNotEqual(0, refused.returncode)
+                self.assertIn(f"Illegal finding transition: open -> {level}; {level} is an evidence level, "
+                              f"not a finding status: {how}", refused.stderr)
+        # A task not bound here says how one comes to be.
+        unknown = self.run_cli("get", "--task-id", "TASK-SLIP-NONE", "--json")
+        self.assertNotEqual(0, unknown.returncode)
+        self.assertIn("Working task not found: TASK-SLIP-NONE; start records it", unknown.stderr)
+        self.assertIn("rebind --task-id TASK-SLIP-NONE", unknown.stderr)
+        # A second start of the task under way says what to run instead.
+        self.start("TASK-SLIP-DONE")
+        again = self.run_cli("start", "--task-id", "TASK-SLIP-DONE", "--goal", "Apply the cobalt rule.", "--json")
+        self.assertNotEqual(0, again.returncode)
+        self.assertIn("it is the task under way: context.py get --task-id TASK-SLIP-DONE reads it", again.stderr)
+        # Completion pins a revision the caller read, and says where it is.
+        pinned = self.run_cli("complete", "--task-id", "TASK-SLIP-DONE", "--revision", "auto",
+                              "--outcome", "success", "--summary", "Done.")
+        self.assertNotEqual(0, pinned.returncode)
+        self.assertIn("context.py get --task-id TASK-SLIP-DONE shows it", pinned.stderr)
+        # A status the lifecycle does not allow says nothing more.
+        refused = self.run_cli("brain-update", "--record-id", created["id"], "--revision", "auto",
+                               "--transition", "accepted", "--json")
+        self.assertIn("Illegal finding transition: open -> accepted", refused.stderr)
+        self.assertNotIn("evidence level", refused.stderr)
+
+
 class ConsolidationPipelineTest(RuntimeHarness):
     """The pipeline had no producers, so its emptiness was unreportable."""
 
