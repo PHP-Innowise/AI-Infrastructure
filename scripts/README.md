@@ -884,6 +884,14 @@ only once their hashes are approved, and turns a Stop hook's block into a
 `<hook_prompt>` item of the same turn. The save after every answer depends on
 both, and on Codex's sandbox letting the save write the project.
 
+Every run checks the policy reached the model as the Claude Code bench does:
+every line of the project's `AGENTS.md` (the clone's, in the developer
+instructions, with `--attached`) in what Codex sent, none of it in a
+truncated hook output. Codex reads at most `project_doc_max_bytes` of the
+project's `AGENTS.md` files, 32 KiB by default, and the bench's Codex home
+leaves it there: a project whose own notes push the policy block past it
+fails, and the report's `policy_bytes` says by how much.
+
 The stand-in serves the Responses API. It follows the save step as written,
 reading XML entities as a model does. It answers through `exec_command`, or
 through code mode's `exec` script when Codex sends no tool list, as it does

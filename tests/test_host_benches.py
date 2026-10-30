@@ -146,6 +146,17 @@ class PolicyHeardTest(unittest.TestCase):
                      "system": ""}]
         self.assertFalse(claude_code_bench.policy_heard(self.POLICY, overflow))
 
+    def test_codex_reads_the_policy_up_to_its_byte_limit_and_names_its_own_overflow(self) -> None:
+        # Codex reads at most project_doc_max_bytes of AGENTS.md: a policy
+        # block past it never arrives, whatever came before it did.
+        cut = [{"since": ["# AGENTS.md instructions for /p\n<INSTRUCTIONS>\n"
+                          + self.POLICY[:self.POLICY.index("- MUST NOT")]], "system": "Codex base instructions"}]
+        self.assertFalse(claude_code_bench.policy_heard(self.POLICY, cut, overflow="Warning: truncated output"))
+        whole = [{"since": [self.POLICY], "system": ""}]
+        self.assertTrue(claude_code_bench.policy_heard(self.POLICY, whole, overflow="Warning: truncated output"))
+        noted = [{"since": [self.POLICY + "\nWarning: truncated output (original token count: 9000)"], "system": ""}]
+        self.assertFalse(claude_code_bench.policy_heard(self.POLICY, noted, overflow="Warning: truncated output"))
+
     def test_html_comments_claude_code_drops_are_not_asked_for(self) -> None:
         managed = ("## Team notes\n\n<!-- BEGIN ACCELERATOR MANAGED POLICY -->\n" + self.POLICY
                    + "<!-- END ACCELERATOR MANAGED POLICY -->\n")

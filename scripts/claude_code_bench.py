@@ -458,16 +458,17 @@ def permission_run(args: argparse.Namespace, work: Path, project: Path, env: Dic
     return 0 if report["ok"] else 1
 
 
-def policy_heard(policy: str, requests: List[Dict[str, Any]]) -> bool:
+def policy_heard(policy: str, requests: List[Dict[str, Any]], overflow: str = "Output too large") -> bool:
     """Every line of the policy reached the model - in the conversation, or in
     the system prompt where a lent edition appends it - and none of it went to
-    a file Claude Code keeps an over-long hook output in. HTML comments, such
-    as the markers around a project's managed policy block, are left out:
-    Claude Code drops them from the instructions it loads."""
+    a file the host keeps an over-long hook output in (`overflow`, the note it
+    leaves). HTML comments, such as the markers around a project's managed
+    policy block, are left out: Claude Code drops them from the instructions
+    it loads."""
     heard = "\n".join([text for request in requests for text in request["since"]]
                       + [request.get("system", "") for request in requests])
     lines = re.sub(r"<!--.*?-->", "", policy, flags=re.S).splitlines()
-    return all(line in heard for line in lines if line.strip()) and "Output too large" not in heard
+    return all(line in heard for line in lines if line.strip()) and overflow not in heard
 
 
 def policy_files(requests: List[Dict[str, Any]]) -> List[str]:
