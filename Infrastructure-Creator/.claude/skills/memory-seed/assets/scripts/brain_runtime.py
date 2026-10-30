@@ -2467,6 +2467,12 @@ def read_messages(
         try:
             record = json.loads(line)
         except json.JSONDecodeError as error:
+            # Two clones that both appended to a task's channel conflict at its
+            # end on pull; "corrupt" sent the reader looking for damage.
+            if line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")):
+                raise BrainError(
+                    f"Unresolved Git merge conflict in message journal line {number}: {path}"
+                ) from error
             raise BrainError(
                 f"Corrupt message journal line {number}: {path}"
             ) from error

@@ -28,7 +28,7 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
-### An index or a chunk left in a merge conflict says so — 2026-10-30
+### An index, a chunk or a channel left in a merge conflict says so — 2026-10-30
 
 - Why: every promotion rewrites the generated `memory-bank/INDEX.md`, so two
   clones of a branch that both promoted leave it in a merge conflict on pull.
@@ -43,10 +43,16 @@ edition's own files remain in that edition's changelog.
   frontmatter; it read as "frontmatter is not valid JSON-compatible YAML".
   It now says it holds an unresolved merge conflict, to keep one side or
   merge both.
+- A task's agent channel (`project-brain/control/messages/<task>.jsonl`),
+  which two clones both appended to, conflicts at its end; `msg-read` and
+  `msg-dispatch` called it "corrupt". They now say the line holds an
+  unresolved merge conflict. The subagent gate's write lock never depended
+  on it: the dispatch hook releases the lock before it journals.
 - Tests: `memory-bank/tests/test_validate.py` conflicts an index row (one
   error naming the conflict and `reindex-bank`; before, two that did not)
   and a chunk's `last_verified` (the error names the conflict; before, the
-  JSON parser's position).
+  JSON parser's position); `memory-bank/tests/test_channel.py` conflicts a
+  channel's last line (before: "corrupt").
 
 ### A learning's citation is kept as the file is spelled — 2026-10-30
 

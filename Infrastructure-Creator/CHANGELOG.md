@@ -4,10 +4,10 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
-### The seeded validator names an index or a chunk left in a merge conflict — 2026-10-30
+### The seeded runtime names an index, a chunk or a channel left in a merge conflict — 2026-10-30
 
-- As the editions' does (root `CHANGELOG.md`, same day): `validate.py`
-  changes in the asset; the policy lock was rewritten.
+- As the editions' does (root `CHANGELOG.md`, same day): `validate.py` and
+  `brain_runtime.py` change in the asset; the policy lock was rewritten.
 
 ### The seeded runtime keeps a citation as the file is spelled — 2026-10-30
 

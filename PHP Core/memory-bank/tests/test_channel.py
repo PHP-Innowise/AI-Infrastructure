@@ -241,6 +241,19 @@ class ChannelTest(unittest.TestCase):
         self.assertNotEqual(0, broken.returncode)
         self.assertIn("seq must increase", broken.stdout + broken.stderr)
 
+    def test_a_journal_left_in_a_merge_conflict_says_so(self) -> None:
+        # Two clones that both appended to the task's channel conflict at its
+        # end on pull; the reader called the journal corrupt.
+        self.assertEqual(0, self.send().returncode)
+        self.assertEqual(0, self.send(**{"--body": "Second finding in src/Repo.php"}).returncode)
+        path = self.journal_path()
+        first, second = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        path.write_text(first + "<<<<<<< HEAD\n" + second + "=======\n"
+                        + second.replace("Second", "Other") + ">>>>>>> 1234567 (theirs)\n", encoding="utf-8")
+        result = self.run_cli("msg-read", "--task-id", "task-1", "--json")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("Unresolved Git merge conflict in message journal line 2", result.stderr)
+
     def test_validate_rejects_foreign_journal_name(self) -> None:
         messages = self.repository / "project-brain" / "control" / "messages"
         messages.mkdir(parents=True, exist_ok=True)
