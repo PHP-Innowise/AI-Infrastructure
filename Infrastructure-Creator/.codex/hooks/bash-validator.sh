@@ -103,11 +103,16 @@ if [ -z "$cmd" ]; then
 fi
 
 # >>> bash-validator generic section >>>
-# Everything from this marker to the closing one is byte-identical in the
-# Laravel, Symfony, PHP Core and WordPress editions and in
-# Infrastructure-Creator (tests/test_bash_validator_corpus.py fails on any
-# drift): edit it in one copy, then paste the block into the other four.
-# Framework rules live below the closing marker, in BV_FRAMEWORK_RULES.
+# Everything from this marker to the closing one is maintained in
+# github.com/PHP-Innowise/AI-Infrastructure: a change is made in the
+# .claude/hooks/bash-validator.sh of one of its Laravel, Symfony, PHP Core
+# and WordPress editions or of Infrastructure-Creator and pasted into the
+# other four, and Infrastructure-Creator copies the block into every project
+# it generates. Every copy is held to it byte for byte - the five and their
+# .cursor and .codex mirrors by tests/test_bash_validator_corpus.py in that
+# repository, a generated project's copies by Infrastructure-Creator's
+# bootstrap-verifier on each generation and update - so framework rules and a
+# project's own rules go below the closing marker, in BV_FRAMEWORK_RULES.
 #
 # The command is parsed once, in pure bash and without a fork per rule, into
 # the simple commands the shell would run:

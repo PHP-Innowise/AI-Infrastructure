@@ -28,6 +28,61 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Generated projects keep their own bash-validator rules on update: the generator's skill-body ceiling — 2026-10-29
+
+- `scripts/token_budget.json` raises Infrastructure-Creator's `body_bytes`
+  from 306100 to 308100 (308063 now) and no further: `infra-update` step 6
+  now offers a team-edited `bash-validator.sh` whose marked blocks are out
+  of date only take staged or a section merge, written by a new
+  `bootstrap-verifier` helper, instead of a keep that failed step 10 and
+  rolled the update back (`Infrastructure-Creator/CHANGELOG.md`, same day).
+
+### Generated projects get the editions' repetition guard: the generator's skill-body ceiling — 2026-10-29
+
+- `scripts/token_budget.json` raises Infrastructure-Creator's `body_bytes`
+  from 303500 to 306100 (305989 now) and no further: `hook-forge` steps 2
+  and 5 now give a generated project's `bash-validator.sh` the four
+  editions' command repetition guard and its `loop-detection.sh` the
+  `edit-*` counters the guard starts a count over on, and
+  `bootstrap-verifier` checks both (`Infrastructure-Creator/CHANGELOG.md`,
+  same day).
+- The generator copies the guard from
+  `Infrastructure-Creator/.agents/skills/hook-forge/assets/bash-validator-repetition-guard.sh`,
+  so a fix to the editions' guard no longer reaches generated projects by
+  itself. `tests/test_bash_validator_corpus.py` compares the guard's code in
+  the four editions' `.claude` validators with the asset's - `$COMMAND`,
+  `$INPUT` and the `claude-` directory prefix read as the generated copy
+  names them, messages and the asset's Cursor branch left out, as they
+  differ on purpose - and names the asset when they part.
+
+### bash-validator: the generic section's opening comment is true in a generated project — 2026-10-29
+
+- The comment that opens the generic section said the block is
+  byte-identical in the four editions and Infrastructure-Creator, that
+  `tests/test_bash_validator_corpus.py` fails on any drift, and to edit it
+  in one copy and paste the block into the other four. Since `hook-forge`
+  copies the section byte for byte into every project Infrastructure-Creator
+  generates (`Infrastructure-Creator/CHANGELOG.md`, same day), the comment
+  ships there too, where neither the test nor the other four copies exist.
+- It now says where the section is maintained
+  (`github.com/PHP-Innowise/AI-Infrastructure`, the five
+  `.claude/hooks/bash-validator.sh`, a change made in one and pasted into
+  the other four), that every copy is held to it byte for byte (the five and
+  their mirrors by the corpus test, a generated project's copies by
+  `bootstrap-verifier` on each generation and update), and that framework
+  rules and a project's own rules go below the closing marker, in
+  `BV_FRAMEWORK_RULES`. Comment lines only, in all five copies and their
+  `.cursor`/`.codex` mirrors; no parser or rule line changes.
+
+### Generated projects get the shared bash-validator parser: the generator's skill-body ceiling — 2026-10-29
+
+- `scripts/token_budget.json` raises Infrastructure-Creator's `body_bytes`
+  from 299600 to 303500 (303404 now) and no further: `hook-forge` step 2
+  now builds a generated project's `bash-validator.sh` around the generic
+  section above, copied from the generator's own validator, and
+  `bootstrap-verifier` holds every generated copy to it byte for byte
+  (`Infrastructure-Creator/CHANGELOG.md`, same day).
+
 ### bash-validator: substitutions in `${...}`, `$((...))` and backquotes, and a time limit — 2026-10-29
 
 - Why: the parser skipped the inside of `${...}` up to the first `}` and of

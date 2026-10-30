@@ -18,6 +18,7 @@
 .claude/skills/bootstrap-verifier/SKILL.md -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/analyze_commands.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/infra_ownership.py -diff linguist-generated=true
+.claude/skills/bootstrap-verifier/scripts/merge_bash_validator.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/merge_gitignore.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/publish_staging.py -diff linguist-generated=true
 .claude/skills/bootstrap-verifier/scripts/validate_content_review.py -diff linguist-generated=true
@@ -35,6 +36,7 @@
 .claude/skills/conventions-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/domain-behavior-scanner/SKILL.md -diff linguist-generated=true
 .claude/skills/hook-forge/SKILL.md -diff linguist-generated=true
+.claude/skills/hook-forge/assets/bash-validator-repetition-guard.sh -diff linguist-generated=true
 .claude/skills/infra-build/SKILL.md -diff linguist-generated=true
 .claude/skills/infra-generate/SKILL.md -diff linguist-generated=true
 .claude/skills/infra-ops-scanner/SKILL.md -diff linguist-generated=true
@@ -166,6 +168,7 @@
 .cursor/skills/bootstrap-verifier/SKILL.md -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/analyze_commands.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/infra_ownership.py -diff linguist-generated=true
+.cursor/skills/bootstrap-verifier/scripts/merge_bash_validator.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/merge_gitignore.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/publish_staging.py -diff linguist-generated=true
 .cursor/skills/bootstrap-verifier/scripts/validate_content_review.py -diff linguist-generated=true
@@ -183,6 +186,7 @@
 .cursor/skills/conventions-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/domain-behavior-scanner/SKILL.md -diff linguist-generated=true
 .cursor/skills/hook-forge/SKILL.md -diff linguist-generated=true
+.cursor/skills/hook-forge/assets/bash-validator-repetition-guard.sh -diff linguist-generated=true
 .cursor/skills/infra-build/SKILL.md -diff linguist-generated=true
 .cursor/skills/infra-generate/SKILL.md -diff linguist-generated=true
 .cursor/skills/infra-ops-scanner/SKILL.md -diff linguist-generated=true

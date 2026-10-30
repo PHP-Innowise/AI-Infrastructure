@@ -398,5 +398,62 @@ class GenericSectionTest(unittest.TestCase):
                 self.assertIn("BV_CONSOLE_ENTRIES=", tail)
 
 
+# Infrastructure-Creator does not run the editions' repetition guard itself:
+# hook-forge copies it into every validator it generates from this asset.
+GENERATED_GUARD = (
+    REPO_ROOT / "Infrastructure-Creator/.agents/skills/hook-forge/assets"
+    / "bash-validator-repetition-guard.sh"
+)
+GUARD_START = "# >>> bash-validator repetition guard >>>"
+GUARD_END = "# <<< bash-validator repetition guard <<<"
+
+
+def guard_logic(text: str) -> list[str]:
+    """A repetition guard's code lines, without its messages.
+
+    The messages differ on purpose: a generated project may have no
+    /debugger to point at. So does the Cursor warning channel, a branch on
+    BV_HOST in the generated guard and a mirror rule in the editions.
+    """
+    cursor_branch = (
+        '  if [ "$BV_HOST" = cursor ]; then',
+        "    printf '%s\\n' \"$BV_WARNING\" >&2",
+        "    exit 1",
+        "  fi",
+    )
+    return [
+        line
+        for line in text.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and not re.match(r"\s*(printf '(\[bash-validator\] )?BLOCKED|printf '   |BV_WARNING=)", line)
+        and line not in cursor_branch
+    ]
+
+
+class RepetitionGuardTest(unittest.TestCase):
+    def test_the_generated_guard_runs_the_editions_guard(self) -> None:
+        asset = GENERATED_GUARD.read_text(encoding="utf-8")
+        self.assertEqual((asset.count(GUARD_START), asset.count(GUARD_END)), (1, 1))
+        generated = guard_logic(asset[asset.index(GUARD_START) : asset.index(GUARD_END)])
+        for edition in ("Laravel", "Symfony", "PHP Core", "Cms/wordpress"):
+            text = (REPO_ROOT / edition / ".claude/hooks/bash-validator.sh").read_text(encoding="utf-8")
+            guard = text[text.index("\nBV_POLL_QUERY=") + 1 : text.rindex("\nexit 0")]
+            # The generated copy reads the generator's payload decoding,
+            # and its host from BV_HOST.
+            guard = (
+                guard.replace('"$COMMAND"', '"$cmd"')
+                .replace('"$INPUT"', '"$input"')
+                .replace("/claude-loop-detection-", "/$BV_HOST-loop-detection-")
+            )
+            with self.subTest(edition=edition):
+                self.assertEqual(
+                    guard_logic(guard),
+                    generated,
+                    "carry the change to the editions' repetition guard into "
+                    f"{GENERATED_GUARD.relative_to(REPO_ROOT)}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

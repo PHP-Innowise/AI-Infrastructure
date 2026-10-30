@@ -4,6 +4,286 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### infra-update keeps a generated project's own bash-validator rules — 2026-10-29
+
+- Why: a generated project that adds its own rule to `bash-validator.sh`
+  below the generic section's closing marker - in `BV_FRAMEWORK_RULES`,
+  where the section's opening comment and `hook-forge` step 2 tell it to -
+  no longer matches its `.infra-manifest.json` hash, so `infra-update`
+  step 5 asks for a decision. Keeping the target version kept the section
+  an earlier release had copied, and step 10's full bootstrap gate
+  (`validate_bash_validators`) compares the section with the current
+  generator's: whenever the section had changed since generation, the gate
+  failed and the whole update rolled back. Taking the staged version
+  dropped the team's rules; only a merge by hand worked.
+- `infra-update` step 6 gives every edition's `bash-validator.sh` the rule
+  hook wiring files already have: for a requires-decision validator it
+  offers only the choices printed by a new helper,
+  `bootstrap-verifier/scripts/merge_bash_validator.py --target <target>
+  --staging <staging> --path <hooks dir>/bash-validator.sh`. A target whose
+  section equals the staged one keeps the ordinary choices. Otherwise the
+  choices are take staged or a section merge: the target version with only
+  the bytes from `# >>> bash-validator generic section >>>` through
+  `# <<< bash-validator generic section <<<` replaced by the staged ones,
+  everything above (header, payload decoding) and below (the team's
+  settings and rules, the call) byte for byte. `--write --staged-sha256
+  <hash>` writes it over the staged file, keeping its mode, and refuses
+  when staging no longer holds the version that was checked, so the
+  `merged` decision's `rejected_sha256` is the staged version the merge was
+  built from. Left unanswered, such a file stops the run before step 9
+  instead of defaulting to keep. The output template and guardrails say
+  the same.
+- The helper's verdicts are the gate's own: it runs `validate_generated.py`'s
+  `validate_bash_validators` on the staged version, which must pass (or
+  staging is repaired through `hook-forge` first), and on the merge, and
+  offers no merge the gate would reject - no target file, no single
+  section, or the team's own code below the section failing the call check
+  (a rule expanding a list nothing assigns, under `set -u`). It reports the
+  target lines the merge replaces and whether the staged version also
+  changes the lines above the section (`above_section`), which the merge
+  keeps as the target has them.
+- `tests/test_bash_validator_merge.py`: a target whose section an earlier
+  release copied (without the `dropdb` rule) under an extra team rule
+  (`helm uninstall`) fails the gate as kept, and take staged lacks the
+  team rule; the section merge is the staged section plus the team's rule
+  byte for byte, passes the gate and, run through bash, refuses both
+  `dropdb shop`, which the kept target let through, and `helm uninstall
+  shop`. A target whose section is current stays an ordinary decision and
+  passes the gate as kept. A deleted validator, one without the markers,
+  one closing the section twice and team code the gate refuses get take
+  staged only; a staged validator failing the gate, a path that is no
+  edition's validator and a staged file behind a symlink are refused; a
+  repeated or stale `--write` changes nothing. A lifecycle test generates,
+  edits below the section, classifies (`tracked-file-modified`), merges,
+  builds the refreshed manifest with the `merged` decision, publishes,
+  passes `validate_manifest` and the gate, and on the next run with the
+  same staged output classifies the file `standing-decision-honored`. Each
+  of ten broken helpers (a no-op merge, the whole staged file, the header
+  replaced too, no gate on the merge or on staging, no sha256 check, the
+  mode lost, a section never or always current, a write on a check) fails
+  at least one test. Restacked onto the repetition guard (same day), the
+  test validators carry the guard and `BV_HOST`, as step 2 now builds them,
+  and run with a private `TMPDIR` for the guard's counters.
+- The section merge replaces every block the staged version marks, not
+  only the generic section: each block from a line `# >>> bash-validator
+  <name> >>>` through `# <<< bash-validator <name> <<<` (the repetition
+  guard step 2 copies into generated validators is one) becomes
+  the staged block of the same name, cut as the gate cuts the section, and
+  everything outside those blocks stays byte for byte, including a block
+  only the target marks. Replacing the section alone kept the target's
+  older copy of any other block, so after a change to it the merge was
+  withheld again. Keep is withheld while any block differs. A target that
+  lacks a block the staged version has (generated before the block
+  existed, or its markers removed), holds one twice or opens one inside
+  another gets take staged only, since the merge has no single place for
+  it; a staged version that holds a block twice is refused until staging is
+  repaired. The report lists each block's state (`blocks`) and the lines
+  of each block it replaces. Tests use a synthetic second block above the
+  `bv_validate` call (below its `fi` the gate allows only the guard and the
+  final `exit 0`): both blocks are replaced, a changed block alone still
+  withholds keep, a block only the target marks and a marker quoted inside
+  a line are left alone, and the generic section is cut exactly where the
+  gate cuts it. With the real guard, an older guard under a current section
+  - which the gate refuses as kept - is replaced, as is an older guard with
+  an older section, and a target generated before the guard gets take
+  staged only; these three fail against the section-only helper. Each of
+  eight broken helpers (the section only, the last block only, an absent
+  or repeated block ignored, no overlap or staged block check, keep judged
+  by the section alone, a marker matched inside a line) fails at least one
+  test.
+- The skill bodies' ceiling rises from 306100 to 308100 bytes for it
+  (308063 now); the policy lock was rewritten.
+
+### The bash-validator gate holds the hit branch to `exit 2` — 2026-10-29
+
+- Why: `validate_generated.py` took any `exit 2` after the `bv_validate`
+  call for the refusal of a command a rule matched. With the generator's
+  own hit branch changed to `exit 0` and `[ -n "${NEVER:-}" ] && exit 2`
+  added below it, the gate passed the validator, which let
+  `git push --force origin main` run with exit 0 (found in review of the
+  parser gate, same day).
+- After the call, the first `exit` must now be `exit 2` on a line of its
+  own inside `if [ -n "$BV_HIT" ]; then` (or `[[ ... ]]`), with no other
+  block opened, switched or closed between them. Quoted text is not code,
+  so a message that names `exit` is not taken for one. The error says the
+  hit branch must exit 2. All fifteen shipped copies - the four editions'
+  and the generator's, in each tool tree - keep that shape.
+- `tests/test_bash_validator_gate.py`: the review's mutant is rejected, on
+  the generator's own validator and in a built one shown to let the force
+  push run; an `exit 2` in a block after a hit branch exiting 0 or before
+  it, under a condition of its own inside it, behind `&&`, after a hit
+  branch with no exit, or in a branch taken on `-z "$BV_HIT"` is rejected;
+  a message that names `exit` and `[[ -n "$BV_HIT" ]]` pass; the fifteen
+  shipped copies pass (skipped where the editions are not beside the
+  generator). Against the previous check the new rejections fail, and
+  each part of the new one, dropped alone, fails a test.
+
+### Generated validators run the editions' command repetition guard — 2026-10-29
+
+- Why: the four editions' `bash-validator.sh` counts a command's identical
+  reruns in a session once the rules let it through, warns at the sixth and
+  refuses the twelfth: a failing command rerun forever touches no file, so
+  `loop-detection.sh` never sees that loop. A generated validator had no
+  such guard. Step 2 builds it from the generator's own validator, which
+  has none, and step 5 left the counter files of the generated
+  `loop-detection.sh` unnamed, so the editions' guard, which starts a
+  count over on those `edit-*` counters, could not simply be pasted in.
+- `hook-forge` ships the guard as `assets/bash-validator-repetition-guard.sh`,
+  and step 2 copies the block between its `bash-validator repetition guard`
+  markers byte for byte, between the `bv_validate` call's `fi` and the final
+  `exit 0`. It is the editions' guard - the status-query exemption, counters
+  per session and exact command in a private
+  `${TMPDIR:-/tmp}/<tool>-loop-detection-<uid>-<repo-key>/`, a linked or
+  foreign directory and a linked counter never trusted, counts read as
+  base-10 digits, a warning at six through `additionalContext` (Cursor:
+  stderr and exit 1), a refusal at twelve, a restart on a newer `edit-*`
+  counter - reading the copied payload decoding's `$cmd` and `$input`, and
+  naming no skill, since a generated project has the debugging skills its
+  scan supports. The hook assigns a new setting below the generic section,
+  `BV_HOST` (`claude`, `cursor` or `codex`), which names the counter
+  directory and selects Cursor's warning channel, so the block is the same
+  bytes in every edition. Step 5 has `loop-detection.sh` compute that
+  directory with the guard's own four lines and write each file's count to
+  `"$TRACK_DIR/edit-$SESSION_KEY-<hash of its path>"`, and `local-context.sh`
+  prune the session's `cmd-` counters with its `edit-` ones. The generator's
+  own validator stays without a guard: its own `loop-detection.sh` keeps no
+  edit counters to start a count over.
+- `validate_generated.py`'s `validate_bash_validators` checks, without
+  running a hook, that each edition's validator holds the guard block (each
+  marker once, the bytes of the asset's; the error names the first
+  differing line) after the `bv_validate` call, with no `exit` before it and
+  only `exit 0` after it, and that the last `BV_HOST` assigned at the start
+  of a line below the generic section is the edition; and that each
+  edition's `loop-detection.sh` holds the guard's four directory lines with
+  the host spelled out and keeps an `edit-` counter in `$TRACK_DIR`. Placed
+  before the call, the guard's exemption let `tail .env` past the generic
+  rule; with `BV_HOST` unset the hook exits 1 on every command the rules let
+  through; with the counters named otherwise, an edit-and-rerun cycle was
+  refused at its twelfth run. The call check no longer reads the guard
+  block, whose own `exit 2` would have passed for the call's. An asset that
+  cannot be read, has no block or computes no directory is an error, not a
+  skip.
+- `tests/test_repetition_guard_gate.py` (23 tests): the asset holds one
+  guard that passes `bash -n`, names its directory by `BV_HOST` and names no
+  skill, and `hook-forge` names the asset, its markers, `BV_HOST`, the four
+  directory lines and the counter name. A validator without the guard (the
+  generator's own included) is rejected; an edited threshold, a dropped
+  polling exemption and CRLF are rejected at their line, as are a missing,
+  doubled or reversed marker; a guard before the call and an `exit` before
+  the guard are rejected and shown to let `tail .env` through and to count
+  nothing; anything but `exit 0` after the guard is rejected. `BV_HOST`
+  unset is rejected and shown to exit 1; another edition's name, a computed
+  value, an assignment in a condition or a comment are rejected, quoted
+  forms pass and the last assignment counts. A `loop-detection.sh` written
+  to step 5 passes in every edition, while step 5's earlier one-liner,
+  another host's directory, the line in a comment and counters without the
+  `edit-` prefix are rejected; only selected, manifest-owned hooks are
+  opened, and an unreadable, unmarked or directory-less asset fails closed.
+  Run through bash, the built pair warns from the sixth rerun (Claude Code
+  and Codex in `additionalContext`, Cursor on stderr with exit 1), refuses
+  the twelfth, counts a changed command anew, each edition in its own
+  directory; an edit the step 5 hook records starts the count over, and
+  counters under another name do not; status queries and refused commands
+  are not counted, a status query chained with an action is; sessions keep
+  their own counts; a planted directory or a linked counter is never
+  trusted, `08` reads as 8 and a stored count is never evaluated. Each new
+  check, disabled alone, fails at least one test.
+  `tests/test_bash_validator_gate.py` builds its validators with the guard
+  and the edition's `BV_HOST`, checks the generator's own rules in a built
+  validator rather than its guardless file, and runs its hooks in the
+  target under a private `TMPDIR`, so no count reaches this checkout.
+  The root `tests/test_bash_validator_corpus.py` fails when the editions'
+  guard changes its code and the asset does not.
+- `bootstrap-verifier`'s checklist and report template, the DOD, the hooks
+  README and `stack-adapter` (a sibling generator's verbatim copy of the
+  script reads the asset from its own `hook-forge`) say the same. The skill
+  bodies' ceiling rises from 303500 to 306100 bytes (305989 now); the
+  policy lock was rewritten.
+
+### Generated projects run the generator's own bash-validator parser — 2026-10-29
+
+- Why: `hook-forge` step 2 said only "Author `bash-validator.sh` to block
+  only detected risks", so the generating agent wrote a validator from
+  scratch, and `bootstrap-verifier` checked it for presence, `bash -n`, the
+  executable bit and wiring, never for content. A generated project got none
+  of the parsing the five shipped copies share: chains, `$(...)` and
+  backquotes, heredocs, `sh -c`, `eval`, wrappers, launchers, and since
+  today `${...}`, `$((...))` and `case` patterns.
+- `hook-forge` step 2 builds the target's `bash-validator.sh` from the
+  generator's own `.claude/hooks/bash-validator.sh`: everything above the
+  generic section (the payload decoding, its header comment naming the
+  target), every byte from `# >>> bash-validator generic section >>>`
+  through `# <<< bash-validator generic section <<<`, and the call that ends
+  the file (`bv_validate "$cmd"`, the block message with `exit 2`). The
+  agent writes only what goes between: the console settings
+  (`BV_CONSOLE_ENTRIES`, `BV_CONSOLE_PHP_SCRIPTS`, `BV_CONSOLE_VALUES`,
+  `BV_CONSOLE_SHORT_VALUES`) and `BV_FRAMEWORK_RULES` - the generator's own
+  framework lines for a detected framework, and a rule per detected risk
+  (`kubectl delete`, `terraform destroy`; `has:` where global options may
+  come before the subcommand, so `kubectl -n prod delete` is caught too).
+  A framework line is copied with the helper list it expands
+  (`BV_LARAVEL_SECRET_CONFIG`, `BV_WP_SECRETS`). The evidence gate governs
+  what the agent writes; the copied section is never trimmed to the
+  profile, since each generic rule fires only on its own command, so one
+  for a tool the target lacks never fires. The skill's
+  description, overview, guardrail and output template, the `hook-forge`
+  agent's description, the README, the hooks README and the DOD say the
+  same.
+- `bootstrap-verifier`'s `validate_generated.py` runs a new
+  `validate_bash_validators` from `main()`: in each selected edition the
+  manifest-owned `bash-validator.sh` must hold each marker exactly once,
+  and the bytes from the first through the second must equal those in the
+  generator's own `.claude/hooks/bash-validator.sh`, found four levels above
+  the script; the error names the first line that differs. Below the
+  section the hook must assign `BV_CONSOLE_ENTRIES` and
+  `BV_CONSOLE_PHP_SCRIPTS` at the start of a line, assign every variable it
+  expands before that use, up to and including the `bv_validate` call, then
+  exit 2 on a hit. The hook runs under `set -u`, where an unset variable
+  ends it with exit 1, which every host treats as non-blocking: without
+  `BV_CONSOLE_ENTRIES` it exited 1 on `ls` and on `php artisan
+  migrate:fresh` alike, and a `config:show` rule copied without
+  `BV_LARAVEL_SECRET_CONFIG` exited 1 on every command, `git push --force`
+  included - all with `bash -n` passing. All fifteen shipped copies pass the
+  gate. A generator validator that cannot be read or has no section is an
+  error, not a skip. The skill
+  and its report template list the check, and `stack-adapter` says a
+  sibling generator's own validator keeps the markers, since its verbatim
+  copy of the script reads them there.
+- `tests/test_bash_validator_gate.py`: a validator built as step 2 says
+  passes in every edition and, run through bash, blocks the target's
+  `kubectl -n prod delete`, a force push, `gh repo delete` inside `${...}`
+  and in an unquoted heredoc, and SQL behind `docker compose exec ... sh -c`,
+  while `kubectl get pods` and the undetected `php artisan migrate:fresh`
+  pass; a Laravel target's two framework lines copied with their helper
+  list pass and block `php artisan mi:fr` and `config:show database`; the
+  generator's own validator passes as it is. A trimmed rule, a one-byte
+  edit, CRLF and a trailing blank are rejected at their line; a validator
+  written from scratch, a missing marker, a second section and a reversed
+  pair are rejected; an unset setting and a rule without its helper list
+  are rejected and shown to exit 1, as are a setting assigned only in a
+  condition, a comment or after the call, a helper list assigned after its
+  rule, a call on a variable nothing assigns, a call only in a comment and a
+  hit that exits 1, while `${NAME-}` and a `$` between single quotes need no
+  assignment. Only selected, manifest-owned validators are opened, an
+  unreadable or unmarked generator validator fails closed, `main()` runs the
+  gate, and `hook-forge` names the source, both markers, the call, the two
+  settings and every helper list the generator's rules expand. Each test
+  fails against a gate that does nothing, one that skips the code below the
+  section, or one that skips the comparison. The existing fixtures
+  that write a stub `bash-validator.sh` call `validate_hooks`, the wiring
+  checks or other validators directly, never `main()`, so none reaches the
+  new gate.
+- The skill bodies' ceiling rises from 299600 to 303500 bytes for it (303404
+  now); the policy lock was rewritten.
+- The comment that opens the generic section, which every generated project
+  now receives with it, is true there (root `CHANGELOG.md`, same day): it
+  says where the section is maintained, that `bootstrap-verifier` holds a
+  generated project's copies to it byte for byte on each generation and
+  update, and that framework rules and a project's own rules go below the
+  closing marker, in `BV_FRAMEWORK_RULES`. It used to tell the reader to
+  edit one copy and paste the block into the other four, and named
+  `tests/test_bash_validator_corpus.py`; a generated project has neither.
+
 ### bash-validator reads what bash runs in `${...}`, `$((...))` and backquotes — 2026-10-29
 
 - Infrastructure-Creator's own `bash-validator.sh` carries the generic
