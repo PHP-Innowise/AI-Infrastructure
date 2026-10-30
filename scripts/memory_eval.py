@@ -4469,6 +4469,147 @@ def command_field_check(arguments: argparse.Namespace) -> int:
     return 0
 
 
+# What `install-status` reads in a project: the sync's record, the runtime's
+# configuration and the profiles its code knows, and the instruction files
+# each host loads.
+INSTALL_RECORD = "memory-bank/local/accelerator-install.json"
+RUNTIME_CONFIG = "project-brain/config/runtime.json"
+PROJECT_RUNTIME = "memory-bank/scripts/brain_runtime.py"
+CLAUDE_IMPORT = "@../AGENTS.md"
+
+
+def last_record(path: Path, keep: Callable[[Dict[str, Any]], bool]) -> Optional[Dict[str, Any]]:
+    found = None
+    for record in read_records(path):
+        if keep(record):
+            found = record
+    return found
+
+
+def project_install_status(project: Path) -> Dict[str, Any]:
+    """Whether memory can run in an installed project, from its own files.
+
+    Each check is one way memory went silent in the client projects: a sync
+    from an older clone that took the runtime back (2026-10-30), a capsule
+    profile the runtime refused on every prompt, Claude Code reading a
+    project's own CLAUDE.md and no AGENTS.md (September), Codex cutting a long
+    AGENTS.md before the policy, and hook commands found only from the
+    project root (3,309 times in September). Counts, flags and fixed texts
+    only: no record text, query or path inside the project leaves it.
+    """
+    def text(relative: str) -> Optional[str]:
+        try:
+            return (project / relative).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+    def loaded(relative: str) -> Dict[str, Any]:
+        try:
+            value = json.loads(text(relative) or "")
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    record = loaded(INSTALL_RECORD)
+    commit = record.get("source_commit") if isinstance(record.get("source_commit"), str) else None
+    head = installer.source_commit(ROOT)
+    if commit is None:
+        clone = "no record of the commit it was synced from"
+    elif commit == head:
+        clone = "this clone's commit"
+    elif installer.installation_ahead(ROOT, commit):
+        clone = "not in this clone (newer, or another line of work)"
+    else:
+        clone = "behind this clone"
+    problems: List[str] = []
+    runtime = text(PROJECT_RUNTIME) or ""
+    declared = re.search(r"^CAPSULE_PROFILES = \(([^)]*)\)", runtime, re.M)
+    known = re.findall(r"[\"']([a-z-]+)[\"']", declared.group(1)) if declared else []
+    configured = loaded(RUNTIME_CONFIG).get("capsule_profile") or "full"
+    if known and configured not in known:
+        problems.append(
+            f"capsule_profile {str(configured)[:40]!r} is unknown to this project's runtime ({', '.join(known)}): "
+            + ("it delivers the full capsule instead" if "def automatic_capsule_profile" in runtime
+               else "every prompt goes without a capsule"))
+    hook = last_record(project / HEALTH_SERIES, lambda line: line.get("source") == "hook")
+    refresh = last_record(project / HEALTH_SERIES, lambda line: line.get("source") in ("refresh", "hook-context"))
+    if refresh is None:
+        capsule = None
+    elif "capsule" not in refresh:
+        capsule = "not recorded (an older runtime)"
+    else:
+        capsule = "none built" if refresh["capsule"] is None else "built"
+    if capsule == "none built":
+        problems.append("the last prompt that asked for a capsule got none")
+    save = last_record(project / NATIVE_JOURNAL, lambda line: bool(line.get("stage")))
+    own_claude = (project / "CLAUDE.md").is_file()
+    imported = CLAUDE_IMPORT in (text(".claude/CLAUDE.md") or "")
+    if own_claude and not imported and (project / ".claude").is_dir():
+        problems.append("Claude Code loads the project's own CLAUDE.md and no AGENTS.md: "
+                        f".claude/CLAUDE.md does not import it ({CLAUDE_IMPORT})")
+    cut = installer.codex_policy_cut(project) if (project / ".codex").is_dir() else None
+    if cut:
+        problems.append(cut)
+    settings = loaded(".claude/settings.json").get("hooks")
+    relative = sorted({
+        str(hook_entry.get("command")).split()[0].strip("\"'")
+        for groups in (settings.values() if isinstance(settings, dict) else [])
+        for group in (groups if isinstance(groups, list) else []) if isinstance(group, dict)
+        for hook_entry in (group.get("hooks") if isinstance(group.get("hooks"), list) else [])
+        if isinstance(hook_entry, dict) and isinstance(hook_entry.get("command"), str)
+        and re.match(r"^(?:(?:bash|sh)\s+)?\.?\.?/?\.claude/", hook_entry["command"].strip())
+    })
+    if relative:
+        problems.append(f"{len(relative)} Claude Code hook command(s) name .claude/ relative to the folder a "
+                        "session starts in: below the project root they are not found")
+    return {
+        "edition": record.get("edition"), "release": record.get("release"),
+        "source": commit[:12] if commit else None, "synced_at": record.get("synced_at"), "clone": clone,
+        "capsule_profile": configured, "profiles_known": known,
+        "last_prompt_hook": (hook or {}).get("at"), "last_capsule": capsule,
+        "last_save_step": f"{save.get('stage')}:{save.get('event')}" if save else None,
+        "last_save_at": (save or {}).get("at"),
+        "claude_policy": "own CLAUDE.md, AGENTS.md imported" if own_claude and imported
+                         else "own CLAUDE.md, no import" if own_claude else "AGENTS.md read by Claude Code itself",
+        "problems": problems,
+    }
+
+
+def format_install_status(projects: Dict[str, Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for name, status in projects.items():
+        release = " ".join(str(part) for part in (status["edition"], status["release"]) if part)
+        lines.append(f"{name} ({release or 'no install record'}; synced {status['synced_at'] or '-'} from "
+                     f"{status['source'] or '-'}: {status['clone']})")
+        known = ", ".join(status["profiles_known"]) or "-"
+        lines.append(f"  capsule profile: {status['capsule_profile']} (the runtime knows {known})")
+        lines.append(f"  last prompt hook: {status['last_prompt_hook'] or '-'}; last capsule: "
+                     f"{status['last_capsule'] or '-'}; last save step: {status['last_save_step'] or '-'}"
+                     f"{' at ' + status['last_save_at'] if status['last_save_at'] else ''}")
+        lines.append(f"  Claude Code policy: {status['claude_policy']}")
+        lines.extend(f"  problem: {problem}" for problem in status["problems"])
+        if not status["problems"]:
+            lines.append("  no problem found")
+    return "\n".join(lines)
+
+
+def command_install_status(arguments: argparse.Namespace) -> int:
+    projects: Dict[str, Dict[str, Any]] = {}
+    for given in arguments.project:
+        project = Path(given).expanduser().resolve()
+        if not project.is_dir():
+            raise EvalError(f"--project {given} is not a directory")
+        label = project.name or "project"
+        while label in projects:
+            label += "'"
+        projects[label] = project_install_status(project)
+    if arguments.json:
+        print(json.dumps({"projects": projects}, ensure_ascii=False, indent=2))
+    else:
+        print(format_install_status(projects))
+    return 1 if any(status["problems"] for status in projects.values()) else 0
+
+
 def command_funnel(arguments: argparse.Namespace) -> int:
     since: Optional[datetime] = None
     if arguments.since:
@@ -4715,6 +4856,12 @@ def build_parser() -> argparse.ArgumentParser:
     funnel.add_argument("--since", help="only journal lines from this UTC date on (YYYY-MM-DD)")
     funnel.add_argument("--json", action="store_true")
     funnel.set_defaults(handler=command_funnel)
+
+    status = commands.add_parser(
+        "install-status", help="whether memory can run in installed projects, from their own files; exit 1 on a problem")
+    status.add_argument("--project", action="append", required=True, help="a project directory; repeat for more")
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(handler=command_install_status)
     return parser
 
 

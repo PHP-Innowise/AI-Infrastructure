@@ -2879,6 +2879,92 @@ class RenderTraceTest(unittest.TestCase):
             self.assertNotIn(path, plain)
 
 
+class InstallStatusTest(unittest.TestCase):
+    """Whether memory can run in an installed project, from its own files.
+
+    Each check is a way memory went silent in the client projects."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.project = (Path(self.temporary.name) / "clients" / "ledger").resolve()
+
+    def write(self, relative: str, content: str) -> None:
+        path = self.project / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def healthy(self) -> None:
+        head = memory_eval.installer.source_commit(memory_eval.ROOT) or "0" * 40
+        self.write("memory-bank/local/accelerator-install.json", json.dumps(
+            {"edition": "Symfony", "release": "2.0.0", "source_commit": head, "synced_at": "2026-10-31T08:00:00+00:00"}))
+        self.write("project-brain/config/runtime.json", json.dumps({"capsule_profile": "recall"}))
+        self.write("memory-bank/scripts/brain_runtime.py",
+                   'CAPSULE_PROFILES = ("full", "navigation", "recall")\n\n\ndef automatic_capsule_profile():\n    pass\n')
+        self.write("CLAUDE.md", "# Ledger\n")
+        self.write(".claude/CLAUDE.md", "This project's policy lives in AGENTS.md.\n\n@../AGENTS.md\n")
+        self.write(".claude/settings.json", json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [
+            {"type": "command", "command": '"${CLAUDE_PROJECT_DIR}"/.claude/hooks/working-memory-read.sh'}]}]}}))
+        self.write("AGENTS.md", "# Policy\n")
+        jsonl(self.project / "memory-bank/local/refresh-health.ndjson", [
+            {"at": "2026-10-31T09:00:00Z", "source": "hook", "hook_status": 0},
+            {"at": "2026-10-31T09:00:01Z", "source": "refresh", "host": "claude", "capsule": {"profile": "recall"}},
+        ])
+        jsonl(self.project / "memory-bank/local/native-results.ndjson", [
+            {"at": "2026-10-31T09:01:00Z", "host": "claude", "stage": "save", "event": "saved"}])
+
+    def status(self) -> Dict[str, Any]:
+        return memory_eval.project_install_status(self.project)
+
+    def test_a_project_where_memory_runs_shows_no_problem(self) -> None:
+        self.healthy()
+        status = self.status()
+        self.assertEqual([], status["problems"])
+        self.assertEqual(("this clone's commit", "built", "save:saved"),
+                         (status["clone"], status["last_capsule"], status["last_save_step"]))
+        self.assertEqual("own CLAUDE.md, AGENTS.md imported", status["claude_policy"])
+
+    def test_a_runtime_taken_back_that_refuses_the_profile_is_named(self) -> None:
+        # The Harness's sync of 2026-10-30: main's runtime, a recall profile.
+        self.healthy()
+        self.write("memory-bank/scripts/brain_runtime.py", 'CAPSULE_PROFILES = ("full", "navigation")\n')
+        jsonl(self.project / "memory-bank/local/refresh-health.ndjson", [
+            {"at": "2026-10-31T09:00:01Z", "source": "refresh", "host": "codex", "capsule": None}])
+        with mock.patch.object(memory_eval.installer, "installation_ahead", return_value="ahead"), \
+                mock.patch.object(memory_eval.installer, "source_commit", return_value="1" * 40):
+            status = self.status()
+        self.assertEqual("not in this clone (newer, or another line of work)", status["clone"])
+        self.assertIn("capsule_profile 'recall' is unknown to this project's runtime (full, navigation): "
+                      "every prompt goes without a capsule", status["problems"])
+        self.assertIn("the last prompt that asked for a capsule got none", status["problems"])
+        with mock.patch.object(memory_eval.installer, "installation_ahead", return_value=None), \
+                mock.patch.object(memory_eval.installer, "source_commit", return_value="1" * 40):
+            self.assertEqual("behind this clone", self.status()["clone"])
+
+    def test_claude_without_the_policy_and_hooks_found_only_from_the_root_are_named(self) -> None:
+        self.healthy()
+        self.write(".claude/CLAUDE.md", "# Team notes\n")
+        self.write(".claude/settings.json", json.dumps({"hooks": {"PreToolUse": [{"hooks": [
+            {"type": "command", "command": "bash .claude/hooks/bash-validator.sh"},
+            {"type": "command", "command": ".claude/hooks/loop-detection.sh"}]}]}}))
+        problems = self.status()["problems"]
+        self.assertTrue(any("no AGENTS.md" in problem for problem in problems), problems)
+        self.assertTrue(any(problem.startswith("2 Claude Code hook command(s)") for problem in problems), problems)
+
+    def test_the_command_exits_non_zero_on_a_problem_and_prints_no_record_text(self) -> None:
+        self.healthy()
+        self.write("project-brain/dynamic/findings/f.md", "invoice rounding for ACME\n")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, memory_eval.main(["install-status", "--project", str(self.project)]))
+        self.write("memory-bank/scripts/brain_runtime.py", 'CAPSULE_PROFILES = ("full", "navigation")\n')
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            code = memory_eval.main(["install-status", "--project", str(self.project), "--json"])
+        self.assertEqual(1, code)
+        self.assertNotIn("ACME", printed.getvalue())
+        self.assertIn("ledger", json.loads(printed.getvalue())["projects"])
+
+
 class FunnelTest(unittest.TestCase):
     """The memory funnel of several projects, from their journals alone."""
 

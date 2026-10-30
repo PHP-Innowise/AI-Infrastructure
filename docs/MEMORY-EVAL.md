@@ -512,6 +512,23 @@ in total, it counts:
   chunks, counted as files. The `--since` window applies to the journals, not
   to these.
 
+`install-status` answers the question before those counts: can memory run
+in the project at all? Per `--project`, from the project's own files: the
+commit its accelerator was last synced from and whether this clone has it
+(this clone's, behind it, or not in it - newer, or another line of work);
+the configured capsule profile and the profiles the project's runtime
+knows; the last prompt hook run, whether the last capsule asked for was
+built, and the last save step; and which instructions Claude Code loads.
+Each problem is one way memory went silent in the client projects: a
+profile the runtime refuses on every prompt (2026-10-30, after a sync from
+an older clone), a last capsule not built, a project's own `CLAUDE.md`
+without the edition's import (September), an `AGENTS.md` Codex cuts before
+the policy, and Claude Code hook commands that name `.claude/` relative to
+the folder a session starts in. It exits 1 when any project has a problem,
+prints no record text, and `--json` gives the same as JSON. On the four
+clients on the night of 2026-10-31 it named the refused `recall` profile in
+each and the cut policy in one.
+
 It prints counts and fixed codes only; `--json` gives the same numbers as
 JSON. A project where the hook ran but no capsule carried a recent file, or
 where saves are requested and none is made, shows where to look next;

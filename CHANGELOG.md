@@ -28,6 +28,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### `memory_eval.py install-status`: can memory run in a project at all — 2026-10-31
+
+- Per project, from its own files: the commit its accelerator was synced
+  from and whether this clone has it, the configured capsule profile against
+  the profiles the project's runtime knows, the last prompt hook run, whether
+  the last capsule asked for was built, the last save step, and which
+  instructions Claude Code loads. Each problem is a way memory went silent
+  in the client projects - a refused profile, a capsule not built, a
+  `CLAUDE.md` without the import, an `AGENTS.md` Codex cuts, hook commands
+  found only from the project root - and the command exits 1 on any. On the
+  four clients tonight it names the refused `recall` profile in each, after
+  the Harness's sync of 2026-10-30 at 17:01, and the cut policy in one.
+
 ### `realized` no longer counts a refused capsule as a capsule turn — 2026-10-31
 
 - A prompt hook whose refresh assembled no capsule prints the refresh's layer
