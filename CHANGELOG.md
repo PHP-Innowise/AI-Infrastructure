@@ -28,6 +28,25 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The agent channel of a branch two task records claim is the one its capsule serves — 2026-10-30
+
+- Why: when two copies of a branch each start its task record and then
+  merge, the task ID names both records. The capsule, the turn checkpoint
+  and the native save already settle on one of them
+  (`served_task_record`). `msg-send`, `msg-read` and `msg-dispatch` still
+  asked for the task ID alone. In a clone without a binding (a fresh clone,
+  or one whose local index was rebuilt) they failed with "identifier is
+  ambiguous". An orchestrator could then read none of its subagents'
+  results, and the dispatch hook reported each completion lost, until a
+  person cancelled a twin. Found by a random sequence of memory commands
+  with pasted texts.
+- What changes: the channel commands take the record the capsule serves.
+  When there is none, they fall back as before to the binding, then to
+  the task ID, so a finished task's journal stays readable.
+- Tests: `project-brain/tests/test_runtime.py` sends, dispatches and reads
+  on a branch two records claim, from a clone without a binding. Before,
+  `msg-send` failed as ambiguous.
+
 ### Text holding half of a character is refused by name — 2026-10-30
 
 - Why: a JSON `\ud83d` with no partner, such as an emoji cut in two by a

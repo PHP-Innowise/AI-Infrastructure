@@ -10030,6 +10030,24 @@ class MultiMachineContinuityTest(RuntimeHarness):
         self.assertEqual(first["task_uuid"], capsule["task_uuid"])
         self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
 
+    def test_a_clone_without_a_binding_uses_the_channel_of_the_record_it_serves(self) -> None:
+        # The channel asked for the task ID alone and failed as ambiguous: an
+        # orchestrator read none of its subagents' results, and the dispatch
+        # hook reported each completion lost.
+        first = self.start("feature/shared")
+        self.twin("feature/shared")
+        self.simulate_second_machine()
+        sent = self.run_cli("msg-send", "--task-id", "feature/shared", "--from", "coder", "--to", "*",
+                            "--type", "finding", "--body", "Cobalt authority checked.", "--json")
+        self.assertEqual(0, sent.returncode, sent.stderr)
+        self.assertEqual(first["task_uuid"], json.loads(sent.stdout)["task_id"])
+        dispatched = self.run_cli("msg-dispatch", "--task-id", "feature/shared", "--agent", "coder",
+                                  "--event", "complete", "--json")
+        self.assertEqual(0, dispatched.returncode, dispatched.stderr)
+        read = self.run_cli("msg-read", "--task-id", "feature/shared", "--json")
+        self.assertEqual(0, read.returncode, read.stderr)
+        self.assertEqual("Cobalt authority checked.", json.loads(read.stdout)[0]["body"])
+
     def test_a_clone_bound_to_the_later_twin_is_told_to_cancel_its_own(self) -> None:
         # Each clone's capsule named the other record: the clone bound to the
         # later twin and one bound to the earlier cancelled one each, and

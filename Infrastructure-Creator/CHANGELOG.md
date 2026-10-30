@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime's agent channel follows the task record its capsule serves — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime refuses text holding half of a character by name — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,

@@ -9428,15 +9428,23 @@ def _command() -> int:
                         )
                     except (ContextError, BrainError):
                         pass
+                # The record the capsule serves, as the native save takes it.
+                # On a branch two records claim - two copies of it each
+                # started one, merged - the task ID alone was ambiguous: in a
+                # clone without a binding an orchestrator read none of its
+                # subagents' results, and the dispatch hook reported each
+                # completion lost.
+                task_reference = served_task_record(connection, repository, arguments.task_id)
                 # The audit trail outlives the local binding: a completed or
                 # archived task has no binding, but its journal must stay
                 # readable (and refuse writes with the honest terminal error),
                 # so fall back to resolving by the Brain identifier itself.
-                try:
-                    binding = governed_binding(connection, arguments.task_id)
-                    task_reference = str(binding["task_uuid"])
-                except ContextError:
-                    task_reference = validate_task_id(arguments.task_id)
+                if task_reference is None:
+                    try:
+                        binding = governed_binding(connection, arguments.task_id)
+                        task_reference = str(binding["task_uuid"])
+                    except ContextError:
+                        task_reference = validate_task_id(arguments.task_id)
                 if arguments.command == "msg-send":
                     body = arguments.body
                     if arguments.body_file:
