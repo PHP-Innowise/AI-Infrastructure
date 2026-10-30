@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime's health line names the host — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime counts the bytes a capsule printed — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py`

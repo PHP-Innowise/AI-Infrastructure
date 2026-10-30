@@ -433,8 +433,10 @@ in total, it counts:
   tokens. The estimate counts documents only, so a capsule of working state
   and recent files reads 0; the bytes the capsule printed, recorded since a
   later runtime of the same day, give the median printed size. An older
-  line has no shape and counts as `unknown`. A refresh line names no host and
-  also comes from an explicit request (the MCP retrieve, the CLI);
+  line has no shape and counts as `unknown`. A refresh line also comes from
+  an explicit request (the MCP retrieve, the CLI); a runtime of 2026-10-30 or
+  later names the host that asked (`cli` for an explicit request), and the
+  funnel counts capsules by host, an older line as `unknown`;
 - **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
   requested at Stop, made (saved or held), refused, failed or omitted,
   learnings written and chunks promoted, with every code and its count;

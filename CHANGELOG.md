@@ -28,6 +28,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A capsule's health line names the host that asked — 2026-10-30
+
+- `refresh` and `hook-context` write the `--host` they were given into their
+  `refresh-health.ndjson` line (`claude`, `codex`, `cursor`, or `cli` for an
+  explicit request), and `memory_eval.py funnel` counts capsules by host. A
+  report per host - capsules, saves, opens - is what the field measurement
+  needs, and the journals alone could not split capsules by client. The
+  shell's own line for a hook run still names none.
+
 ### `realized --traces` sets the runtime's renders beside what the host recorded — 2026-10-30
 
 - The runtime keeps a trace of every capsule it rendered, with the digest of

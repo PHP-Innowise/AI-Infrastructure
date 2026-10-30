@@ -4124,6 +4124,8 @@ def format_realized(report: Dict[str, Any]) -> str:
 
 
 FUNNEL_PROFILES = ("full", "navigation", "recall")
+# Who asked for a capsule; `cli` is an explicit request.
+FUNNEL_HOSTS = ("claude", "codex", "cursor", "cli")
 # Each median row and the per-capsule series it is taken over.
 FUNNEL_MEDIANS = {"median_tokens": "tokens", "median_bytes": "bytes"}
 FUNNEL_ROWS = (
@@ -4172,8 +4174,10 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
     refresh-health.ndjson, the save funnel in native-results.ndjson, and how
     many task records, findings, decisions and bank chunks the project keeps.
     No path, query or text is read into it, so a teammate can send the result.
-    A refresh line names no host and also comes from an explicit request (the
-    MCP retrieve, the CLI), so "capsules built" counts those too.
+    A refresh line also comes from an explicit request (the MCP retrieve, the
+    CLI), so "capsules built" counts those too; a runtime of 2026-10-30 or
+    later names the host that asked (`cli` for an explicit request), and an
+    older line counts as `unknown`.
     """
     def within(record: Dict[str, Any]) -> bool:
         at = parse_instant(record.get("at"))
@@ -4181,6 +4185,7 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
 
     counts: Counter = Counter()
     profiles: Counter = Counter()
+    hosts: Counter = Counter()
     tokens: List[int] = []
     printed: List[int] = []
     for record in read_records(state / HEALTH_SERIES):
@@ -4194,6 +4199,8 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
             counts["hook_failures"] += type(status) is int and status not in (0, 124)
         elif source in ("refresh", "hook-context"):
             counts["capsules"] += 1
+            host = record.get("host")
+            hosts[host if host in FUNNEL_HOSTS else "unknown"] += 1
             shape = record.get("capsule")
             if not isinstance(shape, dict):
                 # A runtime before the shape was recorded.
@@ -4234,6 +4241,7 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
         "tokens": tokens,
         "bytes": printed,
         "profiles": {name: profiles.get(name, 0) for name in (*FUNNEL_PROFILES, "unknown")},
+        "hosts": {name: hosts.get(name, 0) for name in (*FUNNEL_HOSTS, "unknown")},
         "save_journal": native["journal"],
         "save_reasons": saves["reasons"],
     }
@@ -4249,6 +4257,8 @@ def funnel_total(projects: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
         total[key] = round(statistics.median(values)) if values else None
     total["profiles"] = {name: sum(project["profiles"][name] for project in projects.values())
                          for name in (*FUNNEL_PROFILES, "unknown")}
+    total["hosts"] = {name: sum(project["hosts"][name] for project in projects.values())
+                      for name in (*FUNNEL_HOSTS, "unknown")}
     reasons: Dict[str, Counter] = {}
     for project in projects.values():
         for step, codes in project["save_reasons"].items():
@@ -4274,6 +4284,8 @@ def format_funnel(report: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("capsules by profile: " + ", ".join(
         f"{name} {report['total']['profiles'][name]}" for name in (*FUNNEL_PROFILES, "unknown")))
+    lines.append("capsules by host: " + ", ".join(
+        f"{name} {report['total']['hosts'][name]}" for name in (*FUNNEL_HOSTS, "unknown")))
     missing = [name for name, project in report["projects"].items() if not project["save_journal"]]
     if missing:
         lines.append("no save journal (a runtime before it, or no save step ran): " + ", ".join(missing))

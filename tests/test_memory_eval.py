@@ -2832,18 +2832,23 @@ class FunnelTest(unittest.TestCase):
         # recent files reads 0 tokens and printed them all the same.
         printed = Path(self.temporary.name) / "clients" / "printed"
 
-        def line(minute: int, documents: int, tokens: int, size: int) -> Dict[str, Any]:
-            return {"at": f"2026-10-04T09:{minute:02d}:01Z", "source": "refresh", "capsule": {
+        def line(minute: int, documents: int, tokens: int, size: int, host: str = "codex") -> Dict[str, Any]:
+            return {"at": f"2026-10-04T09:{minute:02d}:01Z", "source": "refresh", "host": host, "capsule": {
                 "profile": "recall", "working": True, "recent_files": 4, "ticket_files": 0,
                 "documents": documents, "tokens": tokens, "bytes": size}}
 
         jsonl(printed / "memory-bank/local/refresh-health.ndjson",
-              [line(0, 0, 0, 610), line(5, 1, 300, 1730), line(9, 0, 0, 650)])
+              [line(0, 0, 0, 610), line(5, 1, 300, 1730, "cli"), line(9, 0, 0, 650)])
         project = json.loads(main_output("funnel", "--project", str(printed), "--json"))["projects"]["printed"]
         self.assertEqual((0, 650), (project["median_tokens"], project["median_bytes"]))
+        # The host that asked; a line before the runtime said is unknown.
+        self.assertEqual({"claude": 0, "codex": 2, "cursor": 0, "cli": 1, "unknown": 0}, project["hosts"])
+        self.assertEqual(4, self.funnel()["total"]["hosts"]["unknown"])
         self.assertNotIn("bytes", project)
         self.assertIsNone(self.funnel()["total"]["median_bytes"])
-        self.assertIn("median bytes printed", main_output("funnel", "--project", str(printed)))
+        plain = main_output("funnel", "--project", str(printed))
+        self.assertIn("median bytes printed", plain)
+        self.assertIn("capsules by host: claude 0, codex 2, cursor 0, cli 1, unknown 0", plain)
 
     def test_each_stage_is_counted_per_project_and_in_total(self) -> None:
         report = self.funnel()

@@ -10411,6 +10411,7 @@ def _command() -> int:
                         "mode": mode,
                         "omitted": result.get("omitted"),
                         "source": "hook-context",
+                        "host": arguments.host,
                         "capsule": capsule_shape(
                             repository, result, None,
                             None if excerpts is None else "\n".join(
@@ -10618,6 +10619,9 @@ def _command() -> int:
                     "layers_updated": all(layers[layer] == "updated" for layer in DOCUMENT_LAYERS),
                     "warnings": len(warnings),
                     "source": "refresh",
+                    # The client that asked: a funnel can then count each
+                    # host's capsules, which the line never said.
+                    "host": arguments.host,
                 }
                 if capsule is not None:
                     health_record["capsule"] = capsule_shape(

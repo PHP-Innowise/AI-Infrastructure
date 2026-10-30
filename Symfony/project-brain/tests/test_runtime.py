@@ -4643,8 +4643,12 @@ class RefreshHealthTest(RuntimeHarness):
         self.assertEqual(0, printed.returncode, printed.stderr)
         path = self.repository / "memory-bank/local/refresh-health.ndjson"
         line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-        self.assertEqual("hook-context", line["source"])
+        self.assertEqual(("hook-context", "cli"), (line["source"], line["host"]))
         self.assertEqual(len(printed.stdout.encode("utf-8")), line["capsule"]["bytes"])
+        # The host a hook names is the line's, for a funnel to split by.
+        self.assertEqual(0, self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "TASK-HOOK-SHAPE",
+                                         "--ephemeral", "--host", "codex").returncode)
+        self.assertEqual("codex", json.loads(path.read_text(encoding="utf-8").splitlines()[-1])["host"])
         # The JSON form prints no capsule text, and says nothing of its size.
         self.assertEqual(0, self.run_cli("hook-context", "--task-id", "TASK-HOOK-SHAPE", "--json").returncode)
         line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
