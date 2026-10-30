@@ -28,6 +28,21 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Every Claude Code bench run checks the policy reached the model — 2026-10-30
+
+- `scripts/claude_code_bench.py` checks in every run - a fresh install,
+  `--target`, `--attached`, `--desktop`, plan mode - that every line of the
+  policy reached the model, HTML comments aside (Claude Code drops them), and
+  names each `AGENTS.md` the first question carried with its label
+  (`policy_heard`, `policy_files`). Only `--subfolder` and `--worktree`
+  checked it before, so a project's own `CLAUDE.md` keeping `AGENTS.md` out of
+  every client's Claude Code went unseen; the bench's project now keeps a
+  `CLAUDE.md` of its own, as client projects do. On Claude Code 2.1.278 the
+  edition's import loads the policy once, and without it the run fails. On
+  copies of the four clients the policy arrives once in each; as the Harness
+  left them the save shows as a hook error and nothing is saved, and synced
+  to this branch all four save.
+
 ### A sync never takes a project back — 2026-10-30
 
 - `install_accelerator.py --sync`, and the Harness's sync of its registered

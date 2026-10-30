@@ -13,9 +13,14 @@ Cyrillic.
 
 It reports what the host did: whether the save ran or Claude Code's
 permission check refused it, how many messages carried the step to the model,
-whether the transcript labelled it a hook error, and the journal's events.
-Exit 0 when the save ran, the step reached the model once, no hook error was
-recorded and the second Stop saw the recovery.
+whether the transcript labelled it a hook error, the journal's events, and
+whether the policy reached the model - every line of the project's AGENTS.md
+(the clone's, appended to the system prompt, in an attached run) - and which
+AGENTS.md files Claude Code loaded. The bench's project keeps a CLAUDE.md of
+its own, as client projects do: Claude Code then leaves AGENTS.md out unless
+the edition's .claude/CLAUDE.md imports it. Exit 0 when the save ran, the
+step reached the model once, no hook error was recorded, the second Stop saw
+the recovery and the policy arrived.
 
 Linux only: user and network namespaces (`unshare`), and `ip` to raise the
 loopback. Claude Code is the installed one unless `--claude` names a binary.
@@ -206,7 +211,7 @@ class Scripted(BaseHTTPRequestHandler):
         content, stop, since = self.decide(body)
         self.pause(content)
         with self.lock:
-            self.requests.append({"since": since, "content": content})
+            self.requests.append({"since": since, "content": content, "system": text_of(body.get("system"))})
             number = len(self.requests)
         if number > 30:
             content, stop = [{"type": "text", "text": "Loop guard."}], "end_turn"
@@ -453,6 +458,26 @@ def permission_run(args: argparse.Namespace, work: Path, project: Path, env: Dic
     return 0 if report["ok"] else 1
 
 
+def policy_heard(policy: str, requests: List[Dict[str, Any]]) -> bool:
+    """Every line of the policy reached the model - in the conversation, or in
+    the system prompt where a lent edition appends it - and none of it went to
+    a file Claude Code keeps an over-long hook output in. HTML comments, such
+    as the markers around a project's managed policy block, are left out:
+    Claude Code drops them from the instructions it loads."""
+    heard = "\n".join([text for request in requests for text in request["since"]]
+                      + [request.get("system", "") for request in requests])
+    lines = re.sub(r"<!--.*?-->", "", policy, flags=re.S).splitlines()
+    return all(line in heard for line in lines if line.strip()) and "Output too large" not in heard
+
+
+def policy_files(requests: List[Dict[str, Any]]) -> List[str]:
+    """The AGENTS.md the session's first question carried, each under the
+    label it came with: Claude Code's own load says "project instructions",
+    and below the root a hook hands the policy in parts."""
+    first = next((request for request in requests if request["since"]), None)
+    return re.findall(r"Contents of ([^\n]*?AGENTS\.md[^\n:]*)", "\n".join(first["since"])) if first else []
+
+
 def text_of(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -467,11 +492,15 @@ def text_of(content: Any) -> str:
 
 
 def shop(work: Path) -> Path:
-    """A small PHP project in its own Git repository, with nothing installed."""
+    """A small PHP project in its own Git repository, with nothing installed.
+
+    It keeps a CLAUDE.md of its own, as every client project does: Claude Code
+    then leaves AGENTS.md out unless something imports it."""
     project = work / "project"
     (project / "src").mkdir(parents=True)
     (work / "home").mkdir()
     (project / "composer.json").write_text('{"name": "acme/shop"}\n', encoding="utf-8")
+    (project / "CLAUDE.md").write_text("# Shop\n\nInvoices live in src/Invoice.php.\n", encoding="utf-8")
     (project / "src/Invoice.php").write_text("<?php\nfinal class Invoice {}\n", encoding="utf-8")
     env = clean_env()
     for args in (["init", "-q", "-b", ROOT_BRANCH], ["add", "."], ["commit", "-qm", "Shop baseline"]):
@@ -809,11 +838,21 @@ def inside(args: argparse.Namespace) -> int:
         "error_notifications": sum(item.get("subtype") == "notification"
                                    and "error" in str(item.get("key", "")) for item in stream),
     }
-    report["ok"] = (report["saved"] and carried == 1 and not errors and not report["error_notifications"])
+    # Every run: the policy reached the model. A CLAUDE.md of the project's
+    # own kept it out of every client's Claude Code for months.
+    if args.attached:
+        import accelerator_attach as attach
+        policy = attach.policy(args.edition)
+    else:
+        policy = (project / "AGENTS.md").read_text(encoding="utf-8")
+    report["policy"] = policy_heard(policy, Scripted.requests)
+    report["policy_files"] = policy_files(Scripted.requests)
+    report["ok"] = (report["saved"] and carried == 1 and not errors and not report["error_notifications"]
+                    and report["policy"])
     if args.mode == "plan":
         # Plan mode tells the agent to change nothing: no save is asked for.
         report["ok"] = (not steps and "stop:skipped:plan-mode" in events and not errors
-                        and not report["error_notifications"])
+                        and not report["error_notifications"] and report["policy"])
     if args.sandbox:
         # Below the root or in a worktree the sandbox may not write the
         # project: the save waits in the spool, and the next hook makes it.
@@ -824,15 +863,11 @@ def inside(args: argparse.Namespace) -> int:
         report["permission_prompts"] = [str(item["tool"]) + ": " + json.dumps(item["input"])[:120] for item in asked]
     if args.queued is not None:
         report["unsaved_on_screen"] = UNSAVED in screen
-        report["ok"] = queued_ok(events, screen) and not errors
+        report["ok"] = queued_ok(events, screen) and not errors and report["policy"]
     if args.subfolder or args.worktree:
         # The session below the root got the capsule and the policy, and saved.
         report["started_in"] = args.subfolder
-        heard = "\n".join(text for request in Scripted.requests for text in request["since"])
-        report["capsule"] = "working:" in heard
-        policy = (project / "AGENTS.md").read_text(encoding="utf-8").splitlines()
-        report["policy"] = (all(line in heard for line in policy if line.strip())
-                            and "Output too large" not in heard)
+        report["capsule"] = any("working:" in text for request in Scripted.requests for text in request["since"])
         report["ok"] = report["saved"] and report["capsule"] and report["policy"] and not errors
     if args.worktree:
         # The root's memory, the worktree's own task and index, and nothing

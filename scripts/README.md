@@ -749,6 +749,16 @@ the Stop hook's save step exactly as written. The JSON it saves holds
 backticks, `$`, brackets, an apostrophe, escapes and Cyrillic. Nothing leaves
 the machine and no tokens are spent.
 
+Every run also checks that the policy reached the model: every line of the
+project's `AGENTS.md` (the clone's, appended to the system prompt, with
+`--attached`) in what Claude Code sent, HTML comments aside, which it drops.
+The report names each `AGENTS.md` the first question carried and the label it
+came under (`policy_files`). The bench's project keeps a `CLAUDE.md` of its
+own, as client projects do; Claude Code then reads `AGENTS.md` only through
+the edition's `.claude/CLAUDE.md` import. Without that import the run fails:
+the four client projects' Claude Code sessions never had the policy until
+it arrived.
+
 With `--target DIR` it runs in a copy of an installed project instead of a
 fresh install. The copy leaves out dependency trees as the rollout
 rehearsal's does, and `--sync` first brings it up to this clone. The saved
