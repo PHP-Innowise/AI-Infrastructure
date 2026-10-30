@@ -75,10 +75,17 @@ Tasks retain the compatibility commands `start`, `update`, `get`, `complete`,
 and `clear`. Other dynamic records use:
 
 ```text
-brain-create TYPE --external-id ID --title TITLE
-brain-update --record-id ID --revision N [--transition STATE]
+brain-create TYPE --external-id ID --title TITLE [--authority verified [--attestation agent|person]]
+brain-update --record-id ID --revision N [--transition STATE] [--authority verified | --reverify] [--attestation agent|person]
 brain-get --record-id ID
 ```
+
+A verification says who checked: `--attestation` is `agent` unless a person
+did (`person`), and it is written into the ledger. A verified finding, bug,
+incident or decision keeps the source fingerprints taken when it was checked
+through any write that checks nothing; `--reverify` checks it again and takes
+them anew. A person's verified claim is revised only with `--attestation
+person`.
 
 Cross-store task commands snapshot Brain records, handoffs, and deterministic
 indexes while mutating the SQLite binding/episode transaction. Any failure

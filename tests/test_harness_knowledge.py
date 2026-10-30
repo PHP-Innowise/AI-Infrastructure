@@ -335,6 +335,29 @@ class KnowledgeTests(unittest.TestCase):
             self.assertFalse(self.manager.supports_capsule_profile(
                 self.project_id, self.manager.info(self.project_id)))
 
+    def test_a_persons_verification_is_recorded_as_theirs_where_the_runtime_can(self):
+        self.install()
+
+        def create(external_id, **options):
+            response = self.manager.run(self.project_id, {
+                "action": "brain-create", "record_type": "finding", "external_id": external_id,
+                "title": "Cobalt guard", "sources": ["specs/authority.md"], "authority": "verified"}, **options)
+            self.assertTrue(response["ok"], response)
+            return response["result"]["transitions"][-1]["reason"]
+
+        self.assertTrue(self.manager.supports_brain_attestation(self.project_id, self.manager.info(self.project_id)))
+        self.assertTrue(create("FIND-PERSON", _attestation="person").endswith("[attestation:person]"))
+        # A call nobody vouches for is the runtime's default: an agent's.
+        self.assertTrue(create("FIND-AGENT").endswith("[attestation:agent]"))
+        # A runtime without the flag is never handed it.
+        script = self.project / "memory-bank/scripts/context.py"
+        script.write_text(script.read_text(encoding="utf-8").replace(
+            'BRAIN_ATTESTATION_FLAG = "brain-attestation-v1"', ""), encoding="utf-8")
+        self.assertFalse(self.manager.supports_brain_attestation(self.project_id, self.manager.info(self.project_id)))
+        self.assertTrue(create("FIND-OLDER", _attestation="person").endswith("[attestation:agent]"))
+        with self.assertRaisesRegex(sessions.SessionError, "Invalid internal attestation"):
+            self.manager.run(self.project_id, {"action": "search", "query": "cobalt"}, _attestation="robot")
+
     def test_durable_promotion_requires_eligible_sources_independent_review_and_pinned_revision(self):
         self.install()
         # The reviewed path is the one a project takes with automatic promotion

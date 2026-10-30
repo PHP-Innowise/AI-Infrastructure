@@ -1993,9 +1993,16 @@ def create_record(
     confidence: float = 1.0,
     goal: Optional[str] = None,
     conflicts: Optional[list[str]] = None,
+    attestation: Optional[str] = None,
 ) -> dict[str, Any]:
+    """Create a record. One created `verified` says who checked it, as a
+    verification by update_record does: ``attestation`` goes into an
+    ``observed`` -> ``verified`` entry of its ledger, which record_attestation
+    reads and every runtime's validator accepts."""
     if record_type not in RECORD_TYPES:
         raise BrainError(f"type must be one of: {', '.join(RECORD_TYPES)}")
+    if attestation is not None and (authority != "verified" or attestation not in ATTESTATIONS):
+        raise BrainError("attestation says who checked a verified record: agent or person")
     guard_shared_text(
         f"{record_type.capitalize()} record", [title, goal, *(conflicts or [])]
     )
@@ -2032,7 +2039,11 @@ def create_record(
                     "at": timestamp,
                     "actor": owner,
                     "reason": f"{record_type.capitalize()} created",
-                }
+                },
+                *([{
+                    "from": "observed", "to": "verified", "at": timestamp, "actor": owner,
+                    "reason": f"Created verified [attestation:{attestation}]",
+                }] if attestation is not None else []),
             ],
             "source_fingerprints": source_fingerprints(repository, sources),
             "conflicts": sorted(set(conflicts or [])),
@@ -2154,6 +2165,11 @@ def update_record(
     whole list: without it a step that was done could never leave, and the
     handoff kept presenting finished work as what comes next. ``files`` keep
     the newest touch last, which is the end the capsule projects from.
+
+    A verified finding, bug, incident or decision keeps the fingerprints of
+    the sources that were checked through a write that checks nothing, and a
+    person's verified claim is revised only with ``attestation`` ``person``,
+    as record-result holds it.
     """
     guard_shared_text(
         "Record update",
@@ -2178,6 +2194,17 @@ def update_record(
             raise BrainError("only a task may record an auto checkpoint")
         if attestation is not None and attestation not in ATTESTATIONS:
             raise BrainError("attestation must be one of: " + ", ".join(ATTESTATIONS))
+        # Knowledge that was checked: what promotion carries into the bank.
+        checked = record["type"] in PROMOTABLE_STATES and record["authority"] == "verified"
+        revised = (progress is not None and progress != record["progress"]) or bool(
+            set(sources) - set(record["sources"]))
+        if checked and revised and attestation != "person" and record_attestation(record) == "person":
+            # The next agent must not be free to overwrite a person's check;
+            # record-result holds the same revision.
+            raise BrainError(
+                "A person verified this record's claim; only a person revises it "
+                "(attestation person), or record the new finding as a record of its own"
+            )
         if authority is not None:
             if authority not in AUTHORITY_TRANSITIONS.get(record["authority"], set()):
                 raise BrainError(
@@ -2257,7 +2284,22 @@ def update_record(
             record["conflicts"] = list(
                 dict.fromkeys([*record["conflicts"], *conflicts])
             )
-        record["source_fingerprints"] = source_fingerprints(repository, record["sources"])
+        if checked and authority is None and not reverify:
+            # The fingerprints are the versions of the sources that were
+            # checked: promotion copies them into the chunk, and retrieval
+            # marks the item when a file now differs. A write that checks
+            # nothing - progress, next steps, a lifecycle move - keeps them and
+            # fingerprints only a source cited for the first time. Re-taking
+            # them all let any edit clear "cited file changed" from a claim
+            # nobody checked again.
+            known = {item["path"] for item in record["source_fingerprints"]}
+            record["source_fingerprints"] = sorted(
+                [*record["source_fingerprints"], *source_fingerprints(repository, [
+                    source for source in record["sources"] if source.split("#", 1)[0] not in known])],
+                key=lambda item: item["path"],
+            )
+        else:
+            record["source_fingerprints"] = source_fingerprints(repository, record["sources"])
         record["revision"] += 1
         record["updated_at"] = utc_now()
         _write_record(repository, record, path)
