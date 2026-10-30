@@ -1124,8 +1124,9 @@ def codex_policy_cut(target: Path) -> str | None:
     if len(policy) <= limit:
         return None
     return (
-        f"AGENTS.md is {len(policy)} bytes and Codex reads {limit} of it (project_doc_max_bytes): the policy "
-        f"past byte {limit} never reaches a Codex session. Put project_doc_max_bytes = "
+        f"AGENTS.md is {len(policy)} bytes and Codex reads {limit} of it (project_doc_max_bytes) unless a "
+        f"person's own Codex configuration raises the limit: past byte {limit} the policy never reaches such a "
+        "session. Put project_doc_max_bytes = "
         f"{max(65536, 1 << (len(policy) - 1).bit_length())} at the top of {CODEX_CONFIG}, or shorten the "
         "project's own part of AGENTS.md"
     )

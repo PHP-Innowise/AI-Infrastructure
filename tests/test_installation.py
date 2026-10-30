@@ -1509,7 +1509,7 @@ class CodexPolicyCutTest(unittest.TestCase):
         synced = run(sys.executable, str(INSTALLER), "--sync", "--target", str(project))
         report = json.loads(synced.stdout)
         self.assertIn("AGENTS.md is", report["codex_policy_cut"])
-        self.assertIn("never reaches a Codex session", report["codex_policy_cut"])
+        self.assertIn("unless a person's own Codex configuration raises the limit", report["codex_policy_cut"])
         self.assertNotIn("project_doc_max_bytes =", config.read_text(encoding="utf-8").split("[", 1)[0])
 
     def test_the_editions_own_codex_config_reads_the_policy_whole(self) -> None:
