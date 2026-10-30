@@ -28,6 +28,23 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A channel message holding a Unicode line separator no longer breaks the channel — 2026-10-30
+
+- Why: JSON leaves U+2028, U+2029 and U+0085 unescaped inside a string,
+  and the agent channel's readers split the journal with `str.splitlines`,
+  which also splits a line at them. `msg-send` accepted such a message,
+  for example text pasted from a PDF or a web page. After that, every
+  `msg-read` failed on the journal and so did `validate`, for the whole
+  project and for good.
+- What changes: the journal is split at newlines alone (`journal_lines`),
+  in `msg-read`, `msg-send`'s sequence count and `validate`. The three
+  characters are written escaped (` `), so a runtime from before this
+  change, or a tool that splits the same way, reads new entries too.
+- Tests: `memory-bank/tests/test_channel.py` sends a message holding all
+  three and reads and validates it as written. It then does the same with
+  the characters written raw, as an earlier runtime wrote them. Before,
+  reading failed with "line 1 is not valid JSON".
+
 ### A channel message a full disk cuts short is taken back — 2026-10-30
 
 - Why: a full disk takes part of an append. When `msg-send` failed that way,

@@ -2410,7 +2410,7 @@ def append_message(
         seq, separator = 1, ""
         if path.is_file():
             text = path.read_text(encoding="utf-8")
-            lines = text.splitlines()
+            lines = journal_lines(text)
             seq += sum(1 for line in lines if line.strip())
             if lines and not text.endswith("\n"):
                 # Appended to, the line would join this entry's into one.
@@ -2437,8 +2437,13 @@ def append_message(
             record["capsule_digest"] = capsule_digest
         validate_message(record)
         validate_schema_file(repository, "message.schema.json", record)
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        # JSON leaves these unescaped, and str.splitlines - in every runtime
+        # before journal_lines, and in many tools - splits a line at them.
+        for character in (" ", " ", "\x85"):
+            line = line.replace(character, f"\\u{ord(character):04x}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        append_whole_line(path, separator + json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        append_whole_line(path, separator + line + "\n")
         return record
 
 
@@ -2471,6 +2476,20 @@ def append_whole_line(path: Path, line: str) -> None:
             raise
     finally:
         os.close(descriptor)
+
+
+def journal_lines(text: str) -> list[str]:
+    """A JSON-lines journal's lines, split at newlines alone.
+
+    str.splitlines also splits at U+2028, U+2029 and U+0085, which JSON
+    leaves unescaped inside a string: a message pasted with one read as two
+    broken lines, and the channel - and the project's validation - stayed
+    broken.
+    """
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def message_line_problem(line: str, last: bool) -> str:
@@ -2508,7 +2527,7 @@ def read_messages(
     recipient = validate_actor(for_actor) if for_actor is not None else None
     selected: list[dict[str, Any]] = []
     text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
+    lines = journal_lines(text)
     for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
@@ -2733,7 +2752,7 @@ def validate_repository(
                 )
                 previous_seq = 0
                 text = path.read_text(encoding="utf-8")
-                lines = text.splitlines()
+                lines = journal_lines(text)
                 for number, line in enumerate(lines, 1):
                     if not line.strip():
                         raise BrainError(

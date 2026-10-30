@@ -290,6 +290,28 @@ class ChannelTest(unittest.TestCase):
         self.assertEqual(0, read.returncode, read.stderr)
         self.assertEqual([1, 2], [entry["seq"] for entry in json.loads(read.stdout)])
 
+    def test_a_message_holding_a_unicode_line_separator_reads_back(self) -> None:
+        # JSON leaves U+2028, U+2029 and U+0085 unescaped, and str.splitlines
+        # splits a line at them: a message pasted with one broke every read
+        # of the channel and the project's validation.
+        body = "First line second third\x85fourth"
+        self.assertEqual(0, self.send(**{"--body": body}).returncode)
+        path = self.journal_path()
+        # Written escaped, for readers that still split there.
+        self.assertNotIn(" ", path.read_text(encoding="utf-8"))
+        for _ in ("as written", "as an earlier runtime wrote it"):
+            read = self.run_cli("msg-read", "--task-id", "task-1", "--json")
+            self.assertEqual(0, read.returncode, read.stderr)
+            self.assertEqual([body], [entry["body"] for entry in json.loads(read.stdout)])
+            checked = self.run_cli("validate")
+            self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+            text = path.read_text(encoding="utf-8")
+            path.write_text(text.replace("\\u2028", " ").replace("\\u2029", " ")
+                            .replace("\\u0085", "\x85"), encoding="utf-8")
+        self.assertEqual(0, self.send(**{"--body": "Next"}).returncode)
+        read = self.run_cli("msg-read", "--task-id", "task-1", "--json")
+        self.assertEqual([1, 2], [entry["seq"] for entry in json.loads(read.stdout)])
+
     def test_a_line_an_earlier_append_cut_short_says_so(self) -> None:
         # What a full disk left before appends were taken back: read, checked
         # and appended to, it says where it is, and nothing joins it.
