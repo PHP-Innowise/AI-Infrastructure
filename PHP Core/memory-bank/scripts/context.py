@@ -3229,6 +3229,35 @@ def append_refresh_health(repository: Path, record: dict[str, object]) -> None:
         return
 
 
+def capsule_shape(repository: Path, capsule: object, requested_profile: Optional[str]) -> dict[str, object]:
+    """What a delivered capsule carried, as counts a usage funnel can add up.
+
+    The profile that built it, whether it held the task's working state, how
+    many recent files and documents it named, and its token estimate. Never a
+    path, a title or a text: like the rest of the health record, it must not
+    become a second channel for what the manifest keeps under privacy rules.
+    """
+    try:
+        profile: Optional[str] = configured_capsule_profile(repository, requested_profile)
+    except (BrainError, OSError, ValueError):
+        profile = None
+    capsule = capsule if isinstance(capsule, dict) else {}
+    estimates = capsule.get("token_estimates")
+    tokens = estimates.get("total") if isinstance(estimates, dict) else None
+
+    def count(key: str) -> int:
+        value = capsule.get(key)
+        return len(value) if isinstance(value, list) else 0
+
+    return {
+        "profile": profile,
+        "working": bool(capsule.get("working")),
+        "recent_files": count("recent_files"),
+        "documents": count("selected"),
+        "tokens": tokens if type(tokens) is int and tokens >= 0 else None,
+    }
+
+
 def write_last_turn_report(repository: Path, report: dict[str, object]) -> None:
     """Persist the turn outcome where the next request's capsule can read it.
 
@@ -10157,6 +10186,7 @@ def _command() -> int:
                         "mode": mode,
                         "omitted": result.get("omitted"),
                         "source": "hook-context",
+                        "capsule": capsule_shape(repository, result, None),
                     },
                 )
                 if delivery_admission is not None:
@@ -10361,6 +10391,8 @@ def _command() -> int:
                     "warnings": len(warnings),
                     "source": "refresh",
                 }
+                if capsule is not None:
+                    health_record["capsule"] = capsule_shape(repository, capsule, arguments.capsule_profile)
                 if source_notices:
                     health_record['source_notices'] = source_notices
                 def capture_diagnosis(render: Optional[dict[str, object]]) -> None:

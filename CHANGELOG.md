@@ -28,6 +28,27 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A memory funnel across projects, from their journals — 2026-10-30
+
+- `scripts/memory_eval.py funnel --project A --project B [--since DAY] [--json]`
+  adds up how far memory gets in several projects at once, from their
+  journals alone: the prompt hook's runs, timeouts and failures; the capsules
+  built, how many carried the working state, recent files or documents, by
+  profile, and their median tokens; the saves armed, requested, made, refused,
+  failed or omitted, with learnings written and chunks promoted; and the task
+  records, findings, decisions and bank chunks the project keeps. It reads no
+  transcript, path, query or record text and labels a project by its folder
+  name, so a teammate can send the result; `realized` stays the transcript
+  side.
+- A `refresh` or `hook-context` line in `refresh-health.ndjson` now carries
+  the capsule's shape as counts: `{"profile", "working", "recent_files",
+  "documents", "tokens"}`. A line from an older runtime has none and the
+  funnel counts it as `unknown`.
+- Run over the four client projects after syncing them to this stack on
+  2026-10-30: since 2026-09-01, 640 prompt hook runs (5 timed out), 663
+  capsules with no shape recorded, no save journal yet, 56 task records,
+  77 findings and decisions, 5 bank chunks.
+
 ### Each turn mends a bank index that a stopped write left behind — 2026-10-30
 
 - Why: a promotion, a retire or a re-verify writes the chunk first and

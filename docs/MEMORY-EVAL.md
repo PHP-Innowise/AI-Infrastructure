@@ -205,6 +205,9 @@ python3 scripts/memory_eval.py run ... --as-of now --out ~/memory-eval/results/l
 
 # Do agents use what the hook delivered? Aggregates only.
 python3 scripts/memory_eval.py realized --project ~/Desktop/next --since 2026-09-01
+
+# How far memory gets in several projects at once, from their journals alone.
+python3 scripts/memory_eval.py funnel --project ~/Desktop/next --project ~/Desktop/scb --since 2026-10-30
 ```
 
 | `run` option | Meaning |
@@ -332,6 +335,32 @@ never printed. The prompt hook's lines in `refresh-health.ndjson` name no host,
 so they are given once, for all hosts. A project without the journal ran a
 runtime before it, or no native step at all; `docs/MEMORY-INTEGRATION.md`
 lists what each line means.
+
+`funnel` adds up several projects at once from their journals alone, so it
+needs no transcripts and its output can come from a teammate's machine. Each
+`--project` is a project directory, or an attached project's state directory;
+its folder name labels the column and the path stays local. Per project and
+in total, it counts:
+- **the prompt hook**: its runs from its own lines in `refresh-health.ndjson`,
+  with timeouts (`124`) and other non-zero exits;
+- **the capsules**: every `refresh` and Cursor `hook-context` line, and from
+  the `capsule` shape a runtime of 2026-10-30 or later records - the profile,
+  the working state, how many recent files and documents it carried, its token
+  estimate - how many had each, by profile, and the median tokens. An older
+  line has no shape and counts as `unknown`. A refresh line names no host and
+  also comes from an explicit request (the MCP retrieve, the CLI);
+- **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
+  requested at Stop, made (saved or held), refused, failed or omitted,
+  learnings written and chunks promoted, with every code and its count;
+- **what the project keeps**: task records, findings and decisions, and bank
+  chunks, counted as files. The `--since` window applies to the journals, not
+  to these.
+
+It prints counts and fixed codes only; `--json` gives the same numbers as
+JSON. A project where the hook ran but no capsule carried a recent file, or
+where saves are requested and none is made, shows where to look next;
+`realized` then tells, from the transcripts on the machine that has them,
+whether the agent used what was delivered.
 
 For a real historical comparison, freeze each project's reachable Git head and
 eligible working-tree memory once, preserving modification times, and point both
@@ -542,7 +571,8 @@ outside this repository (`run` warns when an input or the output is inside
 the clone, and refuses a cache there). A result carries prompt ids, document
 paths and counts only - never prompt text, capsule text or document bodies;
 the stderr tail withholds any line that quotes the prompt. `realized` prints
-aggregates; document paths only with `--paths`. The cache holds full copies
+aggregates; document paths only with `--paths`. `funnel` reads no path, query
+or record text and labels a project by its folder name. The cache holds full copies
 of client projects: per-prompt corpora are removed as soon as the prompt is
 scored (unless `--keep`), the tree cache and history clones stay until the
 cache is deleted.

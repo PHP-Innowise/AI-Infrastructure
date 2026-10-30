@@ -4473,6 +4473,29 @@ class RefreshHealthTest(RuntimeHarness):
         path = self.repository / "memory-bank/local/refresh-health.ndjson"
         self.assertNotIn("cobalt", path.read_text(encoding="utf-8"))
 
+    def test_a_health_record_counts_what_the_capsule_carried(self) -> None:
+        # The usage funnel (memory_eval.py funnel) adds capsules up by their
+        # shape. Counts and the profile only: no path, title or query.
+        self.start("TASK-SHAPE")
+        for profile in ("navigation", "full"):
+            result = self.run_cli(
+                "refresh", "--query", "cobalt authority rollout", "--task-id", "TASK-SHAPE",
+                "--ephemeral", "--capsule-profile", profile,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        shapes = [json.loads(line).get("capsule") for line in path.read_text(encoding="utf-8").splitlines()]
+        navigation, full = shapes[-2], shapes[-1]
+        for shape in (navigation, full):
+            self.assertEqual({"profile", "working", "recent_files", "documents", "tokens"}, set(shape))
+            self.assertIsInstance(shape["working"], bool)
+            self.assertIsInstance(shape["recent_files"], int)
+        self.assertEqual(("navigation", 0), (navigation["profile"], navigation["documents"]))
+        self.assertEqual("full", full["profile"])
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn("cobalt", text)
+        self.assertNotIn("TASK-SHAPE", text)
+
 
 class MemoryProbeTest(RuntimeHarness):
     """Category contracts for retrieval, with negatives declared as data.

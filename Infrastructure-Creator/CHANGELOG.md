@@ -4,6 +4,14 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime records each capsule's shape — 2026-10-30
+
+- memory-seed's `context.py` writes the capsule's shape (profile, working
+  state, recent-file and document counts, token estimate) into each
+  `refresh-health.ndjson` line, as the editions' does, so
+  `scripts/memory_eval.py funnel` can add up a generated project too. Counts
+  only: no path, query or text.
+
 ### The seeded runtime's turn mends a bank index a stopped write left behind — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py`

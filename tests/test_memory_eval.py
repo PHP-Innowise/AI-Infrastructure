@@ -2448,6 +2448,109 @@ class RealizedUseTest(unittest.TestCase):
         self.assertFalse(self.realized()["native"]["journal"])
 
 
+class FunnelTest(unittest.TestCase):
+    """The memory funnel of several projects, from their journals alone."""
+
+    SECRET = "invoice rounding for ACME"
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        base = Path(self.temporary.name)
+        self.ledger = (base / "clients" / "ledger").resolve()
+        self.shop = (base / "clients" / "shop").resolve()
+
+        def shape(profile: Optional[str], working: bool, recent: int, documents: int, tokens: int) -> Dict[str, Any]:
+            return {"profile": profile, "working": working, "recent_files": recent,
+                    "documents": documents, "tokens": tokens}
+
+        jsonl(self.ledger / "memory-bank/local/refresh-health.ndjson", [
+            # Before --since.
+            {"at": "2026-09-30T10:00:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-02T10:00:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-02T10:00:01Z", "source": "refresh", "query": self.SECRET,
+             "capsule": shape("recall", True, 3, 2, 400)},
+            {"at": "2026-10-02T11:00:00Z", "hook_status": 124, "source": "hook"},
+            {"at": "2026-10-02T11:00:01Z", "source": "refresh",
+             "capsule": shape("recall", True, 0, 0, 200)},
+            {"at": "2026-10-02T12:00:00Z", "hook_status": 1, "source": "hook"},
+            # A runtime before the shape was recorded.
+            {"at": "2026-10-02T12:00:01Z", "source": "refresh"},
+        ])
+        jsonl(self.ledger / "memory-bank/local/native-results.ndjson", [
+            {"at": "2026-10-02T10:00:00Z", "host": "claude", "stage": "prompt", "event": "armed"},
+            {"at": "2026-10-02T10:01:00Z", "host": "claude", "stage": "stop", "event": "requested"},
+            {"at": "2026-10-02T10:01:30Z", "host": "claude", "stage": "save", "event": "saved",
+             "learnings": 2, "promoted": 1},
+            {"at": "2026-10-02T11:01:00Z", "host": "codex", "stage": "stop", "event": "requested"},
+            {"at": "2026-10-02T11:01:30Z", "host": "codex", "stage": "save", "event": "refused",
+             "code": "memory-result-v1:unverified"},
+        ])
+        for folder, names in (("project-brain/dynamic/tasks", ("a.md", "b.md")),
+                              ("project-brain/archive/finding", ("f.md",)),
+                              ("memory-bank/chunks", ("MEM-20261002-0a1b2c3d-rounding.md",))):
+            for name in names:
+                path = self.ledger / folder / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(self.SECRET + "\n", encoding="utf-8")
+        jsonl(self.shop / "memory-bank/local/refresh-health.ndjson", [
+            {"at": "2026-10-03T09:00:00Z", "hook_status": 0, "source": "hook"},
+            {"at": "2026-10-03T09:00:01Z", "source": "hook-context",
+             "capsule": shape("navigation", False, 5, 0, 300)},
+        ])
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def funnel(self, *extra: str) -> Dict[str, Any]:
+        return json.loads(main_output("funnel", "--project", str(self.ledger), "--project", str(self.shop),
+                                      "--since", "2026-10-01", "--json", *extra))
+
+    def test_each_stage_is_counted_per_project_and_in_total(self) -> None:
+        report = self.funnel()
+        self.assertEqual(["ledger", "shop"], list(report["projects"]))
+        ledger, shop, total = report["projects"]["ledger"], report["projects"]["shop"], report["total"]
+        self.assertEqual((3, 1, 1), (ledger["hook_runs"], ledger["hook_timeouts"], ledger["hook_failures"]))
+        self.assertEqual((3, 2, 2, 1, 1), (ledger["capsules"], ledger["shaped"], ledger["with_working"],
+                                           ledger["with_recent_files"], ledger["with_documents"]))
+        self.assertEqual(300, ledger["median_tokens"])
+        self.assertEqual({"full": 0, "navigation": 0, "recall": 2, "unknown": 1}, ledger["profiles"])
+        self.assertEqual((1, 2, 1, 1), (ledger["armed"], ledger["requested"], ledger["made"], ledger["refused"]))
+        self.assertEqual((2, 1), (ledger["learnings_written"], ledger["chunks_promoted"]))
+        self.assertEqual((2, 1, 1), (ledger["task_records"], ledger["findings_decisions"], ledger["bank_chunks"]))
+        self.assertEqual((1, 1, 0), (shop["capsules"], shop["with_recent_files"], shop["with_working"]))
+        self.assertFalse(shop["save_journal"])
+        self.assertEqual(4, total["hook_runs"])
+        self.assertEqual(300, total["median_tokens"])
+        self.assertEqual({"full": 0, "navigation": 1, "recall": 2, "unknown": 1}, total["profiles"])
+        self.assertEqual({"save refused": {"memory-result-v1:unverified": 1}}, total["save_reasons"])
+
+    def test_the_window_bounds_the_journals_not_what_the_project_keeps(self) -> None:
+        everything = json.loads(main_output("funnel", "--project", str(self.ledger), "--json"))
+        self.assertEqual(4, everything["projects"]["ledger"]["hook_runs"])
+        self.assertEqual(2, everything["projects"]["ledger"]["task_records"])
+        self.assertEqual(2, self.funnel()["projects"]["ledger"]["task_records"])
+
+    def test_no_path_query_or_record_text_leaves_the_machine(self) -> None:
+        for output in (main_output("funnel", "--project", str(self.ledger), "--project", str(self.shop)),
+                       json.dumps(self.funnel())):
+            self.assertNotIn(self.SECRET, output)
+            self.assertNotIn(str(self.ledger.parent), output)
+            self.assertNotIn("MEM-20261002", output)
+        plain = main_output("funnel", "--project", str(self.ledger), "--project", str(self.shop))
+        for row in ("prompt hook runs", "capsules built", "saves made", "bank chunks", "capsules by profile"):
+            self.assertIn(row, plain)
+        self.assertIn("no save journal", plain)
+
+    def test_two_folders_with_one_name_keep_two_columns(self) -> None:
+        twin = (Path(self.temporary.name) / "other" / "ledger").resolve()
+        twin.mkdir(parents=True)
+        report = json.loads(main_output("funnel", "--project", str(self.ledger), "--project", str(twin), "--json"))
+        self.assertEqual(["ledger", "ledger'"], list(report["projects"]))
+
+    def test_a_missing_folder_is_refused(self) -> None:
+        with self.assertRaises(AssertionError):
+            main_output("funnel", "--project", str(Path(self.temporary.name) / "absent"))
+
 
 class OptionalRuntimeDeadlineTests(unittest.TestCase):
     def setUp(self) -> None:
