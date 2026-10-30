@@ -3509,18 +3509,31 @@ def deliver(turn: Dict[str, Any], capsule: Optional[str]) -> None:
         turn["digests"] |= capsule_digests(capsule)
 
 
-def claude_turns(path: Path, retrievals: Optional[Retrievals] = None) -> List[Dict[str, Any]]:
+# How Claude Code records a hook's run, by attachment type; additional
+# context is an output channel, not an outcome. A hook whose command was not
+# found exits 127: in September 2026 the relative `.claude/hooks/...` commands
+# of two client projects failed so 3,309 times, mostly below the project root,
+# and the Bash validator did not run there for a month.
+HOOK_OUTCOMES = {"hook_success": "ok", "hook_non_blocking_error": "error", "hook_blocking_error": "blocked"}
+
+
+def claude_turns(path: Path, retrievals: Optional[Retrievals] = None,
+                 hooks: Optional[Counter] = None) -> List[Dict[str, Any]]:
     """Turns of one Claude Code transcript: each starts at the prompt hook's
     output; the agent's tool calls and text belong to it until the next
     human prompt. Hook outputs before any agent activity share one turn.
     `retrievals`, when given, sees every tool call of the session and its
-    result, in a turn or not."""
+    result, in a turn or not; `hooks` counts every hook's outcome by event."""
     turns: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     for record in read_records(path):
         kind = record.get("type")
         if kind == "attachment":
             attachment = record.get("attachment")
+            if hooks is not None and isinstance(attachment, dict) and attachment.get("type") in HOOK_OUTCOMES:
+                event = str(attachment.get("hookEvent") or "unknown")
+                hooks[(event, HOOK_OUTCOMES[attachment["type"]])] += 1
+                hooks[(event, "not_found")] += attachment.get("exitCode") == 127
             if (
                 isinstance(attachment, dict)
                 and attachment.get("type") == "hook_success"
@@ -4004,16 +4017,21 @@ def project_sessions(project: Path, since: Optional[datetime], claude_root: Path
             "codex": [path for path in codex_files if recent(path)]}
     retrievals: Dict[str, List[Retrievals]] = {"claude": [], "codex": []}
     turns: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
-    for host, read in (("claude", claude_turns), ("codex", codex_turns)):
-        for path in used[host]:
-            session = Retrievals(since)
-            retrievals[host].append(session)
-            turns[host].extend(kept(read(path, session)))
+    hooks: Counter = Counter()
+    for path in used["claude"]:
+        session = Retrievals(since)
+        retrievals["claude"].append(session)
+        turns["claude"].extend(kept(claude_turns(path, session, hooks)))
+    for path in used["codex"]:
+        session = Retrievals(since)
+        retrievals["codex"].append(session)
+        turns["codex"].extend(kept(codex_turns(path, session)))
     return {
         "folders": folders, "folders_skipped": skipped_folders, "used": used, "turns": turns,
         "retrievals": retrievals,
         "costs": {host: [cost for path in used[host] for cost in continuation_costs(path, host)]
                   for host in ("claude", "codex")},
+        "hooks": hooks,
     }
 
 
@@ -4041,6 +4059,10 @@ def command_realized(arguments: argparse.Namespace) -> int:
             "folders": folders,
             "folders_skipped": skipped_folders,
             **tally(claude_all, paths),
+            # Whole transcripts, as Claude Code recorded each hook's run.
+            "hooks": {event: {outcome: sessions["hooks"].get((event, outcome), 0)
+                              for outcome in ("ok", "error", "not_found", "blocked")}
+                      for event in sorted({event for event, _ in sessions["hooks"]})},
         },
         "codex": {"transcripts": len(codex_used), **tally(codex_all, paths)},
         "total": {"transcripts": len(claude_used) + len(codex_used), **tally(claude_all + codex_all)},
@@ -4123,6 +4145,14 @@ def format_realized(report: Dict[str, Any]) -> str:
         counts = report["total"]["by_kind"][kind]
         if counts["delivered"]:
             lines.append(f"  {kind:<11} {counts['delivered']:>6} {counts['touched']:>6} {counts['mentioned']:>6}")
+    hooks = report["claude"].get("hooks") or {}
+    if hooks:
+        lines.append("")
+        lines.append("Claude Code hook runs it recorded, by event: ok / errors (command not found) / blocked"
+                     " - a tool hook that succeeds quietly is not recorded")
+        for event, counts in hooks.items():
+            lines.append(f"  {event:<18} {counts['ok']:>6} {counts['error']:>6} ({counts['not_found']})"
+                         f" {counts['blocked']:>6}")
     lines.extend(format_retrievals(report["retrieve"], width))
     if "traces" in report:
         lines.extend(format_traces(report["traces"], width))

@@ -28,6 +28,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### `realized` counts every Claude Code hook run, and the ones not found — 2026-10-30
+
+- Per event, the hook runs a Claude Code transcript records: succeeded,
+  failed (and of those, the command not found, exit 127) and blocked. In
+  September 2026 two client projects' hooks were wired as relative
+  `.claude/hooks/...` commands, and below the project root none was found:
+  3,309 times, the Bash validator among them, for a month, with nothing to
+  show it. Their wiring names `"${CLAUDE_PROJECT_DIR}"` since today's sync;
+  this count is how a break of that kind shows next time.
+
 ### `memory_eval.py field-check` reads the sealed rule of the every-turn save — 2026-10-30
 
 - One command computes, over several projects' transcripts and per host,

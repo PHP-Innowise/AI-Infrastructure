@@ -2701,6 +2701,45 @@ class ExplicitRetrieveTest(unittest.TestCase):
             self.assertNotIn(path, plain)
 
 
+class HookOutcomeTest(unittest.TestCase):
+    """Every Claude Code hook run, as its transcript records it: a hook whose
+    command was not found must show, not pass for a quiet one."""
+
+    def test_outcomes_are_counted_by_event(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        project = (base / "work" / "ledger").resolve()
+        project.mkdir(parents=True)
+        missing = ("Failed with non-blocking status code: /bin/sh: line 1: "
+                   ".claude/hooks/bash-validator.sh: No such file or directory")
+
+        def ran(kind: str, event: str, code: int, text: str = "") -> Dict[str, Any]:
+            return {"type": "attachment", "timestamp": "2026-09-02T10:00:00Z", "cwd": str(project) + "/src",
+                    "attachment": {"type": kind, "hookEvent": event, "exitCode": code, "stderr": text}}
+
+        jsonl(base / "claude" / re.sub(r"[^A-Za-z0-9]", "-", str(project)) / "s.jsonl", [
+            human("Fix it", "2026-09-02T09:59:00Z"),
+            ran("hook_success", "UserPromptSubmit", 0),
+            ran("hook_non_blocking_error", "PreToolUse", 127, missing),
+            ran("hook_non_blocking_error", "PreToolUse", 127, missing),
+            ran("hook_non_blocking_error", "Stop", 1),
+            ran("hook_blocking_error", "PreToolUse", 2),
+            ran("hook_additional_context", "SessionStart", 0),
+        ])
+        report = json.loads(main_output("realized", "--project", str(project), "--claude-root", str(base / "claude"),
+                                        "--codex-root", str(base / "codex"), "--json"))
+        self.assertEqual({
+            "PreToolUse": {"ok": 0, "error": 2, "not_found": 2, "blocked": 1},
+            "Stop": {"ok": 0, "error": 1, "not_found": 0, "blocked": 0},
+            "UserPromptSubmit": {"ok": 1, "error": 0, "not_found": 0, "blocked": 0},
+        }, report["claude"]["hooks"])
+        plain = main_output("realized", "--project", str(project), "--claude-root", str(base / "claude"),
+                            "--codex-root", str(base / "codex"))
+        self.assertIn("PreToolUse              0      2 (2)      1", plain)
+        self.assertNotIn("bash-validator", plain)
+
+
 class FieldCheckTest(unittest.TestCase):
     """The sealed field check of the every-turn save, computed as written."""
 

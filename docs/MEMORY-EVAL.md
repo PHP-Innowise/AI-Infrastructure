@@ -406,6 +406,15 @@ such a retrieve since 2026-10-06. Codex heads a command's output with its own
 lines ("Script completed", the wall time, "Output:"), which `realized` reads
 past.
 
+`realized` also counts every hook run a Claude Code transcript records, by
+event: succeeded, failed - and of those, how many failed because the command
+was not found (exit 127) - and blocked. Claude Code records a tool hook's
+success only when the hook printed, so a quiet `PreToolUse` reads 0 there. In
+September 2026 two client projects' hooks were wired as relative
+`.claude/hooks/...` commands: below the project root none was found, 3,309
+times, and the Bash validator did not run there for a month. The wiring has
+named `"${CLAUDE_PROJECT_DIR}"` since; this count is how such a break shows.
+
 `realized --traces` sets the runtime's own record beside the host's. The
 runtime keeps a trace of every capsule it rendered (the last 200 by default,
 in `memory-bank/local/retrieval-traces`) with the digest of the text it
