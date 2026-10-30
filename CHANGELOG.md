@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### `realized` no longer counts a refused capsule as a capsule turn — 2026-10-31
+
+- A prompt hook whose refresh assembled no capsule prints the refresh's layer
+  lines and "warning: Capsule unavailable: ...", and `realized` took the layer
+  lines for a capsule's start: each such turn counted as a turn with a
+  capsule. It is now a prompt-hook turn without one, counted apart ("the
+  refresh assembled no capsule"). Over the four client projects from
+  2026-09-01 that is 448 of 931 prompt-hook turns, all in September: 300 of
+  next's 440 Codex turns, 73 of scb's 147, 63 of bauherrenmappe's 216 and 12
+  of aea-partner's 128. Two refusals caused them: "Working task not found"
+  (276 messages; the prompt refresh serves an unrecorded task since
+  2026-10-06) and an automatic-continuation conflict (174) whose code is in
+  no branch of this repository. `docs/MEMORY-EVAL.md`'s "440 capsule turns"
+  for next's September is 140; the sealed field check counts `realized`'s
+  turns with a capsule, so a refused one no longer counts toward its 50.
+
 ### A capsule asked for and not built is recorded, and the funnel counts it apart — 2026-10-31
 
 - A `refresh` that was asked for a capsule (`--query`) and assembled none -

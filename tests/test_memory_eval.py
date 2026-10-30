@@ -2568,6 +2568,35 @@ class CapsuleFormsTest(unittest.TestCase):
                                                     "additionalContext": "working: t — g"}})
         self.assertEqual("working: t — g", memory_eval.hook_capsule(stdout))
 
+    def test_a_refresh_that_assembled_no_capsule_is_no_capsule(self) -> None:
+        # Its own layer lines come first, which read as a capsule's start: on
+        # 2026-10-30 a sync left four projects printing this on every prompt.
+        refused = "\n".join([
+            "procedural: updated (85 documents)",
+            "semantic: updated (3 documents)",
+            "episodic: updated (0 documents)",
+            "phases: stat 54ms index 105ms retrieval 1ms",
+            "warning: Capsule unavailable: Capsule profile must be full or navigation. No task context was"
+            " assembled this turn; read the canonical sources directly.",
+        ])
+        self.assertEqual("", memory_eval.capsule_text(refused))
+        self.assertEqual("", memory_eval.capsule_text(f"{UNSAVED}\n{refused}"))
+        turns = memory_eval.claude_turns(self.transcript([hook(refused, "2026-10-31T09:00:00Z"),
+                                                          says("Read the code instead.")]))
+        stats = memory_eval.tally(turns)
+        self.assertEqual((1, 1, 0), (stats["hook_turns"], stats["turns_no_capsule_assembled"],
+                                     stats["turns_with_capsule"]))
+        working = memory_eval.tally(memory_eval.claude_turns(self.transcript([
+            hook("working: shop/fix-12 — Fix invoice rounding", "2026-10-31T09:05:00Z")])))
+        self.assertEqual((1, 0), (working["turns_with_capsule"], working["turns_no_capsule_assembled"]))
+
+    def transcript(self, records: List[Dict[str, Any]]) -> Path:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "session.jsonl"
+        jsonl(path, records)
+        return path
+
     def test_a_retrieve_answer_in_json_names_its_items_and_record(self) -> None:
         answer = json.dumps({"working": None, "task_record": TASK_RECORD,
                              "semantic": [{"path": CHUNK, "title": "Invoice rounding"}],

@@ -114,7 +114,10 @@ The save request after every answer is a write-path cost that was never
 weighed against a benefit: on 43 saves on copies of two client projects it
 took a median 17.1 s after an answer of 70.5 s, and in real sessions the
 knowledge it writes was not seen opened (`realized`, above). The four client
-projects run it since 2026-10-30. What to read from their sessions, when,
+projects run it since 2026-10-30 - but from 17:01 that day a Harness sync
+put them on `main`'s runtime, which refuses their `recall` profile, so until
+they are synced again their prompts carry no capsule and none of their
+turns counts toward the 50 below. What to read from their sessions, when,
 and what follows was written down before any of them ran it: the field
 counts of `funnel` and `realized --traces` from 2026-10-31, on the first
 Monday with 50 capsule turns for each of Claude Code and Codex (at the latest
@@ -433,8 +436,17 @@ renders showed and how many the turn touched. Counts only. The traces exist
 only where a runtime of 2026-10-13 or later rendered; a capsule from a recall
 profile turn without saves of its own renders without a search and leaves no
 trace. In the same sessions'
-440 capsule turns the capsules delivered 54 items, 44 of them `CHANGELOG.md`
-(25 opened) and none of the rest opened.
+440 prompt-hook turns, 140 carried a capsule. The other 300 printed
+"Capsule unavailable": "Working task not found" from the runtime of then
+(the prompt refresh has served a task not yet recorded since 2026-10-06), or
+an automatic-continuation conflict whose code no longer exists anywhere in
+this repository. The 140 delivered 54 items, 44 of them `CHANGELOG.md` (25
+opened), and none of the rest was opened. Until 2026-10-31 `realized` counted
+a turn whose refresh assembled no capsule as a turn with one, since the
+refresh's own layer lines come first; it now counts them apart. Over the four
+client projects from 2026-09-01 they are 448 of 931 prompt-hook turns - 300
+of next's 440 (Codex), 73 of scb's 147, 63 of bauherrenmappe's 216 and 12 of
+aea-partner's 128 - every one in September, for those two reasons.
 
 Read the Claude Code side of those months with one fact beside it: no Claude
 Code session in the four client projects had the memory policy. Each project
@@ -649,7 +661,8 @@ report them too.
   nothing useful, at least one judged noise), `unjudged-only`, `silent`
   (nothing delivered, or the sanitizer left nothing to search).
 - **latency** - wall time of the refresh process on a warm index, p50 and p95.
-- **realized** - per host: prompt-hook turns, turns with a capsule and with
+- **realized** - per host: prompt-hook turns, those whose refresh assembled
+  no capsule ("Capsule unavailable"), turns with a capsule and with
   documents, delivered items the agent touched with a tool and mentioned in
   its text, by kind (skill, brain, task-record, chunk, task, spec-doc,
   changelog); the capsules' task record pointers and how many the agent

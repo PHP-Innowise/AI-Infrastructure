@@ -3015,6 +3015,12 @@ CAPSULE_START = re.compile(
 HOOK_PREAMBLE = ("Previous native memory result was not saved completely.",)
 # What a prompt hook prints instead of a capsule when its refresh failed.
 HOOK_FAILURE = "Memory refresh unavailable"
+# What the runtime prints when its refresh ran and assembled no capsule - a
+# task ID it cannot read, a profile it refused - after the refresh's own
+# layer lines, which CAPSULE_START takes for a capsule. On 2026-10-30 a sync
+# left four client projects on a runtime that refused their profile, and
+# every prompt there printed this.
+CAPSULE_UNAVAILABLE = "warning: Capsule unavailable:"
 # A capsule names its memory in one of two forms. Since October each item is
 # a line "- memory|history|skill|policy <path> — <title>", its excerpt
 # indented below it. The September runtime printed the layer on a line of its
@@ -3030,7 +3036,7 @@ WEAK_MATCH = "weak-match: "
 TASK_RECORD = "task record: "
 GENERIC_NAMES = {"skill.md", "readme.md", "index.md", "manifest.md"}
 COUNTERS = (
-    "hook_turns", "turns_with_capsule", "turns_with_documents", "delivered_items",
+    "hook_turns", "turns_no_capsule_assembled", "turns_with_capsule", "turns_with_documents", "delivered_items",
     "delivered_touched", "delivered_mentioned", "turns_touching_delivered",
     "turns_mentioning_delivered", "touched_not_delivered", "turns_touching_other_docs",
     "record_pointers", "record_pointers_touched",
@@ -3093,7 +3099,9 @@ def capsule_text(text: str) -> Optional[str]:
     capsule = "\n".join(lines[start:])
     if not CAPSULE_START.match(capsule):
         return None
-    return "" if capsule.startswith(HOOK_FAILURE) else capsule
+    if capsule.startswith(HOOK_FAILURE) or any(line.startswith(CAPSULE_UNAVAILABLE) for line in lines[start:]):
+        return ""
+    return capsule
 
 
 def capsule_items(text: str) -> Tuple[Set[str], Set[str]]:
@@ -3433,6 +3441,7 @@ def new_turn(started: object) -> Dict[str, Any]:
         "retrieve_cli": 0,
         "retrieve_mcp": 0,
         "context_cli": 0,
+        "unassembled": False,
     }
 
 
@@ -3500,7 +3509,10 @@ def read_records(path: Path) -> Iterator[Dict[str, Any]]:
 
 
 def deliver(turn: Dict[str, Any], capsule: Optional[str]) -> None:
-    """Add what a prompt hook's capsule handed over to its turn."""
+    """Add what a prompt hook's capsule handed over to its turn; "" is a
+    refresh that ran and assembled none, a hook turn without a capsule."""
+    if capsule == "":
+        turn["unassembled"] = True
     if capsule:
         turn["output"] = True
         items, records = capsule_items(capsule)
@@ -3631,6 +3643,7 @@ def tally(turns: Sequence[Dict[str, Any]], paths: Optional[Dict[str, Counter]] =
     for turn in turns:
         stats["hook_turns"] += 1
         stats["turns_with_capsule"] += bool(turn["output"])
+        stats["turns_no_capsule_assembled"] += bool(turn.get("unassembled")) and not turn["output"]
         stats["agent_retrieve_cli"] += turn["retrieve_cli"]
         stats["agent_retrieve_mcp"] += turn["retrieve_mcp"]
         stats["agent_context_cli"] += turn["context_cli"]
@@ -4097,6 +4110,7 @@ def command_realized(arguments: argparse.Namespace) -> int:
 REALIZED_ROWS = (
     ("transcripts read", "transcripts"),
     ("prompt-hook turns", "hook_turns"),
+    ("  the refresh assembled no capsule", "turns_no_capsule_assembled"),
     ("turns with a capsule", "turns_with_capsule"),
     ("turns with documents", "turns_with_documents"),
     ("delivered items", "delivered_items"),
