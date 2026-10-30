@@ -1947,7 +1947,25 @@ while it runs joins it; where the window holds none, at the last user message
 that is not context Codex adds itself - its `AGENTS.md` instructions and
 recommended plugins, a skill's text, a Stop hook's continuation, a subagent's
 report, the answer to its question. A task file the line leaves out is counted
-in the compaction line. The transcript is
+in the compaction line.
+
+`ticket files (CMS-741): ...` is an experiment, off unless `ticket_files` is
+`true` in `runtime.json` or `CONTEXT_TICKET_FILES=1` (`0` turns a configured
+one off for a run). It names the files of the newest commits on any ref (200
+at most, no merges) whose message names a ticket of the request, as written,
+or of the task's ID, upper-cased - a branch keeps its ticket in lower case as
+often as not. A ticket is matched in any case as a word of its own (`CMS-74`
+is not `CMS-741`), and only the prefixes the project files its work under
+count when the index knows any. Files still present and kept as recent files
+are, not named in the request and not among the recent files already shown;
+ten at most, whole paths within 720 characters, newest commit first, right
+after the `recent files:` line. A Git failure or a two-second timeout leaves
+the line out; the turn goes on. The `git log` costs a prompt 35 to 60 ms on
+repositories of 4,000 to 5,000 commits. On 155 client cold starts it was the
+most precise list - 9.4% of the files it showed were files the turn went on to
+change, against 6.1% of the recent files - and it becomes a default only on
+the task-outcome measurement sealed for it (`docs/MEMORY-EVAL.md`, "The
+`ticket` arm"). The transcript is
 read after the turn is recorded, for a second at most; each checkout of an
 attached project keeps its own list; and excerpt growth leaves the line its
 720 characters.

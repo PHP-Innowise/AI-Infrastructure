@@ -57,6 +57,7 @@ from brain_runtime import (
     configured_capsule_profile,
     configured_mode,
     configured_retrieval_gate,
+    configured_ticket_files,
     create_promotion,
     create_record,
     create_task,
@@ -99,6 +100,7 @@ from context_retrieval import (
     _CurrentSourcePolicy,
     _capsule_index_images,
     _carry_index_images,
+    _known_ticket_prefixes,
     _with_index_images,
     TOUCH_SEED_LIMIT,
     prompt_path_seeds,
@@ -2321,6 +2323,10 @@ def enforce_capsule_budget(capsule: dict[str, object]) -> dict[str, object]:
             omitted["last_turn_characters"] += len(compacted["last_turn"])
             compacted["last_turn"] = None
             continue
+        # Ticket files are a pointer the turn can do without, not state.
+        if compacted.get("ticket_files"):
+            compacted["ticket_files"] = None
+            continue
         if compacted["episodic"]:
             compacted["episodic"].pop()
             omitted["episodic"] += 1
@@ -2479,6 +2485,10 @@ def enforce_governed_capsule_contract(
         if compacted.get("last_turn"):
             omitted["last_turn_characters"] += len(compacted["last_turn"])
             compacted["last_turn"] = None
+            continue
+        # Ticket files are a pointer the turn can do without, not state.
+        if compacted.get("ticket_files"):
+            compacted["ticket_files"] = None
             continue
         related = _related_positions(compacted["semantic"])
         if related:
@@ -3233,7 +3243,8 @@ def capsule_shape(repository: Path, capsule: object, requested_profile: Optional
     """What a delivered capsule carried, as counts a usage funnel can add up.
 
     The profile that built it, whether it held the task's working state, how
-    many recent files and documents it named, and its token estimate. Never a
+    many recent files, ticket files and documents it named, and its token
+    estimate. Never a
     path, a title or a text: like the rest of the health record, it must not
     become a second channel for what the manifest keeps under privacy rules.
     """
@@ -3249,10 +3260,12 @@ def capsule_shape(repository: Path, capsule: object, requested_profile: Optional
         value = capsule.get(key)
         return len(value) if isinstance(value, list) else 0
 
+    ticket = capsule.get("ticket_files")
     return {
         "profile": profile,
         "working": bool(capsule.get("working")),
         "recent_files": count("recent_files"),
+        "ticket_files": len(ticket.get("paths") or []) if isinstance(ticket, dict) else 0,
         "documents": count("selected"),
         "tokens": tokens if type(tokens) is int and tokens >= 0 else None,
     }
@@ -3526,6 +3539,7 @@ def assemble_capsule(
         result.setdefault("query_source", query_source)
         # The Stop hook keeps the recent files in either mode.
         attach_recent_files(connection, repository, result)
+        attach_ticket_files(connection, repository, result, prompt or query, task_id)
         result = enforce_capsule_budget(result)
         if delivery_admission is not None:
             delivery_admission()
@@ -3650,6 +3664,7 @@ def assemble_capsule(
         if source_notices:
             result['source_notices'] = source_notices
         attach_recent_files(connection, repository, result)
+        attach_ticket_files(connection, repository, result, prompt or query, task_id)
         result = enforce_governed_capsule_contract(result)
         if delivery_admission is not None:
             delivery_admission()
@@ -3687,6 +3702,7 @@ def assemble_capsule(
                 result["task_closed"] = True
             result["pending_turns"] = len(pending_turn_deltas(connection, task_id))
         attach_recent_files(connection, repository, result)
+        attach_ticket_files(connection, repository, result, prompt or query, task_id)
         capsule = enforce_governed_capsule_contract(result)
         if render:
             shown_in_render(connection, capsule, delivery_profile=delivery_profile)
@@ -4312,7 +4328,8 @@ def _excerpt_growth(capsule: dict[str, object], excerpts: dict[str, str]) -> dic
     characters, and growth that counted on the room made the renderer cut the
     later excerpts to pay for it. Its limit, not its length, so the windows
     stay the same from turn to turn."""
-    reserve = EXCERPT_GROWTH_RESERVE + (RECENT_FILES_LINE_LIMIT + 1 if capsule.get("recent_files") else 0)
+    reserve = (EXCERPT_GROWTH_RESERVE + (RECENT_FILES_LINE_LIMIT + 1 if capsule.get("recent_files") else 0)
+               + (RECENT_FILES_LINE_LIMIT + 1 if capsule.get("ticket_files") else 0))
     room = RENDERED_CAPSULE_LIMIT - reserve - sum(len(text) + 3 for text in excerpts.values() if text)
     order = [
         item["path"] for layer in ("semantic", "episodic") for item in capsule.get(layer) or []
@@ -4641,6 +4658,11 @@ def _render_capsule(
         )
         if line:
             head.append(line)
+    ticket_line = ticket_files_line(capsule)
+    if ticket_line:
+        # Beside the recent files, wherever the working state put them.
+        head.insert(next((index + 1 for index, line in enumerate(head) if line.startswith("recent files: ")),
+                         len(head)), ticket_line)
     if capsule.get("kind") == "warming" and not capsule.get("task_closed"):
         head.append('warming: task checkpoint pending' if delivery_profile == 'cursor-rule'
                     else f"warming: {capsule['pending_turns']} turn(s) pending")
@@ -7375,6 +7397,108 @@ def attach_recent_files(
             break
     if shown:
         capsule["recent_files"] = shown
+
+
+# The files of the commits that name the request's ticket or the task's:
+# where earlier work on the same ticket went. An experiment behind
+# configured_ticket_files. On 155 cold starts of four client projects these
+# lists named a file the turn went on to change in 41 tasks - 9.4% of the
+# files shown were such a file, against 6.1% of the recent files - and in 14
+# tasks where the recent files named none (docs/MEMORY-EVAL.md).
+TICKET_FILES_COMMITS = 200
+TICKET_FILES_SECONDS = 2.0
+
+
+def capsule_tickets(connection: sqlite3.Connection, text: str, task_id: Optional[str]) -> list[str]:
+    """The tickets the request names, then those of the task's ID.
+
+    A branch carries its ticket in lower case as often as not - 89 of one
+    client's 282 branches are `feature/next-123-...` - so the task's ID is
+    read upper-cased; the request is read as written, where `use-2` is a
+    word. When the project files its work under known prefixes, only they
+    count (see brain_runtime.ticket_ids)."""
+    known = _known_ticket_prefixes(connection)
+    return list(dict.fromkeys([
+        *brain_runtime.ticket_ids(text, known),
+        *brain_runtime.ticket_ids(str(task_id or "").upper(), known),
+    ]))
+
+
+def ticket_files(repository: Path, tickets: list[str], text: str, shown: list[str]) -> list[str]:
+    """The project files of the newest commits on any ref whose message names
+    one of ``tickets`` in any case, newest commit first: files still there,
+    kept as the recent files are, and neither named in the request nor among
+    the recent files ``shown``. Ten at most; a Git failure or a timeout is no
+    list, never a failed turn."""
+    if not tickets:
+        return []
+    root = workspace_roots.project_root(repository)
+    arguments = [
+        "git", "-C", str(root), "log", "--all", "--no-merges", "--no-renames", "--relative", "-z",
+        "--regexp-ignore-case", "--extended-regexp", "--format=%x1e", "--name-only",
+        f"--max-count={TICKET_FILES_COMMITS}",
+        # A ticket is a word of its own: CMS-74 is not CMS-741.
+        *(f"--grep=(^|[^A-Za-z0-9]){ticket}([^0-9]|$)" for ticket in tickets),
+    ]
+    try:
+        result = subprocess.run(
+            arguments, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+            timeout=TICKET_FILES_SECONDS, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    folded = text.casefold()
+    skipped = set(shown)
+    found: list[str] = []
+    for item in result.stdout.split(b"\0"):
+        # Each commit is its `\x1e` line, then its paths after a newline.
+        path = os.fsdecode(item.lstrip(b"\n"))
+        if not path or path == "\x1e" or path in skipped or path in found:
+            continue
+        if path.casefold() in folded or PurePosixPath(path).name.casefold() in folded:
+            continue
+        try:
+            present = _recent_file_kept(path) and (root / path).is_file()
+        except (OSError, ValueError):
+            present = False
+        if present:
+            found.append(path)
+            if len(found) >= RECENT_FILES_LIMIT:
+                break
+    return found
+
+
+def attach_ticket_files(
+    connection: sqlite3.Connection, repository: Path, capsule: dict[str, object],
+    text: Optional[str], task_id: Optional[str],
+) -> None:
+    """Name the files of the commits for the request's or the task's ticket in
+    a capsule, where configured_ticket_files switches them on."""
+    try:
+        if not configured_ticket_files(repository):
+            return
+    except BrainError:
+        return
+    tickets = capsule_tickets(connection, text or "", task_id)
+    shown = [path for path in capsule.get("recent_files") or [] if isinstance(path, str)]
+    paths = ticket_files(repository, tickets, text or "", shown)
+    if paths:
+        capsule["ticket_files"] = {"tickets": tickets, "paths": paths}
+
+
+def ticket_files_line(capsule: dict[str, object]) -> Optional[str]:
+    """The rendered "ticket files" line: the tickets, then whole paths within
+    the width of the recent files line."""
+    value = capsule.get("ticket_files")
+    if not isinstance(value, dict):
+        return None
+    tickets = [ticket for ticket in value.get("tickets") or [] if isinstance(ticket, str)][:3]
+    paths = [path for path in value.get("paths") or [] if isinstance(path, str)]
+    label = f"ticket files ({', '.join(tickets)}): " if tickets else "ticket files: "
+    kept = _whole_paths(label, paths[:RECENT_FILES_LIMIT], RECENT_FILES_LINE_LIMIT)
+    return label + ", ".join(kept) if kept else None
 
 
 def head_commit(repository: Path) -> Optional[str]:

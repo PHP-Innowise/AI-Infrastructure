@@ -594,6 +594,20 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     return profile
 
 
+def configured_ticket_files(repository: Path) -> bool:
+    """Whether the capsule names the files of the commits for its ticket.
+
+    An experiment, off unless `CONTEXT_TICKET_FILES=1` or `ticket_files: true`
+    in runtime.json; `CONTEXT_TICKET_FILES=0` turns a configured one off for
+    a run. It becomes a default only on a measurement of task outcomes
+    (docs/MEMORY-EVAL.md, "Accepting a retrieval change").
+    """
+    value = os.environ.get("CONTEXT_TICKET_FILES")
+    if value in {"0", "1"}:
+        return value == "1"
+    return load_config(repository).get("ticket_files") is True
+
+
 def configured_retrieval_gate(
     repository: Path, requested: Optional[str] = None
 ) -> str:

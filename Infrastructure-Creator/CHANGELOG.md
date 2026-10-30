@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime can name a ticket's files, switched off — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `brain_runtime.py` change in the asset. `runtime.json.template` names no
+  `ticket_files`, so a generated project keeps the line off. The policy lock
+  was rewritten.
+
 ### The seeded runtime starts a Codex turn where its rollout says — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py`

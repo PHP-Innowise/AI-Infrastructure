@@ -73,21 +73,27 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import memory_eval as stand  # noqa: E402
 from accelerator_attach import _toml  # noqa: E402
 
-ARMS = ("off", "capsule", "navigation", "recall")
+ARMS = ("off", "capsule", "navigation", "recall", "ticket")
 DEFAULT_ARMS = ("off", "capsule")
-# `navigation` and `recall` run the same prompt hook with that
-# `capsule_profile` in the corpus. Navigation: working state and recent files,
-# no documents and no manifest. Recall adds the task's own saves, with a
-# manifest only on a turn one of them matched.
-HOOKED_ARMS = ("capsule", "navigation", "recall")
-PROFILE_ARMS = ("navigation", "recall")
+# `navigation`, `recall` and `ticket` run the same prompt hook with these
+# settings in the corpus's runtime.json. Navigation: working state and recent
+# files, no documents and no manifest. Recall adds the task's own saves, with
+# a manifest only on a turn one of them matched. Ticket is recall with the
+# ticket files line on: the files of the earlier commits that name the
+# prompt's or the branch's ticket.
+HOOKED_ARMS = ("capsule", "navigation", "recall", "ticket")
+ARM_SETTINGS: Dict[str, Dict[str, Any]] = {
+    "navigation": {"capsule_profile": "navigation"},
+    "recall": {"capsule_profile": "recall"},
+    "ticket": {"capsule_profile": "recall", "ticket_files": True},
+}
 # What a run counts: calls to the first gold touch, or for a recall set to the
 # first needed touch or an answer naming a needed file.
 METRICS = ("gold", "recall")
@@ -390,7 +396,91 @@ def cold_starts(project: Path, transcripts: Path, after: Optional[datetime], bef
             "host": host,
             # The run seeds the recent files from these hosts' sessions.
             "seed_hosts": list(hosts),
+            # The corpus branch keeps its ticket (corpus_branch).
+            "branch": session_branch(host, path),
         }
+
+
+def session_branch(host: str, path: Path) -> str:
+    """The Git branch a session started on: Claude Code writes it on its
+    records, Codex in its session_meta."""
+    for index, record in enumerate(read_records(path)):
+        if index >= 200:
+            break
+        if host == "claude" and isinstance(record.get("gitBranch"), str):
+            return record["gitBranch"]
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        if host == "codex" and record.get("type") == "session_meta":
+            git = payload.get("git") if isinstance(payload.get("git"), dict) else {}
+            return str(git.get("branch") or "")
+    return ""
+
+
+def project_turns(project: Path, transcripts: Path, codex_root: Optional[Path],
+                  hosts: Sequence[str]) -> List[Tuple[datetime, List[str]]]:
+    """Every human turn of the project's sessions on these hosts, oldest
+    first: when it was asked, and the files its calls changed, then read."""
+    root = os.path.realpath(str(project))
+    turns: List[Tuple[datetime, List[str]]] = []
+    for _host, path in project_sessions(project, transcripts, codex_root, hosts):
+        for turn in session_turns(path, root):
+            when = stand.parse_instant(turn["ts"])
+            files = list(dict.fromkeys(turn["changed"] + turn["read"]))
+            if when is not None and files:
+                turns.append((when, files))
+    turns.sort(key=lambda entry: entry[0])
+    return turns
+
+
+def recent_at(turns: Sequence[Tuple[datetime, List[str]]], moment: datetime,
+              present: Callable[[str], bool]) -> List[str]:
+    """The recent files the Stop hook would hold at ``moment``, newest first:
+    seed_recent_files's replay, with ``present`` standing in for the corpus."""
+    rt = runtime()
+    selected = []
+    for when, files in turns:
+        if when >= moment:
+            continue
+        files = [item for item in files if present(item) and rt._recent_file_kept(item)]
+        if files:
+            selected.append(files)
+    kept: List[str] = []
+    for files in selected[-SEEDED_TURNS:]:
+        kept = list(dict.fromkeys(files + kept))[:rt.RECENT_FILES_KEPT]
+    return kept
+
+
+def ticket_commit_files(project: Path, task: Dict[str, Any],
+                        turns: Sequence[Tuple[datetime, List[str]]] = ()) -> Tuple[List[str], List[str]]:
+    """The tickets of the prompt and of the session's branch, and what the
+    `ticket` arm's line could show for them: the files of the commits
+    reachable from the corpus commit whose message names one, still in its
+    tree, kept as recent files are, not named in the prompt and not among
+    the ten recent files the capsule shows beside it (from ``turns``). A
+    corpus holds only that history. The project's known ticket prefixes can
+    only narrow it."""
+    brain = runtime().brain_runtime
+    prompt = str(task.get("prompt") or "")
+    tickets = list(dict.fromkeys([*brain.ticket_ids(prompt),
+                                  *brain.ticket_ids(str(task.get("branch") or "").upper())]))
+    moment = stand.parse_instant(task.get("ts"))
+    repository = stand.Repository(project)
+    commit = repository.commit_before(moment) if tickets and moment and repository.prefix is not None else None
+    if commit is None:
+        return tickets, []
+    listing = stand.read_git(project, "log", commit, "--no-merges", "--no-renames", "--relative", "-z",
+                             "--regexp-ignore-case", "--extended-regexp", "--format=%x1e", "--name-only",
+                             "--max-count=200",
+                             *(f"--grep=(^|[^A-Za-z0-9]){ticket}([^0-9]|$)" for ticket in tickets)) or ""
+    tree = set((stand.read_git(project, "ls-tree", "-r", "-z", "--name-only", commit) or "").split("\0"))
+    shown = set(recent_at(turns, moment, tree.__contains__)[:runtime().RECENT_FILES_LIMIT]) if turns else set()
+    files: List[str] = []
+    for item in listing.split("\0"):
+        path = item.lstrip("\n")
+        if (path and path != "\x1e" and path in tree and path not in files and path not in shown
+                and runtime()._recent_file_kept(path) and not named_in(prompt, path)):
+            files.append(path)
+    return tickets, files
 
 
 def command_sample(arguments: argparse.Namespace) -> int:
@@ -412,10 +502,18 @@ def command_sample(arguments: argparse.Namespace) -> int:
         project = stand.resolve_project(name, projects_root)
         if project is None:
             raise OutcomeError(f"no project {name} under {projects_root}")
+        turns = None
         for task in cold_starts(project, transcripts, after, before, codex_root, hosts):
             moment = stand.parse_instant(task["ts"])
             if any(abs((moment - other).total_seconds()) <= 5 for other in exclude.get(task["project"], [])):
                 continue
+            if arguments.require_ticket_commits:
+                if turns is None:
+                    turns = project_turns(project, transcripts, codex_root, hosts)
+                tickets, files = ticket_commit_files(project, task, turns)
+                if not files:
+                    continue
+                task["tickets"] = tickets
             candidates.append(task)
     candidates.sort(key=lambda task: (task["project"], task["ts"]))
     chosen = candidates if arguments.n >= len(candidates) else random.Random(arguments.seed).sample(candidates, arguments.n)
@@ -424,7 +522,8 @@ def command_sample(arguments: argparse.Namespace) -> int:
         "version": 1,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "before": arguments.before, "after": arguments.after, "seed": arguments.seed,
-        "hosts": list(hosts), "candidates": len(candidates), "tasks": chosen,
+        "hosts": list(hosts), "require_ticket_commits": arguments.require_ticket_commits,
+        "candidates": len(candidates), "tasks": chosen,
     })
     os.chmod(out, 0o600)
     by_host = ", ".join(f"{host} {sum(task['host'] == host for task in candidates)}" for host in hosts)
@@ -777,7 +876,7 @@ def build_corpus(task: Dict[str, Any], corpus: Path, cache: Path, projects_root:
     stand.overlay(corpus, edition)
     env = stand.runtime_env(cache, moment, None)
     objects = repository.history(cache, commit)
-    stand.commit_corpus(corpus, env, commit if objects else None, objects, f"ab/{stand.safe_name(task['id'])}")
+    stand.commit_corpus(corpus, env, commit if objects else None, objects, corpus_branch(task))
     warm = stand.run_runtime(corpus, ["index"], env, timeout)
     if warm["exit"] != 0:
         raise stand.Skip("index-failed")
@@ -824,8 +923,12 @@ def seed_recent_files(task: Dict[str, Any], corpus: Path, project: Path, transcr
 
 def corpus_branch(task: Dict[str, Any]) -> str:
     """The branch commit_corpus leaves the corpus on, which the prompt hook
-    takes for the task ID."""
-    return f"ab/{stand.safe_name(str(task['id']))}"
+    takes for the task ID. A session that ran on a ticket's branch keeps the
+    ticket in it: the branch told the agent, and the runtime, which work it
+    was."""
+    name = f"ab/{stand.safe_name(str(task['id']))}"
+    tickets = runtime().brain_runtime.ticket_ids(str(task.get("branch") or "").upper())
+    return f"{name}-{tickets[0]}" if tickets else name
 
 
 def saved_documents(corpus: Path) -> Set[str]:
@@ -1002,8 +1105,27 @@ def health_lines(path: Path) -> int:
         return 0
 
 
-def set_capsule_profile(corpus: Path, profile: str) -> None:
-    """Write the capsule profile into a corpus's runtime.json."""
+def ticket_files_delivered(path: Path, skip: int) -> bool:
+    """Whether a capsule a refresh recorded after line ``skip`` of the health
+    journal carried ticket files: the mechanism the `ticket` arm adds."""
+    try:
+        with path.open("rb") as handle:
+            for number, raw in enumerate(handle):
+                if number < skip:
+                    continue
+                try:
+                    shape = json.loads(raw).get("capsule")
+                except (ValueError, AttributeError):
+                    continue
+                if isinstance(shape, dict) and type(shape.get("ticket_files")) is int and shape["ticket_files"] > 0:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def configure_corpus(corpus: Path, settings: Dict[str, Any]) -> None:
+    """Write settings into a corpus's runtime.json."""
     config = corpus / "project-brain" / "config" / "runtime.json"
     try:
         values = json.loads(config.read_text(encoding="utf-8"))
@@ -1011,9 +1133,14 @@ def set_capsule_profile(corpus: Path, profile: str) -> None:
         values = {}
     if not isinstance(values, dict):
         values = {}
-    values["capsule_profile"] = profile
+    values.update(settings)
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(json.dumps(values, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def set_capsule_profile(corpus: Path, profile: str) -> None:
+    """Write the capsule profile into a corpus's runtime.json."""
+    configure_corpus(corpus, {"capsule_profile": profile})
 
 
 def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
@@ -1121,6 +1248,7 @@ def run_arm(command: Sequence[str], corpus: Path, gold: Sequence[str], cap: int,
         # Every prompt-hook refresh appends one health line, with or without
         # documents: the navigation profile writes no manifest but this.
         "hook_ran": health_lines(health) > health_before,
+        "ticket_files_delivered": ticket_files_delivered(health, health_before),
         "capsule_tokens": capsule_tokens,
         "manifests": dict(sorted(entry_points.items())),
         "exit": process.returncode,
@@ -1189,8 +1317,8 @@ def command_run(arguments: argparse.Namespace) -> int:
                 for arm in order:
                     corpus = work / f"{stand.safe_name(str(task.get('id')))}-{arm}-{replicate}"
                     shutil.copytree(base, corpus, symlinks=True)
-                    if arm in PROFILE_ARMS:
-                        set_capsule_profile(corpus, arm)
+                    if arm in ARM_SETTINGS:
+                        configure_corpus(corpus, ARM_SETTINGS[arm])
                     try:
                         outcome = run_arm(
                             codex_command(arguments.codex, corpus, arm, task["prompt"], arguments.model),
@@ -1284,8 +1412,10 @@ def valid_arm(arm: str, runs: Sequence[Dict[str, Any]]) -> bool:
         return all(delivered)
     if arm == "navigation":
         return all(value is True for value in ran) and not any(delivered)
-    if arm == "recall":
-        # A manifest only on a turn one of the task's saves matched.
+    if arm in ("recall", "ticket"):
+        # A manifest only on a turn one of the task's saves matched. A ticket
+        # run counts whether or not its line came: the sample holds the cold
+        # starts it can act on, and the report says how often it did.
         return all(value is True for value in ran)
     return not any(delivered) and not any(value is True for value in ran)
 
@@ -1314,6 +1444,7 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS,
             f"{treatment}_touched": all(reached(run, metric) is not None for run in arms[treatment]),
             f"{baseline}_saved": any(run.get("saved_delivered") for run in arms[baseline]),
             f"{treatment}_saved": any(run.get("saved_delivered") for run in arms[treatment]),
+            f"{treatment}_ticket": any(run.get("ticket_files_delivered") for run in arms[treatment]),
         })
     differences = [pair[treatment] - pair[baseline] for pair in pairs]
     summary: Dict[str, Any] = {
@@ -1337,6 +1468,10 @@ def summarize(result: Dict[str, Any], compare: Tuple[str, str] = DEFAULT_ARMS,
         # mechanism the arms differ by. Not part of the verdict.
         summary[f"saved_delivered_{baseline}"] = sum(1 for p in pairs if p[f"{baseline}_saved"])
         summary[f"saved_delivered_{treatment}"] = sum(1 for p in pairs if p[f"{treatment}_saved"])
+    if treatment == "ticket":
+        # How often the ticket line reached the capsule: the mechanism, not
+        # part of the verdict.
+        summary["ticket_files_delivered"] = sum(1 for p in pairs if p[f"{treatment}_ticket"])
     summary["verdict"] = verdict(summary)
     return summary
 
@@ -1379,6 +1514,8 @@ def command_report(arguments: argparse.Namespace) -> int:
         if summary["metric"] == "recall":
             print(f"save delivered by the hook: {baseline} {summary[f'saved_delivered_{baseline}']}, "
                   f"{treatment} {summary[f'saved_delivered_{treatment}']}")
+        if "ticket_files_delivered" in summary:
+            print(f"ticket files in the capsule: {summary['ticket_files_delivered']} of {summary['pairs']} pairs")
     print(f"verdict: {summary['verdict']}")
     return 0
 
@@ -1396,6 +1533,9 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--before", required=True)
     sample.add_argument("--after")
     sample.add_argument("--exclude-set", action="append", help="a memory_eval set whose prompts are left out")
+    sample.add_argument("--require-ticket-commits", action="store_true",
+                        help="only cold starts whose prompt or branch names a ticket an earlier commit names, "
+                             "with a file the ticket arm's line could show")
     sample.add_argument("--n", type=int, required=True)
     sample.add_argument("--seed", type=int, required=True)
     sample.add_argument("--out", type=Path, required=True)

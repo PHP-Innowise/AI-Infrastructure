@@ -4487,9 +4487,11 @@ class RefreshHealthTest(RuntimeHarness):
         shapes = [json.loads(line).get("capsule") for line in path.read_text(encoding="utf-8").splitlines()]
         navigation, full = shapes[-2], shapes[-1]
         for shape in (navigation, full):
-            self.assertEqual({"profile", "working", "recent_files", "documents", "tokens"}, set(shape))
+            self.assertEqual({"profile", "working", "recent_files", "ticket_files", "documents", "tokens"},
+                             set(shape))
             self.assertIsInstance(shape["working"], bool)
             self.assertIsInstance(shape["recent_files"], int)
+            self.assertEqual(0, shape["ticket_files"])
         self.assertEqual(("navigation", 0), (navigation["profile"], navigation["documents"]))
         self.assertEqual("full", full["profile"])
         text = path.read_text(encoding="utf-8")
@@ -15443,6 +15445,20 @@ class RecentFilesExcerptRoomTest(unittest.TestCase):
         self.assertGreater(grown(without), context_cli.RECENT_FILES_LINE_LIMIT)
         self.assertEqual(context_cli.RECENT_FILES_LINE_LIMIT + 1, grown(without) - grown(beside))
 
+    def test_the_ticket_line_is_reserved_whole_too(self) -> None:
+        excerpts = {"docs/ledger.md": self.excerpt("a" * 290, 300), "docs/refund.md": self.excerpt("b" * 190, 200)}
+        capsule = {"semantic": [{"path": "docs/ledger.md"}, {"path": "docs/refund.md"}], "episodic": [],
+                   "recent_files": ["src/Export.php"]}
+
+        def grown(limits: dict[str, int]) -> int:
+            return sum(limit - excerpts[path].limit for path, limit in limits.items())
+
+        without = context_cli._excerpt_growth(capsule, excerpts)
+        beside = context_cli._excerpt_growth(
+            {**capsule, "ticket_files": {"tickets": ["CMS-741"], "paths": ["src/Ledger.php"]}}, excerpts)
+        self.assertGreater(grown(without), context_cli.RECENT_FILES_LINE_LIMIT)
+        self.assertEqual(context_cli.RECENT_FILES_LINE_LIMIT + 1, grown(without) - grown(beside))
+
 
 class RecentProjectFilesTest(RuntimeHarness):
     """The project's recently read and changed files, from the host transcript
@@ -15794,6 +15810,128 @@ class RecentProjectFilesTest(RuntimeHarness):
         capsule = json.loads(self.run_cli("refresh", "--task-id", "TASK-RECENT", "--query", "export",
                                           "--json").stdout)
         self.assertNotIn("recent_files", capsule)
+
+
+class TicketFilesTest(RuntimeHarness):
+    """The files of the commits for the request's or the task's ticket, beside
+    the recent files, while the experiment is switched on."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.git("add", "-A")
+        self.git("commit", "-qm", "Initial import")
+        self.commit("CMS-741: start the export", "src/Export.php", "src/Ledger.php")
+        self.commit("Refactor the guard", "src/Guard.php")
+        self.commit("cms-741 follow-up: refunds", "src/Refund.php", "docs/refunds.md")
+        self.commit("CMS-7410: other work", "src/Writer.php")
+        self.commit("CMS-741: a file removed since", "src/Gone.php")
+        (self.repository / "src/Gone.php").unlink()
+
+    def git(self, *arguments: str) -> None:
+        subprocess.run(["git", "-C", str(self.repository), "-c", "user.email=t@example.invalid",
+                        "-c", "user.name=t", *arguments], check=True, capture_output=True)
+
+    def commit(self, subject: str, *paths: str) -> None:
+        for path in paths:
+            target = self.repository / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"<?php // {subject}\n", encoding="utf-8")
+        self.git("add", "-A")
+        self.git("commit", "-qm", subject)
+
+    def switch_on(self, **settings: object) -> None:
+        config = self.repository / "project-brain/config/runtime.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"mode": "governed", "ticket_files": True, **settings}), encoding="utf-8")
+
+    def capsule_lines(self, query: str, *options: str, task_id: str = "TASK-TICKET",
+                      env: dict[str, str] | None = None) -> list[str]:
+        rendered = self.run_cli(*options, "refresh", "--task-id", task_id, "--query", query,
+                                "--session-id", "ticket-session", "--ephemeral", env=env)
+        self.assertIn(rendered.returncode, (0, 1), rendered.stderr)
+        return rendered.stdout.splitlines()
+
+    def ticket_line(self, query: str, *options: str, **keywords: object) -> Optional[str]:
+        return next((line for line in self.capsule_lines(query, *options, **keywords)
+                     if line.startswith("ticket files")), None)
+
+    def test_the_line_is_off_until_switched_on(self) -> None:
+        self.assertIsNone(self.ticket_line("continue CMS-741 export rounding"))
+        self.switch_on()
+        # Newest commit first; a removed file, a document, the commits of
+        # CMS-7410 and those naming no ticket are left out.
+        self.assertEqual("ticket files (CMS-741): src/Refund.php, src/Export.php, src/Ledger.php",
+                         self.ticket_line("continue CMS-741 export rounding"))
+
+    def test_the_environment_switches_it_for_a_run(self) -> None:
+        self.assertIsNotNone(self.ticket_line("continue CMS-741", env={**os.environ, "CONTEXT_TICKET_FILES": "1"}))
+        self.switch_on()
+        self.assertIsNone(self.ticket_line("continue CMS-741", env={**os.environ, "CONTEXT_TICKET_FILES": "0"}))
+
+    def test_every_profile_and_lightweight_mode_carry_it(self) -> None:
+        for profile in ("full", "navigation", "recall"):
+            with self.subTest(profile=profile):
+                self.switch_on(capsule_profile=profile)
+                self.assertIsNotNone(self.ticket_line("continue CMS-741"))
+        self.switch_on()
+        self.assertIsNotNone(self.ticket_line("continue CMS-741", "--mode", "lightweight"))
+
+    def test_the_task_names_the_ticket_when_the_request_does_not(self) -> None:
+        # A branch keeps its ticket in lower case as often as not.
+        self.switch_on()
+        self.assertIsNone(self.ticket_line("continue the rounding"))
+        self.assertEqual("ticket files (CMS-741): src/Refund.php, src/Export.php, src/Ledger.php",
+                         self.ticket_line("continue the rounding", task_id="feature/cms-741-export"))
+
+    def test_files_the_request_names_or_the_recent_files_show_are_left_out(self) -> None:
+        self.switch_on()
+        self.assertEqual("ticket files (CMS-741): src/Refund.php, src/Export.php",
+                         self.ticket_line("fix CMS-741 in Ledger.php"))
+        transcript = Path(self.temporary.name) / "transcript.jsonl"
+        transcript.write_text("".join(json.dumps(record) + "\n" for record in (
+            {"type": "user", "cwd": str(self.repository), "message": {"role": "user", "content": "refunds"}},
+            {"type": "assistant", "cwd": str(self.repository), "message": {"id": "m", "content": [
+                {"type": "tool_use", "id": "t", "name": "Read",
+                 "input": {"file_path": str(self.repository / "src/Refund.php")}}]}},
+        )), encoding="utf-8")
+        turn = self.run_cli("turn", "--task-id", "TASK-TICKET", "--transcript", str(transcript), "--json")
+        self.assertEqual(0, turn.returncode, turn.stderr)
+        lines = self.capsule_lines("continue CMS-741")
+        recent = lines.index("recent files: src/Refund.php")
+        self.assertEqual("ticket files (CMS-741): src/Export.php, src/Ledger.php", lines[recent + 1])
+
+    def test_ten_whole_paths_within_the_recent_line_width(self) -> None:
+        names = [f"src/Module{index:02d}/{'Long' * 10}Handler{index:02d}.php" for index in range(15)]
+        self.commit("CMS-900: the handlers", *names)
+        self.switch_on()
+        line = self.ticket_line("continue CMS-900")
+        shown = line[len("ticket files (CMS-900): "):].split(", ")
+        self.assertLessEqual(len(line), context_cli.RECENT_FILES_LINE_LIMIT)
+        self.assertLessEqual(len(shown), context_cli.RECENT_FILES_LIMIT)
+        self.assertTrue(set(shown) <= set(names))
+
+    def test_what_is_no_ticket_is_never_searched(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        self.assertEqual(["CMS-741", "ABC-12"], context_cli.capsule_tickets(
+            connection, "Encode it as UTF-8 per PSR-4 for CMS-741", "feature/abc-12-export"))
+        self.assertEqual([], context_cli.capsule_tickets(connection, "Encode it as UTF-8 per PSR-4", "main"))
+        with mock.patch.object(context_cli.subprocess, "run") as run:
+            self.assertEqual([], context_cli.ticket_files(self.repository, [], "", []))
+        run.assert_not_called()
+
+    def test_a_git_failure_is_no_list(self) -> None:
+        timeout = subprocess.TimeoutExpired("git", context_cli.TICKET_FILES_SECONDS)
+        with mock.patch.object(context_cli.subprocess, "run", side_effect=timeout):
+            self.assertEqual([], context_cli.ticket_files(self.repository, ["CMS-741"], "", []))
+        outside = tempfile.TemporaryDirectory(prefix="no-repository-")
+        self.addCleanup(outside.cleanup)
+        self.assertEqual([], context_cli.ticket_files(Path(outside.name), ["CMS-741"], "", []))
+
+    def test_the_capsule_shape_counts_them(self) -> None:
+        capsule = {"ticket_files": {"tickets": ["CMS-741"], "paths": ["src/Export.php", "src/Ledger.php"]}}
+        self.assertEqual(2, context_cli.capsule_shape(self.repository, capsule, None)["ticket_files"])
+        self.assertEqual(0, context_cli.capsule_shape(self.repository, {}, None)["ticket_files"])
 
 
 class TicketShapeRetrievalTest(BankFixture):

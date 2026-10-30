@@ -2516,8 +2516,9 @@ class FunnelTest(unittest.TestCase):
         self.ledger = (base / "clients" / "ledger").resolve()
         self.shop = (base / "clients" / "shop").resolve()
 
-        def shape(profile: Optional[str], working: bool, recent: int, documents: int, tokens: int) -> Dict[str, Any]:
-            return {"profile": profile, "working": working, "recent_files": recent,
+        def shape(profile: Optional[str], working: bool, recent: int, documents: int, tokens: int,
+                  ticket: int = 0) -> Dict[str, Any]:
+            return {"profile": profile, "working": working, "recent_files": recent, "ticket_files": ticket,
                     "documents": documents, "tokens": tokens}
 
         jsonl(self.ledger / "memory-bank/local/refresh-health.ndjson", [
@@ -2552,7 +2553,7 @@ class FunnelTest(unittest.TestCase):
         jsonl(self.shop / "memory-bank/local/refresh-health.ndjson", [
             {"at": "2026-10-03T09:00:00Z", "hook_status": 0, "source": "hook"},
             {"at": "2026-10-03T09:00:01Z", "source": "hook-context",
-             "capsule": shape("navigation", False, 5, 0, 300)},
+             "capsule": shape("navigation", False, 5, 0, 300, ticket=2)},
         ])
 
     def tearDown(self) -> None:
@@ -2575,6 +2576,7 @@ class FunnelTest(unittest.TestCase):
         self.assertEqual((2, 1), (ledger["learnings_written"], ledger["chunks_promoted"]))
         self.assertEqual((2, 1, 1), (ledger["task_records"], ledger["findings_decisions"], ledger["bank_chunks"]))
         self.assertEqual((1, 1, 0), (shop["capsules"], shop["with_recent_files"], shop["with_working"]))
+        self.assertEqual((0, 1), (ledger["with_ticket_files"], shop["with_ticket_files"]))
         self.assertFalse(shop["save_journal"])
         self.assertEqual(4, total["hook_runs"])
         self.assertEqual(300, total["median_tokens"])

@@ -86,6 +86,20 @@ delivered documents was opened.
 - Fixes merge with their tests. Heuristics wait for the outcome measurement,
   and an experiment switch must leave the default unchanged.
 
+### The `ticket` arm: a sealed measurement
+
+The ticket files line was chosen on the 155 cold starts before 2026-10-07 of
+four client projects: beside the ten recent files it found a file the turn
+changed in 14 more tasks, and with co-change of the files a prompt names in 23
+more (55 to 78), at the width of twenty recent files (68). That set steered
+the design, so it is a smoke test (78 of its tasks pass
+`--require-ticket-commits`). The measurement is written down before it runs:
+`recall` against `ticket` on the same projects' cold starts from 2026-10-31,
+drawn once at least 30 exist, with the stand's verdict rule. The note is kept
+outside the clone (it names the projects); its SHA-256 is
+`ff43fdbad191b748feacfce2a2a087d3bfdabb71108804ed250d2fdca9cd1a6f`. Until
+it reads `ticket-helps`, `ticket_files` stays off.
+
 ## What a run does, per prompt
 
 Nothing is written into the project. All work happens in the cache (default
@@ -351,8 +365,9 @@ in total, it counts:
   with timeouts (`124`) and other non-zero exits;
 - **the capsules**: every `refresh` and Cursor `hook-context` line, and from
   the `capsule` shape a runtime of 2026-10-30 or later records - the profile,
-  the working state, how many recent files and documents it carried, its token
-  estimate - how many had each, by profile, and the median tokens. An older
+  the working state, how many recent files, ticket files and documents it
+  carried, its token estimate - how many had each, by profile, and the median
+  tokens. An older
   line has no shape and counts as `unknown`. A refresh line names no host and
   also comes from an explicit request (the MCP retrieve, the CLI);
 - **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
@@ -707,6 +722,18 @@ None says whether delivery changes what an agent does.
 - **The `recall` arm** runs it with `capsule_profile: recall`: navigation plus
   the task's own saves. It writes a manifest only on a turn one of them
   matched, so a run is valid when the hook ran.
+- **The `ticket` arm** is `recall` with `ticket_files: true`: the capsule also
+  names the files of the earlier commits for the prompt's or the branch's
+  ticket (`docs/CONTEXT-AND-MEMORY.md`). A run is valid when the hook ran;
+  `report --compare recall,ticket` also says in how many pairs the line
+  reached the capsule (`ticket_files_delivered`, from the health lines). A
+  corpus branch keeps the ticket of the branch its session ran on
+  (`ab/<id>-CMS-741`), so the runtime and the agent see it there as they did.
+  `sample --require-ticket-commits` keeps the cold starts the line can act
+  on: the prompt or the session's branch names a ticket, and a commit
+  reachable from the corpus commit names it with a file the line would show -
+  present, not named in the prompt and not among the ten recent files the
+  seeded capsule shows. Each such task records its `tickets`.
 - **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the

@@ -1111,8 +1111,8 @@ status, because on a timeout the Python process is killed before it can write
 anything, and that is the one case most worth measuring. Records carry no
 query text and no selected paths. A `refresh` or `hook-context` record also
 carries the capsule's shape as counts - `{"profile", "working",
-"recent_files", "documents", "tokens"}` - which `scripts/memory_eval.py
-funnel` adds up across projects.
+"recent_files", "ticket_files", "documents", "tokens"}` - which
+`scripts/memory_eval.py funnel` adds up across projects.
 
 ### `status` consolidation counters
 

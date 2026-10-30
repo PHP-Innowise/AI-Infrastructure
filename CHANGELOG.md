@@ -28,6 +28,38 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A ticket files line in the capsule, an experiment switched off — 2026-10-30
+
+- `ticket_files: true` in `runtime.json` (or `CONTEXT_TICKET_FILES=1`; `0`
+  turns a configured one off) adds `ticket files (CMS-741): ...` beside the
+  recent files: the files of the newest commits on any ref whose message names
+  a ticket of the request, or of the task's ID upper-cased, matched in any
+  case as a word of its own; present, kept as recent files are, not named in
+  the request and not already shown; ten at most within 720 characters. Off
+  by default: it changes what a capsule spends, so it waits for a task-outcome
+  measurement (`docs/MEMORY-EVAL.md`, "Accepting a retrieval change").
+- Why this one: on 155 cold starts of four client projects (before
+  2026-10-07) it was the most precise list - 9.4% of the files it showed were
+  changed by the turn, against 6.1% of the recent files - and found a changed
+  file in 14 tasks the recent files missed; with co-change of the files a
+  prompt names, 23 (55 to 78 tasks) at the width of twenty recent files (68).
+  Co-change of the recent files themselves did no better than ten more recent
+  files and is not built.
+- Cost: `git log --grep` adds 35 to 60 ms a prompt on repositories of 4,000
+  to 5,000 commits (the largest client clone's refresh, median 83 to 143 ms).
+  A Git failure or its two-second timeout leaves the line out.
+- The capsule shape in `refresh-health.ndjson` counts `ticket_files`, and
+  `memory_eval.py funnel` has "with ticket files".
+- `scripts/memory_outcome_ab.py`: arm `ticket` (recall plus the line); `sample
+  --require-ticket-commits` keeps the cold starts it can act on; a task records
+  its session's `branch`, and the corpus branch keeps that ticket
+  (`ab/<id>-CMS-741`); `report --compare recall,ticket` counts the pairs whose
+  capsule carried the line. The measurement is sealed before it runs (SHA-256
+  `ff43fdbad191b748feacfce2a2a087d3bfdabb71108804ed250d2fdca9cd1a6f`):
+  `recall` against `ticket` on the same projects' cold starts from
+  2026-10-31, drawn once at least 30 exist. On 8 corpora of the tuning set the
+  ticket arm's capsule showed the line and the recall arm's did not.
+
 ### A Codex turn begins where its rollout says, not at Codex's own context — 2026-10-30
 
 - The Stop hook keeps the files of the transcript's latest turn, which began

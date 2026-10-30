@@ -3679,6 +3679,7 @@ FUNNEL_ROWS = (
     ("  shape recorded", "shaped"),
     ("  with the working state", "with_working"),
     ("  with recent files", "with_recent_files"),
+    ("  with ticket files", "with_ticket_files"),
     ("  with documents", "with_documents"),
     ("  median tokens", "median_tokens"),
     ("save requests armed", "armed"),
@@ -3745,7 +3746,8 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
             profile = shape.get("profile")
             profiles[profile if profile in FUNNEL_PROFILES else "unknown"] += 1
             counts["with_working"] += shape.get("working") is True
-            for field, counter in (("recent_files", "with_recent_files"), ("documents", "with_documents")):
+            for field, counter in (("recent_files", "with_recent_files"), ("ticket_files", "with_ticket_files"),
+                                   ("documents", "with_documents")):
                 value = shape.get(field)
                 counts[counter] += type(value) is int and value > 0
             value = shape.get("tokens")
