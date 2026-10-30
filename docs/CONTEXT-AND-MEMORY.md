@@ -972,7 +972,12 @@ delivery hooks leave alone: rendering a withheld capsule would satisfy their
 What the automatic capsule carries is a separate setting:
 `CONTEXT_CAPSULE_PROFILE`, then `capsule_profile` in `runtime.json`, defaulting
 to `full`. The four editions and the generator's template ship `recall`; a
-project whose `runtime.json` names no profile keeps `full`.
+project whose `runtime.json` names no profile keeps `full`. A configured
+profile the runtime does not know - one a newer runtime wrote, or a typo -
+builds the `full` capsule, with a warning naming the value; before, it left
+every prompt without a capsule, as it did on 2026-10-30 when a sync from an
+older clone put four projects that say `recall` on a runtime without it.
+`--capsule-profile` with a bad value is still refused.
 
 - **`full`:** the established capsule — working state, recent files and the
   retrieved semantic and episodic documents.

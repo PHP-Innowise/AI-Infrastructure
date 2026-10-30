@@ -57,6 +57,7 @@ from brain_runtime import (
     consolidate,
     CAPSULE_PROFILES,
     configured_capsule_profile,
+    automatic_capsule_profile,
     configured_mode,
     configured_retrieval_gate,
     configured_ticket_files,
@@ -3260,7 +3261,7 @@ def capsule_shape(
     become a second channel for what the manifest keeps under privacy rules.
     """
     try:
-        profile: Optional[str] = configured_capsule_profile(repository, requested_profile)
+        profile: Optional[str] = automatic_capsule_profile(repository, requested_profile)[0]
     except (BrainError, OSError, ValueError):
         profile = None
     capsule = capsule if isinstance(capsule, dict) else {}
@@ -3527,11 +3528,11 @@ def assemble_capsule(
     # The automatic capsule may be configured to carry navigation only, or
     # navigation and the task's own saves; an explicit retrieval always
     # searches everything.
-    profile = (
-        configured_capsule_profile(repository, capsule_profile)
-        if entry_point in AUTOMATIC_ENTRY_POINTS
-        else "full"
-    )
+    profile = "full"
+    if entry_point in AUTOMATIC_ENTRY_POINTS:
+        profile, unknown_profile = automatic_capsule_profile(repository, capsule_profile)
+        if unknown_profile:
+            warnings.append(unknown_profile)
     if mode == "lightweight":
         # Local-only work has no governed task whose saves recall could keep,
         # so a recall capsule here is a navigation one.

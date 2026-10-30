@@ -16646,18 +16646,25 @@ class CapsuleProfileTest(BankFixture):
         self.assertIn("Cerulean rollout waits for the cobalt authority", text)
         self.assertNotIn("MEM-20260101-aaaaaaaa", text)
 
-    def test_an_unknown_profile_is_refused_without_failing_the_turn(self) -> None:
-        # The prompt hook never fails a turn: a bad profile leaves the turn
-        # without a capsule and says why, as a bad index does.
+    def test_an_unknown_configured_profile_delivers_the_full_capsule_and_says_why(self) -> None:
+        # A setting a newer runtime wrote, read by an older one: on 2026-10-30
+        # a refusal here left four projects without a capsule on every prompt.
         self.start()
         self.configure(capsule_profile="documents-only")
         result = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
                               "--ephemeral", "--json")
         self.assertEqual(0, result.returncode, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertIsNone(payload["capsule"])
-        self.assertTrue(any("Capsule profile must be full, navigation or recall" in warning
-                            for warning in payload["warnings"]), payload["warnings"])
+        self.assertIsNotNone(payload["capsule"])
+        self.assertIn("working: TASK-1", payload["capsule_text"])
+        unknown = ("capsule_profile 'documents-only' is unknown to this runtime (full, navigation, recall): "
+                   "full capsule delivered")
+        self.assertIn(unknown, payload["warnings"])
+        self.assertIn(unknown, payload["capsule_text"])
+        # Named by the caller, a bad profile is still refused.
+        named = self.run_cli("refresh", "--query", "cerulean rollout", "--task-id", "TASK-1",
+                             "--ephemeral", "--json", "--capsule-profile", "documents-only")
+        self.assertNotEqual(0, named.returncode)
 
 
 if __name__ == "__main__":

@@ -581,7 +581,8 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     read this. A caller of `refresh` that is itself an explicit request - the
     MCP `memory_retrieve` tool, the evaluation stand - passes
     `--capsule-profile full`. A bad value is rejected here, like a bad
-    retrieval gate.
+    retrieval gate; the automatic entry points read the configured one
+    through automatic_capsule_profile, which builds the full capsule instead.
     """
     profile = (
         requested
@@ -592,6 +593,25 @@ def configured_capsule_profile(repository: Path, requested: Optional[str] = None
     if profile not in CAPSULE_PROFILES:
         raise BrainError("Capsule profile must be full, navigation or recall")
     return profile
+
+
+def automatic_capsule_profile(repository: Path, requested: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """The automatic capsule's profile, and why it is not the one configured.
+
+    A configured profile this runtime does not know - one a newer runtime
+    wrote, or a typo - left every prompt without a capsule: on 2026-10-30 a
+    sync from an older clone put four projects whose runtime.json says
+    `recall` back on a runtime that knew only full and navigation, and each
+    prompt got an error in place of its working state. The automatic entry
+    points build the full capsule then and say why in its warnings; a
+    profile the caller names is still refused (configured_capsule_profile).
+    """
+    configured = os.environ.get("CONTEXT_CAPSULE_PROFILE") or load_config(repository).get("capsule_profile")
+    if requested or not configured or configured in CAPSULE_PROFILES:
+        return configured_capsule_profile(repository, requested), None
+    where = "CONTEXT_CAPSULE_PROFILE" if os.environ.get("CONTEXT_CAPSULE_PROFILE") else "capsule_profile"
+    return "full", (f"{where} {str(configured)[:40]!r} is unknown to this runtime "
+                    f"({', '.join(CAPSULE_PROFILES)}): full capsule delivered")
 
 
 def configured_ticket_files(repository: Path) -> bool:

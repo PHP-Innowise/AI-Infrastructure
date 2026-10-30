@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The automatic capsule survives a profile the runtime does not know — 2026-10-31
+
+- A configured `capsule_profile` (or `CONTEXT_CAPSULE_PROFILE`) the runtime
+  does not know builds the `full` capsule, with the warning "capsule_profile
+  'X' is unknown to this runtime (full, navigation, recall): full capsule
+  delivered" (`automatic_capsule_profile`). Before, the automatic entry
+  points refused it, and every prompt went without a capsule: since the
+  Harness's sync of 2026-10-30 at 17:01, four client projects whose
+  `runtime.json` says `recall` run a runtime that knows only `full` and
+  `navigation`, and each prompt gets "Capsule unavailable" in place of its
+  working state. A profile the caller names (`--capsule-profile`) is still
+  refused, and the health record's `profile` is the one that built the
+  capsule.
+
 ### Every Claude Code bench run checks the policy reached the model — 2026-10-30
 
 - `scripts/claude_code_bench.py` checks in every run - a fresh install,
