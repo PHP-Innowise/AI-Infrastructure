@@ -227,7 +227,8 @@ fi
 # rebased is still the work in hand - often the very conflict a turn asks
 # about. Git keeps its name in rebase-merge/head-name (rebase-apply/ for the
 # apply backend) of this worktree's Git directory; the runtime admits it as
-# the inferred branch only while that rebase is in progress.
+# the inferred branch only while that rebase is in progress. So does a
+# bisect, for the branch it started from.
 rebased_branch() {
   local directory state name
   directory=$(git -C "$PROJECT_DIR" rev-parse --absolute-git-dir 2>/dev/null) || return 1
@@ -237,7 +238,13 @@ rebased_branch() {
     IFS= read -r name < "$directory/$state/head-name" || [ -n "$name" ] || continue
     case "$name" in refs/heads/?*) printf '%s' "${name#refs/heads/}"; return 0 ;; esac
   done
-  return 1
+  # A bisect tests commits on a detached HEAD; BISECT_START keeps the branch
+  # it started from (a commit ID when it started detached) until the reset.
+  [ -f "$directory/BISECT_START" ] || return 1
+  name=
+  IFS= read -r name < "$directory/BISECT_START" || [ -n "$name" ] || return 1
+  [ -n "$name" ] && [[ ! $name =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
+  printf '%s' "$name"
 }
 # A worktree Codex makes for a thread - `codex --worktree`, a new worktree in
 # the Codex app - starts on a detached HEAD and keeps it until someone makes a

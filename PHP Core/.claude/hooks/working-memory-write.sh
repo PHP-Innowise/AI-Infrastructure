@@ -193,7 +193,13 @@ rebased_branch() {
     IFS= read -r name < "$directory/$state/head-name" || [ -n "$name" ] || continue
     case "$name" in refs/heads/?*) printf '%s' "${name#refs/heads/}"; return 0 ;; esac
   done
-  return 1
+  # A bisect tests commits on a detached HEAD; BISECT_START keeps the branch
+  # it started from (a commit ID when it started detached) until the reset.
+  [ -f "$directory/BISECT_START" ] || return 1
+  name=
+  IFS= read -r name < "$directory/BISECT_START" || [ -n "$name" ] || return 1
+  [ -n "$name" ] && [[ ! $name =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
+  printf '%s' "$name"
 }
 codex_thread_task() {
   local directory record= version=$'"version"[ \t\n\v\f\r]*:[ \t\n\v\f\r]*1[ \t\n\v\f\r]*[,}]'

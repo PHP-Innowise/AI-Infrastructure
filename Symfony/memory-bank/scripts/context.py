@@ -1076,6 +1076,33 @@ def _rebased_branch(project: Path) -> Optional[str]:
     return None
 
 
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _bisected_branch(project: Path) -> Optional[str]:
+    """The branch a bisect in progress started from.
+
+    A bisect tests commits on a detached HEAD and keeps the branch it started
+    from in ``BISECT_START`` of the worktree's own Git directory - a commit
+    ID when it started detached - until it is reset. The capsule was empty
+    and no save was asked meanwhile, though what the turns find is about
+    that branch.
+    """
+    try:
+        directory = _checkout_git_directory(project)
+        if directory is None:
+            return None
+        with (directory / "BISECT_START").open("rb") as handle:
+            raw = handle.read(4097)
+        name = raw.decode("utf-8", "strict").rstrip("\r\n")
+    except (SourceGitError, OSError, UnicodeError, ValueError):
+        return None
+    if (len(raw) > 4096 or not name or _OBJECT_ID.fullmatch(name)
+            or any(character in name for character in ("\0", "\r", "\n"))):
+        return None
+    return name
+
+
 def _admit_inferred_task_branch(repository: Path, expected: Optional[str]) -> None:
     """Recheck a hook-inferred identity; explicit task IDs add no branch probe."""
     if expected is None:
@@ -1096,10 +1123,12 @@ def _admit_inferred_task_branch(repository: Path, expected: Optional[str]) -> No
         # Git was slow.
         observed = _source_git_run(project, ["symbolic-ref", "--quiet", "HEAD"],
                                    _source_git_environment(), time.monotonic() + 2.0)
-        # A rebase detaches HEAD; the branch it rewrites stays the task. A
-        # worktree Codex made is detached until a branch is made there; the
-        # thread that owns it names the task meanwhile.
+        # A rebase detaches HEAD; the branch it rewrites stays the task, as
+        # the branch a bisect started from does. A worktree Codex made is
+        # detached until a branch is made there; the thread that owns it
+        # names the task meanwhile.
         if observed.returncode == 1 and (_rebased_branch(project) == expected
+                                         or _bisected_branch(project) == expected
                                          or _owner_thread_task(project) == expected):
             return
         if (observed.returncode != 0
@@ -2523,13 +2552,14 @@ def branch_task_id(branch: str) -> str:
 
 
 def _on_branch(repository: Path, branch: str) -> bool:
-    """Whether the project's checkout is on ``branch`` now, or rebasing it."""
+    """Whether the project's checkout is on ``branch`` now, or rebasing or
+    bisecting it."""
     try:
         project = workspace_roots.project_root(repository.resolve())
         observed = _source_git_run(project, ["symbolic-ref", "--quiet", "HEAD"], _source_git_environment(),
                                    time.monotonic() + 2.0)
         if observed.returncode == 1:
-            return _rebased_branch(project) == branch
+            return branch in (_rebased_branch(project), _bisected_branch(project))
         return (observed.returncode == 0 and isinstance(observed.stdout, bytes)
                 and observed.stdout == ("refs/heads/" + branch + "\n").encode("utf-8", "surrogatepass"))
     except (SourceGitError, OSError, UnicodeError, ValueError):
@@ -5435,12 +5465,15 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 # (fresh init, zero commits) or HEAD itself is broken.
                 git_state = "unborn-head"
     # A detached HEAD names the task where the hooks name one: the branch a
-    # rebase in progress rewrites (_rebased_branch), else, in a worktree Codex
-    # made for a thread, that thread (_owner_thread). The checkpoint skill
-    # takes its task from here on a detached HEAD.
+    # rebase in progress rewrites (_rebased_branch) or a bisect in progress
+    # started from (_bisected_branch), else, in a worktree Codex made for a
+    # thread, that thread (_owner_thread). The checkpoint skill takes its
+    # task from here on a detached HEAD.
     project = workspace_roots.project_root(repository)
     rebased = _rebased_branch(project) if git_state == "detached-head" else None
-    owner = _owner_thread(project) if git_state == "detached-head" and rebased is None else None
+    bisected = _bisected_branch(project) if git_state == "detached-head" and rebased is None else None
+    owner = (_owner_thread(project) if git_state == "detached-head" and rebased is None and bisected is None
+             else None)
 
     if git_error is not None:
         git_metadata = {
@@ -5485,6 +5518,9 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                     "Git changed-path metadata is available; HEAD is detached by a "
                     "rebase, and the branch it rewrites supplies task identity."
                     if rebased else
+                    "Git changed-path metadata is available; HEAD is detached by a "
+                    "bisect, and the branch it started from supplies task identity."
+                    if bisected else
                     "Git changed-path metadata is available; HEAD is detached, and "
                     "the Codex thread that owns this worktree supplies task identity."
                     if owner else
@@ -5498,7 +5534,7 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             }[git_state],
             "remediation": (
                 "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
-                if git_state == "detached-head" and not owner and not rebased
+                if git_state == "detached-head" and not owner and not rebased and not bisected
                 else None
             ),
         }
@@ -5542,23 +5578,25 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 "reason": "The current Git branch supplies task identity.",
                 "remediation": None,
             }
-    elif rebased:
+    elif rebased or bisected:
+        source, branch_of, ends = (("git-rebase", "a rebase in progress rewrites", "rebase") if rebased
+                                   else ("git-bisect", "a bisect in progress started from", "bisect"))
         try:
-            identity = validate_task_id(branch_task_id(rebased))
+            identity = validate_task_id(branch_task_id(rebased or bisected))
         except ContextError:
             task_identity = {
                 "status": "degraded",
-                "source": "git-rebase",
+                "source": source,
                 "task_id": None,
-                "reason": "The branch a rebase in progress rewrites is not a valid task identifier.",
+                "reason": f"The branch {branch_of} is not a valid task identifier.",
                 "remediation": "Set CONTEXT_TASK_ID to a valid task identifier.",
             }
         else:
             task_identity = {
                 "status": "active",
-                "source": "git-rebase",
+                "source": source,
                 "task_id": identity,
-                "reason": "The branch a rebase in progress rewrites supplies task identity until the rebase ends.",
+                "reason": f"The branch {branch_of} supplies task identity until the {ends} ends.",
                 "remediation": None,
             }
     elif owner:

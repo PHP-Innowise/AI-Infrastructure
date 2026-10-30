@@ -144,6 +144,18 @@ class GeneratorPromptReadTests(unittest.TestCase):
         self.assertFalse(self.v.memory_hook_identity_contract(local + '\n' + rebase + '\n' + thread, 'cursor',
                                                               'local-context.sh'))
 
+    def test_documented_rebase_resolver_is_the_one_the_editions_ship(self):
+        # A bisect keeps the branch it started from, as a rebase keeps the one
+        # it rewrites: a generated project's hooks read both, as the editions'.
+        text = (ROOT / "Infrastructure-Creator/.agents/skills/hook-forge/SKILL.md").read_text(encoding="utf-8")
+        documented = re.search(r"^rebased_branch\(\) \{\n.*?^\}\n", text, re.S | re.M).group(0)
+        self.assertIn("BISECT_START", documented)
+        for edition in ("PHP Core", "Laravel", "Symfony", "Cms/wordpress"):
+            for tool in (".claude", ".codex", ".cursor"):
+                for name in ("working-memory-read.sh", "working-memory-write.sh"):
+                    with self.subTest(edition=edition, tool=tool, hook=name):
+                        self.assertIn(documented, (ROOT / edition / tool / "hooks" / name).read_text(encoding="utf-8"))
+
     def test_documented_owner_thread_resolver_is_the_one_the_editions_ship(self):
         text = (ROOT / "Infrastructure-Creator/.agents/skills/hook-forge/SKILL.md").read_text(encoding="utf-8")
         documented = re.search(r"^codex_thread_task\(\) \{\n.*?^\}\n", text, re.S | re.M).group(0)

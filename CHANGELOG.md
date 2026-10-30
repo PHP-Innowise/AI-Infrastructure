@@ -28,6 +28,32 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A bisect keeps the branch it started from as the task — 2026-10-30
+
+- Why: a bisect tests commits on a detached HEAD. A detached HEAD names no
+  task except during a rebase and in a worktree Codex made. So during a
+  bisect, on Claude Code, Codex and Cursor alike, the prompt hook delivered
+  no capsule at all, not even the working state, and the Stop hook asked
+  for no save until `git bisect reset`. Yet what those turns find, such as
+  the commit that broke something, is about the branch the bisect started
+  from. Found by running whole turns through a bisect.
+- What changes: the hooks' `rebased_branch` and the runtime's
+  `_bisected_branch` read `BISECT_START`, which Git keeps in the worktree's
+  own Git directory until the reset. A branch name there is the task, and
+  the runtime admits it only while the bisect runs, as it admits a rebase's
+  branch. A commit ID there (a bisect started on a detached HEAD) names no
+  task. `status` reports the task with the source `git-bisect`. The
+  generator's hook fragment (`hook-forge`) carries the same lines, and a
+  test holds it to the editions' hooks.
+- Tests:
+  - `tests/test_memory_git_reuse.py` refreshes the capsule and reads
+    `status` during a bisect. Before, the refresh failed with "Inferred task
+    branch changed or unavailable".
+  - `memory-bank/tests/test_hooks.py` runs the prompt and Stop hooks of
+    every host during a bisect. Before, they named no task.
+  - `tests/test_memory_prompt_generator.py` compares the documented
+    resolver with every edition's hooks.
+
 ### The agent channel of a branch two task records claim is the one its capsule serves — 2026-10-30
 
 - Why: when two copies of a branch each start its task record and then

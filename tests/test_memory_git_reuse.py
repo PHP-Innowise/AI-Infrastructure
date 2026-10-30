@@ -147,6 +147,23 @@ exit $status
         self.assertNotEqual(0, result.returncode)
         self.assertIn('Inferred task branch changed or unavailable', result.stderr)
 
+    def test_a_bisect_keeps_the_branch_it_started_from_as_the_task(self):
+        # A bisect tests commits on a detached HEAD; the branch it started
+        # from is the work in hand, and the capsule was empty meanwhile.
+        self.git('checkout', '-q', '--detach')
+        start = self.root / '.git/BISECT_START'
+        start.write_text(TASK + '\n', encoding='utf-8')
+        result = self.refresh(self.env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn('working: ' + TASK, result.stdout)
+        status = json.loads(self.cli('status', '--json').stdout)['automatic_memory']['task_identity']
+        self.assertEqual(('git-bisect', TASK), (status['source'], status['task_id']))
+        # Started on a detached HEAD, a bisect names a commit: no task.
+        start.write_text('0123abcd' * 5 + '\n', encoding='utf-8')
+        result = self.refresh(self.env)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn('Inferred task branch changed or unavailable', result.stderr)
+
     def test_a_branch_switched_during_the_refresh_is_still_refused(self):
         # The switch lands after the first answer about the branch and before
         # delivery: the checkout's HEAD is a new file, so Git is asked again.

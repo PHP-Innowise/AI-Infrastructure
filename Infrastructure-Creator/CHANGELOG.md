@@ -4,6 +4,13 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### hook-forge: a generated project's memory hooks follow a bisect — 2026-10-30
+
+- The canonical `rebased_branch()` in `hook-forge` also reads
+  `BISECT_START`, as the editions' hooks do (root `CHANGELOG.md`, same
+  day). The seeded runtime admits that branch while the bisect runs:
+  `context.py` changes in the asset. The policy lock was rewritten.
+
 ### The seeded runtime's agent channel follows the task record its capsule serves — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py`
