@@ -71,11 +71,11 @@ Buffering is what keeps per-turn continuity affordable: without it, every turn w
 **Script:** `subagent-dispatch.sh`, the same script
 **Purpose:** When an agent returns, hands the orchestrator any completion the SubagentStop run could not record (at most the last 20), once, as `additionalContext`. It records and releases nothing itself.
 
-### PostToolUse (Edit|Write|MultiEdit|NotebookEdit): Loop Detection
+### PostToolUse (Edit|Write|MultiEdit|NotebookEdit) and PostToolUseFailure (Bash): Loop Detection
 **Script:** `loop-detection.sh`
-**Purpose:** Tracks edit count per file per session (the payload's `session_id`). Detects doom loops. Every edit it records also restarts the Bash Validator's repetition count for the commands run before it.
-**Return:** 0 = normal (from the seventh edit with the warning as JSON `additionalContext`, which reaches the model), 2 = block at 10 edits
-**Tracking:** `${TMPDIR:-/tmp}/claude-loop-detection-<uid>-<repo-key>/`, created private; a session start clears that session's counters and any left untouched for a day. A linked or foreign directory turns the count off, and a linked counter is never followed.
+**Purpose:** Catches a fix-and-retry loop: the same command failure coming back after edits within one prompt-turn (the payload's `prompt_id`, within its `session_id`). Edits alone never warn - a turn that edits one file many times is ordinary work - and a failure that changes is progress. A failed command reaches the hook only as `PostToolUseFailure`: Claude Code never reports one as `PostToolUse`. Two failures are the same when their output matches once numbers, hex values and absolute paths are taken out; a failure without output, an interrupted command and a failed edit or read are not weighed, and a rerun with nothing edited since is the Bash Validator's to count. Every edit it records also restarts the Bash Validator's repetition count for the commands run before it.
+**Return:** always 0. The second time the same failure is back after an edit, a warning reaches the model as JSON `additionalContext`, naming the file the turn edited most; the fourth time the model is asked to stop editing for it and report, and a `systemMessage` tells the user. Each answer names the event it answers.
+**Tracking:** `${TMPDIR:-/tmp}/claude-loop-detection-<uid>-<repo-key>/`, created private: per session, an edit count with the path for each file, a count for each failure and the current turn, which a new turn starts over; a session start clears that session's counters and any left untouched for a day. A linked or foreign directory turns the count off, and a linked counter is never followed.
 
 ### Notification: Desktop Alert
 **Purpose:** Desktop notification when Claude needs user attention.

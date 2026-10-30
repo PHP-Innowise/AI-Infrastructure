@@ -178,76 +178,87 @@ EDITION_OWNED_SKILLS = frozenset({"skill-creator"})
 # and Codex payloads may use "file_path" or "path", so their mirrors gain a
 # fallback extraction.
 _HOOK_PATH_EXTRACT = (
-    "# Extract file path from JSON input (POSIX-compatible, no grep -P)\n"
-    "FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "  # Extract file path from JSON input (POSIX-compatible, no grep -P)\n"
+    "  FILE_PATH=$(echo \"$INPUT\" | sed -n "
     "'s/.*\"file_path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
     " | head -1)\n"
 )
 _HOOK_PATH_EXTRACT_CURSOR = (
-    "# Extract file path from JSON input (POSIX-compatible, no grep -P).\n"
-    "# Cursor payloads may use \"file_path\" or \"path\"; try both.\n"
-    "FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "  # Extract file path from JSON input (POSIX-compatible, no grep -P).\n"
+    "  # Cursor payloads may use \"file_path\" or \"path\"; try both.\n"
+    "  FILE_PATH=$(echo \"$INPUT\" | sed -n "
     "'s/.*\"file_path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
     " | head -1)\n"
-    "if [ -z \"$FILE_PATH\" ]; then\n"
-    "  FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "  if [ -z \"$FILE_PATH\" ]; then\n"
+    "    FILE_PATH=$(echo \"$INPUT\" | sed -n "
     "'s/.*\"path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
-    " | head -1)\nfi\n"
+    " | head -1)\n  fi\n"
 )
 _HOOK_PATH_EXTRACT_CODEX = (
-    "# Extract file path from JSON input (POSIX-compatible, no grep -P).\n"
-    "# Codex payloads may use \"file_path\" or \"path\"; try both.\n"
-    "FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "  # Extract file path from JSON input (POSIX-compatible, no grep -P).\n"
+    "  # Codex payloads may use \"file_path\" or \"path\"; try both.\n"
+    "  FILE_PATH=$(echo \"$INPUT\" | sed -n "
     "'s/.*\"file_path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
     " | head -1)\n"
-    "if [ -z \"$FILE_PATH\" ]; then\n"
-    "  FILE_PATH=$(echo \"$INPUT\" | sed -n "
+    "  if [ -z \"$FILE_PATH\" ]; then\n"
+    "    FILE_PATH=$(echo \"$INPUT\" | sed -n "
     "'s/.*\"path\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p'"
-    " | head -1)\nfi\n"
+    " | head -1)\n  fi\n"
 )
 
-# loop-detection.sh header: the Claude copy is wired on PostToolUse with an
-# edit-tool matcher, the Codex copy runs on every PostToolUse and filters
-# itself, the Cursor copy runs on afterFileEdit - and only Cursor still warns
-# with exit 1 (see _LOOP_WARNING below).
+# loop-detection.sh header. The Claude copy records edits on PostToolUse with
+# an edit-tool matcher and weighs failed commands on PostToolUseFailure (Bash);
+# the Codex copy runs on every PostToolUse and reads a shell result's exit
+# status itself; the Cursor copy runs on afterFileEdit, which reports no
+# failed command, and so only records edits (see _LOOP_WARNING below).
 _LOOP_HEADER = (
-    "# Hook type: PostToolUse (Edit|Write|MultiEdit|NotebookEdit)\n"
-    "# Exit codes: 0 = pass (a warning travels as JSON additionalContext),\n"
-    "# 2 = block\n"
+    "# Hook type: PostToolUse (Edit|Write|MultiEdit|NotebookEdit) records an edit;\n"
+    "# PostToolUseFailure (Bash) weighs a failed command.\n"
+    "# Exit code: always 0 (a warning travels as JSON additionalContext).\n"
 )
 _LOOP_HEADER_CURSOR = (
-    "# Cursor hook event: afterFileEdit.\n"
-    "# Exit codes: 0 = pass, 1 = warn (continue), 2 = block\n"
+    "# Cursor hook event: afterFileEdit. The edit is recorded, so the Bash\n"
+    "# Validator's repetition count starts over; Cursor reports no failed command\n"
+    "# to this hook, so its copy never warns.\n"
+    "# Exit code: 0 (1 would carry a warning to the hooks output).\n"
 )
 _LOOP_HEADER_CODEX = (
-    "# Codex hook event: PostToolUse (self-filters to file-edit payloads).\n"
-    "# Exit codes: 0 = pass (a warning travels as JSON additionalContext),\n"
-    "# 2 = block\n"
+    "# Codex hook event: PostToolUse, every call: an edit is recorded, and a shell\n"
+    "# result that names a non-zero exit status is weighed as a failed command.\n"
+    "# Exit code: always 0 (a warning travels as JSON additionalContext).\n"
 )
 
 # Warnings that reach the agent. Claude Code and Codex add a hook's
 # hookSpecificOutput.additionalContext to the model's context next to the tool
-# result, on PreToolUse and PostToolUse alike, so the canonical edit-loop
-# warning (loop-detection.sh) and repetition warning (bash-validator.sh) exit
-# 0 with that JSON on stdout. Cursor documents no such channel for an edit it
-# reports (afterFileEdit) or a shell command it lets run
-# (beforeShellExecution's agent_message accompanies a denial), so its mirrors
-# keep the user-visible form - text and exit 1, which Cursor shows in its
-# hooks output and otherwise ignores - and the agent there meets each guard
-# first at its block.
-_LOOP_WARNING = r'''if [ -n "$WARNING" ]; then
-  # Claude Code and Codex hand a PostToolUse hook's additionalContext to the
-  # model next to the tool result. Text with a non-blocking exit code reaches
-  # only the user's transcript, so the agent would never see its warning.
-  printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$WARNING"
+# result - on PreToolUse, PostToolUse and Claude Code's PostToolUseFailure
+# alike - so the canonical loop warning (loop-detection.sh, on a failed
+# command that keeps coming back after edits) and repetition warning
+# (bash-validator.sh) exit 0 with that JSON on stdout; the loop warning's last
+# rung also tells the user, in a systemMessage. Cursor documents no such
+# channel for a shell command it lets run (beforeShellExecution's
+# agent_message accompanies a denial), so its bash-validator mirror keeps the
+# user-visible form - text and exit 1, which Cursor shows in its hooks output
+# and otherwise ignores - and the agent there meets the guard first at its
+# block. Its loop-detection copy runs on afterFileEdit, which reports no
+# failure, and never reaches its warning.
+_LOOP_WARNING = r'''# Claude Code and Codex hand a hook's additionalContext to the model next to
+# the failed call's result and show its systemMessage to the user. Claude
+# Code drops an answer that names another event than the one it answers.
+ANSWERED=PostToolUse
+[ "$EVENT" = PostToolUseFailure ] && ANSWERED=PostToolUseFailure
+if [ -n "$NOTICE" ]; then
+  printf '{"systemMessage":"%s","hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' \
+    "$NOTICE" "$ANSWERED" "$WARNING"
+else
+  printf '{"hookSpecificOutput":{"hookEventName":"%s","additionalContext":"%s"}}\n' "$ANSWERED" "$WARNING"
 fi
+exit 0
 '''
-_LOOP_WARNING_CURSOR = r'''if [ -n "$WARNING" ]; then
-  # Cursor's afterFileEdit has no channel back to the agent: the warning
-  # reaches only the hooks output, where the user sees it.
-  printf '%s\n' "$WARNING"
-  exit 1
-fi
+_LOOP_WARNING_CURSOR = r'''# Cursor reports no failed command to this hook - afterFileEdit is an edit -
+# so its copy never gets here; were it wired to one, its hooks output would
+# carry the warning to the user.
+printf '%s\n' "${NOTICE:-$WARNING}"
+exit 1
 '''
 _GUARD_WARNING = r'''  # Claude Code and Codex add a PreToolUse hook's additionalContext to the
   # model's context next to the tool result, without blocking the call or
@@ -687,12 +698,8 @@ MIRROR_RULES: dict[str, Any] = {
                         ["--host claude", "--host codex"],
                         [" .claude; do", " .agents .codex; do"],
                         [
-                            "- /debugger to investigate the root cause",
-                            "- systematic-debugger to investigate the root cause",
-                        ],
-                        [
-                            "consider using /debugger.",
-                            "consider using systematic-debugger.",
+                            "or use /debugger to find the root cause.",
+                            "or use systematic-debugger to find the root cause.",
                         ],
                         # bash-validator's repetition guard names the same
                         # escalation.

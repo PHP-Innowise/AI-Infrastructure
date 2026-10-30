@@ -40,12 +40,13 @@ if [ "$STATE_DIR" != "$ROOT_DIR" ]; then
   echo "Accelerator state (Project Brain, Memory Bank, index): $STATE_DIR"
 fi
 
-# Edit and repetition counts are session-scoped (loop-detection.sh and the
-# guard at the end of bash-validator.sh). Their counters sit in this user's
-# directory for this repository, keyed by session: this session's start over,
-# any session's left untouched for a day are pruned, and another session still
-# running in this checkout keeps its own. A directory this user does not own,
-# or a symbolic link in its place, is left alone.
+# Edit, failure and repetition counts belong to a session (loop-detection.sh
+# keeps its edits and failures for one prompt-turn of it; the guard at the end
+# of bash-validator.sh counts commands across the session). Their counters sit
+# in this user's directory for this repository, keyed by session: this
+# session's start over, any session's left untouched for a day are pruned, and
+# another session still running in this checkout keeps its own. A directory
+# this user does not own, or a symbolic link in its place, is left alone.
 LOOP_INPUT=
 [ -t 0 ] || IFS= read -r -d '' LOOP_INPUT || :
 SESSION_KEY=$(printf '%s' "$LOOP_INPUT" \
@@ -58,8 +59,8 @@ REPO_KEY=$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)
 TRACK_BASE=${TMPDIR:-/tmp}
 TRACK_DIR="${TRACK_BASE%/}/cursor-loop-detection-${EUID:-0}-$REPO_KEY"
 if [ -d "$TRACK_DIR" ] && [ ! -L "$TRACK_DIR" ] && [ -O "$TRACK_DIR" ]; then
-  find "$TRACK_DIR" -maxdepth 1 -type f \( -name "cmd-$SESSION_KEY-*" -o -name "edit-$SESSION_KEY-*" -o -mtime +0 \) \
-    -delete 2>/dev/null || true
+  find "$TRACK_DIR" -maxdepth 1 -type f \( -name "cmd-$SESSION_KEY-*" -o -name "edit-$SESSION_KEY-*" \
+    -o -name "fail-$SESSION_KEY-*" -o -name "turn-$SESSION_KEY" -o -mtime +0 \) -delete 2>/dev/null || true
 fi
 
 # Git info

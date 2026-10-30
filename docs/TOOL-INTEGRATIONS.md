@@ -78,7 +78,7 @@ The same safety goals are adapted to each client's event schema:
 | Session metadata | `SessionStart` | `sessionStart` | `SessionStart` |
 | Shell safety | `PreToolUse` for Bash | `beforeShellExecution` | `PreToolUse` |
 | File naming | `PreToolUse` for Write/Edit | `afterFileEdit` | `PreToolUse` |
-| Edit-loop detection | `PostToolUse` for Edit | `afterFileEdit` | `PostToolUse` |
+| Fix-and-retry loop detection | `PostToolUse` for edits, `PostToolUseFailure` for Bash | `afterFileEdit` (records edits; reports no failure, never warns) | `PostToolUse` (edits and shell results) |
 | Task Capsule into the prompt | `UserPromptSubmit` | `beforeSubmitPrompt` renders the prompt's capsule into an `alwaysApply` rule (`sessionStart` renders the branch's, and so does `stop` unless the rule holds the prompt's) | `UserPromptSubmit` |
 | Turn checkpoint at turn end | `Stop` | `stop` | `Stop` |
 
@@ -232,7 +232,8 @@ The installed scripts:
 - report framework/tooling markers and context health at session start;
 - block recognized destructive shell operations;
 - warn about invalid task/spec Markdown names;
-- detect repeated-edit loops.
+- warn when the same command failure keeps coming back after edits within
+  one prompt-turn (edits alone never warn).
 
 Session hooks are metadata-only on Claude Code and Codex: they do not index
 sources, retrieve context, print record bodies, or inject records into
@@ -243,10 +244,13 @@ silently, to the file only, never into the session banner.
 Hook return conventions are `0` to continue and `2` to block. Any other exit
 is a non-blocking error, which Claude Code and Codex show to the user and never
 to the model, so a warning the agent has to read exits `0` with JSON
-`hookSpecificOutput.additionalContext` on stdout - the edit-loop and
-repetition warnings do. Cursor documents no such channel for `afterFileEdit` or
-for a command `beforeShellExecution` lets run, so its copies of those two hooks
-warn with `1` and the warning stays the user's. Timeouts are seconds in both Cursor's
+`hookSpecificOutput.additionalContext` on stdout - the loop and repetition
+warnings do, and the loop warning's last rung adds a `systemMessage` for the
+user. An answer to Claude Code's `PostToolUseFailure` names that event; Claude
+Code drops one that names another. Cursor documents no channel to the agent for
+a command `beforeShellExecution` lets run, so its copy of the repetition guard
+warns with `1` and the warning stays the user's; its loop detector runs on
+`afterFileEdit`, which reports no failed command, and only records edits. Timeouts are seconds in both Cursor's
 `hooks.json` and Claude Code's `settings.json`; Codex hooks carry no timeout
 field. Preserve the native values and schemas when synchronizing hooks.
 

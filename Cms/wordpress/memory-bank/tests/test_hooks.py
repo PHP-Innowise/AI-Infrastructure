@@ -194,6 +194,53 @@ def edit_payload(path: str) -> dict:
     }
 
 
+def phpunit_failure(test: str = "test_bar", run: int = 0) -> str:
+    """A PHPUnit failure. `run` changes only what differs between two runs of
+    one failure: the timing, the memory figure and a temporary path."""
+    return (
+        "PHPUnit 10.5.{run} by Sebastian Bergmann and contributors.\n\n"
+        "F  1 / 1 (100%)\n\n"
+        "Time: 00:00.{run:03d}, Memory: {mb}.00 MB\n\n"
+        "There was 1 failure:\n\n"
+        "1) Tests\\Unit\\ExampleTest::{test}\n"
+        "Failed asserting that false is true.\n\n"
+        "/tmp/phpunit-{run}/tests/Unit/ExampleTest.php:15\n\n"
+        "FAILURES!\n"
+        "Tests: 1, Assertions: 1, Failures: 1."
+    ).format(run=run, mb=8 + run, test=test)
+
+
+def failure_payload(tool: str, output: str, turn: str = "t1", session: str | None = None) -> dict:
+    """A failed shell command as the host reports it to loop-detection.sh.
+
+    Claude Code sends PostToolUseFailure with the error text; Codex a
+    PostToolUse whose shell result names its exit status. Cursor reports no
+    failed command to the hook; the Claude shape stands in for one there.
+    """
+    if tool == "codex":
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "vendor/bin/phpunit"},
+            "tool_use_id": "call_1",
+            "tool_response": "Exit code: 1\nWall time: 0.3 seconds\nOutput:\n" + output,
+            "turn_id": turn,
+        }
+    else:
+        payload = {
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Bash",
+            "tool_input": {"command": "vendor/bin/phpunit"},
+            "tool_use_id": "toolu_1",
+            "error": "Exit code 1\n" + output,
+            "is_interrupt": False,
+            ("prompt_id" if tool == "claude" else "generation_id"): turn,
+        }
+    if session:
+        payload["session_id"] = session
+    return payload
+
+
 class FakeRepoMixin:
     """Two throwaway git repositories with isolated loop counters."""
 
@@ -674,95 +721,229 @@ class FileNamingValidatorTest(unittest.TestCase):
 
 
 class LoopDetectionTest(FakeRepoMixin, unittest.TestCase):
+    """A fix-and-retry loop: the same failure coming back after edits.
+
+    Claude Code reports a failed command as PostToolUseFailure, Codex as a
+    PostToolUse whose shell result names a non-zero exit status; Cursor's
+    afterFileEdit reports edits only. Counts belong to one prompt-turn of one
+    session (prompt_id, turn_id, generation_id).
+    """
+
     HOOK = "loop-detection.sh"
     EDITED = "/work/app/Example.php"
+    FAILING = ("claude", "codex")
+    TURN_KEY = {"claude": "prompt_id", "codex": "turn_id", "cursor": "generation_id"}
+    ANSWERED = {"claude": "PostToolUseFailure", "codex": "PostToolUse"}
 
-    def edit(self, tool: str, repo: Path):
-        return run_hook(tool, self.HOOK, edit_payload(self.EDITED), cwd=repo)
+    def call(self, tool: str, payload: dict, repo: Path | None = None):
+        return run_hook(tool, self.HOOK, payload, cwd=repo or self.repo_a)
 
-    def test_warn_and_block_thresholds(self) -> None:
+    def edit(self, tool: str, turn: str = "t1", session: str | None = None,
+             path: str | None = None, repo: Path | None = None):
+        payload = edit_payload(path or self.EDITED)
+        payload[self.TURN_KEY[tool]] = turn
+        if session:
+            payload["session_id"] = session
+        return self.call(tool, payload, repo)
+
+    def fail(self, tool: str, output: str, turn: str = "t1", session: str | None = None,
+             repo: Path | None = None):
+        return self.call(tool, failure_payload(tool, output, turn=turn, session=session), repo)
+
+    def assert_silent(self, result) -> None:
+        self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
+
+    def answer(self, tool: str, result) -> dict:
+        self.assertEqual((0, ""), (result.returncode, result.stderr))
+        answer = json.loads(result.stdout)
+        self.assertEqual(self.ANSWERED[tool], answer["hookSpecificOutput"]["hookEventName"])
+        return answer
+
+    def fix_attempts(self, tool: str, attempts: int, turn: str = "t1", **kwargs) -> list:
+        """The failure, then `attempts` times an edit and the same failure."""
+        results = [self.fail(tool, phpunit_failure(run=0), turn=turn, **kwargs)]
+        for run in range(1, attempts + 1):
+            self.assert_silent(self.edit(tool, turn=turn, **kwargs))
+            results.append(self.fail(tool, phpunit_failure(run=run), turn=turn, **kwargs))
+        return results
+
+    def test_edits_alone_never_warn(self) -> None:
+        # One turn editing one file thirty times is ordinary work.
         for tool in MIRRORS:
             with self.subTest(tool=tool):
-                for count in range(1, 7):
-                    result = self.edit(tool, self.repo_a)
-                    self.assertEqual(result.returncode, 0, "count={}".format(count))
-                    self.assertEqual(result.stdout, "")
-                    self.assertEqual(result.stderr, "")
-                for count in range(7, 10):
-                    result = self.edit(tool, self.repo_a)
-                    expected = "edited {} times this session".format(count)
-                    self.assertEqual(result.stderr, "")
-                    if tool == "cursor":
-                        # afterFileEdit has no channel back to the agent.
-                        self.assertEqual(result.returncode, 1, "count={}".format(count))
-                        self.assertIn("WARNING", result.stdout)
-                        self.assertIn(expected, result.stdout)
-                    else:
-                        # Exit 0 with additionalContext: the model sees it.
-                        self.assertEqual(result.returncode, 0, "count={}".format(count))
-                        self.assertIn(expected, warning_context(result))
-                result = self.edit(tool, self.repo_a)
-                self.assertEqual(result.returncode, 2)
-                self.assertIn("BLOCKED", result.stderr)
-                self.assertEqual(result.stdout, "")
+                for _ in range(30):
+                    self.assert_silent(self.edit(tool))
+
+    def test_the_same_failure_back_after_edits_warns_then_tells_the_user(self) -> None:
+        for tool in self.FAILING:
+            with self.subTest(tool=tool):
+                results = self.fix_attempts(tool, 6)
+                for result in results[:2] + results[3:4] + results[5:]:
+                    self.assert_silent(result)
+                warning = self.answer(tool, results[2])
+                self.assertNotIn("systemMessage", warning)
+                context = warning["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("the same failure has come back 3 times in this turn, "
+                              "2 of them after an edit", context)
+                self.assertIn("most edits in this turn: '{}', 2".format(self.EDITED), context)
+                stop = self.answer(tool, results[4])
+                context = stop["hookSpecificOutput"]["additionalContext"]
+                self.assertTrue(context.startswith("STOP: the same failure has come back 5 times"), context)
+                self.assertIn("4 of them after an edit", context)
+                self.assertIn("tell the user", context)
+                self.assertIn("Loop detection", stop["systemMessage"])
+                # Codex has no slash commands: its mirror names the skill.
+                self.assertIn("systematic-debugger" if tool == "codex" else "/debugger", context)
+
+    def test_numbers_and_absolute_paths_do_not_make_a_new_failure(self) -> None:
+        # Timing, memory and a temporary path differ between two runs of one
+        # failure; phpunit_failure varies all three with its `run`.
+        self.assertNotEqual(phpunit_failure(run=1), phpunit_failure(run=2))
+        for tool in self.FAILING:
+            with self.subTest(tool=tool):
+                self.answer(tool, self.fix_attempts(tool, 2)[-1])
+
+    def test_a_changed_failure_is_progress(self) -> None:
+        for tool in self.FAILING:
+            with self.subTest(tool=tool):
+                for test in ("test_a", "test_b", "test_c", "test_d"):
+                    self.assert_silent(self.fail(tool, phpunit_failure(test=test)))
+                    self.assert_silent(self.edit(tool))
+
+    def test_reruns_without_an_edit_are_not_this_hooks_loop(self) -> None:
+        # The Bash Validator counts reruns of one command; a failure met
+        # again with nothing edited since is not a fix attempt.
+        for tool in self.FAILING:
+            with self.subTest(tool=tool):
+                for run in range(8):
+                    self.assert_silent(self.fail(tool, phpunit_failure(run=run)))
+
+    def test_counts_start_over_each_prompt_turn(self) -> None:
+        for tool in self.FAILING:
+            with self.subTest(tool=tool):
+                for result in self.fix_attempts(tool, 1, turn="first"):
+                    self.assert_silent(result)
+                results = self.fix_attempts(tool, 2, turn="second")
+                for result in results[:2]:
+                    self.assert_silent(result)
+                context = self.answer(tool, results[2])["hookSpecificOutput"]["additionalContext"]
+                # The first turn's failure and edit went when the second began.
+                self.assertIn("come back 3 times in this turn", context)
+                self.assertIn("most edits in this turn: '{}', 2".format(self.EDITED), context)
+
+    def test_a_failure_without_output_is_not_weighed(self) -> None:
+        # grep or test answering 1: nothing to tell one failure from another.
+        for tool in self.FAILING:
+            with self.subTest(tool=tool):
+                for _ in range(5):
+                    self.assert_silent(self.fail(tool, ""))
+                    self.assert_silent(self.edit(tool))
+                names = [p.name for p in counter_files(track_dir(tool, self.repo_a))]
+                self.assertFalse([name for name in names if name.startswith("fail-")], names)
+
+    def test_an_interrupted_command_or_a_failed_edit_is_not_weighed(self) -> None:
+        interrupted = failure_payload("claude", phpunit_failure())
+        interrupted["is_interrupt"] = True
+        failed_edit = dict(failure_payload("claude", "String to replace not found in file."),
+                           tool_name="Edit", tool_input={"file_path": self.EDITED})
+        for payload in (interrupted, failed_edit):
+            with self.subTest(tool=payload["tool_name"]):
+                for _ in range(5):
+                    self.assert_silent(self.call("claude", payload))
+                    self.assert_silent(self.edit("claude"))
+                names = [p.name for p in counter_files(track_dir("claude", self.repo_a))]
+                self.assertFalse([name for name in names if name.startswith("fail-")], names)
+
+    def test_codex_weighs_a_result_only_by_its_exit_status(self) -> None:
+        output = phpunit_failure()
+        for session, response, weighed in (
+            ("field", {"output": output, "exit_code": 1}, True),
+            ("firstline", "Process exited with code 2\n" + output, True),
+            ("zero", "Exit code: 0\nWall time: 0.1 seconds\nOutput:\n" + output, False),
+            ("none", output, False),
+        ):
+            with self.subTest(result=session):
+                payload = failure_payload("codex", output, session=session)
+                payload["tool_response"] = response
+                self.assert_silent(self.call("codex", payload))
+                names = [p.name for p in counter_files(track_dir("codex", self.repo_a))]
+                recorded = any(name.startswith("fail-{}-".format(session)) for name in names)
+                self.assertEqual(weighed, recorded, names)
+
+    def test_cursor_records_edits_but_never_warns(self) -> None:
+        # afterFileEdit names no tool and reports no failed command: the copy
+        # records the edit, so the Bash Validator's repetition count starts
+        # over, and stays silent.
+        for _ in range(30):
+            self.assert_silent(self.call("cursor", {
+                "hook_event_name": "afterFileEdit", "conversation_id": "c1",
+                "generation_id": "g1", "file_path": self.EDITED, "edits": [],
+            }))
+        names = sorted(p.name for p in counter_files(track_dir("cursor", self.repo_a)))
+        self.assertEqual(["edit-c1-", "turn-c1"], [name[:8] for name in names])
+
+    def test_cursor_copy_keeps_a_warning_user_visible(self) -> None:
+        # Were a failed command ever reported to it, Cursor would show the
+        # warning in its hooks output: it has no channel to the agent here.
+        results = self.fix_attempts("cursor", 2)
+        self.assertEqual(1, results[-1].returncode)
+        self.assertTrue(results[-1].stdout.startswith("WARNING: the same failure"), results[-1].stdout)
 
     def test_every_file_of_a_codex_patch_is_counted(self) -> None:
         # apply_patch names its files inside the patch text, one marker line
-        # each; every file the patch touches is an edit of that file.
+        # each; every file the patch touches is an edit of that file, and the
+        # patch is one fix attempt.
         payload = patch_payload("app/A.php", "app/B.php")
         payload["tool_input"]["command"] += "*** Add File: app/C.php\n+new\n"
-        for _ in range(6):
-            result = run_hook("codex", self.HOOK, payload, cwd=self.repo_a)
-            self.assertEqual((0, "", ""), (result.returncode, result.stdout, result.stderr))
-        self.assertEqual(3, len(counter_files(track_dir("codex", self.repo_a))))
-        seventh = run_hook("codex", self.HOOK, payload, cwd=self.repo_a)
-        self.assertEqual(0, seventh.returncode, seventh.stderr)
-        context = warning_context(seventh)
-        for name in ("app/A.php", "app/B.php", "app/C.php"):
-            self.assertIn("File '{}' edited 7 times".format(name), context)
+        payload["turn_id"] = "t1"
+        self.assert_silent(self.call("codex", payload))
+        directory = track_dir("codex", self.repo_a)
+        names = [p.name for p in counter_files(directory)]
+        self.assertEqual(3, sum(name.startswith("edit-") for name in names), names)
+        turn = (directory / "turn-shared").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(["t1", "1"], turn)
 
     def test_counts_are_per_session(self) -> None:
-        for tool in MIRRORS:
+        for tool in self.FAILING:
             with self.subTest(tool=tool):
-                for _ in range(9):
-                    run_hook(tool, self.HOOK, dict(edit_payload(self.EDITED), session_id="one"), cwd=self.repo_a)
-                other = run_hook(tool, self.HOOK, dict(edit_payload(self.EDITED), session_id="two"), cwd=self.repo_a)
-                self.assertEqual((0, "", ""), (other.returncode, other.stdout, other.stderr))
-                tenth = run_hook(tool, self.HOOK, dict(edit_payload(self.EDITED), session_id="one"), cwd=self.repo_a)
-                self.assertEqual(2, tenth.returncode)
+                for result in self.fix_attempts(tool, 1, session="one"):
+                    self.assert_silent(result)
+                self.assert_silent(self.edit(tool, session="one"))
+                for result in self.fix_attempts(tool, 1, session="two"):
+                    self.assert_silent(result)
+                self.answer(tool, self.fail(tool, phpunit_failure(run=9), session="one"))
 
     def test_a_planted_count_is_never_evaluated(self) -> None:
         marker = self.repo_b / "evaluated"
-        for tool in MIRRORS:
+        planted = "a[$(touch {})]\n".format(marker)
+        for tool in self.FAILING:
             with self.subTest(tool=tool):
-                self.assertEqual(0, self.edit(tool, self.repo_a).returncode)
-                (counter,) = counter_files(track_dir(tool, self.repo_a))
-                counter.write_text("a[$(touch {})]\n".format(marker), encoding="utf-8")
-                self.assertEqual(0, self.edit(tool, self.repo_a).returncode)
+                for result in self.fix_attempts(tool, 1):
+                    self.assert_silent(result)
+                for counter in counter_files(track_dir(tool, self.repo_a)):
+                    if not counter.name.startswith("turn-"):
+                        counter.write_text(planted * 4, encoding="utf-8")
+                self.assert_silent(self.edit(tool))
+                self.assert_silent(self.fail(tool, phpunit_failure(run=5)))
                 self.assertFalse(marker.exists())
-                counter.write_text("08\n", encoding="utf-8")
-                ninth = self.edit(tool, self.repo_a)
-                self.assertIn("edited 9 times", ninth.stdout)
+                # The planted failure count started over: one more fix
+                # attempt is not enough to warn.
+                self.assert_silent(self.edit(tool))
+                self.assert_silent(self.fail(tool, phpunit_failure(run=6)))
 
     def test_counters_namespaced_per_repository(self) -> None:
-        for tool in MIRRORS:
+        for tool in self.FAILING:
             with self.subTest(tool=tool):
-                dir_a = track_dir(tool, self.repo_a)
-                dir_b = track_dir(tool, self.repo_b)
-                self.assertNotEqual(dir_a, dir_b)
-                for _ in range(9):
-                    self.edit(tool, self.repo_a)
-                # A different repository starts from a clean counter even for
-                # the very same edited file path.
-                result = self.edit(tool, self.repo_b)
-                self.assertEqual(result.returncode, 0, result.stdout)
-                self.assertEqual(result.stdout, "")
-                self.assertEqual(len(counter_files(dir_a)), 1)
-                self.assertEqual(len(counter_files(dir_b)), 1)
-                # And the first repository still blocks on its own tenth edit.
-                result = self.edit(tool, self.repo_a)
-                self.assertEqual(result.returncode, 2)
-                self.assertIn("BLOCKED", result.stderr)
+                self.assertNotEqual(track_dir(tool, self.repo_a), track_dir(tool, self.repo_b))
+                for result in self.fix_attempts(tool, 1):
+                    self.assert_silent(result)
+                self.assert_silent(self.edit(tool))
+                # The other repository starts from nothing, even for the very
+                # same failure and file...
+                for result in self.fix_attempts(tool, 1, repo=self.repo_b):
+                    self.assert_silent(result)
+                # ...and the first one still warns on its own count.
+                self.answer(tool, self.fail(tool, phpunit_failure(run=7)))
 
     def test_missing_file_path_is_ignored(self) -> None:
         payload = {"tool_name": "Edit", "tool_input": {}}
@@ -778,10 +959,9 @@ class LoopDetectionTest(FakeRepoMixin, unittest.TestCase):
             with self.subTest(tool=tool):
                 result = run_hook(tool, self.HOOK, payload, cwd=self.repo_a)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                names = [p.name for p in counter_files(track_dir(tool, self.repo_a))]
                 expected = 0 if tool == "claude" else 1
-                self.assertEqual(
-                    len(counter_files(track_dir(tool, self.repo_a))), expected
-                )
+                self.assertEqual(expected, sum(name.startswith("edit-") for name in names), names)
 
     def test_read_only_tool_payload_with_file_path_does_not_count(self) -> None:
         # Codex registers this hook without a matcher, so read-only payloads
@@ -873,13 +1053,14 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
                     self.assertEqual(primed.returncode, 0, primed.stderr)
                 dir_a = track_dir(tool, self.repo_a, str(tmp_root))
                 dir_b = track_dir(tool, self.repo_b, str(tmp_root))
-                self.assertEqual(len(counter_files(dir_a)), 1)
-                self.assertEqual(len(counter_files(dir_b)), 1)
+                # An edit counter and the turn it belongs to.
+                self.assertEqual(len(counter_files(dir_a)), 2)
+                self.assertEqual(len(counter_files(dir_b)), 2)
 
                 result = self.run_session(tool, "", env=env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(counter_files(dir_a), [])
-                self.assertEqual(len(counter_files(dir_b)), 1)
+                self.assertEqual(len(counter_files(dir_b)), 2)
 
     def test_session_start_keeps_a_running_sessions_counters(self) -> None:
         # A new session in the same checkout starts its own counts; it must
@@ -898,15 +1079,18 @@ class LocalContextTest(FakeRepoMixin, unittest.TestCase):
                     )
                     self.assertEqual(primed.returncode, 0, primed.stderr)
                 directory = track_dir(tool, self.repo_a, str(tmp_root))
-                (stale,) = [p for p in counter_files(directory) if p.name.startswith("edit-stale-")]
                 old = time.time() - 2 * 86400
-                os.utime(stale, (old, old))
+                for stale in counter_files(directory):
+                    if stale.name.split("-")[1] == "stale":
+                        os.utime(stale, (old, old))
                 result = self.run_session(
                     tool, {"session_id": "starting", "hook_event_name": "SessionStart"}, env=env,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+                # The running session's edit counter and turn.
                 self.assertEqual(
-                    ["running"], [p.name.split("-")[1] for p in counter_files(directory)]
+                    ["running", "running"],
+                    sorted(p.name.split("-")[1] for p in counter_files(directory)),
                 )
 
 
@@ -2782,7 +2966,7 @@ class MirrorConsistencyTest(unittest.TestCase):
 
 
 class HookWiringTest(unittest.TestCase):
-    """What Claude Code runs the edit counter and the dispatch relay on."""
+    """What Claude Code runs the loop detector and the dispatch relay on."""
 
     def post_tool_use(self) -> dict[str, list[str]]:
         settings = json.loads((EDITION_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
@@ -2803,6 +2987,20 @@ class HookWiringTest(unittest.TestCase):
 
     def test_the_dispatch_relay_runs_when_an_agent_returns(self) -> None:
         self.assertIn("Agent", self.post_tool_use()["subagent-dispatch.sh"])
+
+    def test_a_failed_command_reaches_the_loop_detector(self) -> None:
+        # Claude Code reports a call that failed only as PostToolUseFailure,
+        # never as PostToolUse: without this wiring loop-detection.sh would
+        # not see one failing test run.
+        settings = json.loads((EDITION_ROOT / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        matched = [
+            name.strip()
+            for group in settings["hooks"]["PostToolUseFailure"]
+            for hook in group["hooks"]
+            if hook["command"].endswith("/loop-detection.sh")
+            for name in group.get("matcher", "").split("|")
+        ]
+        self.assertIn("Bash", matched)
 
 
 if __name__ == "__main__":

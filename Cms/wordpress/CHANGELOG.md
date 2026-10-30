@@ -5,6 +5,7 @@ context-runtime changes are also recorded in the repository-root changelog.
 
 ## Unreleased
 
+- `.claude/settings.json` also runs `loop-detection.sh` on `PostToolUseFailure` for `Bash`, the only event on which Claude Code reports a failed command. The hook now warns only when the same command failure comes back after edits within one prompt-turn, and never on edits alone (see the root changelog).
 - `runtime.json` ships `automatic_consolidation` and
   `automatic_consolidation_verification` off; `AGENTS.md`, the `project-brain`
   skill, `PROTOCOL.md` and the READMEs say the capsule's episodic layer holds
