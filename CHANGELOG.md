@@ -28,6 +28,373 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Each turn mends a bank index that a stopped write left behind — 2026-10-30
+
+- Why: a promotion, a retire or a re-verify writes the chunk first and
+  `memory-bank/INDEX.md` second. Its snapshot restore covers an `Exception`
+  only. A host that stopped the write between the two, by Ctrl-C, a budget
+  or a kill, left a chunk the index did not name, or named as it had been.
+  The bank's `validate.py`, which a team may run in CI, then failed until
+  the next bank write. Found by a longer lifecycle campaign: 24 installed
+  seeds of 120 steps with stops and lock waits. The last save of seed
+  13018 was stopped by SIGINT between the two writes.
+- What changes: the turn checkpoint each Stop hook runs (`context.py
+  turn`) first compares the index's time with its newest chunk's. When a
+  chunk is newer, it writes the index again through `reindex_bank`, which
+  takes the lock the stopped write held and rewrites only what differs. An
+  index Git checked out after its chunks, as a pull does, is only marked as
+  current, so later turns read the chunks' times and nothing more.
+- Tests: `tests/test_memory_native_capture.py` drops a promoted chunk's row
+  from the index and makes the index older than the chunk. One turn
+  restores the row and the bank validates. Before, the row stayed missing.
+
+### A save the Memory MCP refuses names its code — 2026-10-30
+
+- Why: the Memory MCP answers a refused tool call with fixed text and,
+  as its comment says, with the typed code, the one thing an agent can act
+  on and never the submitted content. It found the code only when the error
+  message was itself a code. A refused save carries its code apart from
+  the message (`ResultRefused.code`), so every refusal of
+  `memory_record_result` read "Memory operation failed" with no reason. A
+  progress too long, a pasted log, a missing source and half a character all
+  looked the same. Found by calling the installed server with refused saves.
+- What changes: the server takes the code through `refusal_code`, as the
+  native save's journal does. The answer names it, for example
+  `(text_limit)`, and still never the submitted text.
+- Tests: `tests/test_memory_mcp.py` makes three refused saves and finds
+  each code, without the submitted text, in the answer. Before, none of
+  the three named its code.
+
+### A bisect keeps the branch it started from as the task — 2026-10-30
+
+- Why: a bisect tests commits on a detached HEAD. A detached HEAD names no
+  task except during a rebase and in a worktree Codex made. So during a
+  bisect, on Claude Code, Codex and Cursor alike, the prompt hook delivered
+  no capsule at all, not even the working state, and the Stop hook asked
+  for no save until `git bisect reset`. Yet what those turns find, such as
+  the commit that broke something, is about the branch the bisect started
+  from. Found by running whole turns through a bisect.
+- What changes: the hooks' `rebased_branch` and the runtime's
+  `_bisected_branch` read `BISECT_START`, which Git keeps in the worktree's
+  own Git directory until the reset. A branch name there is the task, and
+  the runtime admits it only while the bisect runs, as it admits a rebase's
+  branch. A commit ID there (a bisect started on a detached HEAD) names no
+  task. `status` reports the task with the source `git-bisect`. The
+  generator's hook fragment (`hook-forge`) carries the same lines, and a
+  test holds it to the editions' hooks. Those lines take the generator's
+  skill bodies to 307,171 bytes, past their 306,800-byte ceiling, so the
+  ceiling in `scripts/token_budget.json` rises to 307,300.
+- Tests:
+  - `tests/test_memory_git_reuse.py` refreshes the capsule and reads
+    `status` during a bisect. Before, the refresh failed with "Inferred task
+    branch changed or unavailable".
+  - `memory-bank/tests/test_hooks.py` runs the prompt and Stop hooks of
+    every host during a bisect. Before, they named no task.
+  - `tests/test_memory_prompt_generator.py` compares the documented
+    resolver with every edition's hooks.
+
+### The agent channel of a branch two task records claim is the one its capsule serves — 2026-10-30
+
+- Why: when two copies of a branch each start its task record and then
+  merge, the task ID names both records. The capsule, the turn checkpoint
+  and the native save already settle on one of them
+  (`served_task_record`). `msg-send`, `msg-read` and `msg-dispatch` still
+  asked for the task ID alone. In a clone without a binding (a fresh clone,
+  or one whose local index was rebuilt) they failed with "identifier is
+  ambiguous". An orchestrator could then read none of its subagents'
+  results, and the dispatch hook reported each completion lost, until a
+  person cancelled a twin. Found by a random sequence of memory commands
+  with pasted texts.
+- What changes: the channel commands take the record the capsule serves.
+  When there is none, they fall back as before to the binding, then to
+  the task ID, so a finished task's journal stays readable.
+- Tests: `project-brain/tests/test_runtime.py` sends, dispatches and reads
+  on a branch two records claim, from a clone without a binding. Before,
+  `msg-send` failed as ambiguous.
+
+### Text holding half of a character is refused by name — 2026-10-30
+
+- Why: a JSON `\ud83d` with no partner, such as an emoji cut in two by a
+  tool that truncates text, decodes to a lone surrogate. So does a byte
+  that is not UTF-8 in a command argument. No UTF-8 file or SQLite text
+  holds one, so a save failed on a `UnicodeEncodeError` traceback while
+  hashing the request. The journal recorded that as `unclassified`, and
+  `msg-send` and `record` failed the same way. Found by saving texts
+  that agents paste (Unicode line separators, conflict markers, fences,
+  control and bidi characters) and checking `validate`, the capsule and
+  search after each save. This was the only failure.
+- What changes: such text is refused before anything is written. A save
+  is refused with the new code `memory-result-v1:text_unicode` (listed in
+  `docs/MEMORY-INTEGRATION.md`). A Brain write or channel message is
+  refused through `guard_shared_text`, and a lightweight write through
+  `reject_secrets`. Each says the text "holds half of a character" and asks
+  for the whole character or none.
+- Tests: `tests/test_memory_native_capture.py` adds the case to its
+  refusal table (before: a traceback and no code).
+  `memory-bank/tests/test_channel.py` and `test_context.py` send a message
+  and record an episode with a byte that is not UTF-8 (POSIX only, since
+  Windows arguments are Unicode).
+
+### A channel message holding a Unicode line separator no longer breaks the channel — 2026-10-30
+
+- Why: JSON leaves U+2028, U+2029 and U+0085 unescaped inside a string,
+  and the agent channel's readers split the journal with `str.splitlines`,
+  which also splits a line at them. `msg-send` accepted such a message,
+  for example text pasted from a PDF or a web page. After that, every
+  `msg-read` failed on the journal and so did `validate`, for the whole
+  project and for good.
+- What changes: the journal is split at newlines alone (`journal_lines`),
+  in `msg-read`, `msg-send`'s sequence count and `validate`. The three
+  characters are written escaped (` `), so a runtime from before this
+  change, or a tool that splits the same way, reads new entries too.
+- Tests: `memory-bank/tests/test_channel.py` sends a message holding all
+  three and reads and validates it as written. It then does the same with
+  the characters written raw, as an earlier runtime wrote them. Before,
+  reading failed with "line 1 is not valid JSON".
+
+### A channel message a full disk cuts short is taken back — 2026-10-30
+
+- Why: a full disk takes part of an append. When `msg-send` failed that way,
+  the part it had written stayed at the end of the task's agent channel
+  (`project-brain/control/messages/<task>.jsonl`, tracked in Git). Once the
+  disk had room again, every `msg-read` called the journal corrupt and
+  `validate` failed on it ("Unterminated string"). The next message was
+  appended after the broken part, so the two shared one line for good. Found
+  by running the memory's commands and hooks on a nearly full tmpfs; the
+  hooks, saves, checkpoints and the index all failed cleanly there and
+  recovered.
+- What changes: an append that fails is truncated back to where the file
+  ended, under the mutation lock it already held. A line that an earlier
+  append left cut short is named, in `msg-read`, `validate` and `msg-send`,
+  as cut short by an append that stopped part-way, with the advice to
+  remove it; `msg-send` no longer appends after it. A last line that is whole
+  but lacks its newline gets one before the next entry. `validate` names a
+  merge conflict in a channel as `msg-read` does.
+- Tests: `memory-bank/tests/test_channel.py` cuts an append short with a
+  file size limit (`RLIMIT_FSIZE`, POSIX only). Before, the journal kept 300
+  bytes of it and failed validation; now it is unchanged. It also reads,
+  validates and appends to a journal left cut short, and validates one left
+  in a conflict.
+
+### A file named outside UTF-8 no longer stops every turn's checkpoint — 2026-10-30
+
+- Why: `git status` gives a file's name as bytes. A name that is not UTF-8,
+  such as one from a tree unpacked from another system's archive, came back
+  with lone surrogates, and SQLite refused them in the turn buffer. While
+  such a file was changed or untracked, every `context.py turn` failed. The
+  Stop hook's checkpoint runs `turn` and always exits 0, so no turn was
+  buffered or flushed, the capsule's recent files stopped, and nothing said
+  so.
+- What changes: such a name keeps its odd bytes as `\xNN` escapes
+  (`caf\xe9.php`), in the buffer and in the task's file list.
+- Tests: `memory-bank/tests/test_context.py` flushes a turn with an
+  untracked `caf\xe9.txt`. It runs on Linux only, because macOS and Windows
+  keep no such name. Before, the turn exited 1 with a `UnicodeEncodeError`.
+
+### An index, a chunk or a channel left in a merge conflict says so — 2026-10-30
+
+- Why: every promotion rewrites the generated `memory-bank/INDEX.md`, so two
+  clones of a branch that both promoted leave it in a merge conflict on pull.
+  The bank's `validate.py` read that as a duplicate row and every chunk
+  "missing from INDEX.md", and nothing said what had happened; a team that
+  runs it in CI saw a failure about all of its memory.
+- What changes: an index holding Git conflict markers is one error, saying
+  the index is generated from the chunks and that `context.py reindex-bank`
+  writes it again (any bank write does: a save that promotes, `reindex-bank`,
+  a retire); the per-chunk index checks wait for a readable index.
+- A chunk two clones both re-verified or retired conflicts in its
+  frontmatter; it read as "frontmatter is not valid JSON-compatible YAML".
+  It now says it holds an unresolved merge conflict, to keep one side or
+  merge both.
+- A task's agent channel (`project-brain/control/messages/<task>.jsonl`),
+  which two clones both appended to, conflicts at its end; `msg-read` and
+  `msg-dispatch` called it "corrupt". They now say the line holds an
+  unresolved merge conflict. The subagent gate's write lock never depended
+  on it: the dispatch hook releases the lock before it journals.
+- Tests: `memory-bank/tests/test_validate.py` conflicts an index row (one
+  error naming the conflict and `reindex-bank`; before, two that did not)
+  and a chunk's `last_verified` (the error names the conflict; before, the
+  JSON parser's position); `memory-bank/tests/test_channel.py` conflicts a
+  channel's last line (before: "corrupt").
+
+### A learning's citation is kept as the file is spelled — 2026-10-30
+
+- Why: a citation was stored as the agent wrote it. `src/a.php`,
+  `./src/a.php` and `src//a.php` were three keys for one file, and on a file
+  system that ignores case - macOS's, Windows' - `SRC/a.php` was found,
+  stored and committed, then failed validation in every clone on Linux (the
+  chunk left retrieval there). `src\a.php`, as an agent on Windows writes
+  it, was refused with "use project-relative source paths", which it is.
+- What changes: `memory_results.check_source` returns the path as it is
+  spelled on disk - each part the entry of that name, else the one entry
+  that differs only in case - and a result's sources are stored that way,
+  two spellings of one file once. A citation not found as written is
+  refused, or kept as written where the file is not required, as before. A
+  backslash is refused with the path written with forward slashes.
+- Tests: `tests/test_memory_native_capture.py` saves learnings citing
+  `./rules.md`, `.//rules.md` and `RULES.md` (stored `rules.md`) and refuses
+  `docs\rules.md` naming `docs/rules.md`; it fails on the check before.
+
+### A task record left in a merge conflict is not taken for no task — 2026-10-30
+
+- Why: two clones of a branch that both checkpointed its task conflict in
+  that record and its handoff when one pulls the other. A record that fails
+  to parse kept the identity it claims only while its frontmatter still
+  parsed, and with conflict markers it did not: a lookup by the branch said
+  "not found". A clone without a binding was told "working: not recorded
+  yet", and the save its Stop then asked for made a second task for the
+  branch beside the one being merged - a twin once the conflict was
+  resolved. Found with two clones on `main` that had synced, each saving,
+  then a pull.
+- What changes: a record's claimed identity is read from either side of an
+  unresolved Git merge conflict (`brain_runtime.merge_sides`), so a lookup
+  says the record is invalid, and the error says why: "unresolved Git merge
+  conflict". The capsule of a clone without a binding says so as the bound
+  clone's always did, leading with the file ("Unresolved Git merge conflict
+  in project-brain/dynamic/tasks/<uuid>.md: keep one side or merge both"),
+  and a native Stop asks no save until the file is repaired (`skipped`
+  `task-unreadable`, documented in `docs/MEMORY-INTEGRATION.md` with the
+  `interrupted` refusal).
+- Tests: `project-brain/tests/test_runtime.py` conflicts a task record: the
+  lookup is not "not found", the capsule names the conflict and the file,
+  and a checkpoint makes no second task. `tests/test_memory_native_capture.py`:
+  the Stop asks no save and makes no task. Both fail before.
+
+### A branch two task records claim is saved where its capsule says — 2026-10-30
+
+- Why: two copies of a branch - two people on `main`, a branch worked on
+  from two machines - each start the branch's task record before they
+  sync, and once they merge the task ID names both. The capsule already
+  settles on one (the clone's binding, else the earliest created active
+  record) and says so, but a native Stop and save asked for the task ID
+  alone and failed as ambiguous: the Stop hook journaled an unclassified
+  error and exited 1, and no save was asked on that branch, in any clone,
+  until a person cancelled a twin. Found by two clones on `main`, each
+  saving, then a third clone.
+- What changes: where the task ID is ambiguous, the native Stop and save
+  take the record `context.served_task_record` names - the one the capsule
+  serves and the turn checkpoint writes - by its UUID. Anything else that
+  makes the ID ambiguous (an unreadable record claiming it) keeps the
+  refusal.
+- Tests: `tests/test_memory_native_capture.py` adds a twin created before
+  the first record; a clone bound to the first saves into it, and a clone
+  without a binding saves into the earlier twin, which its capsule names.
+  Both fail on the native path before ("identifier is ambiguous").
+- The capsule's advice now names the same twin in every clone: never the
+  earliest created record, which a clone without a binding settles on.
+  Each clone named "the other" record before, so the clone bound to the
+  later twin and one bound to the earlier one cancelled one each - both -
+  and the branch was left with no active task. Cancelled, the later twin's
+  clone follows the earliest (its binding's successor).
+  `project-brain/tests/test_runtime.py` binds a clone to the later twin:
+  it is told to cancel its own, and then works with the earliest; on the
+  advice before, it was told to cancel the earliest.
+- Not changed: the conflicts a merge leaves in the derived
+  `project-brain/indexes/active.json` and `memory-bank/INDEX.md`.
+
+### A line cut inside a character no longer stops the refresh health series — 2026-10-29
+
+- Why: the prompt hook appends one line per refresh to
+  `memory-bank/local/refresh-health.ndjson` and trims it to its retention.
+  Both the trim and `context.py health` read the file as strict UTF-8, so
+  one line a full disk or a crash cut inside a character (a Cyrillic branch
+  name, say) made `health` fail with `UnicodeDecodeError` and stopped every
+  later trim: the series grew for good, and every prompt read it whole.
+- What changes: both read past such a line - it is one bad line, which the
+  reader skips as it skips one that is not JSON - and the trim replaces the
+  file whole (`atomic_write_bytes`) instead of rewriting it in place, which a
+  crash could leave empty.
+- Tests: `tests/test_memory_health_notices.py` reads a series with such a
+  line (two turns counted, `health` answers) and appends to one longer than
+  its retention (trimmed, valid UTF-8). Both fail on the reader before.
+
+### The lifecycle fuzzer runs hooks behind another session's lock — 2026-10-29
+
+- Why: the lost save fixed below needed a hook's own budget to run out
+  while the save waited on another session's lock. `--interrupt` stops a
+  hook at a random moment, never while it waits, and its 36 seeds found
+  nothing; the loss was found by reading the drain.
+- What changes: `scripts/memory_lifecycle_fuzz.py --contention SHARE` runs
+  that share of the turns outside a burst and not interrupted with their
+  prompt hook or the Stop after the save behind another session's hold on
+  the runtime's lock (1.2-2.5 s) and under a one-second hook budget. A save
+  a sandbox held whose Stop ran out of its budget must be made by the
+  session's next prompt hook. A hook out of its budget may say so, once
+  each: the Stop's journal line with `timeout`'s 124, a refresh reported
+  unavailable. A degraded refresh is counted under the fuzzer's lock: with
+  16 sessions in a burst, increments lost between threads read as refreshes
+  that failed (3 of 8 in one run).
+- Found: on the drains before the fix below, 8 of 12 seeds (60 steps,
+  `--contention 0.4`) lost a save a sandbox held; on the fix none did, and
+  12 such saves were made by the next prompt hook.
+- Tests: the `memory-lifecycles` job's interrupted seed is now 24 with
+  `--interrupt 0.3 --contention 0.3`: on the drains before the fix it loses
+  its held save.
+
+### A save or checkpoint a sandbox held survives a hook its budget stops — 2026-10-29
+
+- Why: a save the agent's sandbox could not write waits in the spool, and a
+  checkpoint (`update`, `turn --flush`) in the command queue, until a hook
+  outside the sandbox makes it. Both drains removed the file before the save
+  or the command ran ("one attempt each"). The hooks run them under
+  `timeout` with a 5 s budget, so one that waited on another session's
+  runtime lock - an index build, a long flush - was ended with its file
+  already gone: the save or checkpoint was lost, and nothing was journaled.
+  Reproduced with the lock held and a 1 s budget: 3 of 3 spooled saves and
+  2 of 2 queued checkpoints never made, by that hook or any later one.
+- What changes: a drain renames the file for its attempt and removes it
+  once the save or command has answered, whatever it said, so an attempt a
+  budget or a host cuts off leaves it to the next hook, which begins it
+  again. A save that had landed is only repeated - the request's token keys
+  it - and a waiting `update` is made once unless its hook was stopped after
+  the command finished and before the file went. After three beginnings the
+  save or command is given up as refused with code `interrupted`; a
+  command's refusal is named in the next capsule, as other refusals are.
+  While it works a drain holds a lock file beside the files, taken without
+  waiting and let go by the system however the drain ends: the queue is the
+  project's, so two sessions' Stops drain it at once, and the second took a
+  file the first was still making - waiting on the lock - for a stopped
+  drain's and made the command twice. Now the second leaves the queue to
+  the first. The lock file is made only when there is something to drain.
+- Tests: `tests/test_memory_native_capture.py` holds the runtime lock while
+  a Stop drains a spooled save, ends the Stop's process group as `timeout`
+  does, and has the next prompt hook make the save; a save three hooks
+  began is given up as `interrupted`. `project-brain/tests/test_runtime.py`
+  (`SandboxQueueTest`) does the same for a queued `update`, checks that the
+  refusal reaches the capsule, and has two Stops drain one queued `update`
+  at once while the lock is held: made once, one revision. Each fails on the
+  drains before (the last one on the drain without its lock).
+- Not covered: a drain whose hook runs Python without `timeout` (macOS
+  without coreutils) is in the hook's own process group; a host that kills
+  that group mid-drain is covered by the same rename, a machine that loses
+  power by nothing new.
+
+### The lifecycle fuzzer stops hooks and saves part-way — 2026-10-29
+
+- Why: a host stops a hook at its timeout (Claude Code gives the Stop hooks
+  8 s), when its window closes and at Ctrl+C, and a save, a turn buffer or
+  an index write can be cut anywhere. The fuzzer only ever let a hook finish.
+- What changes: `scripts/memory_lifecycle_fuzz.py --interrupt SHARE` stops
+  one step of that share of the turns outside a burst - the prompt hook,
+  the Stop hook, the save or the Stop after it - by SIGKILL to the hook's
+  process group, SIGTERM to its shell alone or SIGINT to the group, after up
+  to 0.3 s. A save stopped part-way may or may not land; a save a sandbox
+  held whose Stop was stopped must be made by the session's next prompt
+  hook. Off by default, so every other seed takes the steps it always took.
+- Found: nothing in the runtime. 36 seeds with a third of their turns
+  stopped (24 installed at 70 steps, 12 attached at 60): 1078 saves, 224
+  hooks and 55 saves stopped, no violation. The spool's drain removes a held
+  save's file before it makes the save, but the hooks run Python under
+  `timeout`, which leads a process group of its own, so a kill of the
+  hook's group does not reach it: across 36 kills 1.5 ms apart over the
+  drain, every save was made by that Stop or by the next prompt hook.
+  Without `timeout` (macOS without coreutils) the drain runs in the hook's
+  group, and a group kill between its two steps would lose that save.
+- Tests: `tests/test_memory_lifecycle_fuzz.py` runs seed 6 with
+  `--interrupt 0.3` in the `memory-lifecycles` job: a prompt hook, a Stop
+  hook, a save and the Stop after a save stopped, by each of the three
+  signals, most of them while they ran.
+
 ### A commit in a worktree Codex made no longer refuses the save — 2026-10-29
 
 - Why: a native save is pinned when the Stop asks for it: to the branch,

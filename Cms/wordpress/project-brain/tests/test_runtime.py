@@ -10030,6 +10030,83 @@ class MultiMachineContinuityTest(RuntimeHarness):
         self.assertEqual(first["task_uuid"], capsule["task_uuid"])
         self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
 
+    def test_a_clone_without_a_binding_uses_the_channel_of_the_record_it_serves(self) -> None:
+        # The channel asked for the task ID alone and failed as ambiguous: an
+        # orchestrator read none of its subagents' results, and the dispatch
+        # hook reported each completion lost.
+        first = self.start("feature/shared")
+        self.twin("feature/shared")
+        self.simulate_second_machine()
+        sent = self.run_cli("msg-send", "--task-id", "feature/shared", "--from", "coder", "--to", "*",
+                            "--type", "finding", "--body", "Cobalt authority checked.", "--json")
+        self.assertEqual(0, sent.returncode, sent.stderr)
+        self.assertEqual(first["task_uuid"], json.loads(sent.stdout)["task_id"])
+        dispatched = self.run_cli("msg-dispatch", "--task-id", "feature/shared", "--agent", "coder",
+                                  "--event", "complete", "--json")
+        self.assertEqual(0, dispatched.returncode, dispatched.stderr)
+        read = self.run_cli("msg-read", "--task-id", "feature/shared", "--json")
+        self.assertEqual(0, read.returncode, read.stderr)
+        self.assertEqual("Cobalt authority checked.", json.loads(read.stdout)[0]["body"])
+
+    def test_a_clone_bound_to_the_later_twin_is_told_to_cancel_its_own(self) -> None:
+        # Each clone's capsule named the other record: the clone bound to the
+        # later twin and one bound to the earlier cancelled one each, and
+        # the branch was left with no active task.
+        first = self.start("feature/shared")
+        second = self.twin("feature/shared")
+        # The machine that started the later twin: its binding names it.
+        self.simulate_second_machine()
+        rebound = self.run_cli("rebind", "--task-id", "feature/shared", "--record", second["id"], "--json")
+        self.assertEqual(0, rebound.returncode, rebound.stderr)
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(second["id"], capsule["task_uuid"])
+        advice = [warning for warning in capsule["warnings"] if "Keep one task per branch" in warning]
+        self.assertEqual(1, len(advice), capsule["warnings"])
+        self.assertIn(f"--record-id {second['id']}", advice[0])
+        # Followed, the clone works with the earliest record, as every other does.
+        cancel = self.run_cli("brain-update", "--record-id", second["id"], "--revision", "auto",
+                              "--transition", "cancelled")
+        self.assertEqual(0, cancel.returncode, cancel.stderr)
+        capsule = json.loads(self.run_cli(
+            "refresh", "--query", "cobalt authority", "--task-id", "feature/shared",
+            "--ephemeral", "--json").stdout)["capsule"]
+        self.assertEqual(first["task_uuid"], capsule["task_uuid"])
+        self.assertFalse(any("also claims" in warning for warning in capsule["warnings"]))
+
+    def conflicted(self, task_uuid: str) -> None:
+        """The task record as merging two clones that both checkpointed it
+        leaves it: an unresolved conflict in its frontmatter."""
+        path = self.repository / "project-brain/dynamic/tasks" / f"{task_uuid}.md"
+        raw, body = path.read_text(encoding="utf-8")[4:].split("\n---\n", 1)
+        record = json.loads(raw)
+        sides = [json.dumps(dict(record, revision=record["revision"] + 1, progress=side)) for side in ("Ours.", "Theirs.")]
+        path.write_text(f"---\n<<<<<<< HEAD\n{sides[0]}\n=======\n{sides[1]}\n>>>>>>> 1234567 (more work)\n---\n{body}",
+                        encoding="utf-8")
+
+    def test_a_task_record_left_in_a_merge_conflict_is_not_taken_for_none(self) -> None:
+        # Two clones that both checkpointed the branch's task conflict in its
+        # record. A lookup by the branch said "not found": a clone without a
+        # binding was told "not recorded yet", and its next checkpoint made a
+        # second task beside the one being merged.
+        task = self.start("feature/merged")
+        self.conflicted(task["task_uuid"])
+        self.simulate_second_machine()
+        with self.assertRaises(brain.BrainError) as raised:
+            brain.find_task(self.repository, "feature/merged")
+        self.assertNotIsInstance(raised.exception, brain.BrainRecordNotFound)
+        self.assertIn("unresolved Git merge conflict", str(raised.exception))
+        capsule = self.run_cli("refresh", "--query", "cobalt authority", "--task-id", "feature/merged",
+                               "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn(f"Unresolved Git merge conflict in project-brain/dynamic/tasks/{task['task_uuid']}.md",
+                      capsule.stdout)
+        self.assertNotIn("not recorded yet", capsule.stdout)
+        self.repository.joinpath("app.txt").write_text("work\n", encoding="utf-8")
+        self.run_cli("turn", "--task-id", "feature/merged", "--flush", "--json")
+        self.assertEqual(1, len(list((self.repository / "project-brain/dynamic/tasks").glob("*.md"))))
+
     def test_a_second_machine_reads_the_task_before_its_first_checkpoint(self) -> None:
         # Until the first checkpoint rebound it, the branch's existing task
         # read as "not recorded yet" - prompt and session capsule alike.
@@ -10638,6 +10715,91 @@ class SandboxQueueTest(RuntimeHarness):
                          + [("made", None)], self.journal())
         # Another project's queue is left to it.
         self.assertEqual([other], self.waiting())
+
+    @unittest.skipUnless(os.name == "posix", "a flock and a process group stand in for the hook")
+    def test_a_command_a_stopped_hook_began_is_made_by_the_next_hook(self) -> None:
+        # The Stop hook's turn drains the queue under `timeout` with a 5 s
+        # budget. A command that waited on another session's lock outlived
+        # it: its file was removed before it ran, and the checkpoint was
+        # lost with nothing journaled.
+        import fcntl
+        import signal
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Kept", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.unsandboxed()
+        before = self.task()["revision"]
+        lock = (self.repository / "project-brain/local/runtime.lock").open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        turn = subprocess.Popen([sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository), "turn",
+                                 "--task-id", self.TASK, "--flush-after", "5", "--json"],
+                                env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+        deadline = time.monotonic() + 10
+        while not any(".attempt1." in path.name for path in self.waiting()) and turn.poll() is None \
+                and time.monotonic() < deadline:
+            time.sleep(0.02)
+        begun = [path.name for path in self.waiting()]
+        # The command waits on the lock; the budget ends the hook's whole
+        # process group as timeout does.
+        os.killpg(turn.pid, signal.SIGTERM)
+        turn.wait()
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        self.assertEqual(1, len(begun))
+        self.assertIn(".attempt1.", begun[0])
+        self.assertEqual(begun, [path.name for path in self.waiting()])
+        self.assertEqual(before, self.task()["revision"])
+        self.hook_turn()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)], self.journal())
+        self.assertEqual("Kept", self.task()["progress"])
+
+    @unittest.skipUnless(os.name == "posix", "a flock stands in for another session's lock")
+    def test_two_hooks_draining_at_once_make_a_command_once(self) -> None:
+        # The queue is the project's, not a session's: two sessions' Stops
+        # drain it at once. The one that came second took a file the first
+        # had begun - still running, waiting on the lock - for a stopped
+        # drain's and made the command again.
+        import fcntl
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Once", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        self.unsandboxed()
+        before = self.task()["revision"]
+        lock = (self.repository / "project-brain/local/runtime.lock").open("a+")
+        self.addCleanup(lock.close)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        turns = []
+        for _ in range(2):
+            turns.append(subprocess.Popen([sys.executable, str(CONTEXT_SCRIPT), "--root", str(self.repository),
+                                           "turn", "--task-id", self.TASK, "--flush-after", "5", "--json"],
+                                          env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            deadline = time.monotonic() + 10
+            while not any(".attempt" in path.name for path in self.waiting()) and time.monotonic() < deadline:
+                time.sleep(0.02)
+        time.sleep(0.3)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        for turn in turns:
+            self.assertEqual(0, turn.wait(timeout=60))
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("made", None)], self.journal())
+        self.assertEqual(before + 1, self.task()["revision"])
+
+    def test_a_command_three_stopped_hooks_began_is_given_up_as_interrupted(self) -> None:
+        self.sandboxed()
+        done = self.cli("update", "--task-id", self.TASK, "--revision", "auto", "--progress", "Lost", "--json")
+        self.assertEqual(0, done.returncode, done.stderr)
+        [waiting] = self.waiting()
+        waiting.rename(waiting.with_name(waiting.stem + ".attempt3.json"))
+        self.hook_turn()
+        self.assertEqual([], self.waiting())
+        self.assertEqual([("refused", "interrupted")], self.journal())
+        self.assertNotEqual("Lost", self.task()["progress"])
+        capsule = self.cli("refresh", "--query", "cobalt authority", "--task-id", self.TASK, "--ephemeral")
+        self.assertEqual(0, capsule.returncode, capsule.stderr)
+        self.assertIn("queued memory command not made: update - it was stopped before it finished, 3 times",
+                      capsule.stdout)
 
     def test_a_command_a_drain_runs_fails_instead_of_waiting_again(self) -> None:
         self.sandboxed()

@@ -137,6 +137,29 @@ class NativeCaptureFixture(unittest.TestCase):
 
 
 class NativeCaptureTests(NativeCaptureFixture):
+    def test_a_turn_mends_the_bank_index_a_stopped_promotion_left_behind(self):
+        # A promotion writes its chunk, then INDEX.md. Stopped between the two
+        # - Ctrl-C, a budget, a kill - it left a chunk the index did not name,
+        # and the bank's validation failed until the next bank write.
+        shutil.copy(ROOT/'PHP Core/memory-bank/README.md',self.root/'memory-bank/README.md')
+        self.begin();self.stop();self.save()
+        index=self.root/'memory-bank/INDEX.md'
+        chunk,=(self.root/'memory-bank/chunks').glob('MEM-*.md')
+        index.write_text(''.join(line for line in index.read_text(encoding='utf-8').splitlines(keepends=True)
+                                 if chunk.name not in line),encoding='utf-8')
+        before=chunk.stat().st_mtime-60;os.utime(index,(before,before))
+        validator=[sys.executable,'-B',str(self.root/'memory-bank/scripts/validate.py'),str(self.root/'memory-bank')]
+        checked=subprocess.run(validator,cwd=self.root,capture_output=True,text=True)
+        self.assertIn('chunk is missing from INDEX.md',checked.stdout+checked.stderr)
+        self.call('turn','--task-id','research','--json')
+        self.assertIn(chunk.name,index.read_text(encoding='utf-8'))
+        checked=subprocess.run(validator,cwd=self.root,capture_output=True,text=True)
+        self.assertNotIn('INDEX.md',checked.stdout+checked.stderr)
+        # Current again, the index is left alone: a turn reads the chunks' times only.
+        written=index.stat().st_mtime_ns
+        self.call('turn','--task-id','research','--json')
+        self.assertEqual(written,index.stat().st_mtime_ns)
+
     def test_clean_research_creates_result_and_new_session_recalls_it(self):
         source=(self.root/'rules.md').read_bytes();self.assertEqual(b'',self.git('status','--porcelain'))
         self.begin();self.assertEqual([],self.records('tasks'))
@@ -746,6 +769,69 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
                 self.assertEqual([],list(spool.rglob('*.json')))
                 self.assertEqual(1,len(self.records('tasks')))
 
+    def spooled_save(self):
+        """A Codex save its sandbox could not write: the spool folder, the
+        environment its hooks run with, and their next prompt hook."""
+        spool=Path(tempfile.mkdtemp(prefix='native-spool-',dir=self.root.parent))
+        env=dict(self.env,TMPDIR=str(spool))
+        def prompt():
+            return self.call('native-prompt','--host','codex','--task-id','research','--json',env=env,
+                             data={'hook_event_name':'UserPromptSubmit','session_id':'session-a','prompt':'Inspect it.'})
+        prompt();self.call('native-stop','--host','codex','--task-id','research',env=env,data=self.STOP)
+        candidate,state=self.state()
+        modes=self.readonly()
+        try:
+            spooled=self.call('native-result','--request',candidate.stem,'--token',state['token'],'--input','-',
+                              '--json',data=self.payload,env=env)
+            self.assertEqual('spooled',json.loads(spooled.stdout)['state'])
+        finally:
+            for path,mode in modes.items():path.chmod(mode)
+        return spool,env,prompt
+
+    @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,
+                         'permission bits do not stop root; a flock and a process group stand in for the hook')
+    def test_a_save_whose_hook_was_stopped_while_it_waited_is_made_by_the_next_hook(self):
+        # The Stop hook drains the spool under `timeout` with a 5 s budget. A
+        # save that waited on another session's lock outlived it: its file
+        # was removed before the save began, and the save was lost with
+        # nothing journaled.
+        import fcntl,signal,time
+        spool,env,prompt=self.spooled_save()
+        lock=(self.root/'project-brain/local/runtime.lock').open('a+')
+        self.addCleanup(lock.close)
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        stop=subprocess.Popen([sys.executable,'-B',str(self.root/'memory-bank/scripts/context.py'),
+                               '--root',str(self.root),'native-stop','--host','codex','--task-id','research'],
+                              cwd=self.root,env=env,stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL,start_new_session=True)
+        stop.stdin.write(json.dumps(dict(self.STOP,stop_hook_active=True)).encode());stop.stdin.close()
+        deadline=time.monotonic()+10
+        while not list(spool.rglob('*.attempt1.json')) and stop.poll() is None and time.monotonic()<deadline:
+            time.sleep(0.02)
+        begun=list(spool.rglob('*.attempt1.json'))
+        # The save waits on the lock; the budget ends the hook as timeout does.
+        os.killpg(stop.pid,signal.SIGTERM);stop.wait()
+        fcntl.flock(lock,fcntl.LOCK_UN)
+        self.assertEqual(1,len(begun))
+        self.assertEqual(begun,list(spool.rglob('*.json')))
+        self.assertEqual([],self.records('tasks'))
+        lines=[(line['stage'],line['event'],line.get('code')) for line in self.written(prompt)]
+        self.assertEqual(('save','saved','spooled'),lines[0])
+        self.assertEqual([],list(spool.rglob('*.json')))
+        self.assertEqual(1,len(self.records('tasks')))
+
+    @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,'permission bits do not stop root')
+    def test_a_save_three_stopped_hooks_began_is_given_up_as_interrupted(self):
+        spool,env,_=self.spooled_save()
+        [waiting]=list(spool.rglob('*.json'))
+        waiting.rename(waiting.with_name(waiting.stem+'.attempt3.json'))
+        lines=[(line['stage'],line['event'],line.get('code')) for line in self.written(
+            lambda:self.call('native-stop','--host','codex','--task-id','research',env=env,
+                             data=dict(self.STOP,stop_hook_active=True)))]
+        self.assertEqual(('save','refused','interrupted'),lines[0])
+        self.assertEqual([],list(spool.rglob('*.json')))
+        self.assertEqual([],self.records('tasks'))
+
     @unittest.skipUnless(os.name=='posix' and os.geteuid()!=0,'permission bits do not stop root')
     def test_a_save_claude_codes_sandbox_spools_under_its_own_folder_is_made_by_the_next_hook(self):
         # Claude Code's sandbox gives a command claude-<uid> under its own
@@ -775,6 +861,54 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.assertEqual(('save','saved','spooled'),lines[0])
         self.assertEqual([],list(inside.rglob('*.json')))
         self.assertEqual(1,len(self.records('tasks')))
+
+    def twin(self,earlier):
+        """A second active record claiming the branch's task ID, as merging two
+        copies of a branch that each started its task leaves one; created
+        before the first or after it. Returns the first's ID and the twin's."""
+        import uuid
+        [path]=list((self.root/'project-brain/dynamic/tasks').glob('*.md'))
+        record=json.loads(path.read_text().split('---',2)[1])
+        twin=str(uuid.uuid4())
+        text=path.read_text().replace(record['id'],twin)
+        if earlier:text=text.replace(record['created_at'],'2020-01-01T00:00:00+00:00')
+        (path.parent/f'{twin}.md').write_text(text)
+        return record['id'],twin
+
+    def saved_into(self):
+        """After the first save, a twin, and another turn and save: which record
+        the second save landed in."""
+        self.begin();self.one(self.written(self.stop),'stop','requested')
+        self.save(data=dict(self.payload,progress='After the merge.'))
+        return {record['id'] for record in self.records('tasks') if record.get('progress')=='After the merge.'}
+
+    def test_a_clone_bound_to_a_twin_saves_into_the_record_its_capsule_serves(self):
+        # Two copies of a branch each started its task; once merged, a native
+        # Stop asked for the task ID alone and failed as ambiguous - the hook
+        # hid it - so no save was asked until a person cancelled a twin.
+        self.begin();self.stop();self.save()
+        bound,twin=self.twin(earlier=True)
+        self.assertEqual({bound},self.saved_into())
+
+    def test_a_clone_without_a_binding_saves_into_the_earliest_active_twin(self):
+        self.begin();self.stop();self.save()
+        _,twin=self.twin(earlier=True)
+        for local in ('memory-bank/local','project-brain/local'):
+            shutil.rmtree(self.root/local)
+        self.assertEqual({twin},self.saved_into())
+        capsule=self.call('refresh','--host','codex','--query','retry','--task-id','research','--ephemeral').stdout.decode()
+        self.assertIn(f'this turn uses {twin}',capsule)
+
+    def test_a_branch_task_left_in_a_merge_conflict_asks_no_save(self):
+        # Its lookup said "not found", so a Stop asked a save that made a
+        # second task beside the one being merged.
+        self.begin();self.stop();self.save()
+        [path]=list((self.root/'project-brain/dynamic/tasks').glob('*.md'))
+        raw,body=path.read_text()[4:].split('\n---\n',1);record=json.loads(raw)
+        path.write_text('---\n<<<<<<< HEAD\n'+json.dumps(dict(record,progress='Ours.'))+'\n=======\n'
+                        +json.dumps(dict(record,progress='Theirs.'))+'\n>>>>>>> 1234567 (theirs)\n---\n'+body)
+        self.begin();self.one(self.written(self.stop),'stop','skipped','task-unreadable')
+        self.assertEqual(1,len(list((self.root/'project-brain/dynamic/tasks').glob('*.md'))))
 
     def test_each_stop_path_writes_one_line_with_its_code(self):
         def request(payload=self.STOP,host='codex',**values):
@@ -978,6 +1112,21 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
         self.begin()
         self.one(self.written(self.stop),'stop','skipped','task-completed')
 
+    def test_a_citation_is_kept_as_the_file_is_spelled(self):
+        # Kept as written, ./rules.md and rules.md were two keys for one file,
+        # and RULES.md - found on a file system that ignores case, macOS's or
+        # Windows' - was committed and failed validation in every clone on Linux.
+        learning=self.payload['learnings'][0]
+        self.begin();self.stop()
+        refused=self.save(data={**self.payload,'learnings':[{**learning,'sources':['docs\\rules.md']}]},ok=False)
+        self.assertIn(b'Write source paths with forward slashes: docs/rules.md',refused.stderr)
+        spellings=('./rules.md','.//rules.md','RULES.md')
+        self.save(data={**self.payload,'learnings':[{**learning,'title':f'Amber retry boundary {number}',
+                                                     'consequence':f'{learning["consequence"]} ({number})',
+                                                     'sources':[cited]} for number,cited in enumerate(spellings)]})
+        stored={record['title']:record['sources'] for record in self.records('findings')}
+        self.assertEqual({f'Amber retry boundary {number}':['rules.md'] for number in range(len(spellings))},stored)
+
     def test_each_refused_save_writes_one_line_with_its_code(self):
         self.begin();self.stop();candidate,state=self.state()
         learning=self.payload['learnings'][0]
@@ -997,6 +1146,9 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
             ({**self.payload,'summary':'Inspected.'},'memory-result-v1:schema','Unknown result fields'),
             ({**self.payload,'progress':'x'*1001},'memory-result-v1:text_limit','within 1000 characters'),
             ({**self.payload,'progress':'stderr: the dispatcher failed'},'memory-result-v1:raw_text','pasted log'),
+            # An emoji cut in two: hashing the request failed on a traceback.
+            ({**self.payload,'progress':'Checked the retry rule \ud83d.'},'memory-result-v1:text_unicode',
+             'half of a character'),
             ({**self.payload,'progress':'Asked fixture.owner@example.invalid about retries.'},
              'memory-result-v1:sensitive','personal data'),
             ({'learnings':[]},'memory-result-v1:nothing','Nothing to record'),

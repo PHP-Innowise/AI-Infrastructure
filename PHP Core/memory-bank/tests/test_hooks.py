@@ -1548,7 +1548,9 @@ class RebaseIdentityTest(unittest.TestCase):
                               ("checkout", "-q", "--detach")):
                 subprocess.run(["git", "-C", directory, *arguments], env=env, check=True,
                                capture_output=True, timeout=HOOK_TIMEOUT)
-            if state is not None:
+            if state == "BISECT_START":
+                (root / ".git" / state).write_text("feature/rebased\n", encoding="utf-8")
+            elif state is not None:
                 (root / ".git" / state).mkdir()
                 (root / ".git" / state / "head-name").write_text("refs/heads/feature/rebased\n", encoding="utf-8")
             result = subprocess.run([BASH, str(hooks / "working-memory-read.sh")],
@@ -1565,6 +1567,16 @@ class RebaseIdentityTest(unittest.TestCase):
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual("feature/rebased", argv[argv.index("--task-id") + 1])
                     self.assertEqual("feature/rebased", argv[argv.index("--expected-branch") + 1])
+
+    def test_a_bisect_reads_the_branch_it_started_from(self) -> None:
+        # A bisect tests commits on a detached HEAD: the capsule was empty
+        # and no save was asked until it was reset.
+        for tool in ("claude", "codex"):
+            with self.subTest(tool=tool):
+                result, argv = self.run_read_hook(tool, "BISECT_START")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("feature/rebased", argv[argv.index("--task-id") + 1])
+                self.assertEqual("feature/rebased", argv[argv.index("--expected-branch") + 1])
 
     def test_any_other_detached_head_names_no_task(self) -> None:
         _, argv = self.run_read_hook("claude")
@@ -1604,7 +1616,9 @@ class RebaseIdentityTest(unittest.TestCase):
             else:
                 git("checkout", "-q", "--detach")
             git_dir = Path(git("rev-parse", "--absolute-git-dir").stdout.strip())
-            if state:
+            if state == "BISECT_START":
+                (git_dir / state).write_text(ref + "\n", encoding="utf-8")
+            elif state:
                 (git_dir / state).mkdir()
                 (git_dir / state / "head-name").write_text(ref + "\n", encoding="utf-8")
             if attached or linked:
@@ -1626,6 +1640,15 @@ class RebaseIdentityTest(unittest.TestCase):
                     self.assertEqual(1, len(calls))
                     self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
                     self.assertEqual("5", calls[0][calls[0].index("--flush-after") + 1])
+
+    def test_stop_checkpoints_the_branch_a_bisect_started_from(self):
+        for tool in MIRRORS:
+            with self.subTest(tool=tool):
+                calls = self.run_write_hook(tool, "BISECT_START", ref="feature/rebased")
+                self.assertEqual(1, len(calls))
+                self.assertEqual("feature/rebased", calls[0][calls[0].index("--task-id") + 1])
+                # Started on a detached HEAD, a bisect names a commit, not a task.
+                self.assertEqual([], self.run_write_hook(tool, "BISECT_START", ref="0123abcd" * 5))
 
     def test_stop_without_rebase_keeps_detached_head_unbound(self):
         for tool in MIRRORS:

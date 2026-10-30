@@ -2819,6 +2819,15 @@ class ContextEngineTest(unittest.TestCase):
         self.assertNotEqual(0, recorded.returncode)
         self.assertIn("Episode summary and outcome must not be empty", recorded.stderr)
 
+    @unittest.skipIf(sys.platform == "win32", "Windows arguments are Unicode")
+    def test_record_rejects_half_a_character(self) -> None:
+        # A byte of an argument that was not UTF-8 reads as a lone surrogate;
+        # SQLite refused it with a traceback.
+        recorded = self.run_context("record", "--summary", "caf\udce9 latin", "--outcome", "Done.", "--json")
+        self.assertNotEqual(0, recorded.returncode)
+        self.assertNotIn("Traceback", recorded.stderr)
+        self.assertIn("half of a character", recorded.stderr)
+
     def test_record_rejects_empty_optional_file(self) -> None:
         recorded = self.run_context(
             "record",
@@ -2871,6 +2880,23 @@ class ContextEngineTest(unittest.TestCase):
         progress = payload["working"]["progress"]
         self.assertTrue(progress.startswith("Manual narrative."), progress)
         self.assertIn("Since checkpoint: Auto-checkpoint:", progress)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "only Linux keeps a name that is not UTF-8")
+    def test_a_turn_buffers_a_file_whose_name_is_not_utf8(self) -> None:
+        # A tree unpacked from another system's archive names a file in
+        # Latin-1. Its name came back with lone surrogates, which SQLite
+        # refuses: every turn failed while such a file was changed or
+        # untracked, and the Stop hook's checkpoint with it.
+        self.run_context("start", "--task-id", "TASK-CKPT", "--goal", "Keep odd names.")
+        with open(os.path.join(os.fsencode(self.repository), b"caf\xe9.txt"), "wb") as handle:
+            handle.write(b"work\n")
+        result = self.run_context("turn", "--task-id", "TASK-CKPT", "--flush", "--json")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["flushed"])
+        task = json.loads(
+            self.run_context("get", "--task-id", "TASK-CKPT", "--json").stdout
+        )
+        self.assertIn("caf\\xe9.txt", task["files"])
 
     def test_working_table_written_before_checkpoints_is_migrated_in_place(
         self,

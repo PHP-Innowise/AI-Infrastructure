@@ -43,7 +43,7 @@ jobs are listed and skipped on Linux and macOS.
 | `memory` | The memory runtime's regression steps, split from `installation` to run beside it: the memory evaluation stand (`tests/test_memory_eval.py`, one real refresh on a synthetic project), refresh, delivery and Git source boundaries, UTF-8 isolation, Cursor rule custody, result saves with their replay and evidence, the Brain read once per command, Git starts per prompt, a swept working task, the Harness memory delivery and accounting modules, promotion admission, and the offline Hindsight and LongMemEval pilots, on Python 3.9 and the current release. |
 | `harness-fleet` | Python 3.11: builds `harness/.venv` with the optional graph runtime, runs its offline graph and checkpoint tests, then the browser Fleet integration without model calls. |
 | `system-orchestration` | Python 3.9 and 3.x: universal system planning and execution tests behind a working bubblewrap sandbox, and the synthetic service catalog (`scripts/ai_system.py validate`). |
-| `memory-lifecycles` | Random session and Git lifecycles through a fresh installation's hooks (`scripts/memory_lifecycle_fuzz.py`): two fixed seeds installed and one attached, on Python 3.9 and the current release, beside `memory`. |
+| `memory-lifecycles` | Random session and Git lifecycles through a fresh installation's hooks (`scripts/memory_lifecycle_fuzz.py`): three fixed seeds installed - one with hooks and saves stopped part-way - and one attached, on Python 3.9 and the current release, beside `memory`. |
 | `windows-harness` | `windows-latest`, Python 3.13: native Windows Harness acceptance and boundary tests; the merged-chat archive's files through NT handles (`tests/test_harness_merge_archive.py`: written, read, refused once changed or given a second name, removed with its folder, orphans recovered, never through a junction); the memory hooks as Claude Code starts them there (`tests/test_windows_memory_hooks.py`: PHP Core installed by the installer, the session, prompt and Stop hooks run by Git Bash with `python` or `py -3` and no `python3`, the interpreter found once and remembered); and the desktop application's Start menu shortcut as PowerShell writes it (into a temporary folder; the registry is faked). Some memory regression suites run here too; the rest run in `windows-memory`. The whole merge flow (`tests/test_harness_merge.py`) builds an in-process Harness store and runs on Linux only. |
 | `windows-memory` | `windows-latest`, Python 3.13: the rest of the memory regression suites, in one process, on a runner of its own so that neither Windows job nears its 15 minutes: Cursor rule custody, rename recovery and continuation; read-only startup, Git source scope and inferred branch identity through the hooks as Git Bash runs them; the generated-hook validator; retained, quoted and secret-policy source images and source hints; result saves, fences and evidence, and promotion through the CLI and the memory MCP server under an 8.3 short temporary path; the Brain read once per command. |
 | `lint` | `bash -n` and `shellcheck -S error` on all tracked shell scripts, including the extension-less `collect`, `kit3`, `harness-server` and `accelerator-app` launchers; `python3 -m json.tool` on tracked JSON; no clock/random invalidator in Cursor working-memory render hooks; every complete PHP snippet in tracked Markdown parses (`scripts/check_php_snippets.py --require-php`); startup context budget within ceilings (`scripts/context_budget.py --check`); stabilization rules are well-formed (`scripts/check_stabilization.py`); the policy lock matches the model-facing surface (`scripts/policy_lock.py --check`); the regression tests of the stabilization validator, the policy lock and the routing-eval scoring; and that `scripts/check.py` still matches the workflows (`tests/test_check.py`). |
@@ -219,12 +219,18 @@ python3 scripts/check.py --group memory-lifecycles
 Random session and Git lifecycles driven through a fresh installation's
 hooks (`scripts/memory_lifecycle_fuzz.py`) - Claude Code, Codex and Cursor
 sessions in the root, below it and in worktrees, worktrees Codex makes, and
-checkpoints and saves a sandbox holds until the session's Stop: two fixed
+checkpoints and saves a sandbox holds until the session's Stop: three fixed
 seeds installed and one attached, on Python 3.9 and on the current release.
+One installed seed stops a third of its turns part-way - a prompt hook, a
+Stop hook, a save or the Stop after it, by SIGKILL to the hook's process
+group, SIGTERM to its shell or SIGINT - as a host does at its timeout, a
+closed window or Ctrl+C, and runs a third of the others behind another
+session's hold on the runtime's lock under a one-second budget; it checks
+that nothing after either breaks.
 The job installs bubblewrap and lifts the runner's AppArmor restriction on
 unprivileged user namespaces, as `system-orchestration` does, for the saves
-it holds; without `bwrap` they are left out. About two minutes
-a leg locally and three on a hosted runner; as a step of `memory` it took
+it holds; without `bwrap` they are left out. About two and a half minutes
+a leg locally and four on a hosted runner; as a step of `memory` it took
 that job to its 15-minute limit, so it runs beside it. `timeout-minutes`
 is 10.
 

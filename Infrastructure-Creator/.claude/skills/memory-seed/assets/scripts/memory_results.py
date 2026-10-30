@@ -38,7 +38,9 @@ from brain_runtime import (
     create_record,
     find_record,
     guard_shared_text,
+    HALF_CHARACTER,
     iter_records,
+    lone_surrogate,
     load_config,
     mutation_lock,
     record_attestation,
@@ -103,6 +105,9 @@ def refusal_code(error: BrainError) -> str:
 def _text(value: object, label: str, limit: int) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise ResultRefused("text_limit", f"{label} must be nonempty text within {limit} characters")
+    if lone_surrogate(value):
+        # Hashing the request failed on it first, with a traceback.
+        raise ResultRefused("text_unicode", f"{label} {HALF_CHARACTER}")
     try:
         guard_shared_text(label, [value])
     except BrainError as error:
@@ -120,28 +125,63 @@ def _strings(values: object, label: str, count: int, limit: int) -> list[str]:
     return list(dict.fromkeys(_text(value, label, limit) for value in values))
 
 
+def _spelled(base: Path, parts: tuple[str, ...]) -> Optional[list[str]]:
+    """The names `parts` have on disk below `base`: each the entry of that
+    name, else the one entry that differs from it only in case - or None."""
+    names, current = [], base
+    for part in parts:
+        try:
+            entries = os.listdir(current)
+        except OSError:
+            return None
+        if part not in entries:
+            folded = [entry for entry in entries if entry.casefold() == part.casefold()]
+            if len(folded) != 1:
+                return None
+            part = folded[0]
+        names.append(part)
+        current = current / part
+    return names
+
+
 def check_source(root: Path, value: object, *, require_file: bool = True) -> str:
-    """A canonical project file a learning may cite, or BrainError."""
+    """A canonical project file a learning may cite, or BrainError.
+
+    The citation is kept as the file is spelled on disk. Kept as written,
+    `src/a.php`, `./src/a.php` and `src//a.php` were three keys for one
+    file, and on a file system that ignores case (macOS, Windows)
+    `SRC/a.php` was found, stored and committed - and failed validation in
+    every clone on Linux.
+    """
     value = _text(value, "source path", 1024)
     head = value.split("#", 1)[0]
+    if "\\" in head:
+        # src\a.php is project-relative: "use project-relative source
+        # paths" did not say what to change.
+        raise ResultRefused("source_path", "Write source paths with forward slashes: "
+                            + head.replace("\\", "/")[:200])
     problem = source_path_problem(value)
     if problem:
         raise ResultRefused("source_path", problem)
-    if not require_file:
-        return value
     relative = PurePosixPath(head)
     # The project's root: the runtime's own when installed, the project the
     # launcher named when the edition is attached and its state lives apart,
     # and in a worktree the main checkout's for the accelerator's own files.
     current = workspace_roots.citation_base(root, head)
-    for part in relative.parts:
+    spelled = _spelled(current, relative.parts) if relative.parts else None
+    if not require_file:
+        # A check that does not require the file keeps one it cannot find
+        # as written; one it finds is spelled as it is, as below.
+        return "/".join(spelled) + value[len(head):] if spelled else value
+    parts = spelled or list(relative.parts)
+    for part in parts:
         current = current / part
         if current.is_symlink():
             raise ResultRefused("source_path", f"Symlink source paths are refused: {head[:200]}")
     # Named, so an agent with several learnings knows which citation to fix.
     if not current.is_file():
         raise ResultRefused("source_missing", f"Source is missing or is not a regular file: {head[:200]}")
-    return value
+    return "/".join(parts) + value[len(head):]
 
 
 def check_task_id(value: object) -> str:
@@ -205,8 +245,8 @@ def normalize(root: Path, data: object, *, check_files: bool = True) -> dict[str
         sources = _strings(learning["sources"], "sources", SOURCE_LIMIT, 1024)
         if not sources:
             raise ResultRefused("no_sources", "Cite sources for each learning")
-        for source in sources:
-            check_source(root, source, require_file=check_files)
+        # Each as the file is spelled on disk; two spellings of one file, one.
+        sources = list(dict.fromkeys(check_source(root, source, require_file=check_files) for source in sources))
         checked.append({
             "type": learning["type"],
             "title": _text(learning["title"], "title", 200),

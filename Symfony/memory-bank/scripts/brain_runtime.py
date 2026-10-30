@@ -1459,18 +1459,50 @@ def validate_record_image(record: dict[str, Any], text: str, *, archived: bool =
         _VALID_RECORD_IMAGES.add(key)
 
 
+def merge_sides(text: str) -> list[str]:
+    """The two versions an unresolved Git merge conflict in `text` holds -
+    ours, then theirs, each without the other's lines and without a diff3
+    base - or [] when it holds none."""
+    lines = text.splitlines(keepends=True)
+    if not any(line.startswith("<<<<<<< ") for line in lines):
+        return []
+    sides: tuple[list[str], list[str]] = ([], [])
+    state = None
+    for line in lines:
+        if line.startswith("<<<<<<< "):
+            state = "ours"
+        elif state == "ours" and line.startswith("||||||| "):
+            state = "base"
+        elif state in ("ours", "base") and line.rstrip("\r\n") == "=======":
+            state = "theirs"
+        elif state == "theirs" and line.startswith(">>>>>>> "):
+            state = None
+        else:
+            if state in (None, "ours"):
+                sides[0].append(line)
+            if state in (None, "theirs"):
+                sides[1].append(line)
+    return ["".join(side) for side in sides]
+
+
 def _claimed_identity(text: Optional[str]) -> Optional[dict[str, Any]]:
-    """The type/id/external_id a record that failed to parse still names."""
-    if not isinstance(text, str) or not text.startswith("---\n"):
+    """The type/id/external_id a record that failed to parse still names -
+    in either version of an unresolved Git merge conflict too: two clones of
+    a branch that both checkpointed its task conflict in that record, and a
+    lookup by the branch then said "not found" and a checkpoint made a
+    second task beside the one being merged."""
+    if not isinstance(text, str):
         return None
-    try:
-        raw = text[4:].split("\n---\n", 1)[0]
-        metadata = json.loads(raw)
-    except (ValueError, RecursionError):
-        return None
-    if not isinstance(metadata, dict):
-        return None
-    return {key: metadata.get(key) for key in ("type", "id", "external_id")}
+    for version in [text, *merge_sides(text)]:
+        if not version.startswith("---\n"):
+            continue
+        try:
+            metadata = json.loads(version[4:].split("\n---\n", 1)[0])
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(metadata, dict):
+            return {key: metadata.get(key) for key in ("type", "id", "external_id")}
+    return None
 
 
 def _record_problem(repository: Path, path: Path, metadata: Any, error: BrainError, *,
@@ -1687,6 +1719,9 @@ def iter_record_images(repository: Path, *, include_archive: bool = False,
             # (invalid Unicode in a title, say): a lookup for that task then
             # says the record is invalid instead of "not found".
             claimed = _claimed_identity(text)
+            if text is not None and merge_sides(text):
+                error = BrainError(f"{path}: unresolved Git merge conflict (<<<<<<< ... >>>>>>>); keep "
+                                   "one side or merge both, without the markers")
             if claimed is None and is_uuid4(path.stem):
                 # Unreadable bytes name nothing, but the file is named by the
                 # record's UUID: a lookup must say "invalid", not "not found".
@@ -1849,6 +1884,21 @@ def _handoff_body(handoff: dict[str, Any]) -> str:
     )
 
 
+HALF_CHARACTER = ("holds half of a character (a lone surrogate, as an emoji cut in two leaves); "
+                  "write the whole character or leave it out")
+
+
+def lone_surrogate(text: str) -> bool:
+    """Whether `text` holds half of a UTF-16 pair: a JSON `\\ud83d` alone,
+    or a byte of an argument that was not UTF-8. No UTF-8 file or SQLite
+    text holds one, so a write failed on a traceback where it encoded it."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
 def guard_shared_text(label: str, values: Any) -> None:
     """Refuse a Project Brain write that would store a secret or personal data.
 
@@ -1859,6 +1909,8 @@ def guard_shared_text(label: str, values: Any) -> None:
     message names the kind of data, never the value.
     """
     text = "\n".join(value for value in values if isinstance(value, str) and value)
+    if lone_surrogate(text):
+        raise BrainError(f"{label} {HALF_CHARACTER} - nothing was stored")
     found = sensitive_label(text)
     if found:
         raise BrainError(
@@ -2372,10 +2424,19 @@ def append_message(
                 "Messages require an active task; this task is terminal"
             )
         path = messages_path(repository, task["id"])
-        seq = 1
+        seq, separator = 1, ""
         if path.is_file():
-            with path.open("r", encoding="utf-8") as handle:
-                seq += sum(1 for line in handle if line.strip())
+            text = path.read_text(encoding="utf-8")
+            lines = journal_lines(text)
+            seq += sum(1 for line in lines if line.strip())
+            if lines and not text.endswith("\n"):
+                # Appended to, the line would join this entry's into one.
+                try:
+                    json.loads(lines[-1])
+                except json.JSONDecodeError:
+                    raise BrainError(f"Message journal line {len(lines)} "
+                                     f"{message_line_problem(lines[-1], True)}: {path}") from None
+                separator = "\n"
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "id": new_uuid(),
@@ -2393,12 +2454,70 @@ def append_message(
             record["capsule_digest"] = capsule_digest
         validate_message(record)
         validate_schema_file(repository, "message.schema.json", record)
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        # JSON leaves these unescaped, and str.splitlines - in every runtime
+        # before journal_lines, and in many tools - splits a line at them.
+        for character in (" ", " ", "\x85"):
+            line = line.replace(character, f"\\u{ord(character):04x}")
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        append_whole_line(path, separator + line + "\n")
         return record
+
+
+def append_whole_line(path: Path, line: str) -> None:
+    """Append `line` whole, or not at all.
+
+    A full disk takes part of an append. The channel is read strictly line by
+    line, so the part left at its end failed every later read and
+    validation, and the next entry joined it on one line. An append that
+    fails is taken back to where the file ended; the caller holds the
+    mutation lock, so no other append comes between.
+    """
+    data = line.encode("utf-8")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        end = os.fstat(descriptor).st_size
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError(errno.EIO, f"No progress appending to {path}")
+                view = view[written:]
+            os.fsync(descriptor)
+        except BaseException:
+            try:
+                os.ftruncate(descriptor, end)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(descriptor)
+
+
+def journal_lines(text: str) -> list[str]:
+    """A JSON-lines journal's lines, split at newlines alone.
+
+    str.splitlines also splits at U+2028, U+2029 and U+0085, which JSON
+    leaves unescaped inside a string: a message pasted with one read as two
+    broken lines, and the channel - and the project's validation - stayed
+    broken.
+    """
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def message_line_problem(line: str, last: bool) -> str:
+    """Why a channel line does not parse, as far as can be told: two clones'
+    appends left in a merge conflict, or the end of an append that stopped
+    part-way - the last line, with no newline after it."""
+    if line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")):
+        return "holds an unresolved Git merge conflict"
+    if last:
+        return "is cut short: an append stopped part-way, as on a full disk; remove that line"
+    return "is not valid JSON"
 
 
 def read_messages(
@@ -2424,16 +2543,20 @@ def read_messages(
         return []
     recipient = validate_actor(for_actor) if for_actor is not None else None
     selected: list[dict[str, Any]] = []
-    for number, line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), 1
-    ):
+    text = path.read_text(encoding="utf-8")
+    lines = journal_lines(text)
+    for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
         try:
             record = json.loads(line)
         except json.JSONDecodeError as error:
+            # Two clones that both appended to a task's channel conflict at its
+            # end on pull, and a full disk cut an append short; "corrupt" sent
+            # the reader looking for damage.
+            last = number == len(lines) and not text.endswith("\n")
             raise BrainError(
-                f"Corrupt message journal line {number}: {path}"
+                f"Message journal line {number} {message_line_problem(line, last)}: {path}"
             ) from error
         validate_message(record)
         if record["seq"] <= since_seq:
@@ -2645,14 +2768,18 @@ def validate_repository(
                     repository, path.stem, record_type="task", include_archive=True
                 )
                 previous_seq = 0
-                for number, line in enumerate(
-                    path.read_text(encoding="utf-8").splitlines(), 1
-                ):
+                text = path.read_text(encoding="utf-8")
+                lines = journal_lines(text)
+                for number, line in enumerate(lines, 1):
                     if not line.strip():
                         raise BrainError(
                             f"line {number}: blank line in message journal"
                         )
-                    entry = json.loads(line)
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError as error:
+                        last = number == len(lines) and not text.endswith("\n")
+                        raise BrainError(f"line {number} {message_line_problem(line, last)}") from error
                     validate_message(entry)
                     validate_schema_file(
                         repository, "message.schema.json", entry

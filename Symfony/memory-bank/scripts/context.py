@@ -42,6 +42,7 @@ from brain_runtime import (
     TERMINAL_STATES,
     append_message,
     atomic_json,
+    atomic_write_bytes,
     auto_compact,
     auto_consolidate,
     auto_promote,
@@ -1075,6 +1076,33 @@ def _rebased_branch(project: Path) -> Optional[str]:
     return None
 
 
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _bisected_branch(project: Path) -> Optional[str]:
+    """The branch a bisect in progress started from.
+
+    A bisect tests commits on a detached HEAD and keeps the branch it started
+    from in ``BISECT_START`` of the worktree's own Git directory - a commit
+    ID when it started detached - until it is reset. The capsule was empty
+    and no save was asked meanwhile, though what the turns find is about
+    that branch.
+    """
+    try:
+        directory = _checkout_git_directory(project)
+        if directory is None:
+            return None
+        with (directory / "BISECT_START").open("rb") as handle:
+            raw = handle.read(4097)
+        name = raw.decode("utf-8", "strict").rstrip("\r\n")
+    except (SourceGitError, OSError, UnicodeError, ValueError):
+        return None
+    if (len(raw) > 4096 or not name or _OBJECT_ID.fullmatch(name)
+            or any(character in name for character in ("\0", "\r", "\n"))):
+        return None
+    return name
+
+
 def _admit_inferred_task_branch(repository: Path, expected: Optional[str]) -> None:
     """Recheck a hook-inferred identity; explicit task IDs add no branch probe."""
     if expected is None:
@@ -1095,10 +1123,12 @@ def _admit_inferred_task_branch(repository: Path, expected: Optional[str]) -> No
         # Git was slow.
         observed = _source_git_run(project, ["symbolic-ref", "--quiet", "HEAD"],
                                    _source_git_environment(), time.monotonic() + 2.0)
-        # A rebase detaches HEAD; the branch it rewrites stays the task. A
-        # worktree Codex made is detached until a branch is made there; the
-        # thread that owns it names the task meanwhile.
+        # A rebase detaches HEAD; the branch it rewrites stays the task, as
+        # the branch a bisect started from does. A worktree Codex made is
+        # detached until a branch is made there; the thread that owns it
+        # names the task meanwhile.
         if observed.returncode == 1 and (_rebased_branch(project) == expected
+                                         or _bisected_branch(project) == expected
                                          or _owner_thread_task(project) == expected):
             return
         if (observed.returncode != 0
@@ -2522,13 +2552,14 @@ def branch_task_id(branch: str) -> str:
 
 
 def _on_branch(repository: Path, branch: str) -> bool:
-    """Whether the project's checkout is on ``branch`` now, or rebasing it."""
+    """Whether the project's checkout is on ``branch`` now, or rebasing or
+    bisecting it."""
     try:
         project = workspace_roots.project_root(repository.resolve())
         observed = _source_git_run(project, ["symbolic-ref", "--quiet", "HEAD"], _source_git_environment(),
                                    time.monotonic() + 2.0)
         if observed.returncode == 1:
-            return _rebased_branch(project) == branch
+            return branch in (_rebased_branch(project), _bisected_branch(project))
         return (observed.returncode == 0 and isinstance(observed.stdout, bytes)
                 and observed.stdout == ("refs/heads/" + branch + "\n").encode("utf-8", "surrogatepass"))
     except (SourceGitError, OSError, UnicodeError, ValueError):
@@ -2663,6 +2694,8 @@ def merge_recent(existing: list[str], additions: list[str]) -> list[str]:
 
 def reject_secrets(record_type: str, values: list[str]) -> None:
     candidate = "\n".join(values)
+    if brain_runtime.lone_surrogate(candidate):
+        raise ContextError(f"{record_type} {brain_runtime.HALF_CHARACTER}; {record_type} not stored")
     for label, pattern in SECRET_PATTERNS.items():
         if pattern.search(candidate):
             raise ContextError(f"possible {label} detected; {record_type} not stored")
@@ -3186,11 +3219,12 @@ def append_refresh_health(repository: Path, record: dict[str, object]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-        lines = path.read_text(encoding="utf-8").splitlines()
+        # A line cut inside a character - a full disk, a crash - once stopped
+        # every trim here, and the series grew for good: read past it. The
+        # trim replaces the file whole, never a half-written one.
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         if len(lines) > retention:
-            path.write_text(
-                "\n".join(lines[-retention:]) + "\n", encoding="utf-8"
-            )
+            atomic_write_bytes(path, ("\n".join(lines[-retention:]) + "\n").encode("utf-8"))
     except (OSError, BrainError, ValueError):
         return
 
@@ -3498,8 +3532,7 @@ def assemble_capsule(
     elif problem is not None:
         # The record is there but cannot be read as one. The turn keeps the
         # rest of its memory; the record is the person's to repair.
-        binding_notices.append(f"The working task has no state this turn: {problem}. "
-                               "Repair or restore that file; checkpoints wait for it.")
+        binding_notices.append(_unreadable_task_notice(problem))
         binding, unreadable = None, True
     served = str(binding["task_uuid"]) if binding is not None else None
     served_id = str(bound_record["external_id"]) if bound_record is not None else task_id
@@ -3511,9 +3544,12 @@ def assemble_capsule(
         # A fresh clone or a second machine holds the branch's task in the
         # Brain but no binding until its first checkpoint: the turns before
         # it read the task's state instead of "not recorded yet".
-        record = _unbound_task(repository, task_id)
+        record, claim_problem = _unbound_task(repository, task_id)
         if record is not None:
             served, served_id = str(record["id"]), str(record["external_id"])
+        elif claim_problem is not None:
+            binding_notices.append(_unreadable_task_notice(claim_problem))
+            unreadable = True
     if served is not None and allow_unprovisioned:
         binding_notices.extend(_twin_notices(connection, served_id, served))
     if _COMMAND_STATE.get("renamed_from") == task_id:
@@ -4012,7 +4048,7 @@ def assemble_hook_context(
             binding = None
         # A fresh clone holds the branch's task in the Brain before its first
         # checkpoint binds it: the session's rule shows that task too.
-        record = _unbound_task(repository, task_id) if binding is None else None
+        record = _unbound_task(repository, task_id)[0] if binding is None else None
         if binding is not None or record is not None:
             query, query_source = hook_capsule_query(
                 repository, task_id, binding["task_uuid"] if binding is not None else str(record["id"])
@@ -5225,7 +5261,8 @@ def refresh_health(repository: Path, window: Optional[int]) -> dict[str, object]
     records: list[dict] = []
     if path.is_file():
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
+            # A line cut inside a character is one bad line, not the series.
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 if not line.strip():
                     continue
                 try:
@@ -5428,12 +5465,15 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 # (fresh init, zero commits) or HEAD itself is broken.
                 git_state = "unborn-head"
     # A detached HEAD names the task where the hooks name one: the branch a
-    # rebase in progress rewrites (_rebased_branch), else, in a worktree Codex
-    # made for a thread, that thread (_owner_thread). The checkpoint skill
-    # takes its task from here on a detached HEAD.
+    # rebase in progress rewrites (_rebased_branch) or a bisect in progress
+    # started from (_bisected_branch), else, in a worktree Codex made for a
+    # thread, that thread (_owner_thread). The checkpoint skill takes its
+    # task from here on a detached HEAD.
     project = workspace_roots.project_root(repository)
     rebased = _rebased_branch(project) if git_state == "detached-head" else None
-    owner = _owner_thread(project) if git_state == "detached-head" and rebased is None else None
+    bisected = _bisected_branch(project) if git_state == "detached-head" and rebased is None else None
+    owner = (_owner_thread(project) if git_state == "detached-head" and rebased is None and bisected is None
+             else None)
 
     if git_error is not None:
         git_metadata = {
@@ -5478,6 +5518,9 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                     "Git changed-path metadata is available; HEAD is detached by a "
                     "rebase, and the branch it rewrites supplies task identity."
                     if rebased else
+                    "Git changed-path metadata is available; HEAD is detached by a "
+                    "bisect, and the branch it started from supplies task identity."
+                    if bisected else
                     "Git changed-path metadata is available; HEAD is detached, and "
                     "the Codex thread that owns this worktree supplies task identity."
                     if owner else
@@ -5491,7 +5534,7 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
             }[git_state],
             "remediation": (
                 "Set CONTEXT_TASK_ID for task-aware automation while HEAD is detached."
-                if git_state == "detached-head" and not owner and not rebased
+                if git_state == "detached-head" and not owner and not rebased and not bisected
                 else None
             ),
         }
@@ -5535,23 +5578,25 @@ def automatic_memory_readiness(repository: Path) -> dict[str, object]:
                 "reason": "The current Git branch supplies task identity.",
                 "remediation": None,
             }
-    elif rebased:
+    elif rebased or bisected:
+        source, branch_of, ends = (("git-rebase", "a rebase in progress rewrites", "rebase") if rebased
+                                   else ("git-bisect", "a bisect in progress started from", "bisect"))
         try:
-            identity = validate_task_id(branch_task_id(rebased))
+            identity = validate_task_id(branch_task_id(rebased or bisected))
         except ContextError:
             task_identity = {
                 "status": "degraded",
-                "source": "git-rebase",
+                "source": source,
                 "task_id": None,
-                "reason": "The branch a rebase in progress rewrites is not a valid task identifier.",
+                "reason": f"The branch {branch_of} is not a valid task identifier.",
                 "remediation": "Set CONTEXT_TASK_ID to a valid task identifier.",
             }
         else:
             task_identity = {
                 "status": "active",
-                "source": "git-rebase",
+                "source": source,
                 "task_id": identity,
-                "reason": "The branch a rebase in progress rewrites supplies task identity until the rebase ends.",
+                "reason": f"The branch {branch_of} supplies task identity until the {ends} ends.",
                 "remediation": None,
             }
     elif owner:
@@ -5877,6 +5922,33 @@ def _active_claimants(repository: Path, task_id: str) -> Optional[list[dict[str,
                   key=lambda record: (str(record.get("created_at") or ""), str(record["id"])))
 
 
+def served_task_record(connection: sqlite3.Connection, repository: Path, task_id: str) -> Optional[str]:
+    """The UUID of the task record this clone's turns go to when more than
+    one record claims `task_id` - two copies of a branch that each started
+    one, merged - or None to keep the refusal.
+
+    The one the capsule serves and the turn checkpoint writes: the binding's
+    record while it is active, the record that took over a finished bound
+    record's ID, else the earliest created active record, which
+    ensure_working_task binds a clone without a binding to. A native save
+    asked for the task ID alone and failed as ambiguous - its Stop hid it -
+    so the branch's turns went unsaved until a person cancelled a twin.
+    """
+    try:
+        binding = governed_binding(connection, task_id)
+    except ContextError:
+        binding = None
+    if binding is not None:
+        _, record = _bound_record(repository, binding)
+        if record is not None and record.get("status") not in TERMINAL_STATES:
+            return str(record["id"])
+        successor = _successor(repository, binding, record)
+        if successor is not None:
+            return str(successor["id"])
+    claimant = _active_claimant(repository, task_id)
+    return str(claimant["id"]) if claimant is not None else None
+
+
 def _successor(repository: Path, binding: sqlite3.Row, record: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """The active record that took over the task ID of a bound record that is
     finished - a duplicate cancelled after two copies of the branch merged -
@@ -5888,18 +5960,34 @@ def _successor(repository: Path, binding: sqlite3.Row, record: Optional[dict[str
     return next((candidate for candidate in active if candidate["id"] != record["id"]), None)
 
 
-def _unbound_task(repository: Path, task_id: str) -> Optional[dict[str, Any]]:
+def _unreadable_task_notice(problem: str) -> str:
+    """What a turn says when the record of its task cannot be read. An
+    unresolved merge conflict comes first, by its file: the capsule cuts a
+    warning short, and the conflict was cut off behind the record's path."""
+    conflict = re.search(r"record invalid: (\S+): unresolved Git merge conflict", problem)
+    if conflict:
+        return (f"Unresolved Git merge conflict in {conflict.group(1)}: keep one side or merge both, "
+                "without the markers; checkpoints wait for it.")
+    return f"The working task has no state this turn: {problem}. Repair or restore that file; checkpoints wait for it."
+
+
+def _unbound_task(repository: Path, task_id: str) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """The active task record a task ID names on a machine that holds no
-    binding for it yet - a fresh clone or a second machine - or None."""
+    binding for it yet - a fresh clone or a second machine - or None, and
+    why there is none when a record claiming the ID cannot be read: a turn
+    says so instead of "not recorded yet", which a checkpoint then made true
+    with a second task beside it."""
     try:
         _, record, _ = find_task(repository, task_id)
     except BrainRecordNotFound:
-        return None
+        return None, None
     except BrainError as error:
-        record = _active_claimant(repository, task_id) if "ambiguous" in str(error) else None
+        if "ambiguous" not in str(error):
+            return None, (str(error) if "record invalid" in str(error) else None)
+        record = _active_claimant(repository, task_id)
     if record is None or record.get("status") in TERMINAL_STATES:
-        return None
-    return record
+        return None, None
+    return record, None
 
 
 def _twin_notices(connection: sqlite3.Connection, external_id: str, served: str) -> list[str]:
@@ -5913,8 +6001,14 @@ def _twin_notices(connection: sqlite3.Connection, external_id: str, served: str)
     if not isinstance(claimed, list) or served not in claimed or len(claimed) < 2:
         return []
     other = next(str(identifier) for identifier in claimed if identifier != served)
+    # The records come earliest created first, and the earliest is the one a
+    # clone without a binding settles on: every clone advises cancelling a
+    # later one. Each named "the other" before, so the clone bound to the
+    # later twin and the one bound to the earlier cancelled one each - both.
+    # Cancelled, a bound twin's clone follows the earliest (_successor).
+    cancel = served if served != str(claimed[0]) else other
     return [f"Task record {other} also claims {external_id}; this turn uses {served}.",
-            f"Keep one task per branch: context.py brain-update --record-id {other} "
+            f"Keep one task per branch: context.py brain-update --record-id {cancel} "
             "--revision auto --transition cancelled"]
 
 
@@ -6375,10 +6469,16 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
 
 def status_paths(repository: Path) -> list[str]:
     """Every path `git status` reports under the repository, relative to it,
-    untracked directories collapsed as `git status --short` shows them."""
-    prefix = os.fsdecode(
-        git_output(repository, ["rev-parse", "--show-prefix"], "Git prefix probe")
-    ).strip()
+    untracked directories collapsed as `git status --short` shows them.
+
+    A name that is not UTF-8 - a tree unpacked from another system's archive
+    - keeps its odd bytes as `\\xNN` escapes. Decoded as the file system's
+    names, it carried lone surrogates, which SQLite and the Brain's JSON
+    refuse: while such a file was changed or untracked, every turn failed,
+    and the Stop hook's checkpoint with it."""
+    prefix = git_output(
+        repository, ["rev-parse", "--show-prefix"], "Git prefix probe"
+    ).decode("utf-8", "backslashreplace").strip()
     fields = git_output(
         repository,
         [
@@ -6396,7 +6496,7 @@ def status_paths(repository: Path) -> list[str]:
         if entry[:1] in b"RC":
             # Rename and copy entries carry their origin in the next field.
             position += 1
-        path = os.fsdecode(entry[3:])
+        path = entry[3:].decode("utf-8", "backslashreplace")
         if prefix and path.startswith(prefix):
             path = path[len(prefix):]
         paths.append(path)
@@ -7481,6 +7581,8 @@ QUEUE_PROFILE = "memory-command-queue-v1"
 QUEUE_MAX_AGE_SECONDS = 24 * 60 * 60
 QUEUE_MAX_BYTES = 64 * 1024
 QUEUE_UNWRITABLE = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
+# How many hooks may begin one waiting command before it is given up.
+QUEUE_ATTEMPTS = 3
 # Set for the commands a drain runs: one that still cannot write fails
 # instead of waiting again.
 QUEUE_DRAIN_VARIABLE = "CONTEXT_QUEUE_DRAIN"
@@ -7608,11 +7710,65 @@ def _queued_arguments(repository: Path, argv: list) -> Optional[argparse.Namespa
     return parsed
 
 
+def _drain_waiting(repository: Path, waiting: list, prefix: str) -> list:
+    """drain_queued_commands' work on the files it alone holds, oldest first."""
+    outcomes = []
+    for stamp, begun, folder, path in sorted(waiting):
+        record = _queued_record(path)
+        parsed = _queued_arguments(repository, record["argv"]) if record else None
+        command = parsed.command if parsed else None
+        if begun >= QUEUE_ATTEMPTS:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            outcomes.append({"command": command, "made": False, "code": "interrupted",
+                             "detail": f"it was stopped before it finished, {QUEUE_ATTEMPTS} times"})
+            continue
+        attempt = folder / f"{prefix}{stamp}.attempt{begun + 1}.json"
+        try:
+            os.replace(path, attempt)
+        except OSError:
+            continue
+        try:
+            if parsed is None or not 0 <= time.time() - record["created"] <= QUEUE_MAX_AGE_SECONDS:
+                outcomes.append({"command": command, "made": False,
+                                 "code": "unreadable" if parsed is None else "expired",
+                                 "detail": "the waiting command could not be read" if parsed is None
+                                 else "it waited more than a day"})
+                continue
+            try:
+                done = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--root", str(repository),
+                                       *record["argv"]], cwd=str(workspace_roots.project_root(repository)),
+                                      env={**os.environ, QUEUE_DRAIN_VARIABLE: "1", "PYTHONIOENCODING": "utf-8"},
+                                      stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                outcomes.append({"command": command, "made": False, "code": "unfinished",
+                                 "detail": "it did not finish"})
+                continue
+            lines = [line.strip() for line in done.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
+            outcomes.append({"command": command, "made": done.returncode == 0,
+                             **({} if done.returncode == 0 else {"code": "refused",
+                                                                 "detail": (lines[-1] if lines else "")[:200]})})
+        finally:
+            try:
+                attempt.unlink()
+            except OSError:
+                pass
+    return outcomes
+
+
 def drain_queued_commands(repository: Path) -> list:
     """Make what a sandbox left waiting for this project (queue_write),
     oldest first, from a run that writes its memory: a hook's turn, outside
-    the sandbox. Each file goes before its command runs, whatever it then
-    says; a command refused is journaled and named in the next capsule."""
+    the sandbox. A command refused is journaled and named in the next
+    capsule.
+
+    Each file goes once its command has answered, whatever it said, as a
+    spooled save's does (native_results.drain): renamed for the attempt
+    first, so a hook its budget or its host stops while the command waits on
+    another session's lock leaves it for the next hook - up to QUEUE_ATTEMPTS
+    beginnings, then it is given up as `interrupted`."""
     if os.environ.get(QUEUE_DRAIN_VARIABLE) == "1":
         return []
     prefix = f"command-{_queue_key(repository)}-"
@@ -7624,34 +7780,19 @@ def drain_queued_commands(repository: Path) -> list:
             names = [name for name in os.listdir(folder) if name.startswith(prefix) and name.endswith(".json")]
         except OSError:
             continue
-        waiting.extend((name[len(prefix):], folder / name) for name in names)
-    outcomes = []
-    for _, path in sorted(waiting):
-        record = _queued_record(path)
-        try:
-            path.unlink()
-        except OSError:
-            continue
-        parsed = _queued_arguments(repository, record["argv"]) if record else None
-        command = parsed.command if parsed else None
-        if parsed is None or not 0 <= time.time() - record["created"] <= QUEUE_MAX_AGE_SECONDS:
-            outcomes.append({"command": command, "made": False, "code": "unreadable" if parsed is None else "expired",
-                             "detail": "the waiting command could not be read" if parsed is None
-                             else "it waited more than a day"})
-            continue
-        try:
-            done = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--root", str(repository),
-                                   *record["argv"]], cwd=str(workspace_roots.project_root(repository)),
-                                  env={**os.environ, QUEUE_DRAIN_VARIABLE: "1", "PYTHONIOENCODING": "utf-8"},
-                                  stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
-            outcomes.append({"command": command, "made": False, "code": "unfinished",
-                             "detail": "it did not finish"})
-            continue
-        lines = [line.strip() for line in done.stderr.decode("utf-8", "replace").splitlines() if line.strip()]
-        outcomes.append({"command": command, "made": done.returncode == 0,
-                         **({} if done.returncode == 0 else {"code": "refused",
-                                                             "detail": (lines[-1] if lines else "")[:200]})})
+        for name in names:
+            stamp, attempt = name[len(prefix):-len(".json")], 0
+            begun = re.fullmatch(r"(.+)\.attempt([1-9])", stamp)
+            if begun:
+                stamp, attempt = begun.group(1), int(begun.group(2))
+            waiting.append((stamp, attempt, folder, folder / name))
+    with contextlib.ExitStack() as held:
+        # A file under an attempt's name is a stopped drain's only while no
+        # other drain - another session's hook at the same moment - holds
+        # this project's queue in that folder.
+        alone = {folder for folder in {entry[2] for entry in waiting}
+                 if held.enter_context(workspace_roots.draining(folder, prefix.rstrip("-")))}
+        outcomes = _drain_waiting(repository, [entry for entry in waiting if entry[2] in alone], prefix)
     if outcomes:
         import native_results
         for outcome in outcomes:
@@ -7664,6 +7805,31 @@ def drain_queued_commands(repository: Path) -> list:
             report.update(timestamp=datetime.now(timezone.utc).isoformat(), queued_refused=refused[-3:])
             write_last_turn_report(repository, report)
     return outcomes
+
+
+def heal_bank_index(repository: Path) -> bool:
+    """Write memory-bank/INDEX.md again when a chunk is newer than it.
+
+    A promotion, a retire or a re-verify writes the chunk, then the index.
+    Stopped between the two - Ctrl-C, a budget, a kill - it left a chunk the
+    index did not name, or named as it was, and the bank's validation failed
+    until the next bank write. The index is derived: each turn's checkpoint
+    writes it again where it differs (reindex_bank, under the lock that write
+    held). One checked out after its chunks, as a pull leaves it, is only
+    marked as current.
+    """
+    bank = repository / "memory-bank"
+    index = bank / "INDEX.md"
+    try:
+        newest = max((path.stat().st_mtime_ns for path in (bank / "chunks").glob("MEM-*.md")), default=None)
+        if newest is None or (index.is_file() and index.stat().st_mtime_ns >= newest):
+            return False
+        if not reindex_bank(repository)["changed"]:
+            os.utime(index, ns=(newest, newest))
+            return False
+    except (BrainError, OSError, ValueError):
+        return False
+    return True
 
 
 def run_turn(
@@ -7679,6 +7845,7 @@ def run_turn(
     if arguments.max_files < 1:
         raise ContextError("--max-files must be a positive integer")
     task_id = validate_task_id(arguments.task_id)
+    heal_bank_index(repository)
     files, path_excluded = changed_paths(repository)
     # A turn that ended in a commit leaves a clean tree and is still work.
     committed = head_advanced(connection, repository, task_id)
@@ -9325,15 +9492,23 @@ def _command() -> int:
                         )
                     except (ContextError, BrainError):
                         pass
+                # The record the capsule serves, as the native save takes it.
+                # On a branch two records claim - two copies of it each
+                # started one, merged - the task ID alone was ambiguous: in a
+                # clone without a binding an orchestrator read none of its
+                # subagents' results, and the dispatch hook reported each
+                # completion lost.
+                task_reference = served_task_record(connection, repository, arguments.task_id)
                 # The audit trail outlives the local binding: a completed or
                 # archived task has no binding, but its journal must stay
                 # readable (and refuse writes with the honest terminal error),
                 # so fall back to resolving by the Brain identifier itself.
-                try:
-                    binding = governed_binding(connection, arguments.task_id)
-                    task_reference = str(binding["task_uuid"])
-                except ContextError:
-                    task_reference = validate_task_id(arguments.task_id)
+                if task_reference is None:
+                    try:
+                        binding = governed_binding(connection, arguments.task_id)
+                        task_reference = str(binding["task_uuid"])
+                    except ContextError:
+                        task_reference = validate_task_id(arguments.task_id)
                 if arguments.command == "msg-send":
                     body = arguments.body
                     if arguments.body_file:
@@ -9463,20 +9638,23 @@ def _command() -> int:
                             data = native_results.read_input(stream, repository, arguments.request)
                     result = native_results.save(repository, arguments.request, arguments.token, data,
                         owner=owner, mode=mode, skip=arguments.skip,
-                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner))
+                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner),
+                        served=lambda task_id: served_task_record(connection, repository, task_id))
                     print(json.dumps(result, ensure_ascii=False))
                 else:
                     payload = native_results.read_input(sys.stdin.buffer)
                     # A save the agent's sandbox could not write waits in
                     # the spool; this hook runs outside the sandbox.
                     native_results.drain(repository, arguments.task_id, arguments.host, payload, owner=owner, mode=mode,
-                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner))
+                        provision=lambda task_id: ensure_working_task(connection, repository, task_id, mode, owner),
+                        served=lambda task_id: served_task_record(connection, repository, task_id))
                     if arguments.command == "native-prompt":
                         result = native_results.begin(repository, arguments.task_id, arguments.host, payload,
                                                       owner=owner, mode=mode)
                     else:
                         result = native_results.stop(repository, arguments.task_id, arguments.host, payload,
-                                                     owner=owner, mode=mode, entered=arguments.entered)
+                                                     owner=owner, mode=mode, entered=arguments.entered,
+                                                     served=lambda task_id: served_task_record(connection, repository, task_id))
                     if arguments.command == "native-stop":
                         if result: print(json.dumps(result, ensure_ascii=False))
                     else:

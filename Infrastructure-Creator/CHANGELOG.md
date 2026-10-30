@@ -4,6 +4,82 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime's turn mends a bank index a stopped write left behind — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded Memory MCP names the code of a save it refuses — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `mcp_server.py`
+  changes in the asset; the policy lock was rewritten.
+
+### hook-forge: a generated project's memory hooks follow a bisect — 2026-10-30
+
+- The canonical `rebased_branch()` in `hook-forge` also reads
+  `BISECT_START`, as the editions' hooks do (root `CHANGELOG.md`, same
+  day). The seeded runtime admits that branch while the bisect runs:
+  `context.py` changes in the asset. The policy lock was rewritten.
+
+### The seeded runtime's agent channel follows the task record its capsule serves — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime refuses text holding half of a character by name — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,
+  `memory_results.py` and `context.py` change in the asset; the policy lock
+  was rewritten.
+
+### The seeded runtime reads a channel message holding a Unicode line separator — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime takes back a channel message a full disk cuts short — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime buffers a turn that changed a file named outside UTF-8 — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime names an index, a chunk or a channel left in a merge conflict — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `validate.py` and
+  `brain_runtime.py` change in the asset; the policy lock was rewritten.
+
+### The seeded runtime keeps a citation as the file is spelled — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `memory_results.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime reads a task record left in a merge conflict as invalid, not absent — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,
+  `context.py` and `native_results.py` change in the asset; the policy lock
+  was rewritten.
+
+### The seeded runtime saves a branch two task records claim where its capsule says — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day), with the capsule's
+  advice naming the same twin in every clone: `context.py` and
+  `native_results.py` change in the asset; the policy lock was rewritten.
+
+### The seeded runtime reads past a broken line in its health series — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime keeps a held save or checkpoint its hook's budget stops — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`,
+  `context.py` and `workspace_roots.py` change in the asset; the policy lock
+  was rewritten.
+
 ### The seeded runtime pins a save in a worktree Codex made to its thread — 2026-10-29
 
 - As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`
