@@ -372,7 +372,12 @@ any retrieve naming them. In next's Codex sessions since 2026-09-01 (992
 read, 36 of them retrieved, 75 calls) the answers named 25 task records, 9
 of them opened afterwards, 4 findings and chunks, none opened, and
 `CHANGELOG.md` in 14 sessions, opened in 11. That runtime printed no `task
-record:` pointer; the records came as history items. In the same sessions'
+record:` pointer; the records came as history items. It also refused a task
+not recorded yet: 14 of the 23 calls that ran retrieve alone were answered
+"Working task not found", and 39 calls ran `start` first; the runtime answers
+such a retrieve since 2026-10-06. Codex heads a command's output with its own
+lines ("Script completed", the wall time, "Output:"), which `realized` reads
+past. In the same sessions'
 440 capsule turns the capsules delivered 54 items, 44 of them `CHANGELOG.md`
 (25 opened) and none of the rest opened.
 Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of

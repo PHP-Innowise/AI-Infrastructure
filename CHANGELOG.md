@@ -28,6 +28,16 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### `realized` reads a retrieve's answer inside Codex's output wrapper — 2026-10-30
+
+- Codex heads what a command printed with its own lines ("Script completed"
+  or "Script running with cell ...", the wall time, "Output:"): every one of
+  the 75 retrieves in next's September sessions came back so, and a `--json`
+  answer then did not start with `{` and was not read. `realized` now reads
+  past those lines, and of several JSON documents one call printed (`start
+  --json` before the retrieve) takes the one with memory layers. The counts
+  of 2026-10-30 hold: the 17 JSON answers held one capsule.
+
 ### A verified record keeps the versions that were checked, and says who checked — 2026-10-30
 
 - `update_record` took every source fingerprint anew on any write, so a

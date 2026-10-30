@@ -3150,10 +3150,20 @@ def hook_context(payload: Dict[str, Any]) -> bool:
     return not isinstance(kinds, list) or "hooks.additional_context" in kinds
 
 
+# Codex's freeform shell tool heads what a command printed with its own lines:
+# "Script completed" (or "Script running with cell ...", "Exit code: 0"), the
+# wall time, then "Output:". All 75 retrieves in next's September sessions
+# came back so, the 17 asked for --json among them.
+CODEX_OUTPUT_HEADER = re.compile(r"\A(?:Script |Exit code|Process exited|Chunk ID)[^\n]*\n(?:[^\n]*\n){0,4}?Output:\n")
+
+
 def output_text(value: object) -> str:
-    """A tool result's text. Codex wraps a shell's in {"output": ...}, newer
-    hosts send a list of text parts."""
+    """A tool result's text. Codex wraps a shell's in {"output": ...} or heads
+    it with its own lines, newer hosts send a list of text parts."""
     if isinstance(value, str):
+        header = CODEX_OUTPUT_HEADER.match(value)
+        if header:
+            return value[header.end():]
         if value.lstrip().startswith("{"):
             try:
                 parsed = json.loads(value)
@@ -3172,21 +3182,36 @@ def output_text(value: object) -> str:
 
 def retrieved(text: str) -> Tuple[Set[str], Set[str]]:
     """What a retrieve answered: its items and its task record, from the
-    rendered capsule or, with --json, from the capsule's JSON."""
-    if text.lstrip().startswith("{"):
-        try:
-            value = json.loads(text)
-        except ValueError:
-            value = None
-        if isinstance(value, dict):
-            capsule = value["capsule"] if isinstance(value.get("capsule"), dict) else value
-            items: Set[str] = set()
-            for layer in ("semantic", "episodic", "procedural"):
+    rendered capsule or, with --json, from the capsule's JSON. One call may
+    print several JSON documents - `start --json` and then the retrieve -
+    and the capsule is the one with memory layers."""
+    stripped = text.lstrip()
+    if stripped.startswith("{"):
+        items: Set[str] = set()
+        records: Set[str] = set()
+        found = False
+        decoder = json.JSONDecoder()
+        position = 0
+        while position < len(stripped):
+            try:
+                value, position = decoder.raw_decode(stripped, position)
+            except ValueError:
+                break
+            while position < len(stripped) and stripped[position].isspace():
+                position += 1
+            capsule = value.get("capsule") if isinstance(value, dict) and isinstance(value.get("capsule"), dict) else value
+            if not isinstance(capsule, dict) or not any(layer in capsule for layer in LAYERS):
+                continue
+            found = True
+            for layer in LAYERS:
                 for item in capsule.get(layer) or []:
                     if isinstance(item, dict) and isinstance(item.get("path"), str):
                         items |= doc_paths(item["path"])
             record = capsule.get("task_record")
-            return items, doc_paths(record) if isinstance(record, str) else set()
+            if isinstance(record, str):
+                records |= doc_paths(record)
+        if found:
+            return items, records
     return capsule_items(text)
 
 

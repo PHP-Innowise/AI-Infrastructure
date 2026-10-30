@@ -2575,8 +2575,19 @@ class CapsuleFormsTest(unittest.TestCase):
         self.assertEqual(({CHUNK}, {TASK_RECORD}), memory_eval.retrieved(answer))
         provenance = json.dumps({"response_profile": "x", "capsule": json.loads(answer)})
         self.assertEqual(({CHUNK}, {TASK_RECORD}), memory_eval.retrieved(provenance))
+        # `start --json && retrieve --json` prints the task record first.
+        started = json.dumps({"id": "0d9c8b7a", "goal": "Fix rounding", "files": ["docs/billing.md"]})
+        self.assertEqual(({CHUNK}, {TASK_RECORD}), memory_eval.retrieved(started + "\n" + answer + "\n"))
+        self.assertEqual((set(), set()), memory_eval.retrieved(started))
         wrapped = json.dumps({"output": f"working: t — g\n- memory {CHUNK} — T", "metadata": {"exit_code": 0}})
         self.assertEqual(({CHUNK}, set()), memory_eval.retrieved(memory_eval.output_text(wrapped)))
+        # Codex's freeform shell heads the output with its own lines.
+        for head in ("Script completed\nWall time 0.4 seconds\nOutput:\n",
+                     "Script running with cell 3\nWall time 1.2 seconds\nOutput:\n"):
+            with self.subTest(head=head):
+                self.assertEqual(({CHUNK}, {TASK_RECORD}),
+                                 memory_eval.retrieved(memory_eval.output_text(head + answer)))
+        self.assertEqual("Script ran\nno output line", memory_eval.output_text("Script ran\nno output line"))
         self.assertEqual("a\nb", memory_eval.output_text([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]))
 
 
