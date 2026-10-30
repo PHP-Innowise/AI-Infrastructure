@@ -193,6 +193,9 @@ Distinguish data classes before replacement:
 - the document index is derived and rebuildable;
 - governed task authority is in `project-brain/`, although SQLite holds local
   bindings/cache;
+- the turns buffered since the last checkpoint, the recent files and what each
+  conversation was already handed exist only in SQLite: a new database starts
+  them empty;
 - lightweight working tasks and local episodes exist only in SQLite and are
   not reconstructable from the repository.
 
@@ -205,7 +208,9 @@ database"): they move it and its journal files aside to
 `memory-bank/local/context.db.quarantine-<UTC time>`, build a new one and run
 once more, and the capsule says so. Everything in it is derived there - the
 index is rebuilt, the binding comes back from the Brain at the next
-checkpoint - except the turns buffered since the last checkpoint. Lightweight
+checkpoint - except the turns buffered since the last checkpoint, the recent
+files and what each conversation was already handed, which stay in the
+quarantined file. Lightweight
 mode keeps its working tasks only in that file, so it is never moved
 automatically; use the steps below.
 

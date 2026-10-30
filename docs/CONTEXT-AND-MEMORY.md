@@ -171,6 +171,30 @@ with `rebind`, and the next automated turn flush performs the same restoration.
 Lightweight tasks and local episodes remain machine-local and cannot be
 reconstructed after deletion.
 
+So three kinds of state live in two places, and only one kind is authority:
+
+- **Project Brain and Memory Bank**: the records and chunks a team keeps.
+  They are the authority, and only as safe as their copies: in Git, every
+  clone holds one.
+- **Local session state**, in `context.db`: the turns buffered since the last
+  checkpoint (`turn_deltas`, fewer than `--flush-after` per task), the
+  project's recent files, the branch heads the buffer compares against, what
+  each conversation was already handed, and in lightweight mode the working
+  tasks and episodes themselves. None of it can be rebuilt. Losing it costs
+  the paths that became clean since the last checkpoint, delays the next
+  automatic checkpoint, empties the recent files until turns refill them, and
+  may hand a conversation an item again.
+- **The index**: documents, metadata, identifiers and links, rebuilt from the
+  repository whenever it is missing or stale.
+
+The runtime leaves local state behind in four cases: a governed database
+found damaged is quarantined and started afresh (the buffered turns stay in
+the quarantined file); a removed worktree's database is pruned; turns
+buffered after a task closed are dropped; and the buffer of a branch that
+gets no further turn is never flushed. A runtime update, a reindex and a
+process killed mid-checkpoint keep it: the Brain is written before the buffer
+is cleared, and a replayed flush neither loses nor repeats a path.
+
 The active provider is local `sqlite-fts5`: network access and embeddings are
 disabled. An external provider entry exists only as a disabled contract.
 Retrieval is not only on request: each edition's prompt hook injects a bounded

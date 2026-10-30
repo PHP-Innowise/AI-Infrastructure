@@ -72,14 +72,20 @@ So:
 - Insufficient and negative held-out results are reported as they are.
   "Unchanged on the stand" is not evidence that a change is safe.
 
-Retrieval is frozen to fixes until task outcomes are measured: a capsule
-against no capsule, on replayed or real tasks, counting the calls before the
-first touch of the file the task changed. The stand stops a run at that
+Retrieval takes fixes; a heuristic is accepted only on a task-outcome
+measurement of its own: paired runs of the stand (below) on held-out tasks,
+written down and sealed before they run. The first one, on 2026-10-21, found
+the full capsule no better than none, and the navigation profile faster to
+the changed file, though it never delivers a saved result; `recall`
+(navigation plus the task's own saves) became the default after its own run
+the next day. That did not end the rule: every heuristic after it waits for
+its own run, as the `ticket` arm does. The stand counts the calls
+before the first touch of the file the task changed. It stops a run at that
 touch, so it does not see whether the task got done: that needs full-length
-runs and a way to check the result, and neither exists yet. All
-of the earlier measures score relevance labels, and real use has not shown
-that relevant delivery changes what an agent does. In September one of 287
-delivered documents was opened.
+runs and a way to check the result, and neither exists yet. The measures
+before it score relevance labels, and real use has not shown that relevant
+delivery changes what an agent does. In September one of 287 delivered
+documents was opened.
 - A **fix** makes the runtime do what its contract already says. Examples: a
   crash, a secret or privacy leak, a filter that withholds what its own
   documentation keeps, a lost write, a performance regression.
@@ -1018,6 +1024,9 @@ Use a reranker when an eligible document is already found but its ranking or
 quoted window loses the answer. If it is absent from the candidate set, measure
 candidate expansion with a hybrid search separately. An excerpt reranker cannot
 recover an absent document, widen the history slot or enlarge the link cap.
+What the pilot measures decides whether a reranker earns a task-outcome run,
+never whether it ships: a default changes only on its own sealed outcome
+measurement ("Accepting a retrieval change").
 
 For a session repeat, inspect the local trace's `window_observation` before
 attributing the missing answer to ranking. A `different-exposure-window`

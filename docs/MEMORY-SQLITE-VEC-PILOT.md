@@ -73,7 +73,9 @@ p50/p95 including extension load and embedding time, and the index size. A
 dense candidate that only adds noise at the same recall is a negative result,
 not a tuning invitation. Do not adopt an alpha extension as a default
 dependency, and do not let a similarity score satisfy a lexical coverage or
-authority claim.
+authority claim. These numbers decide whether a variant earns a task-outcome
+run, never whether it ships: a default changes only on its own sealed
+outcome measurement (`docs/MEMORY-EVAL.md`, "Accepting a retrieval change").
 
 ## Tests
 
