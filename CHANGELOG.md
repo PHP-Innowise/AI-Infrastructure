@@ -28,6 +28,44 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The maintainer tools measure the retrieves agents make and what a save costs — 2026-10-30
+
+- `memory_eval.py realized` reads every explicit retrieve in the sessions it
+  reads - `context.py retrieve` through a shell and the Memory MCP's
+  `memory_retrieve`, in a capsule turn or not - pairs each call with its
+  answer by the host's call ID and counts, per host and kind, the documents
+  the answers named and how many a later tool call opened, the task records
+  they pointed at, and as a baseline the documents opened that no retrieve
+  named. In next's Codex sessions since 2026-09-01 (75 calls in 36 sessions)
+  the answers named 25 task records, 9 opened afterwards, and 4 findings and
+  chunks, none opened: the one memory path agents were seen using is the
+  working state, and no tool read it before.
+- A capsule's delivered documents are the items it lists as memory, in the
+  current form (`- memory|history|skill|policy <path> — <title>`) or the
+  September one (a `semantic:` line with the items indented under it, and
+  `weak-match:`). Paths on the other lines - recent and ticket files, the
+  task's sources, the last turn, an excerpt - were counted as delivered
+  (next, September: 65 items, now 54); the `task record:` pointer has its own
+  row, and a task's record is the kind `task-record`, apart from `brain`.
+- A Codex capsule after the prompt hook's "Previous native memory result was
+  not saved completely." was no turn at all; it is now, and so is one Codex
+  marks `hooks.additional_context`. A developer message Codex marks as
+  something else is no capsule whatever its first word, and "Memory refresh
+  unavailable" opens a turn without a capsule.
+- The native save cost line adds, where the host records them, the save's and
+  the answer's input tokens and how many came from the cache (Claude Code:
+  fresh, cache-written and cache-read). On the 43 saves of 2026-10-24 on
+  copies of two client projects the median save re-read 176,782 input tokens,
+  175,616 cached, beside its 662 output tokens and 17.1 s.
+- `memory_outcome_ab.py`: the `capsule` arm names `capsule_profile: full`. It
+  left the profile to the corpus, and since the editions ship `recall`
+  (2026-10-22) it would have measured recall under its old name. `report`
+  prints each arm's cost outside the verdict: mean seconds, on how many runs
+  Codex reported usage (never on a run stopped at the gold touch), the mean
+  tokens over those, and the documents' token estimate.
+- `docs/MEMORY-EVAL.md` says the stand counts calls to the first touch of a
+  changed file and does not see whether the task got done.
+
 ### A ticket files line in the capsule, an experiment switched off — 2026-10-30
 
 - `ticket_files: true` in `runtime.json` (or `CONTEXT_TICKET_FILES=1`; `0`
