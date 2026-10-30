@@ -2997,6 +2997,16 @@ class CheckedFingerprintTest(RuntimeHarness):
         self.assertEqual(["specs/authority.md", "specs/limits.md"],
                          [item["path"] for item in cited["source_fingerprints"]])
 
+    def test_a_citation_never_digested_stays_undigested(self) -> None:
+        # A record from before fingerprints: a write that checks nothing must
+        # not take the file as it is now for the version that was checked.
+        self.verified_finding()
+        path, record, _ = brain.find_record(self.repository, self.record_id)
+        record["source_fingerprints"] = []
+        brain._write_record(self.repository, record, path)
+        self.edit_source()
+        self.assertEqual([], self.write(progress="Cobalt guard confirmed (tidied).")["source_fingerprints"])
+
     def test_an_unchecked_record_still_follows_its_sources(self) -> None:
         record = brain.create_record(self.repository, "finding", "FIND-OPEN", "Open question", [],
                                      [self.SOURCE], owner="alice")

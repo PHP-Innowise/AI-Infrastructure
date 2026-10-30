@@ -2196,8 +2196,8 @@ def update_record(
             raise BrainError("attestation must be one of: " + ", ".join(ATTESTATIONS))
         # Knowledge that was checked: what promotion carries into the bank.
         checked = record["type"] in PROMOTABLE_STATES and record["authority"] == "verified"
-        revised = (progress is not None and progress != record["progress"]) or bool(
-            set(sources) - set(record["sources"]))
+        cited_now = [source for source in dict.fromkeys(sources) if source not in record["sources"]]
+        revised = (progress is not None and progress != record["progress"]) or bool(cited_now)
         if checked and revised and attestation != "person" and record_attestation(record) == "person":
             # The next agent must not be free to overwrite a person's check;
             # record-result holds the same revision.
@@ -2289,13 +2289,14 @@ def update_record(
             # checked: promotion copies them into the chunk, and retrieval
             # marks the item when a file now differs. A write that checks
             # nothing - progress, next steps, a lifecycle move - keeps them and
-            # fingerprints only a source cited for the first time. Re-taking
-            # them all let any edit clear "cited file changed" from a claim
-            # nobody checked again.
+            # fingerprints only a source this write cites for the first time.
+            # Re-taking them all let any edit clear "cited file changed" from
+            # a claim nobody checked again; an old citation that was never
+            # digested stays so, and keeps the record from promotion.
             known = {item["path"] for item in record["source_fingerprints"]}
             record["source_fingerprints"] = sorted(
                 [*record["source_fingerprints"], *source_fingerprints(repository, [
-                    source for source in record["sources"] if source.split("#", 1)[0] not in known])],
+                    source for source in cited_now if source.split("#", 1)[0] not in known])],
                 key=lambda item: item["path"],
             )
         else:

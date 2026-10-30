@@ -28,6 +28,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A verified record's citation that was never digested stays so — 2026-10-30
+
+- The fingerprint rule of the same day ("a verified record keeps the versions
+  that were checked") still took the file as it is now for an old citation
+  that had no fingerprint - a record from before fingerprints, three of them
+  in the client project next. Only a source the write itself cites for the
+  first time is fingerprinted now; an old citation never digested stays so,
+  and keeps the record from promotion as before.
+
 ### A capsule's health line names the host that asked — 2026-10-30
 
 - `refresh` and `hook-context` write the `--host` they were given into their
