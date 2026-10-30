@@ -137,6 +137,29 @@ class NativeCaptureFixture(unittest.TestCase):
 
 
 class NativeCaptureTests(NativeCaptureFixture):
+    def test_a_turn_mends_the_bank_index_a_stopped_promotion_left_behind(self):
+        # A promotion writes its chunk, then INDEX.md. Stopped between the two
+        # - Ctrl-C, a budget, a kill - it left a chunk the index did not name,
+        # and the bank's validation failed until the next bank write.
+        shutil.copy(ROOT/'PHP Core/memory-bank/README.md',self.root/'memory-bank/README.md')
+        self.begin();self.stop();self.save()
+        index=self.root/'memory-bank/INDEX.md'
+        chunk,=(self.root/'memory-bank/chunks').glob('MEM-*.md')
+        index.write_text(''.join(line for line in index.read_text(encoding='utf-8').splitlines(keepends=True)
+                                 if chunk.name not in line),encoding='utf-8')
+        before=chunk.stat().st_mtime-60;os.utime(index,(before,before))
+        validator=[sys.executable,'-B',str(self.root/'memory-bank/scripts/validate.py'),str(self.root/'memory-bank')]
+        checked=subprocess.run(validator,cwd=self.root,capture_output=True,text=True)
+        self.assertIn('chunk is missing from INDEX.md',checked.stdout+checked.stderr)
+        self.call('turn','--task-id','research','--json')
+        self.assertIn(chunk.name,index.read_text(encoding='utf-8'))
+        checked=subprocess.run(validator,cwd=self.root,capture_output=True,text=True)
+        self.assertNotIn('INDEX.md',checked.stdout+checked.stderr)
+        # Current again, the index is left alone: a turn reads the chunks' times only.
+        written=index.stat().st_mtime_ns
+        self.call('turn','--task-id','research','--json')
+        self.assertEqual(written,index.stat().st_mtime_ns)
+
     def test_clean_research_creates_result_and_new_session_recalls_it(self):
         source=(self.root/'rules.md').read_bytes();self.assertEqual(b'',self.git('status','--porcelain'))
         self.begin();self.assertEqual([],self.records('tasks'))

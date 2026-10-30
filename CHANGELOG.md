@@ -28,6 +28,26 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Each turn mends a bank index that a stopped write left behind — 2026-10-30
+
+- Why: a promotion, a retire or a re-verify writes the chunk first and
+  `memory-bank/INDEX.md` second. Its snapshot restore covers an `Exception`
+  only. A host that stopped the write between the two, by Ctrl-C, a budget
+  or a kill, left a chunk the index did not name, or named as it had been.
+  The bank's `validate.py`, which a team may run in CI, then failed until
+  the next bank write. Found by a longer lifecycle campaign: 24 installed
+  seeds of 120 steps with stops and lock waits. The last save of seed
+  13018 was stopped by SIGINT between the two writes.
+- What changes: the turn checkpoint each Stop hook runs (`context.py
+  turn`) first compares the index's time with its newest chunk's. When a
+  chunk is newer, it writes the index again through `reindex_bank`, which
+  takes the lock the stopped write held and rewrites only what differs. An
+  index Git checked out after its chunks, as a pull does, is only marked as
+  current, so later turns read the chunks' times and nothing more.
+- Tests: `tests/test_memory_native_capture.py` drops a promoted chunk's row
+  from the index and makes the index older than the chunk. One turn
+  restores the row and the bank validates. Before, the row stayed missing.
+
 ### A save the Memory MCP refuses names its code — 2026-10-30
 
 - Why: the Memory MCP answers a refused tool call with fixed text and,

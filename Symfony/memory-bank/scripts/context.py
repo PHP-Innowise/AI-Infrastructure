@@ -7807,6 +7807,31 @@ def drain_queued_commands(repository: Path) -> list:
     return outcomes
 
 
+def heal_bank_index(repository: Path) -> bool:
+    """Write memory-bank/INDEX.md again when a chunk is newer than it.
+
+    A promotion, a retire or a re-verify writes the chunk, then the index.
+    Stopped between the two - Ctrl-C, a budget, a kill - it left a chunk the
+    index did not name, or named as it was, and the bank's validation failed
+    until the next bank write. The index is derived: each turn's checkpoint
+    writes it again where it differs (reindex_bank, under the lock that write
+    held). One checked out after its chunks, as a pull leaves it, is only
+    marked as current.
+    """
+    bank = repository / "memory-bank"
+    index = bank / "INDEX.md"
+    try:
+        newest = max((path.stat().st_mtime_ns for path in (bank / "chunks").glob("MEM-*.md")), default=None)
+        if newest is None or (index.is_file() and index.stat().st_mtime_ns >= newest):
+            return False
+        if not reindex_bank(repository)["changed"]:
+            os.utime(index, ns=(newest, newest))
+            return False
+    except (BrainError, OSError, ValueError):
+        return False
+    return True
+
+
 def run_turn(
     connection: sqlite3.Connection,
     repository: Path,
@@ -7820,6 +7845,7 @@ def run_turn(
     if arguments.max_files < 1:
         raise ContextError("--max-files must be a positive integer")
     task_id = validate_task_id(arguments.task_id)
+    heal_bank_index(repository)
     files, path_excluded = changed_paths(repository)
     # A turn that ended in a commit leaves a clean tree and is still work.
     committed = head_advanced(connection, repository, task_id)

@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime's turn mends a bank index a stopped write left behind — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded Memory MCP names the code of a save it refuses — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `mcp_server.py`
