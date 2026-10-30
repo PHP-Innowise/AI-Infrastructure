@@ -640,7 +640,10 @@ report them too.
   by the agent in those turns; and, as a baseline, documents of those kinds
   the agent opened that the capsule did not deliver. Then the explicit
   retrieves of whole sessions, what they returned and what was opened
-  afterwards. From the native result journal, per host: the
+  afterwards; the Claude Code hook runs by event, failed and not found among
+  them; and with `--traces` the renders the runtime made that a transcript
+  shows were handed over, and those none shows. From the native result
+  journal, per host: the
   automatic save funnel from prompt hook run to promoted chunk, and the codes
   of every skip, refusal and failure. From the transcripts, per host: how many
   save requests the Stop hook made and, as medians, the seconds and output
