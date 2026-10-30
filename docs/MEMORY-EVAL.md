@@ -108,6 +108,22 @@ outside the clone (it names the projects); its SHA-256 is
 `ff43fdbad191b748feacfce2a2a087d3bfdabb71108804ed250d2fdca9cd1a6f`. Until
 it reads `ticket-helps`, `ticket_files` stays off.
 
+### The every-turn save: a field check
+
+The save request after every answer is a write-path cost that was never
+weighed against a benefit: on 43 saves on copies of two client projects it
+took a median 17.1 s after an answer of 70.5 s, and in real sessions the
+knowledge it writes was not seen opened (`realized`, above). The four client
+projects run it since 2026-10-30. What to read from their sessions, when,
+and what follows was written down before any of them ran it: the field
+counts of `funnel` and `realized --traces` from 2026-10-31, on the first
+Monday with 50 capsule turns for each of Claude Code and Codex (at the latest
+2027-02-01); if no knowledge item was opened on either host while the save
+costs a fifth of the answer's time or more on one, an outcome A/B of the
+every-turn save on continuation tasks comes next, before the default moves.
+The note is kept outside the clone (it names the projects); its SHA-256 is
+`83cf101c527e9341aa42c525d6cc6a0262f794ca1102cea39237cd40524edcee`.
+
 ## What a run does, per prompt
 
 Nothing is written into the project. All work happens in the cache (default
