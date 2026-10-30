@@ -28,6 +28,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Chat snapshots leave out the Codex context the turn reader leaves out — 2026-10-30
+
+- `context_continuity.py` kept as the person's words four envelopes Codex
+  writes into the user role that `context.py`'s turn reader takes for Codex's
+  own since 8b20d5f1: the plugins it recommends (`recommended_plugins`), the
+  user instructions beside AGENTS.md (`user_instructions`), an app's notice
+  that blocks edits (`external_codex_apps_writing_block_edits`) and a
+  subagent's report (`subagent_notification`). They came into every chat
+  snapshot that held them. A test now holds the two lists together and names
+  where they differ on purpose: the answer to the agent's question continues
+  a turn and is still the person's, and a notification starts a turn and is
+  not.
+
 ### `realized` reads a retrieve's answer inside Codex's output wrapper — 2026-10-30
 
 - Codex heads what a command printed with its own lines ("Script completed"

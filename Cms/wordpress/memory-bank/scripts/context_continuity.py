@@ -76,6 +76,12 @@ CODEX_ENVELOPE = re.compile(r"\s*<([a-z][a-z0-9_-]*)(?:\s[^<>]*)?>.*</\1(?:\s[^<
 CODEX_INJECTED_ENVELOPES = {
     "environment_context", "skill", "task-notification", "system-reminder",
     "turn_aborted", "external_codex_apps_open_page", "hook_prompt",
+    # What context.py's turn reader also takes for Codex's own: the plugins it
+    # recommends, the user instructions beside AGENTS.md, an app's notice
+    # that blocks edits and a subagent's report. They came into snapshots as
+    # what the person wrote.
+    "recommended_plugins", "user_instructions", "external_codex_apps_writing_block_edits",
+    "subagent_notification",
 }
 KINDS = {
     kind + suffix
