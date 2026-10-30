@@ -2664,6 +2664,8 @@ def merge_recent(existing: list[str], additions: list[str]) -> list[str]:
 
 def reject_secrets(record_type: str, values: list[str]) -> None:
     candidate = "\n".join(values)
+    if brain_runtime.lone_surrogate(candidate):
+        raise ContextError(f"{record_type} {brain_runtime.HALF_CHARACTER}; {record_type} not stored")
     for label, pattern in SECRET_PATTERNS.items():
         if pattern.search(candidate):
             raise ContextError(f"possible {label} detected; {record_type} not stored")

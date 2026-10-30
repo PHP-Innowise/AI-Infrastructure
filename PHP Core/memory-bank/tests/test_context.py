@@ -2819,6 +2819,15 @@ class ContextEngineTest(unittest.TestCase):
         self.assertNotEqual(0, recorded.returncode)
         self.assertIn("Episode summary and outcome must not be empty", recorded.stderr)
 
+    @unittest.skipIf(sys.platform == "win32", "Windows arguments are Unicode")
+    def test_record_rejects_half_a_character(self) -> None:
+        # A byte of an argument that was not UTF-8 reads as a lone surrogate;
+        # SQLite refused it with a traceback.
+        recorded = self.run_context("record", "--summary", "caf\udce9 latin", "--outcome", "Done.", "--json")
+        self.assertNotEqual(0, recorded.returncode)
+        self.assertNotIn("Traceback", recorded.stderr)
+        self.assertIn("half of a character", recorded.stderr)
+
     def test_record_rejects_empty_optional_file(self) -> None:
         recorded = self.run_context(
             "record",

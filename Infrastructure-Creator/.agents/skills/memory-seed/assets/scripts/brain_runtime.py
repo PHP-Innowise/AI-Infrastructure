@@ -1884,6 +1884,21 @@ def _handoff_body(handoff: dict[str, Any]) -> str:
     )
 
 
+HALF_CHARACTER = ("holds half of a character (a lone surrogate, as an emoji cut in two leaves); "
+                  "write the whole character or leave it out")
+
+
+def lone_surrogate(text: str) -> bool:
+    """Whether `text` holds half of a UTF-16 pair: a JSON `\\ud83d` alone,
+    or a byte of an argument that was not UTF-8. No UTF-8 file or SQLite
+    text holds one, so a write failed on a traceback where it encoded it."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
 def guard_shared_text(label: str, values: Any) -> None:
     """Refuse a Project Brain write that would store a secret or personal data.
 
@@ -1894,6 +1909,8 @@ def guard_shared_text(label: str, values: Any) -> None:
     message names the kind of data, never the value.
     """
     text = "\n".join(value for value in values if isinstance(value, str) and value)
+    if lone_surrogate(text):
+        raise BrainError(f"{label} {HALF_CHARACTER} - nothing was stored")
     found = sensitive_label(text)
     if found:
         raise BrainError(

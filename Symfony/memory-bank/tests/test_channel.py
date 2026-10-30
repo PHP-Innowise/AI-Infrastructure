@@ -312,6 +312,16 @@ class ChannelTest(unittest.TestCase):
         read = self.run_cli("msg-read", "--task-id", "task-1", "--json")
         self.assertEqual([1, 2], [entry["seq"] for entry in json.loads(read.stdout)])
 
+    @unittest.skipIf(sys.platform == "win32", "Windows arguments are Unicode")
+    def test_a_message_holding_half_a_character_is_refused_by_name(self) -> None:
+        # A byte of an argument that was not UTF-8 reads as a lone surrogate,
+        # which failed on a traceback when the entry was written.
+        result = self.send(**{"--body": "caf\udce9 latin"})
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("half of a character", result.stderr)
+        self.assertEqual([], list((self.repository / "project-brain/control/messages").glob("*.jsonl")))
+
     def test_a_line_an_earlier_append_cut_short_says_so(self) -> None:
         # What a full disk left before appends were taken back: read, checked
         # and appended to, it says where it is, and nothing joins it.

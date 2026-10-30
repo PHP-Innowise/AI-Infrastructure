@@ -28,6 +28,29 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Text holding half of a character is refused by name — 2026-10-30
+
+- Why: a JSON `\ud83d` with no partner, such as an emoji cut in two by a
+  tool that truncates text, decodes to a lone surrogate. So does a byte
+  that is not UTF-8 in a command argument. No UTF-8 file or SQLite text
+  holds one, so a save failed on a `UnicodeEncodeError` traceback while
+  hashing the request. The journal recorded that as `unclassified`, and
+  `msg-send` and `record` failed the same way. Found by saving texts
+  that agents paste (Unicode line separators, conflict markers, fences,
+  control and bidi characters) and checking `validate`, the capsule and
+  search after each save. This was the only failure.
+- What changes: such text is refused before anything is written. A save
+  is refused with the new code `memory-result-v1:text_unicode` (listed in
+  `docs/MEMORY-INTEGRATION.md`). A Brain write or channel message is
+  refused through `guard_shared_text`, and a lightweight write through
+  `reject_secrets`. Each says the text "holds half of a character" and asks
+  for the whole character or none.
+- Tests: `tests/test_memory_native_capture.py` adds the case to its
+  refusal table (before: a traceback and no code).
+  `memory-bank/tests/test_channel.py` and `test_context.py` send a message
+  and record an episode with a byte that is not UTF-8 (POSIX only, since
+  Windows arguments are Unicode).
+
 ### A channel message holding a Unicode line separator no longer breaks the channel — 2026-10-30
 
 - Why: JSON leaves U+2028, U+2029 and U+0085 unescaped inside a string,

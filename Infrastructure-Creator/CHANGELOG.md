@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime refuses text holding half of a character by name — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,
+  `memory_results.py` and `context.py` change in the asset; the policy lock
+  was rewritten.
+
 ### The seeded runtime reads a channel message holding a Unicode line separator — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`

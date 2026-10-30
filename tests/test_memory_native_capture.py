@@ -1123,6 +1123,9 @@ class NativeFunnelJournalTests(NativeCaptureFixture):
             ({**self.payload,'summary':'Inspected.'},'memory-result-v1:schema','Unknown result fields'),
             ({**self.payload,'progress':'x'*1001},'memory-result-v1:text_limit','within 1000 characters'),
             ({**self.payload,'progress':'stderr: the dispatcher failed'},'memory-result-v1:raw_text','pasted log'),
+            # An emoji cut in two: hashing the request failed on a traceback.
+            ({**self.payload,'progress':'Checked the retry rule \ud83d.'},'memory-result-v1:text_unicode',
+             'half of a character'),
             ({**self.payload,'progress':'Asked fixture.owner@example.invalid about retries.'},
              'memory-result-v1:sensitive','personal data'),
             ({'learnings':[]},'memory-result-v1:nothing','Nothing to record'),

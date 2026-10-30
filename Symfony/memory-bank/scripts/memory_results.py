@@ -38,7 +38,9 @@ from brain_runtime import (
     create_record,
     find_record,
     guard_shared_text,
+    HALF_CHARACTER,
     iter_records,
+    lone_surrogate,
     load_config,
     mutation_lock,
     record_attestation,
@@ -103,6 +105,9 @@ def refusal_code(error: BrainError) -> str:
 def _text(value: object, label: str, limit: int) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise ResultRefused("text_limit", f"{label} must be nonempty text within {limit} characters")
+    if lone_surrogate(value):
+        # Hashing the request failed on it first, with a traceback.
+        raise ResultRefused("text_unicode", f"{label} {HALF_CHARACTER}")
     try:
         guard_shared_text(label, [value])
     except BrainError as error:
