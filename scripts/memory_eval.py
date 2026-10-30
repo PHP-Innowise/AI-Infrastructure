@@ -3976,24 +3976,22 @@ def continuation_summary(costs: List[Dict[str, Any]]) -> Dict[str, Any]:
     return summary
 
 
-def command_realized(arguments: argparse.Namespace) -> int:
-    project = Path(arguments.project).expanduser().resolve()
-    if not project.is_dir():
-        raise EvalError(f"--project {arguments.project} is not a directory")
-    state = Path(arguments.state).expanduser().resolve() if arguments.state else project
-    if not state.is_dir():
-        raise EvalError(f"--state {arguments.state} is not a directory")
-    since: Optional[datetime] = None
-    if arguments.since:
-        day = parse_day(arguments.since)
-        if day is None or len(arguments.since.strip()) != 10:
-            raise EvalError("--since must be YYYY-MM-DD")
-        since = day_window(day)[0]
+def since_argument(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    day = parse_day(value)
+    if day is None or len(value.strip()) != 10:
+        raise EvalError("--since must be YYYY-MM-DD")
+    return day_window(day)[0]
+
+
+def project_sessions(project: Path, since: Optional[datetime], claude_root: Path,
+                     codex_root: Path) -> Dict[str, Any]:
+    """One project's sessions from ``since``, per host: the capsule turns, the
+    explicit retrieves and the native save requests' costs - what `realized`
+    and `field-check` count."""
     member = Membership(project)
-    claude_root = Path(arguments.claude_root).expanduser()
-    codex_root = Path(arguments.codex_root).expanduser()
     claude_files, folders, skipped_folders = claude_sources(claude_root, project, member)
-    UNREAD_COMPRESSED.clear()
     codex_files = codex_sources(codex_root, member)
 
     def recent(path: Path) -> bool:
@@ -4002,18 +4000,39 @@ def command_realized(arguments: argparse.Namespace) -> int:
     def kept(turns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         return [turn for turn in turns if since is None or turn["started"] is None or turn["started"] >= since]
 
-    paths: Optional[Dict[str, Counter]] = {} if arguments.paths else None
-    claude_used = [path for path in claude_files if recent(path)]
-    codex_used = [path for path in codex_files if recent(path)]
+    used = {"claude": [path for path in claude_files if recent(path)],
+            "codex": [path for path in codex_files if recent(path)]}
     retrievals: Dict[str, List[Retrievals]] = {"claude": [], "codex": []}
+    turns: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
+    for host, read in (("claude", claude_turns), ("codex", codex_turns)):
+        for path in used[host]:
+            session = Retrievals(since)
+            retrievals[host].append(session)
+            turns[host].extend(kept(read(path, session)))
+    return {
+        "folders": folders, "folders_skipped": skipped_folders, "used": used, "turns": turns,
+        "retrievals": retrievals,
+        "costs": {host: [cost for path in used[host] for cost in continuation_costs(path, host)]
+                  for host in ("claude", "codex")},
+    }
 
-    def read(host: str, path: Path) -> List[Dict[str, Any]]:
-        session = Retrievals(since)
-        retrievals[host].append(session)
-        return kept((claude_turns if host == "claude" else codex_turns)(path, session))
 
-    claude_all = [turn for path in claude_used for turn in read("claude", path)]
-    codex_all = [turn for path in codex_used for turn in read("codex", path)]
+def command_realized(arguments: argparse.Namespace) -> int:
+    project = Path(arguments.project).expanduser().resolve()
+    if not project.is_dir():
+        raise EvalError(f"--project {arguments.project} is not a directory")
+    state = Path(arguments.state).expanduser().resolve() if arguments.state else project
+    if not state.is_dir():
+        raise EvalError(f"--state {arguments.state} is not a directory")
+    since = since_argument(arguments.since)
+    UNREAD_COMPRESSED.clear()
+    sessions = project_sessions(project, since, Path(arguments.claude_root).expanduser(),
+                                Path(arguments.codex_root).expanduser())
+    paths: Optional[Dict[str, Counter]] = {} if arguments.paths else None
+    claude_used, codex_used = sessions["used"]["claude"], sessions["used"]["codex"]
+    claude_all, codex_all = sessions["turns"]["claude"], sessions["turns"]["codex"]
+    retrievals = sessions["retrievals"]
+    folders, skipped_folders = sessions["folders"], sessions["folders_skipped"]
     report: Dict[str, Any] = {
         "project": str(project),
         "since": arguments.since,
@@ -4037,10 +4056,7 @@ def command_realized(arguments: argparse.Namespace) -> int:
             render_traces(state, since), {"claude": claude_all, "codex": codex_all},
             [answer for host in ("claude", "codex") for session in retrievals[host] for answer in session.answers],
         )} if arguments.traces else {}),
-        "continuations": {
-            "claude": continuation_summary([cost for path in claude_used for cost in continuation_costs(path, "claude")]),
-            "codex": continuation_summary([cost for path in codex_used for cost in continuation_costs(path, "codex")]),
-        },
+        "continuations": {host: continuation_summary(sessions["costs"][host]) for host in ("claude", "codex")},
     }
     # Rollouts of any project: which project a log nobody could read ran in is unknown.
     report["codex"]["compressed_unread"] = len(UNREAD_COMPRESSED)
@@ -4296,6 +4312,101 @@ def format_funnel(report: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# The sealed field check of the every-turn save (docs/MEMORY-EVAL.md, "The
+# every-turn save: a field check"): the kinds it counts as knowledge, the
+# capsule turns a host needs, and the share of the answer's time that matters.
+FIELD_KNOWLEDGE = ("brain", "chunk")
+FIELD_MIN_TURNS = 50
+FIELD_SAVE_SHARE = 0.20
+
+
+def field_counts(turns: Sequence[Dict[str, Any]], sessions: Sequence[Retrievals],
+                 costs: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """One host's quantities for the field check: capsule turns; K, the
+    knowledge items a later tool call opened, from capsules and explicit
+    retrieves together; T, the task records opened, pointers and returned
+    items together; S, the median save seconds over the median answer's."""
+    knowledge = records = 0
+    for turn in turns:
+        opened = turn["delivered"] & turn["touched"]
+        knowledge += sum(1 for path in opened if doc_kind(path) in FIELD_KNOWLEDGE)
+        records += sum(1 for path in opened if doc_kind(path) == "task-record")
+        records += len(turn["records"] & turn["touched"])
+    for session in sessions:
+        for path, how in session.returned.items():
+            if path not in session.opened:
+                continue
+            if how == "record" or doc_kind(path) == "task-record":
+                records += 1
+            elif doc_kind(path) in FIELD_KNOWLEDGE:
+                knowledge += 1
+    share = None
+    if costs:
+        answer = statistics.median(cost["answer_seconds"] for cost in costs)
+        share = round(statistics.median(cost["save_seconds"] for cost in costs) / answer, 2) if answer > 0 else None
+    return {"capsule_turns": sum(1 for turn in turns if turn["output"]), "knowledge_opened": knowledge,
+            "task_records_opened": records, "save_requests": len(costs), "save_share": share}
+
+
+def field_rule(hosts: Dict[str, Dict[str, Any]], minimum: int) -> Dict[str, Any]:
+    """What the sealed rule says of these counts, host by host."""
+    counted = [host for host, counts in hosts.items() if counts["capsule_turns"] >= minimum]
+    ready = len(counted) == len(hosts)
+    if not counted:
+        return {"ready": False, "counted": [], "outcome": {}}
+    outcome: Dict[str, str] = {}
+    no_knowledge = all(hosts[host]["knowledge_opened"] == 0 for host in counted)
+    for host in counted:
+        counts = hosts[host]
+        share = counts["save_share"]
+        if no_knowledge and share is not None and share >= FIELD_SAVE_SHARE:
+            outcome[host] = "outcome A/B of the every-turn save on continuation tasks"
+        elif counts["task_records_opened"] > 0 and counts["knowledge_opened"] == 0:
+            outcome[host] = "working-state path first"
+        else:
+            outcome[host] = "report as is"
+    return {"ready": ready, "counted": counted, "outcome": outcome}
+
+
+def command_field_check(arguments: argparse.Namespace) -> int:
+    since = since_argument(arguments.since)
+    turns: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
+    retrievals: Dict[str, List[Retrievals]] = {"claude": [], "codex": []}
+    costs: Dict[str, List[Dict[str, Any]]] = {"claude": [], "codex": []}
+    UNREAD_COMPRESSED.clear()
+    for given in arguments.project:
+        project = Path(given).expanduser().resolve()
+        if not project.is_dir():
+            raise EvalError(f"--project {given} is not a directory")
+        sessions = project_sessions(project, since, Path(arguments.claude_root).expanduser(),
+                                    Path(arguments.codex_root).expanduser())
+        for host in turns:
+            turns[host].extend(sessions["turns"][host])
+            retrievals[host].extend(sessions["retrievals"][host])
+            costs[host].extend(sessions["costs"][host])
+    hosts = {host: field_counts(turns[host], retrievals[host], costs[host]) for host in turns}
+    report = {"since": arguments.since, "projects": len(arguments.project), "min_turns": arguments.min_turns,
+              "hosts": hosts, "rule": field_rule(hosts, arguments.min_turns),
+              "compressed_unread": len(UNREAD_COMPRESSED)}
+    if arguments.json:
+        print(json.dumps(report, indent=1, ensure_ascii=False))
+        return 0
+    since_text = f" since {arguments.since}" if arguments.since else ""
+    lines = [f"Field check of the every-turn save{since_text}, {report['projects']} project(s), counts only"]
+    for host, counts in hosts.items():
+        share = f"{counts['save_share']:.0%}" if counts["save_share"] is not None else "-"
+        lines.append(f"  {host:<7} capsule turns {counts['capsule_turns']}, knowledge opened (K)"
+                     f" {counts['knowledge_opened']}, task records opened (T) {counts['task_records_opened']},"
+                     f" save requests {counts['save_requests']}, save share of the answer (S) {share}")
+    rule = report["rule"]
+    if not rule["ready"]:
+        lines.append(f"not ready: a host has fewer than {arguments.min_turns} capsule turns")
+    for host, outcome in rule["outcome"].items():
+        lines.append(f"  rule, {host}: {outcome}")
+    print("\n".join(lines))
+    return 0
+
+
 def command_funnel(arguments: argparse.Namespace) -> int:
     since: Optional[datetime] = None
     if arguments.since:
@@ -4523,6 +4634,17 @@ def build_parser() -> argparse.ArgumentParser:
     realized.add_argument("--traces", action="store_true",
                           help="match the runtime's render traces to what the transcripts show it handed over")
     realized.set_defaults(handler=command_realized)
+
+    field = commands.add_parser(
+        "field-check", help="the sealed field check of the every-turn save, from the transcripts; counts only")
+    field.add_argument("--project", action="append", required=True, help="a project directory; repeat for more")
+    field.add_argument("--claude-root", default="~/.claude/projects")
+    field.add_argument("--codex-root", default="~/.codex/sessions")
+    field.add_argument("--since", help="only sessions from this UTC date on (YYYY-MM-DD)")
+    field.add_argument("--min-turns", type=int, default=FIELD_MIN_TURNS,
+                       help="capsule turns a host needs to count (the sealed note's 50)")
+    field.add_argument("--json", action="store_true")
+    field.set_defaults(handler=command_field_check)
 
     funnel = commands.add_parser(
         "funnel", help="the memory funnel of one or more projects, from their journals; counts only")

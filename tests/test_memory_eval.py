@@ -2701,6 +2701,47 @@ class ExplicitRetrieveTest(unittest.TestCase):
             self.assertNotIn(path, plain)
 
 
+class FieldCheckTest(unittest.TestCase):
+    """The sealed field check of the every-turn save, computed as written."""
+
+    setUp = ExplicitRetrieveTest.setUp
+
+    def check(self, *extra: str) -> Dict[str, Any]:
+        return json.loads(main_output("field-check", "--project", str(self.project), "--claude-root",
+                                      str(self.claude), "--codex-root", str(self.codex), "--json", *extra))
+
+    def test_the_counts_come_from_capsules_and_retrieves_together(self) -> None:
+        report = self.check("--min-turns", "1")
+        # Codex: the capsule's chunk opened in its turn, and the retrieve's
+        # chunk opened afterwards; its task record pointer opened in the turn.
+        self.assertEqual({"capsule_turns": 1, "knowledge_opened": 2, "task_records_opened": 1,
+                          "save_requests": 0, "save_share": None}, report["hosts"]["codex"])
+        # Claude Code: no capsule, a retrieve's task record opened afterwards.
+        self.assertEqual((0, 0, 1), tuple(report["hosts"]["claude"][key] for key in (
+            "capsule_turns", "knowledge_opened", "task_records_opened")))
+        self.assertEqual({"ready": False, "counted": ["codex"], "outcome": {"codex": "report as is"}}, report["rule"])
+        self.assertFalse(self.check()["rule"]["counted"])
+        self.assertIn("not ready", main_output("field-check", "--project", str(self.project), "--claude-root",
+                                               str(self.claude), "--codex-root", str(self.codex)))
+
+    def test_the_rule_as_sealed(self) -> None:
+        def host(turns: int, knowledge: int, records: int, share: Optional[float]) -> Dict[str, Any]:
+            return {"capsule_turns": turns, "knowledge_opened": knowledge, "task_records_opened": records,
+                    "save_requests": 10, "save_share": share}
+
+        ab = memory_eval.field_rule({"claude": host(60, 0, 3, 0.25), "codex": host(70, 0, 5, 0.1)}, 50)
+        self.assertEqual({"claude": "outcome A/B of the every-turn save on continuation tasks",
+                          "codex": "working-state path first"}, ab["outcome"])
+        self.assertTrue(ab["ready"])
+        # Knowledge opened on one host: no A/B, whatever the share.
+        mixed = memory_eval.field_rule({"claude": host(60, 1, 3, 0.4), "codex": host(70, 0, 0, 0.4)}, 50)
+        self.assertEqual({"claude": "report as is", "codex": "report as is"}, mixed["outcome"])
+        # A host below the threshold is left out of the rule.
+        short = memory_eval.field_rule({"claude": host(10, 2, 0, 0.4), "codex": host(70, 0, 0, 0.3)}, 50)
+        self.assertEqual((False, ["codex"]), (short["ready"], short["counted"]))
+        self.assertEqual({"codex": "outcome A/B of the every-turn save on continuation tasks"}, short["outcome"])
+
+
 class RenderTraceTest(unittest.TestCase):
     """Which capsules the runtime rendered the transcripts show it handed
     over: the runtime's own record against the host's."""

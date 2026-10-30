@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### `memory_eval.py field-check` reads the sealed rule of the every-turn save — 2026-10-30
+
+- One command computes, over several projects' transcripts and per host,
+  what the sealed field check reads: capsule turns; K, the knowledge items a
+  later tool call opened, from capsules and explicit retrieves together; T,
+  the task records opened; S, the median save seconds over the median
+  answer's; and which branch of the rule each host meets, or that it is
+  still below 50 capsule turns. `realized` and `field-check` share one
+  collector of a project's sessions. On the four client projects from
+  2026-09-01 (no save step then) it reads K = 0 on both hosts, T = 1 and 9:
+  the working-state path first.
+
 ### The CLI answers the refusals agents met most — 2026-10-30
 
 - In the September 2026 sessions of the four client projects Codex ran

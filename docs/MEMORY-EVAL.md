@@ -124,6 +124,17 @@ every-turn save on continuation tasks comes next, before the default moves.
 The note is kept outside the clone (it names the projects); its SHA-256 is
 `83cf101c527e9341aa42c525d6cc6a0262f794ca1102cea39237cd40524edcee`.
 
+`scripts/memory_eval.py field-check --project <each> --since 2026-10-31`
+computes what the rule reads, per host, from the same transcripts `realized`
+reads: the capsule turns; K, the knowledge items (kinds `brain` and `chunk`)
+a later tool call opened, from capsules and explicit retrieves together; T,
+the task records opened, pointers and returned items together; S, the median
+save seconds over the median answer's; and which branch of the rule each
+host meets, or that a host is still below 50 capsule turns. Counts only. On
+the four projects' sessions from 2026-09-01 - before any save step ran there -
+it reads K = 0 on both hosts, T = 1 for Claude Code and 9 for Codex: the
+working-state path first.
+
 ## What a run does, per prompt
 
 Nothing is written into the project. All work happens in the cache (default
