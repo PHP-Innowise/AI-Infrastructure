@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### An index left in a merge conflict is one error that names it — 2026-10-30
+
+- Why: every promotion rewrites the generated `memory-bank/INDEX.md`, so two
+  clones of a branch that both promoted leave it in a merge conflict on pull.
+  The bank's `validate.py` read that as a duplicate row and every chunk
+  "missing from INDEX.md", and nothing said what had happened; a team that
+  runs it in CI saw a failure about all of its memory.
+- What changes: an index holding Git conflict markers is one error, saying
+  the index is generated from the chunks and that `context.py reindex-bank`
+  writes it again (any bank write does: a save that promotes, `reindex-bank`,
+  a retire); the per-chunk index checks wait for a readable index.
+- Tests: `memory-bank/tests/test_validate.py` conflicts an index row: one
+  error naming the conflict and `reindex-bank`; before, two that did not.
+
 ### A learning's citation is kept as the file is spelled — 2026-10-30
 
 - Why: a citation was stored as the agent wrote it. `src/a.php`,

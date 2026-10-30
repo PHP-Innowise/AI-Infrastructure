@@ -845,14 +845,28 @@ def validate_bank_report(
     if errors:
         return errors, warnings
 
+    # A pull of two clones that both promoted leaves the index in a merge
+    # conflict. It read as a duplicate row and every chunk "missing from
+    # INDEX.md"; the index is generated, and any bank write writes it again.
+    conflicted = False
     try:
-        index = parse_index(index_path)
-    except UnicodeDecodeError:
-        errors.append(f'{index_label}: invalid UTF-8 index')
-        index = {}
-    except ValidationError as error:
-        errors.append(f"{index_label}: {error}")
-        index = {}
+        conflicted = any(line.startswith(("<<<<<<< ", ">>>>>>> "))
+                         for line in index_path.read_text(encoding="utf-8").splitlines())
+    except (OSError, UnicodeDecodeError):
+        pass
+    if conflicted:
+        errors.append(f"{index_label}: unresolved Git merge conflict; the index is generated from the chunks - "
+                      "`python3 memory-bank/scripts/context.py reindex-bank` writes it again")
+        index = None
+    else:
+        try:
+            index = parse_index(index_path)
+        except UnicodeDecodeError:
+            errors.append(f'{index_label}: invalid UTF-8 index')
+            index = {}
+        except ValidationError as error:
+            errors.append(f"{index_label}: {error}")
+            index = {}
 
     chunk_paths: list[Path] = []
     if chunks_dir.is_dir():
@@ -890,7 +904,7 @@ def validate_bank_report(
         except (OSError, ValidationError) as error:
             errors.append(f"{shown(path)}: {error}")
 
-    for memory_id, (path, metadata) in chunks.items():
+    for memory_id, (path, metadata) in chunks.items() if index is not None else ():
         row = index.get(memory_id)
         if row is None:
             errors.append(f"{shown(path)}: chunk is missing from INDEX.md")
@@ -912,7 +926,7 @@ def validate_bank_report(
             if row[index_key] != expected:
                 errors.append(f"{index_label}: {memory_id} {index_key} differs from chunk metadata")
 
-    for memory_id, row in index.items():
+    for memory_id, row in (index or {}).items():
         if memory_id in chunks:
             continue
         if memory_id in on_disk:

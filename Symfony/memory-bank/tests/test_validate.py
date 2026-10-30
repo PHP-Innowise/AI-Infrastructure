@@ -233,6 +233,24 @@ class MemoryBankValidatorTest(unittest.TestCase):
             any("points to a missing chunk" in error for error in errors), errors
         )
 
+    def test_an_index_left_in_a_merge_conflict_is_one_error_naming_the_conflict(self) -> None:
+        # A pull of two clones that both promoted leaves the generated index
+        # in a merge conflict: it read as a duplicate row and every chunk
+        # "missing from INDEX.md", and nothing said what had happened.
+        self.add_chunk()
+        index = self.bank / "INDEX.md"
+        lines = index.read_text(encoding="utf-8").splitlines(keepends=True)
+        row = next(number for number, line in enumerate(lines) if line.startswith("| MEM-0001 "))
+        lines[row:row + 1] = ["<<<<<<< HEAD\n", lines[row], "=======\n",
+                              lines[row].replace("Layering convention", "Layering conventions"),
+                              ">>>>>>> 1234567 (theirs)\n"]
+        index.write_text("".join(lines), encoding="utf-8")
+
+        errors, _ = VALIDATOR.validate_bank_report(self.bank)
+        self.assertEqual(1, len(errors), errors)
+        self.assertIn("unresolved Git merge conflict", errors[0])
+        self.assertIn("reindex-bank", errors[0])
+
     def test_warnings_alone_leave_the_cli_green(self) -> None:
         self.add_chunk()
         self.update_chunk_metadata(
