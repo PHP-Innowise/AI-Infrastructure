@@ -3241,12 +3241,16 @@ def append_refresh_health(repository: Path, record: dict[str, object]) -> None:
         return
 
 
-def capsule_shape(repository: Path, capsule: object, requested_profile: Optional[str]) -> dict[str, object]:
+def capsule_shape(
+    repository: Path, capsule: object, requested_profile: Optional[str], text: Optional[str] = None,
+) -> dict[str, object]:
     """What a delivered capsule carried, as counts a usage funnel can add up.
 
     The profile that built it, whether it held the task's working state, how
-    many recent files, ticket files and documents it named, and its token
-    estimate. Never a
+    many recent files, ticket files and documents it named, its token
+    estimate, and the bytes of ``text``, the capsule as printed. The estimate
+    counts documents only, so a capsule of working state and recent files
+    read 0 tokens whatever it printed. Never a
     path, a title or a text: like the rest of the health record, it must not
     become a second channel for what the manifest keeps under privacy rules.
     """
@@ -3270,6 +3274,7 @@ def capsule_shape(repository: Path, capsule: object, requested_profile: Optional
         "ticket_files": len(ticket.get("paths") or []) if isinstance(ticket, dict) else 0,
         "documents": count("selected"),
         "tokens": tokens if type(tokens) is int and tokens >= 0 else None,
+        "bytes": len((text + "\n").encode("utf-8")) if isinstance(text, str) else None,
     }
 
 
@@ -10395,6 +10400,7 @@ def _command() -> int:
                     # overwrite the rule with an empty one on every skipped
                     # turn, which is the opposite of what a skip means.
                     return 4
+                excerpts = None if arguments.json else capsule_excerpts(connection, result)
                 # Cursor's read path never enters the refresh branch, so
                 # without this the health series would systematically
                 # under-report the one client whose capsule is a turn stale.
@@ -10405,7 +10411,10 @@ def _command() -> int:
                         "mode": mode,
                         "omitted": result.get("omitted"),
                         "source": "hook-context",
-                        "capsule": capsule_shape(repository, result, None),
+                        "capsule": capsule_shape(
+                            repository, result, None,
+                            None if excerpts is None else "\n".join(
+                                render_capsule_lines(result, excerpts, delivery_profile=delivery_profile))),
                     },
                 )
                 if delivery_admission is not None:
@@ -10413,7 +10422,7 @@ def _command() -> int:
                 if arguments.json:
                     print(serialize_capsule(result))
                 else:
-                    print_capsule(result, capsule_excerpts(connection, result), repository=repository, delivery_profile=delivery_profile)
+                    print_capsule(result, excerpts, repository=repository, delivery_profile=delivery_profile)
                 return 0
 
             if arguments.command == "refresh":
@@ -10611,7 +10620,8 @@ def _command() -> int:
                     "source": "refresh",
                 }
                 if capsule is not None:
-                    health_record["capsule"] = capsule_shape(repository, capsule, arguments.capsule_profile)
+                    health_record["capsule"] = capsule_shape(
+                        repository, capsule, arguments.capsule_profile, result.get("capsule_text"))
                 if source_notices:
                     health_record['source_notices'] = source_notices
                 def capture_diagnosis(render: Optional[dict[str, object]]) -> None:

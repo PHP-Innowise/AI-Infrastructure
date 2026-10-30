@@ -28,6 +28,18 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A capsule's health line counts the bytes it printed — 2026-10-30
+
+- The capsule shape in `refresh-health.ndjson` gains `bytes`: the size of
+  the capsule as printed, by `refresh` and by a printing `hook-context`
+  (`None` for `--json`). Its `tokens` estimate counts documents only, so a
+  recall or navigation capsule of working state and recent files read 0
+  whatever it printed. Counts only, as before.
+- `memory_eval.py funnel` prints the median printed bytes beside the median
+  tokens, and `memory_outcome_ab.py` records each run's `capsule_bytes` and
+  prints their mean among the arm's costs: the sealed ticket run promises to
+  report what its capsules cost, and the document estimate cannot say.
+
 ### Chat snapshots leave out the Codex context the turn reader leaves out — 2026-10-30
 
 - `context_continuity.py` kept as the person's words four envelopes Codex

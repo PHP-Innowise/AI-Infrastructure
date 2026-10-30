@@ -414,7 +414,9 @@ in total, it counts:
   the `capsule` shape a runtime of 2026-10-30 or later records - the profile,
   the working state, how many recent files, ticket files and documents it
   carried, its token estimate - how many had each, by profile, and the median
-  tokens. An older
+  tokens. The estimate counts documents only, so a capsule of working state
+  and recent files reads 0; the bytes the capsule printed, recorded since a
+  later runtime of the same day, give the median printed size. An older
   line has no shape and counts as `unknown`. A refresh line names no host and
   also comes from an explicit request (the MCP retrieve, the CLI);
 - **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
@@ -795,13 +797,16 @@ None says whether delivery changes what an agent does.
 - **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the
-  documents the hook's manifest delivered.
+  documents the hook's manifest delivered, and the bytes the hook's capsules
+  printed (`capsule_bytes`, from the health journal, None before the runtime
+  recorded them).
 - **Cost:** `report` prints, per arm and outside the verdict, the mean
   seconds of a run, on how many runs Codex reported its usage, the mean
-  input, cached and output tokens over those, and the documents' token
-  estimate. Codex reports usage only when a turn completes, so a run stopped
-  at the first gold touch has none; the estimate counts documents only, so a
-  recall or ticket capsule without one reads 0 whatever the hook printed.
+  input, cached and output tokens over those, the documents' token
+  estimate and the printed bytes. Codex reports usage only when a turn
+  completes, so a run stopped at the first gold touch has none; the estimate
+  counts documents only, so a recall or ticket capsule without one reads 0
+  tokens, and its printed bytes say what it cost.
 - **Repeats:** `--repeat` runs each arm several times; the order alternates by
   task and repeat.
 

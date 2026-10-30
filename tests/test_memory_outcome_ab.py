@@ -219,8 +219,9 @@ class ReportTest(unittest.TestCase):
         }} for n in range(4)}
         summary = ab.summarize({"meta": {"cap": 40}, "items": items})
         self.assertEqual({"runs": 4, "seconds_mean": 20.0, "runs_with_usage": 1, "capsule_tokens_mean": 400.0,
-                          "input_tokens_mean": 40000.0, "cached_input_tokens_mean": 30000.0,
-                          "output_tokens_mean": 900.0}, summary["cost"]["capsule"])
+                          "capsule_bytes_mean": None, "input_tokens_mean": 40000.0,
+                          "cached_input_tokens_mean": 30000.0, "output_tokens_mean": 900.0},
+                         summary["cost"]["capsule"])
         self.assertEqual((0, 30.0), (summary["cost"]["off"]["runs_with_usage"], summary["cost"]["off"]["seconds_mean"]))
         self.assertEqual("insufficient", summary["verdict"])
         with tempfile.TemporaryDirectory() as directory:
@@ -824,7 +825,7 @@ class RunArmTest(unittest.TestCase):
             manifests = Path({str(manifests)!r})
             if "--dangerously-bypass-hook-trust" in sys.argv:
                 with open(manifests.parent / "refresh-health.ndjson", "a") as health:
-                    health.write(json.dumps({{"source": "refresh"}}) + "\\n")
+                    health.write(json.dumps({{"source": "refresh", "capsule": {{"bytes": 640}}}}) + "\\n")
                 if "--navigation" not in sys.argv:
                     (manifests / "hook.json").write_text(json.dumps(
                         {{"entry_point": "refresh", "token_estimates": {{"total": 812}},
@@ -856,6 +857,7 @@ class RunArmTest(unittest.TestCase):
         self.assertTrue(outcome["capsule_delivered"])
         self.assertTrue(outcome["hook_ran"])
         self.assertEqual(812, outcome["capsule_tokens"])
+        self.assertEqual(640, outcome["capsule_bytes"])
         self.assertEqual({"refresh": 1, "retrieve": 1}, outcome["manifests"])
 
     def test_a_navigation_run_has_a_hook_line_and_no_delivery(self) -> None:
@@ -864,12 +866,15 @@ class RunArmTest(unittest.TestCase):
         self.assertTrue(outcome["hook_ran"])
         self.assertFalse(outcome["capsule_delivered"])
         self.assertEqual(0, outcome["capsule_tokens"])
+        # A capsule without documents estimates 0 tokens and still prints.
+        self.assertEqual(640, outcome["capsule_bytes"])
 
     def test_an_agent_retrieve_is_not_a_delivered_capsule(self) -> None:
         command = [sys.executable, str(self.fake), "prompt"]
         outcome = ab.run_arm(command, self.corpus, ["src/Gold.php"], cap=40, timeout=20)
         self.assertFalse(outcome["capsule_delivered"])
         self.assertFalse(outcome["hook_ran"])
+        self.assertIsNone(outcome["capsule_bytes"])
 
     def test_an_answer_naming_the_needed_file_is_counted_and_the_save_seen(self) -> None:
         command = [sys.executable, str(self.fake), "--dangerously-bypass-hook-trust", "--answer", "prompt"]

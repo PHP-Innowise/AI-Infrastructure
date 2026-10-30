@@ -4,6 +4,12 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime counts the bytes a capsule printed — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset, and each `refresh-health.ndjson` capsule shape gains
+  `bytes`. The policy lock was rewritten.
+
 ### The seeded runtime's chat snapshots leave out more Codex context — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day):

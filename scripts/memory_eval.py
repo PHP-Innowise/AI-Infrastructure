@@ -4006,6 +4006,8 @@ def format_realized(report: Dict[str, Any]) -> str:
 
 
 FUNNEL_PROFILES = ("full", "navigation", "recall")
+# Each median row and the per-capsule series it is taken over.
+FUNNEL_MEDIANS = {"median_tokens": "tokens", "median_bytes": "bytes"}
 FUNNEL_ROWS = (
     ("prompt hook runs", "hook_runs"),
     ("  timed out", "hook_timeouts"),
@@ -4017,6 +4019,7 @@ FUNNEL_ROWS = (
     ("  with ticket files", "with_ticket_files"),
     ("  with documents", "with_documents"),
     ("  median tokens", "median_tokens"),
+    ("  median bytes printed", "median_bytes"),
     ("save requests armed", "armed"),
     ("save requested at Stop", "requested"),
     ("saves made", "made"),
@@ -4061,6 +4064,7 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
     counts: Counter = Counter()
     profiles: Counter = Counter()
     tokens: List[int] = []
+    printed: List[int] = []
     for record in read_records(state / HEALTH_SERIES):
         if not within(record):
             continue
@@ -4088,6 +4092,11 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
             value = shape.get("tokens")
             if type(value) is int and value >= 0:
                 tokens.append(value)
+            # The estimate counts documents only; a runtime of 2026-10-30 or
+            # later also records what the capsule printed.
+            value = shape.get("bytes")
+            if type(value) is int and value >= 0:
+                printed.append(value)
     native = native_funnel(state, since)
     saves = native["total"]
     counts["armed"] = saves["armed"]
@@ -4101,9 +4110,11 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
     counts["findings_decisions"] = count_markdown(state, FUNNEL_FINDING_DIRS)
     counts["bank_chunks"] = count_markdown(state, ("memory-bank/chunks",))
     return {
-        **{key: counts.get(key, 0) for _, key in FUNNEL_ROWS if key != "median_tokens"},
+        **{key: counts.get(key, 0) for _, key in FUNNEL_ROWS if key not in FUNNEL_MEDIANS},
         "median_tokens": round(statistics.median(tokens)) if tokens else None,
+        "median_bytes": round(statistics.median(printed)) if printed else None,
         "tokens": tokens,
+        "bytes": printed,
         "profiles": {name: profiles.get(name, 0) for name in (*FUNNEL_PROFILES, "unknown")},
         "save_journal": native["journal"],
         "save_reasons": saves["reasons"],
@@ -4113,10 +4124,11 @@ def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
 def funnel_total(projects: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     total: Dict[str, Any] = {}
     for _, key in FUNNEL_ROWS:
-        if key != "median_tokens":
+        if key not in FUNNEL_MEDIANS:
             total[key] = sum(project[key] for project in projects.values())
-    tokens = [value for project in projects.values() for value in project["tokens"]]
-    total["median_tokens"] = round(statistics.median(tokens)) if tokens else None
+    for key, series in FUNNEL_MEDIANS.items():
+        values = [value for project in projects.values() for value in project[series]]
+        total[key] = round(statistics.median(values)) if values else None
     total["profiles"] = {name: sum(project["profiles"][name] for project in projects.values())
                          for name in (*FUNNEL_PROFILES, "unknown")}
     reasons: Dict[str, Counter] = {}
@@ -4175,7 +4187,7 @@ def command_funnel(arguments: argparse.Namespace) -> int:
     if arguments.json:
         public = {
             "since": report["since"],
-            "projects": {name: {key: value for key, value in project.items() if key != "tokens"}
+            "projects": {name: {key: value for key, value in project.items() if key not in FUNNEL_MEDIANS.values()}
                          for name, project in projects.items()},
             "total": report["total"],
         }

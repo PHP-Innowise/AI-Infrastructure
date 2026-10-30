@@ -4623,16 +4623,32 @@ class RefreshHealthTest(RuntimeHarness):
         shapes = [json.loads(line).get("capsule") for line in path.read_text(encoding="utf-8").splitlines()]
         navigation, full = shapes[-2], shapes[-1]
         for shape in (navigation, full):
-            self.assertEqual({"profile", "working", "recent_files", "ticket_files", "documents", "tokens"},
+            self.assertEqual({"profile", "working", "recent_files", "ticket_files", "documents", "tokens", "bytes"},
                              set(shape))
             self.assertIsInstance(shape["working"], bool)
             self.assertIsInstance(shape["recent_files"], int)
             self.assertEqual(0, shape["ticket_files"])
+            # The printed capsule's size, which a capsule without documents has too.
+            self.assertIsInstance(shape["bytes"], int)
+            self.assertGreater(shape["bytes"], 0)
         self.assertEqual(("navigation", 0), (navigation["profile"], navigation["documents"]))
         self.assertEqual("full", full["profile"])
         text = path.read_text(encoding="utf-8")
         self.assertNotIn("cobalt", text)
         self.assertNotIn("TASK-SHAPE", text)
+
+    def test_a_hook_context_line_counts_the_bytes_it_prints(self) -> None:
+        self.start("TASK-HOOK-SHAPE")
+        printed = self.run_cli("hook-context", "--task-id", "TASK-HOOK-SHAPE")
+        self.assertEqual(0, printed.returncode, printed.stderr)
+        path = self.repository / "memory-bank/local/refresh-health.ndjson"
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual("hook-context", line["source"])
+        self.assertEqual(len(printed.stdout.encode("utf-8")), line["capsule"]["bytes"])
+        # The JSON form prints no capsule text, and says nothing of its size.
+        self.assertEqual(0, self.run_cli("hook-context", "--task-id", "TASK-HOOK-SHAPE", "--json").returncode)
+        line = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertIsNone(line["capsule"]["bytes"])
 
 
 class MemoryProbeTest(RuntimeHarness):

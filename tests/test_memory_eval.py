@@ -2759,6 +2759,24 @@ class FunnelTest(unittest.TestCase):
         return json.loads(main_output("funnel", "--project", str(self.ledger), "--project", str(self.shop),
                                       "--since", "2026-10-01", "--json", *extra))
 
+    def test_the_median_capsule_size_counts_what_it_printed(self) -> None:
+        # The estimate counts documents only: a capsule of working state and
+        # recent files reads 0 tokens and printed them all the same.
+        printed = Path(self.temporary.name) / "clients" / "printed"
+
+        def line(minute: int, documents: int, tokens: int, size: int) -> Dict[str, Any]:
+            return {"at": f"2026-10-04T09:{minute:02d}:01Z", "source": "refresh", "capsule": {
+                "profile": "recall", "working": True, "recent_files": 4, "ticket_files": 0,
+                "documents": documents, "tokens": tokens, "bytes": size}}
+
+        jsonl(printed / "memory-bank/local/refresh-health.ndjson",
+              [line(0, 0, 0, 610), line(5, 1, 300, 1730), line(9, 0, 0, 650)])
+        project = json.loads(main_output("funnel", "--project", str(printed), "--json"))["projects"]["printed"]
+        self.assertEqual((0, 650), (project["median_tokens"], project["median_bytes"]))
+        self.assertNotIn("bytes", project)
+        self.assertIsNone(self.funnel()["total"]["median_bytes"])
+        self.assertIn("median bytes printed", main_output("funnel", "--project", str(printed)))
+
     def test_each_stage_is_counted_per_project_and_in_total(self) -> None:
         report = self.funnel()
         self.assertEqual(["ledger", "shop"], list(report["projects"]))
