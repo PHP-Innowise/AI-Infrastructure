@@ -38,6 +38,8 @@ Codex's read-only sandbox with `--ephemeral`, so neither the corpus nor
 
     memory_outcome_ab.py sample --projects next,scb --before 2026-10-07 \\
         --n 30 --seed 1 --exclude-set tuning-set.json --out ~/ab/set.json
+    memory_outcome_ab.py sample --hosts claude,codex --projects next,scb \\
+        --before 2026-10-07 --n 30 --seed 2 --out ~/ab/codex-set.json
     memory_outcome_ab.py run --set ~/ab/set.json --out ~/ab/result.json
     memory_outcome_ab.py report ~/ab/result.json
 
@@ -100,6 +102,10 @@ NOT_GOLD = re.compile(
 )
 PROMPT_HOOK = "working-memory-read.sh"
 HOOK_ENTRY_POINTS = ("refresh", "hook-context")
+# Whose sessions a sample is drawn from and seeds the recent files with. The
+# default stays Claude Code alone, so a sealed earlier sample draws the same.
+HOSTS = ("claude", "codex")
+DEFAULT_HOSTS = ("claude",)
 SEEDED_TURNS = 400
 # A recall source: a first turn that answered at this length or more.
 RECALL_ANSWER_MINIMUM = 300
@@ -178,6 +184,11 @@ def call_paths(name: str, data: Dict[str, Any], base: str, root: str) -> List[Tu
 
 
 def prompt_text(record: Dict[str, Any]) -> str:
+    payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+    if record.get("type") == "response_item":
+        # A Codex user message: the `input_text` parts of its content.
+        return "".join(part["text"] for part in payload.get("content") or []
+                       if isinstance(part, dict) and isinstance(part.get("text"), str))
     message = record.get("message") if isinstance(record.get("message"), dict) else {}
     content = message.get("content")
     if isinstance(content, list):
@@ -188,19 +199,38 @@ def prompt_text(record: Dict[str, Any]) -> str:
     return content if isinstance(content, str) else ""
 
 
+# Messages Codex itself writes in the user role: its instructions, plugin and
+# browser context, notifications, a hook's continuation prompt, an aborted
+# turn. The runtime's prompt test lets most through; of 3,099 rollouts on the
+# maintainer machine in October 2026, 2,310 began with `<recommended_plugins>`
+# or `# AGENTS.md instructions`, which made that the session's first "prompt".
+# A paste is the person's own prompt.
+CODEX_CONTEXT = re.compile(
+    r"\s*(?:<(?!pasted_content\b)[A-Za-z_][\w-]*|# AGENTS\.md instructions\b|# In app browser\b"
+    r"|# Files (?:mentioned|pasted) by the user\b|# Response annotations\b)"
+)
+
+
+def human_prompt(record: Dict[str, Any]) -> bool:
+    """A message a person wrote that starts a turn, on either host."""
+    if not runtime()._transcript_prompt(record):
+        return False
+    return not (record.get("type") == "response_item" and CODEX_CONTEXT.match(prompt_text(record)))
+
+
 def read_records(path: Path) -> Iterator[Dict[str, Any]]:
+    """A session log's records; a compressed Codex rollout is read through
+    memory_eval's decoder."""
     try:
-        handle = path.open("rb")
-    except OSError:
-        return
-    with handle:
-        for raw in handle:
+        for raw in stand.session_lines(path):
             try:
                 record = json.loads(raw)
             except (UnicodeDecodeError, ValueError):
                 continue
             if isinstance(record, dict):
                 yield record
+    except OSError:
+        return
 
 
 def session_turns(path: Path, root: str) -> Iterator[Dict[str, Any]]:
@@ -209,7 +239,7 @@ def session_turns(path: Path, root: str) -> Iterator[Dict[str, Any]]:
     rt = runtime()
     turn: Optional[Dict[str, Any]] = None
     for record in read_records(path):
-        if rt._transcript_prompt(record):
+        if human_prompt(record):
             if turn is not None:
                 yield turn
             turn = {"prompt": prompt_text(record), "ts": record.get("timestamp"),
@@ -237,6 +267,36 @@ def session_files(transcripts: Path, project: Path) -> List[Path]:
         return sorted(path for path in folder.glob("*.jsonl") if path.is_file())
     except OSError:
         return []
+
+
+def project_sessions(project: Path, transcripts: Path, codex_root: Optional[Path],
+                     hosts: Sequence[str]) -> List[Tuple[str, Path]]:
+    """(host, log) for the project's main sessions on the hosts asked for:
+    Claude Code transcripts, and Codex rollouts that ran in the project or
+    below it, compressed ones included. A rollout of another worktree is left
+    out, as a Claude Code worktree folder is: its files lie outside the root
+    the gold paths are relative to."""
+    sessions: List[Tuple[str, Path]] = []
+    if "claude" in hosts:
+        sessions.extend(("claude", path) for path in session_files(transcripts, project))
+    if "codex" in hosts and codex_root is not None:
+        root = Path(os.path.realpath(str(project)))
+
+        def inside(cwd: object) -> bool:
+            if not isinstance(cwd, str) or not cwd:
+                return False
+            path = Path(os.path.realpath(cwd))
+            return path == root or root in path.parents
+
+        sessions.extend(("codex", path) for path in stand.codex_sources(codex_root, inside))
+    return sessions
+
+
+def parse_hosts(value: str) -> Tuple[str, ...]:
+    hosts = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+    if not hosts or any(host not in HOSTS for host in hosts):
+        raise OutcomeError(f"--hosts takes {', '.join(HOSTS)}, comma-separated")
+    return hosts
 
 
 # ---------------------------------------------------------------------------
@@ -296,13 +356,15 @@ def git_paths(project: Path) -> Set[str]:
     return known
 
 
-def cold_starts(project: Path, transcripts: Path, after: Optional[datetime],
-                before: datetime) -> Iterator[Dict[str, Any]]:
+def cold_starts(project: Path, transcripts: Path, after: Optional[datetime], before: datetime,
+                codex_root: Optional[Path] = None,
+                hosts: Sequence[str] = DEFAULT_HOSTS) -> Iterator[Dict[str, Any]]:
     """The first human prompt of each session that went on to change a file
-    the prompt does not name."""
+    the prompt does not name. A Codex rollout reads as a Claude Code
+    transcript does: the runtime's own parsers know both."""
     root = os.path.realpath(str(project))
     known = git_paths(project)
-    for path in session_files(transcripts, project):
+    for host, path in project_sessions(project, transcripts, codex_root, hosts):
         first = next(session_turns(path, root), None)
         if first is None:
             continue
@@ -322,7 +384,10 @@ def cold_starts(project: Path, transcripts: Path, after: Optional[datetime],
             "ts": str(first["ts"]),
             "prompt": first["prompt"],
             "gold": gold,
-            "session": path.stem,
+            "session": path.name.split(".", 1)[0],
+            "host": host,
+            # The run seeds the recent files from these hosts' sessions.
+            "seed_hosts": list(hosts),
         }
 
 
@@ -337,12 +402,15 @@ def command_sample(arguments: argparse.Namespace) -> int:
     exclude = excluded_moments([Path(path).expanduser() for path in arguments.exclude_set or []])
     projects_root = arguments.projects_root.expanduser()
     transcripts = arguments.transcripts.expanduser()
+    hosts = parse_hosts(arguments.hosts)
+    codex_root = arguments.codex_root.expanduser()
     candidates: List[Dict[str, Any]] = []
+    stand.UNREAD_COMPRESSED.clear()
     for name in [value.strip() for value in arguments.projects.split(",") if value.strip()]:
         project = stand.resolve_project(name, projects_root)
         if project is None:
             raise OutcomeError(f"no project {name} under {projects_root}")
-        for task in cold_starts(project, transcripts, after, before):
+        for task in cold_starts(project, transcripts, after, before, codex_root, hosts):
             moment = stand.parse_instant(task["ts"])
             if any(abs((moment - other).total_seconds()) <= 5 for other in exclude.get(task["project"], [])):
                 continue
@@ -354,11 +422,21 @@ def command_sample(arguments: argparse.Namespace) -> int:
         "version": 1,
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "before": arguments.before, "after": arguments.after, "seed": arguments.seed,
-        "candidates": len(candidates), "tasks": chosen,
+        "hosts": list(hosts), "candidates": len(candidates), "tasks": chosen,
     })
     os.chmod(out, 0o600)
-    print(f"{len(chosen)} of {len(candidates)} cold starts with changed files -> {out}")
+    by_host = ", ".join(f"{host} {sum(task['host'] == host for task in candidates)}" for host in hosts)
+    print(f"{len(chosen)} of {len(candidates)} cold starts with changed files ({by_host}) -> {out}")
+    report_unread()
     return 0
+
+
+def report_unread() -> None:
+    """Say how many compressed rollouts no decoder could read: a sample
+    without them is smaller than the history, not the history."""
+    if stand.UNREAD_COMPRESSED:
+        print(f"{len(stand.UNREAD_COMPRESSED)} compressed Codex rollout(s) could not be read: no zstd decoder"
+              " (Python 3.14 or the zstd command), or a broken stream", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +450,7 @@ def first_turn(path: Path, root: str) -> Optional[Dict[str, Any]]:
     rt = runtime()
     turn: Optional[Dict[str, Any]] = None
     for record in read_records(path):
-        if rt._transcript_prompt(record):
+        if human_prompt(record):
             if turn is not None:
                 break
             turn = {"prompt": prompt_text(record), "ts": record.get("timestamp"),
@@ -389,6 +467,14 @@ def first_turn(path: Path, root: str) -> Optional[Dict[str, Any]]:
                      and isinstance(part.get("text"), str) and part["text"].strip()]
             if texts:
                 turn["answer"] = texts[-1]
+        payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
+        if (record.get("type") == "response_item" and payload.get("type") == "message"
+                and payload.get("role") == "assistant"):
+            # A Codex answer: `output_text` parts of an assistant message.
+            text = "".join(part["text"] for part in payload.get("content") or []
+                           if isinstance(part, dict) and isinstance(part.get("text"), str))
+            if text.strip():
+                turn["answer"] = text
         for name, data, base in rt._transcript_calls(record, root):
             for relative, changed in call_paths(name, data, base, root):
                 (turn["changed"] if changed else turn["read"]).append(relative)
@@ -432,7 +518,9 @@ def later_moment(project: Path, repository: Any, history: List[Tuple[datetime, L
 
 
 def recall_sources(project: Path, transcripts: Path, after: Optional[datetime], before: datetime,
-                   exclude: Optional[Dict[str, List[datetime]]] = None) -> Iterator[Dict[str, Any]]:
+                   exclude: Optional[Dict[str, List[datetime]]] = None,
+                   codex_root: Optional[Path] = None,
+                   hosts: Sequence[str] = DEFAULT_HOSTS) -> Iterator[Dict[str, Any]]:
     """First turns that read project files and answered with a conclusion
     naming one of them: what a session would save as a learning.
 
@@ -448,7 +536,8 @@ def recall_sources(project: Path, transcripts: Path, after: Optional[datetime], 
     repository = stand.Repository(project)
     history: List[Tuple[datetime, List[str]]] = []
     starts: List[datetime] = []
-    for path in session_files(transcripts, project):
+    sessions = project_sessions(project, transcripts, codex_root, hosts)
+    for _host, path in sessions:
         for number, turn in enumerate(session_turns(path, root)):
             when = stand.parse_instant(turn["ts"])
             if when is None:
@@ -460,7 +549,7 @@ def recall_sources(project: Path, transcripts: Path, after: Optional[datetime], 
                 history.append((when, files))
     history.sort(key=lambda entry: entry[0])
     starts.sort()
-    for path in session_files(transcripts, project):
+    for host, path in sessions:
         turn = first_turn(path, root)
         if turn is None or not turn["prompt"].strip():
             continue
@@ -493,7 +582,9 @@ def recall_sources(project: Path, transcripts: Path, after: Optional[datetime], 
             "project": project.name,
             "ts": stamp,
             "asked": str(turn["ts"]),
-            "session": path.stem,
+            "session": path.name.split(".", 1)[0],
+            "host": host,
+            "seed_hosts": list(hosts),
             "prompt": turn["prompt"],
             "answer": answer[:RECALL_ANSWER_LIMIT],
             "read": read[:20],
@@ -513,20 +604,25 @@ def command_recall_sources(arguments: argparse.Namespace) -> int:
         raise OutcomeError("--before/--after must be ISO dates or timestamps")
     exclude = excluded_moments([Path(path).expanduser() for path in arguments.exclude_set or []])
     projects_root = arguments.projects_root.expanduser()
+    hosts = parse_hosts(arguments.hosts)
+    codex_root = arguments.codex_root.expanduser()
     sources: List[Dict[str, Any]] = []
+    stand.UNREAD_COMPRESSED.clear()
     for name in [value.strip() for value in arguments.projects.split(",") if value.strip()]:
         project = stand.resolve_project(name, projects_root)
         if project is None:
             raise OutcomeError(f"no project {name} under {projects_root}")
-        sources.extend(recall_sources(project, arguments.transcripts.expanduser(), after, before, exclude))
+        sources.extend(recall_sources(project, arguments.transcripts.expanduser(), after, before, exclude,
+                                      codex_root, hosts))
     sources.sort(key=lambda source: (source["project"], source["ts"]))
     stand.write_json(out, {
         "version": 1, "kind": "recall-sources",
         "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "before": arguments.before, "after": arguments.after, "sources": sources,
+        "before": arguments.before, "after": arguments.after, "hosts": list(hosts), "sources": sources,
     })
     os.chmod(out, 0o600)
     print(f"{len(sources)} first turns that answered from files they read -> {out}")
+    report_unread()
     return 0
 
 
@@ -686,18 +782,22 @@ def build_corpus(task: Dict[str, Any], corpus: Path, cache: Path, projects_root:
     return {"commit": commit, "edition": name, "project": project}
 
 
-def seed_recent_files(task: Dict[str, Any], corpus: Path, project: Path, transcripts: Path) -> int:
+def seed_recent_files(task: Dict[str, Any], corpus: Path, project: Path, transcripts: Path,
+                      codex_root: Optional[Path] = None) -> int:
     """Write the recent files the Stop hook would have kept before the prompt.
 
     Every human turn of the project's sessions before the prompt, oldest
     first, moves its changed and read files to the front, as each turn's
     flush does. A path that does not exist in the corpus is dropped - the
-    capsule would not show it.
+    capsule would not show it. The sessions are those of the hosts the task
+    was sampled with (`seed_hosts`; Claude Code for a set from before them),
+    since the Stop hook records each host's turns in the same project.
     """
     moment = stand.parse_instant(task["ts"])
     root = os.path.realpath(str(project))
+    hosts = [host for host in task.get("seed_hosts") or DEFAULT_HOSTS if host in HOSTS]
     turns: List[Tuple[datetime, List[str]]] = []
-    for path in session_files(transcripts, project):
+    for _host, path in project_sessions(project, transcripts, codex_root, hosts):
         for turn in session_turns(path, root):
             when = stand.parse_instant(turn["ts"])
             if when is None or moment is None or when >= moment:
@@ -1073,7 +1173,8 @@ def command_run(arguments: argparse.Namespace) -> int:
         try:
             built = build_corpus(task, base, cache, projects_root, editions, arguments.timeout)
             item.update(commit=built["commit"], edition=built["edition"])
-            item["recent_files"] = seed_recent_files(task, base, built["project"], transcripts)
+            item["recent_files"] = seed_recent_files(task, base, built["project"], transcripts,
+                                                     arguments.codex_root.expanduser())
             planted = plant_saves(task, base, stand.runtime_env(cache, stand.parse_instant(task["ts"]), None),
                                   arguments.timeout, work / "saves")
             if planted:
@@ -1283,10 +1384,13 @@ def command_report(arguments: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    sample = commands.add_parser("sample", help="cold starts that changed files, from Claude Code transcripts")
+    sample = commands.add_parser("sample", help="cold starts that changed files, from recorded sessions")
     sample.add_argument("--projects", required=True, help="comma-separated project folder names")
     sample.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
     sample.add_argument("--transcripts", type=Path, default=Path.home() / ".claude" / "projects")
+    sample.add_argument("--hosts", default=",".join(DEFAULT_HOSTS),
+                        help="whose sessions to draw from and seed recent files with: claude, codex or both")
+    sample.add_argument("--codex-root", type=Path, default=Path.home() / ".codex" / "sessions")
     sample.add_argument("--before", required=True)
     sample.add_argument("--after")
     sample.add_argument("--exclude-set", action="append", help="a memory_eval set whose prompts are left out")
@@ -1298,6 +1402,9 @@ def build_parser() -> argparse.ArgumentParser:
     sources.add_argument("--projects", required=True, help="comma-separated project folder names")
     sources.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
     sources.add_argument("--transcripts", type=Path, default=Path.home() / ".claude" / "projects")
+    sources.add_argument("--hosts", default=",".join(DEFAULT_HOSTS),
+                         help="whose sessions to read: claude, codex or both")
+    sources.add_argument("--codex-root", type=Path, default=Path.home() / ".codex" / "sessions")
     sources.add_argument("--before", required=True)
     sources.add_argument("--after")
     sources.add_argument("--exclude-set", action="append", help="a set whose sessions are left out")
@@ -1319,6 +1426,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--out", type=Path, required=True)
     run.add_argument("--projects-root", type=Path, default=Path.home() / "Desktop")
     run.add_argument("--transcripts", type=Path, default=Path.home() / ".claude" / "projects")
+    run.add_argument("--codex-root", type=Path, default=Path.home() / ".codex" / "sessions",
+                     help="Codex rollouts, for a task whose seed_hosts name codex")
     run.add_argument("--cache", type=Path)
     run.add_argument("--arms", default=",".join(DEFAULT_ARMS), help=f"some of {', '.join(ARMS)}")
     run.add_argument("--ids")

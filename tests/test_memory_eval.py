@@ -23,6 +23,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -2446,6 +2447,62 @@ class RealizedUseTest(unittest.TestCase):
         missing = main_output(*self.arguments())
         self.assertIn("no native-results.ndjson", missing)
         self.assertFalse(self.realized()["native"]["journal"])
+
+
+def zstd_bytes(data: bytes) -> Optional[bytes]:
+    """`data` compressed as Codex stores a finished rollout, or None without a coder."""
+    if memory_eval._zstd is not None:
+        return memory_eval._zstd.compress(data)
+    command = shutil.which("zstd")
+    if command:
+        return subprocess.run([command, "-q", "-c"], input=data, capture_output=True, check=True).stdout
+    return None
+
+
+class CompressedRolloutTest(RealizedUseTest):
+    """Codex keeps a finished rollout as `rollout-*.jsonl.zst`; it reads as the plain one."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        plain = self.codex / "2026" / "09" / "02" / "rollout-1.jsonl"
+        packed = zstd_bytes(plain.read_bytes())
+        if packed is None:
+            self.skipTest("no zstd coder: neither Python 3.14 nor the zstd command")
+        plain.with_name(plain.name + ".zst").write_bytes(packed)
+        plain.unlink()
+
+    def test_codex_rollout(self) -> None:
+        super().test_codex_rollout()
+        self.assertEqual(0, self.realized()["codex"]["compressed_unread"])
+
+    def test_the_zstd_command_reads_it_where_python_cannot(self) -> None:
+        if shutil.which("zstd") is None:
+            self.skipTest("no zstd command")
+        with mock.patch.object(memory_eval, "_zstd", None):
+            self.assertEqual(1, self.realized()["codex"]["transcripts"])
+            log = next((self.codex / "2026" / "09" / "02").glob("*.zst"))
+            lines = memory_eval.session_lines(log)
+            self.assertIn(b"session_meta", next(lines))
+            # A reader that stops at the first line leaves no decoder behind.
+            lines.close()
+
+    def test_without_a_decoder_the_report_says_what_it_could_not_read(self) -> None:
+        with mock.patch.object(memory_eval, "_zstd", None), \
+                mock.patch.object(memory_eval.shutil, "which", return_value=None):
+            codex = self.realized()["codex"]
+            plain = main_output(*self.arguments())
+        # The project's rollout, and the other project's still plain one is read.
+        self.assertEqual((0, 1), (codex["transcripts"], codex["compressed_unread"]))
+        self.assertIn("1 compressed Codex rollout(s) could not be read", plain)
+
+    def test_a_plain_and_a_compressed_log_give_the_same_lines(self) -> None:
+        log = next((self.codex / "2026" / "09" / "02").glob("*.zst"))
+        plain = Path(self.temporary.name) / "plain.jsonl"
+        if memory_eval._zstd is not None:
+            plain.write_bytes(memory_eval._zstd.decompress(log.read_bytes()))
+        else:
+            plain.write_bytes(subprocess.run(["zstd", "-dcq", str(log)], capture_output=True, check=True).stdout)
+        self.assertEqual(list(memory_eval.session_lines(plain)), list(memory_eval.session_lines(log)))
 
 
 class FunnelTest(unittest.TestCase):

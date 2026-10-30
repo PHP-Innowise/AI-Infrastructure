@@ -3084,16 +3084,65 @@ def new_turn(started: object) -> Dict[str, Any]:
     }
 
 
+# Codex compresses a rollout it is done with (`rollout-*.jsonl.zst`): on this
+# repository's maintainer machine 3,040 of 3,099 rollouts in October 2026,
+# 1,837 of them in client projects, which a `*.jsonl` glob never saw.
+COMPRESSED_SUFFIX = ".zst"
+# Compressed logs no decoder could read, for a report to name how many.
+UNREAD_COMPRESSED: Set[str] = set()
+try:  # Python 3.14 reads Zstandard itself; an older interpreter uses the zstd command.
+    from compression import zstd as _zstd
+except ImportError:
+    _zstd = None
+
+
+def session_lines(path: Path) -> Iterator[bytes]:
+    """The lines of a session log as bytes, a `.zst` log decompressed.
+
+    Without a decoder - Python 3.14's compression.zstd, else the `zstd`
+    command - or for a broken stream, a compressed log yields what it could
+    and is remembered in UNREAD_COMPRESSED.
+    """
+    if not path.name.endswith(COMPRESSED_SUFFIX):
+        with path.open("rb") as handle:
+            yield from handle
+        return
+    if _zstd is not None:
+        try:
+            with _zstd.open(path, "rb") as handle:
+                yield from handle
+        except (_zstd.ZstdError, EOFError):
+            UNREAD_COMPRESSED.add(str(path))
+        return
+    command = shutil.which("zstd")
+    if command is None:
+        UNREAD_COMPRESSED.add(str(path))
+        return
+    process = subprocess.Popen([command, "-dcq", "--", str(path)],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        if process.stdout is not None:
+            yield from process.stdout
+    finally:
+        # A reader that stops at the first record must not leave the decoder running.
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.returncode > 0:
+            UNREAD_COMPRESSED.add(str(path))
+
+
 def read_records(path: Path) -> Iterator[Dict[str, Any]]:
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(record, dict):
-                    yield record
+        for line in session_lines(path):
+            try:
+                record = json.loads(line.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                yield record
     except OSError:
         return
 
@@ -3286,10 +3335,13 @@ def claude_sources(root: Path, project: Path, member: Membership) -> Tuple[List[
     return files, len(folders), skipped
 
 
-def codex_sources(root: Path, member: Membership) -> List[Path]:
+def codex_sources(root: Path, member: Callable[[object], bool]) -> List[Path]:
+    """The rollouts under `root` whose session ran where `member` says,
+    compressed ones included."""
     found = []
     if root.is_dir():
-        for rollout in sorted(root.glob("*/*/*/*.jsonl")):
+        logs = [*root.glob("*/*/*/*.jsonl"), *root.glob("*/*/*/*.jsonl" + COMPRESSED_SUFFIX)]
+        for rollout in sorted(logs):
             for record in read_records(rollout):
                 payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
                 if member(payload.get("cwd")):
@@ -3521,6 +3573,7 @@ def command_realized(arguments: argparse.Namespace) -> int:
     claude_root = Path(arguments.claude_root).expanduser()
     codex_root = Path(arguments.codex_root).expanduser()
     claude_files, folders, skipped_folders = claude_sources(claude_root, project, member)
+    UNREAD_COMPRESSED.clear()
     codex_files = codex_sources(codex_root, member)
 
     def recent(path: Path) -> bool:
@@ -3551,6 +3604,8 @@ def command_realized(arguments: argparse.Namespace) -> int:
             "codex": continuation_summary([cost for path in codex_used for cost in continuation_costs(path, "codex")]),
         },
     }
+    # Rollouts of any project: which project a log nobody could read ran in is unknown.
+    report["codex"]["compressed_unread"] = len(UNREAD_COMPRESSED)
     if paths is not None:
         report["paths"] = {
             path: dict(counter)
@@ -3588,6 +3643,10 @@ def format_realized(report: Dict[str, Any]) -> str:
     skipped = report["claude"].get("folders_skipped")
     if skipped:
         lines.append(f"({skipped} Claude Code folder(s) with the same name prefix belong to another project; skipped)")
+    unread = report["codex"].get("compressed_unread")
+    if unread:
+        lines.append(f"({unread} compressed Codex rollout(s) could not be read: no zstd decoder"
+                     " (Python 3.14 or the zstd command), or a broken stream)")
     width = max(len(title) for title, _ in REALIZED_ROWS) + 2
     lines.append(" " * width + "".join(host.rjust(9) for host in hosts))
     for title, key in REALIZED_ROWS:

@@ -319,6 +319,12 @@ counted as skipped - `next-gen` is not `next`). A turn starts at the prompt
 hook's output (a `hook_success` `UserPromptSubmit` attachment; in Codex, a
 developer message that starts like a capsule) and ends at the next human
 prompt. `--json` prints the numbers as JSON, `--paths` adds per-path counts.
+Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of
+3,099 on the maintainer machine in October 2026); `realized` reads those too,
+through Python 3.14's `compression.zstd` or else the `zstd` command. Without
+either, it says how many compressed rollouts it could not read
+(`compressed_unread`), counted over every project, since which project a log
+nobody could read belongs to is unknown.
 
 `realized` also reads the project's native result journal,
 `memory-bank/local/native-results.ndjson` (`--state DIR` for an attached
@@ -661,7 +667,22 @@ None says whether delivery changes what an agent does.
 
 **What a pair is.**
 - **The task:** the first prompt of a recorded Claude Code session whose turn
-  changed at least one file the prompt does not name. Its *gold* files are
+  changed at least one file the prompt does not name. With `sample --hosts
+  codex` (or `claude,codex`) it can also be a Codex rollout that ran in the
+  project or below it, compressed ones included: the runtime's own transcript
+  parsers read both. The default stays `claude`, so a sealed earlier sample
+  draws the same tasks. `--hosts` also decides whose sessions seed the recent
+  files: each task records them as `seed_hosts`, and a task from before them
+  seeds from Claude Code alone. `recall-sources` takes `--hosts` too.
+  A turn starts at what a person wrote: a message Codex itself puts in the
+  user role - its `AGENTS.md` instructions, recommended plugins, browser
+  context, notifications, a hook's continuation prompt, an aborted turn -
+  does not start one, and a paste does. Of 3,099 rollouts on the maintainer
+  machine, 2,310 began with such a message, which the runtime's own prompt
+  test lets through. Before 2026-10-07 the four client projects hold 38
+  Codex cold starts (37 with 1-10 gold files, none in an earlier sample)
+  beside 117 from Claude Code, and 242 Codex recall sources beside 105: most
+  Codex sessions there began with a read-only review. Its *gold* files are
   those changed files. Each one must be:
   - a path the project's Git has known;
   - kept by the runtime's recent-files filter;

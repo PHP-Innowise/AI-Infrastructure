@@ -309,6 +309,125 @@ class SampleTest(DemoProject):
         self.assertIsNone(ab.instant("tomorrow"))
 
 
+def zstd_bytes(data: bytes):
+    """`data` compressed as Codex stores a finished rollout, or None without a coder."""
+    coder = getattr(ab.stand, "_zstd", None)
+    if coder is not None:
+        return coder.compress(data)
+    command = shutil.which("zstd")
+    if command:
+        return subprocess.run([command, "-q", "-c"], input=data, capture_output=True, check=True).stdout
+    return None
+
+
+def codex_message(role: str, words: str) -> dict:
+    kind = "output_text" if role == "assistant" else "input_text"
+    return {"type": "message", "role": role, "content": [{"type": kind, "text": words}]}
+
+
+def codex_rollout(root: str, prompt: str, ts: str) -> list:
+    """A Codex rollout as 0.150-0.163 wrote one: its instructions, plugin and
+    environment messages in the user role, the prompt, a read, a notification
+    mid-turn, a patch, the answer."""
+    def item(payload: dict, at: str = ts) -> dict:
+        return {"timestamp": at, "type": "response_item", "payload": payload}
+
+    patch = "*** Begin Patch\n*** Update File: src/Gold.php\n@@\n-a\n+b\n*** End Patch\n"
+    return [
+        {"timestamp": ts, "type": "session_meta", "payload": {"id": "s", "cwd": root, "timestamp": ts}},
+        item(codex_message("user", f"# AGENTS.md instructions for {root}\n\n<INSTRUCTIONS>rules</INSTRUCTIONS>")),
+        item(codex_message("user", "<recommended_plugins>\nHere is a plugin\n</recommended_plugins>")),
+        item(codex_message("user", "<environment_context><cwd>" + root + "</cwd></environment_context>")),
+        item(codex_message("user", prompt)),
+        item({"type": "function_call", "name": "shell",
+              "arguments": json.dumps({"command": ["bash", "-lc", "cat src/Named.php"], "workdir": root})}),
+        item(codex_message("user", "<task-notification>a background command ended</task-notification>")),
+        item({"type": "custom_tool_call", "name": "apply_patch", "input": patch}),
+        item(codex_message("assistant", "Done.")),
+        item(codex_message("user", "Now the tests"), "2026-09-02T11:05:00Z"),
+    ]
+
+
+class CodexSampleTest(DemoProject):
+    """Cold starts from Codex rollouts, the compressed ones Codex keeps included."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.codex = Path(self.directory.name) / "codex"
+        folder = self.codex / "2026" / "09" / "02"
+        folder.mkdir(parents=True)
+        lines = codex_rollout(str(self.project), "Fix the totals; Named.php is fine as it is.",
+                              "2026-09-02T11:00:00Z")
+        data = "".join(json.dumps(record) + "\n" for record in lines).encode("utf-8")
+        packed = zstd_bytes(data)
+        self.compressed = packed is not None
+        name = "rollout-2026-09-02T11-00-00-0a1b.jsonl"
+        if packed is None:
+            (folder / name).write_bytes(data)
+        else:
+            (folder / (name + ".zst")).write_bytes(packed)
+        # A rollout of another folder is no session of this project.
+        elsewhere = codex_rollout(str(self.project.parent / "elsewhere"), "Fix the totals",
+                                  "2026-09-03T11:00:00Z")
+        (folder / "rollout-2026-09-03T11-00-00-0c2d.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in elsewhere), encoding="utf-8")
+
+    def tasks(self, hosts) -> list:
+        return list(ab.cold_starts(self.project, self.transcripts, None, ab.instant("2026-10-07"),
+                                   self.codex, hosts))
+
+    def test_a_codex_rollout_is_a_cold_start(self) -> None:
+        (task,) = self.tasks(("codex",))
+        self.assertEqual(("codex", ["src/Gold.php"], ["codex"]), (task["host"], task["gold"], task["seed_hosts"]))
+        self.assertTrue(task["prompt"].startswith("Fix the totals"))
+        self.assertEqual("rollout-2026-09-02T11-00-00-0a1b", task["session"])
+
+    def test_the_default_draws_from_claude_code_alone(self) -> None:
+        default = list(ab.cold_starts(self.project, self.transcripts, None, ab.instant("2026-10-07")))
+        self.assertEqual(["claude"], [task["host"] for task in default])
+        self.assertEqual(["claude", "codex"], sorted(task["host"] for task in self.tasks(("claude", "codex"))))
+
+    def test_the_compressed_rollout_is_read(self) -> None:
+        if not self.compressed:
+            self.skipTest("no zstd coder: neither Python 3.14 nor the zstd command")
+        sessions = ab.project_sessions(self.project, self.transcripts, self.codex, ("codex",))
+        self.assertEqual([("codex", ".zst")], [(host, path.suffix) for host, path in sessions])
+
+    def test_seeding_reads_the_hosts_the_task_names(self) -> None:
+        recorded = []
+        with mock.patch.object(ab.runtime(), "record_recent_files",
+                               side_effect=lambda connection, files: recorded.append(list(files))), \
+                mock.patch.object(ab.runtime(), "load_recent_files", return_value=[]), \
+                mock.patch.object(ab.sqlite3, "connect"):
+            corpus = Path(self.directory.name) / "corpus"
+            shutil.copytree(self.project, corpus, ignore=shutil.ignore_patterns(".git"))
+            later = {"ts": "2026-09-05T00:00:00Z"}
+            ab.seed_recent_files(later, corpus, self.project, self.transcripts, self.codex)
+            claude_only = [files for files in recorded]
+            recorded.clear()
+            ab.seed_recent_files(dict(later, seed_hosts=["claude", "codex"]), corpus, self.project,
+                                 self.transcripts, self.codex)
+        # The Claude Code session read and edited both files; the Codex one adds its own turn.
+        self.assertEqual(1, len(claude_only))
+        self.assertEqual(2, len(recorded))
+
+    def test_an_unknown_host_is_refused(self) -> None:
+        with self.assertRaises(ab.OutcomeError):
+            ab.parse_hosts("claude,cursor")
+
+    def test_only_what_a_person_wrote_starts_a_codex_turn(self) -> None:
+        def said(words: str) -> dict:
+            return {"type": "response_item", "payload": codex_message("user", words)}
+
+        for words in ("# AGENTS.md instructions for /w\n\nrules", "<recommended_plugins>x</recommended_plugins>",
+                      "<hook_prompt>save</hook_prompt>", "<turn_aborted>", "# Files mentioned by the user:\n- a"):
+            with self.subTest(words=words[:20]):
+                self.assertFalse(ab.human_prompt(said(words)))
+        for words in ("Fix the totals", '<pasted_content id="1">log</pasted_content> why?', "# Plan\nDo it"):
+            with self.subTest(words=words[:20]):
+                self.assertTrue(ab.human_prompt(said(words)))
+
+
 class RecallSourcesTest(DemoProject):
     """First turns that answered from files they read, from synthetic transcripts."""
 

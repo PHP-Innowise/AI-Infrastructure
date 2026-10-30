@@ -28,6 +28,32 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The evaluation tools read Codex's compressed rollouts and draw Codex tasks — 2026-10-30
+
+- Codex keeps a finished rollout as `rollout-*.jsonl.zst`: 3,040 of the
+  3,099 on the maintainer machine, the four client projects' 1,837 Codex
+  sessions among them. `scripts/memory_eval.py` read only `*.jsonl`, so
+  `realized` reported those clients' Codex history as empty. It now reads
+  compressed rollouts through Python 3.14's `compression.zstd`, or else the
+  `zstd` command, and says how many it could not read without either.
+- With them, over the four clients: Claude Code, 386 sessions, 1 of 289
+  delivered documents opened, no `context.py` call by an agent; Codex, 1,837
+  sessions, 25 of 67 opened, 474 `context.py` calls (66 of them `retrieve`).
+  "Delivered documents go unused" held for Claude Code alone.
+- `scripts/memory_outcome_ab.py`: `sample --hosts claude,codex` and
+  `recall-sources --hosts` draw from Codex rollouts too, compressed ones
+  included; the default stays `claude`, so a sealed sample draws the same
+  tasks. Each task records `seed_hosts`, the sessions its recent files are
+  seeded from (`run --codex-root`); a task from before them seeds from
+  Claude Code alone.
+- A Codex prompt is what a person wrote: the stand reads a Codex message's
+  text, and a message Codex puts in the user role (`AGENTS.md`
+  instructions, recommended plugins, notifications, a hook's continuation
+  prompt) no longer starts a turn. 2,310 of the 3,099 rollouts began with
+  one; before the fix the four clients gave 15 Codex cold starts, after it
+  38 (37 with 1-10 gold files, none in an earlier sample), and 242 Codex
+  recall sources beside Claude Code's 105.
+
 ### A memory funnel across projects, from their journals — 2026-10-30
 
 - `scripts/memory_eval.py funnel --project A --project B [--since DAY] [--json]`
