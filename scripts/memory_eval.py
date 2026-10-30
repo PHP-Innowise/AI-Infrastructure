@@ -3084,16 +3084,65 @@ def new_turn(started: object) -> Dict[str, Any]:
     }
 
 
+# Codex compresses a rollout it is done with (`rollout-*.jsonl.zst`): on this
+# repository's maintainer machine 3,040 of 3,099 rollouts in October 2026,
+# 1,837 of them in client projects, which a `*.jsonl` glob never saw.
+COMPRESSED_SUFFIX = ".zst"
+# Compressed logs no decoder could read, for a report to name how many.
+UNREAD_COMPRESSED: Set[str] = set()
+try:  # Python 3.14 reads Zstandard itself; an older interpreter uses the zstd command.
+    from compression import zstd as _zstd
+except ImportError:
+    _zstd = None
+
+
+def session_lines(path: Path) -> Iterator[bytes]:
+    """The lines of a session log as bytes, a `.zst` log decompressed.
+
+    Without a decoder - Python 3.14's compression.zstd, else the `zstd`
+    command - or for a broken stream, a compressed log yields what it could
+    and is remembered in UNREAD_COMPRESSED.
+    """
+    if not path.name.endswith(COMPRESSED_SUFFIX):
+        with path.open("rb") as handle:
+            yield from handle
+        return
+    if _zstd is not None:
+        try:
+            with _zstd.open(path, "rb") as handle:
+                yield from handle
+        except (_zstd.ZstdError, EOFError):
+            UNREAD_COMPRESSED.add(str(path))
+        return
+    command = shutil.which("zstd")
+    if command is None:
+        UNREAD_COMPRESSED.add(str(path))
+        return
+    process = subprocess.Popen([command, "-dcq", "--", str(path)],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        if process.stdout is not None:
+            yield from process.stdout
+    finally:
+        # A reader that stops at the first record must not leave the decoder running.
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.returncode > 0:
+            UNREAD_COMPRESSED.add(str(path))
+
+
 def read_records(path: Path) -> Iterator[Dict[str, Any]]:
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(record, dict):
-                    yield record
+        for line in session_lines(path):
+            try:
+                record = json.loads(line.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if isinstance(record, dict):
+                yield record
     except OSError:
         return
 
@@ -3286,10 +3335,13 @@ def claude_sources(root: Path, project: Path, member: Membership) -> Tuple[List[
     return files, len(folders), skipped
 
 
-def codex_sources(root: Path, member: Membership) -> List[Path]:
+def codex_sources(root: Path, member: Callable[[object], bool]) -> List[Path]:
+    """The rollouts under `root` whose session ran where `member` says,
+    compressed ones included."""
     found = []
     if root.is_dir():
-        for rollout in sorted(root.glob("*/*/*/*.jsonl")):
+        logs = [*root.glob("*/*/*/*.jsonl"), *root.glob("*/*/*/*.jsonl" + COMPRESSED_SUFFIX)]
+        for rollout in sorted(logs):
             for record in read_records(rollout):
                 payload = record.get("payload") if isinstance(record.get("payload"), dict) else {}
                 if member(payload.get("cwd")):
@@ -3521,6 +3573,7 @@ def command_realized(arguments: argparse.Namespace) -> int:
     claude_root = Path(arguments.claude_root).expanduser()
     codex_root = Path(arguments.codex_root).expanduser()
     claude_files, folders, skipped_folders = claude_sources(claude_root, project, member)
+    UNREAD_COMPRESSED.clear()
     codex_files = codex_sources(codex_root, member)
 
     def recent(path: Path) -> bool:
@@ -3551,6 +3604,8 @@ def command_realized(arguments: argparse.Namespace) -> int:
             "codex": continuation_summary([cost for path in codex_used for cost in continuation_costs(path, "codex")]),
         },
     }
+    # Rollouts of any project: which project a log nobody could read ran in is unknown.
+    report["codex"]["compressed_unread"] = len(UNREAD_COMPRESSED)
     if paths is not None:
         report["paths"] = {
             path: dict(counter)
@@ -3588,6 +3643,10 @@ def format_realized(report: Dict[str, Any]) -> str:
     skipped = report["claude"].get("folders_skipped")
     if skipped:
         lines.append(f"({skipped} Claude Code folder(s) with the same name prefix belong to another project; skipped)")
+    unread = report["codex"].get("compressed_unread")
+    if unread:
+        lines.append(f"({unread} compressed Codex rollout(s) could not be read: no zstd decoder"
+                     " (Python 3.14 or the zstd command), or a broken stream)")
     width = max(len(title) for title, _ in REALIZED_ROWS) + 2
     lines.append(" " * width + "".join(host.rjust(9) for host in hosts))
     for title, key in REALIZED_ROWS:
@@ -3609,6 +3668,186 @@ def format_realized(report: Dict[str, Any]) -> str:
                 f" {counts.get('mentioned', 0):>5}  {path}"
             )
     return "\n".join(lines)
+
+
+FUNNEL_PROFILES = ("full", "navigation", "recall")
+FUNNEL_ROWS = (
+    ("prompt hook runs", "hook_runs"),
+    ("  timed out", "hook_timeouts"),
+    ("  exited non-zero", "hook_failures"),
+    ("capsules built", "capsules"),
+    ("  shape recorded", "shaped"),
+    ("  with the working state", "with_working"),
+    ("  with recent files", "with_recent_files"),
+    ("  with ticket files", "with_ticket_files"),
+    ("  with documents", "with_documents"),
+    ("  median tokens", "median_tokens"),
+    ("save requests armed", "armed"),
+    ("save requested at Stop", "requested"),
+    ("saves made", "made"),
+    ("  refused", "refused"),
+    ("  failed or omitted", "failed_or_omitted"),
+    ("learnings written", "learnings_written"),
+    ("chunks promoted", "chunks_promoted"),
+    ("task records", "task_records"),
+    ("findings and decisions", "findings_decisions"),
+    ("bank chunks", "bank_chunks"),
+)
+# Brain record folders, counted as files: what the project keeps, not what a
+# turn did, so the --since window does not apply to them.
+FUNNEL_TASK_DIRS = ("project-brain/dynamic/tasks", "project-brain/archive/task")
+FUNNEL_FINDING_DIRS = ("project-brain/dynamic/findings", "project-brain/dynamic/decisions",
+                       "project-brain/archive/finding", "project-brain/archive/decision")
+
+
+def count_markdown(state: Path, folders: Sequence[str]) -> int:
+    total = 0
+    for folder in folders:
+        directory = state / folder
+        if directory.is_dir() and not directory.is_symlink():
+            total += sum(1 for path in directory.glob("*.md") if path.is_file() and not path.is_symlink())
+    return total
+
+
+def project_funnel(state: Path, since: Optional[datetime]) -> Dict[str, Any]:
+    """One project's memory funnel from its own journals: counts and fixed codes only.
+
+    The prompt hook's lines and the capsule shapes its refreshes record in
+    refresh-health.ndjson, the save funnel in native-results.ndjson, and how
+    many task records, findings, decisions and bank chunks the project keeps.
+    No path, query or text is read into it, so a teammate can send the result.
+    A refresh line names no host and also comes from an explicit request (the
+    MCP retrieve, the CLI), so "capsules built" counts those too.
+    """
+    def within(record: Dict[str, Any]) -> bool:
+        at = parse_instant(record.get("at"))
+        return since is None or (at is not None and at >= since)
+
+    counts: Counter = Counter()
+    profiles: Counter = Counter()
+    tokens: List[int] = []
+    for record in read_records(state / HEALTH_SERIES):
+        if not within(record):
+            continue
+        source = record.get("source")
+        if source == "hook":
+            counts["hook_runs"] += 1
+            status = record.get("hook_status")
+            counts["hook_timeouts"] += status == 124
+            counts["hook_failures"] += type(status) is int and status not in (0, 124)
+        elif source in ("refresh", "hook-context"):
+            counts["capsules"] += 1
+            shape = record.get("capsule")
+            if not isinstance(shape, dict):
+                # A runtime before the shape was recorded.
+                profiles["unknown"] += 1
+                continue
+            counts["shaped"] += 1
+            profile = shape.get("profile")
+            profiles[profile if profile in FUNNEL_PROFILES else "unknown"] += 1
+            counts["with_working"] += shape.get("working") is True
+            for field, counter in (("recent_files", "with_recent_files"), ("ticket_files", "with_ticket_files"),
+                                   ("documents", "with_documents")):
+                value = shape.get(field)
+                counts[counter] += type(value) is int and value > 0
+            value = shape.get("tokens")
+            if type(value) is int and value >= 0:
+                tokens.append(value)
+    native = native_funnel(state, since)
+    saves = native["total"]
+    counts["armed"] = saves["armed"]
+    counts["requested"] = saves["requested"]
+    counts["made"] = saves["saved"] + saves["held"]
+    counts["refused"] = saves["refused"]
+    counts["failed_or_omitted"] = saves["failed"] + saves["omitted"]
+    counts["learnings_written"] = saves["learnings_written"]
+    counts["chunks_promoted"] = saves["chunks_promoted"]
+    counts["task_records"] = count_markdown(state, FUNNEL_TASK_DIRS)
+    counts["findings_decisions"] = count_markdown(state, FUNNEL_FINDING_DIRS)
+    counts["bank_chunks"] = count_markdown(state, ("memory-bank/chunks",))
+    return {
+        **{key: counts.get(key, 0) for _, key in FUNNEL_ROWS if key != "median_tokens"},
+        "median_tokens": round(statistics.median(tokens)) if tokens else None,
+        "tokens": tokens,
+        "profiles": {name: profiles.get(name, 0) for name in (*FUNNEL_PROFILES, "unknown")},
+        "save_journal": native["journal"],
+        "save_reasons": saves["reasons"],
+    }
+
+
+def funnel_total(projects: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    total: Dict[str, Any] = {}
+    for _, key in FUNNEL_ROWS:
+        if key != "median_tokens":
+            total[key] = sum(project[key] for project in projects.values())
+    tokens = [value for project in projects.values() for value in project["tokens"]]
+    total["median_tokens"] = round(statistics.median(tokens)) if tokens else None
+    total["profiles"] = {name: sum(project["profiles"][name] for project in projects.values())
+                         for name in (*FUNNEL_PROFILES, "unknown")}
+    reasons: Dict[str, Counter] = {}
+    for project in projects.values():
+        for step, codes in project["save_reasons"].items():
+            reasons.setdefault(step, Counter()).update(codes)
+    total["save_reasons"] = {step: dict(sorted(reasons[step].items())) for step in sorted(reasons)}
+    return total
+
+
+def format_funnel(report: Dict[str, Any]) -> str:
+    columns = [*report["projects"], "total"]
+    values = {**report["projects"], "total": report["total"]}
+    since = f" since {report['since']}" if report.get("since") else ""
+    lines = [f"Memory funnel{since}, from the journals (counts only)"]
+    width = max(len(title) for title, _ in FUNNEL_ROWS) + 2
+    column = max(9, *(len(name) + 2 for name in columns))
+    lines.append(" " * width + "".join(name.rjust(column) for name in columns))
+
+    def cell(value: Any) -> str:
+        return ("-" if value is None else str(value)).rjust(column)
+
+    for title, key in FUNNEL_ROWS:
+        lines.append(title.ljust(width) + "".join(cell(values[name][key]) for name in columns))
+    lines.append("")
+    lines.append("capsules by profile: " + ", ".join(
+        f"{name} {report['total']['profiles'][name]}" for name in (*FUNNEL_PROFILES, "unknown")))
+    missing = [name for name, project in report["projects"].items() if not project["save_journal"]]
+    if missing:
+        lines.append("no save journal (a runtime before it, or no save step ran): " + ", ".join(missing))
+    if report["total"]["save_reasons"]:
+        lines.append("save steps with a code, all projects:")
+        for step, codes in report["total"]["save_reasons"].items():
+            lines.append(f"  {step}: " + ", ".join(f"{code} {count}" for code, count in codes.items()))
+    return "\n".join(lines)
+
+
+def command_funnel(arguments: argparse.Namespace) -> int:
+    since: Optional[datetime] = None
+    if arguments.since:
+        day = parse_day(arguments.since)
+        if day is None or len(arguments.since.strip()) != 10:
+            raise EvalError("--since must be YYYY-MM-DD")
+        since = day_window(day)[0]
+    projects: Dict[str, Dict[str, Any]] = {}
+    for given in arguments.project:
+        state = Path(given).expanduser().resolve()
+        if not state.is_dir():
+            raise EvalError(f"--project {given} is not a directory")
+        # A folder's name labels its column: the path itself stays on this machine.
+        label = state.name or "project"
+        while label in projects:
+            label += "'"
+        projects[label] = project_funnel(state, since)
+    report = {"since": arguments.since, "projects": projects, "total": funnel_total(projects)}
+    if arguments.json:
+        public = {
+            "since": report["since"],
+            "projects": {name: {key: value for key, value in project.items() if key != "tokens"}
+                         for name, project in projects.items()},
+            "total": report["total"],
+        }
+        print(json.dumps(public, ensure_ascii=False, indent=2))
+    else:
+        print(format_funnel(report))
+    return 0
 
 
 NATIVE_ROWS = (
@@ -3758,6 +3997,14 @@ def build_parser() -> argparse.ArgumentParser:
     realized.add_argument("--json", action="store_true")
     realized.add_argument("--paths", action="store_true", help="also list delivered document paths")
     realized.set_defaults(handler=command_realized)
+
+    funnel = commands.add_parser(
+        "funnel", help="the memory funnel of one or more projects, from their journals; counts only")
+    funnel.add_argument("--project", action="append", required=True,
+                        help="a project directory, or an attached project's state directory; repeat for more")
+    funnel.add_argument("--since", help="only journal lines from this UTC date on (YYYY-MM-DD)")
+    funnel.add_argument("--json", action="store_true")
+    funnel.set_defaults(handler=command_funnel)
     return parser
 
 

@@ -191,6 +191,32 @@ class ReportTest(unittest.TestCase):
         result["items"]["T0"]["arms"]["capsule"][0]["capsule_delivered"] = False
         self.assertEqual(0, ab.summarize(result)["pairs"])
 
+    def test_the_ticket_arm_is_compared_with_recall_and_its_line_counted(self) -> None:
+        def run(calls, ran, ticket):
+            return {"stopped": "gold", "calls_to_gold": calls, "capsule_delivered": False, "hook_ran": ran,
+                    "ticket_files_delivered": ticket}
+        items = {f"T{n}": {"status": "ok", "arms": {
+            "recall": [run(6, True, False)], "ticket": [run(3, True, n % 3 != 0)],
+        }} for n in range(21)}
+        # A ticket run whose hook never ran got no treatment.
+        items["T0"]["arms"]["ticket"][0]["hook_ran"] = False
+        summary = ab.summarize({"meta": {"cap": 40}, "items": items}, ("recall", "ticket"))
+        self.assertEqual(20, summary["pairs"])
+        self.assertEqual(14, summary["ticket_files_delivered"])
+        self.assertEqual("ticket-helps", summary["verdict"])
+
+    def test_the_health_journal_tells_whether_ticket_files_came(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            health = Path(directory) / "refresh-health.ndjson"
+            health.write_text("".join(json.dumps(line) + "\n" for line in (
+                {"source": "refresh", "capsule": {"ticket_files": 2}},
+                {"source": "hook", "hook_status": 0},
+                {"source": "refresh", "capsule": {"ticket_files": 0}},
+            )), encoding="utf-8")
+            self.assertTrue(ab.ticket_files_delivered(health, 0))
+            self.assertFalse(ab.ticket_files_delivered(health, 1))
+            self.assertFalse(ab.ticket_files_delivered(Path(directory) / "absent.ndjson", 0))
+
     def test_navigation_is_compared_with_the_full_capsule(self) -> None:
         def run(calls, delivered, ran):
             return {"stopped": "gold", "calls_to_gold": calls, "capsule_delivered": delivered, "hook_ran": ran}
@@ -307,6 +333,235 @@ class SampleTest(DemoProject):
     def test_bare_dates_are_utc_midnight(self) -> None:
         self.assertEqual("2026-10-07T00:00:00+00:00", ab.instant("2026-10-07").isoformat())
         self.assertIsNone(ab.instant("tomorrow"))
+
+
+class TicketArmTest(unittest.TestCase):
+    """The `ticket` arm, its corpus branch, and the cold starts it can act on."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        base = Path(self.directory.name)
+        self.project = base / "Desktop" / "demo"
+        (self.project / "src").mkdir(parents=True)
+        self.env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        # Every commit before the sessions, so each has a corpus commit.
+        self.commit("2026-08-01T10:00:00Z", "init", "src/Gold.php", "src/Named.php", "src/Other.php")
+        self.commit("2026-08-10T10:00:00Z", "CMS-741: start the rounding", "src/Other.php")
+        self.commit("2026-08-11T10:00:00Z", "CMS-742: only a named file", "src/Named.php")
+        self.transcripts = base / "projects"
+        self.folder = ab.transcript_directory(self.transcripts, self.project)
+        self.folder.mkdir(parents=True)
+        for number, (prompt, branch) in enumerate((
+            ("CMS-741: fix the rounding; Named.php is fine as it is.", "main"),
+            ("Fix the rounding; Named.php is fine as it is.", "feature/cms-741-rounding"),
+            ("Fix the rounding; Named.php is fine as it is.", "feature/cms-900-rounding"),
+            ("CMS-742: fix the rounding; Named.php is fine as it is.", "main"),
+        )):
+            self.session(number, prompt, branch)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def commit(self, when: str, subject: str, *paths: str) -> None:
+        for path in paths:
+            target = self.project / path
+            target.write_text(f"<?php // {subject}\n", encoding="utf-8")
+        dated = {**self.env, "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+        if not (self.project / ".git").exists():
+            subprocess.run(["git", "-C", str(self.project), "init", "-q"], check=True, env=dated)
+        subprocess.run(["git", "-C", str(self.project), "add", "-A"], check=True, env=dated)
+        subprocess.run(["git", "-C", str(self.project), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "commit", "-qm", subject], check=True, env=dated)
+
+    def session(self, number: int, prompt: str, branch: str) -> None:
+        root = str(self.project)
+        ts = f"2026-09-0{number + 1}T10:00:00Z"
+        records = [
+            {"type": "user", "timestamp": ts, "cwd": root, "gitBranch": branch, "message": {"content": prompt}},
+            {"type": "assistant", "cwd": root, "gitBranch": branch, "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": f"{root}/src/Gold.php"}}]}},
+        ]
+        (self.folder / f"session-{number}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    def test_the_arm_is_recall_with_the_ticket_files_line(self) -> None:
+        corpus = Path(self.directory.name) / "corpus"
+        (corpus / ".codex").mkdir(parents=True)
+        (corpus / ".codex" / "hooks.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [
+            {"hooks": [{"type": "command", "command": "sh working-memory-read.sh"}]}]}}), encoding="utf-8")
+        ab.configure_corpus(corpus, {"retrieval_gate": "shadow"})
+        ab.configure_corpus(corpus, ab.ARM_SETTINGS["ticket"])
+        config = json.loads((corpus / "project-brain/config/runtime.json").read_text(encoding="utf-8"))
+        self.assertEqual({"capsule_profile": "recall", "retrieval_gate": "shadow", "ticket_files": True}, config)
+        self.assertIn("--dangerously-bypass-hook-trust", ab.codex_command("codex", corpus, "ticket", "do it", None))
+
+    def test_the_corpus_branch_keeps_the_sessions_ticket(self) -> None:
+        self.assertEqual("ab/T1", ab.corpus_branch({"id": "T1"}))
+        self.assertEqual("ab/T1", ab.corpus_branch({"id": "T1", "branch": "main"}))
+        self.assertEqual("ab/T1-CMS-741", ab.corpus_branch({"id": "T1", "branch": "feature/cms-741-rounding"}))
+
+    def test_a_cold_start_records_its_branch_and_what_the_line_could_show(self) -> None:
+        tasks = list(ab.cold_starts(self.project, self.transcripts, None, ab.instant("2026-10-07")))
+        self.assertEqual(["main", "feature/cms-741-rounding", "feature/cms-900-rounding", "main"],
+                         [task["branch"] for task in tasks])
+        shown = [ab.ticket_commit_files(self.project, task) for task in tasks]
+        # The prompt's ticket, the branch's ticket, a ticket no commit names,
+        # and a ticket whose only file the prompt names.
+        self.assertEqual([(["CMS-741"], ["src/Other.php"]), (["CMS-741"], ["src/Other.php"]),
+                          (["CMS-900"], []), (["CMS-742"], [])], shown)
+
+    def test_files_the_capsule_already_shows_as_recent_leave_the_line_empty(self) -> None:
+        root = str(self.project)
+        earlier = [
+            {"type": "user", "timestamp": "2026-08-31T10:00:00Z", "cwd": root, "message": {"content": "Look around"}},
+            {"type": "assistant", "cwd": root, "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": f"{root}/src/Other.php"}}]}},
+        ]
+        (self.folder / "session-earlier.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in earlier), encoding="utf-8")
+        turns = ab.project_turns(self.project, self.transcripts, None, ("claude",))
+        self.assertEqual(["src/Other.php"], ab.recent_at(turns, ab.instant("2026-09-01"), lambda path: True))
+        self.assertEqual([], ab.recent_at(turns, ab.instant("2026-08-31"), lambda path: True))
+        task = next(task for task in ab.cold_starts(self.project, self.transcripts, None, ab.instant("2026-10-07"))
+                    if task["prompt"].startswith("CMS-741"))
+        self.assertEqual((["CMS-741"], ["src/Other.php"]), ab.ticket_commit_files(self.project, task))
+        self.assertEqual((["CMS-741"], []), ab.ticket_commit_files(self.project, task, turns))
+
+    def test_sample_keeps_only_the_cold_starts_the_arm_can_act_on(self) -> None:
+        out = Path(self.directory.name) / "sample.json"
+        code = ab.main(["sample", "--projects", "demo", "--projects-root", str(self.project.parent),
+                        "--transcripts", str(self.transcripts), "--before", "2026-10-07", "--n", "10",
+                        "--seed", "1", "--require-ticket-commits", "--out", str(out)])
+        self.assertEqual(0, code)
+        sample = json.loads(out.read_text(encoding="utf-8"))
+        self.assertTrue(sample["require_ticket_commits"])
+        self.assertEqual([["CMS-741"], ["CMS-741"]], [task["tickets"] for task in sample["tasks"]])
+
+
+def zstd_bytes(data: bytes):
+    """`data` compressed as Codex stores a finished rollout, or None without a coder."""
+    coder = getattr(ab.stand, "_zstd", None)
+    if coder is not None:
+        return coder.compress(data)
+    command = shutil.which("zstd")
+    if command:
+        return subprocess.run([command, "-q", "-c"], input=data, capture_output=True, check=True).stdout
+    return None
+
+
+def codex_message(role: str, words: str) -> dict:
+    kind = "output_text" if role == "assistant" else "input_text"
+    return {"type": "message", "role": role, "content": [{"type": kind, "text": words}]}
+
+
+def codex_rollout(root: str, prompt: str, ts: str) -> list:
+    """A Codex rollout as 0.150-0.163 wrote one: its instructions, plugin and
+    environment messages in the user role, the prompt, a read, a notification
+    mid-turn, a patch, the answer."""
+    def item(payload: dict, at: str = ts) -> dict:
+        return {"timestamp": at, "type": "response_item", "payload": payload}
+
+    patch = "*** Begin Patch\n*** Update File: src/Gold.php\n@@\n-a\n+b\n*** End Patch\n"
+    return [
+        {"timestamp": ts, "type": "session_meta", "payload": {"id": "s", "cwd": root, "timestamp": ts}},
+        item(codex_message("user", f"# AGENTS.md instructions for {root}\n\n<INSTRUCTIONS>rules</INSTRUCTIONS>")),
+        item(codex_message("user", "<recommended_plugins>\nHere is a plugin\n</recommended_plugins>")),
+        item(codex_message("user", "<environment_context><cwd>" + root + "</cwd></environment_context>")),
+        item(codex_message("user", prompt)),
+        item({"type": "function_call", "name": "shell",
+              "arguments": json.dumps({"command": ["bash", "-lc", "cat src/Named.php"], "workdir": root})}),
+        item(codex_message("user", "<task-notification>a background command ended</task-notification>")),
+        item({"type": "custom_tool_call", "name": "apply_patch", "input": patch}),
+        item(codex_message("assistant", "Done.")),
+        item(codex_message("user", "Now the tests"), "2026-09-02T11:05:00Z"),
+    ]
+
+
+class CodexSampleTest(DemoProject):
+    """Cold starts from Codex rollouts, the compressed ones Codex keeps included."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.codex = Path(self.directory.name) / "codex"
+        folder = self.codex / "2026" / "09" / "02"
+        folder.mkdir(parents=True)
+        lines = codex_rollout(str(self.project), "Fix the totals; Named.php is fine as it is.",
+                              "2026-09-02T11:00:00Z")
+        data = "".join(json.dumps(record) + "\n" for record in lines).encode("utf-8")
+        packed = zstd_bytes(data)
+        self.compressed = packed is not None
+        name = "rollout-2026-09-02T11-00-00-0a1b.jsonl"
+        if packed is None:
+            (folder / name).write_bytes(data)
+        else:
+            (folder / (name + ".zst")).write_bytes(packed)
+        # A rollout of another folder is no session of this project.
+        elsewhere = codex_rollout(str(self.project.parent / "elsewhere"), "Fix the totals",
+                                  "2026-09-03T11:00:00Z")
+        (folder / "rollout-2026-09-03T11-00-00-0c2d.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in elsewhere), encoding="utf-8")
+
+    def tasks(self, hosts) -> list:
+        return list(ab.cold_starts(self.project, self.transcripts, None, ab.instant("2026-10-07"),
+                                   self.codex, hosts))
+
+    def test_a_codex_rollout_is_a_cold_start(self) -> None:
+        (task,) = self.tasks(("codex",))
+        self.assertEqual(("codex", ["src/Gold.php"], ["codex"]), (task["host"], task["gold"], task["seed_hosts"]))
+        self.assertTrue(task["prompt"].startswith("Fix the totals"))
+        self.assertEqual("rollout-2026-09-02T11-00-00-0a1b", task["session"])
+
+    def test_the_default_draws_from_claude_code_alone(self) -> None:
+        default = list(ab.cold_starts(self.project, self.transcripts, None, ab.instant("2026-10-07")))
+        self.assertEqual(["claude"], [task["host"] for task in default])
+        self.assertEqual(["claude", "codex"], sorted(task["host"] for task in self.tasks(("claude", "codex"))))
+
+    def test_the_compressed_rollout_is_read(self) -> None:
+        if not self.compressed:
+            self.skipTest("no zstd coder: neither Python 3.14 nor the zstd command")
+        sessions = ab.project_sessions(self.project, self.transcripts, self.codex, ("codex",))
+        self.assertEqual([("codex", ".zst")], [(host, path.suffix) for host, path in sessions])
+
+    def test_seeding_reads_the_hosts_the_task_names(self) -> None:
+        recorded = []
+        with mock.patch.object(ab.runtime(), "record_recent_files",
+                               side_effect=lambda connection, files: recorded.append(list(files))), \
+                mock.patch.object(ab.runtime(), "load_recent_files", return_value=[]), \
+                mock.patch.object(ab.sqlite3, "connect"):
+            corpus = Path(self.directory.name) / "corpus"
+            shutil.copytree(self.project, corpus, ignore=shutil.ignore_patterns(".git"))
+            later = {"ts": "2026-09-05T00:00:00Z"}
+            ab.seed_recent_files(later, corpus, self.project, self.transcripts, self.codex)
+            claude_only = [files for files in recorded]
+            recorded.clear()
+            ab.seed_recent_files(dict(later, seed_hosts=["claude", "codex"]), corpus, self.project,
+                                 self.transcripts, self.codex)
+        # The Claude Code session read and edited both files; the Codex one adds its own turn.
+        self.assertEqual(1, len(claude_only))
+        self.assertEqual(2, len(recorded))
+
+    def test_an_unknown_host_is_refused(self) -> None:
+        with self.assertRaises(ab.OutcomeError):
+            ab.parse_hosts("claude,cursor")
+
+    def test_only_what_a_person_wrote_starts_a_codex_turn(self) -> None:
+        def said(words: str) -> dict:
+            return {"type": "response_item", "payload": codex_message("user", words)}
+
+        for words in ("# AGENTS.md instructions for /w\n\nrules", "<recommended_plugins>x</recommended_plugins>",
+                      "<hook_prompt>save</hook_prompt>", "<turn_aborted>\nstopped\n</turn_aborted>",
+                      "<task-notification>\n<task-id>b1</task-id>\n</task-notification>",
+                      "<heartbeat>\n<automation_id>nightly</automation_id>\n</heartbeat>",
+                      "<system-reminder>a side session ended</system-reminder>\nnote"):
+            with self.subTest(words=words[:20]):
+                self.assertFalse(ab.human_prompt(said(words)))
+        for words in ("Fix the totals", '<pasted_content id="1">log</pasted_content> why?', "# Plan\nDo it",
+                      '<pasted_content id="2">only the log</pasted_content>',
+                      "# In app browser:\n- url: http://localhost\n\n## My request for Codex:\nFix the totals",
+                      "# Files mentioned by the user:\n\n## a.png: /w/a.png\n\n## My request:\nFix the totals",
+                      '<in-app-browser-context source="page">url</in-app-browser-context>\n\nFix the totals'):
+            with self.subTest(words=words[:20]):
+                self.assertTrue(ab.human_prompt(said(words)))
 
 
 class RecallSourcesTest(DemoProject):

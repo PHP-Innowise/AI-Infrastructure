@@ -1109,7 +1109,10 @@ enters the refresh branch, so without it that client would be invisible), and
 by the prompt hook itself — the hook writes its own line carrying only an exit
 status, because on a timeout the Python process is killed before it can write
 anything, and that is the one case most worth measuring. Records carry no
-query text and no selected paths.
+query text and no selected paths. A `refresh` or `hook-context` record also
+carries the capsule's shape as counts - `{"profile", "working",
+"recent_files", "ticket_files", "documents", "tokens"}` - which
+`scripts/memory_eval.py funnel` adds up across projects.
 
 ### `status` consolidation counters
 

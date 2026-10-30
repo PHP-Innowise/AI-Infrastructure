@@ -4,6 +4,26 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime can name a ticket's files, switched off — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py` and
+  `brain_runtime.py` change in the asset. `runtime.json.template` names no
+  `ticket_files`, so a generated project keeps the line off. The policy lock
+  was rewritten.
+
+### The seeded runtime starts a Codex turn where its rollout says — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime records each capsule's shape — 2026-10-30
+
+- memory-seed's `context.py` writes the capsule's shape (profile, working
+  state, recent-file and document counts, token estimate) into each
+  `refresh-health.ndjson` line, as the editions' does, so
+  `scripts/memory_eval.py funnel` can add up a generated project too. Counts
+  only: no path, query or text.
+
 ### The seeded runtime's turn mends a bank index a stopped write left behind — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py`

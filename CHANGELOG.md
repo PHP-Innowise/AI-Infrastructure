@@ -28,6 +28,112 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A ticket files line in the capsule, an experiment switched off — 2026-10-30
+
+- `ticket_files: true` in `runtime.json` (or `CONTEXT_TICKET_FILES=1`; `0`
+  turns a configured one off) adds `ticket files (CMS-741): ...` beside the
+  recent files: the files of the newest commits on any ref whose message names
+  a ticket of the request, or of the task's ID upper-cased, matched in any
+  case as a word of its own; present, kept as recent files are, not named in
+  the request and not already shown; ten at most within 720 characters. Off
+  by default: it changes what a capsule spends, so it waits for a task-outcome
+  measurement (`docs/MEMORY-EVAL.md`, "Accepting a retrieval change").
+- Why this one: on 155 cold starts of four client projects (before
+  2026-10-07) it was the most precise list - 9.4% of the files it showed were
+  changed by the turn, against 6.1% of the recent files - and found a changed
+  file in 14 tasks the recent files missed; with co-change of the files a
+  prompt names, 23 (55 to 78 tasks) at the width of twenty recent files (68).
+  Co-change of the recent files themselves did no better than ten more recent
+  files and is not built.
+- Cost: `git log --grep` adds 35 to 60 ms a prompt on repositories of 4,000
+  to 5,000 commits (the largest client clone's refresh, median 83 to 143 ms).
+  A Git failure or its two-second timeout leaves the line out.
+- The capsule shape in `refresh-health.ndjson` counts `ticket_files`, and
+  `memory_eval.py funnel` has "with ticket files".
+- `scripts/memory_outcome_ab.py`: arm `ticket` (recall plus the line); `sample
+  --require-ticket-commits` keeps the cold starts it can act on; a task records
+  its session's `branch`, and the corpus branch keeps that ticket
+  (`ab/<id>-CMS-741`); `report --compare recall,ticket` counts the pairs whose
+  capsule carried the line. The measurement is sealed before it runs (SHA-256
+  `ff43fdbad191b748feacfce2a2a087d3bfdabb71108804ed250d2fdca9cd1a6f`):
+  `recall` against `ticket` on the same projects' cold starts from
+  2026-10-31, drawn once at least 30 exist. On 8 corpora of the tuning set the
+  ticket arm's capsule showed the line and the recall arm's did not.
+
+### A Codex turn begins where its rollout says, not at Codex's own context — 2026-10-30
+
+- The Stop hook keeps the files of the transcript's latest turn, which began
+  after the last user message the runtime took for a prompt. Codex also
+  writes its own context in the user role - its `AGENTS.md` instructions and
+  recommended plugins, an app page, a skill's text, a Stop hook's
+  continuation, a subagent's report, the answer to its question, a stopped
+  turn's note - and each was taken for a prompt: on the 3,099 rollouts of
+  the maintainer machine, 229 of 6,298 Codex turns with calls lost the calls
+  made before one, 5,307 of 131,774. `_transcript_prompt` now leaves out a
+  message that is wholly such context (the instructions, or one of those
+  envelopes). Context around the person's own request (`# In app browser:`
+  or `# Files mentioned by the user:` above `## My request`,
+  `<in-app-browser-context>` with the request after it) and a turn Codex
+  starts itself (a notification, a heartbeat) still start a turn.
+- A Codex turn begins at the rollout's own `task_started`: the 29 turns the
+  prompt rule alone still cut were a message the person sent while the turn
+  ran, which Codex adds to that turn. Without the event in the window
+  (Claude Code, a turn longer than the window) the turn begins at its prompt
+  as before.
+- `scripts/memory_outcome_ab.py` had its own test for a Codex prompt, which
+  also dropped context around the person's request: 484 such prompts on the
+  maintainer machine. It now takes the runtime's and leaves out only a turn
+  Codex starts itself. Before 2026-10-07 the four clients give 268 Codex
+  recall sources (242 before) and still 38 Codex cold starts, 6 of them
+  different: the old test had passed over the session's first prompt.
+
+### The evaluation tools read Codex's compressed rollouts and draw Codex tasks — 2026-10-30
+
+- Codex keeps a finished rollout as `rollout-*.jsonl.zst`: 3,040 of the
+  3,099 on the maintainer machine, the four client projects' 1,837 Codex
+  sessions among them. `scripts/memory_eval.py` read only `*.jsonl`, so
+  `realized` reported those clients' Codex history as empty. It now reads
+  compressed rollouts through Python 3.14's `compression.zstd`, or else the
+  `zstd` command, and says how many it could not read without either.
+- With them, over the four clients: Claude Code, 386 sessions, 1 of 289
+  delivered documents opened, no `context.py` call by an agent; Codex, 1,837
+  sessions, 25 of 67 opened, 474 `context.py` calls (66 of them `retrieve`).
+  "Delivered documents go unused" held for Claude Code alone.
+- `scripts/memory_outcome_ab.py`: `sample --hosts claude,codex` and
+  `recall-sources --hosts` draw from Codex rollouts too, compressed ones
+  included; the default stays `claude`, so a sealed sample draws the same
+  tasks. Each task records `seed_hosts`, the sessions its recent files are
+  seeded from (`run --codex-root`); a task from before them seeds from
+  Claude Code alone.
+- A Codex prompt is what a person wrote: the stand reads a Codex message's
+  text, and a message Codex puts in the user role (`AGENTS.md`
+  instructions, recommended plugins, notifications, a hook's continuation
+  prompt) no longer starts a turn. 2,310 of the 3,099 rollouts began with
+  one; before the fix the four clients gave 15 Codex cold starts, after it
+  38 (37 with 1-10 gold files, none in an earlier sample), and 242 Codex
+  recall sources beside Claude Code's 105.
+
+### A memory funnel across projects, from their journals — 2026-10-30
+
+- `scripts/memory_eval.py funnel --project A --project B [--since DAY] [--json]`
+  adds up how far memory gets in several projects at once, from their
+  journals alone: the prompt hook's runs, timeouts and failures; the capsules
+  built, how many carried the working state, recent files or documents, by
+  profile, and their median tokens; the saves armed, requested, made, refused,
+  failed or omitted, with learnings written and chunks promoted; and the task
+  records, findings, decisions and bank chunks the project keeps. It reads no
+  transcript, path, query or record text and labels a project by its folder
+  name, so a teammate can send the result; `realized` stays the transcript
+  side.
+- A `refresh` or `hook-context` line in `refresh-health.ndjson` now carries
+  the capsule's shape as counts: `{"profile", "working", "recent_files",
+  "documents", "tokens"}`. A line from an older runtime has none and the
+  funnel counts it as `unknown`.
+- Run over the four client projects after syncing them to this stack on
+  2026-10-30: since 2026-09-01, 640 prompt hook runs (5 timed out), 663
+  capsules with no shape recorded, no save journal yet, 56 task records,
+  77 findings and decisions, 5 bank chunks.
+
 ### Each turn mends a bank index that a stopped write left behind — 2026-10-30
 
 - Why: a promotion, a retire or a re-verify writes the chunk first and

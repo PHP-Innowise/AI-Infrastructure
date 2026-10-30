@@ -86,6 +86,20 @@ delivered documents was opened.
 - Fixes merge with their tests. Heuristics wait for the outcome measurement,
   and an experiment switch must leave the default unchanged.
 
+### The `ticket` arm: a sealed measurement
+
+The ticket files line was chosen on the 155 cold starts before 2026-10-07 of
+four client projects: beside the ten recent files it found a file the turn
+changed in 14 more tasks, and with co-change of the files a prompt names in 23
+more (55 to 78), at the width of twenty recent files (68). That set steered
+the design, so it is a smoke test (78 of its tasks pass
+`--require-ticket-commits`). The measurement is written down before it runs:
+`recall` against `ticket` on the same projects' cold starts from 2026-10-31,
+drawn once at least 30 exist, with the stand's verdict rule. The note is kept
+outside the clone (it names the projects); its SHA-256 is
+`ff43fdbad191b748feacfce2a2a087d3bfdabb71108804ed250d2fdca9cd1a6f`. Until
+it reads `ticket-helps`, `ticket_files` stays off.
+
 ## What a run does, per prompt
 
 Nothing is written into the project. All work happens in the cache (default
@@ -205,6 +219,9 @@ python3 scripts/memory_eval.py run ... --as-of now --out ~/memory-eval/results/l
 
 # Do agents use what the hook delivered? Aggregates only.
 python3 scripts/memory_eval.py realized --project ~/Desktop/next --since 2026-09-01
+
+# How far memory gets in several projects at once, from their journals alone.
+python3 scripts/memory_eval.py funnel --project ~/Desktop/next --project ~/Desktop/scb --since 2026-10-30
 ```
 
 | `run` option | Meaning |
@@ -316,6 +333,12 @@ counted as skipped - `next-gen` is not `next`). A turn starts at the prompt
 hook's output (a `hook_success` `UserPromptSubmit` attachment; in Codex, a
 developer message that starts like a capsule) and ends at the next human
 prompt. `--json` prints the numbers as JSON, `--paths` adds per-path counts.
+Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of
+3,099 on the maintainer machine in October 2026); `realized` reads those too,
+through Python 3.14's `compression.zstd` or else the `zstd` command. Without
+either, it says how many compressed rollouts it could not read
+(`compressed_unread`), counted over every project, since which project a log
+nobody could read belongs to is unknown.
 
 `realized` also reads the project's native result journal,
 `memory-bank/local/native-results.ndjson` (`--state DIR` for an attached
@@ -332,6 +355,33 @@ never printed. The prompt hook's lines in `refresh-health.ndjson` name no host,
 so they are given once, for all hosts. A project without the journal ran a
 runtime before it, or no native step at all; `docs/MEMORY-INTEGRATION.md`
 lists what each line means.
+
+`funnel` adds up several projects at once from their journals alone, so it
+needs no transcripts and its output can come from a teammate's machine. Each
+`--project` is a project directory, or an attached project's state directory;
+its folder name labels the column and the path stays local. Per project and
+in total, it counts:
+- **the prompt hook**: its runs from its own lines in `refresh-health.ndjson`,
+  with timeouts (`124`) and other non-zero exits;
+- **the capsules**: every `refresh` and Cursor `hook-context` line, and from
+  the `capsule` shape a runtime of 2026-10-30 or later records - the profile,
+  the working state, how many recent files, ticket files and documents it
+  carried, its token estimate - how many had each, by profile, and the median
+  tokens. An older
+  line has no shape and counts as `unknown`. A refresh line names no host and
+  also comes from an explicit request (the MCP retrieve, the CLI);
+- **the saves**: from `native-results.ndjson`, as `realized` reads it - armed,
+  requested at Stop, made (saved or held), refused, failed or omitted,
+  learnings written and chunks promoted, with every code and its count;
+- **what the project keeps**: task records, findings and decisions, and bank
+  chunks, counted as files. The `--since` window applies to the journals, not
+  to these.
+
+It prints counts and fixed codes only; `--json` gives the same numbers as
+JSON. A project where the hook ran but no capsule carried a recent file, or
+where saves are requested and none is made, shows where to look next;
+`realized` then tells, from the transcripts on the machine that has them,
+whether the agent used what was delivered.
 
 For a real historical comparison, freeze each project's reachable Git head and
 eligible working-tree memory once, preserving modification times, and point both
@@ -542,7 +592,8 @@ outside this repository (`run` warns when an input or the output is inside
 the clone, and refuses a cache there). A result carries prompt ids, document
 paths and counts only - never prompt text, capsule text or document bodies;
 the stderr tail withholds any line that quotes the prompt. `realized` prints
-aggregates; document paths only with `--paths`. The cache holds full copies
+aggregates; document paths only with `--paths`. `funnel` reads no path, query
+or record text and labels a project by its folder name. The cache holds full copies
 of client projects: per-prompt corpora are removed as soon as the prompt is
 scored (unless `--keep`), the tree cache and history clones stay until the
 cache is deleted.
@@ -631,8 +682,27 @@ None says whether delivery changes what an agent does.
 
 **What a pair is.**
 - **The task:** the first prompt of a recorded Claude Code session whose turn
-  changed at least one file the prompt does not name. Its *gold* files are
-  those changed files. Each one must be:
+  changed at least one file the prompt does not name. With `sample --hosts
+  codex` (or `claude,codex`) it can also be a Codex rollout that ran in the
+  project or below it, compressed ones included: the runtime's own transcript
+  parsers read both. The default stays `claude`, so a sealed earlier sample
+  draws the same tasks. `--hosts` also decides whose sessions seed the recent
+  files: each task records them as `seed_hosts`, and a task from before them
+  seeds from Claude Code alone. `recall-sources` takes `--hosts` too.
+  A turn starts at what a person wrote. The runtime's prompt test leaves out
+  the context Codex adds in the user role - its `AGENTS.md` instructions,
+  recommended plugins, a skill's text, a hook's continuation prompt, an
+  aborted turn; of 3,099 rollouts on the maintainer machine, 2,310 began
+  with such a message. The stand also leaves out a turn Codex starts by
+  itself: a notification, a heartbeat, a CI event, each a message that is
+  wholly one envelope. Context around the person's request - `# In app
+  browser:` or `# Files mentioned by the user:` above `## My request`,
+  `<in-app-browser-context>` with the request after it - and a paste are the
+  person's prompt. Before 2026-10-07 the four client projects hold 38 Codex
+  cold starts (all with 1-10 gold files, none in an earlier sample) beside
+  117 from Claude Code, and 268 Codex recall sources beside 105: most Codex
+  sessions there began with a read-only review. Its *gold* files are those
+  changed files. Each one must be:
   - a path the project's Git has known;
   - kept by the runtime's recent-files filter;
   - not part of the memory system itself.
@@ -652,6 +722,18 @@ None says whether delivery changes what an agent does.
 - **The `recall` arm** runs it with `capsule_profile: recall`: navigation plus
   the task's own saves. It writes a manifest only on a turn one of them
   matched, so a run is valid when the hook ran.
+- **The `ticket` arm** is `recall` with `ticket_files: true`: the capsule also
+  names the files of the earlier commits for the prompt's or the branch's
+  ticket (`docs/CONTEXT-AND-MEMORY.md`). A run is valid when the hook ran;
+  `report --compare recall,ticket` also says in how many pairs the line
+  reached the capsule (`ticket_files_delivered`, from the health lines). A
+  corpus branch keeps the ticket of the branch its session ran on
+  (`ab/<id>-CMS-741`), so the runtime and the agent see it there as they did.
+  `sample --require-ticket-commits` keeps the cold starts the line can act
+  on: the prompt or the session's branch names a ticket, and a commit
+  reachable from the corpus commit names it with a file the line would show -
+  present, not named in the prompt and not among the ten recent files the
+  seeded capsule shows. Each such task records its `tickets`.
 - **Comparing arms:** `report --compare BASELINE,TREATMENT` compares any two
   arms of a result. The rule below then reads `<treatment>-helps` /
   `<treatment>-hurts`. Each run also records the token estimate of the
