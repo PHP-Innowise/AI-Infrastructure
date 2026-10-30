@@ -44,7 +44,9 @@ edition's own files remain in that edition's changelog.
   branch. A commit ID there (a bisect started on a detached HEAD) names no
   task. `status` reports the task with the source `git-bisect`. The
   generator's hook fragment (`hook-forge`) carries the same lines, and a
-  test holds it to the editions' hooks.
+  test holds it to the editions' hooks. Those lines take the generator's
+  skill bodies to 307,171 bytes, past their 306,800-byte ceiling, so the
+  ceiling in `scripts/token_budget.json` rises to 307,300.
 - Tests:
   - `tests/test_memory_git_reuse.py` refreshes the capsule and reads
     `status` during a bisect. Before, the refresh failed with "Inferred task
