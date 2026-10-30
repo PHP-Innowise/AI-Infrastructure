@@ -28,6 +28,20 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Install and sync say when Codex would cut the project's policy — 2026-10-31
+
+- Codex reads at most `project_doc_max_bytes` of `AGENTS.md` (32 KiB by
+  default), and the installer appends the policy after the project's own
+  part. The editions' `.codex/config.toml` raises the limit to 128 KiB, but
+  a project's own configuration is kept by every sync: one client's 27 KB of
+  notes and a config without the key leave the policy past byte 32,768 out
+  of Codex (see the Codex bench entry below). `--sync` now reports it as
+  `codex_policy_cut`, with the line to add at the top of
+  `.codex/config.toml` - Codex 0.163 reads it from a trusted project, which
+  the bench showed: with it, the same copy gets the whole 43,260-byte
+  policy - and an install with Codex prints it on stderr
+  (`codex_policy_cut`).
+
 ### Every Codex bench run checks the policy reached the model — 2026-10-31
 
 - `scripts/codex_bench.py` checks in every run what only `--worktree` checked:

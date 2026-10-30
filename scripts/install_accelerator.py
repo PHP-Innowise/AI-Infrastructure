@@ -1093,6 +1093,44 @@ def source_commit(root: Path) -> str | None:
     return result.stdout.strip() or None if result.returncode == 0 else None
 
 
+# Codex reads at most this many bytes of a project's AGENTS.md files
+# (`project_doc_max_bytes`) unless its configuration says otherwise.
+CODEX_DOC_LIMIT = 32 * 1024
+
+
+def codex_policy_cut(target: Path) -> str | None:
+    """Why Codex would not read the project's whole AGENTS.md, or None.
+
+    The installer appends the policy to a project's own AGENTS.md, so the
+    policy is what Codex's byte limit cuts. The editions' .codex/config.toml
+    raises the limit, but a project's own configuration is kept, by install
+    and sync alike: one project's 27 KB of team notes and a config.toml of its
+    own left the policy past byte 32,768 - Verification, Security, Memory
+    Bank And Project Brain - out of every Codex session that did not raise
+    the limit itself. Codex 0.163 reads `project_doc_max_bytes` from a
+    trusted project's `.codex/config.toml`, a top-level key; a person's own
+    configuration is not looked at, since a teammate's differs.
+    """
+    try:
+        policy = read_confined(target, "AGENTS.md")
+        config = read_confined(target, CODEX_CONFIG)
+    except (UnsafePathError, OSError):
+        return None
+    if policy is None:
+        return None
+    top = re.split(rb"(?m)^\s*\[", config or b"", maxsplit=1)[0]
+    found = re.search(rb"(?m)^\s*project_doc_max_bytes\s*=\s*(\d+)\s*(?:#.*)?$", top)
+    limit = int(found.group(1)) if found else CODEX_DOC_LIMIT
+    if len(policy) <= limit:
+        return None
+    return (
+        f"AGENTS.md is {len(policy)} bytes and Codex reads {limit} of it (project_doc_max_bytes): the policy "
+        f"past byte {limit} never reaches a Codex session. Put project_doc_max_bytes = "
+        f"{max(65536, 1 << (len(policy) - 1).bit_length())} at the top of {CODEX_CONFIG}, or shorten the "
+        "project's own part of AGENTS.md"
+    )
+
+
 def installation_ahead(root: Path, recorded: object) -> str | None:
     """Why a sync from this clone would take the project back, or None.
 
@@ -2062,6 +2100,7 @@ def sync_installation(
     report: dict = {
         "target": str(target), "edition": None, "release": None, "changed": [],
         "kept": [], "backups": [], "dry_run": dry_run, "error": None, "partial": None,
+        "codex_policy_cut": None,
     }
     # A runtime reached only through a link is not this project's: the
     # Harness, which reads it without following links, does not count it as
@@ -2379,6 +2418,7 @@ def sync_installation(
             )
         except UnsafePathError as error:
             keep(SYNC_MANIFEST, f"the sync's record is not written ({error})")
+    report["codex_policy_cut"] = codex_policy_cut(target) if "codex" in present else None
     return report
 
 
@@ -2563,6 +2603,9 @@ def main() -> int:
             claude_below_root(target)
         if code == 0 and not args.dry_run and "codex" in tools:
             codex_worktrees(target)
+            cut = codex_policy_cut(target)
+            if cut:
+                print(f"CODEX\tAGENTS.md\t{cut}", file=sys.stderr)
         return code
     except (InventoryError, OSError, subprocess.CalledProcessError) as error:
         print(f"install-accelerator: {error}", file=sys.stderr)

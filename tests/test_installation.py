@@ -1452,6 +1452,78 @@ class SyncNeverBackTest(unittest.TestCase):
         self.assertIn("--allow-downgrade requires --sync", result.stderr)
 
 
+class CodexPolicyCutTest(unittest.TestCase):
+    """Codex reads 32 KiB of AGENTS.md by default, and the policy comes last.
+
+    One project's own notes pushed the policy it was given past the limit:
+    Verification, Security and the memory rules never reached Codex there.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="codex policy cut ")
+        self.addCleanup(self._tmp.cleanup)
+        self.target = Path(self._tmp.name) / "project"
+        (self.target / ".codex").mkdir(parents=True)
+
+    def write(self, policy_bytes: int, config: str | None = None) -> None:
+        (self.target / "AGENTS.md").write_bytes(b"# Team notes\n" + b"x" * (policy_bytes - 13))
+        if config is not None:
+            (self.target / ".codex/config.toml").write_text(config, encoding="utf-8")
+
+    def test_a_policy_within_the_limit_or_a_raised_limit_is_read_whole(self) -> None:
+        cut = install_accelerator.codex_policy_cut
+        self.write(32 * 1024)
+        self.assertIsNone(cut(self.target))
+        self.write(43_260, "project_doc_max_bytes = 65536\n\n[features]\nhooks = true\n")
+        self.assertIsNone(cut(self.target))
+
+    def test_past_the_limit_the_report_names_the_setting_that_reads_it_whole(self) -> None:
+        self.write(43_260, "[features]\nhooks = true\n")
+        reason = install_accelerator.codex_policy_cut(self.target)
+        self.assertIn("AGENTS.md is 43260 bytes and Codex reads 32768", reason)
+        self.assertIn("project_doc_max_bytes = 65536 at the top of .codex/config.toml", reason)
+        # Under a table the key is that table's, not Codex's limit.
+        self.write(43_260, "[agents]\nproject_doc_max_bytes = 65536\n")
+        self.assertIsNotNone(install_accelerator.codex_policy_cut(self.target))
+        # A limit raised, but not enough; or lowered below the file.
+        self.write(70_000, "project_doc_max_bytes = 65536\n")
+        self.assertIn("project_doc_max_bytes = 131072", install_accelerator.codex_policy_cut(self.target))
+        self.write(20_000, "project_doc_max_bytes = 16384  # kept short\n")
+        self.assertIn("Codex reads 16384 of it", install_accelerator.codex_policy_cut(self.target))
+
+    def test_a_sync_says_so_where_the_projects_codex_config_lacks_the_limit(self) -> None:
+        # The edition's config.toml raises the limit; one the team edited -
+        # or an older release's - stays as it is through every sync.
+        project = Path(self._tmp.name) / "noted"
+        project.mkdir()
+        run("git", "init", "--quiet", str(project))
+        (project / "AGENTS.md").write_text("# Team notes\n\n" + "Keep invoices per tenant.\n" * 1400,
+                                           encoding="utf-8")
+        installed = run(sys.executable, str(INSTALLER), "--edition", "Symfony", "--tool", "codex",
+                        "--target", str(project), "--merge-existing")
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        config = project / ".codex/config.toml"
+        edited = "".join(line for line in config.read_text(encoding="utf-8").splitlines(keepends=True)
+                         if not line.startswith("project_doc_max_bytes"))
+        config.write_text(edited + "\n# the team's own line\n", encoding="utf-8")
+        synced = run(sys.executable, str(INSTALLER), "--sync", "--target", str(project))
+        report = json.loads(synced.stdout)
+        self.assertIn("AGENTS.md is", report["codex_policy_cut"])
+        self.assertIn("never reaches a Codex session", report["codex_policy_cut"])
+        self.assertNotIn("project_doc_max_bytes =", config.read_text(encoding="utf-8").split("[", 1)[0])
+
+    def test_the_editions_own_codex_config_reads_the_policy_whole(self) -> None:
+        project = Path(self._tmp.name) / "fresh"
+        project.mkdir()
+        run("git", "init", "--quiet", str(project))
+        (project / "AGENTS.md").write_text("# Team notes\n\n" + "Keep invoices per tenant.\n" * 1400,
+                                           encoding="utf-8")
+        installed = run(sys.executable, str(INSTALLER), "--edition", "Symfony", "--tool", "codex",
+                        "--target", str(project), "--merge-existing")
+        self.assertEqual(0, installed.returncode, installed.stderr)
+        self.assertNotIn("CODEX\tAGENTS.md", installed.stderr)
+
+
 class SyncOfAnOlderReleaseTest(unittest.TestCase):
     """A sync never leaves a project with a newer release's files over its older runtime or wiring.
 

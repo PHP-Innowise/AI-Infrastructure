@@ -292,6 +292,17 @@ Git checkout, or the clone's own commit or a descendant of the project's
 syncs as before. `--allow-downgrade` is a person going back on purpose;
 nothing unattended passes it.
 
+Codex reads at most `project_doc_max_bytes` of a project's `AGENTS.md`, 32 KiB
+by default, and the policy is appended after the project's own part. The
+editions' `.codex/config.toml` raises the limit to 128 KiB, but a project's
+own configuration - one the team edited, or an older release's - is kept by
+every sync. Where Codex would then cut `AGENTS.md`, the sync's
+`codex_policy_cut` says how much it reads and the line to put at the top of
+`.codex/config.toml` (a trusted project's setting, which Codex 0.163 reads),
+and an install with Codex prints the same as `CODEX\tAGENTS.md\t...` on
+stderr. A person's own `~/.codex/config.toml` is not consulted: a teammate's
+differs.
+
 The edition README that `--merge-existing` installed as `ACCELERATOR.md`
 beside a project's own `README.md` follows the release by the same rules:
 the sync records it in `memory-bank/local/accelerator-install.json`, updates
