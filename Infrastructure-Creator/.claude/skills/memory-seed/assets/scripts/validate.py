@@ -183,6 +183,11 @@ def parse_frontmatter(path: Path) -> dict:
     try:
         metadata = json.loads(raw_metadata)
     except json.JSONDecodeError as error:
+        # Two clones that both re-verified or retired a chunk conflict in its
+        # frontmatter on pull; "not valid JSON" did not say why.
+        if any(line.startswith(("<<<<<<< ", ">>>>>>> ")) for line in raw_metadata.splitlines()):
+            raise ValidationError("unresolved Git merge conflict in the frontmatter; keep one side or merge "
+                                  "both, without the markers") from error
         raise ValidationError(f"frontmatter is not valid JSON-compatible YAML: {error}") from error
     if not isinstance(metadata, dict):
         raise ValidationError("frontmatter must be an object")

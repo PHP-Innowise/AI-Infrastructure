@@ -28,7 +28,7 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
-### An index left in a merge conflict is one error that names it — 2026-10-30
+### An index or a chunk left in a merge conflict says so — 2026-10-30
 
 - Why: every promotion rewrites the generated `memory-bank/INDEX.md`, so two
   clones of a branch that both promoted leave it in a merge conflict on pull.
@@ -39,8 +39,14 @@ edition's own files remain in that edition's changelog.
   the index is generated from the chunks and that `context.py reindex-bank`
   writes it again (any bank write does: a save that promotes, `reindex-bank`,
   a retire); the per-chunk index checks wait for a readable index.
-- Tests: `memory-bank/tests/test_validate.py` conflicts an index row: one
-  error naming the conflict and `reindex-bank`; before, two that did not.
+- A chunk two clones both re-verified or retired conflicts in its
+  frontmatter; it read as "frontmatter is not valid JSON-compatible YAML".
+  It now says it holds an unresolved merge conflict, to keep one side or
+  merge both.
+- Tests: `memory-bank/tests/test_validate.py` conflicts an index row (one
+  error naming the conflict and `reindex-bank`; before, two that did not)
+  and a chunk's `last_verified` (the error names the conflict; before, the
+  JSON parser's position).
 
 ### A learning's citation is kept as the file is spelled — 2026-10-30
 

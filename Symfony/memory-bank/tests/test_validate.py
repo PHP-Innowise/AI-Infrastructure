@@ -251,6 +251,18 @@ class MemoryBankValidatorTest(unittest.TestCase):
         self.assertIn("unresolved Git merge conflict", errors[0])
         self.assertIn("reindex-bank", errors[0])
 
+    def test_a_chunk_left_in_a_merge_conflict_says_so(self) -> None:
+        self.add_chunk()
+        chunk = self.bank / "chunks" / "MEM-0001-layering-convention.md"
+        lines = chunk.read_text(encoding="utf-8").splitlines(keepends=True)
+        row = next(number for number, line in enumerate(lines) if '"last_verified"' in line)
+        lines[row:row + 1] = ["<<<<<<< HEAD\n", lines[row], "=======\n",
+                              lines[row].replace('"last_verified": "', '"last_verified": "2'), ">>>>>>> 1234567 (theirs)\n"]
+        chunk.write_text("".join(lines), encoding="utf-8")
+
+        errors, _ = VALIDATOR.validate_bank_report(self.bank)
+        self.assertTrue(any("unresolved Git merge conflict" in error and "MEM-0001" in error for error in errors), errors)
+
     def test_warnings_alone_leave_the_cli_green(self) -> None:
         self.add_chunk()
         self.update_chunk_metadata(
