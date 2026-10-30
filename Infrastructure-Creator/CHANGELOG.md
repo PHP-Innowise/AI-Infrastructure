@@ -4,6 +4,34 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime keeps a citation as the file is spelled — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `memory_results.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime reads a task record left in a merge conflict as invalid, not absent — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`,
+  `context.py` and `native_results.py` change in the asset; the policy lock
+  was rewritten.
+
+### The seeded runtime saves a branch two task records claim where its capsule says — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day), with the capsule's
+  advice naming the same twin in every clone: `context.py` and
+  `native_results.py` change in the asset; the policy lock was rewritten.
+
+### The seeded runtime reads past a broken line in its health series — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `context.py`
+  changes in the asset; the policy lock was rewritten.
+
+### The seeded runtime keeps a held save or checkpoint its hook's budget stops — 2026-10-29
+
+- As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`,
+  `context.py` and `workspace_roots.py` change in the asset; the policy lock
+  was rewritten.
+
 ### The seeded runtime pins a save in a worktree Codex made to its thread — 2026-10-29
 
 - As the editions' does (root `CHANGELOG.md`, same day): `native_results.py`
