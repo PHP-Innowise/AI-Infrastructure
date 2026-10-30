@@ -2701,6 +2701,74 @@ class ExplicitRetrieveTest(unittest.TestCase):
             self.assertNotIn(path, plain)
 
 
+class RenderTraceTest(unittest.TestCase):
+    """Which capsules the runtime rendered the transcripts show it handed
+    over: the runtime's own record against the host's."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        self.project = (base / "work" / "ledger").resolve()
+        self.project.mkdir(parents=True)
+        self.claude = base / "claude"
+        self.codex = base / "codex"
+        project = str(self.project)
+        handed = f"working: shop/fix-12 — Fix\n- memory {CHUNK} — Invoice rounding\n"
+        dropped = "working: shop/fix-12 — Fix\n- memory docs/billing.md — Billing\n"
+        answer = f"working: shop/fix-12 — Fix\n- memory {FINDING} — Rounding bug\n"
+        local = self.project / "memory-bank" / "local"
+
+        def trace(number: int, text: str, entry: str, created: str, items: List[str]) -> None:
+            identity = f"{number:08x}-1111-4222-8333-944455556666"
+            for folder in ("retrieval-traces", "retrieval-manifests"):
+                (local / folder).mkdir(parents=True, exist_ok=True)
+            (local / "retrieval-traces" / f"{identity}.json").write_text(json.dumps({
+                "id": identity, "created_at": created, "render": {
+                    "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "bytes": len(text),
+                    "form": "printed_capsule", "records": [{"path": path} for path in items]}}), encoding="utf-8")
+            (local / "retrieval-manifests" / f"{identity}.json").write_text(
+                json.dumps({"entry_point": entry}), encoding="utf-8")
+
+        trace(1, handed, "hook-context", "2026-09-02T10:00:01Z", [CHUNK])
+        # Rendered, then the hook's budget ran out: the host never got it.
+        trace(2, dropped, "refresh", "2026-09-02T10:30:00Z", ["docs/billing.md"])
+        trace(3, answer, "retrieve", "2026-09-02T10:02:00Z", [FINDING])
+        trace(4, "working: old — x\n", "refresh", "2026-08-01T00:00:00Z", [])
+        mangled = re.sub(r"[^A-Za-z0-9]", "-", project)
+        jsonl(self.claude / mangled / "session.jsonl", [
+            human("Fix the rounding", "2026-09-02T10:00:00Z"),
+            hook(f"{UNSAVED}\n{handed}", "2026-09-02T10:00:01Z", project),
+            {"type": "assistant", "timestamp": "2026-09-02T10:01:00Z", "message": {"id": "m1", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": "python3 memory-bank/scripts/context.py retrieve rounding"}}]}},
+            {"type": "user", "timestamp": "2026-09-02T10:02:00Z", "toolUseResult": {"stdout": answer},
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": answer}]}},
+            tool_use("Read", {"file_path": f"{project}/{CHUNK}"}),
+        ])
+
+    def realized(self, *extra: str) -> Dict[str, Any]:
+        return json.loads(main_output("realized", "--project", str(self.project), "--claude-root", str(self.claude),
+                                      "--codex-root", str(self.codex), "--json", *extra))
+
+    def test_renders_are_matched_to_what_the_host_recorded(self) -> None:
+        traces = self.realized("--since", "2026-09-01", "--traces")["traces"]
+        self.assertEqual(3, traces["traces"])
+        self.assertEqual({"handed": 1, "not_seen": 1}, traces["hook"])
+        self.assertEqual({"answered": 1, "not_seen": 0}, traces["retrieve"])
+        self.assertEqual({"capsules": 1, "with_trace": 1, "trace_items": 1, "trace_items_touched": 1},
+                         traces["hosts"]["claude"])
+        self.assertEqual(4, self.realized("--traces")["traces"]["traces"])
+        self.assertNotIn("traces", self.realized())
+
+    def test_the_text_report_names_no_path(self) -> None:
+        plain = main_output("realized", "--project", str(self.project), "--claude-root", str(self.claude),
+                            "--codex-root", str(self.codex), "--traces")
+        self.assertIn("hook renders never seen in a transcript: 2", plain)
+        for path in (CHUNK, FINDING, "docs/billing.md"):
+            self.assertNotIn(path, plain)
+
+
 class FunnelTest(unittest.TestCase):
     """The memory funnel of several projects, from their journals alone."""
 

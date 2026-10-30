@@ -28,6 +28,19 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### `realized --traces` sets the runtime's renders beside what the host recorded — 2026-10-30
+
+- The runtime keeps a trace of every capsule it rendered, with the digest of
+  the text it printed; `realized --traces` matches each hook turn's capsule
+  and each explicit retrieve's answer to the trace that digest names, each
+  trace once, and counts the hook renders a transcript shows were handed
+  over, those none shows (a refresh stopped at its budget after it printed,
+  a host that dropped the capsule, a transcript not on this machine), the
+  retrieve answers that match a render, and per host the items the matched
+  renders showed and how many the turn touched. Counts only. Checked against
+  a real `refresh` and `hook-context`: the printed text's digest is the
+  trace's.
+
 ### A capsule's health line counts the bytes it printed — 2026-10-30
 
 - The capsule shape in `refresh-health.ndjson` gains `bytes`: the size of

@@ -377,7 +377,23 @@ not recorded yet: 14 of the 23 calls that ran retrieve alone were answered
 "Working task not found", and 39 calls ran `start` first; the runtime answers
 such a retrieve since 2026-10-06. Codex heads a command's output with its own
 lines ("Script completed", the wall time, "Output:"), which `realized` reads
-past. In the same sessions'
+past.
+
+`realized --traces` sets the runtime's own record beside the host's. The
+runtime keeps a trace of every capsule it rendered (the last 200 by default,
+in `memory-bank/local/retrieval-traces`) with the digest of the text it
+printed and the items it showed; the manifest of the same ID names what asked
+for it. Each hook turn's capsule and each explicit retrieve's answer is
+matched to the trace whose digest it reproduces, each trace once. The report
+gives the renders in the window, the hook renders a transcript shows were
+handed over and those none shows - a refresh stopped at its budget after it
+printed, a host that dropped the capsule, a session whose transcript is not
+on this machine, and every Cursor session - the retrieve answers that match
+a render, and per host the hook capsules matched to a render, the items those
+renders showed and how many the turn touched. Counts only. The traces exist
+only where a runtime of 2026-10-13 or later rendered; a capsule from a recall
+profile turn without saves of its own renders without a search and leaves no
+trace. In the same sessions'
 440 capsule turns the capsules delivered 54 items, 44 of them `CHANGELOG.md`
 (25 opened) and none of the rest opened.
 Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of

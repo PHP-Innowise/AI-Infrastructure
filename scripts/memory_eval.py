@@ -3249,6 +3249,8 @@ class Retrievals:
         self.returned: Dict[str, str] = {}
         self.opened: Set[str] = set()
         self.touched: Set[str] = set()
+        # The answers' text, for --traces to find the renders they show.
+        self.answers: List[str] = []
 
     def call(self, identity: object, blob: str, name: str, at: object = None) -> None:
         instant = parse_instant(at) if self.since is not None else None
@@ -3268,6 +3270,7 @@ class Retrievals:
             return
         self.pending.discard(str(identity))
         self.counts["answers"] += 1
+        self.answers.append(text)
         items, records = retrieved(text)
         self.counts["answers_naming"] += bool(items or records)
         for path in records:
@@ -3310,12 +3313,120 @@ def retrieval_summary(sessions: Sequence[Retrievals]) -> Dict[str, Any]:
     return summary
 
 
+def capsule_digests(text: str) -> Set[str]:
+    """The SHA-256 a render trace may hold for this printed capsule: with the
+    newline the printer ends it with, and without, should a host strip it."""
+    body = text.rstrip("\n")
+    return {hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            hashlib.sha256((body + "\n").encode("utf-8")).hexdigest()}
+
+
+# Where the runtime keeps one trace per capsule it rendered (the last 200 by
+# default), and the manifests that say what asked for each.
+TRACE_DIRECTORY = "memory-bank/local/retrieval-traces"
+MANIFEST_DIRECTORIES = ("project-brain/control/retrieval-manifests", "memory-bank/local/retrieval-manifests")
+HOOK_ENTRY_POINTS = ("refresh", "hook-context")
+RETRIEVE_ENTRY_POINTS = ("retrieve", "context")
+
+
+def render_traces(state: Path, since: Optional[datetime]) -> List[Dict[str, Any]]:
+    """The capsules the runtime rendered under ``state``, oldest first: each
+    one's digest, the entry point that asked for it and the items it showed.
+    A trace without a render, or before ``since``, is left out."""
+    traces: List[Dict[str, Any]] = []
+    folder = state / TRACE_DIRECTORY
+    if not folder.is_dir():
+        return traces
+    for path in folder.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        render = data.get("render") if isinstance(data, dict) else None
+        if not isinstance(render, dict) or not isinstance(render.get("sha256"), str):
+            continue
+        created = parse_instant(data.get("created_at"))
+        if since is not None and created is not None and created < since:
+            continue
+        entry = "unknown"
+        for directory in MANIFEST_DIRECTORIES:
+            try:
+                manifest = json.loads((state / directory / path.name).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(manifest, dict) and isinstance(manifest.get("entry_point"), str):
+                entry = manifest["entry_point"]
+                break
+        records = render.get("records") if isinstance(render.get("records"), list) else []
+        traces.append({
+            "sha256": render["sha256"], "entry": entry, "created": created,
+            "items": {normalise_path(record["path"]) for record in records
+                      if isinstance(record, dict) and isinstance(record.get("path"), str)},
+        })
+    traces.sort(key=lambda trace: trace["created"] or datetime.min.replace(tzinfo=timezone.utc))
+    return traces
+
+
+TRACE_COUNTERS = ("capsules", "with_trace", "trace_items", "trace_items_touched")
+
+
+def trace_report(traces: List[Dict[str, Any]], turns: Dict[str, List[Dict[str, Any]]],
+                 answers: Sequence[str]) -> Dict[str, Any]:
+    """Which rendered capsules a host's record shows it handed over.
+
+    A hook turn's capsule and an explicit retrieve's answer are matched to the
+    trace whose render digest they reproduce, each trace once. A hook trace
+    nothing matched was rendered and never seen in a transcript: a refresh
+    stopped at its budget after it printed, a host that dropped the capsule,
+    or a session whose transcript is not on this machine (Cursor keeps none).
+    """
+    pool: Dict[str, List[Dict[str, Any]]] = {}
+    for trace in traces:
+        pool.setdefault(trace["sha256"], []).append(trace)
+    matched: Set[int] = set()
+
+    def take(digests: Set[str]) -> Optional[Dict[str, Any]]:
+        for digest in sorted(digests):
+            for trace in pool.get(digest, ()):
+                if id(trace) not in matched:
+                    matched.add(id(trace))
+                    return trace
+        return None
+
+    hosts: Dict[str, Dict[str, int]] = {}
+    for host, host_turns in turns.items():
+        stats: Counter = Counter()
+        for turn in host_turns:
+            if not turn["output"]:
+                continue
+            stats["capsules"] += 1
+            trace = take(turn["digests"])
+            if trace is not None:
+                stats["with_trace"] += 1
+                stats["trace_items"] += len(trace["items"])
+                stats["trace_items_touched"] += len(trace["items"] & turn["touched"])
+        hosts[host] = {name: stats.get(name, 0) for name in TRACE_COUNTERS}
+    answered = sum(1 for answer in answers if take(capsule_digests(answer)) is not None)
+
+    def count(entries: Sequence[str], seen: bool) -> int:
+        return sum(1 for trace in traces if trace["entry"] in entries and (id(trace) in matched) == seen)
+
+    return {
+        "traces": len(traces),
+        "hook": {"handed": count(HOOK_ENTRY_POINTS, True), "not_seen": count(HOOK_ENTRY_POINTS, False)},
+        "retrieve": {"answered": answered, "not_seen": count(RETRIEVE_ENTRY_POINTS, False)},
+        "unknown_entry": sum(1 for trace in traces if trace["entry"] not in HOOK_ENTRY_POINTS + RETRIEVE_ENTRY_POINTS),
+        "hosts": hosts,
+    }
+
+
 def new_turn(started: object) -> Dict[str, Any]:
     return {
         "started": parse_instant(started),
         "output": False,
         "delivered": set(),
         "records": set(),
+        "digests": set(),
         "touched": set(),
         "text": [],
         "active": False,
@@ -3395,6 +3506,7 @@ def deliver(turn: Dict[str, Any], capsule: Optional[str]) -> None:
         items, records = capsule_items(capsule)
         turn["delivered"] |= items
         turn["records"] |= records
+        turn["digests"] |= capsule_digests(capsule)
 
 
 def claude_turns(path: Path, retrievals: Optional[Retrievals] = None) -> List[Dict[str, Any]]:
@@ -3921,6 +4033,10 @@ def command_realized(arguments: argparse.Namespace) -> int:
             "total": retrieval_summary(retrievals["claude"] + retrievals["codex"]),
         },
         "native": native_funnel(state, since),
+        **({"traces": trace_report(
+            render_traces(state, since), {"claude": claude_all, "codex": codex_all},
+            [answer for host in ("claude", "codex") for session in retrievals[host] for answer in session.answers],
+        )} if arguments.traces else {}),
         "continuations": {
             "claude": continuation_summary([cost for path in claude_used for cost in continuation_costs(path, "claude")]),
             "codex": continuation_summary([cost for path in codex_used for cost in continuation_costs(path, "codex")]),
@@ -3992,6 +4108,8 @@ def format_realized(report: Dict[str, Any]) -> str:
         if counts["delivered"]:
             lines.append(f"  {kind:<11} {counts['delivered']:>6} {counts['touched']:>6} {counts['mentioned']:>6}")
     lines.extend(format_retrievals(report["retrieve"], width))
+    if "traces" in report:
+        lines.extend(format_traces(report["traces"], width))
     lines.extend(format_native(report["native"]))
     lines.extend(format_continuations(report["continuations"]))
     if "paths" in report:
@@ -4235,6 +4353,29 @@ def format_retrievals(retrieve: Dict[str, Any], width: int) -> List[str]:
     return lines
 
 
+TRACE_ROWS = (
+    ("hook capsules in transcripts", "capsules"),
+    ("  matched to a render trace", "with_trace"),
+    ("  items those renders showed", "trace_items"),
+    ("  of them touched", "trace_items_touched"),
+)
+
+
+def format_traces(traces: Dict[str, Any], width: int) -> List[str]:
+    lines = ["", f"Render traces in the window: {traces['traces']}"]
+    lines.append(f"  hook renders handed over (seen in a transcript): {traces['hook']['handed']}")
+    lines.append(f"  hook renders never seen in a transcript: {traces['hook']['not_seen']}")
+    lines.append(f"  retrieve answers matched to a render: {traces['retrieve']['answered']}"
+                 f" (retrieve renders unmatched: {traces['retrieve']['not_seen']})")
+    if traces["unknown_entry"]:
+        lines.append(f"  renders whose manifest is gone: {traces['unknown_entry']}")
+    hosts = traces["hosts"]
+    lines.append(" " * width + "".join(host.rjust(9) for host in hosts))
+    for title, key in TRACE_ROWS:
+        lines.append(title.ljust(width) + "".join(str(hosts[host][key]).rjust(9) for host in hosts))
+    return lines
+
+
 def format_continuations(continuations: Dict[str, Any]) -> List[str]:
     lines = ["", "Native save requests in the transcripts (median per request):"]
     for host, summary in continuations.items():
@@ -4367,6 +4508,8 @@ def build_parser() -> argparse.ArgumentParser:
     realized.add_argument("--since", help="only turns from this UTC date on (YYYY-MM-DD)")
     realized.add_argument("--json", action="store_true")
     realized.add_argument("--paths", action="store_true", help="also list delivered document paths")
+    realized.add_argument("--traces", action="store_true",
+                          help="match the runtime's render traces to what the transcripts show it handed over")
     realized.set_defaults(handler=command_realized)
 
     funnel = commands.add_parser(
