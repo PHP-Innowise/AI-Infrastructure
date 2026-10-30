@@ -156,6 +156,10 @@ class PolicyHeardTest(unittest.TestCase):
         self.assertTrue(claude_code_bench.policy_heard(self.POLICY, whole, overflow="Warning: truncated output"))
         noted = [{"since": [self.POLICY + "\nWarning: truncated output (original token count: 9000)"], "system": ""}]
         self.assertFalse(claude_code_bench.policy_heard(self.POLICY, noted, overflow="Warning: truncated output"))
+        # A long file the stand-in printed is cut too: no policy beside the note.
+        read = [{"since": [self.POLICY, '{"name": "acme/shop"}\nWarning: truncated output (original token count: 9000)'],
+                 "system": ""}]
+        self.assertTrue(claude_code_bench.policy_heard(self.POLICY, read, overflow="Warning: truncated output"))
 
     def test_html_comments_claude_code_drops_are_not_asked_for(self) -> None:
         managed = ("## Team notes\n\n<!-- BEGIN ACCELERATOR MANAGED POLICY -->\n" + self.POLICY

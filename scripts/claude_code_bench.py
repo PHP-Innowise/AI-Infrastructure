@@ -460,15 +460,19 @@ def permission_run(args: argparse.Namespace, work: Path, project: Path, env: Dic
 
 def policy_heard(policy: str, requests: List[Dict[str, Any]], overflow: str = "Output too large") -> bool:
     """Every line of the policy reached the model - in the conversation, or in
-    the system prompt where a lent edition appends it - and none of it went to
-    a file the host keeps an over-long hook output in (`overflow`, the note it
-    leaves). HTML comments, such as the markers around a project's managed
-    policy block, are left out: Claude Code drops them from the instructions
-    it loads."""
-    heard = "\n".join([text for request in requests for text in request["since"]]
-                      + [request.get("system", "") for request in requests])
-    lines = re.sub(r"<!--.*?-->", "", policy, flags=re.S).splitlines()
-    return all(line in heard for line in lines if line.strip()) and overflow not in heard
+    the system prompt where a lent edition appends it - and no text that
+    carries it was cut short (`overflow`, the note the host leaves where it
+    kept the rest of an over-long output in a file). A long file a tool
+    printed may be cut as well; that leaves no policy line beside the note.
+    HTML comments, such as the markers around a project's managed policy
+    block, are left out: Claude Code drops them from the instructions it
+    loads."""
+    texts = [text for request in requests for text in request["since"]] + [
+        request.get("system", "") for request in requests]
+    heard = "\n".join(texts)
+    lines = [line for line in re.sub(r"<!--.*?-->", "", policy, flags=re.S).splitlines() if line.strip()]
+    cut = any(overflow in text and any(line in text for line in lines) for text in texts)
+    return all(line in heard for line in lines) and not cut
 
 
 def policy_files(requests: List[Dict[str, Any]]) -> List[str]:

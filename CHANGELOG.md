@@ -74,8 +74,10 @@ edition's own files remain in that edition's changelog.
 - `scripts/codex_bench.py` checks in every run what only `--worktree` checked:
   every line of the project's `AGENTS.md` (the clone's, in the developer
   instructions, attached) in what Codex sent, none of it in a truncated hook
-  output, and reports the policy's size (`policy_bytes`). On Codex 0.163 a
-  fresh install passes. A synced copy of one client fails it: its
+  output, and reports the policy's size (`policy_bytes`). An overflow note
+  fails it only beside policy text: Codex also cuts a long file the stand-in
+  prints, which on one client's copy failed a policy that had arrived whole.
+  On Codex 0.163 a fresh install passes. A synced copy of one client fails it: its
   `AGENTS.md` is the team's 27 KB of notes with the edition's policy block
   appended, 43,260 bytes, and Codex reads 32,768 by default
   (`project_doc_max_bytes`), so the policy stops mid-line in Working Memory
