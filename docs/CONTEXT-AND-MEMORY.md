@@ -192,8 +192,9 @@ found damaged is quarantined and started afresh (the buffered turns stay in
 the quarantined file); a removed worktree's database is pruned; turns
 buffered after a task closed are dropped; and the buffer of a branch that
 gets no further turn is never flushed. A runtime update, a reindex and a
-process killed mid-checkpoint keep it: the Brain is written before the buffer
-is cleared, and a replayed flush neither loses nor repeats a path.
+process killed mid-checkpoint keep the buffer: the Brain is written before the
+buffer is cleared, and a replayed flush neither loses nor repeats a path. A
+turn killed that way may miss its own update of the recent files.
 
 The active provider is local `sqlite-fts5`: network access and embeddings are
 disabled. An external provider entry exists only as a disabled contract.
