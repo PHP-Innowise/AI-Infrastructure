@@ -2407,10 +2407,19 @@ def append_message(
                 "Messages require an active task; this task is terminal"
             )
         path = messages_path(repository, task["id"])
-        seq = 1
+        seq, separator = 1, ""
         if path.is_file():
-            with path.open("r", encoding="utf-8") as handle:
-                seq += sum(1 for line in handle if line.strip())
+            text = path.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            seq += sum(1 for line in lines if line.strip())
+            if lines and not text.endswith("\n"):
+                # Appended to, the line would join this entry's into one.
+                try:
+                    json.loads(lines[-1])
+                except json.JSONDecodeError:
+                    raise BrainError(f"Message journal line {len(lines)} "
+                                     f"{message_line_problem(lines[-1], True)}: {path}") from None
+                separator = "\n"
         record: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "id": new_uuid(),
@@ -2429,11 +2438,50 @@ def append_message(
         validate_message(record)
         validate_schema_file(repository, "message.schema.json", record)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        append_whole_line(path, separator + json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         return record
+
+
+def append_whole_line(path: Path, line: str) -> None:
+    """Append `line` whole, or not at all.
+
+    A full disk takes part of an append. The channel is read strictly line by
+    line, so the part left at its end failed every later read and
+    validation, and the next entry joined it on one line. An append that
+    fails is taken back to where the file ended; the caller holds the
+    mutation lock, so no other append comes between.
+    """
+    data = line.encode("utf-8")
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        end = os.fstat(descriptor).st_size
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise OSError(errno.EIO, f"No progress appending to {path}")
+                view = view[written:]
+            os.fsync(descriptor)
+        except BaseException:
+            try:
+                os.ftruncate(descriptor, end)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(descriptor)
+
+
+def message_line_problem(line: str, last: bool) -> str:
+    """Why a channel line does not parse, as far as can be told: two clones'
+    appends left in a merge conflict, or the end of an append that stopped
+    part-way - the last line, with no newline after it."""
+    if line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")):
+        return "holds an unresolved Git merge conflict"
+    if last:
+        return "is cut short: an append stopped part-way, as on a full disk; remove that line"
+    return "is not valid JSON"
 
 
 def read_messages(
@@ -2459,22 +2507,20 @@ def read_messages(
         return []
     recipient = validate_actor(for_actor) if for_actor is not None else None
     selected: list[dict[str, Any]] = []
-    for number, line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(), 1
-    ):
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    for number, line in enumerate(lines, 1):
         if not line.strip():
             continue
         try:
             record = json.loads(line)
         except json.JSONDecodeError as error:
             # Two clones that both appended to a task's channel conflict at its
-            # end on pull; "corrupt" sent the reader looking for damage.
-            if line.startswith(("<<<<<<< ", "=======", ">>>>>>> ")):
-                raise BrainError(
-                    f"Unresolved Git merge conflict in message journal line {number}: {path}"
-                ) from error
+            # end on pull, and a full disk cut an append short; "corrupt" sent
+            # the reader looking for damage.
+            last = number == len(lines) and not text.endswith("\n")
             raise BrainError(
-                f"Corrupt message journal line {number}: {path}"
+                f"Message journal line {number} {message_line_problem(line, last)}: {path}"
             ) from error
         validate_message(record)
         if record["seq"] <= since_seq:
@@ -2686,14 +2732,18 @@ def validate_repository(
                     repository, path.stem, record_type="task", include_archive=True
                 )
                 previous_seq = 0
-                for number, line in enumerate(
-                    path.read_text(encoding="utf-8").splitlines(), 1
-                ):
+                text = path.read_text(encoding="utf-8")
+                lines = text.splitlines()
+                for number, line in enumerate(lines, 1):
                     if not line.strip():
                         raise BrainError(
                             f"line {number}: blank line in message journal"
                         )
-                    entry = json.loads(line)
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError as error:
+                        last = number == len(lines) and not text.endswith("\n")
+                        raise BrainError(f"line {number} {message_line_problem(line, last)}") from error
                     validate_message(entry)
                     validate_schema_file(
                         repository, "message.schema.json", entry

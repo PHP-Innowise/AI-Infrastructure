@@ -4,6 +4,11 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### The seeded runtime takes back a channel message a full disk cuts short — 2026-10-30
+
+- As the editions' does (root `CHANGELOG.md`, same day): `brain_runtime.py`
+  changes in the asset; the policy lock was rewritten.
+
 ### The seeded runtime buffers a turn that changed a file named outside UTF-8 — 2026-10-30
 
 - As the editions' does (root `CHANGELOG.md`, same day): `context.py`

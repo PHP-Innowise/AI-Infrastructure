@@ -13,6 +13,7 @@ plus the phase-ordering guard on ``update``.
 
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 import sys
@@ -252,7 +253,56 @@ class ChannelTest(unittest.TestCase):
                         + second.replace("Second", "Other") + ">>>>>>> 1234567 (theirs)\n", encoding="utf-8")
         result = self.run_cli("msg-read", "--task-id", "task-1", "--json")
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("Unresolved Git merge conflict in message journal line 2", result.stderr)
+        self.assertIn("Message journal line 2 holds an unresolved Git merge conflict", result.stderr)
+        checked = self.run_cli("validate")
+        self.assertNotEqual(0, checked.returncode)
+        self.assertIn("line 2 holds an unresolved Git merge conflict", checked.stdout + checked.stderr)
+
+    @unittest.skipIf(sys.platform == "win32", "Windows has no file size limit to set")
+    def test_a_message_a_full_disk_cuts_short_is_taken_back(self) -> None:
+        # A full disk takes part of an append. The part left at the journal's
+        # end failed every later read and validation, and the next entry
+        # joined it on one line. A file size limit cuts the append as a full
+        # disk does.
+        import resource
+
+        self.assertEqual(0, self.send().returncode)
+        journal = self.journal_path()
+        before = journal.read_bytes()
+        limit = len(before) + 300
+
+        def limited() -> None:
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+        cut = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(self.repository), "msg-send", "--task-id", "task-1",
+             "--from", "coder", "--to", "code-reviewer", "--type", "finding",
+             "--body", "Cut short " + "z" * 2000, "--json"],
+            text=True, capture_output=True, preexec_fn=limited,
+        )
+        self.assertNotEqual(0, cut.returncode)
+        self.assertIn(f"[Errno {errno.EFBIG}]", cut.stderr)
+        self.assertEqual(before, journal.read_bytes())
+        checked = self.run_cli("validate")
+        self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+        self.assertEqual(0, self.send(**{"--body": "After the disk was freed"}).returncode)
+        read = self.run_cli("msg-read", "--task-id", "task-1", "--json")
+        self.assertEqual(0, read.returncode, read.stderr)
+        self.assertEqual([1, 2], [entry["seq"] for entry in json.loads(read.stdout)])
+
+    def test_a_line_an_earlier_append_cut_short_says_so(self) -> None:
+        # What a full disk left before appends were taken back: read, checked
+        # and appended to, it says where it is, and nothing joins it.
+        self.assertEqual(0, self.send().returncode)
+        path = self.journal_path()
+        with path.open("ab") as handle:
+            handle.write(b'{"body": "Cut sh')
+        for result in (self.send(**{"--body": "second"}),
+                       self.run_cli("msg-read", "--task-id", "task-1", "--json"),
+                       self.run_cli("validate")):
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("line 2 is cut short", result.stdout + result.stderr)
+        self.assertTrue(path.read_bytes().endswith(b'"Cut sh'))
 
     def test_validate_rejects_foreign_journal_name(self) -> None:
         messages = self.repository / "project-brain" / "control" / "messages"

@@ -28,6 +28,30 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A channel message a full disk cuts short is taken back — 2026-10-30
+
+- Why: a full disk takes part of an append. When `msg-send` failed that way,
+  the part it had written stayed at the end of the task's agent channel
+  (`project-brain/control/messages/<task>.jsonl`, tracked in Git). Once the
+  disk had room again, every `msg-read` called the journal corrupt and
+  `validate` failed on it ("Unterminated string"). The next message was
+  appended after the broken part, so the two shared one line for good. Found
+  by running the memory's commands and hooks on a nearly full tmpfs; the
+  hooks, saves, checkpoints and the index all failed cleanly there and
+  recovered.
+- What changes: an append that fails is truncated back to where the file
+  ended, under the mutation lock it already held. A line that an earlier
+  append left cut short is named, in `msg-read`, `validate` and `msg-send`,
+  as cut short by an append that stopped part-way, with the advice to
+  remove it; `msg-send` no longer appends after it. A last line that is whole
+  but lacks its newline gets one before the next entry. `validate` names a
+  merge conflict in a channel as `msg-read` does.
+- Tests: `memory-bank/tests/test_channel.py` cuts an append short with a
+  file size limit (`RLIMIT_FSIZE`, POSIX only). Before, the journal kept 300
+  bytes of it and failed validation; now it is unchanged. It also reads,
+  validates and appends to a journal left cut short, and validates one left
+  in a conflict.
+
 ### A file named outside UTF-8 no longer stops every turn's checkpoint — 2026-10-30
 
 - Why: `git status` gives a file's name as bytes. A name that is not UTF-8,
