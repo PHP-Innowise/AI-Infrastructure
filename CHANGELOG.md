@@ -28,6 +28,17 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### One scenario table holds the native save on Claude Code, Codex and Cursor — 2026-10-30
+
+- `tests/test_memory_native_capture.py` drives seven scenarios through the
+  native save on each host - a normal answer, a save the runtime refuses,
+  the agent declining, the host refusing the save command, a repeated Stop,
+  a turn cancelled during the save and a prompt sent while saving - and
+  holds the journal each leaves. Where the hosts differ the difference is
+  the expected value: only Claude Code's refusal is read, so Codex and
+  Cursor ask again on the next turn, and Cursor runs a Stop with status
+  aborted for a cancelled save, which settles nothing.
+
 ### `realized` counts every Claude Code hook run, and the ones not found — 2026-10-30
 
 - Per event, the hook runs a Claude Code transcript records: succeeded,
