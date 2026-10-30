@@ -28,6 +28,46 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Loop detection weighs a failure that keeps coming back, not edits — 2026-10-30
+
+- `loop-detection.sh` (all four editions, all hosts) warns only on a
+  fix-and-retry loop: the same command failure coming back after edits within
+  one prompt-turn. Edits alone no longer warn or block. Replayed over this
+  repository's own Claude Code history (76 sessions, 1,081 turns, 2,906 edits,
+  364 failed commands), the old rule - the seventh edit of a file in a session
+  warned, every edit from the tenth said BLOCKED - fired in 21 of the 68
+  sessions that edited, 197 BLOCKED messages (79 for `context.py` alone), all
+  on ordinary work; the new one fires nowhere, since no failure there came
+  back after an edit.
+- Counts belong to one prompt-turn of one session - Claude Code's `prompt_id`,
+  Codex's `turn_id`, Cursor's `generation_id` - and a new turn starts the
+  session's edits and failures over. A payload without a turn id counts toward
+  the session as a whole.
+- A failed command reaches the hook as Claude Code's `PostToolUseFailure`,
+  newly wired on `Bash` (Claude Code never reports a failed call as
+  `PostToolUse`), or as a Codex `PostToolUse` shell result that names a
+  non-zero exit status: an `exit_code` field, or a first line `Exit code: N` /
+  `Process exited with code N`. A result that names none, an interrupted
+  command, a failed edit or read, and a failure without output are not
+  weighed; a rerun with nothing edited since stays the repetition guard's.
+- Two failures are the same when their output (first and last 200 lines)
+  matches without the host's own lines and with numbers, hex values and
+  absolute paths removed. The second time a failure is back after an edit the
+  model is warned (`additionalContext`, naming the turn's most edited file);
+  the fourth time it is asked to stop editing for it and report, and a
+  `systemMessage` tells the user. The hook always exits 0 and names the event
+  it answers, since Claude Code drops an answer that names another.
+- Cursor's `afterFileEdit` reports no failure: its copy records edits and
+  never warns.
+- Every edit still writes an `edit-*` counter, so bash-validator's repetition
+  guard restarts as before; `local-context.sh` also clears the session's new
+  `fail-*` and `turn-*` files.
+- `MIRROR_RULES`: new loop-detection header and answer fragments, the path
+  extraction indented, one Codex `/debugger` substitution for the new wording.
+- The per-turn unit, the repeated failure signature and `PostToolUseFailure`
+  come from the failure-loop guard of microsoft/TokenEconomizer, without its
+  model judge.
+
 ### CI: the Python 3.9 legs run on Ubuntu 24.04 — 2026-10-30
 
 - From 2026-10-19 GitHub moves `ubuntu-latest` to Ubuntu 26.04, and

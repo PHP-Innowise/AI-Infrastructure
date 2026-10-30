@@ -10,7 +10,7 @@ This directory is the **Cursor-native** copy of the accelerator that lives in `.
 | `.cursor/agents/*.md` | Subagents that run one skill in isolation. |
 | `.cursor/commands/*.md` | `/slash` entry points. Invoke as `/name`; context passes via `$ARGUMENTS`. |
 | `.cursor/rules/*.mdc` | Always-on policy + Laravel/PHP standards (native Cursor rules). |
-| `.cursor/hooks.json` + `.cursor/hooks/*.sh` | Session context, shell-command safety, file-naming, loop detection. |
+| `.cursor/hooks.json` + `.cursor/hooks/*.sh` | Session context, shell-command safety, file-naming, edit records (the loop detector warns on Claude Code and Codex only: Cursor reports no failed command to it). |
 | `.cursor/DOD.md`, `.cursor/GOLDEN-PRINCIPLES.md`, `.cursor/STABILIZATION.md` | Definition of Done, principles, error-to-rule process. |
 
 Root `AGENTS.md` is the shared policy and is read automatically by Cursor.

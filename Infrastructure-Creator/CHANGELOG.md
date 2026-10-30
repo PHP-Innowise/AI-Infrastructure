@@ -4,6 +4,26 @@ All notable changes to Infrastructure-Creator are documented here. Format loosel
 
 ## Unreleased
 
+### Generated loop detection weighs failures, per prompt-turn — 2026-10-30
+
+- hook-forge step 5 asks of a generated `loop-detection.sh` what the editions'
+  hook now does: warn only when the same command failure comes back after
+  edits within one prompt-turn (`prompt_id`, Codex `turn_id`, Cursor
+  `generation_id`), never on edits alone, never exit 2. A failure is Claude
+  Code's `PostToolUseFailure` for `Bash` or a Codex shell result that names a
+  non-zero exit status; two are the same when their output matches without
+  numbers, hex values and absolute paths. The second time one is back after
+  an edit the model is warned, the fourth time the user is told as well, and
+  every answer names the event it answers.
+- Step 9 wires the Claude copy on `PostToolUseFailure` (`Bash`, timeout 5)
+  besides `PostToolUse`; the output template lists the new wiring.
+- The seeded `context_retrieval.py` carries the editions' new loop-detection
+  mirror fragments. The generator's own development hook (a two-minute edit
+  window) is unchanged.
+- The skill-body ceiling in `scripts/token_budget.json` rises to the observed
+  300,231 bytes plus the policy's 5% (315,243): the new contract outgrew the
+  old ceiling by 931 bytes after trimming.
+
 ### Seeded memory consolidates only on request — 2026-10-21
 
 - memory-seed's `runtime.json.template` ships `automatic_consolidation` and

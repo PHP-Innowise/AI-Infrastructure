@@ -246,7 +246,7 @@
     ".claude/commands/woocommerce.md": "5a4234e7abb2a4bfcd2bcf1cad2d92e0b243a729285bcae9f2dc47b810ac65cf",
     ".claude/commands/wp-cli.md": "278a6ba67dcd038081fca5d7af93d5860b258b810e9e648901f4249f5014637d",
     ".claude/commands/writing-plans.md": "183238cd9fe57613f955cc23496e149b2a3624e8a13b9cd5dd4a2051e915ac53",
-    ".claude/settings.json": "4749b0c96bc5a6d2feb7aa34f6e6cb93092d124fa424b624f7c1a85d73285684",
+    ".claude/settings.json": "0029a297b24e64a4b156d0b24147854cfea8ca05494b1ef659bd617d46db6fbc",
     ".claude/skills/SKILL FLOW.md": "4c48bccdd0dc852fe62b5b2a7ce1ae5d627702416e432a2cae687f2a71a5ce96",
     ".claude/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     ".codex/config.toml": "9f8c38576d1eabc7e71b642333362d5c22687097bd751a9b9ea74e395c6cd282",
@@ -259,7 +259,7 @@
     ".cursor/skills/skill-creator/SKILL.md": "f1bac11cf8ab0e6acb40196165aab0f8e87556a4e182ff00894b6ee11af3a2a5",
     "AGENTS.md": "dd5e0cab53449ae9eeaaefcd1028032f7df3c96f8401cb809b7f720631dd5bc9"
   },
-  "policy_digest": "a2022c9c80009948bb6b3d9a8943b3eb6b4a4afaf33fe92d3d625d82c36d5cc0",
+  "policy_digest": "eb2c28814fb7f95870165c8e07da511d787e5a53f4848f8d87e5838715e55593",
   "release": "2.0.0",
   "schema_version": 1
 }

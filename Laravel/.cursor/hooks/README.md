@@ -47,8 +47,8 @@ These hooks are registered in `.cursor/hooks.json` (schema `version: 1`). Each i
 
 ### afterFileEdit: Loop Detection
 **Script:** `loop-detection.sh`
-**Purpose:** Tracks edit count per file per session (the payload's `conversation_id`) to detect doom loops. Every edit it records also restarts the Bash Validator's repetition count for the commands run before it.
-**Return:** `0` = normal, `1` = warning at 7 edits (shown in the hooks output; `afterFileEdit` has no channel back to the agent), `2` = block at 10 edits.
+**Purpose:** Records each edit per file and prompt-turn (the payload's `conversation_id` and `generation_id`); every edit it records restarts the Bash Validator's repetition count for the commands run before it. The loop the script exists for - the same command failure coming back after edits - shows only in failed commands, and Cursor reports none to this hook, so here it never warns; Claude Code and Codex warn from the same script.
+**Return:** `0` (`1`, with the warning in the hooks output, were a failed command ever reported to it).
 **Tracking:** `${TMPDIR:-/tmp}/cursor-loop-detection-<uid>-<repo-key>/`, created private; `sessionStart` clears that session's counters and any left untouched for a day. A linked or foreign directory turns the count off, and a linked counter is never followed.
 
 ## Claude Code -> Cursor Event Mapping

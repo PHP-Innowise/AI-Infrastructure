@@ -18,7 +18,7 @@ are not interchangeable.
 | --- | --- | --- |
 | Root `AGENTS.md` and edition rules | States required behavior, exclusions, and safe defaults | Cannot by itself prevent every violating action |
 | Tool permission settings | Allows, denies, or prompts for supported tool operations | Does not govern tools or processes outside that tool's permission model |
-| Shell/file hooks | Detects selected destructive commands, naming violations, and edit loops | Is not a shell sandbox, data-loss-proof parser, DLP system, or authorization service |
+| Shell/file hooks | Detects selected destructive commands, naming violations, and fix-and-retry loops (the same failure back after edits) | Is not a shell sandbox, data-loss-proof parser, DLP system, or authorization service |
 | Write-capable subagent gate | Refuses subagent types outside the accelerator's roster, and serializes agents marked `writes: true` behind one lock per repository | Is an advisory, machine-local `/tmp` lock: two containers or machines on the same branch are not serialized against each other, the lock expires after `SUBAGENT_WRITE_LOCK_TTL_MINUTES` (default 30), it gates subagent spawns only rather than the main conversation's own edits or anything outside the tool, and it fails open without a JSON extractor, without a readable roster, or - for the check-and-take race - without `flock` |
 | Project Brain runtime | Enforces schema, owner checks, revisions, lifecycle, privacy/authority filters, fingerprints, locks, and atomic operations for supported commands | Does not secure hand-edited files or unrelated application data |
 | Memory Bank validator | Validates structure, links, lifecycle metadata, and known secret patterns | Cannot detect every secret, personal datum, or misleading statement |
@@ -48,9 +48,11 @@ judgment.
 
 ### Cursor
 
-`.cursor/hooks.json` wires session metadata, pre-shell validation, file naming,
-and loop detection using Cursor-native events and timeout units. Cursor hooks
-consume Cursor payloads and use exit codes to allow, warn, or block.
+`.cursor/hooks.json` wires session metadata, pre-shell validation, file naming
+and edit records using Cursor-native events and timeout units. Cursor hooks
+consume Cursor payloads and use exit codes to allow, warn, or block. The loop
+detector records edits there but never warns: the failed commands it weighs on
+Claude Code and Codex are not reported to `afterFileEdit`.
 
 Keep Cursor's optional Claude-file loading disabled when using the
 self-contained `.cursor/` edition. Enabling both sources can duplicate skills,
