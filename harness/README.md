@@ -1119,7 +1119,8 @@ per version of the clone - at start, on registration and before a session's
 memory - it brings an installed copy's untouched files and memory runtime up to
 the clone (`scripts/install_accelerator.py --sync`), never back: a project last
 synced from a commit this clone lacks, such as a sync from a newer branch, is
-left as it is, and its sync status says why. With Codex available, it also
+left as it is, and the **Project** chip's panel says why, as it does for a
+release held back in part. With Codex available, it also
 approves the accelerator's own Codex hooks in your Codex config, the record
 Codex's `/hooks` review writes; a team's own or edited hook is left for that
 review. The conversation says what changed, and what was held back: the sync

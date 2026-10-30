@@ -119,11 +119,19 @@ async function loadProjectAccelerator(force = false) {
   try { const data = await api(`/api/projects/${encodeURIComponent(projectId)}/accelerator`); if (epoch === attachState.epoch && projectId === $('project').value) { attachState.data = data; renderProjectAccelerator(); } }
   catch (error) { if (epoch === attachState.epoch) showError('setup-attach-error',textError(error)); }
 }
+function installedSummary(sync) {
+  // The project's own accelerator, and why the server left it behind or in part: a
+  // project synced from newer work than this clone keeps it, and says so here.
+  let text = 'This project has its own installed accelerator; sessions use those files and nothing is attached.';
+  if (sync && sync.error) text += ` It is not kept current from this clone: ${sync.error}.`;
+  else if (sync && sync.partial) text += ` ${sync.partial}.`;
+  return text;
+}
 function renderProjectAccelerator() {
   const info = attachState.data; $('setup-attach').hidden = !attachState.projectId; showError('setup-attach-error',''); $('setup-attach-codex').hidden = true;
   if (!info) { $('setup-attach-summary').textContent = attachState.projectId ? 'Checking the accelerator for this project…' : ''; updateAttachControls(); return; }
   const editions = (info.editions || []).map(id => ({id,name:id})); const selected = info.edition || info.detected || ''; setOptions($('setup-attach-edition'),[{id:'',name:'Choose an edition…'},...editions],item => item.name,item => item.id,selected);
-  if (info.mode === 'installed') $('setup-attach-summary').textContent = 'This project has its own installed accelerator; sessions use those files and nothing is attached.';
+  if (info.mode === 'installed') $('setup-attach-summary').textContent = installedSummary(info.sync);
   else if (info.mode === 'attached') $('setup-attach-summary').textContent = `${info.edition} is attached from ${info.home}. Nothing is installed in this project. Project Brain, Memory Bank and the index for it are kept in ${info.state}.`;
   else $('setup-attach-summary').textContent = info.detected ? `Nothing is attached yet. The project points to ${info.detected} (${info.evidence}).` : `Nothing is attached. No edition fits automatically (${info.evidence}); choose one to attach.`;
   updateAttachControls();

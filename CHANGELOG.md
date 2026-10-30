@@ -28,6 +28,14 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### The Harness's project panel says why an installed project is not kept current — 2026-10-31
+
+- For a project with its own installed accelerator the **Project** chip's
+  panel said only that; the server's record of its last sync - an error,
+  such as a project synced from newer work than the server's clone, which
+  the sync now leaves alone, or a release held back in part - reached no
+  one. The panel now adds it (`installedSummary`).
+
 ### `memory_eval.py install-status`: can memory run in a project at all — 2026-10-31
 
 - Per project, from its own files: the commit its accelerator was synced
