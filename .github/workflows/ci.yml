@@ -8,7 +8,9 @@ on:
 jobs:
   system-orchestration:
     name: "system orchestration (Python ${{ matrix.python }})"
-    runs-on: ubuntu-latest
+    # actions/setup-python has no Python 3.9 for Ubuntu 26.04, which
+    # ubuntu-latest becomes from 2026-10-19, so the 3.9 leg runs on 24.04.
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -156,9 +158,11 @@ jobs:
     # tests matrix (the "Infrastructure-Creator/tests" suite already runs
     # on 3.x above) and the mirrors job (--check covers every edition).
     # What this job adds is the 3.9 run itself plus the reference-catalog
-    # and edition-scoped mirror gates.
+    # and edition-scoped mirror gates. It runs on Ubuntu 24.04:
+    # actions/setup-python has no Python 3.9 for Ubuntu 26.04, which
+    # ubuntu-latest becomes from 2026-10-19.
     name: "Infrastructure-Creator reliability (Python 3.9)"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -221,7 +225,9 @@ jobs:
 
   memory:
     name: "memory (Python ${{ matrix.python }})"
-    runs-on: ubuntu-latest
+    # actions/setup-python has no Python 3.9 for Ubuntu 26.04, which
+    # ubuntu-latest becomes from 2026-10-19, so the 3.9 leg runs on 24.04.
+    runs-on: ${{ matrix.python == '3.9' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     # The memory runtime's own regression steps, split from installation:
     # together they ran about 1000 s of that job's 20 minutes, and each
     # half now runs beside the other. The runtime is declared for Python 3.9

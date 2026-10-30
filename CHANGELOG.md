@@ -28,6 +28,15 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### CI: the Python 3.9 legs run on Ubuntu 24.04 — 2026-10-30
+
+- From 2026-10-19 GitHub moves `ubuntu-latest` to Ubuntu 26.04, and
+  `actions/setup-python` has no Python 3.9 for it: every 3.9 leg
+  (`system-orchestration`, `infrastructure-creator-reliability`, `memory`)
+  failed at its setup step, before a test ran. Those legs now ask for
+  `ubuntu-24.04`, where 3.9 still installs; the 3.x legs and every other job
+  stay on `ubuntu-latest`. 3.9 remains the declared floor.
+
 ### A navigation-only capsule, behind an experiment switch — 2026-10-21
 
 - `capsule_profile` in `runtime.json` (or `CONTEXT_CAPSULE_PROFILE`) chooses
