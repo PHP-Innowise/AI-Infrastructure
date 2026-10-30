@@ -28,6 +28,21 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Claude Code's usage numbers came from sessions without the memory policy — 2026-10-30
+
+- "Delivered documents go unused held for Claude Code alone" (below, from the
+  compressed rollouts) needs this beside it: no Claude Code session in the
+  four client projects loaded `AGENTS.md`. Each project keeps its own
+  `CLAUDE.md`, which keeps Claude Code from reading `AGENTS.md` by itself;
+  the edition's `.claude/CLAUDE.md` imports it since 2026-10-06 (4f1cf107).
+  It reached three clients on 2026-10-08 and `next` on 2026-10-18, after the
+  last Claude Code session in each, and none has run there since. Their
+  transcripts show the project's own `CLAUDE.md` loaded in 191 of 386 and
+  `AGENTS.md` in none.
+  `docs/MEMORY-EVAL.md` says so beside the numbers; the sealed field check
+  from 2026-10-31 is the first that reads Claude Code sessions told to
+  retrieve and save.
+
 ### One scenario table holds the native save on Claude Code, Codex and Cursor — 2026-10-30
 
 - `tests/test_memory_native_capture.py` drives seven scenarios through the

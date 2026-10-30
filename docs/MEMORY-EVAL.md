@@ -435,6 +435,18 @@ profile turn without saves of its own renders without a search and leaves no
 trace. In the same sessions'
 440 capsule turns the capsules delivered 54 items, 44 of them `CHANGELOG.md`
 (25 opened) and none of the rest opened.
+
+Read the Claude Code side of those months with one fact beside it: no Claude
+Code session in the four client projects had the memory policy. Each project
+keeps a `CLAUDE.md` of its own, and Claude Code reads `AGENTS.md` by itself
+only where there is none. The edition's `.claude/CLAUDE.md` imports it since
+2026-10-06; it reached three of the clients on 2026-10-08 and `next` on
+2026-10-18, after the last Claude Code session in each (2026-09-18 to
+2026-10-06), and none has run there since. Their transcripts show the
+instructions Claude Code loaded: the project's own `CLAUDE.md` in 191 of 386,
+`AGENTS.md` in none. Claude Code's "no retrieve,
+1 of 289 delivered documents opened" measures sessions that were never told
+to retrieve; Codex reads `AGENTS.md` itself, and did.
 Codex keeps a finished rollout compressed, as `rollout-*.jsonl.zst` (3,040 of
 3,099 on the maintainer machine in October 2026); `realized` reads those too,
 through Python 3.14's `compression.zstd` or else the `zstd` command. Without
