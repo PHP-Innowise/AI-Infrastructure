@@ -1093,6 +1093,47 @@ def source_commit(root: Path) -> str | None:
     return result.stdout.strip() or None if result.returncode == 0 else None
 
 
+def installation_ahead(root: Path, recorded: object) -> str | None:
+    """Why a sync from this clone would take the project back, or None.
+
+    A sync writes this clone's files over the project's, so from a clone that
+    lacks the commit the project was last synced from it replaces newer work
+    with older: the Harness, keeping its projects current from a clone on
+    main, put four projects synced from a memory branch back onto main that
+    way, runtime and all, with nobody asked. Nothing stops the sync when the
+    record names no commit, this clone is no Git checkout, or the project's
+    commit is this clone's or one of its ancestors. A commit the clone does
+    not have at all stops it too - the project came from work this clone has
+    not seen - except in a shallow clone, which lacks its own history.
+    """
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", recorded):
+        return None
+    head = source_commit(root)
+    if head is None or head == recorded:
+        return None
+    try:
+        ancestry = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", recorded, "HEAD"],
+            capture_output=True, text=True,
+        )
+        if ancestry.returncode == 0:
+            return None
+        if ancestry.returncode != 1:
+            shallow = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+                capture_output=True, text=True,
+            )
+            if shallow.returncode == 0 and shallow.stdout.strip() == "true":
+                return None
+    except OSError:
+        return None
+    return (
+        f"the project was last synced from {recorded[:12]}, which this clone ({head[:12]}) does not "
+        "contain: a sync from here would take it back. Sync from a clone that has that commit, or pass "
+        "--allow-downgrade to go back on purpose"
+    )
+
+
 # A sync reaches every path it reads or writes from the target one folder at
 # a time, so a symbolic link is seen as itself and never followed. Git checks
 # links out, and one standing in for `.cursor`, `memory-bank` or
@@ -1980,6 +2021,7 @@ def sync_installation(
     stamp: str | None = None,
     rewire_codex: bool = False,
     update_tracked: bool = False,
+    allow_downgrade: bool = False,
 ) -> dict:
     """Bring an installed project's accelerator files up to this clone.
 
@@ -2004,6 +2046,11 @@ def sync_installation(
     rules (an edited file still stays), to review and commit: the way a
     project that commits its accelerator takes a release. Nothing that runs
     unattended passes it.
+
+    Never back: a project last synced from a commit this clone does not
+    contain - a newer one, or another line of work - is left as it is, with
+    the reason as the error (installation_ahead). `allow_downgrade` is a
+    person going back on purpose; nothing that runs unattended passes it.
 
     A release is never applied in part over what its files run (see
     HOOK_WIRING): while a runtime file stays at the project's version, the
@@ -2053,6 +2100,12 @@ def sync_installation(
         record_problem, manifest = str(error), None
     except (OSError, ValueError):
         manifest = None
+    ahead = None if allow_downgrade else installation_ahead(
+        root, manifest.get("source_commit") if isinstance(manifest, dict) else None
+    )
+    if ahead is not None:
+        report["error"] = ahead
+        return report
     known = manifest.get("files") if isinstance(manifest, dict) else None
     known = known if isinstance(known, dict) else {}
     history = released_blob_ids(root, edition)
@@ -2438,6 +2491,12 @@ def parse_args() -> argparse.Namespace:
         help="with --sync, also write files the project's Git tracks, by the same "
         "rules (an edited file stays); review the diff and commit it",
     )
+    parser.add_argument(
+        "--allow-downgrade",
+        action="store_true",
+        help="with --sync, sync a project last synced from a commit this clone does not "
+        "contain (newer, or another line of work), taking it back to this clone",
+    )
     parser.add_argument("--target", type=Path)
     parser.add_argument("--tool", action="append", choices=TOOLS)
     parser.add_argument("--dry-run", action="store_true")
@@ -2457,6 +2516,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--rewire-codex requires --sync")
     if args.update_tracked and not args.sync:
         parser.error("--update-tracked requires --sync")
+    if args.allow_downgrade and not args.sync:
+        parser.error("--allow-downgrade requires --sync")
     return args
 
 
@@ -2483,6 +2544,7 @@ def main() -> int:
                 dry_run=args.dry_run,
                 rewire_codex=args.rewire_codex,
                 update_tracked=args.update_tracked,
+                allow_downgrade=args.allow_downgrade,
             )
             print(json.dumps(report, indent=1, ensure_ascii=False))
             return 1 if report["error"] else 0

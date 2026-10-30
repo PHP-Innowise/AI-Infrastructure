@@ -28,6 +28,22 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A sync never takes a project back — 2026-10-30
+
+- `install_accelerator.py --sync`, and the Harness's sync of its registered
+  projects with it, writes nothing into a project last synced from a commit
+  the clone does not contain, and says so as the report's `error`
+  (`installation_ahead`). At 17:01 on 2026-10-30 the Harness started on a
+  clone at `main` (1cbdf9e7) and synced the four client projects that had
+  been synced from the memory stack that morning (adfeb5ab, then 8b20d5f1):
+  26-28 files each went back to `main` - runtime, hooks, the policy block -
+  with no backup. Their `runtime.json` keeps `capsule_profile: recall`,
+  which only the stack's runtime knows, so from then on every prompt there
+  gets "Capsule profile must be full or navigation" instead of a capsule,
+  and Claude Code's save step is the old `decision: block` form again. No
+  hook has run in those projects since. A commit the clone has never seen
+  stops the sync too, except in a shallow clone; `--allow-downgrade` is a
+  person going back on purpose.
 ### Claude Code's usage numbers came from sessions without the memory policy — 2026-10-30
 
 - "Delivered documents go unused held for Claude Code alone" (below, from the

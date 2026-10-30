@@ -1356,6 +1356,102 @@ class InstallSyncTest(unittest.TestCase):
         )
 
 
+class SyncNeverBackTest(unittest.TestCase):
+    """A sync never takes a project back to a clone that lacks its commit.
+
+    The Harness keeps its registered projects current from its own clone, on
+    main: at its next start, four projects a person had synced from a memory
+    branch went back onto main, runtime, hooks and policy, with nobody asked.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="sync never back ")
+        self.addCleanup(self._tmp.cleanup)
+        base = Path(self._tmp.name)
+        # A clone of its own, under Git, so a test can move it between commits.
+        self.clone = base / "clone"
+        shutil.copytree(ROOT / "install" / "inventories", self.clone / "install" / "inventories")
+        shutil.copytree(ROOT / "Symfony", self.clone / "Symfony")
+        self.git = ("git", "-C", str(self.clone), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                    "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null")
+        run("git", "init", "--quiet", str(self.clone))
+        run(*self.git, "add", "-A")
+        run(*self.git, "commit", "--quiet", "-m", "release")
+        self.older = run(*self.git, "rev-parse", "HEAD").stdout.strip()
+        self.runtime = "memory-bank/scripts/context.py"
+        self.target = base / "project"
+        self.target.mkdir()
+        run("git", "init", "--quiet", str(self.target))
+        installed = run(
+            sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+            "--edition", "Symfony", "--tool", "claude", "--target", str(self.target),
+        )
+        self.assertEqual(0, installed.returncode, installed.stderr)
+
+    def sync(self, *extra: str) -> tuple[int, dict]:
+        result = run(sys.executable, str(INSTALLER), "--source-root", str(self.clone),
+                     "--sync", "--target", str(self.target), *extra)
+        return result.returncode, json.loads(result.stdout)
+
+    def newer_runtime(self) -> None:
+        """A runtime fix committed on top of the release, as on a memory branch."""
+        source = self.clone / "Symfony" / self.runtime
+        source.write_text(source.read_text(encoding="utf-8") + "\n# a newer fix\n", encoding="utf-8")
+        run(*self.git, "commit", "--quiet", "-am", "a newer fix")
+
+    def project_runtime(self) -> str:
+        return (self.target / self.runtime).read_text(encoding="utf-8")
+
+    def test_a_clone_behind_the_projects_commit_leaves_it_as_it_is(self) -> None:
+        self.newer_runtime()
+        self.assertEqual(0, self.sync()[0])
+        self.assertIn("# a newer fix", self.project_runtime())
+        run(*self.git, "checkout", "--quiet", self.older)
+        code, report = self.sync()
+        self.assertEqual(1, code)
+        self.assertIn("does not contain", report["error"])
+        self.assertEqual([], report["changed"])
+        self.assertIn("# a newer fix", self.project_runtime())
+        # A person going back on purpose.
+        code, report = self.sync("--allow-downgrade")
+        self.assertEqual((0, None), (code, report["error"]))
+        self.assertNotIn("# a newer fix", self.project_runtime())
+
+    def test_a_clone_ahead_of_the_projects_commit_brings_it_forward(self) -> None:
+        self.assertEqual(0, self.sync()[0])
+        self.newer_runtime()
+        code, report = self.sync()
+        self.assertEqual((0, None), (code, report["error"]))
+        self.assertIn("# a newer fix", self.project_runtime())
+
+    def test_a_commit_this_clone_has_never_seen_stops_the_sync(self) -> None:
+        self.assertEqual(0, self.sync()[0])
+        record = self.target / "memory-bank/local/accelerator-install.json"
+        data = json.loads(record.read_text(encoding="utf-8"))
+        data["source_commit"] = "f" * 40
+        record.write_text(json.dumps(data), encoding="utf-8")
+        self.newer_runtime()
+        code, report = self.sync()
+        self.assertEqual(1, code)
+        self.assertIn("ffffffffffff", report["error"])
+        self.assertNotIn("# a newer fix", self.project_runtime())
+
+    def test_no_record_no_git_or_the_same_commit_never_stops_it(self) -> None:
+        ahead = install_accelerator.installation_ahead
+        self.assertIsNone(ahead(self.clone, None))
+        self.assertIsNone(ahead(self.clone, "not a commit"))
+        self.assertIsNone(ahead(self.clone, self.older))
+        plain = Path(self._tmp.name) / "plain"
+        plain.mkdir()
+        self.assertIsNone(ahead(plain, self.older))
+
+    def test_the_flag_needs_a_sync(self) -> None:
+        result = run(sys.executable, str(INSTALLER), "--edition", "Symfony", "--target", str(self.target),
+                     "--allow-downgrade")
+        self.assertEqual(2, result.returncode)
+        self.assertIn("--allow-downgrade requires --sync", result.stderr)
+
+
 class SyncOfAnOlderReleaseTest(unittest.TestCase):
     """A sync never leaves a project with a newer release's files over its older runtime or wiring.
 

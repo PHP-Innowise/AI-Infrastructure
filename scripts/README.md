@@ -279,6 +279,19 @@ wiring waits for a new hook that cannot be written. Each held-back file is
 listed under `kept` with a reason starting `held back:`, and `partial` says
 the project is not at the release (it is `null` otherwise).
 
+A sync never takes a project back. The record names the commit the project
+was last synced from (`source_commit`); from a clone that lacks it - the
+project was synced from a newer commit, or from another line of work - the
+sync writes nothing and its `error` says so, because it would replace newer
+files with older ones. At its start on 2026-10-30 the Harness, on a clone
+that follows `main`, put four projects synced from a memory branch back onto
+`main` that way, runtime, hooks and policy, and the capsule then failed on a
+setting only the newer runtime knew. A commit the clone has never seen stops
+the sync too, except in a shallow clone; no record, a source that is not a
+Git checkout, or the clone's own commit or a descendant of the project's
+syncs as before. `--allow-downgrade` is a person going back on purpose;
+nothing unattended passes it.
+
 The edition README that `--merge-existing` installed as `ACCELERATOR.md`
 beside a project's own `README.md` follows the release by the same rules:
 the sync records it in `memory-bank/local/accelerator-install.json`, updates
