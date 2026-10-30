@@ -6429,10 +6429,16 @@ def changed_paths(repository: Path) -> tuple[list[str], list[str]]:
 
 def status_paths(repository: Path) -> list[str]:
     """Every path `git status` reports under the repository, relative to it,
-    untracked directories collapsed as `git status --short` shows them."""
-    prefix = os.fsdecode(
-        git_output(repository, ["rev-parse", "--show-prefix"], "Git prefix probe")
-    ).strip()
+    untracked directories collapsed as `git status --short` shows them.
+
+    A name that is not UTF-8 - a tree unpacked from another system's archive
+    - keeps its odd bytes as `\\xNN` escapes. Decoded as the file system's
+    names, it carried lone surrogates, which SQLite and the Brain's JSON
+    refuse: while such a file was changed or untracked, every turn failed,
+    and the Stop hook's checkpoint with it."""
+    prefix = git_output(
+        repository, ["rev-parse", "--show-prefix"], "Git prefix probe"
+    ).decode("utf-8", "backslashreplace").strip()
     fields = git_output(
         repository,
         [
@@ -6450,7 +6456,7 @@ def status_paths(repository: Path) -> list[str]:
         if entry[:1] in b"RC":
             # Rename and copy entries carry their origin in the next field.
             position += 1
-        path = os.fsdecode(entry[3:])
+        path = entry[3:].decode("utf-8", "backslashreplace")
         if prefix and path.startswith(prefix):
             path = path[len(prefix):]
         paths.append(path)

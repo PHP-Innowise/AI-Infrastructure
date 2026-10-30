@@ -28,6 +28,21 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### A file named outside UTF-8 no longer stops every turn's checkpoint — 2026-10-30
+
+- Why: `git status` gives a file's name as bytes. A name that is not UTF-8,
+  such as one from a tree unpacked from another system's archive, came back
+  with lone surrogates, and SQLite refused them in the turn buffer. While
+  such a file was changed or untracked, every `context.py turn` failed. The
+  Stop hook's checkpoint runs `turn` and always exits 0, so no turn was
+  buffered or flushed, the capsule's recent files stopped, and nothing said
+  so.
+- What changes: such a name keeps its odd bytes as `\xNN` escapes
+  (`caf\xe9.php`), in the buffer and in the task's file list.
+- Tests: `memory-bank/tests/test_context.py` flushes a turn with an
+  untracked `caf\xe9.txt`. It runs on Linux only, because macOS and Windows
+  keep no such name. Before, the turn exited 1 with a `UnicodeEncodeError`.
+
 ### An index, a chunk or a channel left in a merge conflict says so — 2026-10-30
 
 - Why: every promotion rewrites the generated `memory-bank/INDEX.md`, so two
