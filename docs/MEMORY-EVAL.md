@@ -1411,6 +1411,15 @@ replaced or silently called complete: a CLI PID is not a physical provider
 attempt, and a local deterministic verifier is not a complete zero-attempt
 model judge.
 
+Native `error` reconnect notifications are provisional: the original deadline
+and cap continue to apply until `turn.failed`, CLI exit or completion. An
+uncompleted native/CLI failure has an unavailable grade, rather than being
+mistaken for an incorrect answer about the project. Explicit timeout/cap
+exhaustion remains a failed task within its sealed budget. On systems whose
+OpenSSL bundle lives at `/etc/ssl/cert.pem`, that exact public trust file is
+mounted read-only alongside the certificate directory; TLS verification is
+never disabled.
+
 ### Source and served tasks
 
 Legacy authored recall sets still save onto their own branch task. New cases

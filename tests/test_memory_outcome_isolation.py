@@ -1,5 +1,6 @@
 """Actual public read-isolation probe where user namespaces are available."""
 import os
+import ssl
 from pathlib import Path
 import sys
 import tempfile
@@ -51,3 +52,15 @@ class IsolationTests(unittest.TestCase):
         self.assertTrue(isolation.probe_agent_view(view,self.sentinel))
         result=isolation.run_probe(view,[sys.executable,'-c',"from pathlib import Path; import sys; sys.exit(0 if not Path(sys.argv[1]).exists() else 1)",str(link)])
         self.assertEqual(0,result.returncode)
+
+    def test_transport_can_load_the_system_certificate_store(self):
+        if not ssl.create_default_context().cert_store_stats()['x509_ca']:
+            self.skipTest('host default certificate store has no eagerly loaded CAs')
+        try: view = isolation.prepare_agent_view(self.corpus, self.private, credentials=False)
+        except isolation.IsolationError as error: self.skipTest(str(error))
+        if not isolation.probe_agent_view(view, self.sentinel):
+            self.skipTest('bubblewrap/user namespaces unavailable; private runs refuse')
+        result = isolation.run_probe(view, [sys.executable, '-c',
+            "import ssl; print(ssl.create_default_context().cert_store_stats()['x509_ca'])"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertGreater(int(result.stdout), 0)

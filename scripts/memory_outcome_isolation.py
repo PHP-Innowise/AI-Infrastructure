@@ -19,7 +19,7 @@ class IsolationError(ValueError):
     pass
 
 
-PUBLIC = ('/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc/ssl/certs',
+PUBLIC = ('/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc/ssl/certs', '/etc/ssl/cert.pem',
           '/etc/pki/tls/certs', '/etc/ld.so.cache', '/etc/nsswitch.conf',
           '/etc/passwd', '/etc/group', '/etc/hosts', '/etc/resolv.conf')
 

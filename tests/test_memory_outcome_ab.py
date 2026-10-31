@@ -1076,6 +1076,22 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':11,'output_tok
         self.assertFalse(list(self.cache.glob('completion-*')))
         self.assertEqual(0,ab.main(['report',str(self.result),'--metric','task-complete','--json']))
 
+    def test_native_failure_is_unknown_while_budget_failure_is_incorrect(self):
+        self.seal()
+        for reason, correct in [('error', None), ('finished', None), ('timeout', False), ('cap', False)]:
+            with self.subTest(reason=reason):
+                result_path = self.private / (reason + '-result.json')
+                outcome = {'completed': False, 'stopped': reason, 'hook_ran': True,
+                           'capsule_delivered': False, 'telemetry_complete': True}
+                with mock.patch.object(ab, 'codex_command', return_value=[sys.executable, '-c', 'pass']), \
+                        mock.patch('memory_outcome_isolation.probe_agent_view', return_value=True), \
+                        mock.patch.object(ab, 'run_arm', return_value=outcome):
+                    self.assertEqual(0, ab.main(['run', *self.options, '--endpoint', 'task-complete',
+                        '--protocol', str(self.protocol), '--out', str(result_path)]))
+                result = json.loads(result_path.read_text())
+                for slot in result['slots']:
+                    self.assertIs(correct, slot['attempts'][0]['verification']['correct'])
+
 
 class WholeCompletionReportTests(unittest.TestCase):
     def slot(self, task, arm, correct=None, completed=True, usage=None):
@@ -1167,6 +1183,7 @@ from pathlib import Path
 def emit(x): print(json.dumps(x),flush=True)
 emit({'type':'item.started','item':{'id':'one','type':'command_execution','command':'cat Gold.php'}})
 mode=sys.argv[1]
+if mode=='reconnect': emit({'type':'error','message':'Reconnecting... 2/5 (temporary transport failure)'})
 if mode=='quiet': time.sleep(20)
 Path('patched.txt').write_text('fixed')
 emit({'type':'item.completed','item':{'id':'answer','type':'agent_message','text':'The result is 42.'}})
@@ -1188,6 +1205,12 @@ sys.exit(9 if mode=='bad-exit' else 0)
         self.assertEqual(11, result['usage']['input_tokens'])
         self.assertEqual('The result is 42.', (self.corpus / 'answer.txt').read_text())
         self.assertNotIn('message', result)
+
+    def test_reconnect_event_can_recover_within_the_original_deadline(self):
+        result = self.run_agent('reconnect')
+        self.assertTrue(result['completed'], result)
+        self.assertEqual('finished', result['stopped'])
+        self.assertEqual(11, result['usage']['input_tokens'])
 
     def test_stdout_eof_allows_normal_process_cleanup(self):
         self.assertTrue(self.run_agent('closed')['completed'])

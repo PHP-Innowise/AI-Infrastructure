@@ -1151,9 +1151,13 @@ class Counter:
     def feed(self, event: Dict[str, Any]) -> Optional[str]:
         """'gold' or 'cap' when the run should stop now, else None."""
         kind = event.get("type")
-        if kind in ("turn.failed", "error"):
+        if kind == "turn.failed" or (kind == "error" and self.endpoint == "first-touch"):
             self.failed = True
             return "error" if self.endpoint == "task-complete" else None
+        if kind == "error":
+            # Native reconnect diagnostics can precede a successful turn.
+            # Keep the original deadline; turn.failed or CLI exit is terminal.
+            return None
         if kind == "turn.completed":
             self.usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
             self.finished = True
@@ -1887,8 +1891,11 @@ def command_run_complete(arguments: argparse.Namespace) -> int:
                     expected = protocol['bindings']['verifier_artifacts'][task['verifier_id']]
                     if attempt['verification']['verifier_digest'] != expected:
                         attempt['verification'].update(status='unavailable', correct=None)
-                else:
+                elif outcome['stopped'] in ('cap', 'timeout'):
                     attempt['verification'] = {'status': 'not-completed', 'correct': False}
+                else:
+                    attempt['failure'] = 'native-turn-or-cli-unavailable'
+                    attempt['verification'] = {'status': 'unavailable', 'correct': None}
                 slot['status'] = 'finished'
             except (OutcomeError, IsolationError, OSError, ValueError, subprocess.SubprocessError):
                 slot['status'] = 'unavailable'

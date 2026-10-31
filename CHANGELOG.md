@@ -28,6 +28,13 @@ edition's own files remain in that edition's changelog.
 
 ## Unreleased
 
+### Private outcome transport reliability — 2026-10-31
+
+- Preserve the system TLS trust bundle in the Linux read allowlist, allow
+  native reconnect events to recover within the original deadline, and keep
+  incomplete native/CLI failures unknown instead of grading them as wrong
+  project answers. Timeout/cap failures and the legacy endpoint are unchanged.
+
 ### Offline memory lifecycle pilots and selective whole-task experiments — 2026-10-31
 
 - Added maintainer-only consolidation replay on physical copies, source-backed
